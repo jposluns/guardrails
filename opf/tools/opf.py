@@ -14148,12 +14148,19 @@ _INIT_BARE_SAFE = frozenset(
 
 
 def _init_exact_str(value):
-    """The EXACT built-in str that every value init renders, compares, gates or
-    formats is converted to first (QA round 14, requirement A: str() may return
-    a str SUBCLASS, and a subclass overriding __eq__, __hash__, __iter__ or
-    __format__ decided what the rendering proof compared, what the renderer
+    """The EXACT built-in str that every value and exception text init renders
+    or formats into a line, and every line it writes, is converted to first, as
+    are the text a rendering proof compares and each argument token before the
+    argument loop compares or gates it (QA round 14, requirement A: str() may
+    return a str SUBCLASS, and a subclass overriding __eq__, __hash__, __iter__
+    or __format__ decided what the rendering proof compared, what the renderer
     iterated and what str.format printed, while the characters it carried
-    reached the output raw). An instance of str or of any str subclass is
+    reached the output raw; QA round 15, requirement C: the argument loop
+    compared and gated tokens it had not converted, so a token whose own __eq__
+    answered "--root" acted as --root). Init's other comparisons (of a
+    sibling module's result, such as a resolver status, and of its own
+    bookkeeping) read their operands as they come and are not claimed here. An
+    instance of str or of any str subclass is
     copied out through the BASE str.__str__ slot, which returns an exact str of
     the same characters and never calls the subclass's own __str__; any other
     value goes through str() once, and whatever that returns, a str subclass
@@ -14281,11 +14288,18 @@ def _init_echo(line, err=False):
     module, one minted through introspection or type() at runtime, or any other
     spelling of a construction the reference scan cannot see) are the same
     residual. What such code hands to init's OWN prints is COVERED AT THE
-    OUTPUT, not chased statically: every value, exception text and printed line
-    is converted to an exact built-in str before it is compared, gated,
-    rendered, formatted or written (_init_exact_str; QA round 14, requirement A:
-    a str subclass returned by str() overrode __eq__, __iter__ or __format__
-    and printed raw past the round-13 checks), the rendering constructors
+    OUTPUT, not chased statically: every value and exception text init
+    renders or formats into a line, and every line this emitter writes, is
+    first converted to an exact built-in str (_init_exact_str; QA round 14,
+    requirement A: a str subclass returned by str() overrode __eq__, __iter__
+    or __format__ and printed raw past the round-13 checks; QA round 15,
+    requirement C pins this emitter's own conversion), a JSON event line
+    passes through unrendered only a value whose type is exactly int, float,
+    bool or None and renders every other value that is not a list, tuple or
+    dict as text (_init_inert_json; QA round 15, requirement A: a tuple from a
+    sibling module's stat result, or one a str subclass's reflected __radd__
+    made of the root-binding text, printed its strings raw), the rendering
+    constructors
     format only registered templates (_INIT_TEMPLATES) and render anything else
     as a value, and the refusal handler accepts a message or restore line only
     with its constructor's rendering proof, re-rendering everything else at the
@@ -14300,24 +14314,35 @@ def _init_echo(line, err=False):
 
 
 def _init_inert_json(value):
-    """Apply _init_inert to every string in a report bound for json.dumps, KEYS included,
-    recursively through lists and dicts (every key the init reports bind today is a
-    fixed literal, so rendering keys usually changes no output byte; rendering them
-    anyway means every string this returns went through the one renderer, and the init
-    suite drives one hostile key through this arm to hold it).
+    """Prepare a report for json.dumps so that every string in it went through
+    _init_inert, KEYS included, and FAIL CLOSED on every other type (QA round 15,
+    requirement A: the round-14 walk returned unchanged any value that was not a
+    str, list or dict, so a tuple reaching a report, a sibling module's stat
+    st_size or a root binding that a str subclass's reflected __radd__ turned
+    into a tuple, was serialised by json.dumps as an array of its raw strings).
+    A value whose type is EXACTLY int, float, bool or None passes unchanged; a
+    list, tuple or dict is walked into a new built-in list or dict, every item
+    through this function and every KEY rendered as text through _init_inert
+    whatever its type (every key the init reports bind today is a fixed literal,
+    so rendering keys usually changes no output byte; the init suite drives one
+    hostile key through this arm to hold it); and EVERY other value, a str or
+    str subclass, an int or float subclass, bytes or any other object, is
+    rendered through _init_inert as a value, which reads a str by its exact
+    characters and converts anything else once through str().
     json.dumps alone is NOT shell-inert: it escapes quotes and control characters but
     leaves "$" and "`" raw inside the JSON double quotes, exactly the double-quote context
     in which a POSIX shell keeps substitutions live, so a pasted event line whose root or
     foreign-entry name carries $(...) could execute it (QA round 5). An escaped value
     reads back as a Python string literal."""
-    if isinstance(value, str):
-        return _init_inert(value)
-    if isinstance(value, list):
+    kind = type(value)
+    if value is None or kind is bool or kind is int or kind is float:
+        return value
+    if isinstance(value, (list, tuple)):
         return [_init_inert_json(item) for item in value]
     if isinstance(value, dict):
-        return {_init_inert_json(key): _init_inert_json(item)
+        return {_init_inert(key): _init_inert_json(item)
                 for key, item in value.items()}
-    return value
+    return _init_inert(value)
 
 
 # The REGISTERED rendering templates (QA round 13, requirement A: render at the
@@ -15400,19 +15425,27 @@ def _init_main(rest):
     Every failure path prints rendered text through the two handlers below; the second catches
     BaseException, so a non-Exception raised while the try body runs (an interrupt or SystemExit after
     publication started) still reports the partial-publication disclosure before returning rendered (QA
-    round 12 C). The disclosure is itself guarded (QA round 13 D; QA round 14 D: the cannot-evaluate
-    line now prints inside the guard too), with its windows stated exactly. Once publication has
-    started, a SECOND interrupt raised while the cannot-evaluate line or the detail report (the root
-    re-check, the observation pass, the JSON event line) runs drops whatever of those had not yet
-    printed, and a fixed fallback line plus the fixed "publication may be partial" sentence still print.
-    A further interrupt landing in one of those two fixed prints (a third, or a second one landing there
-    directly) escapes to _cmd_init's boundary, which adds only its rendered last-resort line: landing in
-    the fallback print, it leaves no partial-publication sentence printed at all; landing in the fixed
-    sentence, the lines already printed before it (the cannot-evaluate line and detail, or the
-    fallback line, which says the report failed and asks for a review of the created paths) stay
-    printed while the sentence itself may not print. Before publication starts, an interrupt landing in
-    the cannot-evaluate line or the "no publication attempted" line escapes the same way; nothing was
-    published there, so no disclosure is owed. Whatever escapes the handlers (an interrupt during the
+    round 12 C). The disclosure is itself guarded (QA round 13 D; QA round 14 D; QA round 15 B: the
+    guard is the handler's first statement, so the publication test runs inside it too), with its
+    windows stated exactly. Once publication has started, a SECOND interrupt raised anywhere from the
+    publication test through the cannot-evaluate line and the detail report (the root re-check, the
+    observation pass, the JSON event line) drops whatever of those had not yet printed, and a fixed
+    fallback line plus the fixed "publication may be partial" sentence still print. The handler's
+    ENTRY is outside the guard: CPython raises a line event for the except clause that binds the
+    caught exception and for the guard's own try line, and an interrupt injected on either through a
+    trace function escapes to _cmd_init's boundary, which prints only its rendered last-resort line,
+    so no partial-publication sentence prints (whether a real asynchronous signal can be delivered on
+    those two lines is not exercised). A further interrupt landing in the fallback (its publication
+    test or its print, a third) or in the fixed sentence (a third, or a second one landing there
+    directly) escapes to _cmd_init's boundary the same way: landing in the fallback, it leaves no
+    partial-publication sentence printed at all; landing in the fixed sentence, the lines already
+    printed before it (the cannot-evaluate line and detail, or the fallback line, which says the
+    report failed and asks for a review of the created paths) stay printed while the sentence itself
+    may not print. Before publication starts, a second interrupt landing in the cannot-evaluate line
+    or the "no publication attempted" line is caught by the same guard, which prints a fixed line
+    saying a second failure interrupted the report and no publication was attempted; nothing was
+    published there, so no disclosure is owed, and a further interrupt landing in that fixed line
+    escapes to the boundary the same way. Whatever escapes the handlers (an interrupt during the
     argument loop above the try, for one) is caught by _cmd_init's last-resort rendering boundary (QA
     round 10 MAJOR 1); the windows that boundary itself does not cover are stated there and in
     QUICKSTART.
@@ -15420,7 +15453,10 @@ def _init_main(rest):
     root = None
     i = 0
     while i < len(rest):
-        tok = rest[i]
+        # Each token is read as its exact str before it is compared or gated (QA
+        # round 15, requirement C: a str subclass whose own __eq__ answered
+        # "--root" acted as --root).
+        tok = _init_exact_str(rest[i])
         if tok == "--root":
             if i + 1 >= len(rest):
                 _init_echo("opf init: --root requires a directory argument", err=True)
@@ -15428,7 +15464,7 @@ def _init_main(rest):
             if root is not None:
                 _init_echo("opf init: --root given more than once", err=True)
                 return EXIT_MALFORMED
-            val = rest[i + 1]
+            val = _init_exact_str(rest[i + 1])
             if val == "" or val.startswith("-"):
                 # The rejected value is rendered inert, never {!r}: repr of a value
                 # holding a single quote and no double quote is a DOUBLE-quoted literal
@@ -15651,12 +15687,15 @@ def _init_main(rest):
         # the root, the stage token and the exception text through _init_inert, whose
         # raising sites may quote path-derived values with ascii() (not shell-inert on its
         # own); the exception TYPE is printed by name around the escaped text, the
-        # readable part ascii(exc) used to carry. Once publication has started, the
-        # cannot-evaluate line is printed INSIDE the disclosure guard (QA round 14 D:
-        # a second interrupt landing in that first print escaped past the guard and
-        # dropped the partial-publication sentence).
-        if publishing and root_fd is not None:
-            try:
+        # readable part ascii(exc) used to carry. The handler's FIRST statement
+        # enters the disclosure guard, so the publication test, the cannot-evaluate
+        # line and the detail report all run inside it (QA round 14 D: a second
+        # interrupt landing in the first print escaped past the guard; QA round 15
+        # B: one landing on the publication test, which the round-14 handler ran
+        # before entering the guard, escaped the same way and dropped the
+        # partial-publication sentence).
+        try:
+            if publishing and root_fd is not None:
                 _init_echo("opf init: cannot evaluate at {} during {}: {}({}); exit 2".format(
                     _init_inert(str(root)), _init_inert(stage),
                     _init_inert(type(exc).__name__), _init_inert(str(exc))), err=True)
@@ -15664,7 +15703,11 @@ def _init_main(rest):
                     _init_same_root(root, root_fd)
                     binding = "same-root"
                 except Exception as binding_exc:
-                    binding = "cannot-confirm-root: " + ascii(binding_exc)
+                    # The exception text is an exact str BEFORE the concatenation
+                    # (QA round 15, requirement A: ascii() may return the str
+                    # subclass repr() returned, whose reflected __radd__ decided
+                    # the result); the report renders it once, at the output.
+                    binding = "cannot-confirm-root: " + _init_exact_str(ascii(binding_exc))
                 _init_echo(json.dumps(_init_inert_json({
                     "event": "partial-publication",
                     "root": str(root),
@@ -15672,18 +15715,23 @@ def _init_main(rest):
                     "root_binding": binding,
                     "paths": _init_observed(root_fd, directories, payloads),
                 }), sort_keys=True), err=True)
-            except BaseException:  # noqa: BLE001  a SECOND interrupt while the cannot-evaluate line or the detail report runs must not drop the fixed disclosure below (QA round 13 D; QA round 14 D)
-                _init_echo("opf init: the cannot-evaluate line or the partial-publication "
-                           "detail could not be reported (a second failure while the "
-                           "report itself ran); review the created paths yourself.",
-                           err=True)
-            _init_echo("opf init: publication may be partial; review the observed state. No rollback performed.",
+            else:
+                _init_echo("opf init: cannot evaluate at {} during {}: {}({}); exit 2".format(
+                    _init_inert(str(root)), _init_inert(stage),
+                    _init_inert(type(exc).__name__), _init_inert(str(exc))), err=True)
+                _init_echo("opf init: preflight refused; no publication attempted.", err=True)
+                return EXIT_MALFORMED
+        except BaseException:  # noqa: BLE001  a SECOND interrupt anywhere from the publication test through the detail report must not drop the fixed disclosure below (QA round 13 D; QA round 14 D; QA round 15 B)
+            if not (publishing and root_fd is not None):
+                _init_echo("opf init: a second failure interrupted this report; "
+                           "preflight refused; no publication attempted.", err=True)
+                return EXIT_MALFORMED
+            _init_echo("opf init: the cannot-evaluate line or the partial-publication "
+                       "detail could not be reported (a second failure while the "
+                       "report itself ran); review the created paths yourself.",
                        err=True)
-        else:
-            _init_echo("opf init: cannot evaluate at {} during {}: {}({}); exit 2".format(
-                _init_inert(str(root)), _init_inert(stage),
-                _init_inert(type(exc).__name__), _init_inert(str(exc))), err=True)
-            _init_echo("opf init: preflight refused; no publication attempted.", err=True)
+        _init_echo("opf init: publication may be partial; review the observed state. No rollback performed.",
+                   err=True)
         return EXIT_MALFORMED
     finally:
         if root_fd is not None:

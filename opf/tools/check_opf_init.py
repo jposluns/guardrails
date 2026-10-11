@@ -227,7 +227,8 @@ _ROUTE_ALLOWED_REFS = dict(
         "_INIT_INERT_SAFE", "ord", "str-literal.format", "str-literal.join",
     ]),
     _init_inert_json=frozenset([
-        "dict", "isinstance", "list", "str", "value.items",
+        "bool", "dict", "float", "int", "isinstance", "list", "tuple", "type",
+        "value.items",
     ]),
     _init_inventory=frozenset([
         "Exception", "RuntimeError", "_INIT_MAX_DEPTH", "_INIT_MAX_ENTRIES",
@@ -301,10 +302,10 @@ _ROUTE_ALLOWED_REFS = dict(
 # writer to a permitted spelling and passed the call gate).
 _ROUTE_EXTERNAL_BASES = frozenset([
     "AttributeError", "BaseException", "Exception", "FileNotFoundError", "OSError", "Path",
-    "RuntimeError", "UnicodeError", "all", "any", "ascii", "dict", "enumerate",
-    "isinstance", "issubclass", "json", "len", "list", "ord", "os", "set",
+    "RuntimeError", "UnicodeError", "all", "any", "ascii", "bool", "dict", "enumerate",
+    "float", "int", "isinstance", "issubclass", "json", "len", "list", "ord", "os", "set",
     "sorted", "stat",
-    "str", "super", "type",
+    "str", "super", "tuple", "type",
     "_opf_check", "_opf_emit", "_opf_init", "_opf_observe", "_opf_store",
     "_opf_write_guard",
 ])
@@ -4430,6 +4431,284 @@ def _suite_isolated(invoke):
                       and str(opf._InitPriorStoreRefusal(
                           qa14_braces, (Qa14StrOverride("data"),), []))
                       == "data")
+
+                # QA round 15 A (claude round-14 MEDIUM 1): the JSON walk FAILS
+                # CLOSED. The round-14 walk returned unchanged any value that
+                # was not a str, list or dict, and json.dumps serialised a tuple
+                # as an array of its raw strings; two routes reached it through
+                # SIBLING-module behaviour only (no init function is patched
+                # beyond the injected publication fault): a stat result whose
+                # st_size is a tuple, and a root binding a str subclass's
+                # reflected __radd__ turned into a tuple. On the round-14 code
+                # both printed the payload raw, so both route checks and the
+                # in-process table fail with the change reverted; the binding
+                # check also fails with only the binding line reverted (its
+                # value is then a walked list, not the one rendered string).
+                # The int-size run is a CONTROL: an exact int passes unchanged
+                # on both revisions, so it guards against over-rendering and is
+                # not a discriminating vector.
+                qa15_payload = ("qa15" + chr(36) + chr(40) + "touch QA15-PWNED)"
+                                + chr(96) + ";#")
+                qa15_store = opf._opf_store
+                qa15_journal = qa15_store._journal
+                qa15_real_create = opf._init_create
+                qa15_real_lstat = qa15_journal._lstat_contained
+                qa15_real_open_dir = qa15_store._open_dir_nofollow
+
+                def qa15_fault_create(state):
+                    def create(root_fd, relpath, data):
+                        state["calls"] += 1
+                        if state["calls"] >= 3:
+                            state["published"] = True
+                            raise RuntimeError("qa15 create fault")
+                        return qa15_real_create(root_fd, relpath, data)
+                    return create
+
+                class Qa15Stat:
+                    def __init__(self, size):
+                        self.st_mode = stat.S_IFREG | 0o644
+                        self.st_size = size
+
+                def qa15_sized_lstat(state, size):
+                    def lstat_contained(root_fd, relpath):
+                        if not state["published"]:
+                            return qa15_real_lstat(root_fd, relpath)
+                        return Qa15Stat(size)
+                    return lstat_contained
+
+                class Qa15Radd(str):
+                    def __radd__(self, other):
+                        return (other, qa15_payload)
+
+                class Qa15BindingError(RuntimeError):
+                    def __repr__(self):
+                        return Qa15Radd("Qa15BindingError(" + qa15_payload + ")")
+
+                def qa15_binding_open(state):
+                    def open_dir_nofollow(*args, **kwargs):
+                        if state["published"]:
+                            raise Qa15BindingError()
+                        return qa15_real_open_dir(*args, **kwargs)
+                    return open_dir_nofollow
+
+                def qa15_drive(tag, sibling):
+                    state = dict(calls=0, published=False)
+                    repo = make_git(tag)
+                    with contextlib.ExitStack() as stack:
+                        for owner, attr, make in sibling:
+                            stack.enter_context(
+                                mock.patch.object(owner, attr, make(state)))
+                        rc, output = drive_cmd_init(
+                            repo, dict(_init_create=qa15_fault_create(state)))
+                    rows = [json.loads(line) for line in output.splitlines()
+                            if line.startswith("{")]
+                    events = [row for row in rows
+                              if row.get("event") == "partial-publication"]
+                    return state, rc, output, events
+
+                def qa15_sized(events):
+                    return [entry for row in events for entry in row.get("paths", [])
+                            if entry.get("state") == "different-size"]
+
+                state, rc, output, events = qa15_drive(
+                    "qa15-st-size-tuple",
+                    [(qa15_journal, "_lstat_contained",
+                      lambda st: qa15_sized_lstat(st, (qa15_payload,)))])
+                check("a tuple a sibling module's stat returns as st_size is walked "
+                      "and its strings rendered in the partial-publication JSON, "
+                      "never serialised raw (QA round 15 A)",
+                      state["published"] and rc == EXIT_ERROR
+                      and qa15_sized(events) != []
+                      and all(entry.get("bytes") == [inert(qa15_payload)]
+                              for entry in qa15_sized(events))
+                      and chr(36) + chr(40) not in output and chr(96) not in output
+                      and not (base / "QA15-PWNED").exists()
+                      and paste_probe(output, "qa15-st-size-tuple") == [])
+                state, rc, output, events = qa15_drive(
+                    "qa15-st-size-int",
+                    [(qa15_journal, "_lstat_contained",
+                      lambda st: qa15_sized_lstat(st, 999999))])
+                check("CONTROL: an exact int st_size passes the JSON walk unchanged, "
+                      "as a JSON number (QA round 15 A; passes on both revisions)",
+                      state["published"] and rc == EXIT_ERROR
+                      and qa15_sized(events) != []
+                      and all(type(entry.get("bytes")) is int
+                              and entry.get("bytes") == 999999
+                              for entry in qa15_sized(events)))
+                state, rc, output, events = qa15_drive(
+                    "qa15-radd-binding",
+                    [(qa15_store, "_open_dir_nofollow", qa15_binding_open)])
+                check("the root-binding exception text is an exact str before the "
+                      "concatenation, so a str subclass's reflected __radd__ cannot "
+                      "decide the binding, and the binding renders as one string "
+                      "(QA round 15 A)",
+                      state["published"] and rc == EXIT_ERROR and events != []
+                      and all(row.get("root_binding")
+                              == inert("cannot-confirm-root: Qa15BindingError("
+                                       + qa15_payload + ")")
+                              for row in events)
+                      and chr(36) + chr(40) not in output and chr(96) not in output
+                      and not (base / "QA15-PWNED").exists()
+                      and paste_probe(output, "qa15-radd-binding") == [])
+
+                class Qa15Int(int):
+                    def __str__(self):
+                        return qa15_payload
+
+                qa15_walked = opf._init_inert_json(dict(
+                    n=None, b=True, i=7, f=1.5, t=(qa15_payload, 3),
+                    s=Qa15Int(5), o=qa15_payload.encode("ascii")))
+                qa15_expected = dict(
+                    n=None, b=True, i=7, f=1.5, t=[inert(qa15_payload), 3],
+                    s=inert(qa15_payload),
+                    o=inert(repr(qa15_payload.encode("ascii"))))
+                check("the JSON walk passes only exact int, float, bool and None, "
+                      "walks a tuple, and renders any other value as text (QA "
+                      "round 15 A)",
+                      qa15_walked == qa15_expected
+                      and all(type(qa15_walked[key]) is type(qa15_expected[key])
+                              for key in qa15_expected)
+                      and opf._init_inert_json(dict([(1, "a")]))
+                      == dict([("1", "a")]))
+
+                # QA round 15 B (codex round-14 MINOR): a second interrupt
+                # landing on the handler's PUBLICATION TEST, which the round-14
+                # handler ran before entering the disclosure guard, escaped to
+                # the last-resort boundary and dropped the partial-publication
+                # sentence. The guard is now the handler's first statement. The
+                # interrupt is injected by a trace function on the first line of
+                # _init_main that spells the publication test after its
+                # BaseException handler opens, found in the live source so the
+                # vector follows the line wherever it sits; on the round-14
+                # handler only the last-resort line printed, so this check fails
+                # with the guard move reverted.
+                qa15_lines = (Path(opf.__file__).resolve()
+                              .read_text(encoding="utf-8").splitlines())
+                qa15_code = opf._init_main.__code__
+                qa15_target = None
+                qa15_in_handler = False
+                for qa15_number in range(qa15_code.co_firstlineno, len(qa15_lines) + 1):
+                    qa15_text = qa15_lines[qa15_number - 1]
+                    if qa15_text.startswith("    except BaseException as exc:"):
+                        qa15_in_handler = True
+                    elif (qa15_in_handler and qa15_text.strip()
+                          == "if publishing and root_fd is not None:"):
+                        qa15_target = qa15_number
+                        break
+
+                def qa15_trace(frame, event, arg):
+                    if frame.f_code is not qa15_code:
+                        return None
+                    if (event == "line" and frame.f_lineno == qa15_target
+                            and not qa15_trace.fired):
+                        qa15_trace.fired = True
+                        raise KeyboardInterrupt()
+                    return qa15_trace
+                qa15_trace.fired = False
+
+                qa15_kb_state = dict(calls=0)
+
+                def qa15_kb_create(root_fd, relpath, data):
+                    qa15_kb_state["calls"] += 1
+                    if qa15_kb_state["calls"] >= 3:
+                        raise KeyboardInterrupt()
+                    return qa15_real_create(root_fd, relpath, data)
+
+                qa15_kb_repo = make_git("qa15-publication-test-interrupt")
+                qa15_prior_trace = sys.gettrace()
+                sys.settrace(qa15_trace)
+                try:
+                    rc, output = drive_cmd_init(
+                        qa15_kb_repo, dict(_init_create=qa15_kb_create))
+                finally:
+                    sys.settrace(qa15_prior_trace)
+                check("a second interrupt on the handler's publication test still "
+                      "prints the fallback line and the fixed partial-publication "
+                      "sentence, then exits 2 (QA round 15 B)",
+                      qa15_target is not None and qa15_trace.fired
+                      and rc == EXIT_ERROR
+                      and "publication may be partial" in output
+                      and "detail could not be reported" in output
+                      and "last-resort boundary" not in output)
+
+                # QA round 15 B, the pre-publication arm of the same guard: a
+                # second interrupt in the cannot-evaluate line before publication
+                # escaped to the last-resort boundary on the round-14 handler;
+                # the guard now catches it and a fixed line says no publication
+                # was attempted, so this check fails with the move reverted.
+                qa15_real_echo = opf._init_echo
+
+                def qa15_pre_scan(git_arg, repo_arg, root_arg):
+                    raise RuntimeError("qa15 preflight fault")
+
+                def qa15_pre_echo(line, err=False):
+                    if (not qa15_pre_echo.fired
+                            and str(line).startswith("opf init: cannot evaluate at ")):
+                        qa15_pre_echo.fired = True
+                        raise KeyboardInterrupt()
+                    return qa15_real_echo(line, err=err)
+                qa15_pre_echo.fired = False
+                rc, output = drive_cmd_init(
+                    make_git("qa15-preflight-second-interrupt"),
+                    dict(_init_no_prior_store=qa15_pre_scan,
+                         _init_echo=qa15_pre_echo))
+                check("before publication, a second interrupt in the cannot-evaluate "
+                      "line is caught by the same guard, which says no publication "
+                      "was attempted, then exits 2 (QA round 15 B)",
+                      rc == EXIT_ERROR and qa15_pre_echo.fired
+                      and "opf init: a second failure interrupted this report; "
+                      "preflight refused; no publication attempted." in output
+                      and "last-resort boundary" not in output
+                      and "publication may be partial" not in output)
+
+                # QA round 15 C (claude round-14 MINOR 2): the argument loop reads
+                # each token as its exact str before comparing or gating it. On
+                # the round-14 loop a token whose own __eq__ answered "--root"
+                # acted as --root, and a value whose startswith hid its leading
+                # dash passed the gate; both checks fail with the conversion
+                # reverted.
+                class Qa15EqToken(str):
+                    def __eq__(self, other):
+                        return str.__eq__("--root", other)
+
+                    __hash__ = str.__hash__
+
+                class Qa15DashValue(str):
+                    def startswith(self, *args):
+                        return False
+
+                qa15_missing = str(base / "qa15-argv-missing")
+                rc, output = fd_capture(lambda: opf._cmd_init(
+                    [Qa15EqToken("--qa15-not-root"), qa15_missing]))
+                check("an argument token is compared as its exact str: a str subclass "
+                      "whose __eq__ answers --root is an unrecognized argument (QA "
+                      "round 15 C)",
+                      rc == EXIT_ERROR
+                      and "opf init: unrecognized argument, inert-escaped: "
+                      + inert("--qa15-not-root") in output)
+                rc, output = fd_capture(lambda: opf._cmd_init(
+                    ["--root", Qa15DashValue("-qa15")]))
+                check("a --root value is gated as its exact str: a str subclass "
+                      "whose startswith hides its leading dash is refused (QA round "
+                      "15 C)",
+                      rc == EXIT_ERROR
+                      and "requires a non-empty directory argument" in output
+                      and inert("-qa15") in output)
+
+                # QA round 15 C (claude round-14 MINOR 3): the emitter writes a
+                # line by its exact characters. No real init line reaches it as
+                # a str subclass with its own __str__ today, so this in-process
+                # call pins the emitter itself: with its conversion reverted to
+                # str(line), the overriding __str__ is written instead.
+                class Qa15Line(str):
+                    def __str__(self):
+                        return "qa15-override"
+
+                rc, output = fd_capture(
+                    lambda: opf._init_echo(Qa15Line("qa15-own-line")))
+                check("the emitter writes a line by its own exact characters, never "
+                      "by its overriding __str__ (QA round 15 C)",
+                      output == "qa15-own-line" + chr(10))
 
                 # QA round 13 A, the SYNC check: every template a rendered-type
                 # construction site in the real source spells, as a string

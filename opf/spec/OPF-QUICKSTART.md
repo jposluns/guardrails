@@ -136,10 +136,13 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
    spellings, rendered-type constructions outside the scanned module, and the
    sibling modules the init path calls into), is stated in the tooling docstrings.
    What such code hands to init's own printed lines is covered at the output: every
-   value is first converted to an exact built-in string, so a string subclass cannot
-   change what is compared, rendered or printed; the constructors format only
-   registered templates; and the refusal handler re-renders anything without its
-   rendering proof. Output such code writes by itself, and in-process code that
+   value and exception text init renders or formats into a line, and every line it
+   writes, is first converted to an exact built-in string, as is each argument token
+   before the argument loop compares it, so a string subclass cannot change what is
+   rendered or printed; a JSON event line passes through unrendered only values that
+   are exactly integers, floats, booleans or null and renders any other value that is
+   not a list, tuple or mapping as text; the constructors format only registered
+   templates; and the refusal handler re-renders anything without its rendering proof. Output such code writes by itself, and in-process code that
    rebinds init's own functions or forges the private rendering proof, are not
    covered. The suite's runtime paste test is the primary guard. A repository whose history the scan cannot trust as-is (a shallow clone, any entry
    at the legacy `.git/info/grafts` path, or a grafts path it cannot inspect) is refused as
