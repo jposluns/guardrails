@@ -14039,7 +14039,9 @@ def _init_repo(root):
     repo = Path(os.path.abspath(os.fsdecode(lines[2])))
     if root != repo and repo not in root.parents:
         raise RuntimeError("git preflight: reported repository does not contain root")
-    repo_fd = _opf_store._open_dir_nofollow(repo)
+    # A no-follow probe only, closed unread: traverse_only, so an enclosing repository with search but
+    # no read permission (0111) above a nested product root is confirmed rather than refused EACCES (#516).
+    repo_fd = _opf_store._open_dir_nofollow(repo, traverse_only=True)
     _opf_store._journal._close_fd_propagating(repo_fd)
     if _init_git(git, repo, args) != raw:
         raise RuntimeError("git preflight: repository identity changed during confirmation")
@@ -15356,7 +15358,8 @@ def _init_no_prior_store(git, repo, root):
 
 
 def _init_same_root(root, root_fd):
-    check_fd = _opf_store._open_dir_nofollow(root)
+    # fstat only, never listed or read: traverse_only, so the identity check needs search permission only.
+    check_fd = _opf_store._open_dir_nofollow(root, traverse_only=True)
     try:
         current = os.fstat(check_fd)
         opened = os.fstat(root_fd)
@@ -19883,8 +19886,8 @@ def _close_exc_safe_vectors_self_test():
         def call():
             real_nofollow = _opf_store._open_dir_nofollow
 
-            def nofollow(path):
-                fd = real_nofollow(path)
+            def nofollow(path, **kwargs):
+                fd = real_nofollow(path, **kwargs)   # the real walk, with _init_repo's traverse_only
                 arm(fd)                       # only the repository-root probe's close is injected
                 return fd
             with mock.patch.object(_opf_store, "_open_dir_nofollow", nofollow):

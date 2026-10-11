@@ -2081,6 +2081,65 @@ def _suite_isolated(invoke):
                       "limit in the shared words",
                       _states_path_limit(opf._init_no_prior_store.__doc__))
 
+                # #516: a NESTED product root beneath an enclosing repository with search but no read
+                # permission (0111). _init_repo opens the repository root only as a no-follow probe it
+                # closes unread, and _init_same_root only fstat-s its descriptor, so both open
+                # traverse_only: init proceeds, and a search-only root binds. DISCRIMINATORS: the
+                # readable open restored at either site refuses EACCES (the nested init exits 2 in
+                # preflight; the identity check raises PermissionError). Mode bits do not bind uid 0,
+                # so that run discloses a skip; without os.O_PATH the walk keeps its documented
+                # O_RDONLY fallback, so the EACCES refusal is asserted there instead (fail-closed).
+                so_repo = make_git("search-only-enclosing-repo")
+                so_product = so_repo / "product"
+                so_product.mkdir()
+                so_root = base / "search-only-root"
+                so_root.mkdir()
+                so_other = base / "search-only-root-other"
+                so_other.mkdir()
+                if hasattr(os, "geteuid") and os.geteuid() == 0:
+                    print("check_opf_init: DISCLOSED SKIP: search-only (0111) enclosing repository and root "
+                          "vectors not run (uid 0 is not bound by mode bits)", file=sys.stderr)
+                else:
+                    os.chmod(so_repo, 0o111)
+                    try:
+                        rc, output = run(so_product)
+                    finally:
+                        os.chmod(so_repo, 0o755)
+                    so_fd = _opf_store._open_dir_nofollow(str(so_root), traverse_only=True)
+                    try:
+                        os.chmod(so_root, 0o111)
+                        try:
+                            try:
+                                opf._init_same_root(so_root, so_fd)
+                                so_bound = "bound"
+                            except OSError as exc:
+                                so_bound = ascii(exc)
+                            try:
+                                opf._init_same_root(so_other, so_fd)
+                                so_moved = "bound"
+                            except RuntimeError as exc:
+                                so_moved = str(exc)
+                            except OSError as exc:
+                                so_moved = ascii(exc)
+                        finally:
+                            os.chmod(so_root, 0o755)
+                    finally:
+                        os.close(so_fd)
+                    check("the root identity check still refuses a different directory",
+                          so_moved == "root changed since its contained directory was opened")
+                    if hasattr(os, "O_PATH"):
+                        check("a nested product root beneath a search-only (0111) enclosing repository "
+                              "initializes", rc == EXIT_OK and valid_sources(so_product))
+                        check("the root identity check binds a search-only (0111) root",
+                              so_bound == "bound")
+                    else:
+                        check("without os.O_PATH a search-only (0111) enclosing repository keeps the "
+                              "documented EACCES refusal",
+                              rc == EXIT_ERROR and inert("Permission denied") in output
+                              and not (so_product / working).exists())
+                        check("without os.O_PATH a search-only (0111) root keeps the documented EACCES "
+                              "refusal", "[Errno 13]" in so_bound)
+
                 # QA round 3 MINOR 3: the missing-newline and NUL arms of the info/grafts shape
                 # check. Real git always ends the line with a newline and cannot print a NUL in
                 # a path, so these answers come from a stubbed _run_git (a commit-holding,
@@ -3151,7 +3210,7 @@ def _suite_isolated(invoke):
                 gate_anchor = '    stage = "preflight"'
                 check("route gate: the mutation anchor is present once",
                       gate_source.count(gate_anchor) == 1)
-                deep_anchor = "    check_fd = _opf_store._open_dir_nofollow(root)"
+                deep_anchor = "    check_fd = _opf_store._open_dir_nofollow(root, traverse_only=True)"
                 check("route gate: the deep-helper anchor is present once",
                       gate_source.count(deep_anchor) == 1)
                 gate_mutants = [
