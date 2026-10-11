@@ -1389,7 +1389,9 @@ def _config_injection_lane(base):
 # derivation vector below restates how the sum combines its terms, and the
 # probe also runs opf's close-out vector and returns its faults.
 # _install_member_bound() installs the bound only when that restatement
-# matches and the fault list is empty; otherwise it exits 2 with the bound
+# matches, the fault list is empty, and the bound is a usable timeout
+# (strictly above the declared worst case once added, and at most
+# _MEMBER_BOUND_CEILING_SECONDS); otherwise it exits 2 with the bound
 # unset, so no member launches under it. The margin is a STATED
 # allowance, not a derivation, and covers only this: interpreter start, and
 # the opf self-tests and other members that declare no end-to-end budget
@@ -1406,7 +1408,13 @@ _MEMBER_BOUND_MARGIN_SECONDS = 1200
 # else: a deliberately short fast-fail bound, its expiry attributed (exit 2
 # naming the derivation), never member evidence.
 _MEMBER_BOUND_PROBE_SECONDS = 120
-_MEMBER_BOUND_SECONDS = None  # set once by _derive_member_bound(); None refuses every launch
+# The largest per-member bound installed: one week. A larger bound is no
+# liveness bound for any run this suite serves, and an absurd one is not
+# even a usable timeout (subprocess.run raises OverflowError past its
+# platform limit, and a float sum can absorb the margin entirely), so
+# _install_member_bound() refuses it rather than launch under it.
+_MEMBER_BOUND_CEILING_SECONDS = 7 * 24 * 3600
+_MEMBER_BOUND_SECONDS = None  # set once by _install_member_bound(); None refuses every launch
 # The derivation vector: a synthetic two-leg plan evaluated by opf's own
 # derivation in the probe, against the rule restated here: every leg's
 # bound, plus every leg's close-out allowance (the value the probe reads
@@ -1439,10 +1447,22 @@ def _derive_member_bound(run=subprocess.run):
     synthetic _DERIVATION_VECTOR_PLAN, the faults of opf's close-out
     vector), (the total the rule restated here requires, no faults)); or
     exit 2 (cannot evaluate) when the declared budget cannot be read: no
-    member may run under a guessed bound. `run` is the launch (scripted by
-    the vectors)."""
+    member may run under a guessed bound. Each value must be an int or
+    float (never a bool) that converts to a finite, positive float; an int
+    past float range is refused here, never raised past this check. `run`
+    is the launch (scripted by the vectors)."""
     import json
     import math
+
+    def seconds(value):
+        if type(value) not in (int, float):
+            return None
+        try:
+            value = float(value)
+        except OverflowError:
+            return None
+        return value if math.isfinite(value) and value > 0 else None
+
     code = ("import json, sys; sys.path.insert(0, sys.argv[1]); import opf; "
             "rc = opf._bootstrap(); "
             "print(json.dumps(dict(declared=opf._watchdog_declared_seconds(), "
@@ -1465,10 +1485,9 @@ def _derive_member_bound(run=subprocess.run):
         detail = "; ".join(part for part in (detail, str(exc)) if part)
     values = faults = None
     if isinstance(payload, dict):
-        values = [payload.get(key) for key in ("declared", "vector", "closeout")]
+        values = [seconds(payload.get(key)) for key in ("declared", "vector", "closeout")]
         faults = payload.get("closeout_faults")
-        if not (all(type(value) in (int, float) and math.isfinite(value) and value > 0
-                    for value in values)
+        if not (None not in values
                 and type(faults) is list and all(type(fault) is str for fault in faults)):
             values = None
     if values is None:
@@ -1595,11 +1614,14 @@ def _member_rc_or_refuse(member, env):
 def _install_member_bound(run=subprocess.run):
     """Derive the per-member bound and install it only when the derivation
     holds: opf's total over the synthetic plan equals the rule restated
-    here, and opf's close-out vector returned no faults. Otherwise exit 2
-    (cannot evaluate) with the bound left unset, so no member launches
-    under an allowance the probe itself rejected. Returns opf's declared
-    worst case and the derivation vector's (got, want). `run` is the
-    probe's launch (scripted by the vectors)."""
+    here, and opf's close-out vector returned no faults; and only when the
+    bound is a usable timeout: strictly above opf's declared worst case as
+    computed (a float sum can absorb the margin) and at most
+    _MEMBER_BOUND_CEILING_SECONDS. Otherwise exit 2 (cannot evaluate) with
+    the bound left unset, so no member launches under an allowance the
+    probe itself rejected or under a timeout the launch cannot honour.
+    Returns opf's declared worst case and the derivation vector's (got,
+    want). `run` is the probe's launch (scripted by the vectors)."""
     global _MEMBER_BOUND_SECONDS
     declared, bound, vector = _derive_member_bound(run=run)
     (got, faults), (want, _none) = vector
@@ -1608,6 +1630,14 @@ def _install_member_bound(run=subprocess.run):
                                "over the synthetic plan {!r}, the rule restated here {!r}; "
                                "close-out vector faults: {}): no member runs under it".format(
                                    got, want, "; ".join(faults) or "none")])
+    unusable = None
+    if not bound > declared:
+        unusable = "{!r} s is not above opf's declared worst case {!r} s".format(bound, declared)
+    elif bound > _MEMBER_BOUND_CEILING_SECONDS:
+        unusable = "{!r} s is above the {} s ceiling".format(bound, _MEMBER_BOUND_CEILING_SECONDS)
+    if unusable is not None:
+        _cannot_evaluate_exit(["the per-member bound is not a usable timeout: {}: no member "
+                               "runs under it".format(unusable)])
     _MEMBER_BOUND_SECONDS = bound
     return declared, vector
 
@@ -1625,6 +1655,18 @@ _MEMBER_BOUND_EXPECTED = [
     ("closeout-faults", 2, True, None, 2, 0), ("vector-mismatch", 2, True, None, 2, 0),
     ("install-clean", "returned", 7.5 + _MEMBER_BOUND_MARGIN_SECONDS, 0, 1,
      7.5 + _MEMBER_BOUND_MARGIN_SECONDS),
+    # A bound that is no usable timeout leaves the bound unset and reaches no
+    # launch: a float sum that absorbs the margin (1e308 and 1e300; a real
+    # subprocess.run also raises OverflowError on either as a timeout), an
+    # int past float range (refused at conversion, never raised), and a
+    # bound one second above the ceiling; a bound exactly at the ceiling
+    # installs.
+    ("margin-absorbed-1e308", 2, True, None, 2, 0),
+    ("int-past-float-range", 2, True, None, 2, 0),
+    ("margin-absorbed-1e300", 2, True, None, 2, 0),
+    ("above-ceiling", 2, True, None, 2, 0),
+    ("at-ceiling", "returned", _MEMBER_BOUND_CEILING_SECONDS, 0, 1,
+     _MEMBER_BOUND_CEILING_SECONDS),
 ]
 
 
@@ -1635,8 +1677,9 @@ def _member_bound_vectors():
     2 naming the derivation, a clean one installs declared + margin, a
     member launch reached with no bound derived exits 2 before launching,
     and a well-formed derivation whose close-out fault list is not empty,
-    or whose total misses the restated rule, exits 2 at installation with
-    the bound unset, so a member launch after it exits 2 before launching."""
+    or whose total misses the restated rule, or whose bound is no usable
+    timeout, exits 2 at installation with the bound unset, so a member
+    launch after it exits 2 before launching."""
     import contextlib
     import io
     import json
@@ -1700,11 +1743,24 @@ def _member_bound_vectors():
                 return subprocess.CompletedProcess(argv, 0, "", "")
             return run
 
-        for label, effect in (
+        rejected = "per-member bound's derivation was rejected"
+        absorbed = "per-member bound is not a usable timeout: {!r} s is not above".format
+        ceiling = _MEMBER_BOUND_CEILING_SECONDS
+        for label, effect, phrase in (
                 ("closeout-faults", payload(vector=want,
-                                            closeout_faults=["close-out vector armed: overrun"])),
-                ("vector-mismatch", payload()),
-                ("install-clean", payload(vector=want))):
+                                            closeout_faults=["close-out vector armed: overrun"]),
+                 rejected),
+                ("vector-mismatch", payload(), rejected),
+                ("install-clean", payload(vector=want), None),
+                ("margin-absorbed-1e308", payload(vector=want, declared=1e308), absorbed(1e308)),
+                ("int-past-float-range", payload(vector=want, declared=10 ** 400),
+                 "per-member bound cannot be derived"),
+                ("margin-absorbed-1e300", payload(vector=want, declared=1e300), absorbed(1e300)),
+                ("above-ceiling", payload(vector=want,
+                                          declared=ceiling - _MEMBER_BOUND_MARGIN_SECONDS + 1),
+                 "is above the {} s ceiling".format(ceiling)),
+                ("at-ceiling", payload(vector=want,
+                                       declared=ceiling - _MEMBER_BOUND_MARGIN_SECONDS), None)):
             _MEMBER_BOUND_SECONDS = None
             subprocess.run = real_run
             code, text = refused(lambda: _install_member_bound(run=scripted((0, effect))))
@@ -1712,13 +1768,12 @@ def _member_bound_vectors():
             subprocess.run = launcher(launches)
             launch, _text = refused(
                 lambda: _run_config_member(_VECTOR_MEMBER, dict(os.environ)))
-            if label == "install-clean":
+            if phrase is None:
                 got.append((label, code[0] if isinstance(code, tuple) else code, installed,
                             launch[1] if isinstance(launch, tuple) else launch, len(launches),
                             launches[0] if launches else None))
                 continue
-            got.append((label, code, "per-member bound's derivation was rejected" in text,
-                        installed, launch, len(launches)))
+            got.append((label, code, phrase in text, installed, launch, len(launches)))
     finally:
         subprocess.run = real_run
         _MEMBER_BOUND_SECONDS = saved

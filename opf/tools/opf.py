@@ -1241,6 +1241,11 @@ def _watchdog_closeout_paths():
     same waits as armed, ownership-lost and poll-collected, but the
     subject's exit is proven at the end of its proof wait, so the close-out
     reaches its cleaned state and then refuses with that proof.
+    armed-tree: armed-cleaned whose verification census comes back clean
+    twice in a row at once (the killed subject and member are zombies
+    under the frozen guardian), so the escalation reaches its "tree"
+    observation without waiting in that census, and close() refuses with
+    that observation.
     completed (a clean guardian collected by the run loop's last poll
     before the deadline: the call returns its result) and
     completed-overdue (that collection first observed at the deadline's
@@ -1276,8 +1281,8 @@ def _watchdog_closeout_paths():
     run_loop = ("the run loop's last poll", 0.0, 1)
     collection = ("guardian collection", 2 * grace, 1)
     escalated = ("post-escalation collection", grace, 1)
-    armed = (run_loop, ("subject receipt", receipt, 0), collection,
-             ("group pin", grace, 1), ("verification census", grace, 1), escalated)
+    pinned = (run_loop, ("subject receipt", receipt, 0), collection, ("group pin", grace, 1))
+    armed = pinned + (("verification census", grace, 1), escalated)
     unarmed = (collection, escalated)
     startup = (("the startup READY poll", 0.0, 1),)
     reap = ("interrupt-owner reap", grace, 1)
@@ -1289,6 +1294,7 @@ def _watchdog_closeout_paths():
     return dict([
         ("armed", armed + (exit_proof,)),
         ("armed-cleaned", armed + (exit_proof,)),
+        ("armed-tree", pinned + (escalated, exit_proof)),
         ("armed-interrupted", armed + (reap, reap)),
         ("ownership-lost", armed + (lost_proof,)),
         ("ownership-lost-cleaned", armed + (lost_proof,)),
@@ -1327,7 +1333,9 @@ def _watchdog_closeout_vectors(source=None):
     path of _watchdog_closeout_paths, under a virtual clock, each schedule
     holding that path's waits to (nearly) their limits. The schedules
     include the refusals, the cleaned refusals (the subject's exit proven,
-    reaching both of the copy's cleaned states), and the clean collections
+    reaching both of the copy's cleaned states), an escalation whose
+    verification census comes back clean twice in a row (its "tree"
+    observation and the refusal that reports it), and the clean collections
     before and at the deadline's expiry. Only boundaries are
     scripted, and only for the calling thread: time.monotonic and
     time.sleep, select.poll, socket.recv_fds, signal.pidfd_send_signal, and
@@ -1340,13 +1348,23 @@ def _watchdog_closeout_vectors(source=None):
     stat boundary is refused, never passed through. These other blocking
     calls are refused outright on the calling thread while a schedule runs:
     threading.Event.wait, Condition.wait and Thread.join, queue.Queue.get,
-    select.select and select.epoll, signal.sigtimedwait, sigwaitinfo and
-    pause, and os.wait, wait3 and wait4. So a wait added to the close-out
-    is caught when a schedule reaches it and it is one of the scripted or
-    refused calls; outside that coverage are a wait on a path no schedule
-    takes, a blocking read, write or accept on a real descriptor, a lock
-    acquired with a timeout, and compute (a busy loop that never reads the
-    clock does not end). Returns the faults: a
+    the get of a queue.SimpleQueue made while the schedule runs,
+    select.select and select.epoll, the select of every selectors class
+    that defines one (so of every selector class the selectors module
+    offers), signal.sigtimedwait, sigwaitinfo and pause, and os.wait,
+    wait3 and wait4. So a wait added to the close-out is caught when a
+    schedule reaches it and it is one of the scripted or refused calls.
+    Outside that coverage: a wait on a path no schedule takes; a blocking
+    read, write or accept on a real descriptor; a lock acquired with a
+    timeout; a get on a queue.SimpleQueue made before the schedule ran or
+    reached through _queue directly; a wait timed by an unscripted clock
+    (time.time, time.perf_counter, time.monotonic_ns and the other clocks
+    besides time.monotonic), which runs in real time and advances no
+    virtual time; any other blocking call not named here; and compute,
+    which advances no virtual time either (a busy loop that ends by itself
+    or by an unscripted clock costs real time unnoticed, and one that spins
+    on the scripted time.monotonic without a scripted sleep never ends,
+    since the virtual clock stands still). Returns the faults: a
     schedule that did not end as its path does; one whose virtual time
     after the deadline exceeds its path's total or the allowance
     (_watchdog_leg_closeout_seconds) (a wait left out of the derivation, or
@@ -1361,6 +1379,7 @@ def _watchdog_closeout_vectors(source=None):
     import io
     import queue
     import select
+    import selectors
     import signal
     import socket
     import subprocess
@@ -1501,6 +1520,8 @@ def _watchdog_closeout_vectors(source=None):
     def record(pid, sig):
         if pid == guardian and sig == signal.SIGSTOP:
             world["stopped"] = world["now"]
+        if sig == signal.SIGKILL:
+            world.setdefault("killed", set()).add(pid)
 
     def pidfd_send_signal(fd, sig, *rest):
         record(pid_of(fd), sig)
@@ -1575,7 +1596,10 @@ def _watchdog_closeout_vectors(source=None):
             frozen = world.get("stopped") is not None and last_poll_of("_fixture_group_pinned")
             return [b"T" if frozen else b"R", str(os.getpid()).encode(), str(guardian).encode()]
         if pid in (subject, member):
-            return [b"S", str(guardian).encode(), str(subject).encode()]
+            # Under a schedule whose census comes back clean, a killed subject
+            # or member is a zombie the frozen guardian cannot reap.
+            dead = world["spec"].get("quiesces") and pid in world.get("killed", ())
+            return [b"Z" if dead else b"S", str(guardian).encode(), str(subject).encode()]
         refuse("a /proc read of %r" % (target,))
 
     def pidfd_open(pid):
@@ -1617,6 +1641,27 @@ def _watchdog_closeout_vectors(source=None):
             refuse("an unscripted blocking call: " + name)
         return call
 
+    class SimpleQueue(queue.SimpleQueue):
+        """queue.SimpleQueue (a C type whose get cannot be patched) for the
+        queues made while a schedule runs: get is refused on the calling
+        thread while a schedule runs, and is the real get anywhere else."""
+
+        def get(self, *args, **kwargs):
+            if threading.get_ident() == owner and "now" in world:
+                refuse("an unscripted blocking call: queue.SimpleQueue.get")
+            return super().get(*args, **kwargs)
+
+    # Every selectors class that defines select (the others inherit one of
+    # these; DefaultSelector is an alias), so the select of any selector is
+    # refused, including one whose class kept the real select.epoll from
+    # import time.
+    selector_classes = []
+    for cls in vars(selectors).values():
+        if (isinstance(cls, type) and issubclass(cls, selectors.BaseSelector)
+                and cls is not selectors.BaseSelector and "select" in vars(cls)
+                and cls not in selector_classes):
+            selector_classes.append(cls)
+
     boundaries = (
         (time, "monotonic", lambda: world["now"], None), (time, "sleep", advance, None),
         (select, "poll", Poller, None), (socket, "recv_fds", recv_fds, None),
@@ -1633,7 +1678,9 @@ def _watchdog_closeout_vectors(source=None):
                 (queue.Queue, "get", "queue.Queue.get"), (select, "select", "select.select"),
                 (select, "epoll", "select.epoll"), (signal, "sigtimedwait", "signal.sigtimedwait"),
                 (signal, "sigwaitinfo", "signal.sigwaitinfo"), (signal, "pause", "signal.pause"),
-                (os, "wait", "os.wait"), (os, "wait3", "os.wait3"), (os, "wait4", "os.wait4")))
+                (os, "wait", "os.wait"), (os, "wait3", "os.wait3"), (os, "wait4", "os.wait4"))
+            ) + tuple((cls, "select", blocked("selectors.%s.select" % cls.__name__), None)
+                      for cls in selector_classes)
     unreaped = (emit.ChildStatusUnavailable, "not collected after escalation")
     clean = b"[0, false]"  # the guardian's receipt: subject status 0, not timed out
     schedules = dict([
@@ -1643,6 +1690,9 @@ def _watchdog_closeout_vectors(source=None):
         ("armed-cleaned", dict(ready=True, receipt="end", collect="late", exits=True,
                                end=(emit.ChildStatusUnavailable,
                                     "after bounded-close escalation"))),
+        ("armed-tree", dict(ready=True, receipt="end", collect="late", exits=True,
+                            quiesces=True, end=(emit.ChildStatusUnavailable,
+                                                "subject tree killed: every observed member"))),
         ("ownership-lost-cleaned", dict(ready=True, receipt="end", collect="echild", exits=True,
                                         end=(emit.ChildStatusUnavailable,
                                              "receipt subject killed on its held pidfd and "
@@ -1680,6 +1730,7 @@ def _watchdog_closeout_vectors(source=None):
         for target, name, fake, ours in boundaries:
             stack.enter_context(patch.object(target, name,
                                              scoped(getattr(target, name), fake, ours)))
+        stack.enter_context(patch.object(queue, "SimpleQueue", SimpleQueue))
         for label in [label for label in paths if label in schedules]:
             spec = schedules[label]
             world.clear()
@@ -1728,35 +1779,53 @@ def _watchdog_closeout_vectors(source=None):
 
 def _watchdog_closeout_mutant_faults():
     """The close-out vector's own red-on-revert check: each mutant adds one
-    wait to a copy of _opf_emit just before _finish_close records its
-    cleaned state (a line only the cleaned and clean-collection schedules
-    reach), and _watchdog_closeout_vectors must refuse that copy. The
-    mutants are a 70 s time.sleep (past every path's total), a 1 s
-    threading.Event wait and a 1 s select.select (each refused outright).
-    Returns a fault for each mutant the vector does not refuse, and one
-    when the anchor line is not found exactly once."""
+    wait to a copy of _opf_emit at one anchor line, and
+    _watchdog_closeout_vectors must refuse that copy. Just before
+    _finish_close records its cleaned state (a line only the cleaned and
+    clean-collection schedules reach): a 70 s time.sleep (past every path's
+    total), and, each refused outright, a 1 s threading.Event wait, a 1 s
+    select.select, a 1 s get on a new queue.SimpleQueue (its queue.Empty
+    caught, so only the refusal exposes it) and a 1 s select on a new
+    selectors.DefaultSelector. Just before _fixture_verify_group_kill
+    returns its "tree" observation (a line only the armed-tree schedule
+    reaches): a 70 s time.sleep. Returns a fault for each mutant the vector
+    does not refuse, and one for each anchor not found exactly once."""
     import tempfile
     text = (Path(__file__).resolve().parent / "_opf_emit.py").read_text(encoding="utf-8")
     indent = " " * 16
-    anchor = ('                            "survive".format(self.subject_pid))\n'
-              + indent + "self.cleaned = True\n")
-    if text.count(anchor) != 1:
-        return ["close-out mutant: _finish_close's cleaned-state anchor found %d times, not once"
-                % text.count(anchor)]
-    faults = []
+    cleaned = "_finish_close's cleaned state"
+    tree = "_fixture_verify_group_kill's \"tree\" return"
+    anchors = dict([
+        (cleaned, ('                            "survive".format(self.subject_pid))\n'
+                   + indent + "self.cleaned = True\n", indent + "self.cleaned = True")),
+        (tree, ("            if clean >= 2:\n" + indent + 'return ("tree", [])\n',
+                indent + 'return ("tree", [])')),
+    ])
+    faults = ["close-out mutant: %s anchor found %d times, not once" % (name, text.count(anchor))
+              for name, (anchor, _line) in anchors.items() if text.count(anchor) != 1]
+    if faults:
+        return faults
     with tempfile.TemporaryDirectory(prefix="opf-closeout-mutant-") as directory:
-        for index, (label, lines) in enumerate((
-                ("a 70 s time.sleep", ("time.sleep(70)",)),
-                ("a 1 s threading.Event wait", ("import threading", "threading.Event().wait(1.0)")),
-                ("a 1 s select.select", ("select.select([], [], [], 1.0)",)))):
+        for index, (label, where, lines) in enumerate((
+                ("a 70 s time.sleep", cleaned, ("time.sleep(70)",)),
+                ("a 1 s threading.Event wait", cleaned,
+                 ("import threading", "threading.Event().wait(1.0)")),
+                ("a 1 s select.select", cleaned, ("select.select([], [], [], 1.0)",)),
+                ("a 1 s queue.SimpleQueue get", cleaned,
+                 ("import queue", "try:", "    queue.SimpleQueue().get(timeout=1.0)",
+                  "except queue.Empty:", "    pass")),
+                ("a 1 s selectors.DefaultSelector select", cleaned,
+                 ("import selectors", "with selectors.DefaultSelector() as chosen:",
+                  "    chosen.select(1.0)")),
+                ("a 70 s time.sleep", tree, ("time.sleep(70)",)))):
             # One file per mutant: no copy can load another's cached code.
             mutant = Path(directory, "_opf_emit_mutant_%d.py" % index)
-            added = "".join(indent + line + "\n" for line in lines)
-            mutant.write_text(text.replace(anchor, anchor.replace(
-                indent + "self.cleaned", added + indent + "self.cleaned")), encoding="utf-8")
+            anchor, line = anchors[where]
+            added = "".join(indent + piece + "\n" for piece in lines)
+            mutant.write_text(text.replace(anchor, anchor.replace(line, added + line)),
+                              encoding="utf-8")
             if not _watchdog_closeout_vectors(source=mutant):
-                faults.append("close-out mutant not refused: %s before _finish_close's cleaned "
-                              "state" % label)
+                faults.append("close-out mutant not refused: %s before %s" % (label, where))
     return faults
 
 
@@ -4473,26 +4542,32 @@ def _watchdog_tree_vectors():
     # Pass condition (2), nested-timeout: a guardian that left supervision
     # without its own expiry (its subject tree killed from outside) while
     # the caller's deadline passed between collection and its overdue
-    # check; only the timed_out check refuses it.
-    expect_failure("killed/timeout", "left supervision without its own expiry",
-                   live_then_held_early, "nested-timeout", order="killed-after-snapshot")
+    # check; only the timed_out check refuses it. Its predicate and
+    # schedule are bound once here and shared with the stall vector below,
+    # so the predicate the call uses is the one that vector checks.
+    killed_timeout = dict(label="killed/timeout",
+                          phrase="left supervision without its own expiry",
+                          established=live_then_held_early, mode="nested-timeout",
+                          order="killed-after-snapshot")
+    expect_failure(**killed_timeout)
     # The held-early rule: the same outside kill, but the guardian held
     # stopped across its own deadline (a host stall) first expires, so the
     # leg passes on a genuine expiry. That schedule is NOT killed/timeout's
-    # (a guardian that left supervision before its deadline), and read as
-    # that schedule this stall would be reported as a code regression.
+    # (a guardian that left supervision before its deadline): killed/timeout's
+    # own predicate must not hold on its facts, or this stall would be
+    # reported as a code regression by the killed/timeout vector above.
     facts = {}
     try:
-        verdict, out = run("nested-timeout", dict(order="killed-after-snapshot",
-                                                  backstop=_TREE_VECTOR_BACKSTOP,
-                                                  stall_guardian=True), facts)
+        verdict, out = run(killed_timeout["mode"], dict(order=killed_timeout["order"],
+                                                        backstop=_TREE_VECTOR_BACKSTOP,
+                                                        stall_guardian=True), facts)
     except AssertionError as exc:
         verdict, out = "refused", str(exc)
     if not (live_then_held(facts) and facts.get("stopped") is True
             and facts.get("stalled-past") is True):
         unestablished.append("stalled-past-deadline/timeout: schedule not established on this "
                              "host (recorded %r; the leg reported %s)" % (facts, verdict))
-    elif live_then_held_early(facts) or verdict == "refused":
+    elif killed_timeout["established"](facts) or verdict == "refused":
         raise AssertionError("tree vector stalled-past-deadline/timeout: a guardian held stopped "
                              "past its deadline was read as leaving supervision before it "
                              "(recorded %r; the leg reported %s: %r)" % (facts, verdict, out))
@@ -14224,13 +14299,22 @@ def _watchdog_declared_seconds(plan=None):
     close-out after that bound (_watchdog_leg_closeout_seconds), plus the
     watchdog isolation self-test's run at top level. That run has no leg
     bound around it, so it is priced the way a leg is, per fixture call:
-    each of its calls runs at most to its process bound
+    each of its calls is CHARGED its process bound
     (_WATCHDOG_ISOLATION_TIMEOUT) plus the close-out allowance after it,
-    never at a passing call's budget (_deadline_case_budget), which assumes
-    the call ends inside its timeout. The other registered opf self-tests
-    declare no end-to-end budget; the consumer's margin is the allowance
-    for them. `plan` defaults to the runner's own tables; the consumer
-    passes a synthetic plan as its red-on-revert vector for each term."""
+    never a passing call's budget (_deadline_case_budget), which assumes
+    the call ends inside its timeout. The close-out allowance is a
+    timed-wait allowance, not a wall-clock ceiling, so this total is a sum
+    of charges, not a wall-clock ceiling on the self-test's run: it charges
+    nothing for what _watchdog_closeout_paths excludes (the caller's own
+    compute between and inside the charged waits, time in which the host
+    does not run the caller, the untimed reap in _start(), a cancellation
+    raised at any other point, and exceptions another thread raises into
+    the caller), nor for the self-test's work outside the charged legs and
+    calls (the regression runner's pre-flight vectors among it). The
+    other registered opf self-tests declare no end-to-end budget; the
+    consumer's margin is the allowance for them. `plan` defaults to the
+    runner's own tables; the consumer passes a synthetic plan as its
+    red-on-revert vector for each term."""
     if plan is None:
         plan = _watchdog_regression_self_test(plan_only=True)
     if not isinstance(plan, dict):
