@@ -2530,10 +2530,11 @@ def boundary_self_test():
                 patch.object(store, "validate_manifest", return_value=store.ManifestValidation(store.VALID)), \
                 patch.object(store._journal, "_open_parent", side_effect=FileNotFoundError), \
                 patch.object(adopt, "validate_plan", wraps=adopt.validate_plan) as frozen:
-            # Every planned creation needs observed absence, so the root-level ones are declared targets; the
-            # enforcement members are installed by the pack row the frozen plan ties them to.
+            # Every planned creation needs observed absence, so the root-level ones and the opf/ mirror are
+            # declared targets; the enforcement members are installed by the pack row the frozen plan ties
+            # them to.
             bindings = adopt.canonical_plan_bindings()
-            targets = ["notes.txt", ".opf/hooks/pre-commit"]
+            targets = ["notes.txt", adopt.PACK_MIRROR_ROOT]
             observed = planning.investigate(Path("/store"), sources=[], targets=targets)
             result = planning.plan(
                 Path("/store"), sources=[], targets=targets, product="opf", decisions=[],
