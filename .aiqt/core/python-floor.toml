@@ -14,15 +14,21 @@
 #                     adopter-tool and OPF enforcement deny-hook entrypoints and
 #                     tools/check_entry_guard.py are listed, so every shipped entrypoint carries the
 #                     guard. The deny hook (opf/enforcement/claude/pretooluse_deny.py, PreToolUse only)
-#                     carries the CLI form with exit 2, so a sub-floor interpreter blocks the call. The
-#                     core hook and its plugin copy carry the guard's hook form (HOOK_SURFACES in the
-#                     gate): a fail-open event's mode warns on exit 0 instead of refusing. The pack's
-#                     clock-inject.py and future-stamp-write.py (core sources and plugin copies) carry
-#                     the CLI form with exit 2, which the plugin's launcher reports as exit 1.
+#                     carries the CLI form with exit 2, so a sub-floor interpreter that can start it
+#                     blocks the call (one that cannot start it fails first with Python's own exit; an
+#                     exit other than 2 lets the call proceed). The core hook and its plugin copy carry
+#                     the guard's hook form (HOOK_SURFACES in the gate): a fail-open event's mode warns
+#                     on exit 0 instead of refusing. The pack's clock-inject.py and future-stamp-write.py
+#                     (core sources and plugin copies) carry the CLI form with exit 2, which the plugin's
+#                     launcher reports as exit 1. Every guard's exit holds while the guarded file's
+#                     output (its diagnostic on stderr, and what it prints on stdout) can be written and
+#                     flushed. A failing output stream can change the exit status and can lose output,
+#                     a decision included; a separate fix in progress addresses this.
 # nonblocking-surfaces the guarded-surfaces entries whose guard exits 1 instead of 2, sorted, unique and each
 #                     also listed above: a hook whose event reads exit 2 as a block (a Stop hook's exit 2
 #                     blocks the stop, and the guard runs before the hook's own block cap). Never a
-#                     HOOK_SURFACES entry (cannot-evaluate): its hook form denies with exit 2, fixed.
+#                     HOOK_SURFACES entry (cannot-evaluate): the gate's hook template, not this list,
+#                     sets the hook form's refusal to raise SystemExit(2).
 # completeness-check  true since tools/check_entry_guard.py, the last shipped entrypoint, was guarded
 #                     and listed: an unlisted shipped entrypoint is a finding.
 # documentation-check true since the declarations landed: each declaration file must state the floor and
@@ -35,7 +41,11 @@ guarded-surfaces = [
     ".aiqt/core/hooks/scripts/aiqt_hooks.py",
     ".aiqt/core/hooks/scripts/clock-inject.py",
     ".aiqt/core/hooks/scripts/future-stamp-write.py",
+    ".preview/char-policy-write.py",
+    ".preview/constraint-reread.py",
+    ".preview/pattern-self-match.py",
     ".preview/record-remove-check.py",
+    ".preview/rerun-pass-check.py",
     ".preview/stamp-truth-stop.py",
     ".preview/unbounded-wait.py",
     ".preview/ungated-record.py",
@@ -113,6 +123,7 @@ guarded-surfaces = [
     "tools/check_msg_leaks.py",
     "tools/check_newtab.py",
     "tools/check_no_dashes.py",
+    "tools/check_opf_enforce_platforms.py",
     "tools/check_opf_standalone_closure.py",
     "tools/check_overclaim.py",
     "tools/check_portability.py",
@@ -139,6 +150,7 @@ guarded-surfaces = [
     "tools/gen_adapters.py",
     "tools/gen_agents.py",
     "tools/gen_changelog.py",
+    "tools/gen_char_policy.py",
     "tools/gen_claude.py",
     "tools/gen_crosswalk.py",
     "tools/gen_cursor.py",
@@ -174,6 +186,8 @@ guarded-surfaces = [
     "tools/selftest_orch_hooks.py",
 ]
 nonblocking-surfaces = [
+    ".preview/constraint-reread.py",
+    ".preview/rerun-pass-check.py",
     ".preview/stamp-truth-stop.py",
 ]
 completeness-check = true

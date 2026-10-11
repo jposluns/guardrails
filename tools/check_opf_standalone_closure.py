@@ -230,10 +230,11 @@ reports only a count (the attribution inventory's unpinned sites and unrecorded 
 the offending keys are deliberately not printed. The canonical Python floor guard that opens this
 file (tools/check_python_floor.py GUARD_TEMPLATE) is the one code outside the emitter the
 allowlist exempts: below the
-floor it writes its fixed refusal formatted with the interpreter's version and sys.executable, and
-exits 2 before anything else runs. closure/closed-sites exempts exactly the guard's two channel
-references (its refusal write's sys.stderr and its raise's SystemExit) by their position and
-exact shape (_floor_guard) and, through one flip per tested shape condition (each declaring the
+floor it writes its fixed refusal formatted with the interpreter's version and sys.executable,
+flushes it (both best-effort), and exits 2 through os._exit before anything else runs.
+closure/closed-sites exempts exactly the guard's three channel references (its refusal write's
+sys.stderr, its flush's sys.stderr and its os._exit) by their position and exact shape
+(_floor_guard) and, through one flip per tested shape condition (each declaring the
 count the exemption may remove in its flip module) plus the preamble controls, refutes an
 exemption that would cover a reference in any other position or tested shape; the structural length
 bounds of the preamble (a module too short to hold the guard) and the qualname component of the
@@ -256,11 +257,16 @@ text).
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: check_opf_standalone_closure.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: check_opf_standalone_closure.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 import ast
 import contextlib
@@ -293,7 +299,7 @@ from _gen_common import repo_root  # noqa: E402
 # module-level emitter _emit (pinned verbatim against _EMITTER_SOURCE) and the canonical Python
 # floor guard that opens this file (tools/check_python_floor.py GUARD_TEMPLATE, which that gate
 # requires verbatim; below the floor it writes its fixed refusal with the interpreter's version
-# and sys.executable, before anything else runs, and closure/closed-sites exempts exactly its two
+# and sys.executable, before anything else runs, and closure/closed-sites exempts exactly its three
 # channel references by position and exact shape, _floor_guard, nothing else) may reference an
 # output or exit channel; any other reference, alias, binding or import of one is refused, closed
 # text or not. Every _emit call passes each text argument as a string or int constant, a module
@@ -384,8 +390,9 @@ _MODULE_ATTRS = dict(
         "BinOp", "Call", "ClassDef", "Compare", "Constant", "Del", "Delete", "ExceptHandler",
         "Expr", "FunctionDef", "GeneratorExp",
         "Global", "If", "IfExp", "Import", "ImportFrom", "Lambda", "Load", "Lt", "MatchAs",
-        "MatchMapping", "MatchStar", "Mod", "Name", "Nonlocal", "ParamSpec", "Raise", "Starred",
-        "Store", "Subscript", "Tuple", "TypeVar", "TypeVarTuple", "alias", "arg", "dump",
+        "MatchMapping", "MatchStar", "Mod", "Name", "Nonlocal", "ParamSpec", "Pass", "Raise",
+        "Starred", "Store", "Subscript", "Try", "Tuple", "TypeVar", "TypeVarTuple", "alias", "arg",
+        "dump",
         "get_source_segment", "iter_child_nodes", "parse", "unparse", "walk")),
     contextlib=frozenset(("contextmanager", "redirect_stderr", "redirect_stdout")),
     errno=frozenset(("EACCES", "ENOSPC", "errorcode.get", "errorcode.values")),
@@ -2866,14 +2873,16 @@ _FLOOR_GUARD_VALUES = 'tuple(sys.version_info[:3]) + (sys.executable or "unknown
 
 
 def _floor_guard(tree):
-    """The module-level `if` statement whose refusal write closure/closed-sites exempts as the
+    """The module-level `if` statement whose channel references closure/closed-sites exempts as the
     canonical Python floor guard, or None. It directly follows a plain `import sys` at the end of
     the preamble (a docstring and `from __future__` imports, as tools/check_python_floor.py reads
     it), has no else, tests `tuple(sys.version_info[:2]) < (M, N)` with two int constants, and holds
-    exactly two statements: a sys.stderr.write passing one positional argument, a str constant %
-    exactly _FLOOR_GUARD_VALUES, then `raise SystemExit(<int>)`. A guard in any other position or
-    shape (a third statement, another value formatted, a second copy later in the module, one
-    inside a def) is not this one, so its write is not exempted."""
+    exactly three statements: a plain `import os`; a try with no else and no finally whose body is
+    a sys.stderr.write passing one positional argument, a str constant % exactly
+    _FLOOR_GUARD_VALUES, then a sys.stderr.flush() passing nothing, and whose one handler is
+    `except BaseException:` with no name, holding only `pass`; then `os._exit(<int>)`. A guard in
+    any other position or shape (a fourth statement, another value formatted, a second copy later
+    in the module, one inside a def) is not this one, so its references are not exempted."""
     body, start = tree.body, 0
     if (body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant)
             and isinstance(body[0].value.value, str)):
@@ -2887,19 +2896,35 @@ def _floor_guard(tree):
     if not (isinstance(head, ast.Import) and len(head.names) == 1 and head.names[0].name == "sys"
             and head.names[0].asname is None):
         return None
-    if not (isinstance(guard, ast.If) and not guard.orelse and len(guard.body) == 2):
+    if not (isinstance(guard, ast.If) and not guard.orelse and len(guard.body) == 3):
         return None
-    test, write, leave = guard.test, guard.body[0], guard.body[1]
+    test, local, attempt, leave = guard.test, guard.body[0], guard.body[1], guard.body[2]
     if not (isinstance(test, ast.Compare) and len(test.ops) == 1 and isinstance(test.ops[0], ast.Lt)
             and ast.dump(test.left) == ast.dump(ast.parse("tuple(sys.version_info[:2])", mode="eval").body)
             and isinstance(test.comparators[0], ast.Tuple) and len(test.comparators[0].elts) == 2
             and all(isinstance(elt, ast.Constant) and type(elt.value) is int
                     for elt in test.comparators[0].elts)):
         return None
-    if not (isinstance(leave, ast.Raise) and leave.cause is None and isinstance(leave.exc, ast.Call)
-            and _callee_name(leave.exc.func) == "SystemExit" and not leave.exc.keywords
-            and len(leave.exc.args) == 1 and isinstance(leave.exc.args[0], ast.Constant)
-            and type(leave.exc.args[0].value) is int):
+    if not (isinstance(local, ast.Import) and len(local.names) == 1 and local.names[0].name == "os"
+            and local.names[0].asname is None):
+        return None
+    if not (isinstance(attempt, ast.Try) and len(attempt.body) == 2 and not attempt.orelse
+            and not attempt.finalbody and len(attempt.handlers) == 1):
+        return None
+    handler = attempt.handlers[0]
+    if not (handler.name is None and isinstance(handler.type, ast.Name)
+            and handler.type.id == "BaseException" and len(handler.body) == 1
+            and isinstance(handler.body[0], ast.Pass)):
+        return None
+    leave_call = leave.value if isinstance(leave, ast.Expr) else None
+    if not (isinstance(leave_call, ast.Call) and _callee_name(leave_call.func) == "os._exit"
+            and not leave_call.keywords and len(leave_call.args) == 1
+            and isinstance(leave_call.args[0], ast.Constant) and type(leave_call.args[0].value) is int):
+        return None
+    write, flush = attempt.body
+    flush_call = flush.value if isinstance(flush, ast.Expr) else None
+    if not (isinstance(flush_call, ast.Call) and _callee_name(flush_call.func) == "sys.stderr.flush"
+            and not flush_call.args and not flush_call.keywords):
         return None
     call = write.value if isinstance(write, ast.Expr) else None
     if not (isinstance(call, ast.Call) and _callee_name(call.func) == "sys.stderr.write"
@@ -2914,15 +2939,16 @@ def _floor_guard(tree):
 
 
 def _unexempted_violations(tree):
-    """_closed_output_violations(tree) less the canonical floor guard's two channel references
-    (_floor_guard: its refusal write's sys.stderr and its raise's SystemExit, each matched by
-    qualname, token and line), with the number of violations that exemption removed (the guard
-    holds exactly those two references, so a count other than 2 means the exemption is stale or
-    too wide)."""
+    """_closed_output_violations(tree) less the canonical floor guard's three channel references
+    (_floor_guard: its refusal write's sys.stderr, its flush's sys.stderr and its os._exit, each
+    matched by qualname, token and line), with the number of violations that exemption removed (the
+    guard holds exactly those three references, so a count other than 3 means the exemption is
+    stale or too wide)."""
     guard = _floor_guard(tree)
     found = _closed_output_violations(tree)
-    exempt = () if guard is None else (("<module>", "sys.stderr", guard.body[0].lineno),
-                                       ("<module>", "SystemExit", guard.body[1].lineno))
+    exempt = () if guard is None else (("<module>", "sys.stderr", guard.body[1].body[0].lineno),
+                                       ("<module>", "sys.stderr", guard.body[1].body[1].lineno),
+                                       ("<module>", "os._exit", guard.body[2].lineno))
     kept = [site for site in found if site[:3] not in exempt]
     return kept, len(found) - len(kept)
 
@@ -2952,7 +2978,7 @@ def _closed_output_violations(tree):
     """Every reference under `tree` that the closed-diagnostics ALLOWLIST refuses, as (qualname,
     token, line, why). Only the one module-level def named _emit (whose statements
     _check_closed_sites pins verbatim against _EMITTER_SOURCE) may reference a channel; the
-    canonical floor guard's two references are exempted by position and shape in
+    canonical floor guard's three references are exempted by position and shape in
     _unexempted_violations; everywhere else:
     any reference to a _CHANNEL_NAMES name (print, exit, quit, SystemExit, warnings, logging,
     traceback, builtins, __builtins__), in any context, is refused, closed text or not; a bare
@@ -3710,21 +3736,21 @@ _EMITTER_FLIPS = (
 # "{guard}" replaced by this file's own guard source (the `if` statement) after replacing old with
 # new in it once (no change when old is empty), and "{indented}" by that guard indented one level.
 # Each module must keep an unexempted violation AND the exemption must remove exactly the declared
-# `exempted` count there (0 for a guard made non-canonical; 2 where the flip module also carries
-# the canonical guard, whose refusal write and exit raise are its two exempted channel
-# references), so the exemption covers the canonical guard's two references in their canonical
+# `exempted` count there (0 for a guard made non-canonical; 3 where the flip module also carries
+# the canonical guard, whose refusal write, flush and os._exit are its three exempted channel
+# references), so the exemption covers the canonical guard's three references in their canonical
 # position and shape and nothing else, one flip per tested _floor_guard shape condition.
 _FLOOR_GUARD_FLIPS = (
-    ("guard-extra-write", "    raise SystemExit(", "    sys.stderr.write(value)\n    raise SystemExit(",
+    ("guard-extra-write", "    os._exit(", "    sys.stderr.write(value)\n    os._exit(",
      "import sys\n{guard}\n", 0),
     ("guard-other-values", "sys.executable or", "value or", "import sys\n{guard}\n", 0),
     ("guard-not-after-import", "", "", "import sys\nimport os\n{guard}\n", 0),
     ("guard-head-other-module", "", "", "import os\n{guard}\n", 0),
     ("guard-import-two-names", "", "", "import sys, os\n{guard}\n", 0),
     ("guard-import-as", "", "", "import sys as sys\n{guard}\n", 0),
-    ("guard-second-copy", "", "", "import sys\n{guard}\n{guard}\n", 2),
-    ("guard-in-def", "", "", "import sys\n{guard}\ndef f():\n{indented}\n", 2),
-    ("guard-then-write", "", "", "import sys\n{guard}\nsys.stderr.write(value)\n", 2),
+    ("guard-second-copy", "", "", "import sys\n{guard}\n{guard}\n", 3),
+    ("guard-in-def", "", "", "import sys\n{guard}\ndef f():\n{indented}\n", 3),
+    ("guard-then-write", "", "", "import sys\n{guard}\nsys.stderr.write(value)\n", 3),
     ("guard-test-not-compare", "tuple(sys.version_info[:2]) < (3, 14)", "flag",
      "import sys\n{guard}\n", 0),
     ("guard-version-expression", "tuple(sys.version_info[:2])", "sys.version_info[:2]",
@@ -3736,7 +3762,7 @@ _FLOOR_GUARD_FLIPS = (
     ("guard-floor-not-int", "(3, 14)", "(3, '14')", "import sys\n{guard}\n", 0),
     ("guard-format-not-constant",
      "\"error: check_opf_standalone_closure.py requires Python 3.14 or newer; this is Python "
-     "%d.%d.%d (%s). \"\n        \"Nothing was run (cannot evaluate).\\n\"",
+     "%d.%d.%d (%s). \"\n            \"Nothing was run (cannot evaluate).\\n\"",
      "template", "import sys\n{guard}\n", 0),
     ("guard-write-assigned", "    sys.stderr.write(", "    _refusal = sys.stderr.write(",
      "import sys\n{guard}\n", 0),
@@ -3748,29 +3774,45 @@ _FLOOR_GUARD_FLIPS = (
      "import sys\n{guard}\n", 0),
     ("guard-write-plain-name",
      "\"error: check_opf_standalone_closure.py requires Python 3.14 or newer; this is Python "
-     "%d.%d.%d (%s). \"\n        \"Nothing was run (cannot evaluate).\\n\"\n        "
+     "%d.%d.%d (%s). \"\n            \"Nothing was run (cannot evaluate).\\n\"\n            "
      "% (tuple(sys.version_info[:3]) + (sys.executable or \"unknown interpreter\",))",
      "template", "import sys\n{guard}\n", 0),
     ("guard-write-stdout", "sys.stderr.write", "sys.stdout.write", "import sys\n{guard}\n", 0),
-    ("guard-raise-bare", "raise SystemExit(2)", "raise SystemExit", "import sys\n{guard}\n", 0),
-    ("guard-exit-call-not-raise", "raise SystemExit(2)", "sys.exit(2)", "import sys\n{guard}\n", 0),
-    ("guard-raise-from", "raise SystemExit(2)", "raise SystemExit(2) from None",
+    ("guard-local-import-missing", "    import os\n", "", "import sys\n{guard}\n", 0),
+    ("guard-local-import-other", "    import os\n", "    import io\n", "import sys\n{guard}\n", 0),
+    ("guard-local-import-as", "    import os\n", "    import os as os\n", "import sys\n{guard}\n", 0),
+    ("guard-flush-missing", "        sys.stderr.flush()\n", "", "import sys\n{guard}\n", 0),
+    ("guard-flush-stdout", "sys.stderr.flush()", "sys.stdout.flush()", "import sys\n{guard}\n", 0),
+    ("guard-flush-argument", "sys.stderr.flush()", "sys.stderr.flush(1)", "import sys\n{guard}\n", 0),
+    ("guard-flush-outside-try", "        sys.stderr.flush()\n    except BaseException:\n        pass\n",
+     "    except BaseException:\n        pass\n    sys.stderr.flush()\n", "import sys\n{guard}\n", 0),
+    ("guard-except-narrow", "except BaseException:", "except Exception:", "import sys\n{guard}\n", 0),
+    ("guard-except-bare", "except BaseException:", "except:", "import sys\n{guard}\n", 0),
+    ("guard-except-named", "except BaseException:", "except BaseException as error:",
      "import sys\n{guard}\n", 0),
-    ("guard-raise-other-name", "SystemExit(2)", "GuardExit(2)", "import sys\n{guard}\n", 0),
-    ("guard-raise-keyword", "SystemExit(2)", "SystemExit(2, code=2)", "import sys\n{guard}\n", 0),
-    ("guard-raise-two-args", "SystemExit(2)", "SystemExit(2, 2)", "import sys\n{guard}\n", 0),
-    ("guard-raise-not-int", "SystemExit(2)", "SystemExit(code)", "import sys\n{guard}\n", 0),
-    ("guard-raise-string-int", "SystemExit(2)", "SystemExit('2')", "import sys\n{guard}\n", 0),
-    ("guard-raise-bool", "SystemExit(2)", "SystemExit(True)", "import sys\n{guard}\n", 0),
-    ("guard-third-statement", "raise SystemExit(2)", "raise SystemExit(2)\n    sys.stderr.flush()",
+    ("guard-except-body", "        pass\n", "        sys.stderr.write(value)\n", "import sys\n{guard}\n", 0),
+    ("guard-try-finally", "        pass\n", "        pass\n    finally:\n        pass\n",
      "import sys\n{guard}\n", 0),
-    ("guard-with-else", "    raise SystemExit(2)", "    raise SystemExit(2)\nelse:\n    pass",
+    ("guard-try-else", "        pass\n", "        pass\n    else:\n        pass\n",
+     "import sys\n{guard}\n", 0),
+    ("guard-exit-sys-exit", "os._exit(2)", "sys.exit(2)", "import sys\n{guard}\n", 0),
+    ("guard-exit-raised", "os._exit(2)", "raise SystemExit(2)", "import sys\n{guard}\n", 0),
+    ("guard-exit-other-name", "os._exit(2)", "os.abort(2)", "import sys\n{guard}\n", 0),
+    ("guard-exit-bare", "os._exit(2)", "os._exit()", "import sys\n{guard}\n", 0),
+    ("guard-exit-keyword", "os._exit(2)", "os._exit(status=2)", "import sys\n{guard}\n", 0),
+    ("guard-exit-two-args", "os._exit(2)", "os._exit(2, 2)", "import sys\n{guard}\n", 0),
+    ("guard-exit-not-int", "os._exit(2)", "os._exit(code)", "import sys\n{guard}\n", 0),
+    ("guard-exit-string-int", "os._exit(2)", "os._exit('2')", "import sys\n{guard}\n", 0),
+    ("guard-exit-bool", "os._exit(2)", "os._exit(True)", "import sys\n{guard}\n", 0),
+    ("guard-fourth-statement", "    os._exit(2)", "    os._exit(2)\n    sys.stderr.flush()",
+     "import sys\n{guard}\n", 0),
+    ("guard-with-else", "    os._exit(2)", "    os._exit(2)\nelse:\n    pass",
      "import sys\n{guard}\n", 0),
 )
 
 # Positive controls of the exemption, as (name, module): each module holds the canonical guard in
 # a permitted preamble (plain, after a docstring, after a docstring and a __future__ import) and
-# must come back fully exempt (no violation kept, exactly the guard's two references removed), so
+# must come back fully exempt (no violation kept, exactly the guard's three references removed), so
 # the preamble tolerances of _floor_guard cannot be narrowed without failing here.
 _FLOOR_GUARD_CONTROLS = (
     ("guard-plain", "import sys\n{guard}\n"),
@@ -3815,7 +3857,7 @@ def _check_closed_sites(_root):
     def carrying any decorator is refused (the decorator allowlist is empty);
     the emitter shape pin must refuse every _EMITTER_FLIPS mutation of _EMITTER_SOURCE and accept
     it unchanged, with and without a docstring; the floor-guard exemption must remove exactly the
-    guard's two channel references, flag every _FLOOR_GUARD_FLIPS module built from this file's
+    guard's three channel references, flag every _FLOOR_GUARD_FLIPS module built from this file's
     own guard (removing exactly the declared count there) and come back fully exempt on every
     _FLOOR_GUARD_CONTROLS module; the walk must flag every _CLOSED_FLIPS snippet by a rule other
     than the permit lists (so recording its site could not admit it), must leave every
@@ -3916,9 +3958,9 @@ def _check_closed_sites(_root):
         raise AssertionError("closure/closed-sites: the exception-entry check refused its own "
                              "control (one well-formed entry with a positive count)")
     violations, exempted = _unexempted_violations(tree)
-    if exempted != 2:
+    if exempted != 3:
         raise AssertionError("closure/closed-sites: the floor-guard exemption removed {} violation(s), "
-                             "not exactly the guard's refusal write and its exit raise".format(
+                             "not exactly the guard's refusal write, its flush and its exit".format(
                                  _n(exempted)))
     unclosed, mismatched = _exception_ledger(violations, registries)
     if unclosed:
@@ -3982,9 +4024,9 @@ def _check_closed_sites(_root):
                                  "so it covers more than the canonical guard's references".format(
                                      _cv("flip", flip), _n(removed), _n(exempted)))
     for control, module in _FLOOR_GUARD_CONTROLS:
-        if _unexempted_violations(ast.parse(module.replace('{guard}', guard))) != ([], 2):
+        if _unexempted_violations(ast.parse(module.replace('{guard}', guard))) != ([], 3):
             raise AssertionError("closure/closed-sites: the floor-guard exemption did not cover exactly "
-                                 "the canonical guard's two references in the {} control".format(
+                                 "the canonical guard's three references in the {} control".format(
                                      _cv("flip", control)))
     _result, probe_out, probe_err = _captured(lambda: _emit("closure/closed-sites emitter probe"))
     if (probe_out, probe_err) != ("closure/closed-sites emitter probe\n", ""):
