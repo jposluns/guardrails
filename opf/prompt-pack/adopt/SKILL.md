@@ -86,9 +86,10 @@ the sources and targets you name. It never enters `.git`.
   for: a hand-kept TODO list, a decisions log, release notes, an issue export. Ask the adopter;
   a file you do not name is not inventoried, and detection is by path, not by content.
 - **Targets** are paths the plan will create outside the scanned roots, for example `opf`, the
-  directory where the plan installs the OPF pack mirror: the pre-commit hook at
-  `opf/enforcement/precommit/pre-commit`, the CI recipe and the tools they run. The planner needs
-  to see that each is absent.
+  directory of the OPF pack mirror. The plan installs there only the members it names: the
+  pre-commit hook at `opf/enforcement/precommit/pre-commit` with `install.sh` beside it, the CI
+  recipe and the tool entry point `opf/tools/opf.py`. The modules that entry point imports come
+  from a later install step (section 4). The planner needs to see that each target is absent.
 
 This build has no `opf adopt` subcommand that prints the observation. Use the planner's
 read-only library entry, with an absolute product root and the tooling directory that holds
@@ -381,11 +382,26 @@ How to fill it:
   workflow's `run:` line points, and both rows name `opf/tools/opf.py`, the tool those files run.
   The sample names only that entry point. The modules it imports sit beside it in the release's
   `opf/tools/` directory, which a later install step mirrors; that step is not executable in
-  this build. A plan in which an installed file runs a file the plan does not install refuses
-  with exit 2: a hook at the former `.opf/hooks/pre-commit`, for example, would run
-  `tools/opf.py`, outside the mirror. Otherwise, a `ci` or `pre-commit` row that leaves out one
-  of the files that runs another (the workflow, the recipe, the hook or `install.sh`) refuses
-  with exit 1.
+  this build. The planner treats a member named `opf.yml`, `opf-ci.sh`, `pre-commit` or
+  `install.sh`, in any row, as that file, whichever of `install-pack`, `plant-governance` or
+  `enable-hook` installs it. If the path it runs lies outside `opf/` or above the product root,
+  or no `install-pack` or `plant-governance` operation in the plan creates that path, the plan
+  refuses with exit 2. A hook at the former `.opf/hooks/pre-commit`, for example, would run
+  `tools/opf.py`, outside the mirror. In a `ci` or `pre-commit` row, every other installed file
+  must be one that a file named as above in the same row runs; any other refuses with exit 2,
+  because the planner cannot tell what it runs. Give no other platform's member one of those
+  four names. The planner never reads member bytes, so it does not recognize a renamed copy of
+  a hook in another platform's row. Otherwise, a `ci` or `pre-commit` row that leaves out one of
+  the files that runs another (the workflow, the recipe, the hook or `install.sh`) refuses with
+  exit 1.
+- Compatibility with earlier worksheets: the samples in prompt pack 0.4.0 and 0.4.1 named only
+  the workflow in the `ci` row, placed the pre-commit hook alone at `.opf/hooks/pre-commit`, and
+  listed that path in `targets`. A plan from such a worksheet now refuses with exit 2, because
+  its workflow runs `opf/enforcement/ci/opf-ci.sh` and its hook runs `tools/opf.py`, and the
+  plan installs neither in the mirror. Installing the hook with `enable-hook` instead refuses
+  the same way. Rewrite the `ci` and `pre-commit` rows and the `install-pack` members as the
+  sample shows, replace the target with `opf`, and investigate again, because the targets
+  changed.
 - `init-store` is required when no store resolves and refused when one does. `render-views`
   lists exactly the views the planned store declares, one member each; with no store yet, those
   are the thirteen views of the default manifest, as in the sample. Every enforcement member is
