@@ -7,7 +7,7 @@ source lives in .aiqt/core/hooks/scripts/ and tools/gen_hooks.py copies it byte-
 plugin/aiqt-guardrails-hooks/hooks/scripts/ (byte identity is that generator's --check, not this gate).
 Every script the manifest names must have a fixture set in build_specs below, and every fixture set must
 be in the manifest; a mismatch either way is a cannot-evaluate (exit 2), so a new script forces a
-reviewed edit here. Six legs:
+reviewed edit here. Seven legs:
 
   (a) SELF-TEST. Each source script runs as [sys.executable, "-I", "-S", "-B", <path>, "--self-test"]
       under the run contract below. A nonzero exit is a finding.
@@ -42,6 +42,14 @@ reviewed edit here. Six legs:
       must give exit 0, both as rendered and with an extra argument appended after the path, so the
       launcher is shown to run the file the way a direct launch would and to take the file from its own
       fixed position.
+  (f) FLOOR GUARD, through the rendered launcher. Every hooks.json entry that names a script (its command
+      python3, run as sys.executable) is run on the plugin copy with sys.version_info set below the
+      Python floor of .aiqt/core/python-floor.toml (one minor version under it) by a line prepended to
+      its -c launcher program, so the script's own interpreter guard runs as it would on an older
+      python3. The guard ends the process with os._exit, which the launcher cannot intercept, so this
+      leg is the one that sees the guard's exit code: it must be exactly 1 (never 2, which blocks a
+      PreToolUse call), with nothing on stdout and the guard's `error: <file> requires Python` line on
+      stderr.
   (d) DUPLICATES. A file name present both in .preview/ and in the manifest's script set is a finding:
       a reader could install both copies and run the check twice.
   (p) REPOSITORY PARITY. Code the pack copies share with .preview/stamp-truth-stop.py, and the `_cfg`
@@ -89,7 +97,7 @@ followed, or the same file by device and inode), or has the script's name as its
 once ./, // and .. are normalised. So `scripts/./<file>`, `scripts//<file>`, `scripts/../scripts/<file>`,
 a symlinked plugin root, a symlink to the file under another name and a relative path all name it.
 
-RUN CONTRACT for legs (a), (w), (k) and (l): a fresh temporary working directory per run, stdin closed or
+RUN CONTRACT for legs (a), (w), (k), (l) and (f): a fresh temporary working directory per run, stdin closed or
 fed the fixture, every AIQT_, ORCH_ and CLAUDE_ variable and CDPATH removed, TZ=UTC, and per-run
 temporary store and lease paths where a fixture needs them. A run that outlives its deadline is a
 cannot-evaluate (exit 2).
@@ -119,7 +127,8 @@ DISCLOSED RESIDUALS (what this gate does not catch):
     Not exercised: a python3 too old to accept -I (before 3.4), which exits 2 with a usage error before
     the launcher runs; a python3 that cannot be found or started (the outcome is the host's); and a
     script that ends the process itself with os._exit(2), which bypasses the launcher (leg (w) sees it
-    only on a fixture that reaches it); a directory as a standard stream, which makes Python exit 1 at
+    only on a fixture that reaches it, and leg (f) only in the interpreter guard; leg (f) models an
+    older interpreter by the patched sys.version_info alone, never by running one); a directory as a standard stream, which makes Python exit 1 at
     startup; and a host that runs command and args through a shell (the launcher assumes it does not).
   - Leg (w) reconciles only entries that name a manifest script; an entry naming none (a dispatcher
     row, or any other) and group-level keys are tools/gen_hooks.py --check's drift comparison. An entry
@@ -161,6 +170,7 @@ MANIFEST_REL = ".aiqt/core/hooks/manifest.toml"
 SRC_REL = ".aiqt/core/hooks/scripts"
 PLUGIN_REL = "plugin/aiqt-guardrails-hooks"
 HOOKS_JSON_REL = PLUGIN_REL + "/hooks/hooks.json"
+FLOOR_REL = ".aiqt/core/python-floor.toml"
 PREVIEW_REL = ".preview"
 STOP_REL = ".preview/stamp-truth-stop.py"
 CLOCK = "clock-inject.py"
@@ -560,6 +570,58 @@ def leg_launch(root, rows, findings):
                                                           "y" if len(found) == 1 else "ies"))
 
 
+def _below_floor(root):
+    """The version one minor under the floor .aiqt/core/python-floor.toml states, as a tuple literal."""
+    import tomllib
+    try:
+        with open(root / FLOOR_REL, "rb") as fh:
+            floor = tomllib.load(fh)["python-floor"]
+        major, minor = (int(part) for part in floor.split("."))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise GateError("%s: no python-floor to run the guard under: %s" % (FLOOR_REL, _bounded(exc)))
+    if minor < 1:
+        raise GateError("%s: python-floor %s has no earlier minor version" % (FLOOR_REL, floor))
+    return (major, minor - 1, 0, "final", 0)
+
+
+def leg_floor(root, rows, findings):
+    """Leg (f): run every hooks.json entry naming a script with sys.version_info below the floor, set
+    by a line prepended to its launcher program, so the plugin copy's interpreter guard decides the
+    exit. The guard ends the process with os._exit, past the launcher, so it must exit 1 itself."""
+    below = _below_floor(root)
+    for script in sorted(set(r[0] for r in rows)):
+        found = rendered_entries(root, script)
+        if not found:
+            findings.append("(f) %s: no hooks.json entry to launch" % script)
+            continue
+        for number, (event, matcher, hook) in enumerate(found, 1):
+            args = hook.get("args")
+            where = "(f) %s (%s %r entry %s of %s)" % (script, event, matcher, number, len(found))
+            if (hook.get("type") != "command" or hook.get("command") != "python3"
+                    or not isinstance(args, list) or not all(isinstance(a, str) for a in args)
+                    or args.count("-c") != 1 or args.index("-c") + 1 >= len(args)):
+                findings.append("%s: type %r command %r is not the python3 -c launcher; the floor guard "
+                                "cannot be run through it" % (where, hook.get("type"), hook.get("command")))
+                continue
+            argv = launch_argv(args, root / PLUGIN_REL)
+            at = argv.index("-c") + 1
+            argv[at] = "import sys\nsys.version_info = %r\n" % (below,) + argv[at]
+            rc, out, err = run_argv(argv, "{}", dict(), RUN_TIMEOUT)
+            if rc != 1:
+                findings.append("%s: under Python %d.%d the guard exited %s, expected 1 (its os._exit "
+                                "passes the launcher, and exit 2 blocks a PreToolUse call)"
+                                % (where, below[0], below[1], rc))
+            if out.strip():
+                findings.append("%s: under Python %d.%d the guard printed on stdout: %s"
+                                % (where, below[0], below[1], _bounded(out)))
+            marker = ("error: %s requires Python" % script).encode("utf-8")
+            if marker not in err:
+                findings.append("%s: under Python %d.%d stderr lacks the guard's line %r: %s"
+                                % (where, below[0], below[1], marker.decode("utf-8"), _bounded(err)))
+        print("  (f) %s: the floor guard run through %s entr%s" % (script, len(found),
+                                                                 "y" if len(found) == 1 else "ies"))
+
+
 def leg_selftest(root, scripts, findings):
     for script in scripts:
         rc, out, err = run_script(root / SRC_REL / script, ["--self-test"], None, dict(), SELFTEST_TIMEOUT)
@@ -776,7 +838,7 @@ def parity_child(spec):
     return 0
 
 
-def run_gate(root, legs=("a", "w", "l", "d", "p"), only=None):
+def run_gate(root, legs=("a", "w", "l", "f", "d", "p"), only=None):
     """(findings, unverifiable) for the tree at root. `only` restricts legs (a) and (w)(k) to scripts."""
     findings = []
     try:
@@ -798,6 +860,8 @@ def run_gate(root, legs=("a", "w", "l", "d", "p"), only=None):
                 leg_warn_and_inert(root, specs, chosen, launcher, findings)
             if "l" in legs:
                 leg_launch(root, [r for r in rows if r[0] in chosen], findings)
+            if "f" in legs:
+                leg_floor(root, [r for r in rows if r[0] in chosen], findings)
             if "d" in legs:
                 leg_duplicates(root, scripts, findings)
             if "p" in legs:
@@ -823,7 +887,8 @@ def report(findings, unverifiable):
     if findings:
         return 1
     print("PASS: hook scripts are warn-only, inert to the worker and legacy variables tried, launched "
-          "so a missing or failing script exits 1 (never 2), unduplicated, and in parity")
+          "so a missing or failing script exits 1 (never 2), exit 1 under a below-floor interpreter, "
+          "unduplicated, and in parity")
     return 0
 
 
@@ -997,7 +1062,8 @@ _PARITY_FAULTS = (
 
 def _copy_tree(src_root, dst):
     for rel in (MANIFEST_REL, SRC_REL + "/" + CLOCK, SRC_REL + "/" + RECORD, HOOKS_JSON_REL,
-                PLUGIN_REL + "/hooks/scripts/" + CLOCK, PLUGIN_REL + "/hooks/scripts/" + RECORD, STOP_REL):
+                PLUGIN_REL + "/hooks/scripts/" + CLOCK, PLUGIN_REL + "/hooks/scripts/" + RECORD, STOP_REL,
+                FLOOR_REL):
         os.makedirs((dst / rel).parent, exist_ok=True)
         shutil.copyfile(src_root / rel, dst / rel)
 
@@ -1070,7 +1136,7 @@ def self_test_main():
             _copy_tree(ROOT, dst)
             return dst
 
-        findings, unver = run_gate(fresh("clean"), legs=("w", "l", "d", "p"))
+        findings, unver = run_gate(fresh("clean"), legs=("w", "l", "f", "d", "p"))
         if findings or unver:
             failures.append("clean copy: expected no finding, got %s %s" % (findings, unver))
 
@@ -1086,6 +1152,15 @@ def self_test_main():
             _patch(target, _FAULT_HEAD, src)
             findings, unver = run_gate(root, legs=(leg,), only=(script,))
             expect(name, needles, findings, unver)
+
+        # Leg (f): a plugin copy whose interpreter guard exits 2 (the pre-fix guard) is caught; its
+        # os._exit passes the launcher, so no other leg sees that code.
+        for script in (CLOCK, RECORD):
+            root = fresh("f-" + script)
+            _patch(root / PLUGIN_REL / "hooks" / "scripts" / script,
+                   "        pass\n    os._exit(1)\n", "        pass\n    os._exit(2)\n")
+            findings, unver = run_gate(root, legs=("f",), only=(script,))
+            expect("floor guard exit 2 (%s)" % script, ("the guard exited 2, expected 1",), findings, unver)
 
         mode0 = _mode0_unreadable(tmp)
         for name, script, leg, needles, edit in _RENDER_FAULTS:
@@ -1417,9 +1492,9 @@ def self_test_main():
         for failure in failures:
             print("  - " + failure)
         return 1
-    print("SELF-TEST PASS: a clean copy passes legs (w), (k), (l), (d) and (p); a deny key, a block key, "
-          "an honoured worker variable, an over-length line with a line break, a script returning 2 or "
-          "calling os._exit(2), a silent clock script, a wrong clock shape, an elapsed segment where "
+    print("SELF-TEST PASS: a clean copy passes legs (w), (k), (l), (f), (d) and (p); a deny key, a block "
+          "key, an honoured worker variable, an over-length line with a line break, a script returning 2 or "
+          "calling os._exit(2), a plugin copy whose interpreter floor guard exits 2, a silent clock script, a wrong clock shape, an elapsed segment where "
           "forbidden, a failing self-test, a substituted command, a direct python3 <file> launch, a "
           "launcher that skips the file, reports on stdout, takes the last argument, swallows a failure "
           "or exits 2 on an unreadable file, a changed timeout, matcher or extra key, an extra exit-2 entry "

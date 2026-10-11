@@ -19,14 +19,19 @@
 #                     exit other than 2 lets the call proceed). The core hook and its plugin copy carry
 #                     the guard's hook form (HOOK_SURFACES in the gate): a fail-open event's mode warns
 #                     on exit 0 instead of refusing. The pack's clock-inject.py and future-stamp-write.py
-#                     (core sources and plugin copies) carry the CLI form with exit 2, which the plugin's
-#                     launcher reports as exit 1. Every guard's exit holds while the guarded file's
+#                     (core sources and plugin copies) are warn-only plugin hooks: they carry the CLI form
+#                     with exit 1 and are listed in nonblocking-surfaces. The guard ends the process with
+#                     os._exit, which the plugin's launcher cannot intercept, so the host receives that
+#                     exit unchanged; an exit 2 would block a PreToolUse call (the gate's
+#                     LAUNCHED_SURFACES rule and tools/check_hook_scripts.py leg (f), which runs the guard
+#                     through the rendered launcher, hold this). Every guard's exit holds while the guarded file's
 #                     output (its diagnostic on stderr, and what it prints on stdout) can be written and
 #                     flushed. A failing output stream can change the exit status and can lose output,
 #                     a decision included; a separate fix in progress addresses this.
 # nonblocking-surfaces the guarded-surfaces entries whose guard exits 1 instead of 2, sorted, unique and each
 #                     also listed above: a hook whose event reads exit 2 as a block (a Stop hook's exit 2
-#                     blocks the stop, and the guard runs before the hook's own block cap). Never a
+#                     blocks the stop, and the guard runs before the hook's own block cap; a PreToolUse
+#                     hook's exit 2 blocks the call, and the pack's warn-only scripts must never block). Never a
 #                     HOOK_SURFACES entry (cannot-evaluate): the gate's hook template, not this list,
 #                     sets the hook form's refusal to raise SystemExit(2).
 # completeness-check  true since tools/check_entry_guard.py, the last shipped entrypoint, was guarded
@@ -186,9 +191,13 @@ guarded-surfaces = [
     "tools/selftest_orch_hooks.py",
 ]
 nonblocking-surfaces = [
+    ".aiqt/core/hooks/scripts/clock-inject.py",
+    ".aiqt/core/hooks/scripts/future-stamp-write.py",
     ".preview/constraint-reread.py",
     ".preview/rerun-pass-check.py",
     ".preview/stamp-truth-stop.py",
+    "plugin/aiqt-guardrails-hooks/hooks/scripts/clock-inject.py",
+    "plugin/aiqt-guardrails-hooks/hooks/scripts/future-stamp-write.py",
 ]
 completeness-check = true
 documentation-check = true

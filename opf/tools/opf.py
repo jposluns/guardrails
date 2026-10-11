@@ -3583,7 +3583,8 @@ _RUNTIME_WAIT_EXEMPT = (
     ('opf.py', '_watchdog_ledger_case.equal_threads.leg', 'second.join()', _LEDGER_VECTOR_PARK),
     ('opf.py', '_watchdog_ledger_case.equal_threads.leg', 'first.join()', _LEDGER_VECTOR_PARK),
     ("opf.py", "_watchdog_regression_self_test.slept.leg", "time.sleep(seconds)",
-     "a ledger vector's declared sleep: every caller passes a literal of at most 0.15 s"),
+     "a ledger vector's declared sleep: every caller passes at most 0.15 s (the literal 0.15, "
+     "or tick / 20, 0.005 s with tick the 0.1 s _WATCHDOG_POLL_TICK)"),
     ("opf.py", "_watchdog_regression_self_test.waited_condition.leg", "with condition",
      "a fresh threading.Condition that only this leg's own thread ever takes"),
 )
@@ -19210,48 +19211,83 @@ def _watchdog_regression_self_test():
                    for label in launcher_labels for disposition in launcher_dispositions)
     budgets.update(("completion-" + mode, seconds) for mode, seconds in (
         ("audit-ignore", 16), ("reaper", 42), ("nonce", 32), ("fixture-id", 32),
-        ("status", 32), ("early-exit", 48), ("cleanup-reaped", 15 + 1), ("cleanup-cancel", 16),
-        ("premature-exit", 80), ("nested-timeout", 11 + 1), ("nested-cancel", 11 + 1),
-        ("no-signal-echild", 15 + 1), ("guardian-error", 48), ("empty-children", 48),
+        ("status", 32), ("early-exit", 48), ("cleanup-reaped", 30 + 1), ("cleanup-cancel", 16),
+        ("premature-exit", 80), ("nested-timeout", 71 + 1), ("nested-cancel", 71 + 1),
+        ("no-signal-echild", 45 + 1), ("guardian-error", 48), ("empty-children", 48),
         ("bounded-diagnostics", 66), ("cleanup-budget", 21), ("deadline-flips", 77),
         ("subject-setup", 22), ("overdue-success", 161.0 + 0.01), ("launch-ownership", 60),
         ("launch-cancel", 33), ("fd-hygiene-total", 92), ("nested-keep", 108),
         ("fd-census", 48), ("subject-gc", 32), ("guardian-preload", 20),
-        ("subject-receipt", 784), ("subject-ack", 814), ("subject-orphan", 2080 + 0.01),
-        # escalation-subject: 914 is the UPPER bound on the leg's declared
-        # timeouts, not an exact base (two of its charges are fixture holds
-        # charged at what REMAINS of their 300 s hold when start() runs, so
-        # the timeout-derived sum is at most 914: two holds, nine 30 s
-        # deadlines, two 20 s joins and two 2 s waits, as itemized on the
-        # train 2 merge on 2026-10-11). Margin 6 covers the leg's
-        # load-dependent cleanup ticks, which are MEASURED, not structural:
-        # the three 2026-10-06 ledger runs measured 3.78 to 3.95 s of ticks
-        # above the timeout-derived sum, and the 2026-10-11 run 3.91 s, all
-        # under the 6 s margin (inferred from those totals and wait counts;
-        # the per-exercise split was not instrumented).
-        ("pdeathsig", 32), ("escalation-subject", 914 + 6), ("escalate-reaped", 784),
-        ("poll-collected", 1266), ("close-cancel", 1014 + 1), ("escalate-degraded", 784),
+        ("subject-receipt", 784), ("subject-ack", 814), ("subject-orphan", 2105 + 1),
+        ("pdeathsig", 32), ("escalation-subject", 924 + 1), ("escalate-reaped", 784),
+        ("poll-collected", 1266), ("close-cancel", 1227 + 1), ("escalate-degraded", 784),
         ("poll-masked", 2954), ("unpinned-kill", 600), ("census-verify", 630),
-        ("census-exception", 1020 + 0.01), ("receipt-high-fd", 10)))
-    # Train 2's restructured completion legs (merged 2026-10-11) re-priced
-    # from one itemized run each: subject-orphan charges five fixture holds
-    # (at most 300 s each), fourteen 30 s deadlines, five 30 s selects and
-    # five 2 s waits = 2080 at most; census-exception charges thirty-four
-    # 30 s deadlines = 1020; each measured no ticks, so each margin is 0.01,
-    # float headroom only. cleanup-reaped, no-signal-echild, nested-timeout,
-    # nested-cancel and close-cancel keep their timeout-derived bases and
-    # gain a 1 s margin for the sub-tick polls of _bounded_wait (measured
-    # 0.015, 0.015, 0.153, 0.151 and 0.003 s), a load-dependent tick charge.
-    # The two D-385-CURRENT-CHILD drain legs poll against raw time.monotonic()
-    # deadlines, so the ledger charges their sub-tick polls (about their elapsed
-    # time, never their full bound); each budget is the UPPER bound of the
-    # leg's own declared deadlines, not a measured base. drain-adopted: two
-    # 30 s polls, then drains of 1.5 s and 10 s = 71.5. reaped-subject-retry:
-    # two 30 s polls, drains of 1.0, 0.5, 0.5 and 1.0 s, a 5 s start deadline
-    # and three _bounded_wait calls at _CASE_WAIT_SECONDS (15 s) = 113. One
-    # isolated 2026-10-11 run measured 1.44 s and 6.959 s charged.
-    budgets.update((("completion-drain-adopted", 71.5),
-                    ("completion-reaped-subject-retry", 113)))
+        ("census-exception", 1230 + 1), ("receipt-high-fd", 10)))
+    # The ten completion legs train 2 added or re-priced (merged 2026-10-11)
+    # are priced from their PERMITTED PATHS, never from a measured run: each
+    # base is the UPPER bound of every wait the leg's own thread or a thread
+    # it starts can charge on a path where the leg still passes. A timed
+    # wait is charged at its declared timeout (a fixture hold at what
+    # remains of _WATCHDOG_FIXTURE_HOLD, at most 300 s; start() at
+    # max(remaining deadline, cleanup grace); close() at its 2 x grace
+    # launch wait; a fixture call at its allowance, max(timeout, 5) + 5 +
+    # 1). A raw time.monotonic() polling loop charges its sub-tick sleeps
+    # one by one whenever no unexpired charged deadline of its own thread
+    # covers them, and that cover depends on timing, so each loop is priced
+    # at its whole bound: one _bounded_wait call at its bound (each sleep is
+    # min(pause, left, 0.05), so its sleeps sum to at most the bound), an
+    # _await_exit at its `until`, a fixed-tick loop at its bound, and one
+    # close() collection whose guardian reap loop runs at
+    # 5 g, g the cleanup grace in force: the reap loop's 2 g, its one
+    # escalation's two /proc census loops (_fixture_group_pinned and
+    # _fixture_verify_group_kill, g each) and the g it reaps for after
+    # that escalation. Every _bounded_wait is priced at its bound even
+    # where its child is already proven exited. The margin of 1 s is float
+    # summation plus the at most one tick (0.005 s, or 0.05 s for the
+    # nested legs' file gate) each fixed-tick or deadline-guarded loop can
+    # sleep past its bound, under 0.5 s on every leg here; it is no timing
+    # allowance.
+    #   cleanup-reaped: start() 5 + one _bounded_wait 15 + close() launch
+    #     wait 10 (the guardian is marked collected, so no reap loop) = 30.
+    #   no-signal-echild: start() 5 + two _bounded_wait 30 + close() 10
+    #     (collected, no reap loop) = 45.
+    #   nested-timeout, nested-cancel: the run_status_owned(timeout=2)
+    #     fixture allowance 11 (its own waits are suppressed under it) +
+    #     _zombie_survival_control's two _bounded_wait 30 + the file-gate
+    #     release loop (30 s bound, 0.05 s tick) 30 = 71.
+    #   subject-orphan: five fixture holds 1500, five launch_held 30 s
+    #     deadlines 150 and 30 s selects 150, eight await_state deadlines
+    #     240, Flip A's 30 s deadline 30 and five close() launch waits at
+    #     g = 1 (10) = 2080, plus five close() collections at 5 g = 25:
+    #     2105.
+    #   escalation-subject: two fixture holds 600, nine 30 s deadlines 270,
+    #     two 20 s worker joins 40 and two close() launch waits at g = 1 (4)
+    #     = 914, plus the two worker-thread close() collections at 5 g = 10:
+    #     924 (the 30 s rescue join runs only on a path the leg fails).
+    #   close-cancel: start() 1 x 4 (g patched to 1), 30 x 3 and 300 (leg
+    #     4) = 394; four wedged-fork gate waits 240; the interrupted launch
+    #     waits 2, 2, 10 and 10 (Flip B's priced although its interrupt
+    #     usually fires first) = 24; the plain close() launch waits 10 x 3
+    #     and 2 = 32; five launcher joins 150; three await_subject and three
+    #     await_state deadlines 180; leg 6's 2 s spin deadline and 2 s wait
+    #     4; and drive()'s 10 s delivery deadline in each of its seven calls
+    #     70 = 1094. Polling: four close() collections at 5 g, g = 5 (100),
+    #     Flip B's interrupt-owner collection (its g loop and one escalation's
+    #     two census loops, 3 g = 15), Flip A's hygiene _bounded_wait 15 and
+    #     three abandoned-launch _await_exit at g = 1 on the launcher thread
+    #     (3) = 133. 1094 + 133 = 1227.
+    #   census-exception: thirty-four 30 s deadlines 1020 + fourteen
+    #     _bounded_wait calls in the leg process 210 = 1230 (the forked
+    #     children's waits charge no ledger).
+    #   drain-adopted: two 30 s raw polls (0.005 s tick) 60 + drains whose
+    #     loops run to deadlines 1.5 s and 10 s = 71.5.
+    #   reaped-subject-retry: two 30 s raw polls 60, drains of 1.0, 0.5,
+    #     0.5 and 1.0 s = 3, three _bounded_wait 45, and the startup probe's
+    #     _start() launch wait 5 and its _await_exit to the same 5 s
+    #     deadline 5 = 118 (its SIGKILL branch reads the pidfd the probe
+    #     object never has, so the leg cannot pass along it).
+    budgets.update((("completion-drain-adopted", 71.5 + 1),
+                    ("completion-reaped-subject-retry", 118 + 1)))
     # The isolation matrix: 31 timer cases, each one 180 s fixture call.
     budgets["blocked-isolation"] = 31 * _deadline_case_budget(180)
     # The ledger concurrency vectors: the declared budget IS the vector

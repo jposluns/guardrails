@@ -239,7 +239,9 @@ count the exemption may remove in its flip module) plus the preamble controls, r
 exemption that would cover a reference in any other position or tested shape; the structural length
 bounds of the preamble (a module too short to hold the guard) and the qualname component of the
 site filter in _unexempted_violations are held jointly with the position flips (guard-in-def,
-guard-second-copy), not by a flip of their own. Not
+guard-second-copy), not by a flip of their own, and so are the two statement-type tests (the
+guard an `if`, its second statement a `try`), which no one-replacement flip can change without
+also breaking the syntax or another tested condition. Not
 checked: that the process exits with main()'s return (the last line of this file relays it
 through the emitter's int clamp; _check_entry_points calls main() directly), and that run()
 removes its scratch directory afterwards (a
@@ -3739,7 +3741,8 @@ _EMITTER_FLIPS = (
 # `exempted` count there (0 for a guard made non-canonical; 3 where the flip module also carries
 # the canonical guard, whose refusal write, flush and os._exit are its three exempted channel
 # references), so the exemption covers the canonical guard's three references in their canonical
-# position and shape and nothing else, one flip per tested _floor_guard shape condition.
+# position and shape and nothing else, one flip per tested _floor_guard shape condition (the
+# statement-type tests, `if` and `try`, aside: see the module docstring).
 _FLOOR_GUARD_FLIPS = (
     ("guard-extra-write", "    os._exit(", "    sys.stderr.write(value)\n    os._exit(",
      "import sys\n{guard}\n", 0),
@@ -3786,6 +3789,30 @@ _FLOOR_GUARD_FLIPS = (
     ("guard-flush-argument", "sys.stderr.flush()", "sys.stderr.flush(1)", "import sys\n{guard}\n", 0),
     ("guard-flush-outside-try", "        sys.stderr.flush()\n    except BaseException:\n        pass\n",
      "    except BaseException:\n        pass\n    sys.stderr.flush()\n", "import sys\n{guard}\n", 0),
+    ("guard-local-import-two-names", "    import os\n", "    import os, io\n", "import sys\n{guard}\n", 0),
+    ("guard-try-third-statement", "        sys.stderr.flush()\n",
+     "        sys.stderr.flush()\n        sys.stderr.flush()\n", "import sys\n{guard}\n", 0),
+    ("guard-flush-keyword", "sys.stderr.flush()", "sys.stderr.flush(x=1)", "import sys\n{guard}\n", 0),
+    ("guard-flush-assigned", "        sys.stderr.flush()\n", "        _flushed = sys.stderr.flush()\n",
+     "import sys\n{guard}\n", 0),
+    ("guard-flush-before-write",
+     "        sys.stderr.write(\n"
+     "            \"error: check_opf_standalone_closure.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). \"\n"
+     "            \"Nothing was run (cannot evaluate).\\n\"\n"
+     "            % (tuple(sys.version_info[:3]) + (sys.executable or \"unknown interpreter\",)))\n"
+     "        sys.stderr.flush()\n",
+     "        sys.stderr.flush()\n"
+     "        sys.stderr.write(\n"
+     "            \"error: check_opf_standalone_closure.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). \"\n"
+     "            \"Nothing was run (cannot evaluate).\\n\"\n"
+     "            % (tuple(sys.version_info[:3]) + (sys.executable or \"unknown interpreter\",)))\n",
+     "import sys\n{guard}\n", 0),
+    ("guard-except-tuple", "except BaseException:", "except (BaseException,):",
+     "import sys\n{guard}\n", 0),
+    ("guard-second-handler", "        pass\n", "        pass\n    except Exception:\n        pass\n",
+     "import sys\n{guard}\n", 0),
+    ("guard-handler-two-statements", "        pass\n", "        pass\n        pass\n",
+     "import sys\n{guard}\n", 0),
     ("guard-except-narrow", "except BaseException:", "except Exception:", "import sys\n{guard}\n", 0),
     ("guard-except-bare", "except BaseException:", "except:", "import sys\n{guard}\n", 0),
     ("guard-except-named", "except BaseException:", "except BaseException as error:",

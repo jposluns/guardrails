@@ -52,10 +52,11 @@ NEVER fails the tool: any error at all exits 0, including an argument, stdin, or
 payload is evaluated. The one exception to exit 0 is an interpreter older than Python 3.14 that can start the
 hook: the guard at the top of this file reads no input, writes one line beginning
 `error: clock-inject.py requires Python 3.14 or newer` to stderr (a best-effort write: the exit does
-not depend on it) and exits 2. Under PostToolUse and
-PostToolUseFailure the tool call has already run, so that exit blocks nothing and no clock line is added: run
-directly, the exit is 2 and the line reaches the assistant; the pack's plugin runs this file through a fixed
-launcher that reports any nonzero exit as exit 1, a non-blocking error. These exits hold while the hook's
+not depend on it) and exits 1 through os._exit, a non-blocking error. Under PostToolUse and
+PostToolUseFailure the tool call has already run, so that exit blocks nothing and no clock line is added.
+os._exit ends the process itself, so the pack's plugin launcher (which reports a nonzero sys.exit as exit 1)
+never sees it: the host receives this exit 1 directly, whether the file is run directly or through the
+plugin, and tools/check_hook_scripts.py leg (f) checks it through the rendered launcher. These exits hold while the hook's
 output (its diagnostic on stderr, and what it prints on stdout) can be written and flushed. A failing output
 stream can change the exit status and can lose output; a separate fix in progress addresses this. An older
 interpreter that cannot start the hook never reaches the guard and fails with Python's own error first;
@@ -100,7 +101,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
         sys.stderr.flush()
     except BaseException:
         pass
-    os._exit(2)
+    os._exit(1)
 
 import datetime
 import json

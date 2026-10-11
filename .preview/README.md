@@ -227,13 +227,13 @@ What changed in the pack copies:
   `PreToolUse` blocks the call. Exit 1 is a non-blocking hook error (from the host hook documentation,
   not a live probe). On a `python3` that accepts `-I` but is older than the floor the hooks require,
   each pack script either cannot be compiled (an interpreter that predates f-strings, which both scripts
-  use) or stops at its own interpreter guard, which writes its one-line error (the form shown in
-  [Installing a hook](#installing-a-hook), step 4) to standard error and exits 2; the launcher reports
-  both as exit 1, so the call goes ahead with no warning and no clock line. Five cases fall outside the
-  launcher. A `python3` older than 3.4 rejects `-I` and
+  use), which the launcher reports as exit 1, or stops at its own interpreter guard, which writes its
+  one-line error (the form shown in [Installing a hook](#installing-a-hook), step 4) to standard error
+  and ends the process with exit 1 itself; either way the call goes ahead with no warning and no clock
+  line. Five cases fall outside the launcher. A `python3` older than 3.4 rejects `-I` and
   exits 2. A `python3` that cannot be found or started gets whatever outcome the host gives it (not
   verified). A script that ends the process with `os._exit(2)` exits 2; the shipped scripts call
-  `os._exit` only with 0. A standard stream that is a directory makes Python exit 1 at startup, before
+  `os._exit` only with 0, and with 1 in the interpreter guard. A standard stream that is a directory makes Python exit 1 at startup, before
   the hook can fail open, because the plugin does not use the `[ -d ... ]` launch guard this page uses. A
   run past its timeout (30 seconds for `future-stamp-write.py`, 10 for `clock-inject.py`) is ended by
   the host, which its documentation describes as non-blocking (not verified here). The launcher also

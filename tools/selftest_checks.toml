@@ -1231,6 +1231,7 @@ expected-check-ids = [
   "guard/late-placement-finding",
   "guard/assert-form-finding",
   "guard/nonblocking-exit-1-passes",
+  "source/launched-surface-unlisted-cannot-evaluate",
   "guard/nonblocking-exit-2-finding",
   "guard/unlisted-exit-1-finding",
   "guard/parser-overflow-cannot-evaluate",

@@ -322,11 +322,12 @@ denies, blocks, or asks: where this text says a write is "denied" or a "false de
 stdin, or JSON error before the payload is evaluated: a DISCIPLINE guard, not a security boundary. The one
 exception to both is an interpreter older than Python 3.14 that can start the hook: the guard at the top of
 this file reads no input, writes one line beginning `error: future-stamp-write.py requires Python 3.14 or
-newer` to stderr (a best-effort write: the exit does not depend on it) and exits 2. Run directly from a
-PreToolUse entry, that exit blocks every matching Write,
-Edit, MultiEdit and Bash call until Python is upgraded or the hook's entry is removed. The pack's plugin
-runs this file through a fixed launcher that reports any nonzero exit as exit 1, a non-blocking error, so
-under the plugin every matching call goes ahead unchecked. These exits hold while the hook's output (its
+newer` to stderr (a best-effort write: the exit does not depend on it) and exits 1 through os._exit, a
+non-blocking error, never 2, which on PreToolUse would block every matching Write, Edit, MultiEdit and Bash
+call. os._exit ends the process itself, so the pack's plugin launcher (which reports a nonzero sys.exit as
+exit 1) never sees it: the host receives this exit 1 directly, whether the file is run directly from a
+PreToolUse entry or through the plugin, and every matching call goes ahead unchecked; tools/check_hook_scripts.py
+leg (f) checks it through the rendered launcher. These exits hold while the hook's output (its
 diagnostic on stderr, and what it prints on stdout) can be written and flushed. A failing output stream can
 change the exit status and can lose output. An older interpreter that cannot start the hook
 never reaches the guard and fails with Python's own error first: one that predates the -I option exits 2,
@@ -482,7 +483,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
         sys.stderr.flush()
     except BaseException:
         pass
-    os._exit(2)
+    os._exit(1)
 
 import bisect
 import collections
