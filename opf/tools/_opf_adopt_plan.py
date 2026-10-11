@@ -879,8 +879,9 @@ def self_test():
             self.views = sorted(v["target"] for v in views)
 
         def all_targets(self):
-            # The pre-commit hook lies outside every walked root, so its absence is a declared target.
-            return sorted(set(self.targets) | {".opf/hooks/pre-commit"})
+            # The opf/ mirror the pack row plants (the pre-commit hook, the CI recipe and the tool entry
+            # point) lies outside every walked root, so its absence is a declared target.
+            return sorted(set(self.targets) | {schema.PACK_MIRROR_ROOT})
 
         def base_ops(self):
             # Scaffold the default store (unless one resolves), render its declared views and plant
@@ -1030,7 +1031,8 @@ def self_test():
                                              "preservation": preserved}])
             # The exact effects: the preservation copy, the scaffolded manifest and every enforcement
             # member, each tied to the op that writes it, beside the retire removal.
-            pack = [dict(m) for row in self.bindings["enforcement"] for m in row["members"]]
+            # (a member two rows share, the mirrored tool entry point, is one creation)
+            pack = schema.enforcement_install_op(self.bindings["enforcement"])["members"]
             init, render, _ = self.base_ops()
             creations = sorted([{"path": preserved, "digest": digest}] + init["members"]
                                + render["members"] + pack, key=lambda r: sorted(r.items()))

@@ -85,15 +85,17 @@ the sources and targets you name. It never enters `.git`.
 - **Sources** are the old operational files outside those roots that the adoption must account
   for: a hand-kept TODO list, a decisions log, release notes, an issue export. Ask the adopter;
   a file you do not name is not inventoried, and detection is by path, not by content.
-- **Targets** are paths the plan will create outside the scanned roots, for example a pre-commit
-  hook path such as `.opf/hooks/pre-commit`. The planner needs to see that each is absent.
+- **Targets** are paths the plan will create outside the scanned roots, for example `opf`, the
+  directory where the plan installs the OPF pack mirror: the pre-commit hook at
+  `opf/enforcement/precommit/pre-commit`, the CI recipe and the tools they run. The planner needs
+  to see that each is absent.
 
 This build has no `opf adopt` subcommand that prints the observation. Use the planner's
 read-only library entry, with an absolute product root and the tooling directory that holds
 `opf.py`:
 
 ```
-python3 -I -B -c "import sys; sys.path.insert(0, '<opf tools directory>'); import _opf_adopt_plan as p; r = p.investigate('<absolute product root>', sources=['TODO.md'], targets=['.opf/hooks/pre-commit']); print(r.status, list(r.findings), file=sys.stderr); sys.stdout.write(r.observation.decode() if r.observation else '')"
+python3 -I -B -c "import sys; sys.path.insert(0, '<opf tools directory>'); import _opf_adopt_plan as p; r = p.investigate('<absolute product root>', sources=['TODO.md'], targets=['opf']); print(r.status, list(r.findings), file=sys.stderr); sys.stdout.write(r.observation.decode() if r.observation else '')"
 ```
 
 `investigate` opens nothing for writing. A status other than VALID is a stop: report its
@@ -152,7 +154,7 @@ schema = 1
 product = "opf"
 expected_observation_digest = "<observation_digest from section 3>"
 sources = ["TODO.md"]
-targets = [".opf/hooks/pre-commit"]
+targets = ["opf"]
 
 [[decisions]]
 path = "TODO.md"
@@ -182,6 +184,14 @@ residuals = ["server-side-protection-adopter-attested"]
 path = ".github/workflows/opf.yml"
 digest = "<digest of the bytes to install there>"
 
+[[bindings.enforcement.members]]
+path = "opf/enforcement/ci/opf-ci.sh"
+digest = "<digest of the bytes to install there>"
+
+[[bindings.enforcement.members]]
+path = "opf/tools/opf.py"
+digest = "<digest of the bytes to install there>"
+
 [[bindings.enforcement]]
 platform = "pre-commit"
 means = "staged-pre-commit"
@@ -189,7 +199,15 @@ residuals = ["per-clone-installation-and-bypass", "canonical-hand-edits",
              "same-user-tampering"]
 
 [[bindings.enforcement.members]]
-path = ".opf/hooks/pre-commit"
+path = "opf/enforcement/precommit/pre-commit"
+digest = "<digest of the bytes to install there>"
+
+[[bindings.enforcement.members]]
+path = "opf/enforcement/precommit/install.sh"
+digest = "<digest of the bytes to install there>"
+
+[[bindings.enforcement.members]]
+path = "opf/tools/opf.py"
 digest = "<digest of the bytes to install there>"
 
 [[bindings.enforcement]]
@@ -301,7 +319,19 @@ path = ".github/workflows/opf.yml"
 digest = "<digest of the bytes to install there>"
 
 [[ops.members]]
-path = ".opf/hooks/pre-commit"
+path = "opf/enforcement/ci/opf-ci.sh"
+digest = "<digest of the bytes to install there>"
+
+[[ops.members]]
+path = "opf/tools/opf.py"
+digest = "<digest of the bytes to install there>"
+
+[[ops.members]]
+path = "opf/enforcement/precommit/pre-commit"
+digest = "<digest of the bytes to install there>"
+
+[[ops.members]]
+path = "opf/enforcement/precommit/install.sh"
 digest = "<digest of the bytes to install there>"
 
 [[ops.members]]
@@ -342,8 +372,20 @@ How to fill it:
   `instructions` carries `unverified-platform-denial`. Across all rows, the plan must disclose
   each of `per-clone-installation-and-bypass`, `canonical-hand-edits`,
   `shell-or-interpreter-wrapping`, `same-user-tampering` and `unverified-platform-denial` at
-  least once. Each row lists the member files that carry it. The sample's member paths are
-  examples; name the files you would install.
+  least once. Each row lists the member files that carry it. The `claude-code`, `codex`,
+  `gemini-cli` and `cursor` member paths in the sample are examples; name the files you would
+  install. The `ci` and `pre-commit` paths are fixed by the pack. Each of their files runs another
+  file at a path relative to itself, and that path must land inside the `opf/` mirror the plan
+  installs. So the pre-commit hook sits at `opf/enforcement/precommit/pre-commit` with
+  `install.sh` beside it, the CI recipe sits at `opf/enforcement/ci/opf-ci.sh`, where the
+  workflow's `run:` line points, and both rows name `opf/tools/opf.py`, the tool those files run.
+  The sample names only that entry point. The modules it imports sit beside it in the release's
+  `opf/tools/` directory, which a later install step mirrors; that step is not executable in
+  this build. A plan in which an installed file runs a file the plan does not install refuses
+  with exit 2: a hook at the former `.opf/hooks/pre-commit`, for example, would run
+  `tools/opf.py`, outside the mirror. Otherwise, a `ci` or `pre-commit` row that leaves out one
+  of the files that runs another (the workflow, the recipe, the hook or `install.sh`) refuses
+  with exit 1.
 - `init-store` is required when no store resolves and refused when one does. `render-views`
   lists exactly the views the planned store declares, one member each; with no store yet, those
   are the thirteen views of the default manifest, as in the sample. Every enforcement member is
@@ -353,7 +395,7 @@ How to fill it:
   decisions; never list them under `ops`.
 - Every planned creation needs an observed absence, and every replacement needs matching
   observed bytes. A path outside the scanned roots is observed only when you list it in
-  `targets`, as the sample does for `.opf/hooks/pre-commit`.
+  `targets`, as the sample does for `opf`.
 
 Some values are caller-asserted. The planner checks the shape of the release identity, the
 prompt-pack binding, the enforcement member digests and the `init-store` and `render-views`
