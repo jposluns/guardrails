@@ -247,9 +247,12 @@ _REVISION_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?\Z")
 # install-pack and plant-governance rows create, which proves the launch path lands on a planned opf/ mirror
 # member, not that the planted bytes are the launcher or that the mirror holds every module the launched
 # tool imports (the install-pack step's release inventory names the whole opf/tools/** tree); a
-# launcher-bearing row names only its launchers and the files they launch, so a renamed launcher there is
-# refused, but a renamed launcher in another platform's row is not recognized, since no member's bytes are
-# read; the residual
+# launcher-bearing row names its launchers, every file they launch and nothing else, and every file the
+# plan places under a launcher's file name is a member of some row, so a named decoy cannot leave the file
+# that runs uninspected. No member's bytes are read, so this file-name rule cannot see a renamed launcher
+# outside a launcher-bearing row (in another platform's row, or planted in no row), nor a renamed launcher
+# placed at a path one of the row's launchers runs (hook bytes planted as opf/tools/opf.py, say), which
+# that row admits as the launched file; the residual
 # tokens are closed and each means' required disclosure is enforced, which proves a disclosure is recorded,
 # not that it is complete for a live platform; a source's `occupying` flag is the planner's classification
 # against the planned managed destinations, which a lone plan cannot re-derive. `effects` enumerates every
@@ -1492,10 +1495,15 @@ def _enforcement_launch_refusal(plan):
     would not exist in the mirrored tree (a hook placed outside opf/enforcement/, whose
     `$here/../../tools/opf.py` then names no mirror file, a launch that climbs above the product root, or a
     mirror that omits the launched file) cannot run its check. A launcher-bearing platform's row names its
-    launchers and the files they launch and nothing else: any other member placed there (a renamed hook,
-    say) runs something this module cannot tell. Either way the plan cannot be evaluated: it is refused,
-    never planted. Returns CANNOT-EVALUATE for the first such member, else None (a malformed row already
-    carries a finding, and a member no op places is _enforcement_install_findings' INVALID)."""
+    launchers and the files they launch and nothing else. Every file a placed launcher in that row launches
+    is itself a member of the row, so the file that actually runs (the hook beside install.sh, the recipe the
+    workflow runs) is inspected in turn, never left out while a decoy launcher elsewhere is named; and any
+    other member placed there (a renamed hook, say) runs something this module cannot tell. Last, once every
+    row is well-formed and every member placed (otherwise the plan is already INVALID), every file those ops
+    place under a launcher's file name is a member of some enforcement row, so a launcher the plan installs
+    is never left uninspected behind a named decoy chain. Either way the plan cannot be evaluated:
+    it is refused, never planted. Returns CANNOT-EVALUATE for the first such member, else None (a malformed
+    row already carries a finding, and a member no op places is _enforcement_install_findings' INVALID)."""
     rows = plan.get("enforcement")
     if not isinstance(rows, list):
         return None
@@ -1505,9 +1513,14 @@ def _enforcement_launch_refusal(plan):
     launchers = dict((destination.rsplit("/", 1)[-1], (frame, target))
                      for _platform, _member, destination, _line, frame, target in ENFORCEMENT_LAUNCHERS)
     bearing = set(row[0] for row in ENFORCEMENT_LAUNCHERS)
+    named, complete = set(), True
     for i, row in enumerate(rows):
         if not (isinstance(row, dict) and _valid_field("members", row.get("members"))):
+            complete = False
             continue
+        paths = set(member["path"] for member in row["members"])
+        named.update(paths)
+        complete = complete and paths <= placed
         launched_here = set()
         for member in row["members"]:
             if member["path"].rsplit("/", 1)[-1] not in launchers:
@@ -1528,6 +1541,10 @@ def _enforcement_launch_refusal(plan):
                                "resolves to {!r}, a path the {}/ mirror this plan installs does not hold; "
                                "the launcher cannot run, so it is refused rather than planted".format(
                                    i, member["path"], target, relative, launched, PACK_MIRROR_ROOT))
+            if row.get("platform") in bearing and launched not in paths:
+                return _cannot("plan enforcement[{}] member {!r} launches {!r}, which the row does not name, "
+                               "so the file it runs is never inspected; it is refused rather than "
+                               "planted".format(i, member["path"], launched))
         if row.get("platform") not in bearing:
             continue
         for member in row["members"]:
@@ -1536,6 +1553,13 @@ def _enforcement_launch_refusal(plan):
                 return _cannot("plan enforcement[{}] member {!r} is neither a launcher, by its installed file "
                                "name, nor a file one of the row's launchers launches, so what it runs cannot "
                                "be evaluated; it is refused rather than planted".format(i, member["path"]))
+    if not complete:
+        return None                     # a malformed row or an unplaced member already makes the plan INVALID
+    for op, path, _digest in placements:
+        if path.rsplit("/", 1)[-1] in launchers and path not in named:
+            return _cannot("plan {} row places {!r} under a launcher's file name, but no enforcement row "
+                           "names it, so what it launches is never inspected; it is refused rather than "
+                           "planted".format(op, path))
     return None
 
 
@@ -2686,11 +2710,6 @@ def self_test():
         p["enforcement"][1]["members"][2]["path"] = "tools/opf.py"
         p["ops"][3]["members"].append({"path": "tools/opf.py", "digest": _D9})
     for label, mutate, want in (
-            # the round-1 reproduction: hook and installer at .opf/hooks/, each placed by an enable-hook,
-            # which the install check accepts, so the refusal inspects it as well
-            ("enable-hook-outside-mirror", lambda p: (_relocate(
-                (_HOOK, ".opf/hooks/pre-commit"), (_INSTALLER, ".opf/hooks/install.sh"))(p), _hooked(
-                    ".opf/hooks/pre-commit", ".opf/hooks/install.sh")(p)), CANNOT_EVALUATE),
             ("enable-hook-old-hook-added", _add(1, ".opf/hooks/pre-commit", by_hook=True), CANNOT_EVALUATE),
             # an enable-hook creates no mirror file, so a hook it places is no launch target
             ("enable-hook-target-not-created", _hooked(_HOOK), CANNOT_EVALUATE),
@@ -2706,6 +2725,83 @@ def self_test():
             # the mirror-prefix guard: the launch lands on a file the plan creates, but outside opf/
             ("target-created-outside-mirror", _outside_mirror, CANNOT_EVALUATE)):
         check("launch-" + label, _mutated(base_plan, mutate, True) == want)
+    _CI_RECIPE, _TOOL = "opf/enforcement/ci/opf-ci.sh", "opf/tools/opf.py"
+
+    def _validated(mutate):
+        # the base plan under `mutate`, effects refreshed, validated whole so a vector can name its reason
+        p = copy.deepcopy(base_plan)
+        mutate(p)
+        p["effects"] = derive_effects(p["ops"], p["sources"], store_manifest(p.get("store")))
+        return validate_plan(p)
+
+    def _row_set(index, *paths):
+        # set enforcement row `index` to exactly `paths`, and have the pack row plant each one it lacks
+        def mutate(p):
+            p["enforcement"][index]["members"] = [{"path": path, "digest": _D9} for path in paths]
+            planted = [m["path"] for m in p["ops"][3]["members"]]
+            p["ops"][3]["members"].extend({"path": path, "digest": _D9} for path in paths
+                                          if path not in planted)
+        return mutate
+
+    def _decoys(p):
+        # the round-2 reproduction: decoy launchers under opf/q/r/s/ in the ci and pre-commit rows, the real
+        # hook and recipe planted but named in no row, and the tool entry point the real pair runs not planted
+        _row_set(0, ".github/workflows/opf.yml", "opf/q/r/s/opf-ci.sh", "opf/q/tools/opf.py")(p)
+        _row_set(1, _INSTALLER, "opf/q/r/s/pre-commit", "opf/q/tools/opf.py")(p)
+        _drop(_TOOL, rows=False)(p)
+
+    def _governed(path, source):
+        # take `path` out of the pack row and create it by a plant-governance row instead
+        def mutate(p):
+            _drop(path, rows=False)(p)
+            p["ops"][4:4] = [{"op": "plant-governance", "path": path, "content_digest": _D9,
+                              "source_member": source}]
+        return mutate
+    _unrowed = "under a launcher's file name, but no enforcement row names it"
+    for label, mutate, reason in (
+            # the round-1 reproduction: hook and installer at .opf/hooks/, each placed by an enable-hook,
+            # which the install check accepts, so the refusal inspects it as well and names that reason
+            ("enable-hook-outside-mirror", lambda p: (_relocate(
+                (_HOOK, ".opf/hooks/pre-commit"), (_INSTALLER, ".opf/hooks/install.sh"))(p), _hooked(
+                    ".opf/hooks/pre-commit", ".opf/hooks/install.sh")(p)),
+             "member '.opf/hooks/pre-commit' launches '../../tools/opf.py' (relative to its own directory), "
+             "which resolves to 'tools/opf.py'"),
+            # a launcher-bearing row names every file its launchers launch: the decoys resolve, but the real
+            # recipe the workflow runs and the real hook install.sh runs are left out (the ci row refuses
+            # first), and the pre-commit row alone refuses the same way
+            ("decoy-launchers-in-rows", _decoys,
+             "member '.github/workflows/opf.yml' launches '" + _CI_RECIPE + "', which the row does not name"),
+            ("decoy-hook-in-pre-commit-row", _row_set(1, _INSTALLER, "opf/q/r/s/pre-commit",
+                                                      "opf/q/tools/opf.py"),
+             "member '" + _INSTALLER + "' launches '" + _HOOK + "', which the row does not name"),
+            ("tool-unnamed-in-pre-commit-row", _row_set(1, _HOOK, _INSTALLER),
+             "member '" + _HOOK + "' launches '" + _TOOL + "', which the row does not name"),
+            ("tool-unnamed-in-ci-row", _row_set(0, ".github/workflows/opf.yml", _CI_RECIPE),
+             "member '" + _CI_RECIPE + "' launches '" + _TOOL + "', which the row does not name"),
+            # a whole decoy chain named in the pre-commit row while the real pair is planted in no row: every
+            # file an install op places under a launcher's file name is a row member, whichever op places it
+            ("decoy-chain-real-pair-unnamed", _row_set(1, "opf/q/r/s/install.sh", "opf/q/r/s/pre-commit",
+                                                    "opf/q/tools/opf.py"),
+             "plan install-pack row places '" + _HOOK + "' " + _unrowed),
+            ("unnamed-hook-by-enable-hook", lambda p: p["ops"].insert(4, {
+                "op": "enable-hook", "registration_path": ".opf/hooks/pre-commit", "plugin_entry": "opf",
+                "old_digest": _D5, "new_digest": _D9}),
+             "plan enable-hook row places '.opf/hooks/pre-commit' " + _unrowed),
+            ("unnamed-hook-by-governance", _governed("opf/x/y/pre-commit", "enforcement/precommit/pre-commit"),
+             "plan plant-governance row places 'opf/x/y/pre-commit' " + _unrowed)):
+        result = _validated(mutate)
+        check("launch-" + label, result.status == CANNOT_EVALUATE and reason in result.findings[0])
+    for label, mutate in (
+            # counter-vectors: the canonical plan, whose rows name every file their launchers launch, stays
+            # VALID; so does a launch target a plant-governance row creates (an install-pack is not the only
+            # creator), a planted file named in no row whose file name is no launcher's, and a hook named in
+            # another platform's row whose launch resolves (only a launcher-bearing row must name its targets)
+            ("canonical-plan-valid", lambda p: None),
+            ("governance-created-target-valid", _governed(_TOOL, "tools/opf.py")),
+            ("unrowed-support-module-valid", lambda p: p["ops"][3]["members"].append(
+                {"path": "opf/tools/_opf_store.py", "digest": _D9})),
+            ("hook-in-other-platform-row-valid", _add(2, "opf/enforcement/other/pre-commit"))):
+        check("launch-" + label, _validated(mutate).status == VALID)
     # the climb guard: a hook at the product root launches a path above it, refused with that reason
     _climb = copy.deepcopy(base_plan)
     _relocate((_HOOK, "pre-commit"), (_INSTALLER, "install.sh"))(_climb)

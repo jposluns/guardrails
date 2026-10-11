@@ -387,13 +387,20 @@ How to fill it:
   `enable-hook` installs it. If the path it runs lies outside `opf/` or above the product root,
   or no `install-pack` or `plant-governance` operation in the plan creates that path, the plan
   refuses with exit 2. A hook at the former `.opf/hooks/pre-commit`, for example, would run
-  `tools/opf.py`, outside the mirror. In a `ci` or `pre-commit` row, every other installed file
-  must be one that a file named as above in the same row runs; any other refuses with exit 2,
-  because the planner cannot tell what it runs. Give no other platform's member one of those
-  four names. The planner never reads member bytes, so it does not recognize a renamed copy of
-  a hook in another platform's row. Otherwise, a `ci` or `pre-commit` row that leaves out one of
-  the files that runs another (the workflow, the recipe, the hook or `install.sh`) refuses with
-  exit 1.
+  `tools/opf.py`, outside the mirror. In a `ci` or `pre-commit` row, each file that one of
+  those files runs must be named in the same row too, so the hook beside `install.sh` and the
+  recipe the workflow runs are checked in turn; a row that leaves one out refuses with exit 2.
+  Every other installed file in that row must be one that a file named as above in the same row
+  runs; any other refuses with exit 2, because the planner cannot tell what it runs. A file any
+  of those three operations installs under one of the four names must be named in some row, or
+  the plan refuses with exit 2, so a launcher the plan installs is never left out while a decoy
+  is named. Give no other platform's member one of those four names. The planner never reads
+  member bytes, so it cannot see a renamed copy of one of those files outside the `ci` and
+  `pre-commit` rows (in another platform's row, or installed but named in no row), nor one
+  installed at a path that a file in the row runs, such as hook bytes installed as
+  `opf/tools/opf.py`. Otherwise, a `ci` row that names no workflow, or a `pre-commit` row that
+  names no `install.sh`, refuses with exit 1, or with exit 2 if the plan still installs that
+  file.
 - Compatibility with earlier worksheets: the samples in prompt pack 0.4.0 and 0.4.1 named only
   the workflow in the `ci` row, placed the pre-commit hook alone at `.opf/hooks/pre-commit`, and
   listed that path in `targets`. A plan from such a worksheet now refuses with exit 2, because
