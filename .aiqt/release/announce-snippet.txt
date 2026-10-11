@@ -1,2 +1,2 @@
 aiqt-guardrails release 1.0.5
-root sha256:aeaf3b1920fe8116a082a85bf9dd462b2818f9e45ea33a1cbfdeb37b1b1baad0
+root sha256:907241e2a678e7bd08f3d3e32f7611bf3ad7432d768e22171d2ec06b3c36b012
