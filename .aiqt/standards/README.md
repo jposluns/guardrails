@@ -13,15 +13,23 @@ FIPS, NIST FIPS or FIPS PUB; and RFC; each followed by its number. NIST is joine
 FIPS to PUB, by whitespace, a dash or a dot (as in NIST.SP.800-53), a body to its number by whitespace,
 a dash, a dot or nothing, and a joining dash or dot may end a line. A designator run on into letters or
 digits the grammar does not read, or into a dash that, after any further dashes, is followed neither by
-a letter nor by whitespace and a non-digit on the same line (a dash that ends a line counts, whatever
-opens the next line), is reported as a whole token, never resolved to a shorter identity, and only an
-exclusion naming the whole token as the finding prints it waives it. Not detected: a framework named in
+a letter nor by same-line whitespace and then a character that is neither whitespace nor a digit (a dash
+before an LF counts, directly or after same-line whitespace, whatever opens the next line), is reported
+as a whole token, never resolved to a shorter identity, and only an exclusion naming the whole token as
+the finding prints it waives it. A token that ends at a dash keeps nothing after the dash, so one
+exclusion naming it waives each citation in its listed paths printed as that token, whatever followed
+the dash. Not detected: a framework named in
 prose without such a number; the omissions the gate names, among them the ISO prefixes DPAS, PWI, CDV,
 PDTR, PDTS, TTA, NP and PRF and the IWA and ISO Guide series, a list that is not complete; any other
 body, series, prefix or spelling outside the grammar; and a designator broken by markup or continued
 onto a line opened by anything but whitespace and blockquote markers, such as a comment marker.
-Whitespace, markup or an entity before or in place of a dash, and a dot, colon or slash that ends a
-line, end a designator, so such a spelling can read as a shorter identity. The grammar and its full
+Read short, so such a spelling can resolve to a registered shorter identity (named cases, not a complete
+list): whitespace before a dash; an entity, markup or any other character outside the dash list, such
+as a soft hyphen, before or in place of a dash; a dash followed by same-line whitespace and then a
+character that is neither whitespace nor a digit, such as markup, or, since only LF ends a line, a lone
+CR, VT, FF, U+0085, U+2028 or U+2029 and then such a character; and a dot, colon or slash followed by
+whitespace, on the same line or at a line end, other than the ISO year colon. A hyphenated year
+(ISO 42001-2023) is its own identity: it does not resolve to ISO 42001. The grammar and its full
 residual are in the docstring of `tools/check_cited_standards.py`.
 
 ## How it is enforced

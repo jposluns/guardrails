@@ -30,24 +30,30 @@ also by nothing. Between a body and its number the separator is whitespace, one 
 U+002D, U+2010 to U+2015, U+2212, U+FE58, U+FE63 and U+FF0D. Wherever the grammar allows whitespace (between words,
 before and after the ISO slash, after a dash or dot that joins, after the year colon) that whitespace may hold one
 line break (ISO-<break>27001, RFC-<break>3339, NIST.AI.<break>600-1), and Markdown blockquote markers (">") may open
-the continued line; no other line prefix is read (a comment marker #, // or *). Every spelling here is matched from
-its first character, so a finding prints the whole designator.
+the continued line; no other line prefix is read (a comment marker #, // or *). A line break is an LF (a CR before
+it is whitespace): every other whitespace character, a lone CR, VT, FF, U+0085, U+2028 and U+2029 among them, is
+same-line whitespace to the gate. Every spelling here is matched from its first character, so a finding prints the
+whole designator.
 
 Token boundaries. A designator starts only where the character before it is not a letter or digit, and it runs to
 the end of its token. Letters or digits the grammar does not read as a known part (RFC3339Parser, SP 800-53Ar5,
 SP 800-53AB) join it, and so does a dot, colon or slash with a digit right after it (ISO 27001/27002). A dash after
 it joins it too, unless, after any further dashes, a letter follows (RFC 3339-compliant, NIST-AI-100-1--AI-RMF) or
-whitespace on the same line and then something other than a digit (ISO 27001- and 27002). So a dash followed by a
-digit (SP 800-63-3-1), by whitespace and a digit, one line break and blockquote markers allowed (ISO 42001- 2023,
-NIST SP 800-<break>53, ISO 42001-<break>> 2023), by a line break whatever opens the next line (ISO 42001-<break>#
-2023), by markup or punctuation (ISO 42001-<br>2023), or by the end of the text joins the token; the digits after it
-join as well only when whitespace and blockquote markers alone come before them. Such a run is reported as token
-"<text>": the matched text with each whitespace run or blockquote marker printed as one space, each dash as a
-hyphen, and its letter case kept (ISO 42001-<break># 2023 prints as token "ISO 42001-"). It is never resolved to a
-shorter identity; no manifest registers a token, and only an exclusion naming the whole printed text waives it
-(NIST.SP.800-53r5, not SP.800-53r5). An exclusion is read with the corpus grammar, which reads a space wherever it
-reads a line break, so it may give a token exactly as a finding prints it. An underscore, other punctuation,
-whitespace, or a dash as above ends a token (strict_rfc3339 and RFC 3339-compliant both read RFC 3339).
+same-line whitespace and then a character that is neither whitespace nor a digit (ISO 27001- and 27002). So a dash
+followed by a digit (SP 800-63-3-1), by whitespace and a digit, one line break and blockquote markers allowed
+(ISO 42001- 2023, NIST SP 800-<break>53, ISO 42001-<break>> 2023), by a line break, directly or after same-line
+whitespace, whatever opens the next line (ISO 42001-<break># 2023, ISO 42001- <break># 2023), by markup or
+punctuation (ISO 42001-<br>2023), or by the end of the text joins the token; the digits after it join as well only
+when whitespace and blockquote markers alone come before them. Such a run is reported as token "<text>": the
+matched text with each whitespace run or blockquote marker printed as one space, each dash as a hyphen, and its
+letter case kept (ISO 42001-<break># 2023 prints as token "ISO 42001-"). A token that ends at a dash keeps nothing
+after the dash, so ISO 99999-<break># 2023, ISO 99999-<br>1 and ISO 99999-**2031** all print as token "ISO 99999-",
+and one exclusion naming that token waives each of them in its listed paths, whatever followed the dash. A token
+is never resolved to a shorter identity; no manifest registers a token, and only an exclusion naming the whole
+printed text waives it (NIST.SP.800-53r5, not SP.800-53r5). An exclusion is read with the corpus grammar, which
+reads a space wherever it reads a line break, so it may give a token exactly as a finding prints it. An underscore,
+other punctuation, whitespace, or a dash as above ends a token (strict_rfc3339 and RFC 3339-compliant both read
+RFC 3339).
 
 The corpus is scanned as raw text, code spans and fences included, so backticks are not a bypass. The
 threshold is fixed at one document: a single citation in a single file fails. It is not configurable.
@@ -66,15 +72,21 @@ ISO/IEC&nbsp;42001), one whose gap or join continues onto a line opened by anyth
 markers (ISO/IEC<break># 42001, ISO-<break>// 27001), or a line break inside a number where the text before the
 break is no designator (SP 800-<break>53, NIST AI 100-<break>1). Read from a later word: NIST joined to its series
 any other way (NIST/SP 800-53, NIST - SP 800-53, NIST_SP800-53 all read from SP; the identity is the same). Read
-short, so it can resolve to a registered shorter identity: whitespace before a dash ends a designator
+short, so it can resolve to a registered shorter identity: whatever ends a token ends the designator there and what
+follows is not read, and the cases named here are not a complete list. Whitespace before a dash ends a designator
 (ISO 42001 - 2023 reads ISO 42001), as do an entity, markup or any other character outside the dash list before or
-in place of a dash (ISO 42001&ndash;2023, a soft hyphen), and a dot, colon or slash that ends a line
-(ISO 27001/<break>27002 reads ISO 27001). Prose control ids (CWE-79, LLM01) are not checked; a prose edition is not
-compared with the manifest `edition`, and a hyphenated year reads as a part (ISO 42001-2023 is its own identity, so
-it fails). Matching errs toward reporting: it is case-insensitive and an underscore is a boundary, so a look-alike
-(sp 3-4, strict_rfc3339, ISO WD-40) is reported, never ignored, a dash that ends a line makes a token even before a
-hyphenated word (RFC 3339-<break>compliant is token "RFC 3339-"), and a sentence ending in a body before a number
-reads as a designator (RFC. 2 and RFC.<break>2. Next read RFC 2).
+in place of a dash (ISO 42001&ndash;2023, a soft hyphen); a dash followed by same-line whitespace and then a
+character that is neither whitespace nor a digit, such as markup after a space (ISO 42001- **2023**,
+ISO 42001- (2023), ISO 42001- <sup>2023</sup>) or, since only LF ends a line, a lone CR, VT, FF, U+0085, U+2028 or
+U+2029 and then such a character (ISO 42001-<CR># 2023 reads ISO 42001); and a dot, colon or slash followed by
+whitespace, on the same line or at a line end, other than the ISO year colon (ISO 27001/ 27002 and
+ISO 27001/<break>27002 read ISO 27001). Prose control ids (CWE-79, LLM01) are not checked; a prose edition is not
+compared with the manifest `edition`, and a hyphenated year reads as a part: ISO 42001-2023 is its own identity, so
+it does not resolve to ISO 42001, and it resolves when a manifest registers ISO 42001-2023 itself. Matching errs
+toward reporting: it is case-insensitive and an underscore is a boundary, so a look-alike (sp 3-4, strict_rfc3339,
+ISO WD-40) is reported, never ignored, a dash that ends a line makes a token even before a hyphenated word
+(RFC 3339-<break>compliant is token "RFC 3339-"), and a sentence ending in a body before a number reads as a
+designator (RFC. 2 and RFC.<break>2. Next read RFC 2).
 
   check_cited_standards.py                  check the repository's rule corpus
   check_cited_standards.py --root DIR       check the tree at DIR (manifests from DIR/.aiqt/standards)
@@ -94,8 +106,8 @@ finding) when its identity no longer occurs in one of those paths.
 
 Exit: 0 clean; 1 an unresolved identity or token, or a stale exclusion; 2 cannot evaluate (a malformed or
 unreadable manifest, config or corpus file, a corpus glob that matches nothing, an unlistable directory, two
-manifests deriving one identity, an exclusion that a manifest contradicts, or a usage error). Fail-closed:
-never a false clean.
+manifests deriving one identity, an exclusion that a manifest contradicts, or a usage error). Fail-closed: an
+input it cannot evaluate exits 2, never 0; a spelling it reads short (see the residual) can still pass clean.
 """
 import sys
 
@@ -146,18 +158,27 @@ RESIDUAL = (
     "(ISO/IEC<break># 42001, ISO-<break>// 27001), or by a line break inside a number where the text before the "
     "break is no designator (SP 800-<break>53, NIST AI 100-<break>1).",
     "  Read from a later word, same identity: NIST/SP 800-53, NIST - SP 800-53 and NIST_SP800-53 read from SP.",
-    "  Read short, so it can resolve to a registered shorter identity: whitespace before a dash ends a designator "
-    "(ISO 42001 - 2023 reads ISO 42001), as do an entity, markup or any other character outside the dash list "
-    "before or in place of a dash (ISO 42001&ndash;2023, a soft hyphen), and a dot, colon or slash that ends a "
-    "line (ISO 27001/<break>27002 reads ISO 27001).",
+    "  Read short, so it can resolve to a registered shorter identity (whatever ends a token ends the designator "
+    "there and what follows is not read; the cases named here are not a complete list): whitespace before a dash "
+    "(ISO 42001 - 2023 reads ISO 42001); an entity, markup or any other character outside the dash list before or "
+    "in place of a dash (ISO 42001&ndash;2023, a soft hyphen); a dash followed by same-line whitespace and then a "
+    "character that is neither whitespace nor a digit, such as markup (ISO 42001- **2023**, ISO 42001- (2023), "
+    "ISO 42001- <sup>2023</sup>) or, since only LF ends a line, a lone CR, VT, FF, U+0085, U+2028 or U+2029 and "
+    "then such a character (ISO 42001-<CR># 2023); and a dot, colon or slash followed by whitespace, on the same "
+    "line or at a line end, other than the ISO year colon (ISO 27001/ 27002 and ISO 27001/<break>27002 read "
+    "ISO 27001).",
     "  Prose control ids (CWE-79, LLM01) are not checked.",
     "  A prose edition is not compared with the manifest edition (ISO/IEC 42001:2015 resolves to ISO 42001); a "
-    "hyphenated year reads as a part (ISO 42001-2023 is its own identity).",
+    "hyphenated year reads as a part (ISO 42001-2023 is its own identity: it does not resolve to ISO 42001, and it "
+    "resolves when a manifest registers ISO 42001-2023).",
     "  A designator run on into letters or digits it does not read (RFC3339Parser, SP 800-53Ar5), or into a dash "
-    "that, after any further dashes, neither a letter nor same-line whitespace before a non-digit follows, is "
-    "reported as a whole token, never resolved to a shorter identity. A dash that ends a line counts whatever "
-    "opens the next line: ISO 42001-<break># 2023 is token ISO 42001-. Only an exclusion naming the whole token as "
-    "printed waives it.",
+    "that, after any further dashes, neither a letter nor same-line whitespace and then a character that is neither "
+    "whitespace nor a digit follows, is reported as a whole token, never resolved to a shorter identity. A dash "
+    "before an LF, directly or after same-line whitespace, counts whatever opens the next line: "
+    "ISO 42001-<break># 2023 is token ISO 42001-. Only an exclusion naming the whole token as printed waives it. A "
+    "token that ends at a dash keeps nothing after it (ISO 99999-<break># 2023, ISO 99999-<br>1 and "
+    "ISO 99999-**2031** all print as token ISO 99999-), so one exclusion of it waives each such citation in its "
+    "listed paths.",
     "  Matching is case-insensitive and an underscore is a boundary, so a look-alike (sp 3-4, strict_rfc3339, "
     "ISO WD-40) is reported, never ignored; a dash that ends a line makes a token even before a word "
     "(RFC 3339-<break>compliant), and a sentence ending in a body before a number reads as a designator "
@@ -188,9 +209,12 @@ _SP = r"(?:SP|SPECIAL" + _GAP + r"PUBLICATION(?:" + _GAP + r"\(SP\))?)"
 
 # The designator pattern. A designator starts where no letter or digit precedes it. GLUED takes the rest of its
 # token: letters or digits, a dot, colon or slash followed by a digit, and a dash unless, after any further dashes, a
-# letter follows it or same-line whitespace and then a non-digit does (so ISO-IEC-27001-2022--full-text ends at 2022);
-# the digits after a dash join it across OPT. A non-empty GLUED makes the whole match a token, so a dash that ends a
-# line never leaves a shorter identity behind it, whatever opens the next line.
+# letter follows it or same-line whitespace and then a character that is neither whitespace nor a digit does (so
+# ISO-IEC-27001-2022--full-text ends at 2022); the digits after a dash join it across OPT. A non-empty GLUED makes the
+# whole match a token, so a dash right after a designator and before an LF, directly or after same-line whitespace,
+# leaves no shorter identity behind it, whatever opens the next line. Only LF ends a line here: a dash before a lone
+# CR, U+2028 or other non-LF whitespace and then a character that is neither whitespace nor a digit (a comment marker,
+# markup) ends the designator before the dash, which reads short (RESIDUAL names such cases, not claiming all).
 _PATTERN = re.compile(
     r"(?<![^\W_])(?:"
     r"(?P<iso>ISO(?:(?:" + _OPT + "/" + _OPT + "|" + _DASH + _OPT + "|" + _GAP + ")(?:IEC|IEEE|" + _TYPE + "))*"
@@ -779,6 +803,37 @@ _VECTORS += (
      _EXCL.format("  RFC 3339  ", _A, "r"), lambda o: o.startswith("PASS") and "1 exclusion(s)" in o),
 )
 
+# V99 and V100 hold a dash before same-line whitespace (spaces, a tab, the CR of a CRLF) and then an LF: each registers
+# the shorter identity, so reading that whitespace and the LF as whitespace before a non-digit passes V99 and leaves
+# the exclusion in V100 stale. V101 and V102 hold the line break after Special and after Publication, each with a
+# printed-token exclusion round trip: a gap that cannot hold a line break discovers nothing there. V103 pins the
+# documented collapse of a token that ends at a dash: one exclusion waives each citation printed as that token.
+_DASH_LF = "Follows ISO 42001- \n// 2023\nPer ISO 42001-\r\n# 2023\r\n```yaml\n# Per ISO 42001-  \t\n# 2023\n```\n"
+_VECTORS += (
+    ("V99 a dash before trailing whitespace and an LF never resolves to the registered ISO 42001", 1, None,
+     {"r.md": _DASH_LF}, None,
+     lambda o: all(s in o for s in ('token "ISO 42001-": cited in 1', "FAIL: 1 unresolved", "r.md:1: ISO 42001-\n",
+                                    "r.md:3: ISO 42001-\n", "r.md:6: ISO 42001-\n"))),
+    ("V100 an exclusion naming a token that ends at a dash before trailing whitespace waives it as printed", 0, None,
+     {"a.md": _DASH_LF}, _EXCL.format("ISO 42001-", _A, "a wrapped year"),
+     lambda o: o.startswith("PASS") and "1 exclusion(s)" in o),
+    ("V101 NIST Special<break>Publication 800-999 is discovered whole and its r9 token is excluded as printed", 1,
+     None, {"a.md": "Cites NIST Special\nPublication 800-999 here.\nAlso NIST Special\n> Publication 800-999r9.\n"},
+     _EXCL.format("NIST Special Publication 800-999r9", _A, "r"),
+     lambda o: ("NIST SP 800-999: cited in 1" in o and ".aiqt/core/rules/a.md:1: NIST Special Publication 800-999\n"
+                in o and "FAIL: 1 unresolved standard identity(ies), 0 stale" in o)),
+    ("V102 NIST Special Publication<break>(SP) 800-999 is discovered whole and its r9 token is excluded as printed",
+     1, None,
+     {"a.md": "Cites NIST Special Publication\n(SP) 800-999 here.\nAlso Special Publication\n> (SP) 800-999r9.\n"},
+     _EXCL.format("Special Publication (SP) 800-999r9", _A, "r"),
+     lambda o: ("NIST SP 800-999: cited in 1" in o
+                and ".aiqt/core/rules/a.md:1: NIST Special Publication (SP) 800-999\n" in o
+                and "FAIL: 1 unresolved standard identity(ies), 0 stale" in o)),
+    ("V103 one exclusion of a token that ends at a dash waives each citation printed as that token", 0, None,
+     {"a.md": "# Per ISO 99999-\n# 2023\n\nLater: ISO 99999-<br>1 and ISO 99999-**2031**.\n"},
+     _EXCL.format("ISO 99999-", _A, "a wrapped year"), lambda o: o.startswith("PASS") and "1 exclusion(s)" in o),
+)
+
 _NORMALISATION = (
     ("ISO/IEC 42001:2023", "ISO 42001"),
     ("iso 42001", "ISO 42001"),
@@ -906,6 +961,12 @@ _IN_TEXT = (
     ("NIST/SP 800-53 and NIST - SP 800-53", ["NIST SP 800-53", "NIST SP 800-53"]),
     ("Per ISO 42001 - 2023 and ISO 42001&ndash;2023.", ["ISO 42001", "ISO 42001"]),
     ("Per ISO 27001/\n27002.", ["ISO 27001"]),
+    ("Per ISO 42001- **2023**, ISO 42001- (2023) and ISO 42001- <sup>2023</sup>.", ["ISO 42001"] * 3),
+    ("ISO 42001-\r# 1, ISO 42001-\x0b# 1, ISO 42001-\x0c# 1, ISO 42001-\x85# 1, ISO 42001-\u2028# 1, "
+     "ISO 42001-\u2029# 1", ["ISO 42001"] * 6),
+    ("Per ISO 27001/ 27002.", ["ISO 27001"]),
+    # a token that ends at a dash keeps nothing after it
+    ("Per ISO 99999-\n# 2023, ISO 99999-<br>1 and ISO 99999-**2031**.", ['token "ISO 99999-"'] * 3),
     ("Timestamps are RFC 3339-\ncompliant.", ['token "RFC 3339-"']),
     ("as in the initial RFC.\n2. Next item", ["RFC 2"]),
 )
