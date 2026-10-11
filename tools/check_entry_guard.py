@@ -88,12 +88,16 @@ import contextlib
 import errno
 import importlib.util
 import io
+import json
 import os
+import select
 import signal
 import stat
 import subprocess
 import tempfile
+import time
 import tomllib
+import types
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -427,30 +431,141 @@ def _replace_with(root, rel, kind):
         path.mkdir()
 
 
-class _Hung(BaseException):
-    """A gate run still blocked after GATE_TIMEOUT (BaseException, so no handler under test swallows it)."""
+def _child_leg(thunk, rfd, wfd):
+    """The forked child of _in_child: run thunk and write its JSON report to wfd. It never returns into the
+    frames of its caller, so no finally block, cleanup or interpreter-exit hook of the parent copy runs here:
+    every path, a BaseException included, ends in os._exit."""
+    status = 1
+    try:
+        os.close(rfd)
+        try:
+            report = [True, thunk()]
+        except BaseException as exc:
+            report = [False, "crashed ({})".format(type(exc).__name__)]
+        data = json.dumps(report, default=repr).encode("utf-8")
+        while data:
+            data = data[os.write(wfd, data):]
+        status = 0
+    finally:
+        os._exit(status)
 
 
-def _on_alarm(signum, frame):
-    raise _Hung()
+def _in_child(thunk, timeout):
+    """Run thunk() in a forked child; returns (True, its result through JSON) or (False, "hung" or
+    "crashed (...)"). The bound is a monotonic deadline this parent owns: on expiry the child is killed and
+    reaped. Nothing here reads, arms or restores a process timer, a signal handler or the signal mask, so the
+    ITIMER_REAL of a caller, its interval, its SIGALRM handler and its mask are untouched (the rule
+    elapsed-aware-timer-restore: a mechanism that is not process-global, rather than a borrow); a forked
+    child inherits no interval timer."""
+    deadline = time.monotonic() + timeout
+    rfd, wfd = os.pipe()
+    try:
+        pid = os.fork()
+    except BaseException:
+        os.close(rfd)
+        os.close(wfd)
+        raise
+    if pid == 0:
+        _child_leg(thunk, rfd, wfd)
+    os.close(wfd)
+    chunks, status, hung, reaped = [], None, False, False
+    try:
+        poller = select.poll()
+        poller.register(rfd, select.POLLIN)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                hung = True
+                break
+            if not poller.poll(int(remaining * 1000) + 1):
+                continue
+            chunk = os.read(rfd, READ_CHUNK)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        while not hung:
+            reaped, status = os.waitpid(pid, os.WNOHANG)
+            if reaped:
+                break
+            if time.monotonic() >= deadline:
+                hung = True
+            else:
+                time.sleep(0.001)
+    finally:
+        os.close(rfd)
+        if not reaped:
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+    if hung:
+        return False, "hung"
+    if not (os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0):
+        return False, "crashed (child wait status {})".format(status)
+    try:
+        done, result = json.loads(b"".join(chunks).decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, TypeError):
+        return False, "crashed (unreadable child report)"
+    return done, result
 
 
 def _gate(module, root, timeout=GATE_TIMEOUT):
-    """Run module.run(root); returns (exit code, or "hung" or "crashed (...)", combined output)."""
-    out, err = io.StringIO(), io.StringIO()
-    previous = signal.signal(signal.SIGALRM, _on_alarm)
-    signal.setitimer(signal.ITIMER_REAL, timeout)
-    try:
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = module.run(root)
-    except _Hung:
-        code = "hung"
-    except Exception as exc:
-        code = "crashed ({})".format(type(exc).__name__)
-    finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, previous)
-    return code, out.getvalue() + err.getvalue()
+    """Run module.run(root) in a bounded child (_in_child), so every patch and mutant in place at the call is
+    in force there; returns (exit code, or "hung" or "crashed (...)", combined output)."""
+    def gated():
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = module.run(root)
+        except Exception as exc:
+            code = "crashed ({})".format(type(exc).__name__)
+        return [code, out.getvalue() + err.getvalue()]
+    done, result = _in_child(gated, timeout)
+    return (result[0], result[1]) if done else (result, "")
+
+
+# The caller timer the timer vector arms in its own child: (countdown, interval) in seconds, far beyond the run.
+CALLER_TIMER = (600.0, 300.0)
+# The countdown the timer vector allows beyond the measured gate run, for the two timer reads around it.
+TIMER_SLACK = 0.25
+# The bound of the overrun vector, and how long its gate run sleeps with SIGALRM ignored before printing a pass.
+OVERRUN_TIMEOUT = 0.5
+OVERRUN_SECONDS = 2.0
+
+
+def _caller_alarm(signum, frame):
+    """The SIGALRM handler of the caller in the timer vector; its timer never comes due during the run."""
+
+
+def _caller_timer_probe(module, root):
+    """Arm a caller timer with an interval and a handler, run root through the _gate of module, and report the
+    timer, handler and mask after it. Run only inside _in_child, so the timer it arms is its own."""
+    signal.signal(signal.SIGALRM, _caller_alarm)
+    signal.setitimer(signal.ITIMER_REAL, *CALLER_TIMER)
+    mask = signal.pthread_sigmask(signal.SIG_BLOCK, ())
+    before = signal.getitimer(signal.ITIMER_REAL)
+    start = time.monotonic()
+    code, _output = module._gate(module, root)
+    elapsed = time.monotonic() - start
+    after = signal.getitimer(signal.ITIMER_REAL)
+    return dict(code=code, before=before, after=after, elapsed=elapsed,
+                handler=signal.getsignal(signal.SIGALRM) is _caller_alarm,
+                mask=signal.pthread_sigmask(signal.SIG_BLOCK, ()) == mask)
+
+
+def _timer_kept(probe):
+    """True when the gate run of the probe passed, and its caller timer kept its interval, counted down by no
+    more than the run took, and kept its handler and mask."""
+    (before, _interval), (after, interval) = probe["before"], probe["after"]
+    return (probe["code"] == 0 and interval == CALLER_TIMER[1] and probe["handler"] and probe["mask"]
+            and before - probe["elapsed"] - TIMER_SLACK <= after <= before)
+
+
+def _overrunning_run(root):
+    """A gate run that ignores SIGALRM and overruns its bound, then prints a pass: a hang no in-process alarm
+    can interrupt."""
+    signal.signal(signal.SIGALRM, signal.SIG_IGN)
+    time.sleep(OVERRUN_SECONDS)
+    print("PASS: entry-guard checked 2 launched scripts")
+    return 0
 
 
 def _launch(path, *args, cwd=None):
@@ -765,7 +880,20 @@ def self_test(report_path=None):
         never = sorted(set(vector for vector, _root, _code, _text, _patch in vectors) - exposed - UNMUTATED)
         check("mutant/every-vector-discriminates", not never, never)
 
-    # 5. the live leg: the real surface passes and is no smaller than the recorded floor, both in process and
+        # 5. the gate runner borrows no process timer: an armed caller ITIMER_REAL keeps its countdown, its
+        # interval, its SIGALRM handler and its signal mask across a gate run (probed in a child, so this
+        # self-test never arms its own process timer), and a gate run that ignores SIGALRM and overruns its
+        # bound is still bounded and reported hung, never as its late pass
+        done, probe = _in_child(lambda: _caller_timer_probe(this, roots["intact/passes"]), CHILD_TIMEOUT)
+        check("gate/caller-timer-survives", done and _timer_kept(probe), probe)
+        start = time.monotonic()
+        overrun = _gate(types.SimpleNamespace(run=_overrunning_run), roots["intact/passes"],
+                        timeout=OVERRUN_TIMEOUT)
+        elapsed = time.monotonic() - start
+        check("gate/overrun-bounded-as-hung", overrun == ("hung", "") and elapsed < OVERRUN_SECONDS,
+              (overrun, elapsed))
+
+    # 6. the live leg: the real surface passes and is no smaller than the recorded floor, both in a gate child and
     # through this file's own entry, launched as the roster launches the gate step
     code, output = _gate(this, ROOT, timeout=CHILD_TIMEOUT)
     marker = "entry-guard checked "
@@ -794,7 +922,8 @@ def self_test(report_path=None):
           "duplicated, else-bearing, misnamed, callless, dormant-call, unreachable, nested and unlaunched-runner "
           "entries are findings; non-regular, unreadable, malformed and schema-invalid inputs fail closed; {} "
           "mutants each caught, every vector discriminating; this gate's own lost guard caught by the execution "
-          "gate; live surface {} scripts)".format(len(results), len(vectors), len(MUTANTS), count))
+          "gate; a caller timer survives the gate runner and an overrun is bounded as hung; live surface {} "
+          "scripts)".format(len(results), len(vectors), len(MUTANTS), count))
     return 0
 
 

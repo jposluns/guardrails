@@ -1443,6 +1443,8 @@ expected-check-ids = [
   "own-entry/guard-loss-caught-by-execution-gate",
   "mutant/every-mutant-caught",
   "mutant/every-vector-discriminates",
+  "gate/caller-timer-survives",
+  "gate/overrun-bounded-as-hung",
   "live/real-tree-passes",
   "live/direct-launch-passes",
 ]
