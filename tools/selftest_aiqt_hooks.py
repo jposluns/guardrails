@@ -106,6 +106,16 @@ the session is armed, and every cannot-evaluate denies once armed. Fixtures are 
 sibling repo, and a nested repo), with the declaration written into the redirected XDG_STATE_HOME and the
 floor synthesized in-tree, removed in the finally.
 
+It also covers the destructive-operation guard (destructive_guard, sechau/secrst) through synthetic payloads
+only (no submitted command runs): rm/unlink, truncate and dd of= operands outside scratch and outside every
+repository, the home directory, the repository root, ignored content, a nested repository, a submodule, an
+unresolvable operand, an xargs-fed path word and rm --no-preserve-root DENY, as do find -delete/-exec rm,
+mkfs/wipefs, shred, dropdb, a psql DROP, terraform/tofu destroy, kubectl delete and an unparseable command
+naming a recursive rm; a literal /tmp or TMPDIR path, a regenerable build directory, tracked clean content
+and the leading GUARDRAIL_ALLOW_DESTRUCTIVE opt-out ALLOW (some with a note), and untracked content in a
+repository is SNAPSHOT-THEN-ALLOWED. A mutant sweep removes each named rule from _DESTRUCT_RULES and requires
+every vector that names it to change outcome.
+
   selftest_aiqt_hooks.py    exit 0 on SELF-TEST PASS, 1 on SELF-TEST FAIL, 2 on a harness/setup error
 """
 import sys
@@ -1712,6 +1722,222 @@ def _test_git_stash_ref(failures):
     if (aiqt_hooks.HANDLERS.get("git_stash_ref") is not aiqt_hooks.git_stash_ref or
             aiqt_hooks.HANDLER_EVENT.get("git_stash_ref") != aiqt_hooks.PRETOOL):
         failures.append("(sr-wiring) git_stash_ref handler/event wiring is missing or wrong")
+
+
+def _test_destructive_guard(failures, tmp):
+    """(dz-*) The destructive-operation guard (destructive_guard, sechau/secrst), driven only through
+    synthetic payloads: no submitted command is executed, and every absolute target outside the fixture tree
+    is a path this suite never creates. Fixtures: a working repo (a tracked clean src/pkg, an untracked file,
+    an ignored .env, and an ignored directory under each regenerable name), a repo holding a nested
+    repository and a committed gitlink, a clean repo whose tracked homedir stands in for HOME, and a
+    dedicated scratch root used as TMPDIR. Repository vectors see only that scratch root (the fixture tree
+    may itself sit under /tmp or TMPDIR, which the guard treats as disposable); the scratch vectors use the
+    guard's real scratch roots. Every vector names the one rule it depends on, and the mutant sweep removes
+    that rule from _DESTRUCT_RULES and requires the vector's outcome to change, so no deny or allow vector
+    passes by accident."""
+    handler = aiqt_hooks.destructive_guard
+    base = tmp / "destructive"
+    saved_env = {key: os.environ.get(key) for key in ("HOME", "TMPDIR")}
+    saved_roots = aiqt_hooks._destruct_scratch_roots
+    saved_rules = aiqt_hooks._DESTRUCT_RULES
+    saved_record = aiqt_hooks._record_recovery
+    saved_budget = aiqt_hooks._DESTRUCT_BUDGET
+    try:
+        scratch = base / "scratch"
+        scratch.mkdir(parents=True)
+        repo = _init_repo(base / "repo")
+        (repo / "src" / "pkg").mkdir(parents=True)
+        (repo / "src" / "pkg" / "a.py").write_text("x = 1\n", encoding="utf-8")
+        regen = sorted(aiqt_hooks._DESTRUCT_REGENERABLE)
+        (repo / ".gitignore").write_text(".env\n" + "".join(name + "/\n" for name in regen), encoding="utf-8")
+        _git(repo, "add", ".gitignore", "src/pkg/a.py")
+        _git(repo, "commit", "-q", "-m", "pkg", env_identity=True)
+        (repo / ".env").write_text("TOKEN=placeholder\n", encoding="utf-8")
+        for name in regen:
+            (repo / name).mkdir()
+            (repo / name / "artifact.bin").write_text("generated\n", encoding="utf-8")
+        (repo / "notes.txt").write_text("uncommitted notes\n", encoding="utf-8")
+        nest = _init_repo(base / "nest")
+        (nest / "holder").mkdir()
+        subprocess.run(["git", "init", "-q", str(nest / "holder" / "inner")], check=True, capture_output=True,
+                       text=True, timeout=30, env=git_fixture_env())
+        (nest / "holder" / "inner" / "work.txt").write_text("nested work\n", encoding="utf-8")
+        head = subprocess.run(["git", "-C", str(nest), "rev-parse", "HEAD"], check=True, capture_output=True,
+                              text=True, timeout=30, env=git_fixture_env()).stdout.strip()
+        _git(nest, "update-index", "--add", "--cacheinfo", "160000,{},mod".format(head))
+        _git(nest, "commit", "-q", "-m", "gitlink", env_identity=True)
+        (nest / "mod").mkdir()
+        clean = _init_repo(base / "clean")
+        (clean / "homedir").mkdir()
+        (clean / "homedir" / "profile").write_text("profile\n", encoding="utf-8")
+        _git(clean, "add", "homedir/profile")
+        _git(clean, "commit", "-q", "-m", "home", env_identity=True)
+    except (OSError, subprocess.SubprocessError) as exc:
+        failures.append("(dz-fixture) could not build the destructive-guard fixtures: {}".format(exc))
+        return
+    os.environ["TMPDIR"] = str(scratch)
+    scratch_real = os.path.realpath(str(scratch))
+    home0 = saved_env["HOME"] or ""
+    rp, absent = str(repo), "/srv/aiqt-selftest-absent"
+    real_roots, fake_home = {"real_roots": True}, {"home": str(clean / "homedir")}
+
+    def run(command, cwd, opts):
+        os.environ["HOME"] = opts.get("home", home0)
+        aiqt_hooks._destruct_scratch_roots = saved_roots if opts.get("real_roots") else (lambda: [scratch_real])
+        try:
+            return _decision(handler, command, cwd=cwd)
+        finally:
+            os.environ["HOME"] = home0
+            aiqt_hooks._destruct_scratch_roots = saved_roots
+
+    # (label, rule, command, cwd, expected, options): the rule is the one the vector depends on.
+    vectors = [
+        ("deny-abs-outside", "rm", "rm -rf {}/appdata".format(absent), rp, "deny", {}),
+        ("deny-root", "rm", "rm -rf /", rp, "deny", {}),
+        ("deny-unlink-outside", "rm", "unlink {}/one.db".format(absent), rp, "deny", {}),
+        ("deny-variable", "unresolvable", "rm -rf $TARGET", rp, "deny", {}),
+        ("deny-home-tilde", "home", "rm -rf ~", rp, "deny", fake_home),
+        ("deny-home-literal", "home", "rm -rf {}".format(clean / "homedir"), rp, "deny", fake_home),
+        ("deny-no-preserve-root", "no-preserve-root", "rm -rf --no-preserve-root {}/x".format(scratch), rp,
+         "deny", real_roots),
+        ("deny-find-delete", "find", "find . -name '*.pyc' -delete", rp, "deny", {}),
+        ("deny-find-exec-rm", "find", "find /srv -type f -exec rm -f {} +", rp, "deny", {}),
+        ("deny-terraform", "terraform", "terraform destroy -auto-approve", rp, "deny", {}),
+        ("deny-tofu-apply-destroy", "terraform", "tofu apply -destroy", rp, "deny", {}),
+        ("deny-kubectl-namespace", "kubectl", "kubectl delete namespace prod", rp, "deny", {}),
+        ("deny-dropdb", "dropdb", "dropdb prod", rp, "deny", {}),
+        ("deny-psql-drop", "sql", "psql -c 'DROP TABLE users'", rp, "deny", {}),
+        ("deny-truncate-data", "truncate", "truncate -s 0 {}/data.db".format(absent), rp, "deny", {}),
+        ("deny-dd-device", "dd", "dd if=/dev/zero of=/dev/sda bs=1M", rp, "deny", {}),
+        ("deny-mkfs", "format", "mkfs.ext4 /dev/sdb1", rp, "deny", {}),
+        ("deny-wipefs", "format", "wipefs -a /dev/sdb", rp, "deny", {}),
+        ("deny-shred", "shred", "shred -u {}/secrets.txt".format(rp), rp, "deny", {}),
+        ("deny-unparseable-rm", "raw", 'rm -rf "{}/appdata'.format(absent), rp, "deny", {}),
+        ("deny-unparseable-find", "raw", "find . -delete 'x", rp, "deny", {}),
+        ("deny-sudo-wrapped", "wrappers", "sudo rm -rf {}/appdata".format(absent), rp, "deny", {}),
+        ("deny-control-flow", "wrappers", "if true; then rm -rf {}/appdata; fi".format(absent), rp, "deny", {}),
+        ("deny-xargs-fed", "xargs", "find . -name '*.log' | xargs rm -f", rp, "deny", {}),
+        ("deny-cd-tracked", "cd", "cd /srv && rm -rf build", rp, "deny", {}),
+        ("deny-backtick-subst", "subst", "echo `rm -rf {}/appdata`".format(absent), rp, "deny", {}),
+        ("deny-quoted-subst", "subst", 'echo "$(rm -rf {}/appdata)"'.format(absent), rp, "deny", {}),
+        ("deny-repo-root", "repo-root", "rm -rf {}".format(clean), rp, "deny", {}),
+        ("deny-ignored-file", "ignored", "rm .env", rp, "deny", {}),
+        ("deny-nested-repo", "embedded", "rm -rf holder", str(nest), "deny", {}),
+        ("deny-gitlink", "gitlink", "rm -rf mod", str(nest), "deny", {}),
+        ("allow-clean-dir-note", "clean", "rm -rf src/pkg", rp, "allow-note", {}),
+        ("allow-clean-file", "clean", "rm src/pkg/a.py", rp, "allow", {}),
+        ("allow-truncate-clean", "clean", "truncate -s 0 src/pkg/a.py", rp, "allow", {}),
+        ("allow-tmp-literal", "scratch", "rm -rf /tmp/aiqt-selftest-absent-dir", rp, "allow", real_roots),
+        ("allow-tmpdir-literal", "scratch", "rm -rf {}/work".format(scratch), rp, "allow", real_roots),
+        ("allow-untracked-snapshot", "snapshot", "rm notes.txt", rp, "allow-note", {}),
+        ("allow-optout-note", "optout", "GUARDRAIL_ALLOW_DESTRUCTIVE=1 rm -rf {}/appdata".format(absent), rp,
+         "allow-note", {}),
+        ("allow-dd-null", "benign-sink", "dd if=/dev/zero of=/dev/null count=1", rp, "allow", {}),
+    ] + [("allow-regenerable-" + name.strip("._"), "regenerable", "rm -rf " + name, rp, "allow", {})
+         for name in regen]
+    try:
+        for label, rule, command, cwd, want, opts in vectors:
+            got = run(command, cwd, opts)
+            if got != want:
+                failures.append("(dz-{}) {!r}: expected {}, got {}".format(label, command, want, got))
+                continue
+            if rule not in saved_rules:
+                failures.append("(dz-rule-{}) the vector names rule {!r}, which _DESTRUCT_RULES does not "
+                                "hold".format(label, rule))
+                continue
+            aiqt_hooks._DESTRUCT_RULES = saved_rules - {rule}
+            try:
+                mutant = run(command, cwd, opts)
+            finally:
+                aiqt_hooks._DESTRUCT_RULES = saved_rules
+            if mutant == want:
+                failures.append("(dz-mutant-{}) removing rule {!r} left {!r} at {}; the vector does not depend "
+                                "on its rule".format(label, rule, command, want))
+        covered = {vec[1] for vec in vectors}
+        if covered != saved_rules:
+            failures.append("(dz-rules-covered) rules without a vector: {}; vectors naming no rule: {}".format(
+                sorted(saved_rules - covered), sorted(covered - saved_rules)))
+        # Outcomes that are not rule-attributed: the boundary, the fail posture, and the snapshot evidence.
+        before = _recovery_refs(repo)
+        for label, command, cwd, want in (
+                ("dz-snapshot-ref", "rm -f notes.txt", rp, "allow-note"),
+                ("dz-optout-falsy", "GUARDRAIL_ALLOW_DESTRUCTIVE=0 rm -rf {}/appdata".format(absent), rp, "deny"),
+                ("dz-optout-last-wins",
+                 "GUARDRAIL_ALLOW_DESTRUCTIVE=1 GUARDRAIL_ALLOW_DESTRUCTIVE= rm -rf {}/x".format(absent), rp, "deny"),
+                ("dz-optout-after-wrapper", "sudo GUARDRAIL_ALLOW_DESTRUCTIVE=1 rm -rf {}/x".format(absent), rp,
+                 "deny"),
+                ("dz-optout-other-segment", "GUARDRAIL_ALLOW_DESTRUCTIVE=1 true; rm -rf {}/x".format(absent), rp,
+                 "deny"),
+                ("dz-glob", "rm -f src/*.py", rp, "deny"),
+                ("dz-relative-no-cwd", "rm -rf build", None, "deny"),
+                ("dz-cd-semicolon", "cd src ; rm -rf pkg", rp, "deny"),
+                ("dz-cd-and-tracked", "cd src && rm -rf pkg", rp, "allow-note"),
+                ("dz-absent-in-repo", "rm -rf src/absent", rp, "allow"),
+                ("dz-dot-git", "rm -rf .git", rp, "deny"),
+                ("dz-unparseable-benign", 'ls "unbalanced', rp, "allow"),
+                ("dz-echo-text", "echo rm -rf /", rp, "allow"),
+                ("dz-git-rm", "git rm -r src", rp, "allow"),
+                ("dz-unquoted-subst", "echo $(rm -rf {}/appdata)".format(absent), rp, "deny"),
+                ("dz-subst-benign", 'git log -1 --format="$(echo %H)"', rp, "allow"),
+                ("dz-subst-heredoc-prose", "git commit -m \"$(cat <<'EOF'\nRefuse rm -rf outside scratch\nEOF\n)\"",
+                 rp, "allow"),
+                ("dz-ls", "ls -la", rp, "allow"),
+                ("dz-kubectl-get", "kubectl get pods", rp, "allow"),
+                ("dz-psql-select", "psql -c 'SELECT 1'", rp, "allow")):
+            got = run(command, cwd, {})
+            if got != want:
+                failures.append("({}) {!r}: expected {}, got {}".format(label, command, want, got))
+        if len(_recovery_refs(repo)) <= len(before):
+            failures.append("(dz-snapshot-made) the untracked-delete allow left no new refs/aiqt-recovery/ ref")
+        roots = aiqt_hooks._destruct_scratch_roots()
+        if os.path.realpath("/tmp") not in roots or scratch_real not in roots:
+            failures.append("(dz-roots) the scratch roots {!r} must hold /tmp and the TMPDIR {}"
+                            .format(roots, scratch_real))
+        os.environ["TMPDIR"] = str(tmp)
+        if os.path.realpath(str(tmp)) in aiqt_hooks._destruct_scratch_roots():
+            failures.append("(dz-roots-home) a TMPDIR that is an ancestor of HOME must not be a scratch root")
+        os.environ["TMPDIR"] = str(scratch)
+        aiqt_hooks._record_recovery = lambda *_a, **_k: ("fail", "forced by the self-test")
+        try:
+            got = run("rm notes.txt", rp, {})
+        finally:
+            aiqt_hooks._record_recovery = saved_record
+        if got != "deny":
+            failures.append("(dz-snapshot-fail) a failed recovery snapshot must deny; got {}".format(got))
+        aiqt_hooks._DESTRUCT_BUDGET = -1.0
+        try:
+            got = run("rm src/pkg/a.py", rp, {})
+        finally:
+            aiqt_hooks._DESTRUCT_BUDGET = saved_budget
+        if got != "deny":
+            failures.append("(dz-budget) an operand reached past the time budget must deny; got {}".format(got))
+        for label, data, want in (
+                ("dz-missing-tool", {"hook_event_name": "PreToolUse", "tool_input": {"command": "rm -rf /"}},
+                 "deny"),
+                ("dz-other-tool", {"hook_event_name": "PreToolUse", "tool_name": "Read",
+                                   "tool_input": {"file_path": "/etc/hosts"}}, "allow"),
+                ("dz-unreadable", {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                   "tool_input": {"command": 7}}, "deny")):
+            code, obj, _err = handler(data)
+            got = _reduce_result(code, obj)
+            if got != want:
+                failures.append("({}) expected {}, got {}".format(label, want, got))
+        code, _obj, _err = handler({"hook_event_name": "Stop"})
+        if code != 2:
+            failures.append("(dz-wrong-event) a mis-wired event must hard-block with exit 2; got {}".format(code))
+        if (aiqt_hooks.HANDLERS.get("destructive_guard") is not handler
+                or aiqt_hooks.HANDLER_EVENT.get("destructive_guard") != aiqt_hooks.PRETOOL):
+            failures.append("(dz-wiring) destructive_guard handler/event wiring is missing or wrong")
+    finally:
+        aiqt_hooks._destruct_scratch_roots = saved_roots
+        aiqt_hooks._DESTRUCT_RULES = saved_rules
+        aiqt_hooks._record_recovery = saved_record
+        aiqt_hooks._DESTRUCT_BUDGET = saved_budget
+        for key, value in saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def main():
@@ -9448,6 +9674,7 @@ def _main_isolated(monitor):
         _test_stop_dispatch_note_sites(failures, tmp)
         _test_note_shape_pins(failures, tmp)
         _test_stream_failure_exits(failures)
+        _test_destructive_guard(failures, tmp)
 
         # === write_scope_guard (wrtscp, EN-8): confine guarded-tool writes to a per-slice scope =========
         # declaration; hard-deny writes to the frozen floor and to other/nested repos as an un-lowerable
@@ -10166,7 +10393,8 @@ def _main_isolated(monitor):
 
     _bash_guards = [aiqt_hooks.diff_source_pretool, aiqt_hooks.bash_absolute_paths,
                     aiqt_hooks.git_explicit_binding, aiqt_hooks.git_discard, aiqt_hooks.protected_line,
-                    aiqt_hooks.branch_root, aiqt_hooks.gate_weakening, aiqt_hooks.commit_msg_subst]
+                    aiqt_hooks.branch_root, aiqt_hooks.gate_weakening, aiqt_hooks.commit_msg_subst,
+                    aiqt_hooks.destructive_guard]
     _bash_vectors = [
         "git status", "ls -la", "git diff", "git diff --color=always | grep foo", "/usr/bin/git diff",
         "git checkout -- file.txt", "git reset --hard", "git reset --soft", "git clean -fd",
@@ -10177,6 +10405,7 @@ def _main_isolated(monitor):
         'git commit -m "fix `whoami`"', "git commit -m x", "git -c alias.co=checkout co -- f",
         "git checkout-index -a -f", "eval 'git reset --hard'", 'git reset --hard "unbalanced',
         'git push --force "unbalanced', 'git commit -m "x `y', "git branch --track t origin/x",
+        "rm -rf /srv/aiqt-noask-absent", 'rm -rf "unbalanced', "find . -delete", "rm -f rel.txt",
     ]
     for _g in _bash_guards:
         for _cmd in _bash_vectors:
@@ -10401,7 +10630,13 @@ def _main_isolated(monitor):
           "the frozen/floor denials are evaluated BEFORE the companion-store allow so a symlink into a "
           "declared store cannot bypass the freeze (findings 1 and 2), so a companion_stores widening cannot "
           "be self-declared through a guarded tool; the general Bash-write path stays the disclosed wrtscp "
-          "residual. A "
+          "residual. sechau/secrst (destructive_guard) DENIES-and-educates a destructive operation with no "
+          "verified restore path (a path outside scratch and every repository, the home directory, a "
+          "repository root, ignored or nested-repository or submodule content, an unresolvable or xargs-fed "
+          "operand, find -delete, a device, database or cloud destroyer, an unparseable recursive rm), "
+          "SNAPSHOT-THEN-ALLOWS untracked repository content, and ALLOWS tracked clean content (a note on a "
+          "recursive delete), a literal scratch path, a regenerable build directory, and the leading opt-out "
+          "convention (with a note). A "
           "mis-wired PreToolUse event hard-blocks (exit 2). Historical note: several guards were "
           "originally ASK-based; this suite now asserts the no-ask outcomes above and the global "
           "invariant guarantees none reverts to an ask.")
