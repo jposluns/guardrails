@@ -2,18 +2,9 @@
 # Every sentence or clause of every rule under .aiqt/core/rules/ lies inside a clause row's
 # canonical-text in .aiqt/core/clauses.toml or is named here, byte-exact, with the reason it needs
 # no row. An entry with no reason, an entry whose text no longer occurs in its rule (stale), and an
-# entry whose text a clause row already covers (redundant) each fail the gate. Author-maintained;
-# review an entry whenever its rule changes.
-
-[[exempt]]
-corpus-id = "prjint1"
-text = "(Accuracy = Integrity = Quality = Trust) > Progress > Speed > Cost."
-reason = "Defines the AIQT ordering that prjint1.1 and prjint1.2 apply; the rule says it defines the ordering and guards no single facet."
-
-[[exempt]]
-corpus-id = "prjint1"
-text = "The four facets form one\nnon-negotiable top tier with no internal ranking; the tier is lexicographically above Progress, Progress\nabove Speed, Speed above Cost."
-reason = "Defines the AIQT ordering that prjint1.1 and prjint1.2 apply; the rule says it defines the ordering and guards no single facet."
+# entry whose text a clause row already covers (redundant) each fail the gate. The file is required:
+# the gate refuses (exit 2) when it is absent or unreadable, so deleting it never hides a finding.
+# Author-maintained; review an entry whenever its rule changes.
 
 [[exempt]]
 corpus-id = "prjint1"
@@ -173,7 +164,7 @@ reason = "Restates vfxcmt.1 (confirm the fix is in its commit before claiming it
 [[exempt]]
 corpus-id = "vfxcmt"
 text = "Uncommitted work outside the declared review set does not block the dispatch."
-reason = "Scope carve-out bounding vfxcmt.9; a permission, not an obligation."
+reason = "Scope bound on vfxcmt.9's cleanliness check; the obligation it states, never widening the dispatch into a whole-tree cleanliness demand the declaration did not make, is carried by vfxcmt.5."
 
 [[exempt]]
 corpus-id = "vfxcmt"
@@ -297,11 +288,6 @@ reason = "Summary of wowo01.1; it adds no obligation."
 
 [[exempt]]
 corpus-id = "wowo01"
-text = "Narrow recovery-snapshot exception: a guard or hook that snapshots uncommitted work so a discard can be\nundone may write a private recovery ref under `refs/aiqt-recovery/` (and the objects it points to)."
-reason = "Grants the recovery-snapshot exception whose limits wowo01.6 and wowo01.10 carry; a permission, not an obligation."
-
-[[exempt]]
-corpus-id = "wowo01"
 text = "The residual is not limited to on-disk config: it spans the non-`GIT_` environment (HOME,\nXDG_CONFIG_HOME, PATH, TMPDIR), on-disk git configuration and attributes (repository, global, or system\n`.gitconfig` and `.gitattributes`), index and ignore state, submodules and embedded repositories,\nconfigured hooks and filters, PATH-based git resolution, and partial-clone object availability, all of\nwhich git reads by design."
 reason = "Disclosed residual of wowo01.7; no obligation of its own."
 
@@ -389,11 +375,6 @@ reason = "Rationale for secvln.1; no obligation of its own."
 corpus-id = "secpub"
 text = "An adopter can then\nverify that what they installed matches that authenticated reference."
 reason = "Rationale for secpub.1; no obligation of its own."
-
-[[exempt]]
-corpus-id = "sectok"
-text = "Code the assistant writes and operations it performs handle sessions and tokens securely."
-reason = "Lead sentence summarizing sectok.1 and sectok.7, which carry the testable obligations."
 
 [[exempt]]
 corpus-id = "secthm"

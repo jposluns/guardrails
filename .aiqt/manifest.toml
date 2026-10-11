@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "c96f6d8d25ceaa226002be92957e0418b633bf2396e295a4c221be921ab7a953"
+tree-sha256 = "3377421d87e62e1508a1bd06bc7225182065c691c71b8bf42fb412a05e6539b5"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -31,13 +31,13 @@ sha256 = "a2188250b031d6168937b6857d01fe48bdc7f5ed5e93fbc682908b0415a1453f"
 
 [[sources]]
 path = ".aiqt/core/clause-exemptions.toml"
-bytes = 26855
-sha256 = "40a3112608d34f1bc8048202d3d7fc91cb75b0115e8f8ca0366b2a0ba502272c"
+bytes = 25900
+sha256 = "d4ef1d48ca18a5429ae86ca8843b77a3b407a1131b3282f770628d43a912c271"
 
 [[sources]]
 path = ".aiqt/core/clauses.toml"
-bytes = 301435
-sha256 = "b2c61e4f7a2d52e98dad3717769bfd5b478f5bf0d1286daa1cfccdcff7243529"
+bytes = 303222
+sha256 = "1702b9f66de193c05aa1f53416f7272da27b0a76c627c6982ee90d506249a9c4"
 
 [[sources]]
 path = ".aiqt/core/conformance/behaviour-checklist.md"
@@ -66,8 +66,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 270511
-sha256 = "a0c56a54b7c7bb03ecb71476205a390c821809df73055e842035bbab25382781"
+bytes = 270613
+sha256 = "66372aaeab738bdbbd59dc5f2c48a02fa3574b2a973efd6812d4cf4d10c5f768"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -91,8 +91,8 @@ sha256 = "268659bc6b9040c3d27aa0e95bbc9a40f777e9403a0a69bae485b8d80d4bf3d9"
 
 [[sources]]
 path = ".aiqt/core/id-history.toml"
-bytes = 37731
-sha256 = "1297c1ea6d7c96cdac3e1e588dee1c2e6cde93ede97ded789adb2b6dbdd59080"
+bytes = 37980
+sha256 = "28f6908372fc942a6e13cba7b6a67a68385601b3ab38ab7dc7fe78087dbf6492"
 
 [[sources]]
 path = ".aiqt/core/instruction-budget.toml"
@@ -3296,8 +3296,8 @@ sha256 = "acb14676e67989fa529a2b3de3a17a334eb1e711c97a38dbd2647b6ca45b0108"
 
 [[sources]]
 path = "tools/check_clauses.py"
-bytes = 197040
-sha256 = "33078838ee6790c157efa2d1c6cf2fbac5681b3a324c7b8b5d4752cdcf9ea35c"
+bytes = 207236
+sha256 = "f3896cd9c5815bd4c16d492ac7d4582501ab57fce6d830ad92d522bc73f74313"
 
 [[sources]]
 path = "tools/check_crosswalk.py"
