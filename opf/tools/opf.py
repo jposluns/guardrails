@@ -5550,9 +5550,12 @@ def _watchdog_bound_faults(bounds, budgets):
 # have exactly one of a checked derivation block (in the runner's comment) or
 # an entry here; the derived set is read from those blocks, never listed.
 _WATCHDOG_FLAT_BUDGET = (
-    "a flat declared budget train 2 did not re-derive from its permitted paths: the runtime "
-    "ledger charges every registered wait the leg makes against it on every run, so an "
-    "under-price can only fail the leg (a loud FAIL or a kill at its bound), never pass it")
+    "a flat declared budget not derived from the leg's permitted paths: the runtime ledger "
+    "charges the registered waits each run actually makes, so a run whose realized charges "
+    "exceed the budget fails the leg (a loud FAIL or a kill at its bound), but nothing checks "
+    "the budget against any path's cost: a slower permitted path can exceed a budget that a "
+    "fast run fits within (the leg then fails on that run only), and a budget above what "
+    "every permitted path needs is not refused")
 _WATCHDOG_UNDERIVED_LEGS = dict(
     [(leg, _WATCHDOG_FLAT_BUDGET) for leg in (
         "audit-ignore", "reaper", "nonce", "fixture-id", "status", "early-exit",
@@ -5561,19 +5564,29 @@ _WATCHDOG_UNDERIVED_LEGS = dict(
         "launch-ownership", "launch-cancel", "fd-hygiene-total", "nested-keep", "fd-census",
         "subject-gc", "guardian-preload", "subject-receipt", "subject-ack", "pdeathsig",
         "escalate-reaped", "poll-collected", "escalate-degraded", "poll-masked",
-        "unpinned-kill", "census-verify", "receipt-high-fd")]
+        "unpinned-kill", "census-verify")]
     + [("overdue-success",
         "priced term by term under per-thread accounting in the runner's budget comment "
         "(4 x deadline 30 + join 30 + fixture allowance 11 = 161.0) with its stated 0.01 s "
         "float-summation margin, not the 1 s derivation margin")])
 _WATCHDOG_DERIVATION_MARGIN = 1
-# Each case function the regression runner launches, and the label prefix its
-# modes carry: a call to one of these from inside another case runs that mode
-# in the caller's process, charged to the caller's ledger.
+# Each case function whose modes another case may run, and the label prefix
+# its modes carry: a call to one of these from inside another case runs that
+# mode in the caller's process, charged to the caller's ledger.
+# _watchdog_dispatch_faults reads the bodies of exactly these functions.
 _WATCHDOG_CASE_PREFIXES = (("_watchdog_deadline_case", ""), ("_watchdog_safety_case", ""),
                            ("_watchdog_overlap_case", "overlap-"),
                            ("_watchdog_completion_case", "completion-"),
                            ("_watchdog_ledger_case", "ledger-"))
+# The case functions the regression runner launches that the dispatch scan
+# does NOT read, each with its reason: every other launched case function
+# must be one of _WATCHDOG_CASE_PREFIXES, or the scan refuses the runner.
+_WATCHDOG_UNSCANNED_CASES = {
+    "_watchdog_launcher_case": (
+        "runs a whole runner, or one shared launch, with every fixture launch patched to one "
+        "exit-37 process, and is priced from those launches (nested_launches in the runner), "
+        "not from a mode; it reaches the case functions through the runner it runs, so a "
+        "scanned case that spells its name is refused as a helper that can reach a case")}
 
 
 def _watchdog_derivation_faults(source, budgets, launched=(), exempt=None):
@@ -5586,9 +5599,11 @@ def _watchdog_derivation_faults(source, budgets, launched=(), exempt=None):
     READ, never listed: every completion leg (a `completion-` label in
     `budgets` or in `launched`) must have exactly one of a derivation block or
     an `exempt` entry (default _WATCHDOG_UNDERIVED_LEGS) carrying a nonempty
-    reason, so a leg dropped from both, carried by both, or named by either
-    without being budgeted is a fault, and with `launched` given a budget for a
-    leg the runner never launches is one too. Returns the faults."""
+    reason, and a finite positive declared budget on either path, so a leg
+    dropped from both, carried by both, or named by either without a usable
+    budget is a fault (_watchdog_bound_faults refuses a launched leg with no
+    budget again), and with `launched` given a budget for a leg the runner
+    never launches is one too. Returns the faults."""
     import math
     import re
     exempt = _WATCHDOG_UNDERIVED_LEGS if exempt is None else exempt
@@ -5629,6 +5644,8 @@ def _watchdog_derivation_faults(source, budgets, launched=(), exempt=None):
             if not isinstance(reason, str) or not reason.strip():
                 faults.append("%s: neither a derivation block nor an exemption with a reason; "
                               "a completion budget is derived or exempted by name" % label)
+            elif not _watchdog_finite_seconds(budgets.get(label)):
+                faults.append("%s: exempted, but no usable declared budget" % label)
             continue
         entries = seen[leg]
         if len(entries) != 1 or len(entries[0]) != 1:
@@ -5657,25 +5674,61 @@ def _watchdog_derivation_faults(source, budgets, launched=(), exempt=None):
     return faults
 
 
-def _watchdog_dispatch_faults(budgets, sources=None):
+def _watchdog_dispatch_faults(budgets, module=None, cases=None):
     """Every case branch that runs another case's mode in its own process (the
     safety leg lost-cleanup runs the completion mode no-signal-echild) is priced
-    from what it dispatches, read from the case functions' source (`sources`,
-    name to text; default the live _WATCHDOG_CASE_PREFIXES functions): a branch
+    from what it dispatches, read from `module` (the source text defining the
+    _WATCHDOG_CASE_PREFIXES functions; default this module's own): a branch
     whose whole body is `return <case>(<mode>)` must carry exactly that mode's
     budget, and any other dispatching branch at least the sum of its dispatched
     modes' budgets (a floor only: its own waits, and a dispatched mode run under
-    a patched bound, may need more). A dispatch the scan cannot attribute to a
-    single run of one `mode == ...` or `mode in (...)` branch (a non-constant
-    mode, a call outside any mode test, or one inside a loop, comprehension,
-    nested function or lambda, which may run any number of times) is a fault.
-    Returns the faults."""
+    a patched bound, may need more). The scan ATTRIBUTES only a direct call, by
+    name or attribute, to a case function with a constant string mode, made
+    once inside one `mode == ...` or `mode in (...)` branch; anywhere in a case
+    function it refuses, as a fault, everything else it can see that may
+    dispatch: (1) a case call it cannot attribute (a non-constant mode, a call
+    outside any mode test, or one inside a loop, comprehension, nested function
+    or lambda, which may run any number of times); (2) any other spelling of a
+    case function: its name or attribute read or bound anywhere but as the
+    callee of a call the scan handles (an alias, an argument such as one to
+    functools.partial, a container entry), or a string constant equal to its
+    name (a getattr, globals() or patch.object lookup); and (3) any spelling,
+    called or not, of a name that can REACH a case function: a top-level
+    definition, class or assignment in `module` whose statement spells a case
+    function or another such name in any of those ways, closed over the whole
+    module, so a call through a helper is refused, never priced. A case
+    function not bound exactly once at the top level, by its def, is a fault;
+    with `cases` (the case functions the runner launches) given, each must be
+    scanned or carry a reasoned _WATCHDOG_UNSCANNED_CASES entry, and each such
+    entry must name a launched one.
+
+    The remaining static-analysis boundary, exactly: the scan reads only names
+    spelled in `module`'s text, so it does not see a case function reached
+    through a name computed at run time (a getattr, vars(), sys.modules or
+    __globals__ lookup, or a key built from data: the case functions use these
+    on other names, so the forms cannot be refused outright), through code
+    compiled from a string (the case functions exec mutant sources), through a
+    callable or object from outside `module` (another module, or a value a
+    caller supplies), or through a rebinding made at run time by code outside
+    the case bodies (a global statement, setattr or patch.object). Returns the
+    faults."""
     import ast
     import inspect
     import math
     prefixes = dict(_WATCHDOG_CASE_PREFIXES)
-    if sources is None:
-        sources = dict((name, inspect.getsource(globals()[name])) for name in prefixes)
+    if module is None:
+        module = inspect.getsource(sys.modules[__name__])
+    tree = ast.parse(module)
+
+    def spelled(node):
+        # The name a node spells: a Name's id, an attribute, or a string constant.
+        if isinstance(node, ast.Name):
+            return node.id
+        if isinstance(node, ast.Attribute):
+            return node.attr
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        return None
 
     def tested(test):
         if (not isinstance(test, ast.Compare) or not isinstance(test.left, ast.Name)
@@ -5698,14 +5751,45 @@ def _watchdog_dispatch_faults(budgets, sources=None):
                 else func.attr if isinstance(func, ast.Attribute) else None)
         return name if name in prefixes else None
 
+    # Each top-level binding (a def or class, or any name a statement binds:
+    # an assignment or import target, or a def, class or target inside a
+    # compound statement) and every name its statement spells.
+    defs = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+    spells, bindings = {}, {}
+    for statement in tree.body:
+        if isinstance(statement, defs):
+            bound = [statement.name]
+        else:
+            bound = [node.name if isinstance(node, defs) else node.id
+                     for node in ast.walk(statement) if isinstance(node, defs)
+                     or isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)]
+            bound.extend((alias.asname or alias.name).split(".")[0]
+                         for node in ast.walk(statement)
+                         if isinstance(node, (ast.Import, ast.ImportFrom))
+                         for alias in node.names)
+        names = set(spelled(node) for node in ast.walk(statement))
+        for name in bound:
+            spells.setdefault(name, set()).update(names)
+            bindings.setdefault(name, []).append(statement)
+    reaching, grew = set(prefixes), True
+    while grew:
+        grew = False
+        for name, names in spells.items():
+            if name not in reaching and names & reaching:
+                reaching.add(name)
+                grew = True
     repeated = (ast.For, ast.AsyncFor, ast.While, ast.ListComp, ast.SetComp, ast.DictComp,
                 ast.GeneratorExp, ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
     faults, priced = [], {}
-    for case, text in sorted(sources.items()):
-        roots = [child for node in ast.parse(text).body for child in
-                 (node.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-                  else [node])]
-        stack, pure = [(child, None, False) for child in roots], set()
+    for case in sorted(prefixes):
+        found = bindings.get(case, [])
+        if (len(found) != 1 or not isinstance(found[0], (ast.FunctionDef, ast.AsyncFunctionDef))
+                or found[0].name != case):
+            faults.append("%s: bound %d time(s) at the module top level, want exactly its one "
+                          "def for the scan to read" % (case, len(found)))
+            continue
+        definition, handled = found[0], set()
+        stack, pure = [(child, None, False) for child in definition.body], set()
         while stack:
             node, modes, looped = stack.pop()
             branch = tested(node.test) if isinstance(node, ast.If) else None
@@ -5719,6 +5803,7 @@ def _watchdog_dispatch_faults(budgets, sources=None):
                 continue
             looped = looped or isinstance(node, repeated)
             if isinstance(node, ast.Call) and callee(node):
+                handled.add(id(node.func))
                 arg = node.args[0] if node.args else None
                 where = "%s line %d" % (case, node.lineno)
                 if (modes is None or looped or not isinstance(arg, ast.Constant)
@@ -5730,6 +5815,28 @@ def _watchdog_dispatch_faults(budgets, sources=None):
                         priced.setdefault(prefixes[case] + mode, []).append(
                             (prefixes[callee(node)] + arg.value, id(node) in pure))
             stack.extend((child, modes, looped) for child in ast.iter_child_nodes(node))
+        for node in ast.walk(definition):
+            name = spelled(node)
+            if name not in reaching or id(node) in handled:
+                continue
+            where = "%s line %d" % (case, node.lineno)
+            if name not in prefixes:
+                faults.append("%s: spells %s, which can reach a case function, so the scan "
+                              "cannot attribute what it runs" % (where, name))
+            elif isinstance(node, ast.Constant):
+                faults.append("%s: names the case function %s in a string, a lookup by name "
+                              "the scan cannot attribute" % (where, name))
+            else:
+                faults.append("%s: reads the case function %s outside a direct call the scan "
+                              "attributes" % (where, name))
+    if cases is not None:
+        for case in sorted(set(cases) - set(prefixes)):
+            reason = _WATCHDOG_UNSCANNED_CASES.get(case)
+            if not isinstance(reason, str) or not reason.strip():
+                faults.append("%s: a case function the runner launches that the dispatch scan "
+                              "neither reads nor exempts with a reason" % case)
+        faults.extend("%s: an unscanned-case exemption for a function the runner does not "
+                      "launch" % case for case in sorted(set(_WATCHDOG_UNSCANNED_CASES) - set(cases)))
     for label, dispatched in sorted(priced.items()):
         budget = budgets.get(label)
         names = [name for name, _pure in dispatched]
@@ -8018,7 +8125,7 @@ def _watchdog_completion_case(mode):
         # to the window keeps the mutant red under any load (load only
         # delays the retried send further; F-335-LOAD-FLAKE-PIPE-STALL).
         import sys as sys_module
-        runner_module = sys_module.modules[_watchdog_deadline_case.__module__]
+        runner_module = sys_module.modules[__name__]
         with patch.object(emit, "_fixture_signal", census_only), \
                 patch.object(runner_module, "_DEADLINE_EXECUTION_BOUND", 1.6):
             assert _watchdog_deadline_case("transient-census") == EXIT_FINDING
@@ -19425,9 +19532,10 @@ def _watchdog_regression_self_test():
         ("pdeathsig", 32), ("escalation-subject", 924 + 1), ("escalate-reaped", 784),
         ("poll-collected", 1266), ("close-cancel", 1227 + 1), ("escalate-degraded", 784),
         ("poll-masked", 2954), ("unpinned-kill", 600), ("census-verify", 630),
-        ("census-exception", 1235 + 1), ("receipt-high-fd", 10)))
-    # The ten completion legs train 2 added or re-priced (merged 2026-10-11)
-    # are priced from their PERMITTED PATHS, never from a measured run: each
+        ("census-exception", 1235 + 1), ("receipt-high-fd", 15 + 1)))
+    # The ten completion legs train 2 added or re-priced (merged 2026-10-11),
+    # and receipt-high-fd re-priced after them, are priced from their
+    # PERMITTED PATHS, never from a measured run: each
     # base is the UPPER bound of every wait the leg's own thread or a thread
     # it starts can charge on a path where the leg still passes. A timed
     # wait is charged at its declared timeout (a fixture hold at what
@@ -19540,12 +19648,19 @@ def _watchdog_regression_self_test():
     #     deadline 5 = 118 (its SIGKILL branch reads the pidfd the probe
     #     object never has, so the leg cannot pass along it).
     #     [derived: 60 + 3 + 45 + 5 + 5 = 118 s]
+    #   receipt-high-fd: one _bounded_wait at its default bound 15 (the
+    #     SIGKILLed subject's reap; its sleeps sum to at most the bound) =
+    #     15. Not counted: the subject's 3600 s sleep runs in the forked
+    #     child (no ledger), the zero-timeout select.select flip charges 0,
+    #     and _recv_subject's select.poll wait is not a registered primitive.
+    #     [derived: 15 = 15 s]
     budgets.update((("completion-drain-adopted", 71.5 + 1),
                     ("completion-reaped-subject-retry", 118 + 1)))
     # The safety leg lost-cleanup runs the completion mode no-signal-echild
     # and nothing else (an alias in _watchdog_safety_case), so it carries
-    # that mode's derived budget; _watchdog_dispatch_faults holds every
-    # case that dispatches another mode to the price of what it runs.
+    # that mode's derived budget; _watchdog_dispatch_faults prices each
+    # dispatch it attributes (exactly for such an alias, as a floor
+    # otherwise) and refuses every other spelling of a case it can see.
     budgets["lost-cleanup"] = budgets["completion-no-signal-echild"]
     # The isolation matrix: 31 timer cases, each one 180 s fixture call.
     budgets["blocked-isolation"] = 31 * _deadline_case_budget(180)
@@ -20109,16 +20224,21 @@ def _watchdog_regression_self_test():
             flip_missed.append("non-finite floor input %r" % (bad,))
     # Every completion budget against its stated derivation or its reasoned
     # exemption, and every dispatching case against what it runs, with the
-    # flips each check must refuse, each by its own fault: for census-exception
-    # a derivation raised above its declared budget, a budget raised past
-    # derivation plus margin, its marker removed and a marker term that is
-    # not a number; for cleanup-reaped its budget moved, its marker removed
-    # and its whole derivation block removed; an exempt leg dropped from the
-    # exemption table, a derived leg exempted as well, an exemption naming
-    # no leg, one with no reason, and a completion leg dropped from the
-    # launched set; the alias lost-cleanup priced one second below the mode
-    # it runs, deadline-flips one second below the modes it runs, and the
-    # alias dispatch moved into a loop.
+    # flips each check must refuse, each matched to a fault text it must
+    # produce (two pairs share one text): for census-exception a derivation
+    # raised above its declared budget, a budget raised past derivation plus
+    # margin, its marker removed and a marker term that is not a number; for
+    # cleanup-reaped its budget moved, its marker removed and its whole
+    # derivation block removed; an exempt leg dropped from the exemption
+    # table, a derived leg exempted as well, an exemption naming no leg, one
+    # with no reason, a completion leg dropped from the launched set, and an
+    # exempt leg with no budget; the alias lost-cleanup priced one second
+    # below the mode it runs, deadline-flips one second below the modes it
+    # runs, and the alias dispatch moved into a loop; at the head of the
+    # audit-ignore branch (away from that alias), the mode no-signal-echild
+    # dispatched through a local alias, a getattr lookup by name and a
+    # module-level helper; a case function bound twice at the top level; and
+    # a launched case function neither scanned nor exempted.
     runner_source = inspect.getsource(_watchdog_regression_self_test)
     launched = set(live)
     # Assembled, never one literal, so each marker occurs once: in the comment.
@@ -20165,7 +20285,11 @@ def _watchdog_regression_self_test():
              "completion-audit-ignore: neither a derivation block nor an exemption"),
             ("completion leg dropped from the launched set", runner_source, budgets, exempt,
              launched - {"completion-audit-ignore"},
-             "completion-audit-ignore: a declared budget for a leg the runner never launches")):
+             "completion-audit-ignore: a declared budget for a leg the runner never launches"),
+            ("exempt leg with no budget", runner_source,
+             dict((label, seconds) for label, seconds in budgets.items()
+                  if label != "completion-audit-ignore"), exempt, launched,
+             "completion-audit-ignore: exempted, but no usable declared budget")):
         if needle not in "\n".join(_watchdog_derivation_faults(
                 flip_source, flip_budgets, flip_launched, flip_exempt)):
             flip_missed.append("derivation flip not refused: " + flip)
@@ -20174,24 +20298,54 @@ def _watchdog_regression_self_test():
     alias = "        return _watchdog_completion_case(\"no-signal-echild\")\n"
     looped_alias = ("        for _ in (1, 2):\n"
                     "            _watchdog_completion_case(\"no-signal-echild\")\n")
-    case_sources = dict((name, inspect.getsource(globals()[name]))
-                        for name, _prefix in _WATCHDOG_CASE_PREFIXES)
+    module_source = inspect.getsource(sys.modules[__name__])
+    launched_cases = set(case for _label, case, _args in entries)
+    # Indirect dispatches planted at the head of the audit-ignore branch, away
+    # from the lost-cleanup alias, each hiding the mode no-signal-echild.
+    branch_head = "    elif mode == \"audit-ignore\":\n"
+    hidden_by = dict(
+        alias=("        hidden = _watchdog_completion_case\n"
+               "        return hidden(\"no-signal-echild\")\n"),
+        getattr=("        return getattr(sys.modules[__name__], \"_watchdog_completion_case\")"
+                 "(\"no-signal-echild\")\n"),
+        helper="        return _watchdog_hidden_dispatch()\n")
+    helper_def = ("\n\ndef _watchdog_hidden_dispatch():\n"
+                  "    return _watchdog_completion_case(\"no-signal-echild\")\n")
+
+    def hidden(how, extra=""):
+        return module_source.replace(branch_head, branch_head + hidden_by[how]) + extra
+
     flips_run = budgets["pipe-stall"] * 2 + budgets["transient-census"]
-    for flip, flip_budgets, flip_sources, needle in (
+    for flip, flip_budgets, flip_module, flip_cases, needle in (
             ("alias priced below its mode", dict(
-                budgets, **{"lost-cleanup": budgets["completion-no-signal-echild"] - 1}), None,
+                budgets, **{"lost-cleanup": budgets["completion-no-signal-echild"] - 1}),
+             module_source, launched_cases,
              "lost-cleanup: runs exactly completion-no-signal-echild"),
             ("dispatching leg priced below its modes", dict(
-                budgets, **{"completion-deadline-flips": flips_run - 1}), None,
-             "completion-deadline-flips: dispatches"),
-            ("alias dispatch in a loop", budgets, dict(case_sources, _watchdog_safety_case=(
-                case_sources["_watchdog_safety_case"].replace(alias, looped_alias))),
-             "the scan cannot price")):
-        if needle not in "\n".join(_watchdog_dispatch_faults(flip_budgets, flip_sources)):
+                budgets, **{"completion-deadline-flips": flips_run - 1}), module_source,
+             launched_cases, "completion-deadline-flips: dispatches"),
+            ("alias dispatch in a loop", budgets, module_source.replace(alias, looped_alias),
+             launched_cases, "the scan cannot price"),
+            ("dispatch through a local alias", budgets, hidden("alias"), launched_cases,
+             "reads the case function _watchdog_completion_case outside a direct call"),
+            ("dispatch through a getattr lookup", budgets, hidden("getattr"), launched_cases,
+             "names the case function _watchdog_completion_case in a string"),
+            ("dispatch through a module-level helper", budgets, hidden("helper", helper_def),
+             launched_cases, "spells _watchdog_hidden_dispatch, which can reach a case function"),
+            ("case function bound twice", budgets,
+             module_source + "\n_watchdog_completion_case = _watchdog_safety_case\n",
+             launched_cases, "_watchdog_completion_case: bound 2 time(s)"),
+            ("launched case neither scanned nor exempted", budgets, module_source,
+             launched_cases | {"_watchdog_unlisted_case"},
+             "_watchdog_unlisted_case: a case function the runner launches")):
+        if needle not in "\n".join(_watchdog_dispatch_faults(flip_budgets, flip_module,
+                                                             flip_cases)):
             flip_missed.append("dispatch flip not refused: " + flip)
+    if module_source.count(alias) != 1 or module_source.count(branch_head) != 1:
+        flip_missed.append("dispatch flip anchors not found once in the module")
     floor = _watchdog_bound_faults(live, budgets)
     derivation = (_watchdog_derivation_faults(runner_source, budgets, launched)
-                  + _watchdog_dispatch_faults(budgets))
+                  + _watchdog_dispatch_faults(budgets, module_source, launched_cases))
     if floor or derivation or flip_missed:
         print("opf watchdog regressions: FAIL (process bound below a leg's own budget: %s; "
               "budget not reconciled to its derivation, exemption or dispatched mode: %s; "

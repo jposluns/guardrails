@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "3e4a1bafccf8145262b89d313d05f009e905a9c9166ec8dd36996996626191cf"
+tree-sha256 = "18d15d5fe5b263e6ba2fa0d6f7be4fcc8d5a0b81faceb007940c4a37620f8f56"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3011,8 +3011,8 @@ sha256 = "5bd27665a3c757397d62b076ea65759bbfd5406e74f04660b538ac7b4eef6470"
 
 [[sources]]
 path = "opf/tools/opf.py"
-bytes = 1633703
-sha256 = "b43aa5785689ac0b078bb752de4a79b36784e3941330edb6eca347de10c84063"
+bytes = 1643385
+sha256 = "fad79ddb6d6f1d812d6b93fb178b56c5f5070c471f1c2d4ebeb6e2c84d17748e"
 
 [[sources]]
 path = "opf/tools/run_all_checks.sh"
@@ -3431,8 +3431,8 @@ sha256 = "2f51eb3b302390e276ac0b2adc002fd2c184a9cc7e0afdbfc903a30976d06d71"
 
 [[sources]]
 path = "tools/check_python_floor.py"
-bytes = 197028
-sha256 = "4b390800e8fccbbb4f5e9101eccab1a24aba78f9d78cb3f90ce5b81bc61a9ae2"
+bytes = 197195
+sha256 = "33023aa3a754cdfdf45c28650a8ce271cda3c726dfbad0ee0fedcc9634fceaef"
 
 [[sources]]
 path = "tools/check_python_launcher_isolation.py"

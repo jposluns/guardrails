@@ -649,7 +649,9 @@ def launched_findings(root):
         data = tomllib.loads(_read_text(root / HOOKS_MANIFEST_REL))
     except tomllib.TOMLDecodeError as exc:
         raise CannotEvaluate("{}: does not parse: {}".format(HOOKS_MANIFEST_REL, exc))
-    # No hook rows at all is no manifest to reconcile against: every entry would read as stale.
+    # A hook key missing or not a nonempty array of tables cannot be evaluated (no row to reconcile).
+    # Rows are otherwise read as they stand, so rows that all lack a script key report every
+    # LAUNCHED_SURFACES entry as a stale entry, not CannotEvaluate.
     rows = data.get("hook")
     if not isinstance(rows, list) or not rows or not all(isinstance(row, dict) for row in rows):
         raise CannotEvaluate("{}: hook must be a nonempty array of tables".format(HOOKS_MANIFEST_REL))
