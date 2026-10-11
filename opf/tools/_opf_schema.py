@@ -105,13 +105,16 @@ unit is that schema release for the record model and DEFINES the following where
     record must be plain throughout before any of it is read: exactly a dict whose every key and nested
     value is exactly a str, int, float, bool, date-time, list or dict, as a TOML parser yields, or None,
     a tuple, a set or a frozenset; a date-time's tzinfo is None or exactly a datetime.timezone whose name
-    is exactly a str and whose offset is exactly a datetime.timedelta; no non-empty container appears
-    twice (shared or cyclic); and no path through it passes more than 512 containers. Anything else is
-    CANNOT-EVALUATE, since its own methods could answer a lookup, a hash, a comparison, a format or a
-    repr with caller code, or rendering it could exhaust the stack or grow without bound. A record also
-    holds only what a TOML document can (spec 4.4): None, a tuple, a set, a frozenset or a non-str key
-    anywhere in it, a registered `x-<vendor>` table and a module field no value rule reads included, is
-    INVALID.
+    is exactly a str and whose offset is exactly a datetime.timedelta; and no non-empty container
+    appears twice (shared or cyclic). Anything else is CANNOT-EVALUATE, since its own methods could
+    answer a lookup, a hash, a comparison, a format or a repr with caller code. Depth alone is never
+    refused, since tomllib nests tables to any depth through a dotted key or a table header; instead
+    every finding renders a record value through a renderer that is iterative and stops at a fixed
+    character budget, so no rendering overflows the stack or exceeds that budget. A record also holds
+    only TOML value types (spec 4.4): None, a tuple, a set, a frozenset or a non-str key anywhere in it,
+    a registered `x-<vendor>` table and a module field no value rule reads included, is INVALID, and so
+    is a date-time in a form no TOML date-time takes (a time with a tzinfo, a nonzero fold, or an offset
+    that is not a whole number of minutes or carries its own name).
 """
 import sys
 
@@ -494,10 +497,11 @@ def _id_digits(n):
     return "".join(reversed(chunks))
 
 
-def parse_status(status, spec):
+def parse_status(status, spec, display=_safe_display):
     """Parse a status string against a type's grammar (spec 8.4). Returns ((state, qualifier), None) on
     success, or (None, message) on a malformed or type-illegal status. `qualifier` is None or "proposed",
-    and "proposed" is legal only on a state the type marks proposable."""
+    and "proposed" is legal only on a state the type marks proposable. `display` renders the status and
+    its parts in a message (_bounded_display for an imported record)."""
     if not isinstance(status, str) or not status:
         return None, "status must be a non-empty string"
     if not isinstance(spec, TypeSpec):
@@ -511,13 +515,14 @@ def parse_status(status, spec):
     elif len(parts) == 2:
         state, qual = parts[0], parts[1]
     else:
-        return None, "status {!r} has more than one '/' qualifier".format(status)
+        return None, "status {} has more than one '/' qualifier".format(display(status))
     if state not in spec.states:
-        return None, "status state {!r} is not a {} state {}".format(
-            state, spec.name, sorted(spec.states))
+        return None, "status state {} is not a {} state {}".format(
+            display(state), spec.name, sorted(spec.states))
     if qual is not None:
         if qual != "proposed":
-            return None, "status qualifier {!r} is not 'proposed' (the only qualifier, spec 8.4)".format(qual)
+            return None, "status qualifier {} is not 'proposed' (the only qualifier, spec 8.4)".format(
+                display(qual))
         if state not in spec.proposable:
             return None, "state {!r} may not carry '/proposed' for a {} (spec 8.4/8.5)".format(
                 state, spec.name)
@@ -604,19 +609,21 @@ def _id_counter_shape(value, imported_series):
     return _valid_id_shape(value)
 
 
-def _safe_key_names(keys):
+def _safe_key_names(keys, display=_safe_display):
     """Order surplus keys for a finding message, each rendered through _safe_display, so a control
     character embedded in an (untrusted) key name cannot forge an extra finding line and an oversized
     non-decimal int key cannot crash the render. It is the newline-safe, oversized-safe render for this
     validator's unknown-key joins (the module's own _safe_display convention); _safe_display yields a
     total-orderable, byte-stable string for every key so the sort itself cannot raise
-    (guard-input-soundness; Fable-M2, gemini finding 3)."""
-    return sorted(_safe_display(k) for k in keys)
+    (guard-input-soundness; Fable-M2, gemini finding 3). The imported validator passes _bounded_display
+    as `display`, so each of its keys renders within that renderer's budget."""
+    return sorted(display(k) for k in keys)
 
 
-def _validate_actor(record, findings):
+def _validate_actor(record, findings, display=_safe_display):
     """Validate the `actor` table (spec 8.3). Returns the actor kind string, or None when it is absent or
-    malformed (so the caller can apply the importer created_at exception on a KNOWN kind only)."""
+    malformed (so the caller can apply the importer created_at exception on a KNOWN kind only). `display`
+    renders each actor value in a finding (_bounded_display for an imported record)."""
     actor = record.get("actor")
     if "actor" not in record:
         findings.append("missing required field: actor")
@@ -626,7 +633,7 @@ def _validate_actor(record, findings):
         return None
     extra = set(actor) - ACTOR_KEYS
     if extra:
-        findings.append("actor unknown key(s): {}".format(", ".join(_safe_key_names(extra))))
+        findings.append("actor unknown key(s): {}".format(", ".join(_safe_key_names(extra, display))))
     kind = actor.get("kind")
     if not isinstance(kind, str):
         # A non-string kind (e.g. a TOML-valid list/dict) is unhashable and would raise on the tuple
@@ -634,7 +641,7 @@ def _validate_actor(record, findings):
         findings.append("actor.kind must be a string")
         kind = None
     elif kind not in ACTOR_KINDS:
-        findings.append("actor.kind {!r} is not one of {}".format(kind, list(ACTOR_KINDS)))
+        findings.append("actor.kind {} is not one of {}".format(display(kind), list(ACTOR_KINDS)))
         kind = None
     if "id" in actor and (not isinstance(actor.get("id"), str) or not actor.get("id").strip()):
         # A whitespace-only id is semantically blank, rejected like a blank title/summary/reason
@@ -687,9 +694,10 @@ def _validate_links(record, findings):
                                                 link.get("id")))
 
 
-def _validate_refs(record, findings):
+def _validate_refs(record, findings, display=_safe_display):
     """Validate the optional `refs` array of {kind, locator, note} (spec 8.6): kind from the closed set,
-    locator a non-empty string, note an optional string."""
+    locator a non-empty string, note an optional string. `display` renders each ref value in a finding
+    (_bounded_display for an imported record)."""
     if "refs" not in record:
         return
     refs = record.get("refs")
@@ -703,14 +711,14 @@ def _validate_refs(record, findings):
             continue
         extra = set(ref) - REF_KEYS
         if extra:
-            findings.append("{} unknown key(s): {}".format(where, ", ".join(_safe_key_names(extra))))
+            findings.append("{} unknown key(s): {}".format(where, ", ".join(_safe_key_names(extra, display))))
         if not isinstance(ref.get("kind"), str):
             # A non-string kind (e.g. a TOML-valid list/dict) is unhashable and would raise on the set
             # membership below: guard by type first and fail closed with a clean finding (spec 8.6).
             findings.append("{}.kind must be a string".format(where))
         elif ref.get("kind") not in REF_KINDS:
-            findings.append("{}.kind {!r} is not one of {} (spec 8.6)".format(
-                where, ref.get("kind"), list(REF_KINDS)))
+            findings.append("{}.kind {} is not one of {} (spec 8.6)".format(
+                where, display(ref.get("kind")), list(REF_KINDS)))
         if not isinstance(ref.get("locator"), str) or not ref.get("locator").strip():
             # A whitespace-only locator is semantically blank (the Fable-M4 stance; Fable-F4).
             findings.append("{}.locator must be a non-empty string".format(where))
@@ -722,25 +730,27 @@ def _validate_refs(record, findings):
             findings.append("{}.note must be a string".format(where))
 
 
-def _check_keyset(record, allowed, registered_vendors, findings):
+def _check_keyset(record, allowed, registered_vendors, findings, display=_safe_display):
     """Enforce the closed schema (spec 8.3, 8.7): every top-level key is either in `allowed` or a
     registered `x-<vendor>` extension TABLE. An unregistered or malformed vendor prefix, or a vendor
-    entry that is not a table, is a finding; any other unknown key is a finding."""
+    entry that is not a table, is a finding; any other unknown key is a finding. `display` renders each
+    key in a finding (_bounded_display for an imported record)."""
     for key in record:
         if key in allowed:
             continue
         if isinstance(key, str) and key.startswith("x-"):
             if not _valid_extension_namespace(key):
-                findings.append("extension key {!r} is not a valid x-<vendor> namespace (spec 8.7)".format(key))
+                findings.append("extension key {} is not a valid x-<vendor> namespace (spec 8.7)".format(
+                    display(key)))
             elif key not in registered_vendors:
-                findings.append("extension {!r} is not registered in the manifest [vendors] "
-                                "(spec 8.7)".format(key))
+                findings.append("extension {} is not registered in the manifest [vendors] "
+                                "(spec 8.7)".format(display(key)))
             elif not isinstance(record.get(key), dict):
-                findings.append("extension {!r} must be a table (spec 8.7)".format(key))
+                findings.append("extension {} must be a table (spec 8.7)".format(display(key)))
         else:
             # `key` is an untrusted top-level key: an oversized non-decimal int key would crash a raw
             # {!r} render, so it goes through _safe_display like every other key render (Fable-F2).
-            findings.append("unknown key {} (schemas are closed; spec 8.3)".format(_safe_display(key)))
+            findings.append("unknown key {} (schemas are closed; spec 8.3)".format(display(key)))
 
 
 def _standing_auth_permits(standing_auth, recipient):
@@ -1293,12 +1303,12 @@ def _imported_schema_fields(spec):
 
 def _check_closed_table(table, allowed, where, findings):
     """Report each key of an imported sub-table outside its closed keyset, in table order, each rendered
-    through _safe_display (the _check_keyset idiom), so the report is deterministic and an oversized or
-    control-bearing key cannot crash it or forge a line."""
+    through _bounded_display, so the report is deterministic and an oversized, deep or control-bearing
+    key cannot crash it, forge a line or exceed the rendering budget."""
     for key in table:
         if key not in allowed:
             findings.append("{} unknown key {} (schemas are closed; spec 8.3)".format(
-                where, _safe_display(key)))
+                where, _bounded_display(key)))
 
 
 # The exact built-in types a plain value is made of: what a TOML parser yields (str, int, float, bool, the
@@ -1307,10 +1317,6 @@ def _check_closed_table(table, allowed, where, findings):
 # not CANNOT-EVALUATE. Each type is compared by identity, so no metaclass comparison runs.
 _PLAIN_SCALAR_TYPES = (str, int, float, bool, type(None), datetime.datetime, datetime.date, datetime.time)
 _PLAIN_COLLECTION_TYPES = (dict, list, tuple, set, frozenset)
-# The most containers any path through a plain value may pass, the value itself counted as level 1. It
-# keeps every later repr, hash and comparison of a plain value well inside the stack, and it exceeds what
-# tomllib parses at the default recursion limit (496 nested arrays), so a parsed record is not refused.
-_PLAIN_MAX_DEPTH = 512
 
 
 def _plain_tzinfo(tz):
@@ -1329,19 +1335,22 @@ def _plain_problem(value):
     """None when value is plain, else (reason, where): reason says why it is not, and where is () when
     value itself is the culprit or (key,) for the key of the top-level table entry under which the walk
     found it. Plain: value, and every key and member nested in it, is exactly one of the plain built-in
-    types above; every date-time's tzinfo passes _plain_tzinfo; no non-empty container is reached twice,
-    so the value is a tree as a parsed one is; and no path passes more than _PLAIN_MAX_DEPTH containers.
-    type() reads the real type, never an advertised `__class__`, and each container is read through its
-    built-in type's own iterator, so the walk runs no caller code. A subclass or any other object is not
-    plain: its own methods (a lookup, a hash, a comparison, a format, a repr, a startswith) could answer
-    a later check with caller code. A shared container could make a rendering grow exponentially, and a
-    deep one could overflow the stack while it is rendered, hashed or compared. The walk is iterative and
-    reads each container once, and refuses a second visit (a cycle included) before the depth bound, so
-    it ends. An empty container has no members, so sharing one (the empty tuple is shared by CPython
-    itself) is harmless and allowed."""
-    stack, seen = [(value, 1, ())], set()
+    types above; every date-time's tzinfo passes _plain_tzinfo; and no non-empty container is reached
+    twice, so the value is a tree as a parsed one is. type() reads the real type, never an advertised
+    `__class__`, and each container is read through its built-in type's own iterator, so the walk runs no
+    caller code. A subclass or any other object is not plain: its own methods (a lookup, a hash, a
+    comparison, a format, a repr, a startswith) could answer a later check with caller code. A shared
+    container is not plain because a walk over its members (_is_toml_value) could repeat without bound,
+    exponentially for a shared one and forever for a cyclic one. Depth is not bounded: tomllib builds
+    nested tables from a dotted key or a table header without recursion, so a parsed record can be
+    nested to any depth, and a plain value is rendered only by _bounded_display, which is bounded on its
+    own. The walk is iterative and reads each non-empty container once, refusing a second visit (a cycle
+    included), so it ends after a number of steps linear in the value's references. An empty container
+    has no members, so sharing one (the empty tuple is shared by CPython itself) is harmless and
+    allowed."""
+    stack, seen = [(value, True, ())], set()
     while stack:
-        v, depth, where = stack.pop()
+        v, top, where = stack.pop()
         t = type(v)
         if any(t is p for p in _PLAIN_SCALAR_TYPES):
             if (t is datetime.datetime or t is datetime.time) and not _plain_tzinfo(v.tzinfo):
@@ -1353,20 +1362,17 @@ def _plain_problem(value):
             return ("holds a key or value that is not exactly a plain built-in type, so its own methods "
                     "could answer a check"), where
         if t.__len__(v) and id(v) in seen:
-            return ("holds a non-empty container reached twice (shared or cyclic), so rendering it could "
-                    "grow without bound"), where
-        if depth > _PLAIN_MAX_DEPTH:
-            return ("holds a value nested deeper than {} containers, so rendering it could exhaust the "
-                    "stack".format(_PLAIN_MAX_DEPTH)), where
+            return ("holds a non-empty container reached twice (shared or cyclic), so a walk over its "
+                    "members could repeat without bound"), where
         seen.add(id(v))
         if t is dict:
             for key, member in dict.items(v):
-                inner = where if where or depth > 1 else (key,)
-                stack.append((key, depth + 1, inner))
-                stack.append((member, depth + 1, inner))
+                inner = (key,) if top else where
+                stack.append((key, False, inner))
+                stack.append((member, False, inner))
         else:
             for member in t.__iter__(v):
-                stack.append((member, depth + 1, where))
+                stack.append((member, False, where))
     return None
 
 
@@ -1375,25 +1381,166 @@ def _is_plain_value(value):
     return _plain_problem(value) is None
 
 
+# The most characters one rendering of a record value in a finding takes (_bounded_display), the cut
+# marker aside. It exceeds the rendering of any well-formed id (`imported:`, a two-letter namespace, a
+# hyphen and up to _MAX_ID_DIGITS digits, in quotes), so no record's label is cut.
+_DISPLAY_BUDGET = 8192
+# What ends a rendering cut at _DISPLAY_BUDGET characters.
+_DISPLAY_CUT = "...<cut at {} characters>".format(_DISPLAY_BUDGET)
+# An int of more bits than this has more than _DISPLAY_BUDGET decimal digits, so it is named by the
+# oversized marker without being converted.
+_DISPLAY_INT_BITS = 4 * _DISPLAY_BUDGET
+# The fixed text that stands for a value that is not plain, which is never rendered.
+_NOT_PLAIN_MARK = "<not a plain built-in value>"
+# Each container type's repr when empty, and its opening and closing text otherwise; a one-member tuple
+# closes with ",)". Each type is compared by identity, never looked up by hash.
+_DISPLAY_BRACKETS = ((list, "[]", "[", "]"), (dict, "{}", "{", "}"), (tuple, "()", "(", ")"),
+                     (set, "set()", "{", "}"), (frozenset, "frozenset()", "frozenset({", "})"))
+# The three kinds of step on _bounded_display's explicit stack, and the end of a container's members.
+_DISPLAY_TEXT, _DISPLAY_VALUE, _DISPLAY_MEMBERS, _DISPLAY_END = object(), object(), object(), object()
+
+
+def _display_int(n):
+    """The repr of an exact int, or None when it is oversized: more than _DISPLAY_INT_BITS bits, or over
+    the runtime int-to-str limit (the ValueError _safe_display catches)."""
+    if int.bit_length(n) > _DISPLAY_INT_BITS:
+        return None
+    try:
+        return int.__repr__(n)
+    except ValueError:
+        return None
+
+
+def _display_scalar(v, room):
+    """The repr of one scalar for _bounded_display, through its exact built-in type's own __repr__, with
+    `room` characters left in the budget; None for an oversized int. A str longer than `room` is sliced to
+    it first, so its repr exceeds the room and is cut, and a date-time whose timezone name is longer than
+    the budget is named by a fixed text instead, so no single scalar's repr costs more than the budget.
+    Anything that is not a plain scalar, a date-time whose tzinfo fails _plain_tzinfo included, is named
+    by _NOT_PLAIN_MARK and never rendered."""
+    t = type(v)
+    if t is str:
+        return str.__repr__(v if str.__len__(v) <= room else v[:room])
+    if t is int:
+        return _display_int(v)
+    if t is bool or t is float or t is datetime.date or v is None:
+        return t.__repr__(v)
+    if (t is datetime.datetime or t is datetime.time) and _plain_tzinfo(v.tzinfo):
+        if v.tzinfo is not None and str.__len__(datetime.timezone.tzname(v.tzinfo, None)) > _DISPLAY_BUDGET:
+            return "<a date-time whose timezone name exceeds {} characters>".format(_DISPLAY_BUDGET)
+        return t.__repr__(v)
+    return _NOT_PLAIN_MARK
+
+
+def _bounded_display(value):
+    """Render a value for a finding message iteratively and within a budget: a rendering longer than
+    _DISPLAY_BUDGET characters is cut there and ends in _DISPLAY_CUT. For a plain value (_is_plain_value)
+    whose rendering fits the budget it is _safe_display, byte for byte, its markers included: an
+    oversized int is `<oversized-int: N bits>` alone and makes a container holding it
+    `<oversized-value>`. Two cases differ from _safe_display: an int of more than _DISPLAY_INT_BITS bits,
+    which the budget could not hold, is oversized even when the runtime int-to-str limit is lifted, and a
+    date-time whose timezone name is longer than the budget is named by a fixed text (_display_scalar).
+    It runs no caller code: each container is read through its exact built-in type's own iterator and
+    each scalar rendered through its exact built-in type's own __repr__, and any other object, a subclass
+    included, is named by _NOT_PLAIN_MARK in its place and never rendered. The walk is an explicit stack,
+    so no depth overflows the stack. Each step emits at least one character, starts a member, or ends a
+    container that emitted its opening, so the steps, the stack and the output all grow at most in
+    proportion to the budget, whatever the value's depth, width or sharing (a shared or cyclic value
+    renders as the tree it unfolds to, up to the cut). Every imported-record finding renders a record
+    value through it, directly or through _plain_display, except a value already confined to a fixed
+    vocabulary (a two-letter namespace, a schema field name, a known type or actor kind)."""
+    if type(value) is int and _display_int(value) is None:
+        return "<oversized-int: {} bits>".format(int.bit_length(value))
+    out, size, stack = [], 0, [(_DISPLAY_VALUE, value)]
+    while stack:
+        step = stack.pop()
+        if step[0] is _DISPLAY_MEMBERS:
+            _, members, pairs, first = step
+            member = next(members, _DISPLAY_END)
+            if member is _DISPLAY_END:
+                continue
+            stack.append((_DISPLAY_MEMBERS, members, pairs, False))
+            if pairs:
+                stack.append((_DISPLAY_VALUE, member[1]))
+                stack.append((_DISPLAY_TEXT, ": "))
+                stack.append((_DISPLAY_VALUE, member[0]))
+            else:
+                stack.append((_DISPLAY_VALUE, member))
+            if not first:
+                stack.append((_DISPLAY_TEXT, ", "))
+            continue
+        if step[0] is _DISPLAY_TEXT:
+            text = step[1]
+        else:
+            v = step[1]
+            t = type(v)
+            brackets = next((b for b in _DISPLAY_BRACKETS if t is b[0]), None)
+            if brackets is None:
+                text = _display_scalar(v, _DISPLAY_BUDGET - size)
+                if text is None:
+                    return "<oversized-value>"
+            elif not t.__len__(v):
+                text = brackets[1]
+            else:
+                stack.append((_DISPLAY_TEXT, ",)" if t is tuple and tuple.__len__(v) == 1 else brackets[3]))
+                stack.append((_DISPLAY_MEMBERS, iter(dict.items(v)) if t is dict else t.__iter__(v),
+                              t is dict, True))
+                text = brackets[2]
+        if size + len(text) > _DISPLAY_BUDGET:
+            out.append(text[:_DISPLAY_BUDGET - size])
+            return "".join(out) + _DISPLAY_CUT
+        out.append(text)
+        size += len(text)
+    return "".join(out)
+
+
 def _plain_display(value):
-    """_safe_display of a plain value (_is_plain_value), which is bounded in depth and size, so rendering it
-    runs no caller code and cannot overflow the stack; any other value is named by a fixed marker and never
-    rendered, so its own __repr__ cannot run or forge the message."""
-    return _safe_display(value) if _is_plain_value(value) else "<not a plain built-in value>"
+    """_bounded_display of a plain value (_is_plain_value), so rendering it runs no caller code, cannot
+    overflow the stack, and takes at most _DISPLAY_BUDGET characters and the cut marker; any other value is
+    named by _NOT_PLAIN_MARK and never rendered, so its own __repr__ cannot run or forge the message. The
+    plainness walk reads the whole value once, in steps linear in its references; the rendering itself
+    is bounded by the budget."""
+    return _bounded_display(value) if _is_plain_value(value) else _NOT_PLAIN_MARK
 
 
 # The exact scalar types a TOML value takes (tomllib's output): _PLAIN_SCALAR_TYPES without None.
 _TOML_SCALAR_TYPES = (str, int, float, bool, datetime.datetime, datetime.date, datetime.time)
 
 
+def _is_toml_date_time(v):
+    """True when a plain date-time (exactly a datetime or a time whose tzinfo passes _plain_tzinfo) takes a
+    form a TOML date-time can, as tomllib builds it: fold 0, which no TOML form sets; a time without a
+    tzinfo, since TOML has no offset time; and a datetime whose tzinfo is None (a local date-time) or a
+    timezone whose offset is a whole number of minutes (TOML writes `Z` or `+HH:MM`) and whose name is
+    the one that offset alone gives it. Fractional seconds are not limited: tomllib keeps them to the
+    microsecond, the finest a date-time holds. Each read is a built-in accessor of an exact type."""
+    if v.fold:
+        return False
+    tz = v.tzinfo
+    if tz is None:
+        return True
+    if type(v) is datetime.time:
+        return False
+    offset = datetime.timezone.utcoffset(tz, None)
+    return (offset.seconds % 60 == 0 and offset.microseconds == 0
+            and datetime.timezone.tzname(tz, None) == datetime.timezone.tzname(datetime.timezone(offset), None))
+
+
 def _is_toml_value(value):
-    """True when a plain value (_is_plain_value) is one a TOML document can hold: exactly a TOML scalar, a
-    list or a table, nested, every table key exactly a str, so never None, a tuple, a set or a frozenset.
-    A plain value is a bounded tree, so the walk ends."""
+    """True when a plain value (_is_plain_value) holds only TOML value types: exactly a TOML scalar, a list
+    or a table, nested, every table key exactly a str, so never None, a tuple, a set or a frozenset, and
+    every date-time in a form a TOML date-time takes (_is_toml_date_time). It checks types and date-time
+    forms, not the content of a str or the size of an int: a str holding a lone surrogate, which no UTF-8
+    TOML document carries, and an int outside TOML's 64-bit range both pass, since tomllib.loads yields
+    each. A plain value is a tree, so the iterative walk reads each member once and ends."""
     stack = [value]
     while stack:
         v = stack.pop()
         t = type(v)
+        if t is datetime.datetime or t is datetime.time:
+            if not _is_toml_date_time(v):
+                return False
+            continue
         if any(t is p for p in _TOML_SCALAR_TYPES):
             continue
         if t is dict:
@@ -1452,7 +1599,7 @@ def _validate_import_table(record, schema_fields, findings):
     if "source_sha256" in imp and not (isinstance(imp.get("source_sha256"), str)
                                        and _SOURCE_SHA256_RE.match(imp.get("source_sha256"))):
         findings.append("import.source_sha256 {} is not 64 lowercase hexadecimal digits (spec 8.3)".format(
-            _safe_display(imp.get("source_sha256"))))
+            _plain_display(imp.get("source_sha256"))))
     run_ok = type(run) is str and re.fullmatch(_IMPORT_RUN_PATTERN, run) is not None
     if "run" in imp and not run_ok:
         findings.append("import.run {} is not an imp-<YYYYMMDD>T<HHMMSS>Z-<hash16> run id (spec 8.3)".format(
@@ -1465,7 +1612,7 @@ def _validate_import_table(record, schema_fields, findings):
         originals = evidence_run("import", run) + "/originals/"
         if not str.startswith(source, originals):
             findings.append("import.source {} does not lie under {}, the preserved originals of the "
-                            "record's own import.run (spec 8.3/8.8)".format(_safe_display(source), originals))
+                            "record's own import.run (spec 8.3/8.8)".format(_bounded_display(source), originals))
     imported_at = None
     if "imported_at" in imp:
         if _valid_timestamp(imp.get("imported_at")):
@@ -1495,7 +1642,7 @@ def _validate_import_table(record, schema_fields, findings):
             field = row.get("field")
             if not isinstance(field, str) or field not in schema_fields:
                 findings.append("{}.field {} names no field of the type's schema (spec 8.3)".format(
-                    where, _safe_display(field)))
+                    where, _plain_display(field)))
             if not isinstance(row.get("value"), str):
                 findings.append("{}.value must be the verbatim source value as a string (spec 8.3)".format(
                     where))
@@ -1526,23 +1673,23 @@ def _validate_unrecorded(record, spec, schema_fields, findings):
         reason = row.get("reason")
         if not isinstance(reason, str) or reason not in IMPORTED_MISSINGNESS_REASONS:
             findings.append("{}.reason {} is not one of {} (spec 8.3)".format(
-                where, _safe_display(reason), list(IMPORTED_MISSINGNESS_REASONS)))
+                where, _bounded_display(reason), list(IMPORTED_MISSINGNESS_REASONS)))
         field = row.get("field")
         if not isinstance(field, str):
             findings.append("{}.field must be a string naming a field of the type's schema "
                             "(spec 8.3)".format(where))
             continue
         if field in seen:
-            findings.append("{} repeats the field {!r}: unrecorded holds exactly one row per omitted "
-                            "field (spec 8.3)".format(where, field))
+            findings.append("{} repeats the field {}: unrecorded holds exactly one row per omitted "
+                            "field (spec 8.3)".format(where, _bounded_display(field)))
             continue
         seen.add(field)
         if field.startswith("x-"):
-            findings.append("{} names the x-<vendor> extension {!r}, which is exempt from missingness "
-                            "and MUST be refused (spec 8.3)".format(where, field))
+            findings.append("{} names the x-<vendor> extension {}, which is exempt from missingness "
+                            "and MUST be refused (spec 8.3)".format(where, _bounded_display(field)))
         elif field not in schema_fields:
-            findings.append("{} names {!r}, which is no field of the {} schema (spec 8.3)".format(
-                where, field, spec.name))
+            findings.append("{} names {}, which is no field of the {} schema (spec 8.3)".format(
+                where, _bounded_display(field), spec.name))
         elif field in IMPORTED_REQUIRED_KEYS:
             findings.append("{} names the required imported envelope field {!r}, which missingness "
                             "cannot waive (spec 8.3)".format(where, field))
@@ -1579,12 +1726,12 @@ def _validate_imported_links(record, spec, findings):
         rel = link.get("rel")
         if not isinstance(rel, str) or rel not in LINK_RELS:
             findings.append("{}.rel {} is not one of {} (spec 8.6)".format(
-                where, _safe_display(rel), list(LINK_RELS)))
+                where, _bounded_display(rel), list(LINK_RELS)))
             rel = None
         shape = parse_series_id(link.get("id"))
         if shape is None:
             findings.append("{}.id {} is not a well-formed id (spec 8.2)".format(
-                where, _safe_display(link.get("id"))))
+                where, _bounded_display(link.get("id"))))
             continue
         if shape[0] == shape[1]:
             findings.append("{}.id {!r} is a clean-series id: an imported-to-clean link MUST be refused "
@@ -1647,7 +1794,7 @@ def _validate_imported_values(record, spec, findings, registered_kinds, imported
     if "kind" in record:
         if not isinstance(record.get("kind"), str) or record.get("kind") not in allowed_kinds:
             findings.append("worklog kind {} is not one of {} (spec 6.2)".format(
-                _safe_display(record.get("kind")), sorted(allowed_kinds)))
+                _bounded_display(record.get("kind")), sorted(allowed_kinds)))
     if "scopes" in record:
         scopes = record.get("scopes")
         if not isinstance(scopes, list) or not scopes:
@@ -1659,7 +1806,7 @@ def _validate_imported_values(record, spec, findings, registered_kinds, imported
             if shape is None or shape[1] not in (IMPORTED_NAMESPACES if shape[0] != shape[1]
                                                  else RECORD_NAMESPACES):
                 findings.append("block.scopes entry {} is not a record id of a section 8.1 type "
-                                "(spec 8.1/8.2)".format(_safe_display(s)))
+                                "(spec 8.1/8.2)".format(_bounded_display(s)))
     if "delivery" in record:
         delivery = record.get("delivery")
         if not isinstance(delivery, dict):
@@ -1681,7 +1828,7 @@ def _validate_imported_values(record, spec, findings, registered_kinds, imported
         findings.append("a reference's supplied refs must hold at least one ref (spec 8.6); an absent "
                         "capture is an unrecorded row")
     _validate_imported_links(record, spec, findings)
-    _validate_refs(record, findings)
+    _validate_refs(record, findings, _bounded_display)
 
 
 def _imported_namespace_refusal(ns):
@@ -1823,15 +1970,16 @@ def _imported_specs_control(specs):
 def _imported_not_plain(record):
     """The CANNOT-EVALUATE result for a table that is not plain (_is_plain_value). Nothing is looked up in
     it: its entries are read through dict's own items(), the id is the value under the exact-str key
-    `id`, and the label shows that id only when the id is plain itself, else calls it unreadable, so
-    neither the label nor the finding runs caller code. For an exact dict, the finding names the field
-    under which the walk (_plain_problem) found the first value that is not plain, and says why; for a
-    dict subclass it names no field, since the record itself is the culprit."""
+    `id`, and the label shows that id, through _bounded_display, only when the id is plain itself, else
+    calls it unreadable, so neither the label nor the finding runs caller code or exceeds the rendering
+    budget. For an exact dict, the finding names the field under which the walk (_plain_problem) found
+    the first value that is not plain, and says why; for a dict subclass it names no field, since the
+    record itself is the culprit."""
     ids = [v for k, v in dict.items(record) if type(k) is str and k == "id"]
     if not ids:
         label, rid = "imported record (no id)", None
     elif _is_plain_value(ids[0]):
-        label, rid = "imported record {}".format(_safe_display(ids[0])), ids[0]
+        label, rid = "imported record {}".format(_bounded_display(ids[0])), ids[0]
     else:
         label, rid = "imported record (unreadable id)", None
     if type(record) is not dict:
@@ -1864,11 +2012,15 @@ def validate_imported_record(record, expected_type=None, specs=None, registered_
     their declared types and vocabularies; historical timestamps are no later than `imported_at`;
     `proposed_from` is never carried; unknown keys fail. The importer-only legacy_fragment (LF) is
     refused (spec 8.1/8.2). Before any of the record is read, it must be plain (_plain_problem): exactly
-    a dict whose every key and nested value is exactly a plain built-in type, a tree bounded in depth, as
-    a parsed record is, so no method of a record value (a lookup, a hash, a comparison, a format, a repr,
-    a startswith) runs during validation and no rendering of it overflows the stack or grows without
-    bound. Every field then holds only what a TOML document can (_is_toml_value, spec 4.4), a registered
-    `x-<vendor>` table and a module field no value rule reads included. A supplied `specs` roster is
+    a dict whose every key and nested value is exactly a plain built-in type, a tree as a parsed record
+    is, so no method of a record value (a lookup, a hash, a comparison, a format, a repr, a startswith)
+    runs during validation. Its depth is not bounded, since tomllib nests tables to any depth through a
+    dotted key or a table header; instead every finding renders a record value through _bounded_display,
+    so no rendering overflows the stack and each takes at most _DISPLAY_BUDGET characters and the cut
+    marker (a finding may render more than one value, and every finding repeats the label, which renders
+    the id). Every field then holds only TOML value types, each date-time in a TOML form (_is_toml_value,
+    spec 4.4), a registered `x-<vendor>` table and a module field no value rule reads included. A
+    supplied `specs` roster is
     checked in full before use, and only fresh copies of its checked entries are read
     (_imported_specs_control). Every control is judged by its
     real type, never by an advertised `__class__`, and a collection control is read once, through its
@@ -1881,9 +2033,9 @@ def validate_imported_record(record, expected_type=None, specs=None, registered_
     the envelope, or the `registered_vendors` control (or, on a worklog, the `registered_kinds` control)
     is malformed, as validate_record judges them; VALID otherwise.
 
-    Not checked here. Each item but the last two needs evidence beyond this one record (other records,
-    the store, the preserved original, the source or the import run); the last two need a definition
-    this unit does not hold:
+    Not checked here. Each item but the last three needs evidence beyond this one record (other records,
+    the store, the preserved original, the source or the import run); the next two need a definition
+    this unit does not hold, and the last is left open so that no record tomllib parses is refused:
       - the cross-record checks: C-IMPORTED-IDS counters and no-deletion, C-LINKS resolution over both
         series, and the C-IMPORTED-SEGREGATION firewall beyond the per-record imported-to-clean link
         refusal (spec 8.3, 8.6);
@@ -1905,13 +2057,17 @@ def validate_imported_record(record, expected_type=None, specs=None, registered_
         and its form (a non-empty string) are checked, since which assistant ran the run is run
         evidence, not record content;
       - what a registered `x-<vendor>` table means, including that it overrides none of identity, state,
-        transitions or the other spec 8.7 concerns: only its registration, that it is a table, and that
-        it holds only what a TOML document can are checked, since its meaning is the vendor's definition;
+        transitions or the other spec 8.7 concerns: only its registration, that it is a table, that it is
+        plain, and that it holds only TOML value types with each date-time in a TOML form
+        (_is_toml_value) are checked, since its meaning is the vendor's definition;
       - the field semantics of a module or importer roster entry. Its shape and its reserved field names
         are checked, but this unit holds no authoritative definition for it (the module schemas ship
         with the module schemas release, spec 8.5), and the value rules here key on a field's name, not
         its type: a module entry that declares a baseline field name such as `kind`, `detail`,
-        `delivery` or `severity` inherits that field's baseline rule, which may not be the module's."""
+        `delivery` or `severity` inherits that field's baseline rule, which may not be the module's;
+      - that every str and int is one a TOML document can carry: a str holding a lone surrogate, which
+        no UTF-8 document carries, and an int outside TOML's 64-bit range are accepted wherever no value
+        rule refuses them, since tomllib.loads yields both."""
     if not issubclass(type(record), dict):
         # No id is available to label a non-table input: the one finding without an id (see above). type()
         # reads the real type, so an object that only advertises dict as its __class__ is not a table.
@@ -1921,7 +2077,7 @@ def validate_imported_record(record, expected_type=None, specs=None, registered_
         # or answer a check with a value it does not hold.
         return _imported_not_plain(record)
     rid = record.get("id")
-    label = "imported record {}".format(_safe_display(rid) if "id" in record else "(no id)")
+    label = "imported record {}".format(_bounded_display(rid) if "id" in record else "(no id)")
 
     def named(findings):
         return ["{}: {}".format(label, f) for f in findings]
@@ -1954,8 +2110,8 @@ def validate_imported_record(record, expected_type=None, specs=None, registered_
     if isinstance(tval, str) and tval:
         rtype = tval
         if expected_type is not None and tval != expected_type:
-            findings.append("type {!r} does not match the expected type {!r} (spec 8.3)".format(
-                tval, expected_type))
+            findings.append("type {} does not match the expected type {} (spec 8.3)".format(
+                _bounded_display(tval), _bounded_display(expected_type)))
     elif expected_type is not None:
         # Every imported record carries `type`, the worklog included (spec 8.3): never substitute it.
         findings.append("missing or non-string required field: type (spec 8.3)")
@@ -1970,8 +2126,8 @@ def validate_imported_record(record, expected_type=None, specs=None, registered_
         return RecordValidation(INVALID, named(findings), rtype, rid)
     spec = specs.get(rtype)
     if spec is None:
-        findings.append("{!r} is not a supported record type (baseline: {})".format(
-            rtype, ", ".join(sorted(_safe_display(s) for s in specs))))
+        findings.append("{} is not a supported record type (baseline: {})".format(
+            _bounded_display(rtype), ", ".join(sorted(_bounded_display(s) for s in specs))))
         return RecordValidation(INVALID, named(findings), rtype, rid)
 
     shape = parse_series_id(rid)
@@ -1979,7 +2135,7 @@ def validate_imported_record(record, expected_type=None, specs=None, registered_
         findings.append("missing required field: id")
     elif shape is None or shape[0] == shape[1]:
         findings.append("id {} is not an imported-series imported:<NS>-<n> id (spec 8.2/8.3)".format(
-            _safe_display(rid)))
+            _bounded_display(rid)))
     elif shape[1] not in IMPORTED_NAMESPACES:
         findings.append("id namespace {!r} is refused by the imported series: {}".format(
             shape[1], _imported_namespace_refusal(shape[1])))
@@ -1988,14 +2144,16 @@ def validate_imported_record(record, expected_type=None, specs=None, registered_
                         "(spec 8.2)".format(shape[1], spec.namespace, rtype))
 
     schema_fields = _imported_schema_fields(spec)
-    _check_keyset(record, schema_fields | {"import", "unrecorded"}, registered_vendors, findings)
+    _check_keyset(record, schema_fields | {"import", "unrecorded"}, registered_vendors, findings,
+                  _bounded_display)
     for key, value in dict.items(record):
         # A record is TOML (spec 4.4), so no field holds a value a TOML document cannot, whether or not a
         # value rule reads it: a registered x-<vendor> table, or a module field with no baseline rule, is
         # held to this too. A top-level key that is not a str is an unknown key above.
         if type(key) is str and not _is_toml_value(value):
-            findings.append("field {!r} holds a key or value no TOML document can (a non-string key, None, a "
-                            "tuple, a set or a frozenset); a record is TOML (spec 4.4)".format(key))
+            findings.append("field {} holds a key or value no TOML document can (a non-string key, None, a "
+                            "tuple, a set, a frozenset, or a date-time in no TOML form); a record is TOML "
+                            "(spec 4.4)".format(_bounded_display(key)))
     if "proposed_from" in record:
         findings.append("an imported record never carries proposed_from, since its status never takes "
                         "/proposed (spec 8.3)")
@@ -2003,13 +2161,13 @@ def validate_imported_record(record, expected_type=None, specs=None, registered_
         if k not in record:
             findings.append("missing required field: {}".format(k))
     if "status" in record:
-        parsed, err = parse_status(record.get("status"), spec)
+        parsed, err = parse_status(record.get("status"), spec, _bounded_display)
         if err is not None:
             findings.append("status: {}".format(err))
         elif parsed[1] is not None:
-            findings.append("imported status {!r} takes /proposed; an imported status is a legal state "
-                            "without it (spec 8.3)".format(record.get("status")))
-    actor_kind = _validate_actor(record, findings)
+            findings.append("imported status {} takes /proposed; an imported status is a legal state "
+                            "without it (spec 8.3)".format(_bounded_display(record.get("status"))))
+    actor_kind = _validate_actor(record, findings, _bounded_display)
     if actor_kind is not None and actor_kind != "importer":
         findings.append("actor.kind {!r} is not 'importer': an imported record is importer-authored "
                         "(spec 8.3)".format(actor_kind))
@@ -4211,9 +4369,31 @@ def self_test():
         check("imported-record-not-plain-" + _name + "-cannot-eval", _unplain(
             _imp_try(_rec, registered_vendors=REG), _prefix, _rid))
     # A non-empty container reached twice, a cycle included, is not plain: no parsed record shares one, and
-    # rendering a shared one could grow exponentially. Each vector is finite and the walk is depth-bounded,
-    # so with the visited set removed the cycle ends at the depth bound, under the wrong reason, and the
-    # shared values reach their field rules: each named check fails rather than hanging the run.
+    # a walk over a shared one could repeat without bound. The walk has no depth bound, so with its visited
+    # set removed it would never end on a cycle: each vector runs under a ten-second alarm where the
+    # platform and thread allow one, and the shared values, which are finite, reach their field rules, so
+    # each named check fails rather than hanging the run.
+    import signal
+
+    def _within_alarm(thunk):
+        def _expired(signum, frame):
+            raise TimeoutError("a plainness walk did not end within its alarm")
+
+        try:
+            previous = signal.signal(signal.SIGALRM, _expired)
+        except (AttributeError, ValueError):
+            return thunk()
+        try:
+            try:
+                signal.setitimer(signal.ITIMER_REAL, 10)
+                return thunk()
+            finally:
+                signal.setitimer(signal.ITIMER_REAL, 0)
+        except TimeoutError:
+            return None
+        finally:
+            signal.signal(signal.SIGALRM, previous)
+
     _twice = "holds a non-empty container reached twice (shared or cyclic)"
     _cyc = []
     _cyc.append(_cyc)
@@ -4230,56 +4410,249 @@ def self_test():
             ("shared-doubling", _imp_md(**{"x-aiqt": {"lane": _dag}}), "'x-aiqt'"),
             ("shared-across-fields", _imp_md(**dict([("import", _imp_table(unparsed=_shared)),
                                                     ("x-aiqt", {"lane": _shared})])), None)):
-        _res = _imp_try(_rec, registered_vendors=REG)
+        _res = _within_alarm(lambda: _imp_try(_rec, registered_vendors=REG))
         check("imported-record-" + _name + "-cannot-eval", _unplain(_res, _md4 + "field ", "imported:MD-4")
               and _twice in _res.findings[0]
               and (_field is None or _res.findings[0].startswith(_md4 + "field " + _field + " " + _twice)))
+    _self_rec = _imp_md()
+    _self_rec["self"] = _self_rec
+    _res = _within_alarm(lambda: _imp_try(_self_rec, registered_vendors=REG))
+    check("imported-record-contains-itself-cannot-eval", _unplain(_res, _md4 + "field 'self' " + _twice,
+                                                                  "imported:MD-4"))
     # An empty container may be shared (CPython shares the empty tuple itself); it reaches its field rule.
     _empty = []
     check("imported-record-shared-empty-container-ok", _imp_ok(_imp_md(**{"x-aiqt": {"a": _empty, "b": _empty}}),
                                                                registered_vendors=REG))
 
-    # Depth: every later repr, hash and comparison of a plain value recurses, so the walk refuses a value
-    # nested deeper than _PLAIN_MAX_DEPTH containers, with a labelled CANNOT-EVALUATE and never a raw
-    # RecursionError, on the normal label, the refusal label, a key, and the import-table renderer. The
-    # bound is exact (512 containers on a path is plain), and a document tomllib parses is not refused.
+    # Depth alone is never refused: tomllib nests tables to any depth through a dotted key or a table
+    # header, so a deep value is plain and reaches its field rules (VALID where it is TOML and no rule reads
+    # it). Every finding renders a record value through _bounded_display, which is iterative and cut at
+    # _DISPLAY_BUDGET characters, so no vector raises (a RecursionError included) and no rendering in a
+    # finding outgrows the budget: on the normal label, the refusal label, a key, and the import table.
+    import tomllib
+
     def _nest(levels, inner=None):
         v = [] if inner is None else inner
         for _ in range(levels - 1):
             v = [v]
         return v
 
-    _deeper = "holds a value nested deeper than {} containers".format(_PLAIN_MAX_DEPTH)
+    _cut_len = _DISPLAY_BUDGET + len(_DISPLAY_CUT)
+
+    def _bounded_findings(res, rendered):
+        # Each finding renders at most `rendered` record values, each cut at the budget, beside fixed text.
+        return res is not None and all(len(f) <= rendered * _cut_len + 1000 for f in res.findings)
+
     _very_deep = _nest(100000)
+    _deep_list = "[" * _DISPLAY_BUDGET + _DISPLAY_CUT
+    _deep_label = "imported record " + _deep_list + ": "
     _deep_key = ()
-    for _ in range(1000):
+    for _ in range(100000):
         _deep_key = (_deep_key,)
+    _deep_tuple = "(" * _DISPLAY_BUDGET + _DISPLAY_CUT
     _deep_key_rec = _imp_md()
-    _deep_key_rec[_deep_key] = _Str("x")
-    for _name, _rec, _prefix in (
-            ("id", _imp_md(id=_very_deep), "imported record (unreadable id): field 'id' " + _deeper),
-            ("id-refusal-label", _imp_md(id=_very_deep, title=_Str("x")), "imported record (unreadable id): field "),
+    _deep_key_rec[_deep_key] = "x"
+    _deep_key_unplain = _imp_md()
+    _deep_key_unplain[_deep_key] = _Str("x")
+    _path600 = ".".join(["a"] * 600)
+    _deep_doc_id = tomllib.loads("[id." + ".".join(["a"] * 100000) + "]\nv = 1")["id"]
+    for _name, _rec, _needle in (
+            ("id", _imp_md(id=_very_deep), _deep_label + "id " + _deep_list + " is not an imported-series"),
+            ("parsed-id", _imp_md(id=_deep_doc_id), "imported record {'a': {'a': "),
             ("source", _imp_md(**dict([("import", _imp_table(source=_very_deep))])),
-             _md4 + "field 'import' " + _deeper),
-            ("key", _deep_key_rec, _md4 + "field <not a plain built-in value> "),
-            # 2 levels (the record and x-aiqt) plus 511: one past the bound.
-            ("bound-plus-one", _imp_md(**{"x-aiqt": {"lane": _nest(511)}}), _md4 + "field 'x-aiqt' " + _deeper)):
-        check("imported-record-deep-" + _name + "-cannot-eval", _unplain(
-            _imp_try(_rec, registered_vendors=REG), _prefix, None if _name.startswith("id") else "imported:MD-4"))
-    check("imported-record-deep-at-bound-ok", _imp_ok(_imp_md(**{"x-aiqt": {"lane": _nest(510)}}),
-                                                      registered_vendors=REG))
-    import tomllib
-    _parsed = tomllib.loads("lane = " + "[" * 400 + "]" * 400)
-    check("imported-record-deep-parsed-toml-ok", _imp_ok(_imp_md(**{"x-aiqt": _parsed}), registered_vendors=REG))
+             _md4 + "import.source " + _deep_list + " is not a canonical"),
+            ("key", _deep_key_rec, _md4 + "unknown key " + _deep_tuple + " (schemas are closed")):
+        _res = _imp_try(_rec, registered_vendors=REG)
+        check("imported-record-deep-" + _name + "-invalid-bounded", _res is not None and _res.status == INVALID
+              and any(f.startswith(_needle) for f in _res.findings) and _bounded_findings(_res, 2))
+    for _name, _rec, _prefix, _rid in (
+            ("id-refusal-label", _imp_md(id=_very_deep, title=_Str("x")), _deep_label + "field 'title' holds",
+             _very_deep),
+            ("key", _deep_key_unplain, _md4 + "field " + _deep_tuple + " holds a key or value that is not",
+             "imported:MD-4")):
+        _res = _imp_try(_rec, registered_vendors=REG)
+        check("imported-record-deep-" + _name + "-cannot-eval-bounded", _unplain(_res, _prefix, _rid)
+              and _bounded_findings(_res, 2))
+    # Deep TOML values are VALID: a constructed nest, and tomllib's own dotted assignments, table headers
+    # and arrays, alone and combined, in a registered vendor table and in a whole parsed record.
+    for _name, _val in (
+            ("list-100000", {"lane": _very_deep}),
+            ("dotted-600", tomllib.loads("lane." + _path600 + " = 1")),
+            ("header-600", tomllib.loads("[lane." + _path600 + "]\nv = 1")),
+            ("header-100000", tomllib.loads("[lane." + ".".join(["a"] * 100000) + "]\nv = 1")),
+            ("header-and-array", tomllib.loads("[lane." + ".".join(["a"] * 300) + "]\nv = " + "[" * 300
+                                               + "]" * 300)),
+            ("arrays-400", tomllib.loads("lane = " + "[" * 400 + "]" * 400))):
+        check("imported-record-deep-" + _name + "-ok", _imp_ok(_imp_md(**{"x-aiqt": _val}), registered_vendors=REG))
+    _toml_md = "\n".join([
+        'id = "imported:MD-4"', 'type = "maintainer_decision"', 'status = "recorded"',
+        'title = "Prefer additive migrations"', 'created_at = "2025-01-05T08:00:00Z"',
+        'updated_at = "2025-01-05T08:00:00Z"', 'decision = "Additive migrations only"',
+        'summary = "Recorded in the old decision log"', 'links = [{rel = "exemplifies", id = "imported:PP-2"}]',
+        'refs = [{kind = "path", locator = "DECISIONS.md", note = "original entry"}]',
+        'actor = {kind = "importer", id = "import-assistant"}', "x-aiqt.dotted." + _path600 + " = 1",
+        "[import]", 'source = "' + _imp_table()["source"] + '"', 'source_sha256 = "' + _IMP_SHA + '"',
+        'run = "' + _IMP_RUN + '"', 'imported_at = "' + _IMP_AT + '"', "[x-aiqt.header." + _path600 + "]",
+        "v = 1", ""])
+    check("imported-record-deep-parsed-document-ok", _imp_ok(tomllib.loads(_toml_md), registered_vendors=REG))
     _found = []
     try:
         _validate_import_table(dict([("import", _imp_table(source=_very_deep, run=_very_deep))]),
                                _imported_schema_fields(_MD), _found)
     except Exception:
         _found = None
-    check("imported-import-table-deep-operands-not-rendered", _found is not None
-          and any(f.startswith("import.source <not a plain built-in value> is not ") for f in _found)
-          and any(f.startswith("import.run <not a plain built-in value> is not ") for f in _found))
+    check("imported-import-table-deep-operands-rendered-bounded", _found is not None
+          and any(f.startswith("import.source " + _deep_list + " is not ") for f in _found)
+          and any(f.startswith("import.run " + _deep_list + " is not ") for f in _found))
+
+    # _bounded_display is _safe_display, byte for byte, for a plain value whose rendering fits the budget,
+    # its oversized-int markers included, and is cut at exactly the budget otherwise.
+    _cet = datetime.timezone(datetime.timedelta(hours=1), "CET")
+    _render_same = (
+        "plain", "it's", 'say "hi"', "a\nb\u2028\U000e0001", "", 0, -7, 1 << 64, 1.5, float("nan"), float("-inf"),
+        True, None, datetime.date(2025, 1, 5), datetime.datetime(2025, 1, 5, 8, tzinfo=datetime.timezone.utc),
+        datetime.datetime(2025, 1, 5, 8, tzinfo=datetime.timezone(datetime.timedelta(hours=-7, minutes=-30))),
+        datetime.datetime(2025, 1, 5, 8, 0, 0, 7, tzinfo=_cet), datetime.time(8, 0, 0, 500000, fold=1),
+        [], {}, (), set(), frozenset(), ("a",), ("a", 1), [1, [2, ["x"]]], {"k": {"n": [1, {"o": None}]}, 1: ("t",)},
+        {frozenset({1}): set(["a"])}, frozenset({("a", 1)}), [[], {}, (), set(), frozenset()],
+        1 << 20000, [1 << 20000], {"k": [1, (1 << 20000,)]}, "x" * (_DISPLAY_BUDGET - 2),
+        ["x" * (_DISPLAY_BUDGET - 4)])
+    check("imported-bounded-display-is-safe-display", all(_bounded_display(v) == _safe_display(v)
+                                                          for v in _render_same))
+    for _name, _val, _want in (
+            ("str-one-over", "x" * (_DISPLAY_BUDGET - 1), repr("x" * (_DISPLAY_BUDGET - 1))[:_DISPLAY_BUDGET]),
+            ("list-one-over", ["x" * (_DISPLAY_BUDGET - 3)], repr(["x" * (_DISPLAY_BUDGET - 3)])[:_DISPLAY_BUDGET]),
+            ("deep-list", _very_deep, "[" * _DISPLAY_BUDGET),
+            ("deep-tuple", _deep_key, "(" * _DISPLAY_BUDGET),
+            ("parsed-header", _deep_doc_id, ("{'a': " * (_DISPLAY_BUDGET // 6 + 1))[:_DISPLAY_BUDGET])):
+        check("imported-bounded-display-cut-" + _name, _bounded_display(_val) == _want + _DISPLAY_CUT)
+    # A value that repeats one string renders far beyond its own size under a bare repr; here every
+    # rendering, whatever the width, the sharing or a cycle, stops at the budget, and so does a record's.
+    _wide = ["a" * 4096] * 1024
+    _dag = ["leaf"]
+    for _ in range(60):
+        _dag = [_dag, _dag]
+    _cyc_render = []
+    _cyc_render.append(_cyc_render)
+    for _name, _val, _want in (
+            ("wide-shared-str", _wide, repr(_wide[:3])[:_DISPLAY_BUDGET]),
+            ("huge-str", "x" * 1000000, "'" + "x" * (_DISPLAY_BUDGET - 1)),
+            ("doubling-dag", _dag, "[" * 61 + "'leaf'], ['leaf']], "),
+            ("cycle", _cyc_render, "[" * _DISPLAY_BUDGET)):
+        _r = _bounded_display(_val)
+        check("imported-bounded-display-bounded-" + _name, len(_r) == _cut_len and _r.endswith(_DISPLAY_CUT)
+              and _r.startswith(_want))
+    check("imported-plain-display-wide-shared-str", _plain_display(_wide) == repr(_wide[:3])[:_DISPLAY_BUDGET]
+          + _DISPLAY_CUT)
+    _res = _imp_try(_imp_md(id=["x" * 100000] * 200), registered_vendors=REG)
+    check("imported-record-wide-shared-id-bounded", _res is not None and _res.status == INVALID
+          and _bounded_findings(_res, 2) and _res.findings[0].startswith("imported record [" + repr("x" * 100)[:-1]))
+    # An int too large for the budget is named, unconverted, even with the int-to-str limit lifted; an object
+    # that is not plain, a date-time with a foreign tzinfo included, is named by the fixed marker and never
+    # rendered; a timezone name longer than the budget is never rendered.
+    _old_digits = sys.get_int_max_str_digits()
+    try:
+        sys.set_int_max_str_digits(0)
+        _big = _bounded_display(1 << (_DISPLAY_INT_BITS + 1))
+        _big_nested = _bounded_display([1 << (_DISPLAY_INT_BITS + 1)])
+    finally:
+        sys.set_int_max_str_digits(_old_digits)
+    check("imported-bounded-display-int-over-bits", _big == "<oversized-int: {} bits>".format(_DISPLAY_INT_BITS + 2)
+          and _big_nested == "<oversized-value>")
+    _ran = []
+
+    class _ReprZoneRan(datetime.tzinfo):
+        def utcoffset(self, dt):
+            return datetime.timedelta(0)
+
+        def __repr__(self):
+            _ran.append("zone")
+            raise RuntimeError("a foreign tzinfo ran its own __repr__")
+
+    class _ReprListRan(list):
+        def __repr__(self):
+            _ran.append("list")
+            raise RuntimeError("a list subclass ran its own __repr__")
+
+    check("imported-bounded-display-not-plain-marked", _bounded_display(
+        [_ReprRaisesStr("x"), datetime.datetime(2025, 1, 5, tzinfo=_ReprZoneRan()), {"k": _ReprListRan([1])}])
+        == "[{0}, {0}, {{'k': {0}}}]".format(_NOT_PLAIN_MARK) and not _ran)
+    check("imported-bounded-display-long-zone-name", _bounded_display(datetime.datetime(
+        2025, 1, 5, tzinfo=datetime.timezone(datetime.timedelta(hours=1), "Z" * (_DISPLAY_BUDGET + 1))))
+        == "<a date-time whose timezone name exceeds {} characters>".format(_DISPLAY_BUDGET))
+    # A str is sliced to the budget before its repr is taken, so rendering a huge one costs the budget, not
+    # its length.
+    import tracemalloc
+    _huge = "x" * 10000000
+    _was_tracing = tracemalloc.is_tracing()
+    if not _was_tracing:
+        tracemalloc.start()
+    tracemalloc.reset_peak()
+    _base = tracemalloc.get_traced_memory()[0]
+    _bounded_display([_huge])
+    _peak = tracemalloc.get_traced_memory()[1] - _base
+    if not _was_tracing:
+        tracemalloc.stop()
+    check("imported-bounded-display-huge-str-cost", _peak < 1000000)
+    del _huge
+    # Every site that renders a record value in an imported-record finding renders it through
+    # _bounded_display: a deep value or a 100000-character str there is cut at the budget, never raised on,
+    # never rendered whole.
+    _z = "z" * 100000
+    _long = "'" + "z" * (_DISPLAY_BUDGET - 1) + _DISPLAY_CUT
+    _dl, _dt = _deep_list, _deep_tuple
+    _tkey = {_deep_key: "v"}
+    for _name, _rec, _kw, _needle in (
+            ("source-sha256", _imp_md(**dict([("import", _imp_table(source_sha256=_very_deep))])), {},
+             "import.source_sha256 " + _dl),
+            ("source-not-canonical", _imp_md(**dict([("import", _imp_table(source="/" + _z))])), {},
+             "import.source '/" + "z" * (_DISPLAY_BUDGET - 2) + _DISPLAY_CUT + " is not a canonical"),
+            ("source-elsewhere", _imp_md(**dict([("import", _imp_table(source=".working/" + _z))])), {},
+             "import.source '.working/" + "z" * (_DISPLAY_BUDGET - 10) + _DISPLAY_CUT + " does not lie"),
+            ("run", _imp_md(**dict([("import", _imp_table(run=_z))])), {}, "import.run " + _long),
+            ("history-field", _imp_md(**dict([("import", _imp_table(history=[{"field": _very_deep, "value": "v"}]))])),
+             {}, "import.history[0].field " + _dl),
+            ("import-key", _imp_md(**dict([("import", dict(_imp_table(), **{}) | _tkey)])), {},
+             "import unknown key " + _dt),
+            ("unrecorded-reason", _imp_md(unrecorded=[{"field": "decided_at", "reason": _very_deep}]), {},
+             "unrecorded[0].reason " + _dl),
+            ("unrecorded-field", _imp_md(unrecorded=[{"field": _z, "reason": "unparsed"}]), {},
+             "unrecorded[0] names " + _long),
+            ("unrecorded-repeat", _imp_md(unrecorded=[{"field": _z, "reason": "unparsed"},
+                                                      {"field": _z, "reason": "unparsed"}]), {},
+             "unrecorded[1] repeats the field " + _long),
+            ("unrecorded-vendor", _imp_md(unrecorded=[{"field": "x-" + _z, "reason": "unparsed"}]), {},
+             "unrecorded[0] names the x-<vendor> extension '" + "x-" + "z" * (_DISPLAY_BUDGET - 3) + _DISPLAY_CUT),
+            ("unrecorded-key", _imp_md(unrecorded=[dict({"field": "decided_at", "reason": "unparsed"}, **{}) | _tkey]),
+             {}, "unrecorded[0] unknown key " + _dt),
+            ("link-rel", _imp_md(links=[{"rel": _very_deep, "id": "imported:PP-2"}]), {}, "links[0].rel " + _dl),
+            ("link-id", _imp_md(links=[{"rel": "exemplifies", "id": _very_deep}]), {}, "links[0].id " + _dl),
+            ("link-key", _imp_md(links=[dict({"rel": "exemplifies", "id": "imported:PP-2"}) | _tkey]), {},
+             "links[0] unknown key " + _dt),
+            ("kind", _imp_md(kind=_very_deep), {}, "worklog kind " + _dl),
+            ("scopes", _imp_md(scopes=[_very_deep]), {}, "block.scopes entry " + _dl),
+            ("ref-kind", _imp_md(refs=[{"kind": _z, "locator": "x", "note": "n"}]), {}, "refs[0].kind " + _long),
+            ("ref-key", _imp_md(refs=[dict({"kind": "path", "locator": "x", "note": "n"}) | _tkey]), {},
+             "refs[0] unknown key(s): " + _dt),
+            ("actor-kind", _imp_md(actor={"kind": _z, "id": "a"}), {}, "actor.kind " + _long),
+            ("actor-key", _imp_md(actor=dict(_IMP_ACTOR) | _tkey), {}, "actor unknown key(s): " + _dt),
+            ("status-state", _imp_md(status=_z), {}, "status: status state " + _long),
+            ("status-slashes", _imp_md(status=_z + "/a/b"), {}, "status: status " + _long),
+            ("status-qualifier", _imp_md(status="recorded/" + _z), {}, "status: status qualifier " + _long),
+            ("type-mismatch", _imp_md(type=_z), {"expected_type": "maintainer_decision"}, "type " + _long),
+            ("type-unsupported", _imp_md(type=_z), {}, _long + " is not a supported record type"),
+            ("record-key", _imp_md(**{_z: None}), {}, "unknown key " + _long),
+            ("toml-key", _imp_md(**{_z: None}), {}, "field " + _long + " holds a key or value no TOML"),
+            ("vendor-not-registered", _imp_md(**{"x-" + _z: {}}), {},
+             "extension 'x-" + "z" * (_DISPLAY_BUDGET - 3) + _DISPLAY_CUT + " is not registered"),
+            ("vendor-malformed", _imp_md(**{"x-" + _z.upper(): {}}), {},
+             "extension key 'x-" + "Z" * (_DISPLAY_BUDGET - 3) + _DISPLAY_CUT + " is not a valid"),
+            ("vendor-not-table", _imp_md(**{"x-" + _z: 1}), {"registered_vendors": REG | {"x-" + _z}},
+             "extension 'x-" + "z" * (_DISPLAY_BUDGET - 3) + _DISPLAY_CUT + " must be a table"),
+            ("id", _imp_md(id=_z), {}, "imported record " + _long + ": id " + _long)):
+        _res = _imp_try(_rec, **dict(dict(registered_vendors=REG), **_kw))
+        check("imported-render-site-bounded-" + _name, _res is not None and _res.status == INVALID
+              and any(_needle in f and _DISPLAY_CUT in f for f in _res.findings) and _bounded_findings(_res, 2))
     # A plain operand that is not a str is refused and rendered, as the import-table docstring says.
     _found = []
     _validate_import_table({"import": {"run": 42, "source": None}}, _imported_schema_fields(_MD), _found)
@@ -4384,6 +4757,31 @@ def self_test():
     check("imported-vendor-table-toml-values-ok", _imp_ok(_imp_md(**{"x-aiqt": tomllib.loads(
         'a = "s"\nb = 1\nc = 1.5\nd = true\ne = 2025-01-05T08:00:00Z\nf = 2025-01-05T08:00:00\ng = 2025-01-05\n'
         'h = 08:00:00\ni = [1, [2, "x"]]\nj = nan\nk = inf\n[[l]]\nm = {n = [{o = 1}]}\n')}), registered_vendors=REG))
+    # A date-time in a form no TOML date-time takes is INVALID: an offset time, a nonzero fold, an offset that
+    # is not a whole number of minutes, or a timezone with a name of its own. Every form tomllib yields, a
+    # timezone named as its offset alone names it, and microseconds stay VALID.
+    _utc = datetime.timezone.utc
+    for _name, _val in (
+            ("time-offset", datetime.time(8, tzinfo=_utc)),
+            ("named-zone", datetime.datetime(2025, 1, 5, 8, tzinfo=datetime.timezone(datetime.timedelta(hours=1), "CET"))),
+            ("named-utc-zone", datetime.datetime(2025, 1, 5, 8, tzinfo=datetime.timezone(datetime.timedelta(0), "Z"))),
+            ("second-offset", datetime.datetime(2025, 1, 5, 8, tzinfo=datetime.timezone(datetime.timedelta(seconds=30)))),
+            ("negative-second-offset", datetime.datetime(2025, 1, 5, 8, tzinfo=datetime.timezone(
+                -datetime.timedelta(hours=7, seconds=30)))),
+            ("microsecond-offset", datetime.datetime(2025, 1, 5, 8, tzinfo=datetime.timezone(
+                datetime.timedelta(minutes=1, microseconds=1)))),
+            ("fold-datetime", datetime.datetime(2025, 1, 5, 8, fold=1)),
+            ("fold-time", datetime.time(8, fold=1)),
+            ("nested-time-offset", [{"t": datetime.time(8, tzinfo=_utc)}])):
+        check("imported-vendor-table-date-time-" + _name + "-refused", _imp_refused(
+            _imp_md(**{"x-aiqt": {"v": _val}}), _no_toml, registered_vendors=REG))
+    check("imported-vendor-table-toml-date-times-ok", _imp_ok(_imp_md(**{"x-aiqt": dict(tomllib.loads(
+        'a = 2025-01-05T08:00:00Z\nb = 2025-01-05T08:00:00+00:00\nc = 2025-01-05T08:00:00-00:00\n'
+        'd = 2025-01-05T08:00:00+23:59\ne = 2025-01-05T08:00:00-07:30\nf = 2025-01-05T08:00:00.123456789Z\n'
+        'g = 2025-01-05T08:00:00.5\nh = 08:00:00.999999\ni = 0001-01-01\nj = 9999-12-31T23:59:59.999999-23:59\n'),
+        k=datetime.datetime(2025, 1, 5, 8, tzinfo=datetime.timezone(datetime.timedelta(hours=1), "UTC+01:00")),
+        l=datetime.datetime(2025, 1, 5, 8, 0, 0, 1, tzinfo=datetime.timezone(-datetime.timedelta(hours=7))))}),
+        registered_vendors=REG))
 
     for _sha in (_IMP_SHA[:-1], _IMP_SHA + "0", "sha256:" + _IMP_SHA, _IMP_SHA[:-1] + "g", 0):
         check("imported-sha-refused-" + repr(_sha)[:24], _imp_refused(
