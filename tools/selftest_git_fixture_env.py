@@ -3432,10 +3432,12 @@ def _handshake_expired(scenario, extra):
 # in, with every compared field structural, so an edit tying an allowlisted field to
 # those facts, on code that run executes, yields there the value a slow-git run would
 # give it (a wrong VALUE, reflection and module attributes included) unless it also
-# depends on something else that differs between the two runs (the scenario's name,
-# member b's absence); a stall's presence is pinned the same way by "failed-refused"
-# (stalls nonempty) beside "failed" (stalls empty). What neither net reaches is THE
-# RESIDUAL, stated with the oracle's DISCLOSED BOUNDARIES in _allowlist_producers.
+# depends on ANY other state that differs between the two runs (the scenario's name,
+# member b's presence or absence, the exception outcome's text and similar); a stall's
+# presence is pinned the same way by "failed-refused" (stalls nonempty) beside "failed"
+# (stalls empty). What neither net reaches is THE RESIDUAL, stated with the oracle's
+# DISCLOSED BOUNDARIES in _allowlist_producers, whose named residual probes are
+# examples of it and not the class.
 # A handshake kind naming a thread its bounded join left ALIVE (the report's join loop,
 # hold_lock's release and loop's sender join all record "<name> finished" exactly then) can
 # still poison any field, the allowlist included (a live holder owns the lock; a live
@@ -3776,18 +3778,26 @@ def _allowlist_producers(source=None):
     THE RESIDUAL, a disclosure and not a guarantee. A producer that ties evidence,
     lock_free or restored to member a's arrival or raise or to the send list through a
     boundary above (a for, try or assert gate and similar) passes BOTH nets when it
-    also (a) depends on scenario identity, so the stalled run takes the healthy branch
-    (round 20's scenario gate, probe scenariogate: a for gate on scenario ==
-    'failed-stalled' or member a's arrival before the evidence read), or (b) sits on a
+    also (a) depends on ANY state that differs between the "failed-stalled" run and a
+    "failed" run whose positive control reached its 60 s bound, so the stalled run takes
+    the healthy branch: the scenario's name, member b's presence or absence (b_arrived,
+    b_running, late), the exception outcome's text (ValueError in the stalled run,
+    TimeoutExpired in the slow one) and any other such difference; or (b) sits on a
     code path the "failed-stalled" run does not execute: member b's whole path and
     run_member, which that run never calls (its one member raises inside observed
-    first; its pinned late=[] shows it), as in round 20's R1 (a for gate on member a's
-    raise after run_member's late append, probe raisegate), R2 (the same gate spelled
-    try/assert, trygate) and R4 (a for gate on the send list there, sendgate). A
-    producer tied to a timing MAGNITUDE (never to those facts) through a boundary above
-    is likewise outside both nets. The four residual probes are recorded in
-    "producer-oracle" at their empty diff, so an oracle or scenario change that starts
-    catching one fails that pin and must update this text. Which runs would still catch
+    first; its pinned late=[] shows it). The residual probes named here are EXAMPLES
+    of these two clauses, not the class: for (a), round 20's scenario gate
+    (scenariogate: a for gate on scenario == 'failed-stalled' or member a's arrival
+    before the evidence read), round 21's gate on member b's absence (bgate: a for gate
+    on member a's arrival and b_arrived before the evidence read) and its gate on the
+    outcome text (outcomegate: a for gate on outcome.startswith('TimeoutExpired') and
+    member a's arrival before the evidence read); for (b), round 20's R1 (a for gate on member a's raise after run_member's late append,
+    raisegate), R2 (the same gate spelled try/assert, trygate) and R4 (a for gate on
+    the send list there, sendgate). A producer tied to a timing MAGNITUDE (never to
+    those facts) through a boundary above is likewise outside both nets. The six
+    residual probes are recorded in "producer-oracle" at their empty diff, so an oracle
+    or scenario change that starts catching one fails that pin and must update this
+    text. Which runs would still catch
     such a producer: a "failed" run whose member-a positive control reaches its 60 s
     bound (a slow host) leaves the arrival, the raise and the send list unset when member
     b's run_member and the post-main reads run, so the field goes wrong beside the
@@ -4026,15 +4036,36 @@ def _slow_control_record(source=None):
     in TimeoutExpired, the deliberate empty send list records no budget, and without the
     reached bound "positive control a observed" in the "missing" extras nothing would stand
     the run down, so its outcome would be a definite mismatch. No healthy run reaches the
-    record, so this reads it instead. "record": exactly one statement of the child is
+    record, so this reads it instead. A BINDING of a name below is every node of the child
+    that binds it: a store or del, an import alias, a def or class name, an except-as name,
+    a match capture and a parameter. "record": exactly one statement of the child is
     extra.setdefault('missing', []).append('positive control a observed'). "gate": its
     enclosing if, with no else, tests exactly scenario == 'failed-stalled' and
     outcome.startswith('TimeoutExpired') and holds that statement alone, inside the body of
-    the module-level if scenario.startswith('failed'). "outcome": every store to outcome is
-    in the module-level try that calls main(), whose except Exception handler spells it
-    '{}: {}'.format(type(exc).__name__, exc), so a TimeoutExpired yields the prefix the gate
-    tests. Raises LookupError, which the caller records as cannot-evaluate, when the source
-    does not parse."""
+    the module-level if scenario.startswith('failed'), and scenario has exactly one
+    binding, the statement scenario, folder, fixture = sys.argv[2], sys.argv[3],
+    sys.argv[4]. "kept": every use of the key 'missing' in the child (the constant
+    'missing' anywhere, a keyword missing= on any call) is either the call
+    extra.setdefault('missing', []) inside, through conditional expressions only, the
+    receiver of an append call, or sits in the body of the module-level if scenario ==
+    'lock', which no failed scenario enters (scenario's one binding is part of "gate"), so
+    no statement of the child, after the gate or in a def called after it, pops, deletes,
+    clears or rebinds the record THROUGH THE KEY; removing it without the key (clear,
+    popitem, a rebinding of extra, a dynamic key, __delitem__) is refused by "producer-map"
+    (_allowlist_producers, the extras dict's fail-closed rules), not here, and reaching the
+    dict or the record's list without the name extra (a module attribute such as
+    sys.modules, gc) is read by neither. "outcome": the child has exactly one module-level
+    try calling main(), every binding of outcome is inside it, and that try statement is
+    exactly the committed one: its body, its handler sequence (KeyboardInterrupt,
+    SystemExit, then Exception, each with its committed name and its one committed
+    statement, the last outcome = '{}: {}'.format(type(exc).__name__, exc)), no else and
+    no finally. So a TimeoutExpired that reaches this try out of main() is caught by no
+    earlier handler and no nested try, and yields the prefix the gate tests. NOT READ:
+    whether a TimeoutExpired reaches this try at all (the suite code main() runs, and the
+    child's replacements of suite attributes on that path, such as the sweep wrapper, can
+    swallow or replace it), and a rebinding of a builtin the handler calls (type). Raises
+    LookupError, which the caller records as cannot-evaluate, when the source does not
+    parse."""
     source = _CLOSE_PROBE_CHILD if source is None else source
     try:
         tree = ast.parse(source)
@@ -4048,11 +4079,57 @@ def _slow_control_record(source=None):
     def shape(text):
         return ast.dump(ast.parse(text).body[0])
 
+    def binds(name):
+        found = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name):
+                bound = None if isinstance(node.ctx, ast.Load) else node.id
+            elif isinstance(node, ast.alias):
+                bound = (node.asname or node.name).partition(".")[0]
+            elif isinstance(node, ast.MatchMapping):
+                bound = node.rest
+            elif isinstance(node, ast.arg):
+                bound = node.arg
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef,
+                                   ast.ExceptHandler, ast.MatchAs, ast.MatchStar)):
+                bound = node.name
+            else:
+                continue
+            if bound == name:
+                found.append(node)
+        return found
+
+    def statement(node):
+        while node is not None and not isinstance(node, ast.stmt):
+            node = parents.get(node)
+        return node
+
+    def appended(use):
+        # The key as extra.setdefault('missing', []) inside, through conditional
+        # expressions only, the receiver of an append call: a use that only adds.
+        call = parents.get(use)
+        if not (isinstance(call, ast.Call) and ast.dump(call) == keyed):
+            return False
+        receiver = parents.get(call)
+        while isinstance(receiver, ast.IfExp):
+            receiver = parents.get(receiver)
+        caller = parents.get(receiver)
+        return (isinstance(receiver, ast.Attribute) and receiver.attr == "append"
+                and isinstance(caller, ast.Call) and caller.func is receiver)
+
     record = shape("extra.setdefault('missing', []).append('positive control a observed')")
     gate = shape("if scenario == 'failed-stalled' and outcome.startswith('TimeoutExpired'):"
                  "\n    extra.setdefault('missing', []).append('positive control a observed')")
     failed = ast.dump(ast.parse("scenario.startswith('failed')", mode="eval").body)
-    spelled = shape("outcome = '{}: {}'.format(type(exc).__name__, exc)")
+    bound = shape("scenario, folder, fixture = sys.argv[2], sys.argv[3], sys.argv[4]")
+    lock = ast.dump(ast.parse("scenario == 'lock'", mode="eval").body)
+    keyed = ast.dump(ast.parse("extra.setdefault('missing', [])", mode="eval").body)
+    run = shape("try:\n    with contextlib.redirect_stdout(captured):\n"
+                "        outcome = 'returned {}'.format(suite.main(None, lanes))\n"
+                "except KeyboardInterrupt:\n    outcome = 'KeyboardInterrupt'\n"
+                "except SystemExit as exc:\n    outcome = 'SystemExit {}'.format(exc.code)\n"
+                "except Exception as exc:\n"
+                "    outcome = '{}: {}'.format(type(exc).__name__, exc)")
     missing = []
     records = [node for node in ast.walk(tree)
                if isinstance(node, ast.stmt) and ast.dump(node) == record]
@@ -4060,20 +4137,27 @@ def _slow_control_record(source=None):
         missing.append("record")
     branch = parents.get(records[0]) if records else None
     outer = parents.get(branch)
-    if not (isinstance(branch, ast.If) and ast.dump(branch) == gate
+    scenarios = binds("scenario")
+    if not (branch is not None and ast.dump(branch) == gate
             and isinstance(outer, ast.If) and outer in tree.body
-            and ast.dump(outer.test) == failed and branch in outer.body):
+            and ast.dump(outer.test) == failed and branch in outer.body
+            and len(scenarios) == 1 and ast.dump(statement(scenarios[0])) == bound):
         missing.append("gate")
+    locked = {node for test in tree.body
+              if isinstance(test, ast.If) and ast.dump(test.test) == lock
+              for held in test.body for node in ast.walk(held)}
+    uses = [node for node in ast.walk(tree)
+            if (isinstance(node, ast.Constant) and node.value == "missing")
+            or (isinstance(node, ast.keyword) and node.arg == "missing")]
+    if not all(appended(use) or use in locked for use in uses):
+        missing.append("kept")
     runs = [node for node in tree.body if isinstance(node, ast.Try)
             and any(isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
                     and call.func.attr == "main" for call in ast.walk(node))]
-    stores = [name for name in ast.walk(tree) if isinstance(name, ast.Name)
-              and name.id == "outcome" and isinstance(name.ctx, ast.Store)]
     if not (len(runs) == 1
-            and all(any(name is part for part in ast.walk(runs[0])) for name in stores)
-            and any(isinstance(handler.type, ast.Name) and handler.type.id == "Exception"
-                    and len(handler.body) == 1 and ast.dump(handler.body[0]) == spelled
-                    for handler in runs[0].handlers)):
+            and all(any(node is part for part in ast.walk(runs[0]))
+                    for node in binds("outcome"))
+            and ast.dump(runs[0]) == run):
         missing.append("outcome")
     return sorted(missing)
 
@@ -4181,8 +4265,10 @@ def _member_close_controls(fixture):
     allowlisted field to member a's arrival or raise or to the send list, on code that run
     executes and not also gated on something that tells it apart from a slow "failed" run,
     is a definite mismatch there in a healthy run (THE RESIDUAL it does not reach, a gate
-    on member b's path or in run_member or on scenario identity, is stated in
-    _allowlist_producers); TIMING ALONE IS NEVER A DEFINITE FINDING
+    on ANY state that tells this run apart from a slow "failed" run, the scenario's name,
+    member b's presence and the outcome text among them, or one on code this run never
+    executes, member b's path and run_member, is stated in _allowlist_producers);
+    TIMING ALONE IS NEVER A DEFINITE FINDING
     in these scenarios: member b times the kill sweep in bounded stages (member a's raise, the
     failed-member branch entering the sweep, the harness lock holders' release, the real
     sweep's return), and every reached bound, whoever was slow, is recorded by the parent as a
@@ -4696,10 +4782,13 @@ def _member_close_controls(fixture):
     # besides the list (dictlit, setlit, listcomp, setcomp, dictcomp); the two disclosed
     # boundaries pinned AT their empty diff, a module attribute store (moduleattr) and a
     # for-loop gate on member a's arrival (forloop, which the "failed-stalled" value pin
-    # catches); and THE RESIDUAL's examples pinned AT their empty diff, which pass the value
-    # pin too: round 20's R1 (raisegate), R2 (trygate) and R4 (sendgate) in run_member,
-    # which the stalled run never calls (its late=[]), and round 20's scenario-identity
-    # gate (scenariogate). An anchor no longer in the source is "anchor missing", never a
+    # catches); and examples of THE RESIDUAL pinned AT their empty diff, which pass the
+    # value pin too (examples, not the class: _allowlist_producers states the class):
+    # round 20's R1 (raisegate), R2 (trygate) and R4 (sendgate) in run_member, which the
+    # stalled run never calls (its late=[]), and three gates on state that tells the
+    # stalled run apart from a slow "failed" run, round 20's on the scenario's name
+    # (scenariogate) and round 21's on member b's absence (bgate) and on the outcome
+    # text (outcomegate). An anchor no longer in the source is "anchor missing", never a
     # silently clean probe. ast.parse alone reads each source; no probe source is
     # executed.
     witnessed_line = "    witnessed = len(branch_swept)\n"
@@ -4788,7 +4877,14 @@ def _member_close_controls(fixture):
             + "        for _ in () if sent else (0,):\n            branch_swept[:] = []\n"),
            ("scenariogate", evidence_line,
             "    for _ in range(0 if scenario == 'failed-stalled' or a_arrived.is_set()"
-            " else 1):\n        branch_swept[:] = []\n" + evidence_line)))
+            " else 1):\n        branch_swept[:] = []\n" + evidence_line),
+           ("bgate", evidence_line,
+            "    for _ in () if a_arrived.is_set() or not b_arrived.is_set() else (0,):\n"
+            "        branch_swept[:] = []\n" + evidence_line),
+           ("outcomegate", evidence_line,
+            "    for _ in range(1 if outcome.startswith('TimeoutExpired')"
+            " and not a_arrived.is_set() else 0):\n        branch_swept[:] = []\n"
+            + evidence_line)))
     try:
         producers = _allowlist_producers()
         got["producer-map"] = ("producer-map", producers)
@@ -4805,27 +4901,97 @@ def _member_close_controls(fixture):
         CANNOT_EVALUATE.append(producer_down)
         got["producer-map"] = got["producer-oracle"] = producer_down
     # The slow-control record (_slow_control_record): no healthy run reaches it, so it is
-    # read from the source, and each disabling probe must name the fact it breaks: the gate
-    # replaced by if False (round 20's NOREC), the record replaced by pass, the enclosing
-    # failed-scenario block disabled, outcome rebound ahead of the gate, and the exception
-    # outcome respelled so no TimeoutExpired prefix reaches the gate. No probe source is
-    # executed.
+    # read from the source, and each probe must name the fact it breaks; every condition
+    # of the reader has a probe built to fail when that condition is removed, except the
+    # binding forms named last: the gate replaced by if False (round 20's NOREC), the
+    # record replaced by pass, the enclosing failed-scenario block disabled, outcome
+    # rebound ahead of the gate, the exception outcome respelled; round 21's earlier
+    # handlers that catch TimeoutExpired ahead of the Exception handler (earlyhandler,
+    # ahead of KeyboardInterrupt; timeouthandler, ahead of Exception), the same through a
+    # try nested in the body (innertry), a second statement rebinding outcome in the
+    # Exception handler (handlerextra), that handler's type changed (handlertype), a
+    # finally rebinding outcome (finallystore), a second module-level try calling main()
+    # (secondrun), outcome bound outside that try by an import alias (importbind), a del
+    # (delbind) or a match capture (matchbind), a second record deeper in the tree
+    # (duprecord), the gate moved into a def that is never called (nested) or into the
+    # failed block's else (elsebranch), that block spelled as a while (whileouter),
+    # scenario rebound ahead of the gate (scenariorebind) or bound by another statement
+    # (scenariosplit); and the record removed through the key: popped after the gate
+    # (popmissing), deleted (delmissing), popped inside the sweep wrapper the failed block
+    # calls after the gate (sweeppop), cleared through setdefault (setdefclear), replaced
+    # by update (updatemissing), popped as an append receiver (popappend) and cleared
+    # through the append method taken uncalled (boundappend). The other binding forms the
+    # reader reads (a def, class or except-as name, a match star or mapping rest, a
+    # parameter) have no probe of their own. No probe source is executed.
     stalled_gate = ("    if scenario == 'failed-stalled' and "
                     "outcome.startswith('TimeoutExpired'):\n")
     stalled_record = ("        extra.setdefault('missing', [])"
                       ".append('positive control a observed')\n")
     failed_block = "registered = len(suite._MEMBERS['groups'])\nif scenario.startswith('failed')"
     raised_outcome = "    outcome = '{}: {}'.format(type(exc).__name__, exc)\n"
+    raised_handler = "except Exception as exc:\n" + raised_outcome
+    interrupt_handler = "except KeyboardInterrupt:\n    outcome = 'KeyboardInterrupt'\n"
+    returned_line = "        outcome = 'returned {}'.format(suite.main(None, lanes))\n"
+    scenario_line = "scenario, folder, fixture = sys.argv[2], sys.argv[3], sys.argv[4]\n"
+    released_line = "    extra['released'] = [problems, len(suite._MEMBERS['groups'])]\n"
+    # The gate with its record as one span ("" when either is not found, which then
+    # counts as an anchor missing).
+    gate_start = _CLOSE_PROBE_CHILD.find(stalled_gate)
+    gate_end = _CLOSE_PROBE_CHILD.find(stalled_record, max(gate_start, 0))
+    gate_span = (_CLOSE_PROBE_CHILD[gate_start:gate_end + len(stalled_record)]
+                 if gate_start >= 0 and gate_end >= 0 else "")
+    hidden = "outcome = outcome.replace('TimeoutExpired', 'slow')\n"
+    control_probes = (
+        ("norec", stalled_gate, "    if False:\n"),
+        ("passrecord", stalled_record, "        pass\n"),
+        ("failedoff", failed_block, failed_block + " and False"),
+        ("rebound", stalled_gate, "    outcome = 'returned 0'\n" + stalled_gate),
+        ("respelled", raised_outcome, "    outcome = 'raised: {}'.format(exc)\n"),
+        ("earlyhandler", interrupt_handler,
+         "except suite.subprocess.TimeoutExpired as exc:\n    outcome = 'slow: ' + str(exc)\n"
+         + interrupt_handler),
+        ("timeouthandler", raised_handler,
+         "except suite.subprocess.TimeoutExpired:\n    outcome = 'hidden timeout'\n"
+         + raised_handler),
+        ("innertry", returned_line,
+         "        try:\n    " + returned_line
+         + "        except suite.subprocess.TimeoutExpired:\n"
+         "            outcome = 'returned 2'\n"),
+        ("handlerextra", raised_outcome, raised_outcome + "    " + hidden),
+        ("handlertype", raised_handler, "except LookupError as exc:\n" + raised_outcome),
+        ("finallystore", raised_outcome, raised_outcome + "finally:\n    " + hidden),
+        ("secondrun", "ended = time.monotonic()\n",
+         "try:\n    suite.main(None, [])\nexcept Exception:\n    pass\n"
+         "ended = time.monotonic()\n"),
+        ("importbind", stalled_gate, "    import os as outcome\n" + stalled_gate),
+        ("delbind", stalled_gate, "    del outcome\n" + stalled_gate),
+        ("matchbind", stalled_gate,
+         "    match 'returned 0':\n        case outcome:\n            pass\n" + stalled_gate),
+        ("duprecord", released_line, released_line + "    if False:\n" + stalled_record),
+        ("nested", gate_span,
+         "    def _later():\n        if scenario.startswith('failed'):\n        "
+         + gate_span[:-1].replace("\n", "\n        ") + "\n"),
+        ("elsebranch", stalled_gate, "    pass\nelse:\n" + stalled_gate),
+        ("whileouter", failed_block, failed_block.replace("\nif ", "\nwhile ")),
+        ("scenariorebind", stalled_gate, "    scenario = 'failed'\n" + stalled_gate),
+        ("scenariosplit", scenario_line,
+         "scenario = sys.argv[2]\nfolder, fixture = sys.argv[3], sys.argv[4]\n"),
+        ("popmissing", stalled_record, stalled_record + "    extra.pop('missing', None)\n"),
+        ("delmissing", stalled_record, stalled_record + "    del extra['missing']\n"),
+        ("sweeppop", "        released.set()\n",
+         "        released.set()\n        extra.pop('missing', None)\n"),
+        ("setdefclear", stalled_record,
+         stalled_record + "    extra.setdefault('missing', []).clear()\n"),
+        ("updatemissing", stalled_record, stalled_record + "    extra.update(missing=[])\n"),
+        ("popappend", stalled_record,
+         stalled_record + "    extra.pop('missing', []).append(0)\n"),
+        ("boundappend", stalled_record,
+         stalled_record + "    extra.setdefault('missing', []).append.__self__.clear()\n"))
     try:
         got["slow-control"] = ("slow-control", [_slow_control_record()] + [
             _slow_control_record(_CLOSE_PROBE_CHILD.replace(anchor, mutant))
             if _CLOSE_PROBE_CHILD.count(anchor) == 1 else "anchor missing"
-            for anchor, mutant in ((stalled_gate, "    if False:\n"),
-                                   (stalled_record, "        pass\n"),
-                                   (failed_block, failed_block + " and False"),
-                                   (stalled_gate, "    outcome = 'returned 0'\n"
-                                    + stalled_gate),
-                                   (raised_outcome, "    outcome = 'raised: {}'.format(exc)\n"))])
+            for _, anchor, mutant in control_probes])
     except LookupError as exc:
         control_down = "TIMEOUT: slow-control reader: {} (cannot evaluate)".format(exc)
         CANNOT_EVALUATE.append(control_down)
@@ -5021,11 +5187,15 @@ def _member_close_controls(fixture):
                 ("handshake-map", [True, True, True, True]),
                 ("record-map", [True] * 30),
                 # The stalled run's slow-control record, read from the child's source: intact
-                # in the committed child, and each disabling probe (if False, the record
-                # replaced, the failed block disabled, outcome rebound, the exception outcome
-                # respelled) names the fact it breaks.
+                # in the committed child, and each probe, in control_probes order (norec
+                # through boundappend), names the fact it breaks.
                 ("slow-control", [[], ["gate"], ["gate", "record"], ["gate"], ["outcome"],
-                                  ["outcome"]]),
+                                  ["outcome"], ["outcome"], ["outcome"], ["outcome"],
+                                  ["outcome"], ["outcome"], ["outcome"], ["outcome"],
+                                  ["outcome"], ["outcome"], ["outcome"], ["record"],
+                                  ["gate"], ["gate"], ["gate"], ["gate"], ["gate"],
+                                  ["kept"], ["kept"], ["kept"], ["kept"], ["kept"],
+                                  ["kept"], ["kept"]]),
                 # Each allowlisted field's producer reads only its traced bound-free source:
                 # evidence the sweep wrapper's branch_swept appends (guarded only by its pure
                 # frame walk, frame), their count before the direct call (witnessed), the
@@ -5037,12 +5207,13 @@ def _member_close_controls(fixture):
                               "witnessed"],
                     lock_free=["lock_free", "suite"], restored=["restored", "signal"],
                     unrecognized=[])),
-                # One expectation per probe, in producer_probes order. The six final empty
-                # diffs pass this net by design: moduleattr and forloop are disclosed
-                # boundaries (forloop is caught by the "failed-stalled" value pin);
-                # raisegate, trygate, sendgate and scenariogate are THE RESIDUAL
-                # (_allowlist_producers), which passes the value pin too, so an oracle or
-                # scenario change that starts catching one of them must update that text.
+                # One expectation per probe, in producer_probes order. The eight final
+                # empty diffs pass this net by design: moduleattr and forloop are
+                # disclosed boundaries (forloop is caught by the "failed-stalled" value
+                # pin); raisegate, trygate, sendgate, scenariogate, bgate and outcomegate
+                # are examples of THE RESIDUAL (_allowlist_producers), which passes the
+                # value pin too, so an oracle or scenario change that starts catching one
+                # of them must update that text.
                 ("producer-oracle", [["evidence"], ["evidence"], ["evidence"],
                                      ["lock_free", "unrecognized"],
                                      ["restored", "unrecognized"],
@@ -5064,7 +5235,7 @@ def _member_close_controls(fixture):
                                      ["evidence", "unrecognized"],
                                      ["evidence", "unrecognized"],
                                      ["evidence", "unrecognized"],
-                                     [], [], [], [], [], []]),
+                                     [], [], [], [], [], [], [], []]),
                 ("sweep-site", ["except-before-wait"]),
                 ("sweep-oracle", [[(4, "except-before-wait")], [(5, "unrecognized")],
                                   "LookupError", [(5, "unrecognized")],
