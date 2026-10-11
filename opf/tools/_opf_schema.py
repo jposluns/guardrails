@@ -109,12 +109,14 @@ unit is that schema release for the record model and DEFINES the following where
     appears twice (shared or cyclic). Anything else is CANNOT-EVALUATE, since its own methods could
     answer a lookup, a hash, a comparison, a format or a repr with caller code. Depth alone is never
     refused, since tomllib nests tables to any depth through a dotted key or a table header; instead
-    every finding renders a record value through a renderer that is iterative and stops at a fixed
-    character budget, so no rendering overflows the stack or exceeds that budget. A record also holds
-    only TOML value types (spec 4.4): None, a tuple, a set, a frozenset or a non-str key anywhere in it,
-    a registered `x-<vendor>` table and a module field no value rule reads included, is INVALID, and so
-    is a date-time in a form no TOML date-time takes (a time with a tzinfo, a nonzero fold, or an offset
-    that is not a whole number of minutes or carries its own name).
+    every finding renders a record value, and every name a caller's `specs` roster or
+    `registered_kinds` control supplies (a module type's states and fields, a roster key, a registered
+    kind), through a renderer that is iterative and stops at a fixed character budget, so no rendering
+    overflows the stack or exceeds that budget plus the cut marker. A record also holds only TOML value
+    types (spec 4.4): None, a tuple, a set, a frozenset or a non-str key anywhere in it, a registered
+    `x-<vendor>` table and a module field no value rule reads included, is INVALID, and so is a
+    date-time in a form no TOML date-time takes (a time with a tzinfo, a nonzero fold, or an offset that
+    is not a whole number of minutes or carries a name other than the one its offset gives).
 """
 import sys
 
@@ -183,7 +185,7 @@ _TAXONOMY_NAMESPACES.update({_name: _ns for _name, (_ns, _module) in MODULE_TYPE
 _TAXONOMY_NAMESPACES.update(IMPORTER_TYPES)
 
 
-def _specs_roster_error(specs):
+def _specs_roster_error(specs, display=_safe_display):
     """Reconcile a caller-supplied `specs` roster against the section-8.1 taxonomy BEFORE either validator
     uses it. Each mapping KEY must be a string that equals its spec's own declared `name`, that name must be
     a real section-8.1 record type, and the spec's `namespace` must be exactly the one the taxonomy binds to
@@ -193,7 +195,8 @@ def _specs_roster_error(specs):
     is keyed under is a cannot-evaluate, not a silent pass (guard-input-soundness; F-R17-A3). Returns None
     when every entry reconciles, else a finding message naming the first contradiction. The default
     BASELINE_SPECS and the importer roster (legacy_fragment/LF) reconcile cleanly; only a hand-constructed
-    misbound roster is newly rejected."""
+    misbound roster is newly rejected. `display` renders a key that names no section-8.1 type
+    (_bounded_display for the imported validator, since that key is the caller's own text)."""
     if not isinstance(specs, dict):
         return "the type-spec roster is not a mapping (fail-closed)"
     for key, spec in specs.items():
@@ -203,8 +206,8 @@ def _specs_roster_error(specs):
             return "the type-spec roster contains a non-TypeSpec value (fail-closed)"
         expected_namespace = _TAXONOMY_NAMESPACES.get(key)
         if expected_namespace is None:
-            return ("the type-spec roster names a type absent from the section-8.1 taxonomy: {!r} "
-                    "(fail-closed)".format(key))
+            return ("the type-spec roster names a type absent from the section-8.1 taxonomy: {} "
+                    "(fail-closed)".format(display(key)))
         if getattr(spec, "name", None) != key:
             return "the type-spec roster key {!r} contradicts its TypeSpec name (fail-closed)".format(key)
         if getattr(spec, "namespace", None) != expected_namespace:
@@ -500,8 +503,9 @@ def _id_digits(n):
 def parse_status(status, spec, display=_safe_display):
     """Parse a status string against a type's grammar (spec 8.4). Returns ((state, qualifier), None) on
     success, or (None, message) on a malformed or type-illegal status. `qualifier` is None or "proposed",
-    and "proposed" is legal only on a state the type marks proposable. `display` renders the status and
-    its parts in a message (_bounded_display for an imported record)."""
+    and "proposed" is legal only on a state the type marks proposable. `display` renders the status, its
+    parts and the type's states in a message (_bounded_display for an imported record, whose type may be
+    a module type with caller-defined states)."""
     if not isinstance(status, str) or not status:
         return None, "status must be a non-empty string"
     if not isinstance(spec, TypeSpec):
@@ -518,14 +522,14 @@ def parse_status(status, spec, display=_safe_display):
         return None, "status {} has more than one '/' qualifier".format(display(status))
     if state not in spec.states:
         return None, "status state {} is not a {} state {}".format(
-            display(state), spec.name, sorted(spec.states))
+            display(state), spec.name, display(sorted(spec.states)))
     if qual is not None:
         if qual != "proposed":
             return None, "status qualifier {} is not 'proposed' (the only qualifier, spec 8.4)".format(
                 display(qual))
         if state not in spec.proposable:
-            return None, "state {!r} may not carry '/proposed' for a {} (spec 8.4/8.5)".format(
-                state, spec.name)
+            return None, "state {} may not carry '/proposed' for a {} (spec 8.4/8.5)".format(
+                display(state), spec.name)
     return (state, qual), None
 
 
@@ -1415,12 +1419,19 @@ def _display_scalar(v, room):
     """The repr of one scalar for _bounded_display, through its exact built-in type's own __repr__, with
     `room` characters left in the budget; None for an oversized int. A str longer than `room` is sliced to
     it first, so its repr exceeds the room and is cut, and a date-time whose timezone name is longer than
-    the budget is named by a fixed text instead, so no single scalar's repr costs more than the budget.
-    Anything that is not a plain scalar, a date-time whose tzinfo fails _plain_tzinfo included, is named
-    by _NOT_PLAIN_MARK and never rendered."""
+    the budget is named by a fixed text instead, so no single scalar's repr costs more than a constant
+    multiple of the budget (an escape takes at most ten characters for one character). A sliced str is
+    rendered in the quote the whole str's repr takes, chosen from the whole str, so the cut rendering is
+    that repr's prefix: a quote of the other kind is appended to the slice, which makes its repr take
+    the same quote, and is dropped with the closing quote, which the cut drops anyway. Anything that is
+    not a plain scalar, a date-time whose tzinfo fails _plain_tzinfo included, is named by
+    _NOT_PLAIN_MARK and never rendered."""
     t = type(v)
     if t is str:
-        return str.__repr__(v if str.__len__(v) <= room else v[:room])
+        if str.__len__(v) <= room:
+            return str.__repr__(v)
+        double = str.__contains__(v, "'") and not str.__contains__(v, '"')
+        return str.__repr__(v[:room] + ("'" if double else '"'))[:-2]
     if t is int:
         return _display_int(v)
     if t is bool or t is float or t is datetime.date or v is None:
@@ -1435,11 +1446,16 @@ def _display_scalar(v, room):
 def _bounded_display(value):
     """Render a value for a finding message iteratively and within a budget: a rendering longer than
     _DISPLAY_BUDGET characters is cut there and ends in _DISPLAY_CUT. For a plain value (_is_plain_value)
-    whose rendering fits the budget it is _safe_display, byte for byte, its markers included: an
-    oversized int is `<oversized-int: N bits>` alone and makes a container holding it
-    `<oversized-value>`. Two cases differ from _safe_display: an int of more than _DISPLAY_INT_BITS bits,
-    which the budget could not hold, is oversized even when the runtime int-to-str limit is lifted, and a
-    date-time whose timezone name is longer than the budget is named by a fixed text (_display_scalar).
+    whose repr exists and fits the budget it is that repr, so _safe_display, byte for byte; for one whose
+    repr exists and does not fit, it is that repr's first _DISPLAY_BUDGET characters and _DISPLAY_CUT.
+    The repr does not exist for an oversized int, nor for a value nested deeper than the repr's recursion
+    limit, which this walk renders up to the cut all the same. An oversized int alone is
+    `<oversized-int: N bits>`, as from _safe_display, and a container holding one is `<oversized-value>`
+    when the walk reaches the int before the cut; past the cut the int is never read, so that container
+    renders as its cut prefix, where _safe_display gives `<oversized-value>`. Two cases differ from the
+    repr: an int of more than _DISPLAY_INT_BITS bits, which the budget could not hold, is oversized even
+    when the runtime int-to-str limit is lifted, and a date-time whose timezone name is longer than the
+    budget is named by a fixed text (_display_scalar).
     It runs no caller code: each container is read through its exact built-in type's own iterator and
     each scalar rendered through its exact built-in type's own __repr__, and any other object, a subclass
     included, is named by _NOT_PLAIN_MARK in its place and never rendered. The walk is an explicit stack,
@@ -1447,8 +1463,11 @@ def _bounded_display(value):
     container that emitted its opening, so the steps, the stack and the output all grow at most in
     proportion to the budget, whatever the value's depth, width or sharing (a shared or cyclic value
     renders as the tree it unfolds to, up to the cut). Every imported-record finding renders a record
-    value through it, directly or through _plain_display, except a value already confined to a fixed
-    vocabulary (a two-letter namespace, a schema field name, a known type or actor kind)."""
+    value, and every name a caller's `specs` roster or `registered_kinds` control supplies (a module
+    type's states and fields, a roster key, a registered kind), through it, directly or through
+    _plain_display. Only a value already confined to a fixed vocabulary is rendered raw: a two-letter
+    namespace, a required or exempt imported envelope field name, a section-8.1 type name, an actor kind
+    that ACTOR_KINDS holds, and a well-formed series id (_SERIES_ID_RE, at most _MAX_ID_DIGITS digits)."""
     if type(value) is int and _display_int(value) is None:
         return "<oversized-int: {} bits>".format(int.bit_length(value))
     out, size, stack = [], 0, [(_DISPLAY_VALUE, value)]
@@ -1657,7 +1676,9 @@ def _validate_unrecorded(record, spec, schema_fields, findings):
     """The missingness contract (spec 8.3): `unrecorded` holds exactly one closed-reason row for each
     omitted field of the type's schema that is not exempt, and no row that repeats a field, claims a
     supplied field absent, names a field outside the schema, names an exempt field, or waives a required
-    imported envelope field."""
+    imported envelope field. A field of the type's schema renders through _bounded_display, since a
+    module type's fields are the caller's own text; only a required or exempt envelope field, a fixed
+    vocabulary, renders raw."""
     exempt = IMPORTED_EXEMPT_FIELDS - _IMPORTED_TYPE_REQUIRED.get(spec.name, frozenset())
     rows = record.get("unrecorded", [])
     if not isinstance(rows, list):
@@ -1697,12 +1718,13 @@ def _validate_unrecorded(record, spec, schema_fields, findings):
             findings.append("{} names the exempt optional envelope field {!r}, which MUST be refused "
                             "(spec 8.3)".format(where, field))
         elif field in record:
-            findings.append("{} claims the supplied field {!r} absent (spec 8.3)".format(where, field))
+            findings.append("{} claims the supplied field {} absent (spec 8.3)".format(
+                where, _bounded_display(field)))
     for field in sorted(schema_fields):
         if field in record or field in exempt or field in IMPORTED_REQUIRED_KEYS or field in seen:
             continue
-        findings.append("the omitted field {!r} of the {} schema has no unrecorded row "
-                        "(spec 8.3)".format(field, spec.name))
+        findings.append("the omitted field {} of the {} schema has no unrecorded row "
+                        "(spec 8.3)".format(_bounded_display(field), spec.name))
 
 
 def _validate_imported_links(record, spec, findings):
@@ -1794,7 +1816,7 @@ def _validate_imported_values(record, spec, findings, registered_kinds, imported
     if "kind" in record:
         if not isinstance(record.get("kind"), str) or record.get("kind") not in allowed_kinds:
             findings.append("worklog kind {} is not one of {} (spec 6.2)".format(
-                _bounded_display(record.get("kind")), sorted(allowed_kinds)))
+                _bounded_display(record.get("kind")), _bounded_display(sorted(allowed_kinds))))
     if "scopes" in record:
         scopes = record.get("scopes")
         if not isinstance(scopes, list) or not scopes:
@@ -1884,14 +1906,16 @@ def _imported_spec_copy(key, spec):
     `transitions` a dict from a state to a frozenset of states; `proposable` within `states`, `gated`
     within the non-terminal proposable states (the TypeSpec construction rule); and `reduced` a bool. The
     copy holds those immutable values and its own transitions dict, so no caller code that runs later (a
-    control's or a record value's own method) can change the grammar that was checked."""
+    control's or a record value's own method) can change the grammar that was checked. The key is not yet
+    reconciled with the taxonomy here, so a refusal renders it through _bounded_display."""
     if type(spec) is not TypeSpec:
-        return "the type-spec roster entry {!r} is not exactly a TypeSpec (fail-closed)".format(key), None
+        return ("the type-spec roster entry {} is not exactly a TypeSpec (fail-closed)".format(
+            _bounded_display(key))), None
     v = {slot: getattr(spec, slot, _NO_SLOT) for slot in TypeSpec.__slots__}
 
     def bad(slot):
-        return ("the type-spec roster entry {!r} has a malformed or missing {} (fail-closed)".format(
-            key, slot)), None
+        return ("the type-spec roster entry {} has a malformed or missing {} (fail-closed)".format(
+            _bounded_display(key), slot)), None
 
     for slot in ("name", "namespace", "initial"):
         if type(v[slot]) is not str or not v[slot]:
@@ -1946,7 +1970,7 @@ def _imported_specs_control(specs):
         if err is not None:
             return err, None
         roster[key] = copy
-    err = _specs_roster_error(roster)
+    err = _specs_roster_error(roster, _bounded_display)
     if err is not None:
         return err, None
     for key, spec in roster.items():
@@ -1962,8 +1986,8 @@ def _imported_specs_control(specs):
                     "worklog alone (fail-closed)".format(key)), None
         for field in sorted(spec.extra_keys):
             if field in ("import", "unrecorded") or field.startswith("x-"):
-                return ("the type-spec roster entry {!r} declares the field {!r}, which the imported "
-                        "envelope reserves (spec 8.3/8.7; fail-closed)".format(key, field)), None
+                return ("the type-spec roster entry {!r} declares the field {}, which the imported "
+                        "envelope reserves (spec 8.3/8.7; fail-closed)".format(key, _bounded_display(field))), None
     return None, roster
 
 
@@ -2015,11 +2039,12 @@ def validate_imported_record(record, expected_type=None, specs=None, registered_
     a dict whose every key and nested value is exactly a plain built-in type, a tree as a parsed record
     is, so no method of a record value (a lookup, a hash, a comparison, a format, a repr, a startswith)
     runs during validation. Its depth is not bounded, since tomllib nests tables to any depth through a
-    dotted key or a table header; instead every finding renders a record value through _bounded_display,
-    so no rendering overflows the stack and each takes at most _DISPLAY_BUDGET characters and the cut
-    marker (a finding may render more than one value, and every finding repeats the label, which renders
-    the id). Every field then holds only TOML value types, each date-time in a TOML form (_is_toml_value,
-    spec 4.4), a registered `x-<vendor>` table and a module field no value rule reads included. A
+    dotted key or a table header; instead every finding renders a record value, and every name a caller's
+    `specs` roster or `registered_kinds` control supplies, through _bounded_display, so no rendering
+    overflows the stack and each takes at most _DISPLAY_BUDGET characters and the cut marker (a finding
+    may render more than one value, and every finding repeats the label, which renders the id). Every
+    field then holds only TOML value types, each date-time in a TOML form (_is_toml_value, spec 4.4), a
+    registered `x-<vendor>` table and a module field no value rule reads included. A
     supplied `specs` roster is
     checked in full before use, and only fresh copies of its checked entries are read
     (_imported_specs_control). Every control is judged by its
@@ -2667,6 +2692,11 @@ def check_unique_ids(ids, imported_series=False):
 
 
 # --- self-test ---------------------------------------------------------------------------------------
+
+# True only inside the bounded child of self_test's caller-timer vector, which runs the self-test again
+# in-process there; that nested run skips the vector, so it never recurses.
+_SELF_TEST_NESTED = False
+
 
 def self_test():
     """Envelope + type-schema + status/transition + counters invariants over synthetic vectors. Judged on
@@ -4370,29 +4400,17 @@ def self_test():
             _imp_try(_rec, registered_vendors=REG), _prefix, _rid))
     # A non-empty container reached twice, a cycle included, is not plain: no parsed record shares one, and
     # a walk over a shared one could repeat without bound. The walk has no depth bound, so with its visited
-    # set removed it would never end on a cycle: each vector runs under a ten-second alarm where the
-    # platform and thread allow one, and the shared values, which are finite, reach their field rules, so
-    # each named check fails rather than hanging the run.
-    import signal
+    # set removed it would never end on a cycle: each vector runs in a bounded child process
+    # (_opf_emit.run_bounded) and returns a short token from there, and the shared values, which are
+    # finite, reach their field rules, so each named check fails rather than hanging the run. The
+    # self-test borrows no process-wide timer, handler or signal mask: run_bounded installs its bounds in
+    # the child alone (the caller-timer vector at the end holds this).
+    import _opf_emit
 
-    def _within_alarm(thunk):
-        def _expired(signum, frame):
-            raise TimeoutError("a plainness walk did not end within its alarm")
-
-        try:
-            previous = signal.signal(signal.SIGALRM, _expired)
-        except (AttributeError, ValueError):
-            return thunk()
-        try:
-            try:
-                signal.setitimer(signal.ITIMER_REAL, 10)
-                return thunk()
-            finally:
-                signal.setitimer(signal.ITIMER_REAL, 0)
-        except TimeoutError:
-            return None
-        finally:
-            signal.signal(signal.SIGALRM, previous)
+    def _in_child(thunk):
+        # "OK" when the vector holds in the child, else "MISMATCH" or a run_bounded sentinel (TIMEOUT, OOM,
+        # CHILD-DIED, ERROR:<type>, SETUP-ERROR:...), none of which is "OK".
+        return _opf_emit.run_bounded(lambda: "OK" if thunk() else "MISMATCH", timeout_s=30)
 
     _twice = "holds a non-empty container reached twice (shared or cyclic)"
     _cyc = []
@@ -4410,15 +4428,16 @@ def self_test():
             ("shared-doubling", _imp_md(**{"x-aiqt": {"lane": _dag}}), "'x-aiqt'"),
             ("shared-across-fields", _imp_md(**dict([("import", _imp_table(unparsed=_shared)),
                                                     ("x-aiqt", {"lane": _shared})])), None)):
-        _res = _within_alarm(lambda: _imp_try(_rec, registered_vendors=REG))
-        check("imported-record-" + _name + "-cannot-eval", _unplain(_res, _md4 + "field ", "imported:MD-4")
-              and _twice in _res.findings[0]
-              and (_field is None or _res.findings[0].startswith(_md4 + "field " + _field + " " + _twice)))
+        def _shared_refused():
+            res = _imp_try(_rec, registered_vendors=REG)
+            return (_unplain(res, _md4 + "field ", "imported:MD-4") and _twice in res.findings[0]
+                    and (_field is None or res.findings[0].startswith(_md4 + "field " + _field + " " + _twice)))
+
+        check("imported-record-" + _name + "-cannot-eval", _in_child(_shared_refused) == "OK")
     _self_rec = _imp_md()
     _self_rec["self"] = _self_rec
-    _res = _within_alarm(lambda: _imp_try(_self_rec, registered_vendors=REG))
-    check("imported-record-contains-itself-cannot-eval", _unplain(_res, _md4 + "field 'self' " + _twice,
-                                                                  "imported:MD-4"))
+    check("imported-record-contains-itself-cannot-eval", _in_child(lambda: _unplain(
+        _imp_try(_self_rec, registered_vendors=REG), _md4 + "field 'self' " + _twice, "imported:MD-4")) == "OK")
     # An empty container may be shared (CPython shares the empty tuple itself); it reaches its field rule.
     _empty = []
     check("imported-record-shared-empty-container-ok", _imp_ok(_imp_md(**{"x-aiqt": {"a": _empty, "b": _empty}}),
@@ -4526,6 +4545,24 @@ def self_test():
             ("deep-tuple", _deep_key, "(" * _DISPLAY_BUDGET),
             ("parsed-header", _deep_doc_id, ("{'a': " * (_DISPLAY_BUDGET // 6 + 1))[:_DISPLAY_BUDGET])):
         check("imported-bounded-display-cut-" + _name, _bounded_display(_val) == _want + _DISPLAY_CUT)
+    # A str cut short keeps the quote its whole repr takes, chosen from the whole str, so the cut rendering
+    # is the repr's prefix also when the quote that decides it lies past the cut. An oversized int past the
+    # cut is never read, so its container renders as the cut prefix where _safe_display gives the marker;
+    # one before the cut makes the container the marker, as _safe_display does.
+    for _name, _val in (
+            ("both-quotes", "'" + "a" * 9000 + '"'), ("single-quote-past-cut", "a" * 9000 + "'"),
+            ("single-quote-before-cut", "'" + "a" * 9000), ("nested-both-quotes", ["'" + "a" * 9000 + '"'])):
+        check("imported-bounded-display-cut-quote-" + _name,
+              _bounded_display(_val) == repr(_val)[:_DISPLAY_BUDGET] + _DISPLAY_CUT)
+    _old_digits = sys.get_int_max_str_digits()
+    try:
+        sys.set_int_max_str_digits(4300)
+        _past_cut = ["x" * _DISPLAY_BUDGET, 1 << 20000]
+        _past = (_bounded_display(_past_cut), _safe_display(_past_cut), _bounded_display([1 << 20000, "x"]))
+    finally:
+        sys.set_int_max_str_digits(_old_digits)
+    check("imported-bounded-display-oversized-int-past-cut",
+          _past == (repr(_past_cut[:1])[:_DISPLAY_BUDGET] + _DISPLAY_CUT, "<oversized-value>", "<oversized-value>"))
     # A value that repeats one string renders far beyond its own size under a bare repr; here every
     # rendering, whatever the width, the sharing or a cycle, stops at the budget, and so does a record's.
     _wide = ["a" * 4096] * 1024
@@ -4539,9 +4576,12 @@ def self_test():
             ("huge-str", "x" * 1000000, "'" + "x" * (_DISPLAY_BUDGET - 1)),
             ("doubling-dag", _dag, "[" * 61 + "'leaf'], ['leaf']], "),
             ("cycle", _cyc_render, "[" * _DISPLAY_BUDGET)):
-        _r = _bounded_display(_val)
-        check("imported-bounded-display-bounded-" + _name, len(_r) == _cut_len and _r.endswith(_DISPLAY_CUT)
-              and _r.startswith(_want))
+        # The doubling DAG and the cycle unfold without end, so each rendering runs in a bounded child.
+        def _render_bounded():
+            r = _bounded_display(_val)
+            return len(r) == _cut_len and r.endswith(_DISPLAY_CUT) and r.startswith(_want)
+
+        check("imported-bounded-display-bounded-" + _name, _in_child(_render_bounded) == "OK")
     check("imported-plain-display-wide-shared-str", _plain_display(_wide) == repr(_wide[:3])[:_DISPLAY_BUDGET]
           + _DISPLAY_CUT)
     _res = _imp_try(_imp_md(id=["x" * 100000] * 200), registered_vendors=REG)
@@ -4653,6 +4693,45 @@ def self_test():
         _res = _imp_try(_rec, **dict(dict(registered_vendors=REG), **_kw))
         check("imported-render-site-bounded-" + _name, _res is not None and _res.status == INVALID
               and any(_needle in f and _DISPLAY_CUT in f for f in _res.findings) and _bounded_findings(_res, 2))
+    # A name a caller's `specs` roster or `registered_kinds` control supplies is the caller's own text, not a
+    # fixed vocabulary: a 100000-character module field or state, roster key or registered kind is cut at
+    # the budget, in a refusal and in a control refusal alike.
+    def _cut(v):
+        return repr(v)[:_DISPLAY_BUDGET] + _DISPLAY_CUT
+
+    _zf = _module_roster(extra_keys=frozenset(["digest", _z]))
+    _zs = _module_roster(initial=_z, terminal=frozenset([_z]), states=frozenset([_z]))
+    for _name, _rec, _kw, _status, _needle in (
+            ("module-field-claimed-absent", dict(_ar, **{_z: "v", "unrecorded": [{"field": _z, "reason": "unparsed"}]}),
+             dict(specs=_zf), INVALID, "unrecorded[0] claims the supplied field " + _cut(_z) + " absent"),
+            ("module-field-omitted", _ar, dict(specs=_zf), INVALID,
+             "the omitted field " + _cut(_z) + " of the artifact schema has no unrecorded row"),
+            ("module-state-proposed", dict(_ar, status=_z + "/proposed"), dict(specs=_zs), INVALID,
+             "status: state " + _cut(_z) + " may not carry '/proposed' for a artifact"),
+            ("module-states-listed", _ar, dict(specs=_zs), INVALID,
+             "status: status state 'recorded' is not a artifact state " + _cut([_z])),
+            ("module-reserved-field", _ar, dict(specs=_module_roster(extra_keys=frozenset(["digest", "x-" + _z]))),
+             CANNOT_EVALUATE, "declares the field " + _cut("x-" + _z) + ", which the imported envelope reserves"),
+            ("roster-key-not-typespec", _ar, dict(specs={_z: 1}), CANNOT_EVALUATE,
+             "the type-spec roster entry " + _cut(_z) + " is not exactly a TypeSpec"),
+            ("roster-key-missing-slot", _ar, dict(specs={_z: object.__new__(TypeSpec)}), CANNOT_EVALUATE,
+             "the type-spec roster entry " + _cut(_z) + " has a malformed or missing name"),
+            ("roster-key-untyped", _ar, dict(specs={_z: BASELINE_SPECS["backlog_item"]}), CANNOT_EVALUATE,
+             "absent from the section-8.1 taxonomy: " + _cut(_z) + " (fail-closed)"),
+            ("registered-kind", dict(_ar, kind="bogus"), dict(specs=_module_roster(), registered_kinds=[_z]),
+             INVALID, "worklog kind 'bogus' is not one of " + _cut(sorted(set(WORKLOG_KINDS) | {_z})))):
+        _res = _imp_try(_rec, **_kw)
+        check("imported-module-name-bounded-" + _name, _res is not None and _res.status == _status
+              and any(_needle in f for f in _res.findings) and _bounded_findings(_res, 2))
+    # The clean validators keep their messages byte for byte: their renderer is _safe_display, the repr.
+    _bi_spec = BASELINE_SPECS["backlog_item"]
+    check("clean-status-and-roster-messages-unchanged",
+          parse_status("bogus", _bi_spec) == (
+              None, "status state 'bogus' is not a backlog_item state ['active', 'done', 'dropped', 'open']")
+          and parse_status("open/proposed", _bi_spec) == (
+              None, "state 'open' may not carry '/proposed' for a backlog_item (spec 8.4/8.5)")
+          and _specs_roster_error({"not_a_type": _bi_spec}) == (
+              "the type-spec roster names a type absent from the section-8.1 taxonomy: 'not_a_type' (fail-closed)"))
     # A plain operand that is not a str is refused and rendered, as the import-table docstring says.
     _found = []
     _validate_import_table({"import": {"run": 42, "source": None}}, _imported_schema_fields(_MD), _found)
@@ -4993,6 +5072,66 @@ def self_test():
         _imp_adv("huge-key-" + _where, _rec)
     _imp_adv("huge-id", _imp_pd(id=_huge))
     _imp_adv("huge-link", _imp_md(links=[{"rel": _huge, "id": _huge}]))
+
+    # The self-test borrows no process-wide timer: a caller's armed ITIMER_REAL keeps counting down through
+    # the whole self-test with its interval kept, and its SIGALRM handler and signal mask stay as they were,
+    # never cancelled, restarted, delivered early or replaced. The caller is a bounded child: it installs a
+    # handler, arms the timer with an interval, runs this self-test in-process (that nested run skips this
+    # vector), and returns KEPT only when the countdown left is the armed one less the time elapsed since
+    # (elapsed-aware), within a 0.05-second reading tolerance, and the run made no in-process call to
+    # signal.signal, signal.setitimer or signal.alarm, so a borrow that restores the timer verbatim after
+    # a short window is caught too (run_bounded makes those calls in its own child alone). Arming there
+    # replaces the child's own run_bounded timer; the parent-owned run_bounded deadline still bounds it.
+    if not _SELF_TEST_NESTED:
+        import contextlib
+        import io
+        import signal
+        import time
+
+        def _caller_timer_kept():
+            global _SELF_TEST_NESTED
+            _SELF_TEST_NESTED = True
+            fired = []
+
+            def _caller_alarm(signum, frame):
+                fired.append(signum)
+
+            def _mask():
+                return signal.pthread_sigmask(signal.SIG_BLOCK, ()) if hasattr(signal, "pthread_sigmask") else None
+
+            calls = []
+            real = {name: getattr(signal, name) for name in ("signal", "setitimer", "alarm") if hasattr(signal, name)}
+
+            def _spy(name):
+                def call(*args, **kwargs):
+                    calls.append(name)
+                    return real[name](*args, **kwargs)
+                return call
+
+            signal.signal(signal.SIGALRM, _caller_alarm)
+            mask = _mask()
+            start = time.monotonic()
+            signal.setitimer(signal.ITIMER_REAL, 3600, 7)
+            armed = time.monotonic()
+            for name in real:
+                setattr(signal, name, _spy(name))
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    code = self_test()
+            finally:
+                for name, fn in real.items():
+                    setattr(signal, name, fn)
+            before = time.monotonic()
+            remaining, interval = signal.getitimer(signal.ITIMER_REAL)
+            after = time.monotonic()
+            kept = (signal.getsignal(signal.SIGALRM) is _caller_alarm and _mask() == mask and not fired
+                    and not calls and interval == 7
+                    and 3600 - (after - start) - 0.05 <= remaining <= 3600 - (before - armed) + 0.05)
+            return "KEPT" if kept else "LOST code={} remaining={:.3f} interval={} fired={} calls={}".format(
+                code, remaining, interval, len(fired), ",".join(sorted(set(calls))))
+
+        check("self-test-keeps-caller-timer", _opf_emit.run_bounded(
+            _caller_timer_kept, timeout_s=300, mem_bytes=2 * 1024 ** 3) == "KEPT")
 
     if failures:
         print("OPF-SCHEMA SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked))
