@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OPF record-authoring gate (spec 8.8): `opf record` behaviour, and red-on-revert discriminators.
 
-  check_opf_record.py --self-test                    the fixture suite (T1-T77)
+  check_opf_record.py --self-test                    the fixture suite (T1-T78)
   check_opf_record.py --self-test --red-on-revert    the same, plus each test's flip must turn it red
 
 There is no live-adopter leg (this repository is not an OPFiles adopter), so the whole assurance rides the
@@ -101,8 +101,10 @@ Each case runs on its own copy of that template; the root is removed in a finall
       .working/journals/record/journal with its projection at txn_record("record", <rid>), the operands
       rewritten, and nothing under .aiqt (flip: route homes 2 to the legacy journal root)
   T22 on a homes-2 store the verb still refuses at the claim seam (the record reservation is a separate
-      later change), with every byte untouched and neither journal home created (flip: a reconcile that
-      mkdirs the typed home)
+      later change), with every byte untouched and neither journal home created (flips: a reconcile that
+      mkdirs the typed home; the retired validate_manifest patch, which validates the declaration with
+      homes stripped, so the real 2.0.0 homes-2 manifest reads as above the supported spec_version and
+      the run refuses at the manifest, never at the claim seam)
   T23 a homes-2 publication killed at each journal step leaves the typed journal reconcilable: the next
       run reconciles it under the operation capability (the confirmed-dead gate clears the dead run's
       lease and active record), the operands end exactly at the prestate or exactly at the poststate,
@@ -367,6 +369,11 @@ Each case runs on its own copy of that template; the root is removed in a finall
       type: an EMFILE on the retried O_EXCL claim, a JournalError reopening the lease directory, and an
       interrupt (the report attached as a note) (flip: the round-2 retry, which appended the report to a
       WriteGuardError alone)
+  T78 with homes 2 activated as the homes-2 vectors activate it, a store declaring homes = 2 at the base
+      spec_version 1.2.0 is graded generation 1 and the record verb refuses it at the journal-home probe,
+      every byte untouched and neither journal home created (flips: the retired HOMES2_SPEC_VERSION
+      patch, under which that store reads as generation 2; the generation-only probe of T30, under which
+      the run passes the probe and refuses later at the manifest)
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
 or unusable, temporary storage unusable, or any unexpected harness fault), never a clean skip.
@@ -2282,10 +2289,28 @@ import re
 import _opf_store
 
 
-def _self_test_homes2_active(root):
-    """Activate homes 2 over a fixture store the way apply's A11 test does: declare `homes = 2` in the
-    manifest and patch SUPPORTED_HOMES, HOMES2_SPEC_VERSION and validate_manifest (homes is not yet a
-    manifest schema key). The manifest bytes are restored on exit."""
+class _Homes2SpecGate:
+    """The record module's view of _opf_store with ONE name moved: SUPPORTED_SPEC_VERSION reads as
+    HOMES2_SPEC_VERSION, so _load_manifest's spec_version gate (it admits only SUPPORTED_SPEC_VERSION,
+    1.2.0) admits the real homes-2 declaration pair. Every other name, validate_manifest,
+    homes_generation, HOMES2_SPEC_VERSION and SUPPORTED_HOMES included, is read through to the real
+    module at each access, so a patch on _opf_store still reaches the record module."""
+
+    def __getattr__(self, name):
+        if name == "SUPPORTED_SPEC_VERSION":
+            return _opf_store.HOMES2_SPEC_VERSION
+        return getattr(_opf_store, name)
+
+
+def _self_test_homes2_active(root, spec_version=None):
+    """Activate homes 2 over a fixture store: the manifest on disk declares the real homes-2 pair,
+    spec_version HOMES2_SPEC_VERSION (2.0.0) and homes = 2, which the shipped validate_manifest accepts
+    as it stands. Only what this build still needs to exercise homes 2 is patched: SUPPORTED_HOMES = 2
+    (homes_generation activates nothing while it is 1), and the record module's spec_version gate
+    through _Homes2SpecGate (_load_manifest refuses any spec_version but 1.2.0, the real pair
+    included). validate_manifest, homes_generation and HOMES2_SPEC_VERSION are the shipped ones.
+    `spec_version` replaces the declared version (T78 declares homes = 2 at the base version). The
+    manifest bytes are restored on exit."""
     import contextlib
     import tomllib
     from unittest.mock import patch
@@ -2294,27 +2319,14 @@ def _self_test_homes2_active(root):
     original = path.read_bytes()
     model = tomllib.loads(original.decode("utf-8"))
     model["opf"]["homes"] = 2
-    real_validate = _opf_store.validate_manifest
-
-    def validate_declared(data, *args, **kwargs):
-        # Validate the rest as shipped, then keep the declaration in the validated base: _store_homes
-        # derives the generation from that base.
-        opf = data.get("opf") if isinstance(data, dict) else None
-        if not (isinstance(opf, dict) and "homes" in opf):
-            return real_validate(data, *args, **kwargs)
-        result = real_validate(dict(data, opf=dict((k, v) for k, v in opf.items() if k != "homes")),
-                               *args, **kwargs)
-        if isinstance(result.base, dict):
-            result.base = dict(result.base, homes=opf["homes"])
-        return result
+    model["opf"]["spec_version"] = _opf_store.HOMES2_SPEC_VERSION if spec_version is None else spec_version
 
     @contextlib.contextmanager
     def active():
         path.write_text(emit.emit_checked(model), encoding="utf-8")
         try:
             with patch.object(_opf_store, "SUPPORTED_HOMES", 2), \
-                    patch.object(_opf_store, "HOMES2_SPEC_VERSION", _opf_store.SUPPORTED_SPEC_VERSION), \
-                    patch.object(_opf_store, "validate_manifest", validate_declared):
+                    patch.object(record, "_opf_store", _Homes2SpecGate()):
                 yield
         finally:
             path.write_bytes(original)
@@ -2331,25 +2343,20 @@ import os, time
 record._record_run_id = lambda lock_id: "record-create." + str(os.getpid()) + "." + str(time.time_ns()) + "." + lock_id
 """
 
-# Inside a killed child: activate homes 2 exactly as _self_test_homes2_active does (the
-# manifest on disk already declares homes = 2; these are the module patches), and route the claim seam
-# through the homes-1 counters path, emulating the later id-reservation change, so the run reaches the
-# homes-2 publication.
+# Inside a killed child: activate homes 2 exactly as _self_test_homes2_active does (the manifest on
+# disk already declares the real pair, spec_version 2.0.0 and homes = 2; these are the two remaining
+# module patches, SUPPORTED_HOMES and the record spec_version gate of _Homes2SpecGate), and route the
+# claim seam through the homes-1 counters path, emulating the later id-reservation change, so the run
+# reaches the homes-2 publication.
 HOMES2_CHILD_FLIP = """
 import _opf_store
 _opf_store.SUPPORTED_HOMES = 2
-_opf_store.HOMES2_SPEC_VERSION = _opf_store.SUPPORTED_SPEC_VERSION
-_real_validate = _opf_store.validate_manifest
-def _declared_validate(data, *a, **k):
-    table = data.get("opf") if isinstance(data, dict) else None
-    if not (isinstance(table, dict) and "homes" in table):
-        return _real_validate(data, *a, **k)
-    result = _real_validate(dict(data, opf=dict((key, v) for key, v in table.items() if key != "homes")),
-                            *a, **k)
-    if isinstance(result.base, dict):
-        result.base = dict(result.base, homes=table["homes"])
-    return result
-_opf_store.validate_manifest = _declared_validate
+class _Homes2SpecGate:
+    def __getattr__(self, name):
+        if name == "SUPPORTED_SPEC_VERSION":
+            return _opf_store.HOMES2_SPEC_VERSION
+        return getattr(_opf_store, name)
+record._opf_store = _Homes2SpecGate()
 _claim_seam = record.claim_ids
 record.claim_ids = lambda homes, high, demand, known_complete: _claim_seam(1, high, demand, known_complete)
 """
@@ -2495,6 +2502,20 @@ def flip_t22():
     def creating(ctx):
         (Path(ctx.res.store_root) / ctx.journal_rel).mkdir(parents=True, exist_ok=True)
     return patch.object(record, "_reconcile_capability_journal", creating)
+
+
+def flip_t22_validator():
+    """Restore the retired validate_manifest patch, which validates the declaration with homes stripped:
+    the real 2.0.0 homes-2 manifest then reads as above the supported spec_version and the run refuses at
+    the manifest, never reaching the claim seam."""
+    real = _opf_store.validate_manifest
+
+    def homes_stripped(data, *args, **kwargs):
+        opf = data.get("opf") if isinstance(data, dict) else None
+        if not (isinstance(opf, dict) and "homes" in opf):
+            return real(data, *args, **kwargs)
+        return real(dict(data, opf=dict((k, v) for k, v in opf.items() if k != "homes")), *args, **kwargs)
+    return patch.object(_opf_store, "validate_manifest", homes_stripped)
 
 
 def t23_homes2_crash(fx):
@@ -5807,6 +5828,33 @@ def flip_t77():
     return patch.object(guard, "_claim_after_release", narrow)
 
 
+# --- T78: homes 2 is the declaration pair, never homes = 2 alone (spec 4.2) ---------------------------------
+
+def t78_homes2_needs_the_pair(fx):
+    """With homes 2 activated exactly as the homes-2 vectors activate it, a store declaring homes = 2 at
+    the base spec_version (1.2.0, not HOMES2_SPEC_VERSION) is not a homes-2 store: homes_generation
+    grades it generation 1, and the record verb refuses it at the journal-home probe before any
+    reconciliation or write, every byte untouched and neither journal home created. The retired
+    HOMES2_SPEC_VERSION patch made 1.2.0 the homes-2 version, so it read this very store as homes 2."""
+    env = fx.env
+    root = fx.case("t78-homes2-base-version")
+    manifest_rel = MACH + "/" + _opf_store.MANIFEST_NAME
+    with _self_test_homes2_active(root, spec_version=_opf_store.SUPPORTED_SPEC_VERSION):
+        declared = model(root, manifest_rel)
+        assert (declared["opf"]["homes"], declared["opf"]["spec_version"]) == (
+            2, _opf_store.SUPPORTED_SPEC_VERSION), ("T78 the store declares homes = 2 at 1.2.0", declared["opf"])
+        assert _opf_store.homes_generation(declared) == 1, "T78 homes = 2 at 1.2.0 is graded generation 1"
+        refused_untouched(env, root, CREATE, "homes 2 only with spec_version " + _opf_store.HOMES2_SPEC_VERSION)
+        assert not (Path(root) / record.JOURNAL_REL).exists(), "T78 no legacy journal is created"
+        assert not (Path(root) / ".working/journals").exists(), "T78 no typed journal home is created"
+
+
+def flip_t78():
+    """Restore the retired HOMES2_SPEC_VERSION patch: the base spec_version becomes the homes-2 one, so
+    the 1.2.0 store declaring homes = 2 reads as generation 2."""
+    return patch.object(_opf_store, "HOMES2_SPEC_VERSION", _opf_store.SUPPORTED_SPEC_VERSION)
+
+
 TESTS = (
     ("T1-precondition-byte-reproduction", t1_precondition, flip_t1),
     ("T2-round-trip-emit-checked", t2_round_trip, flip_t2),
@@ -5839,7 +5887,7 @@ TESTS = (
     ("T19-legacy-name-recovery", t19_legacy_name_recovery, flip_t19_legacy),
     ("T20-homes2-legacy-journal-refused", t20_homes2_legacy_refused, flip_t20),
     ("T21-homes2-publish-typed", t21_homes2_publish, flip_t21),
-    ("T22-homes2-claim-still-refused", t22_homes2_claim_refused, flip_t22),
+    ("T22-homes2-claim-still-refused", t22_homes2_claim_refused, (flip_t22, flip_t22_validator)),
     ("T23-homes2-crash-typed", t23_homes2_crash, flip_t23),
     ("T5-flip-unjournaled-write", t5_flip_write, None),     # FLIP_T5 itself is T5's discriminator
     ("T24-broken-manifest-fail-closed", t24_broken_manifest, flip_t24),
@@ -5924,6 +5972,7 @@ TESTS = (
     ("T75-concurrent-recovery-single-writer", t75_concurrent_recovery, None),  # its flip runs inside the children
     ("T76-examination-lock-failure-diagnosed", t76_lock_failure_diagnosed, flip_t76),
     ("T77-release-report-every-failure", t77_report_every_failure, flip_t77),
+    ("T78-homes2-declaration-pair-required", t78_homes2_needs_the_pair, (flip_t78, flip_t30)),
 )
 
 
