@@ -13,7 +13,9 @@ transaction per (run, phase), reconcile-first; and a dispatch table keyed by the
 ADOPT_OPS vocabulary. Slice 5 makes the three finish ops executable: plant-governance (create-only
 planting of a pack member that passed the b.5 trust gate, verify_pack_member), render-views (create-only view
 publication of the render engine's planned bytes, composed into the journaled transaction) and record-adoption (the immutable receipt core and its genesis outcome event in the
-run's own evidence bundle, adoption_record). Every other op returns a refusing not-yet-executable verdict:
+run's own evidence bundle, adoption_record). The apply-time preservation pass (compose_preservation)
+composes the spec 14.2 preservation of the approved plan's sources into a transaction; it is a composition
+pass, not a dispatch entry. Every other op returns a refusing not-yet-executable verdict:
 the file ops, init-store composition, approval capture, hook activation, the completion checks,
 retirement, the stage driver, and the MUTATING CLI subcommands (approve, apply, complete, reconcile)
 remain later slices; the read-only `opf adopt` subcommands plan and status
@@ -599,6 +601,98 @@ class ApplyOps:
         data = emit_inventory(self.run_id, derive_rows(self.run_id, self.ops, self.staged))
         self.create(self.inventory, data)
         self.sealed = True
+
+
+def _classify_source(run_id, label, row):
+    """Read and classify ONE plan source row for the preservation pass: (path, digest, action), the action
+    one of "preserved", "archived-removed" or "none". Anything it cannot read or classify raises a
+    cannot-evaluate AdoptApplyError, never a skip; a preservation other than this run's archive path for a
+    source the pass archives refuses the plan."""
+    def cannot(why):
+        return AdoptApplyError("cannot evaluate {}: {}; the preservation pass composes nothing "
+                               "(fail-closed)".format(label, why))
+    if not isinstance(row, dict):
+        raise cannot("it is not a table")
+    missing, unknown = schema._closed_keyset(row, schema.PLAN_SOURCE_REQUIRED, schema.PLAN_SOURCE_OPTIONAL)
+    if missing or unknown:
+        raise cannot("it is missing {} or carries unknown {} (schemas are closed)".format(
+            missing, [str(k) for k in unknown]))
+    path, digest, disp, occupying = row["path"], row["digest"], row["disposition"], row["occupying"]
+    if not schema._is_contained_filepath(path):
+        raise cannot("its path is not a contained relative file path")
+    if not schema._is_digest(digest):
+        raise cannot("its digest is not a sha256:<64 hex> digest")
+    if not isinstance(disp, str) or disp not in schema.DISPOSITIONS:
+        raise cannot("its disposition {!r} is outside DISPOSITIONS".format(disp))
+    if not schema._is_bool(occupying):
+        raise cannot("its occupying flag is not a boolean")
+    if disp == "keep":
+        if occupying:
+            raise cannot("it is kept but occupies a managed destination (spec 14.2 refuses it)")
+        if "preservation" in row:
+            raise cannot("it is kept in place but records a preservation destination")
+        return path, digest, "none"
+    if not schema._is_contained_filepath(row.get("preservation")):
+        raise cannot("it records no contained preservation destination")
+    if disp == "move" and not occupying:
+        return path, digest, "none"
+    home = archive_rel(run_id, path)
+    if row["preservation"] != home:
+        raise AdoptApplyError("{} preservation {!r} is not this run's adoption archive path {!r}, so the "
+                              "plan is refused and the preservation pass composes nothing (spec 14.2, "
+                              "fail-closed)".format(label, row["preservation"], home))
+    return path, digest, ("archived-removed" if occupying else "preserved")
+
+
+def compose_preservation(ops, plan):
+    """The apply-time preservation pass (spec 14.1, 14.2), driven by the approved plan's `sources` rows and
+    composed into ONE adoption transaction's ApplyOps. Every row is read and classified BEFORE anything is
+    composed, so a plan or row the pass cannot read or classify (a non-table plan or row, a plan naming
+    another run, sources that are not a list, a closed-keyset violation, a malformed path or digest, a
+    disposition outside DISPOSITIONS, a non-boolean occupying flag, a duplicate path, a kept source that
+    occupies a destination or records a preservation, a missing preservation) refuses the whole pass as
+    cannot-evaluate with nothing composed, never a silent skip. Then, in plan order: an OCCUPYING source is
+    archived and then removed with a pinned remove, in that order and in this transaction
+    (ApplyOps.archive_occupying); a NON-OCCUPYING retire or migrate source is preserved (its byte-identical
+    archive copy created) and left frozen in place (ApplyOps.preserve), its removal waiting for the green
+    completion check; a kept source and a non-occupying move source take no op here (a non-occupying move
+    is preserved at its move destination by move-file, not by this pass). Every source the pass archives
+    must record exactly archive_rel(run_id, path) as its preservation, or the plan is refused. A drifted or
+    absent source refuses through ApplyOps.preserve. Returns the (path, action) accounting of every row in
+    plan order, the action one of "preserved", "archived-removed" or "none"; raises AdoptApplyError on
+    every refusal. DISCLOSED-RESIDUAL: the pass holds only the rows it reads. It does not re-run
+    validate_plan or check the approval binding (apply_plan's later slice), and it takes the `occupying`
+    flag as the planner recorded it, never re-deriving the plan's managed destinations."""
+    if not isinstance(ops, ApplyOps):
+        raise AdoptApplyError("the preservation pass composes only into an adoption transaction's ApplyOps; "
+                              "nothing composed (fail-closed)")
+    if not isinstance(plan, dict):
+        raise AdoptApplyError("cannot evaluate the preservation pass: the plan is not a table; nothing "
+                              "composed (fail-closed)")
+    if plan.get("run_id") != ops.run_id:
+        raise AdoptApplyError("cannot evaluate the preservation pass: the plan names run {!r}, not this "
+                              "transaction's run {!r}; nothing composed (fail-closed)".format(
+                                  plan.get("run_id"), ops.run_id))
+    rows = plan.get("sources")
+    if not isinstance(rows, list):
+        raise AdoptApplyError("cannot evaluate the preservation pass: the plan's sources is not a list; "
+                              "nothing composed (fail-closed)")
+    classified = []
+    seen = set()
+    for i, row in enumerate(rows):
+        label = "plan sources[{}]".format(i)
+        path, digest, action = _classify_source(ops.run_id, label, row)
+        if path in seen:
+            raise AdoptApplyError("cannot evaluate {}: its path {!r} is a duplicate of an earlier row; the "
+                                  "preservation pass composes nothing (fail-closed)".format(label, path))
+        seen.add(path)
+        classified.append((path, digest, action))
+    for path, digest, action in classified:
+        if action == "archived-removed":
+            ops.archive_occupying(path, digest)
+        elif action == "preserved":
+            ops.preserve(path, digest)
+    return [(path, action) for path, _digest, action in classified]
 
 
 def check_apply_ops(run_id, phase, ops, staged):
@@ -3086,6 +3180,182 @@ def _self_test_checks():
             except OSError:
                 pass
         os.close(jr_fd)
+
+    # 9b: the apply-time preservation pass (compose_preservation), driven by the plan's sources (spec
+    # 14.2): a non-occupying migrate or retire source is archived byte-equal and left frozen in place; an
+    # occupying source is archived and then removed by a pinned remove, in that order, and a kill-point
+    # after the removal reconciles back to the byte-identical source; keep and a non-occupying move
+    # compose no op; a drifted source, a preservation other than archive_rel(run_id, path), and every row
+    # the pass cannot read or classify refuse with nothing composed; retire-file stays not yet executable.
+    pres_files = dict([("legacy/OLD.md", b"old notes\n"), (".working/TODO.md", b"hand-kept todo\n"),
+                       ("legacy/KEEP.md", b"kept\n"), ("legacy/MOVE.md", b"moved\n")])
+
+    def pres_row(path, disposition, occupying, payload=None, **extra):
+        row = dict(path=path, digest=plan_digest(pres_files[path] if payload is None else payload),
+                   disposition=disposition, occupying=occupying)
+        if disposition != "keep":
+            row["preservation"] = archive_rel(rid, path)
+        row.update(extra)
+        return row
+
+    def pres_plan(*rows):
+        p = schema.canonical_plan()
+        p["sources"] = [dict(r) if isinstance(r, dict) else r for r in rows]
+        return p
+
+    def pres_fixture(temp):
+        root = Path(temp).resolve()
+        for rel, payload in pres_files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_bytes(payload)
+        return root
+
+    def pres_compose(plan, seen):
+        def compose(ops):
+            seen.append(compose_preservation(ops, plan))
+            seen.append([dict(op) for op in ops.ops])
+        return compose
+
+    def bare_compose(root, plan):
+        """(accounting, refusal, ops, staged) of the pass over a bare ApplyOps on `root`, no transaction."""
+        root_fd = _open_product_root(root)
+        try:
+            bare = ApplyOps(root_fd, rid)
+            acct, why = attempt(compose_preservation, bare, plan)
+            return acct, why, list(bare.ops), dict(bare.staged)
+        finally:
+            store._close_fd_exc_safe(root_fd)
+
+    migrate = pres_row("legacy/OLD.md", "migrate", False)
+    occupying = pres_row(".working/TODO.md", "retire", True)
+    keep = pres_row("legacy/KEEP.md", "keep", False)
+    move = pres_row("legacy/MOVE.md", "move", False, preservation=store.moved_dest("legacy/MOVE.md"))
+    shape = []
+    schema._validate_plan_sources([migrate, occupying, keep, move], rid, 1, shape)
+    check("preservation-vector-rows-plan-valid", shape == [])
+    todo, todo_copy = ".working/TODO.md", archive_rel(rid, ".working/TODO.md")
+    nothing = dict()
+
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root = pres_fixture(temp)
+        seen = []
+        txn, _why = attempt(run_adopt_transaction, root, rid, pres_compose(pres_plan(migrate), seen))
+        after = snapshot(root)
+        composed = seen[1] if len(seen) == 2 else []
+        check("preservation-migrate-non-occupying-archive-byte-equal",
+              txn == rid and after.get(archive_rel(rid, "legacy/OLD.md")) == pres_files["legacy/OLD.md"]
+              and seen[:1] == [[("legacy/OLD.md", "preserved")]])
+        check("preservation-migrate-non-occupying-source-unchanged",
+              all(after.get(rel) == payload for rel, payload in pres_files.items())
+              and [(op["op"], op["path"]) for op in composed if op["op"] != "mkdir"]
+              == [("create", archive_rel(rid, "legacy/OLD.md"))])
+        check("preservation-migrate-bundle-verifies", verify_bundle(root, rid).status == VALID)
+
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root = pres_fixture(temp)
+        before = snapshot(root)
+        for label, row in (("non-occupying", pres_row("legacy/OLD.md", "migrate", False, b"as planned\n")),
+                           ("occupying", pres_row(todo, "retire", True, b"as planned\n"))):
+            why = refusal(run_adopt_transaction, root, rid, pres_compose(pres_plan(row), []))
+            check("preservation-drifted-" + label + "-source-refused",
+                  why is not None and "drifted" in why and snapshot(root) == before and lock_free(root))
+
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root = pres_fixture(temp)
+        before = snapshot(root)
+        why = refusal(run_adopt_transaction, root, rid, pres_compose(pres_plan(
+            migrate, dict(pres_row("legacy/OLD.md", "migrate", False), path="legacy/GONE.md",
+                          preservation=archive_rel(rid, "legacy/GONE.md"))), []))
+        check("preservation-absent-source-refused",
+              why is not None and "absent" in why and snapshot(root) == before and lock_free(root))
+
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root = pres_fixture(temp)
+        seen = []
+        txn, _why = attempt(run_adopt_transaction, root, rid, pres_compose(pres_plan(occupying), seen))
+        after = snapshot(root)
+        composed = seen[1] if len(seen) == 2 else []
+        pin = composed[-1].get("source-poststate") if composed else None
+        check("preservation-occupying-create-then-pinned-remove",
+              [(op["op"], op["path"]) for op in composed if op["op"] != "mkdir"]
+              == [("create", todo_copy), ("remove", todo)]
+              and isinstance(pin, dict) and pin.get("sha256") == _sha256(pres_files[todo])
+              and seen[:1] == [[(todo, "archived-removed")]])
+        check("preservation-occupying-archived-then-removed",
+              txn == rid and after.get(todo_copy) == pres_files[todo] and todo not in after
+              and verify_bundle(root, rid).status == VALID)
+
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root = pres_fixture(temp)
+        before = snapshot(root)
+        removed = interrupt_when(lambda: (root / todo_copy).exists() and not (root / todo).exists())
+        with mock.patch.object(_journal, "_kill_point", removed):
+            try:
+                run_adopt_transaction(root, rid, pres_compose(pres_plan(occupying), []))
+                interrupted = False
+            except (_Interrupt, AdoptApplyError) as exc:
+                interrupted = isinstance(exc, _Interrupt)
+        check("preservation-kill-after-remove-leaves-open",
+              interrupted and txn_state(root, rid) == "open" and not (root / todo).exists())
+        check("preservation-kill-reconcile-restores-source-byte-identical",
+              (rid, "rolled-back") in reconcile_without_store(root) and snapshot(root) == before
+              and snapshot(root).get(todo) == pres_files[todo] and lock_free(root))
+
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root = pres_fixture(temp)
+        before = snapshot(root)
+        for label, rows, expect in (("keep", (keep,), [("legacy/KEEP.md", "none")]),
+                                    ("move", (move,), [("legacy/MOVE.md", "none")])):
+            acct, _why, composed, staged = bare_compose(root, pres_plan(*rows))
+            check("preservation-" + label + "-composes-no-op",
+                  acct == expect and composed == [] and staged == nothing and snapshot(root) == before)
+        acct, _why, composed, _staged = bare_compose(root, pres_plan(migrate, occupying, keep, move))
+        check("preservation-mixed-plan-accounts-every-source",
+              acct == [("legacy/OLD.md", "preserved"), (todo, "archived-removed"),
+                       ("legacy/KEEP.md", "none"), ("legacy/MOVE.md", "none")]
+              and [(op["op"], op["path"]) for op in composed if op["op"] != "mkdir"]
+              == [("create", archive_rel(rid, "legacy/OLD.md")), ("create", todo_copy), ("remove", todo)])
+        for label, row in (("foreign", pres_row("legacy/OLD.md", "migrate", False,
+                                                  preservation="legacy/elsewhere.md")),
+                           ("other-run", pres_row("legacy/OLD.md", "retire", False,
+                                                    preservation=archive_rel(other_run, "legacy/OLD.md"))),
+                           ("occupying-move-destination",
+                            pres_row(todo, "move", True, preservation=store.moved_dest(todo)))):
+            first = migrate if row["path"] == todo else occupying
+            acct, why, composed, staged = bare_compose(root, pres_plan(first, row))
+            check("preservation-mismatched-path-" + label + "-refused",
+                  acct is None and "adoption archive path" in (why or "") and composed == []
+                  and staged == nothing and snapshot(root) == before)
+        unknown = dict(keep, note="x")
+        no_flag = dict(migrate)
+        no_flag.pop("occupying")
+        no_pres = dict(migrate)
+        no_pres.pop("preservation")
+        for label, plan in (("plan-not-table", []),
+                            ("other-run-plan", dict(pres_plan(migrate), run_id=other_run)),
+                            ("sources-not-list", dict(pres_plan(), sources=nothing)),
+                            ("row-not-table", pres_plan(migrate, "legacy/KEEP.md")),
+                            ("row-missing-occupying", pres_plan(occupying, no_flag)),
+                            ("row-unknown-key", pres_plan(migrate, unknown)),
+                            ("row-bad-path", pres_plan(migrate, dict(keep, path="legacy/../x.md"))),
+                            ("row-bad-digest", pres_plan(migrate, dict(keep, digest="sha256:" + "Z" * 64))),
+                            ("row-unknown-disposition", pres_plan(migrate, dict(keep, disposition="delete"))),
+                            ("row-occupying-not-bool", pres_plan(migrate, dict(keep, occupying="no"))),
+                            ("row-duplicate-path", pres_plan(migrate, migrate)),
+                            ("row-keep-occupying", pres_plan(migrate, dict(keep, occupying=True))),
+                            ("row-keep-with-preservation",
+                             pres_plan(migrate, dict(keep, preservation=archive_rel(rid, "legacy/KEEP.md")))),
+                            ("row-missing-preservation", pres_plan(occupying, no_pres))):
+            acct, why, composed, staged = bare_compose(root, plan)
+            check("preservation-" + label + "-cannot-eval",
+                  acct is None and "cannot evaluate" in (why or "") and composed == [] and staged == nothing)
+        check("preservation-outside-transaction-refused",
+              "ApplyOps" in (refusal(compose_preservation, None, pres_plan(migrate)) or ""))
+        check("preservation-fixture-untouched", snapshot(root) == before)
+    rf = dispatch(schema.canonical_op("retire-file"))
+    check("preservation-retire-file-stays-not-yet-executable",
+          OP_HANDLERS["retire-file"] is _not_yet_executable and rf.status == CANNOT
+          and any("not yet executable" in f for f in rf.findings))
 
     # 10: apply takes only a plan/v2 (spec 14.1): a v1-marked plan is never apply input. The v1 schema no
     # longer ships (the plan-v2 schema replaced it, U8), and apply refuses on the format marker before it
