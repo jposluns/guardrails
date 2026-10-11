@@ -3424,9 +3424,10 @@ def _handshake_expired(scenario, extra):
 # (_allowlist_producers) pins, read from the child's source and fail closed on the
 # constructs it refuses, the exact names every write of each entry above reads, closed
 # over their origins through the forms it traces, so a producer re-tied to timing
-# (member a's arrival or raise, the send list, a stall) through one of those forms fails
-# definitively in a healthy run too; "producer-oracle" pins that discrimination, one
-# probe per rule it names, on mutated copies of the child source. THE VALUE PIN: the
+# (member a's arrival or raise, the send list, a stall) through one of those forms, by a
+# read that adds a name to the pinned signature, fails definitively in a healthy run
+# too; "producer-oracle" pins that discrimination, one probe per rule it names, on
+# mutated copies of the child source. THE VALUE PIN: the
 # "failed-stalled" scenario holds member a's arrival and raise and the send list,
 # deterministically and in every run, in the exact state a merely slow git leaves them
 # in, with every compared field structural, so an edit tying an allowlisted field to
@@ -3435,18 +3436,21 @@ def _handshake_expired(scenario, extra):
 # depends on ANY other state that differs between the two runs (the scenario's name,
 # member b's presence or absence, the exception outcome's text and similar); a stall's
 # presence is pinned the same way by "failed-refused" (stalls nonempty) beside "failed"
-# (stalls empty). Neither net establishes more than that: the value pin compares the
-# allowlisted fields only in the runs the scenarios make within their bounds, and the
-# oracle catches only the producer forms it traces or refuses. So ANY producer the
-# oracle neither traces nor refuses that changes an allowlisted field only under a
-# condition that no run within the scenarios' bounds reproduces where the producer runs
-# passes both nets, whatever the condition (what a slow positive control alters: arrival,
-# raise, send list, member b's presence, the exception outcome's text; a stall's length;
-# wall clock or environment; or anything else): THE RESIDUAL, stated in
+# (stalls empty). Neither net catches more than its own mechanics reach: the value pin
+# catches a producer only by a compared field differing from its want (a missing report
+# included) in a run the scenarios make within their bounds, and the oracle only by a
+# refusal or by a change to a pinned signature (a traced read adding a name to it, or a
+# name leaving it). So ANY producer that neither net catches passes both nets, whatever the
+# condition under which it changes an allowlisted field (what a slow positive control
+# alters: arrival, raise, send list, member b's presence, the exception outcome's text; a
+# stall's length; the Python version, wall clock or environment; or anything else) and
+# whatever carries it (a form the oracle neither traces nor refuses, or a traced test whose
+# names are all pinned already, such as pinned_version's if sys.version_info >= (3, 99) or
+# a pure-local gate such as if len(branch_swept) > 1): THE RESIDUAL, stated in
 # _allowlist_producers beside the oracle's DISCLOSED BOUNDARIES, whose named residual
-# probes are examples of it, not the class. Only a run in which that condition holds
-# where the producer runs can catch it (a slow positive control is one such run, for a
-# condition it alters), and such a catch is never a pin.
+# probes are examples of it, not the class. Only a run in which that condition holds where
+# the producer runs can catch it (a slow positive control is one such run, for a condition
+# it alters), and such a catch is never a pin.
 # A handshake kind naming a thread its bounded join left ALIVE (the report's join loop,
 # hold_lock's release and loop's sender join all record "<name> finished" exactly then) can
 # still poison any field, the allowlist included (a live holder owns the lock; a live
@@ -3736,10 +3740,11 @@ def _allowlist_producers(source=None):
     holds member a's arrival and raise and the send list in the slow-git state while every
     compared field is structural), so a child that ties evidence, lock_free or restored to
     member a's arrival or raise or to the send list fails a check even in a healthy run,
-    where no timeout ever exercises the classifier, when this oracle traces the tie or the
-    stalled run executes it as a slow run would; THE RESIDUAL below is what neither
-    reaches. A stall's presence is pinned by "failed-refused" (stalls nonempty) beside
-    "failed" (stalls empty).
+    where no timeout ever exercises the classifier, when this oracle traces the tie
+    through a read that adds a name to a pinned signature or the stalled run executes it
+    as a slow run would; THE RESIDUAL below is what neither net catches. A stall's
+    presence is pinned by "failed-refused" (stalls nonempty) beside "failed" (stalls
+    empty).
     A producer is every write of an allowlisted key: extra['<key>'] = value (a tuple target
     is paired element by element), extra['<key>'].<mutator>(args) and extra.update(<key>=
     value). Its reads are the names loaded in the written value, plus the names loaded in
@@ -3785,46 +3790,53 @@ def _allowlist_producers(source=None):
     post-main reads (forloop, which the "failed-stalled" value pin catches, arrival being
     absent there).
     THE RESIDUAL, a disclosure and not a guarantee, stated as the literal complement of
-    what the two nets establish. The value pin compares the allowlisted fields only in
-    the runs the scenarios make within their bounds (the deterministic "failed-stalled"
-    included), and this oracle catches only the producer forms it traces or refuses, as
-    named above. So ANY producer this oracle neither traces nor refuses that changes
-    evidence, lock_free or restored only under a condition that no run within the
-    scenarios' bounds reproduces where the producer runs passes BOTH nets, whatever the
-    condition: what a slow positive control alters (member a's arrival or raise, the send
-    list, member b's presence or absence (b_arrived, b_running, late), the exception
-    outcome's text (ValueError in the stalled run, TimeoutExpired in a slow one)), the
-    scenario's name, a stall's length, wall clock or environment, timing of any other
-    kind, or anything else; and whatever carries it (a for, try or assert gate, an early
-    return, a module attribute, a form not listed here). The value pin catches a producer
-    keyed on one of these facts only where some run within its bounds reproduces that
-    fact (failed-stalled for arrival, raise and the send list, on the code that run
-    executes, where forloop shows the catch, so it is outside THE RESIDUAL;
-    failed-handshake for a handshake expiry; failed-refused for a stall's presence); the
-    stalled run never executes member b's path or run_member (its one member raises
-    inside observed first; its pinned late=[] shows it), and differs from a slow
+    what the two nets catch, each by its own mechanics. The value pin catches a producer
+    only by a compared field differing from its want (a missing report included) in a run
+    the scenarios make within their bounds (the deterministic "failed-stalled" included).
+    This oracle catches a producer only by a refusal (an "unrecognized" entry) or by a
+    change to a pinned signature: a traced read that adds a name to it, or a name leaving
+    it. So ANY producer that neither net catches passes BOTH nets, whatever the condition
+    under which it changes evidence, lock_free or restored: what a slow positive control
+    alters (member a's arrival or raise, the send list, member b's presence or absence
+    (b_arrived, b_running, late), the exception outcome's text (ValueError in the stalled
+    run, TimeoutExpired in a slow one)), the scenario's name, a stall's length, the Python
+    version, wall clock or environment, timing of any other kind, or anything else; and
+    whatever carries it: a form this oracle neither traces nor refuses (a for, try or
+    assert gate, an early return, a module attribute, a form not listed here), or a form it
+    traces whose reads are all names already in the pinned signature. Two EXAMPLES of the
+    latter, not the class: pinned_version (if sys.version_info >= (3, 99):
+    branch_swept[:] = [] before the evidence read, a traced if whose test loads only sys,
+    already pinned, under a condition no run on a Python before 3.99 reproduces) and a
+    pure-local gate (a traced test loading only pinned names, such as if
+    len(branch_swept) > 1:, wherever no run within the bounds makes it hold). The value pin
+    catches a producer keyed on one of the facts named above only where some run within its
+    bounds reproduces that fact (failed-stalled for arrival, raise and the send list, on
+    the code that run executes, where forloop shows the catch, so it is outside THE
+    RESIDUAL; failed-handshake for a handshake expiry; failed-refused for a stall's
+    presence); the stalled run never executes member b's path or run_member (its one member
+    raises inside observed first; its pinned late=[] shows it), and differs from a slow
     "failed" run in the other facts named above. The residual probes named here are
     EXAMPLES, not the class: round 20's R1 (a for gate on member a's raise after
     run_member's late append, raisegate), R2 (the same gate spelled try/assert, trygate)
     and R4 (a for gate on the send list there, sendgate), and its gate on the scenario's
     name (scenariogate: a for gate on scenario == 'failed-stalled' or member a's arrival
-    before the evidence read); round 21's gate on member b's absence (bgate: a for gate
-    on member a's arrival and b_arrived before the evidence read) and on the outcome text
-    (outcomegate: a for gate on outcome.startswith('TimeoutExpired') and member a's
-    arrival before the evidence read); round 22's gate on the outcome text alone
-    (outcomeonlygate: a for gate on outcome.startswith('TimeoutExpired') before the
-    evidence read, tied to no arrival, raise or send list); round 24's gate on a stall's
-    length (stallgate: a for gate on max(stalls) > 0.5 before the evidence read, stalls
-    holding how long "failed-refused" took to release its lock holders, a length no
-    scenario arranges and a slow positive control, which leaves stalls empty, does not
-    produce). The eight residual probes are recorded in "producer-oracle" at their empty
-    diff, so an oracle or scenario change that starts catching one fails that pin and
-    must update this text. Only a run in which that condition holds where the producer
-    runs can catch it (a slow positive control is one such run, for a condition it
-    alters: a "failed" run whose member-a positive control reaches its 60 s bound can
-    leave the field wrong beside the recorded timeout and, the allowlist staying
-    compared, report a definite mismatch); such a catch is intermittent, depends on the
-    host or the condition, and is never a pin."""
+    before the evidence read); round 21's gate on member b's absence (bgate: a for gate on
+    member a's arrival and b_arrived before the evidence read) and on the outcome text
+    (outcomegate: a for gate on outcome.startswith('TimeoutExpired') and member a's arrival
+    before the evidence read); round 22's gate on the outcome text alone (outcomeonlygate:
+    a for gate on outcome.startswith('TimeoutExpired') before the evidence read, tied to no
+    arrival, raise or send list); round 24's gate on a stall's length (stallgate: a for
+    gate on max(stalls) > 0.5 before the evidence read, stalls holding how long
+    "failed-refused" took to release its lock holders, a length no scenario arranges and a
+    slow positive control, which leaves stalls empty, does not produce); round 25's
+    pinned_version, above. The nine residual probes are recorded in "producer-oracle" at
+    their empty diff, so an oracle or scenario change that starts catching one fails that
+    pin and must update this text. Only a run in which the residual producer's condition
+    holds where the producer runs can catch it (a slow positive control is one such run,
+    for a condition it alters: a "failed" run whose member-a positive control reaches its
+    60 s bound can leave the field wrong beside the recorded timeout and, the allowlist
+    staying compared, report a definite mismatch); such a catch is intermittent, depends on
+    the host or the condition, and is never a pin."""
     source = _CLOSE_PROBE_CHILD if source is None else source
     try:
         tree = ast.parse(source)
@@ -4080,28 +4092,40 @@ def _slow_control_record(source=None):
     SystemExit, then Exception, each with its committed name and its one committed
     statement, the last outcome = '{}: {}'.format(type(exc).__name__, exc)), no else and
     no finally. So a TimeoutExpired that reaches this try out of main() is caught by no
-    earlier handler and no nested try, and yields the prefix the gate tests. NOT READ,
-    each a route that can keep the record out of the report while this reader still gives
-    []: whether a TimeoutExpired reaches this try at all (the suite code main() runs, and
-    the child's replacements of suite attributes on that path, such as the sweep wrapper,
-    can swallow or replace it); a binding made by a wildcard import (from <module>
-    import *), which can bind outcome or scenario unseen (sys.outcome = ..., then from
-    sys import *); a rebinding, by ANY binding form (a wildcard import included) or by a
-    module-attribute store (through the builtins module or any other), of ANY name the
-    pinned try loads (contextlib and redirect_stdout, captured, suite, lanes, type, and
-    the handlers' exception names KeyboardInterrupt, SystemExit and Exception), the try
-    itself still parsing to the committed one (KeyboardInterrupt = TimeoutExpired makes
-    the first handler catch the timeout; a contextlib whose redirect_stdout raises on exit
-    replaces it inside the try); a store into the child's own globals through a module
-    attribute (__main__.outcome, __main__.scenario, sys.modules['__main__'].outcome),
-    which binds no name, so neither "gate" nor "outcome" sees it; an exit or raise
-    between the gate and the report (an assert, raise, sys.exit or os._exit after the
-    record, in the child or a def it calls), so no PROBE-REPORT line is printed and the
-    run reads as a missing report, not a timeout; and any change to how the report is
-    written (a rebinding or replacement of print, sys.stdout or json.dumps). The probes
-    exceptbind and ctxclass (the rebinding class), wildcard and mainattr (the wildcard and
-    own-globals routes) and exitafter each hold ONE instance AT [] (disclosed, not read);
-    the classes above, not those instances, are what this reader does not read.
+    earlier handler and no nested try, and yields the prefix the gate tests unless an edit
+    in the NOT READ class below changes what the try or the gate evaluates. NOT READ, each
+    named route an EXAMPLE of that class, a route that can keep the record out of the
+    report while this reader still gives []: whether a TimeoutExpired reaches this try at
+    all (the suite code main() runs, and the child's replacements of suite attributes on
+    that path, such as the sweep wrapper, can swallow or replace it); a binding made by a
+    wildcard import (from <module> import *), which can bind outcome or scenario unseen
+    (sys.outcome = ..., then from sys import *); a rebinding, by ANY binding form (a
+    wildcard import included) or by a module-attribute store (through the builtins module
+    or any other), of ANY name the pinned try loads (contextlib and redirect_stdout,
+    captured, suite, lanes, type, and the handlers' exception names KeyboardInterrupt,
+    SystemExit and Exception), the try itself still parsing to the committed one
+    (KeyboardInterrupt = TimeoutExpired makes the first handler catch the timeout; a
+    contextlib whose redirect_stdout raises on exit replaces it inside the try); a store
+    into the child's own globals through a module attribute (__main__.outcome,
+    __main__.scenario, sys.modules['__main__'].outcome), which binds no name, so neither
+    "gate" nor "outcome" sees it; a store into an attribute of an object the try or the
+    gate evaluates (the exception class's __name__ or __str__:
+    suite.subprocess.TimeoutExpired.__name__ = 'Slow' turns the handler's outcome into
+    'Slow: ...'), which binds no name either; a write to the child's namespace through a
+    function's __globals__ or a frame's globals (handle.__globals__['outcome'] = ...,
+    sys._getframe().f_globals['outcome'] = ...), which binds no name either; an exit or
+    raise between the gate and the report (an assert, raise, sys.exit or os._exit after the
+    record, in the child or a def it calls), so no PROBE-REPORT line is printed and the run
+    reads as a missing report, not a timeout; and any change to how the report is written
+    (a rebinding or replacement of print, sys.stdout or json.dumps). THE NOT READ CLASS,
+    exact by construction: this reader does not read ANY edit, by any route, that changes
+    what the pinned try or the gate evaluates, or whether the record reaches the printed
+    report, without a change it parses as a fact that does not hold (it then still gives
+    []); every route named above is an EXAMPLE of that class, not its bound. The probes
+    exceptbind and ctxclass (the rebinding route), wildcard and mainattr (the wildcard and
+    own-globals routes), exitafter, clsname (the attribute-store route) and funcglobals
+    (the __globals__ route) each hold ONE instance AT [] (disclosed, not read); the class,
+    not those instances, is what this reader does not read.
     Raises LookupError, which the caller records as cannot-evaluate, when the source does
     not parse."""
     source = _CLOSE_PROBE_CHILD if source is None else source
@@ -4303,15 +4327,18 @@ def _member_close_controls(fixture):
     allowlisted field to member a's arrival or raise or to the send list, on code that run
     executes and not also dependent on any other state that differs from a slow "failed"
     run, is a definite mismatch there in a healthy run (THE RESIDUAL, stated in
-    _allowlist_producers: ANY producer the producer oracle neither traces nor refuses
-    that changes an allowlisted field only under a condition that no run within the
-    scenarios' bounds reproduces where the producer runs passes both nets, whatever the
-    condition: what a slow positive control alters (member b's presence, the outcome
-    text, or member a's arrival or raise or the send list on member b's path and
-    run_member, which this run never executes), the scenario's name, a stall's length,
-    wall clock or environment, or anything else; only a run in which that condition
-    holds can catch it, a slow positive control being one such run for a condition it
-    alters);
+    _allowlist_producers: ANY producer that neither net catches passes both nets (the value
+    pin catches only by a compared field differing from its want, a missing report
+    included, in a run within the scenarios' bounds, and the producer oracle only by a
+    refusal or by a change to a pinned signature, such as a traced read adding a name to
+    it), whatever the condition under which it changes an allowlisted field: what a slow
+    positive control alters (member b's presence, the outcome text, or member a's arrival
+    or raise or the send list on member b's path and run_member, which this run never
+    executes), the scenario's name, a stall's length, the Python version, wall clock or
+    environment, or anything else, and whatever carries it, a form the oracle neither
+    traces nor refuses or a traced test whose names are all pinned already (pinned_version,
+    a pure-local gate); only a run in which that condition holds can catch it, a slow
+    positive control being one such run for a condition it alters);
     TIMING ALONE IS NEVER A DEFINITE FINDING
     in these scenarios: member b times the kill sweep in bounded stages (member a's raise, the
     failed-member branch entering the sweep, the harness lock holders' release, the real
@@ -4353,10 +4380,11 @@ def _member_close_controls(fixture):
     the stand-down of every extras key the child writes; "producer-map" pins the producers
     themselves, read from the child's source: the names every write of an allowlisted key
     reads, closed over their origins, so a child tying evidence, lock_free or restored to
-    timing again through a form that oracle traces fails definitively even in a healthy
-    run, and "producer-oracle" that oracle's discrimination on mutated copies of the
-    source, the residual's examples included at their empty diff; "slow-control" pins the
-    stalled run's slow-control record, read from the child's source (_slow_control_record);
+    timing again through a form that oracle traces, by a read that adds a name to a
+    pinned signature, fails definitively even in a healthy run, and "producer-oracle" that
+    oracle's discrimination on mutated copies of the source, the residual's examples
+    included at their empty diff; "slow-control" pins the stalled run's slow-control
+    record, read from the child's source (_slow_control_record);
     "down-map" pins the oracle-down stand-down);
     config/member-close-unresolved-verdict, "unresolved":
     main() returns 2 with
@@ -4801,9 +4829,10 @@ def _member_close_controls(fixture):
     # The allowlist's PRODUCER pin, beside the classifier pins above: the names every write
     # of an allowlisted extras key reads in the child source, closed over their origins
     # (_allowlist_producers), so a child tying a kept field to timing again through a form
-    # the oracle traces fails here even in a healthy run, where no timeout exercises the
-    # classifier (the "failed-stalled" value pin is the second net, and THE RESIDUAL in
-    # _allowlist_producers is what neither reaches). Its own discrimination
+    # the oracle traces, by a read that adds a name to a pinned signature, fails here even
+    # in a healthy run, where no timeout exercises the classifier (the "failed-stalled"
+    # value pin is the second net, and THE RESIDUAL in _allowlist_producers is what
+    # neither net catches). Its own discrimination
     # ("producer-oracle"): each probe rewrites one statement of the child source and must
     # change exactly the named entries, so each rule named here has a probe built to fail
     # when that rule regresses (a rule not named here is not pinned by this list):
@@ -4827,19 +4856,22 @@ def _member_close_controls(fixture):
     # boundaries pinned AT their empty diff, a module attribute store (moduleattr) and a
     # for-loop gate on member a's arrival (forloop, which the "failed-stalled" value pin
     # catches); and examples of THE RESIDUAL pinned AT their empty diff, which pass the
-    # value pin too (examples, not the class: _allowlist_producers states the class, any
-    # producer this oracle neither traces nor refuses that changes an allowlisted field
-    # only under a condition that no run within the scenarios' bounds reproduces where
-    # the producer runs, whatever the condition): round 20's R1 (raisegate), R2
-    # (trygate) and R4 (sendgate) in run_member, which the stalled run never calls (its
-    # late=[]); four gates on facts that differ between the stalled run and a slow
-    # "failed" run, round 20's on the scenario's name (scenariogate), round 21's on
-    # member b's absence (bgate) and on the outcome text with member a's arrival
-    # (outcomegate), and round 22's on the outcome text alone (outcomeonlygate); and
-    # round 24's on a stall's length (stallgate), a condition no scenario arranges and a
-    # slow positive control does not produce. An anchor no longer in the source
-    # is "anchor missing", never a silently clean probe. ast.parse alone reads each
-    # source; no probe source is executed.
+    # value pin too (examples, not the class: _allowlist_producers states the class, ANY
+    # producer that neither net catches, the value pin catching only by a compared field
+    # differing from its want (a missing report included) in a run within the scenarios'
+    # bounds and this oracle only by a refusal or by a change to a pinned signature, such
+    # as a traced read adding a name to it, whatever the condition and whatever carries
+    # it): round 20's R1 (raisegate), R2 (trygate) and R4 (sendgate) in run_member, which
+    # the stalled run never calls (its late=[]); four gates on facts that differ between
+    # the stalled run and a slow "failed" run, round 20's on the scenario's name
+    # (scenariogate), round 21's on member b's absence (bgate) and on the outcome text with
+    # member a's arrival (outcomegate), and round 22's on the outcome text alone
+    # (outcomeonlygate); round 24's on a stall's length (stallgate), a condition no
+    # scenario arranges and a slow positive control does not produce; and round 25's traced
+    # if whose reads are all pinned already (pinned_version: a test on sys.version_info
+    # before the evidence read, adding no name to the signature). An anchor no longer in
+    # the source is "anchor missing", never a silently clean probe. ast.parse alone reads
+    # each source; no probe source is executed.
     witnessed_line = "    witnessed = len(branch_swept)\n"
     late_line = "        late.append([member_argv[2], rc])\n"
     evidence_line = "    extra['evidence'] = [bool(branch_swept)]\n"
@@ -4939,7 +4971,10 @@ def _member_close_controls(fixture):
             "        branch_swept[:] = []\n" + evidence_line),
            ("stallgate", evidence_line,
             "    for _ in range(1 if stalls and max(stalls) > 0.5 else 0):\n"
-            "        branch_swept[:] = []\n" + evidence_line)))
+            "        branch_swept[:] = []\n" + evidence_line),
+           ("pinned_version", evidence_line,
+            "    if sys.version_info >= (3, 99):\n        branch_swept[:] = []\n"
+            + evidence_line)))
     try:
         producers = _allowlist_producers()
         got["producer-map"] = ("producer-map", producers)
@@ -4991,14 +5026,17 @@ def _member_close_controls(fixture):
     # isinstance(test, ast.If) in the lock scope (without it the reader crashes on the
     # committed child, and keeping only a test check admits just a while on the same
     # test, whose body also runs only in the lock scenario).
-    # Last, five instances of routes the reader does NOT read (instances, not the
-    # classes, which the NOT READ text of _slow_control_record states), held AT [] so a
-    # reader that starts catching one must update that text: an exception name the
-    # handlers use rebound ahead of the try (exceptbind), contextlib rebound by a class
-    # whose redirect_stdout turns a TimeoutExpired into RuntimeError on exit (ctxclass),
-    # outcome stored through the child's own module attribute (mainattr) and through
-    # sys's, then bound by a wildcard import (wildcard), and an assert after the record
-    # that ends the child before its report (exitafter). No probe source is executed.
+    # Last, seven instances of routes the reader does NOT read (instances, not the
+    # class, which the NOT READ text of _slow_control_record states by construction),
+    # held AT [] so a reader that starts catching one must update that text: an
+    # exception name the handlers use rebound ahead of the try (exceptbind), contextlib
+    # rebound by a class whose redirect_stdout turns a TimeoutExpired into RuntimeError
+    # on exit (ctxclass), outcome stored through the child's own module attribute
+    # (mainattr) and through sys's, then bound by a wildcard import (wildcard), an
+    # assert after the record that ends the child before its report (exitafter), the
+    # exception class's __name__ stored ahead of the try (clsname), and outcome written
+    # through a function's __globals__ ahead of the gate (funcglobals). No probe source
+    # is executed.
     stalled_gate = ("    if scenario == 'failed-stalled' and "
                     "outcome.startswith('TimeoutExpired'):\n")
     stalled_record = ("        extra.setdefault('missing', [])"
@@ -5090,7 +5128,15 @@ def _member_close_controls(fixture):
         ("wildcard", stalled_gate,
          "    sys." + hidden + "    from sys import *\n" + stalled_gate),
         ("exitafter", stalled_record,
-         stalled_record + "    assert not outcome.startswith('TimeoutExpired')\n"))
+         stalled_record + "    assert not outcome.startswith('TimeoutExpired')\n"),
+        ("clsname", "captured = io.StringIO()\n",
+         "if scenario == 'failed-stalled':\n"
+         "    suite.subprocess.TimeoutExpired.__name__ = 'Slow'\n"
+         "captured = io.StringIO()\n"),
+        ("funcglobals", stalled_gate,
+         "    def namespace_handle():\n        pass\n"
+         "    namespace_handle.__globals__['outcome'] = "
+         "outcome.replace('TimeoutExpired', 'slow')\n" + stalled_gate))
     try:
         got["slow-control"] = ("slow-control", [_slow_control_record()] + [
             _slow_control_record(_CLOSE_PROBE_CHILD.replace(anchor, mutant))
@@ -5292,11 +5338,11 @@ def _member_close_controls(fixture):
                 ("record-map", [True] * 30),
                 # The stalled run's slow-control record, read from the child's source: intact
                 # in the committed child, and each probe, in control_probes order (norec
-                # through dottedimport), names the fact it breaks; the last five
-                # (exceptbind, ctxclass, mainattr, wildcard, exitafter) are instances of
-                # disclosed routes the reader does not read, held at [] so a reader that
-                # starts catching one must update the NOT READ text of
-                # _slow_control_record.
+                # through dottedimport), names the fact it breaks; the last seven
+                # (exceptbind, ctxclass, mainattr, wildcard, exitafter, clsname,
+                # funcglobals) are instances of disclosed routes the reader does not read,
+                # held at [] so a reader that starts catching one must update the NOT READ
+                # text of _slow_control_record.
                 ("slow-control", [[], ["gate"], ["gate", "record"], ["gate"], ["outcome"],
                                   ["outcome"], ["outcome"], ["outcome"], ["outcome"],
                                   ["outcome"], ["outcome"], ["outcome"], ["outcome"],
@@ -5304,7 +5350,7 @@ def _member_close_controls(fixture):
                                   ["gate"], ["gate"], ["gate"], ["gate"], ["gate"],
                                   ["kept"], ["kept"], ["kept"], ["kept"], ["kept"],
                                   ["kept"], ["kept"], ["kept"], ["outcome"], ["outcome"],
-                                  [], [], [], [], []]),
+                                  [], [], [], [], [], [], []]),
                 # Each allowlisted field's producer reads only its traced bound-free source:
                 # evidence the sweep wrapper's branch_swept appends (guarded only by its pure
                 # frame walk, frame), their count before the direct call (witnessed), the
@@ -5316,13 +5362,14 @@ def _member_close_controls(fixture):
                               "witnessed"],
                     lock_free=["lock_free", "suite"], restored=["restored", "signal"],
                     unrecognized=[])),
-                # One expectation per probe, in producer_probes order. The ten final
-                # empty diffs pass this net by design: moduleattr and forloop are
-                # disclosed boundaries (forloop is caught by the "failed-stalled" value
-                # pin); raisegate, trygate, sendgate, scenariogate, bgate, outcomegate,
-                # outcomeonlygate and stallgate are examples of THE RESIDUAL
-                # (_allowlist_producers), which passes the value pin too, so an oracle or
-                # scenario change that starts catching one of them must update that text.
+                # One expectation per probe, in producer_probes order. The eleven final
+                # empty diffs pass this net by design: moduleattr and forloop are disclosed
+                # boundaries (forloop is caught by the "failed-stalled" value pin);
+                # raisegate, trygate, sendgate, scenariogate, bgate, outcomegate,
+                # outcomeonlygate, stallgate and pinned_version are examples of THE
+                # RESIDUAL (_allowlist_producers), which passes the value pin too, so an
+                # oracle or scenario change that starts catching one of them must update
+                # that text.
                 ("producer-oracle", [["evidence"], ["evidence"], ["evidence"],
                                      ["lock_free", "unrecognized"],
                                      ["restored", "unrecognized"],
@@ -5344,7 +5391,7 @@ def _member_close_controls(fixture):
                                      ["evidence", "unrecognized"],
                                      ["evidence", "unrecognized"],
                                      ["evidence", "unrecognized"],
-                                     [], [], [], [], [], [], [], [], [], []]),
+                                     [], [], [], [], [], [], [], [], [], [], []]),
                 ("sweep-site", ["except-before-wait"]),
                 ("sweep-oracle", [[(4, "except-before-wait")], [(5, "unrecognized")],
                                   "LookupError", [(5, "unrecognized")],
