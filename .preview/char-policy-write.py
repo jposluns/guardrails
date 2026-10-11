@@ -9,21 +9,26 @@ WHAT IT DOES
     their names, the advice and the scope all come from the policy file.
 
     Event: PreToolUse, matcher Write|Edit|MultiEdit. Output: nothing (allow), one line holding the standard
-    PreToolUse deny object, or one line holding a systemMessage note (allow with a note). Exit status: always
-    0; the decision travels in the JSON. The verdict is deny, a note or silence: this hook never asks. Once
-    armed (its root set), it allows every call it cannot evaluate with a note naming why, a malformed call
-    among them, and it allows silently only a tool other than Write, Edit or MultiEdit and a well-formed call
-    (see DECISION) that it evaluates and finds clean, whose target is outside the root or the policy's scope,
-    or whose root holds no policy file.
+    PreToolUse deny object, or one line holding a systemMessage note (allow with a note). Exit status: 0,
+    with the decision in the JSON, except the floor guard's exit 2 on an interpreter older than Python 3.14
+    that can start the hook, armed or not; one that cannot start it exits with Python's own status first
+    (DECISION). These exits hold while the hook's output (its diagnostic on stderr, and what it prints on
+    stdout) can be written and flushed. A failing output stream can change the exit status and can lose
+    output, a decision included: the exit is the blocking exit 2 when a DENY line cannot be written to stdout
+    and flushed (a lost deny blocks, never allows; a lost note keeps exit 0). The verdict is deny, a note or
+    silence: this hook never asks. Once armed (its root set), it allows every call it cannot evaluate with a
+    note naming why, a malformed call among them, and it allows silently only a tool other than Write, Edit
+    or MultiEdit and a well-formed call (see DECISION) that it evaluates and finds clean, whose target is
+    outside the root or the policy's scope, or whose root holds no policy file.
 
 CONFIGURATION
     AIQT_CHAR_POLICY_ROOT holds one absolute path, the repository root whose policy applies. There is no
-    default and no older spelling. Unset or empty, the hook is not armed and does nothing, silently. Set but
-    relative, holding a control character, or naming a path that does not exist or is not a directory, it
-    checks nothing and says so in a note on every call; so does an armed hook launched with any command-line
-    argument other than --self-test alone. The policy file is <root>/.aiqt/char-policy.json; absent, the hook
-    allows a well-formed call silently and notes a malformed one (the gate then applies its built-in default
-    policy, which this hook does not copy).
+    default and no older spelling. Unset or empty, the hook is not armed and does nothing, silently (the
+    floor guard still runs first: DECISION). Set but relative, holding a control character, or naming a path
+    that does not exist or is not a directory, it checks nothing and says so in a note on every call; so does
+    an armed hook launched with any command-line argument other than --self-test alone. The policy file is
+    <root>/.aiqt/char-policy.json; absent, the hook allows a well-formed call silently and notes a malformed
+    one (the gate then applies its built-in default policy, which this hook does not copy).
 
 POLICY FILE
     {"version": 1, "id": <name>, "chars": {<one code point>: <name>, ...}, "advice": <optional text>,
@@ -86,6 +91,18 @@ POLICY FILE
     from the reviewed one; whoever makes an edit can record the new hashes in the same change.
 
 DECISION
+    - The floor guard runs first, armed or not, on every call the launch line hands to Python (the README
+      launch line skips the hook, so the call goes ahead, when a standard stream is a directory). On an
+      interpreter older than Python 3.14 that can start the hook, the guard at the top of this file reads
+      no input, writes one line beginning `error: char-policy-write.py requires Python 3.14 or newer` to
+      stderr and exits 2, which PreToolUse treats as a deny, so every such matching Write, Edit and
+      MultiEdit call is denied until Python is upgraded or the hook's entry is removed, under the output
+      condition WHAT IT DOES states. An older interpreter that cannot start the hook never reaches the
+      guard and fails with Python's own error first: one that predates the -I option exits 2, which still
+      denies every such matching call, and one that accepts -I but cannot compile this file (Python 3.4
+      and 3.5 cannot: it uses f-strings, and 3.4 also rejects its starred items in list displays) exits 1,
+      a non-blocking error, so every such matching call is allowed unchecked; .preview/README.md
+      (Installing a hook, step 4) describes those cases.
     - AIQT_CHAR_POLICY_ROOT unset or empty: allow, silently (the hook is not armed). Set but relative,
       holding a control character, or naming a path that does not exist, cannot be examined or is not a
       directory: allow with a note naming the variable and the reason. Armed, but launched with a
@@ -174,11 +191,16 @@ SELF-TEST
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: char-policy-write.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: char-policy-write.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 import os
 import select
@@ -643,8 +665,10 @@ def _read_payload(fd=0, deadline=None):
 
 
 def _emit_line(text):
-    """Write one line to stdout; on any output failure point descriptor 1 at /dev/null so the interpreter's
-    shutdown flush cannot fail, or end at once with status 0: the hook always exits 0."""
+    """Write one NOTE line to stdout; on any output failure point descriptor 1 at /dev/null so the
+    interpreter's shutdown flush cannot fail, or end at once with status 0: every line this path carries
+    is advisory, so losing one keeps exit 0 (the deny line goes through _emit_deny_line, which fails
+    closed when the deny cannot be written and flushed)."""
     try:
         sys.stdout.write(text + "\n")
         sys.stdout.flush()
@@ -659,10 +683,32 @@ def _emit_line(text):
             os._exit(0)
 
 
+def _emit_deny_line(text):
+    """Write the DENY line to stdout and flush it. A deny that cannot be both written and flushed never
+    provably reached the platform, and the silent exit 0 reads as an allow, so the failure is noted on
+    stderr (best-effort: write, then flush, each failure swallowed) and the process ends at once with the
+    blocking exit 2 through os._exit, which skips the interpreter's exit flush (a stream that buffered a
+    failed write raises again there, and the interpreter's own status, 120, is non-blocking). A lost deny
+    blocks, never allows; a lost NOTE still travels _emit_line's fail-open path and keeps exit 0."""
+    try:
+        sys.stdout.write(text + "\n")
+        sys.stdout.flush()
+    except BaseException:
+        try:
+            sys.stderr.write("char-policy-write: the deny decision could not be written to stdout; failing "
+                             "closed with exit 2 (a lost deny blocks, never allows).\n")
+            sys.stderr.flush()
+        except BaseException:
+            pass
+        os._exit(2)
+
+
 def main(argv):
-    """The hook: always 0. `--self-test` alone runs the self-test instead. A real launch passes sys.argv, a
-    non-empty list of strings; any other argv (a call from other code, a tuple included) is treated like an
-    unknown argument, and its payload is never read."""
+    """The hook, reached only past the floor guard: 0, or, through _emit_deny_line, the blocking exit 2
+    when a deny line cannot be written
+    and flushed (a lost deny blocks, never allows). `--self-test` alone runs the self-test instead. A real
+    launch passes sys.argv, a non-empty list of strings; any other argv (a call from other code, a tuple
+    included) is treated like an unknown argument, and its payload is never read."""
     readable = isinstance(argv, list) and len(argv) > 0 and all(isinstance(a, str) for a in argv)
     if readable and list(argv[1:]) == ["--self-test"]:
         return _self_test()
@@ -688,7 +734,10 @@ def main(argv):
         except Exception as exc:
             out = _unchecked(f"an internal error ({type(exc).__name__}) stopped the check")
     if out is not None:
-        _emit_line(json.dumps(out))
+        if "hookSpecificOutput" in out:  # a deny decision: lost means blocked, never allowed
+            _emit_deny_line(json.dumps(out))
+        else:
+            _emit_line(json.dumps(out))
     return 0
 
 
@@ -1428,6 +1477,50 @@ def _self_test():
                 p = subprocess.run([sys.executable, "-I", "-S", "-B", here, *extra], input=data,
                                    capture_output=True, env={"LC_ALL": "C"}, timeout=60)
                 self.assertEqual((p.returncode, p.stdout), (0, b""), extra)
+
+        def test_h04b_stream_failure_deny_exits_2(self):
+            """A deny whose stdout cannot be written or flushed exits 2 with the failure noted on stderr
+            (a lost deny blocks, never allows; before this hardening these runs exited 0 with the deny
+            lost, which allowed the call), while a lost NOTE keeps exit 0. One child per state: stdout on
+            /dev/full (the write or flush raises ENOSPC) and on the write end of a pipe whose read end is
+            already closed (EPIPE). Skipped where /dev/full is absent."""
+            if not os.path.exists("/dev/full"):
+                self.skipTest("/dev/full is absent on this host")
+            deny_data = json.dumps({"tool_name": "Edit", "tool_input": {
+                "file_path": self.at("docs/a.md"), "old_string": "x", "new_string": em}}).encode("ascii")
+            env = {"LC_ALL": "C", ROOT_VAR: self.root}
+
+            def run_streams(data, stdout_to):
+                handles = []
+                if stdout_to == "full":
+                    handle = open("/dev/full", "wb")
+                    handles.append(handle)
+                    stdout_target = handle
+                else:
+                    read_end, write_end = os.pipe()
+                    os.close(read_end)
+                    handles.append(write_end)
+                    stdout_target = write_end
+                try:
+                    p = subprocess.run([sys.executable, "-I", "-S", "-B", here], input=data,
+                                       stdout=stdout_target, stderr=subprocess.PIPE, env=env, timeout=60)
+                finally:
+                    for handle in handles:
+                        try:
+                            if isinstance(handle, int):
+                                os.close(handle)
+                            else:
+                                handle.close()
+                        except OSError:
+                            pass
+                return p.returncode, p.stderr
+
+            for stdout_to in ("full", "broken"):
+                rc, err = run_streams(deny_data, stdout_to)
+                self.assertEqual(rc, 2, (stdout_to, err))
+                self.assertIn(b"could not be written to stdout", err)
+                rc, err = run_streams(b"not json", stdout_to)  # armed cannot-evaluate: a NOTE line, lost, exit 0
+                self.assertEqual((rc, err), (0, b""), stdout_to)
 
         def test_h05_policy(self):
             self.is_deny(self.edit("docs/a.md", "x", em))

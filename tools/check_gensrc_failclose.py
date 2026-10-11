@@ -114,11 +114,16 @@ tree, so it captures local uncommitted edits; on CI, HEAD equals the tree.
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: check_gensrc_failclose.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: check_gensrc_failclose.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 # Set BEFORE importing gen_gensrc (below): importing the loader must write no .pyc into the real tools/
 # tree. The subprocess env also carries PYTHONDONTWRITEBYTECODE=1 for the generators it runs.

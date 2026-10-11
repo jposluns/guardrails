@@ -65,11 +65,16 @@ fail-closed way and names it so the choice is reviewable, per disclose-guard-res
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: _opf_store.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: _opf_store.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 import collections.abc
 import operator
@@ -779,12 +784,16 @@ def _open_working_dir_fd(store_root_fd, working_rel):
 
 
 def _list_real_subdirs(wfd, working_rel):
-    """The listing half of _immediate_subdirs: the sorted immediate real subdirectory names read
-    THROUGH the held `working_rel` descriptor, each entry stat'ed no-follow through that same
-    descriptor. A symlinked entry is skipped (never followed)."""
+    """The listing half of _immediate_subdirs: the sorted immediate real subdirectory names of the
+    directory held open at `wfd`, listed through a FRESH descriptor reopened as "." beneath the held
+    one (F-JOURNAL-HELD-FD-LISTING: a listing read through a descriptor held from an earlier open can
+    miss entries created since that open, so a store subdirectory created after the open would be
+    silently undiscovered), each entry then stat'ed no-follow through the SAME held descriptor, so use
+    stays bound to the directory identity the caller retains (no path re-resolution). A symlinked
+    entry is skipped (never followed)."""
     try:
-        names = sorted(os.listdir(wfd))
-    except OSError as exc:
+        names = sorted(_journal._listdir_fresh(wfd, working_rel))
+    except (_journal.JournalError, OSError) as exc:
         # A listing I/O error (EIO, or a state change after the open) is fail-closed, never read as
         # an empty (no-store) directory (check-fails-closed-on-unreadable).
         raise StoreError("cannot list {} ({})".format(working_rel, exc))
@@ -2543,14 +2552,16 @@ def self_test():
         check("m1-oddly-named-subdir-cannot-eval", resolve_store(m1_root).status == CANNOT_EVALUATE)
 
         # S1.3: a listing I/O error inside .working fails closed, never read as an empty (no-store) dir.
+        # The enumeration reads through os.scandir on the fresh listing descriptor (an int;
+        # F-JOURNAL-HELD-FD-LISTING), so the fault is injected there.
         s13_root = build_store(manifest=manifest_text())
-        _real_listdir = os.listdir
-        os.listdir = (lambda x: (_ for _ in ()).throw(OSError(5, "EIO"))
-                      if isinstance(x, int) else _real_listdir(x))
+        _real_scandir = os.scandir
+        os.scandir = (lambda x: (_ for _ in ()).throw(OSError(5, "EIO"))
+                      if isinstance(x, int) else _real_scandir(x))
         try:
-            check("s13-listdir-io-error-cannot-eval", resolve_store(s13_root).status == CANNOT_EVALUATE)
+            check("s13-listing-io-error-cannot-eval", resolve_store(s13_root).status == CANNOT_EVALUATE)
         finally:
-            os.listdir = _real_listdir
+            os.scandir = _real_scandir
 
         # S2.2: a non-ASCII x-<vendor> slug is not a valid extension namespace (islower()/isdigit() admit
         # non-ASCII; the ASCII alphabet does not).
@@ -3657,6 +3668,42 @@ def self_test():
             os.close(a1_gfd)
         check("a1-generic-product-hardlink-allowed",
               a1_gdata == b"intentional product hardlink" and a1_gst.st_nlink == 2)
+
+        # F-JOURNAL-HELD-FD-LISTING: a store subdirectory created AFTER the held .working descriptor
+        # was opened is still discovered: _list_real_subdirs reads the listing through a fresh
+        # descriptor reopened as "." beneath the held one, never through the held descriptor itself
+        # (a held descriptor's listing can miss every entry created since its open). FILESYSTEM-DEPENDENT
+        # integration evidence: this native leg discriminates only where a held descriptor's listing is
+        # stale (btrfs, not tmpfs); the seam leg after it discriminates on any filesystem.
+        hf_working = base / "heldfd-root" / WORKING_DIRNAME
+        hf_working.mkdir(parents=True)
+        (hf_working / "early-store").mkdir()
+        hf_wfd = os.open(str(hf_working), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            (hf_working / "late-store").mkdir()           # created AFTER the descriptor was opened
+            hf_names = _guard(lambda: _list_real_subdirs(hf_wfd, WORKING_DIRNAME))
+            check("heldfd-late-store-subdir-listed-through-fresh-descriptor",
+                  hf_names == ["early-store", "late-store"])
+        finally:
+            os.close(hf_wfd)
+        # The same late subdirectory under _journal._StStaleListing, held from the .working open: the seam
+        # serves the stale view through the held descriptor and any dup of it, and the current view only
+        # through a "." descriptor opened relative to it, so on ANY filesystem _list_real_subdirs must
+        # list through a fresh descriptor.
+        hs_working = base / "heldfd-seam-root" / WORKING_DIRNAME
+        hs_working.mkdir(parents=True)
+        (hs_working / "early-store").mkdir()
+        hs_wfd = os.open(str(hs_working), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            with _journal._StStaleListing() as hs_seam:
+                hs_seam.hold(hs_wfd)
+                (hs_working / "late-store").mkdir()       # created AFTER the descriptor was opened
+                hs_names = _guard(lambda: _list_real_subdirs(hs_wfd, WORKING_DIRNAME))
+            check("heldfd-seam-late-store-subdir-listed-through-fresh-descriptor",
+                  hs_names == ["early-store", "late-store"] and hs_seam.views
+                  and "stale" not in hs_seam.views)
+        finally:
+            os.close(hs_wfd)
 
     finally:
         shutil.rmtree(base, ignore_errors=True)

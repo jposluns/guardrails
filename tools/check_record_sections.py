@@ -93,11 +93,16 @@ line. Missing or ambiguous inputs inside the declared surface fail closed.
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: check_record_sections.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: check_record_sections.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 import argparse
 import io
@@ -111,10 +116,15 @@ from pathlib import Path, PurePosixPath
 try:
     import tomllib
 except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships tomllib
-    sys.stderr.write(
-        "error: check_record_sections.py cannot import tomllib, part of the Python standard library; "
-        "this installation is incomplete. Nothing was run (cannot evaluate).\n")
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: check_record_sections.py cannot import tomllib, part of the Python standard library; "
+            "this installation is incomplete. Nothing was run (cannot evaluate).\n")
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 CONFIG_REL = ".aiqt/record-sections.toml"
 OID_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")

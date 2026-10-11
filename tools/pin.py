@@ -37,11 +37,16 @@ failure, which reads as a finding, or 2 for an interpreter predating -I when run
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: pin.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: pin.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 import hashlib
 import json
@@ -55,10 +60,15 @@ try:
 except ModuleNotFoundError as exc:  # not a version problem: every Python 3.14 ships tomllib
     if exc.name != "tomllib":
         raise  # a dependency missing while tomllib loads keeps its own diagnostic
-    sys.stderr.write(
-        "error: pin.py cannot import tomllib, part of the Python standard library; "
-        "this installation is incomplete. Nothing was run (cannot evaluate).\n")
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: pin.py cannot import tomllib, part of the Python standard library; "
+            "this installation is incomplete. Nothing was run (cannot evaluate).\n")
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "opf" / "tools"))  # _journal relocated to opf/tools (OPF-SELF-CONTAIN)
@@ -599,7 +609,12 @@ def _blocking_open_journal(root, root_fd):
     """True if the migration cutover journal holds any OPEN (non-terminal) transaction, which blocks a new
     pin operation until recovered (the 9.3 gate line / 4.4). Enumerated through a no-follow dir fd,
     rejecting a symlinked journal root or a symlinked entry (containment, B9); an unreadable or corrupt
-    journal fails closed (blocks). A journal holding only terminal transactions does not block."""
+    journal fails closed (blocks). A journal holding only terminal transactions does not block. The
+    entries are listed through a FRESH descriptor reopened as "." beneath the held journal fd
+    (F-JOURNAL-HELD-FD-LISTING: a listing read through a descriptor held from an earlier open can miss
+    entries created since that open, so an open transaction created after the journal fd was opened
+    would slip past this gate); each entry's stat and frame reads stay bound to the held fd (no path
+    re-resolution)."""
     st = _journal._lstat_contained(root_fd, JOURNAL_REL)
     if st is None:
         return False
@@ -616,7 +631,7 @@ def _blocking_open_journal(root, root_fd):
         _journal._close_fd_yielding(pfd)
         return True
     try:
-        for entry in os.listdir(jfd):
+        for entry in _journal._listdir_fresh(jfd, JOURNAL_REL):
             est = os.stat(entry, dir_fd=jfd, follow_symlinks=False)
             if stat.S_ISLNK(est.st_mode):
                 return True                               # a symlinked journal entry is never followed (block)
@@ -1385,27 +1400,25 @@ def self_test():
     try:
         # ---- TNOTOML: a 3.14 interpreter that cannot import tomllib is an incomplete install, not an old
         # one; the module refuses at exit 2 with one error line naming tomllib (never a traceback, never the
-        # version refusal). It is loaded afresh from this file with tomllib blocked (None in sys.modules makes
-        # the import fail). ----
-        nt_err = io.StringIO()
-        nt_saved = sys.modules.get("tomllib"), list(sys.path)
-        sys.modules["tomllib"] = None
-        try:
-            nt_spec = importlib.util.spec_from_file_location("_pin_no_tomllib", os.path.abspath(__file__))
-            with redirect_stderr(nt_err):
-                nt_spec.loader.exec_module(importlib.util.module_from_spec(nt_spec))
-            nt_outcome = "loaded"
-        except SystemExit as exc:
-            nt_outcome = exc.code
-        except ModuleNotFoundError as exc:
-            nt_outcome = "escaped " + type(exc).__name__
-        finally:
-            sys.modules["tomllib"] = nt_saved[0]
-            sys.path[:] = nt_saved[1]
-        nt_lines = nt_err.getvalue().splitlines()
-        check("TNOTOML: a missing tomllib on a 3.14 interpreter is one exit-2 'cannot import' line, got "
-              "{} with {!r}".format(nt_outcome, nt_lines),
-              nt_outcome == 2 and len(nt_lines) == 1 and nt_lines[0].startswith("error: pin.py cannot import "
+        # version refusal) and an empty stdout. The guard ends its process through os._exit, which an
+        # in-process load would turn into the end of this self-test run itself, so the refusal is exercised
+        # in a REAL subprocess: the child loads the module afresh from this file with tomllib blocked (None
+        # in sys.modules makes the import fail); its trailing sentinel (one 'loaded' line, exit 86) is
+        # reached only if the guard does not refuse. ----
+        nt = subprocess.run(
+            [sys.executable, "-I", "-B", "-c",
+             'import importlib.util, sys\n'
+             'sys.modules["tomllib"] = None\n'
+             'spec = importlib.util.spec_from_file_location("_pin_no_tomllib", sys.argv[1])\n'
+             'spec.loader.exec_module(importlib.util.module_from_spec(spec))\n'
+             'sys.stderr.write("loaded with tomllib blocked\\n")\n'
+             'sys.exit(86)\n', os.path.abspath(__file__)],
+            capture_output=True, text=True, timeout=600)
+        nt_lines = nt.stderr.splitlines()
+        check("TNOTOML: a missing tomllib on a 3.14 interpreter is one exit-2 'cannot import' line with "
+              "empty stdout, got {} with {!r} and stdout {!r}".format(nt.returncode, nt_lines, nt.stdout),
+              nt.returncode == 2 and nt.stdout == "" and len(nt_lines) == 1
+              and nt_lines[0].startswith("error: pin.py cannot import "
               "tomllib, part of the Python standard library") and "requires Python" not in nt_lines[0])
 
         # ---- TNESTED: a ModuleNotFoundError for a DIFFERENT module, raised while tomllib is being imported
@@ -1950,6 +1963,64 @@ def self_test():
                             {".aiqt/evil": b"x\n"}, rel1, [])
         rc, out = _run_cli(["pin", "--root", str(t31), "--staged", str(s31)])
         check("T31: do_pin REFUSES an op targeting .aiqt/ exit 2", rc == 2 and ".aiqt" in out)
+
+        # F-JOURNAL-HELD-FD-LISTING: an open cutover transaction created AFTER the journal fd was
+        # opened still blocks a new pin operation: _blocking_open_journal lists the journal through a
+        # FRESH descriptor reopened beneath the held one (a held descriptor's listing can miss entries
+        # created since its open). The os.open spy creates the open (INTENT-only) transaction right
+        # after the gate opens the journal fd, inside its own open-to-list window. FILESYSTEM-DEPENDENT
+        # integration evidence: this native leg discriminates only where a held descriptor's listing is
+        # stale (btrfs, not tmpfs); the seam leg after it discriminates on any filesystem.
+        hf_root = tmp / "heldfd-gate"
+        (hf_root / JOURNAL_REL).mkdir(parents=True)
+        hf_rfd = os.open(str(hf_root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        hf_real_open = os.open
+        hf_state = {"fired": False}
+        hf_jname = JOURNAL_REL.rsplit("/", 1)[-1]
+
+        def hf_spy(path, flags, *a, **k):
+            fd = hf_real_open(path, flags, *a, **k)
+            if not hf_state["fired"] and path == hf_jname and k.get("dir_fd") is not None:
+                hf_state["fired"] = True
+                os.mkdir("late-open-txn", dir_fd=fd)
+                _journal.publish(fd, hf_root / JOURNAL_REL / "late-open-txn", _journal.F_INTENT,
+                                 {"txn": "A", "header": {}, "ops": []})
+            return fd
+
+        os.open = hf_spy
+        try:
+            hf_blocking = _blocking_open_journal(hf_root, hf_rfd)
+        finally:
+            os.open = hf_real_open
+            os.close(hf_rfd)
+        check("HELDFD: an open transaction created after the journal fd was opened still blocks "
+              "(the gate lists through a fresh descriptor)",
+              hf_state["fired"] and hf_blocking is True)
+        # The same late open transaction under _journal._StStaleListing: the journal fd is held from the
+        # gate's own open and the transaction created right after it; the seam serves the stale view
+        # through the held fd and any dup of it, and the current view only through a "." descriptor
+        # opened relative to it, so on ANY filesystem the gate must list through a fresh descriptor.
+        hs_root = tmp / "heldfd-gate-seam"
+        (hs_root / JOURNAL_REL).mkdir(parents=True)
+        hs_rfd = os.open(str(hs_root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        hs_seam = _journal._StStaleListing()
+
+        def hs_txn(fd):
+            os.mkdir("late-open-txn", dir_fd=fd)
+            _journal.publish(fd, hs_root / JOURNAL_REL / "late-open-txn", _journal.F_INTENT,
+                             {"txn": "A", "header": {}, "ops": []})
+
+        hs_seam.hold_on_open(lambda path, kwargs: path == hf_jname and kwargs.get("dir_fd") is not None,
+                             hs_txn)
+        try:
+            with hs_seam:
+                hs_blocking = _blocking_open_journal(hs_root, hs_rfd)
+        finally:
+            os.close(hs_rfd)
+        check("HELDFD-SEAM: under the stale-listing seam, an open transaction created after the journal fd "
+              "was opened still blocks (the gate lists through a fresh descriptor)",
+              hs_seam.views and "stale" not in hs_seam.views
+              and hs_blocking is True)
 
         # #378: the representative _close_fd_yielding site, each vector green and red under its flip.
         close_failures, close_runs = _journal._st_close_check(vars(_journal), _close_vectors(tmp / "close"))
