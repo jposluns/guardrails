@@ -104,8 +104,14 @@ unit is that schema release for the record model and DEFINES the following where
     matched exactly (anchored, case-sensitive, through the `/` after `originals`) on exact strings. A
     record must be plain throughout before any of it is read: exactly a dict whose every key and nested
     value is exactly a str, int, float, bool, date-time, list or dict, as a TOML parser yields, or None,
-    a tuple or a set. A subclass or any other object is CANNOT-EVALUATE, since its own methods could
-    answer a lookup, a hash, a comparison, a format or a repr with caller code.
+    a tuple, a set or a frozenset; a date-time's tzinfo is None or exactly a datetime.timezone whose name
+    is exactly a str and whose offset is exactly a datetime.timedelta; no non-empty container appears
+    twice (shared or cyclic); and no path through it passes more than 512 containers. Anything else is
+    CANNOT-EVALUATE, since its own methods could answer a lookup, a hash, a comparison, a format or a
+    repr with caller code, or rendering it could exhaust the stack or grow without bound. A record also
+    holds only what a TOML document can (spec 4.4): None, a tuple, a set, a frozenset or a non-str key
+    anywhere in it, a registered `x-<vendor>` table and a module field no value rule reads included, is
+    INVALID.
 """
 import sys
 
@@ -1296,46 +1302,110 @@ def _check_closed_table(table, allowed, where, findings):
 
 
 # The exact built-in types a plain value is made of: what a TOML parser yields (str, int, float, bool, the
-# date-time types, list and dict), plus None, a tuple and a set, which a field rule refuses by name. Each
-# is compared by identity, so no metaclass comparison runs.
+# date-time types, list and dict), plus None, a tuple, a set and a frozenset, which no TOML document
+# yields: a record holding one is plain, so it reaches its field rules and _is_toml_value and is INVALID,
+# not CANNOT-EVALUATE. Each type is compared by identity, so no metaclass comparison runs.
 _PLAIN_SCALAR_TYPES = (str, int, float, bool, type(None), datetime.datetime, datetime.date, datetime.time)
 _PLAIN_COLLECTION_TYPES = (dict, list, tuple, set, frozenset)
+# The most containers any path through a plain value may pass, the value itself counted as level 1. It
+# keeps every later repr, hash and comparison of a plain value well inside the stack, and it exceeds what
+# tomllib parses at the default recursion limit (496 nested arrays), so a parsed record is not refused.
+_PLAIN_MAX_DEPTH = 512
 
 
-def _is_plain_value(value):
-    """True when value, and every key and member nested in it, is exactly one of the plain built-in types
-    above, and every date-time's tzinfo is None or exactly a datetime.timezone. type() reads the real
-    type, never an advertised `__class__`, and each container is read through its built-in type's own
-    iterator, so the walk runs no caller code. A subclass or any other object is not plain: its own
-    methods (a lookup, a hash, a comparison, a format, a repr, a startswith) could answer a later check
-    with caller code. The walk is iterative and reads each container once, so a cycle ends it."""
-    stack, seen = [value], set()
+def _plain_tzinfo(tz):
+    """True when a date-time's tzinfo is None, or exactly a datetime.timezone whose two retained objects,
+    its name and its offset, are exactly a str and exactly a datetime.timedelta. A timezone retains
+    nothing else, and each is read through the exact timezone's own built-in accessor, which returns the
+    retained object itself. A timezone built from a str or timedelta subclass keeps that subclass, and
+    the date-time's repr would run the subclass's own __repr__."""
+    if tz is None:
+        return True
+    return (type(tz) is datetime.timezone and type(datetime.timezone.tzname(tz, None)) is str
+            and type(datetime.timezone.utcoffset(tz, None)) is datetime.timedelta)
+
+
+def _plain_problem(value):
+    """None when value is plain, else (reason, where): reason says why it is not, and where is () when
+    value itself is the culprit or (key,) for the key of the top-level table entry under which the walk
+    found it. Plain: value, and every key and member nested in it, is exactly one of the plain built-in
+    types above; every date-time's tzinfo passes _plain_tzinfo; no non-empty container is reached twice,
+    so the value is a tree as a parsed one is; and no path passes more than _PLAIN_MAX_DEPTH containers.
+    type() reads the real type, never an advertised `__class__`, and each container is read through its
+    built-in type's own iterator, so the walk runs no caller code. A subclass or any other object is not
+    plain: its own methods (a lookup, a hash, a comparison, a format, a repr, a startswith) could answer
+    a later check with caller code. A shared container could make a rendering grow exponentially, and a
+    deep one could overflow the stack while it is rendered, hashed or compared. The walk is iterative and
+    reads each container once, and refuses a second visit (a cycle included) before the depth bound, so
+    it ends. An empty container has no members, so sharing one (the empty tuple is shared by CPython
+    itself) is harmless and allowed."""
+    stack, seen = [(value, 1, ())], set()
     while stack:
-        v = stack.pop()
+        v, depth, where = stack.pop()
         t = type(v)
         if any(t is p for p in _PLAIN_SCALAR_TYPES):
-            if (t is datetime.datetime or t is datetime.time) and not (
-                    v.tzinfo is None or type(v.tzinfo) is datetime.timezone):
-                return False
+            if (t is datetime.datetime or t is datetime.time) and not _plain_tzinfo(v.tzinfo):
+                return ("holds a date-time whose tzinfo is neither None nor exactly a datetime.timezone "
+                        "retaining an exact str name and an exact timedelta offset, so its own methods "
+                        "could answer a check"), where
             continue
         if not any(t is p for p in _PLAIN_COLLECTION_TYPES):
-            return False
-        if id(v) in seen:
-            continue
+            return ("holds a key or value that is not exactly a plain built-in type, so its own methods "
+                    "could answer a check"), where
+        if t.__len__(v) and id(v) in seen:
+            return ("holds a non-empty container reached twice (shared or cyclic), so rendering it could "
+                    "grow without bound"), where
+        if depth > _PLAIN_MAX_DEPTH:
+            return ("holds a value nested deeper than {} containers, so rendering it could exhaust the "
+                    "stack".format(_PLAIN_MAX_DEPTH)), where
         seen.add(id(v))
         if t is dict:
             for key, member in dict.items(v):
-                stack.append(key)
-                stack.append(member)
+                inner = where if where or depth > 1 else (key,)
+                stack.append((key, depth + 1, inner))
+                stack.append((member, depth + 1, inner))
         else:
-            stack.extend(t.__iter__(v))
-    return True
+            for member in t.__iter__(v):
+                stack.append((member, depth + 1, where))
+    return None
+
+
+def _is_plain_value(value):
+    """True when value is plain (_plain_problem)."""
+    return _plain_problem(value) is None
 
 
 def _plain_display(value):
-    """_safe_display of a plain value (_is_plain_value); any other value is named by a fixed marker and
-    never rendered, so its own __repr__ cannot run or forge the message."""
+    """_safe_display of a plain value (_is_plain_value), which is bounded in depth and size, so rendering it
+    runs no caller code and cannot overflow the stack; any other value is named by a fixed marker and never
+    rendered, so its own __repr__ cannot run or forge the message."""
     return _safe_display(value) if _is_plain_value(value) else "<not a plain built-in value>"
+
+
+# The exact scalar types a TOML value takes (tomllib's output): _PLAIN_SCALAR_TYPES without None.
+_TOML_SCALAR_TYPES = (str, int, float, bool, datetime.datetime, datetime.date, datetime.time)
+
+
+def _is_toml_value(value):
+    """True when a plain value (_is_plain_value) is one a TOML document can hold: exactly a TOML scalar, a
+    list or a table, nested, every table key exactly a str, so never None, a tuple, a set or a frozenset.
+    A plain value is a bounded tree, so the walk ends."""
+    stack = [value]
+    while stack:
+        v = stack.pop()
+        t = type(v)
+        if any(t is p for p in _TOML_SCALAR_TYPES):
+            continue
+        if t is dict:
+            for key, member in dict.items(v):
+                if type(key) is not str:
+                    return False
+                stack.append(member)
+        elif t is list:
+            stack.extend(list.__iter__(v))
+        else:
+            return False
+    return True
 
 
 def _is_imported_source(value):
@@ -1360,8 +1430,9 @@ def _validate_import_table(record, schema_fields, findings):
     dict. Its provenance operands `source` and `run` are read from it once and must each be exactly a
     str; every check below, the source binding included, reads only those captured values, through
     built-in operations, so no method of a caller-supplied value runs (a format that names another run
-    or raises, a startswith that forges the match), and an operand that is not exactly a str is refused
-    and never rendered."""
+    or raises, a startswith that forges the match). An operand that is not exactly a str is refused, and
+    its finding renders it only when it is plain (_plain_display), such as None or an int; an operand that
+    is not plain is never rendered but named by a fixed marker."""
     if "import" not in record:
         findings.append("missing required field: import (the provenance table, spec 8.3)")
         return None
@@ -1753,8 +1824,9 @@ def _imported_not_plain(record):
     """The CANNOT-EVALUATE result for a table that is not plain (_is_plain_value). Nothing is looked up in
     it: its entries are read through dict's own items(), the id is the value under the exact-str key
     `id`, and the label shows that id only when the id is plain itself, else calls it unreadable, so
-    neither the label nor the finding runs caller code. The finding names the first field, in table
-    order, whose key or value is not plain."""
+    neither the label nor the finding runs caller code. For an exact dict, the finding names the field
+    under which the walk (_plain_problem) found the first value that is not plain, and says why; for a
+    dict subclass it names no field, since the record itself is the culprit."""
     ids = [v for k, v in dict.items(record) if type(k) is str and k == "id"]
     if not ids:
         label, rid = "imported record (no id)", None
@@ -1765,9 +1837,8 @@ def _imported_not_plain(record):
     if type(record) is not dict:
         why = "the record is a subclass of a table, not exactly one, so its own methods could answer each read"
     else:
-        key = next(k for k, v in dict.items(record) if not (_is_plain_value(k) and _is_plain_value(v)))
-        why = ("field {} holds a key or value that is not exactly a plain built-in type, so its own methods "
-               "could answer a check".format(_plain_display(key)))
+        reason, where = _plain_problem(record)
+        why = "field {} {}".format(_plain_display(where[0]) if where else "<the record>", reason)
     return RecordValidation(CANNOT_EVALUATE, ["{}: {} (a parsed record holds none; fail-closed)".format(
         label, why)], rid=rid)
 
@@ -1792,11 +1863,14 @@ def validate_imported_record(record, expected_type=None, specs=None, registered_
     field of the type's schema carries exactly one closed-reason `unrecorded` row; supplied fields keep
     their declared types and vocabularies; historical timestamps are no later than `imported_at`;
     `proposed_from` is never carried; unknown keys fail. The importer-only legacy_fragment (LF) is
-    refused (spec 8.1/8.2). Before any of the record is read, it must be plain (_is_plain_value): exactly
-    a dict whose every key and nested value is exactly a plain built-in type, as a parsed record is, so
-    no method of a record value (a lookup, a hash, a comparison, a format, a repr, a startswith) runs
-    during validation. A supplied `specs` roster is checked in full before use, and only fresh
-    copies of its checked entries are read (_imported_specs_control). Every control is judged by its
+    refused (spec 8.1/8.2). Before any of the record is read, it must be plain (_plain_problem): exactly
+    a dict whose every key and nested value is exactly a plain built-in type, a tree bounded in depth, as
+    a parsed record is, so no method of a record value (a lookup, a hash, a comparison, a format, a repr,
+    a startswith) runs during validation and no rendering of it overflows the stack or grows without
+    bound. Every field then holds only what a TOML document can (_is_toml_value, spec 4.4), a registered
+    `x-<vendor>` table and a module field no value rule reads included. A supplied `specs` roster is
+    checked in full before use, and only fresh copies of its checked entries are read
+    (_imported_specs_control). Every control is judged by its
     real type, never by an advertised `__class__`, and a collection control is read once, through its
     built-in base's own iterator (_control_members). A worklog record judges the `registered_kinds`
     control whether or not it supplies `kind`.
@@ -1807,9 +1881,9 @@ def validate_imported_record(record, expected_type=None, specs=None, registered_
     the envelope, or the `registered_vendors` control (or, on a worklog, the `registered_kinds` control)
     is malformed, as validate_record judges them; VALID otherwise.
 
-    Not checked here. Each item but the last needs evidence beyond this one record (other records, the
-    store, the preserved original, the source or the import run); the last needs a definition this unit
-    does not hold:
+    Not checked here. Each item but the last two needs evidence beyond this one record (other records,
+    the store, the preserved original, the source or the import run); the last two need a definition
+    this unit does not hold:
       - the cross-record checks: C-IMPORTED-IDS counters and no-deletion, C-LINKS resolution over both
         series, and the C-IMPORTED-SEGREGATION firewall beyond the per-record imported-to-clean link
         refusal (spec 8.3, 8.6);
@@ -1830,6 +1904,9 @@ def validate_imported_record(record, expected_type=None, specs=None, registered_
       - that `actor.id` names the assistant that actually ran the import (spec 8.3): only its presence
         and its form (a non-empty string) are checked, since which assistant ran the run is run
         evidence, not record content;
+      - what a registered `x-<vendor>` table means, including that it overrides none of identity, state,
+        transitions or the other spec 8.7 concerns: only its registration, that it is a table, and that
+        it holds only what a TOML document can are checked, since its meaning is the vendor's definition;
       - the field semantics of a module or importer roster entry. Its shape and its reserved field names
         are checked, but this unit holds no authoritative definition for it (the module schemas ship
         with the module schemas release, spec 8.5), and the value rules here key on a field's name, not
@@ -1912,6 +1989,13 @@ def validate_imported_record(record, expected_type=None, specs=None, registered_
 
     schema_fields = _imported_schema_fields(spec)
     _check_keyset(record, schema_fields | {"import", "unrecorded"}, registered_vendors, findings)
+    for key, value in dict.items(record):
+        # A record is TOML (spec 4.4), so no field holds a value a TOML document cannot, whether or not a
+        # value rule reads it: a registered x-<vendor> table, or a module field with no baseline rule, is
+        # held to this too. A top-level key that is not a str is an unknown key above.
+        if type(key) is str and not _is_toml_value(value):
+            findings.append("field {!r} holds a key or value no TOML document can (a non-string key, None, a "
+                            "tuple, a set or a frozenset); a record is TOML (spec 4.4)".format(key))
     if "proposed_from" in record:
         findings.append("an imported record never carries proposed_from, since its status never takes "
                         "/proposed (spec 8.3)")
@@ -4126,11 +4210,180 @@ def self_test():
              "imported record (no id): field 'title' holds", None)):
         check("imported-record-not-plain-" + _name + "-cannot-eval", _unplain(
             _imp_try(_rec, registered_vendors=REG), _prefix, _rid))
-    # A cyclic value ends the walk, since each container is read once, and reaches its own field rule.
+    # A non-empty container reached twice, a cycle included, is not plain: no parsed record shares one, and
+    # rendering a shared one could grow exponentially. Each vector is finite and the walk is depth-bounded,
+    # so with the visited set removed the cycle ends at the depth bound, under the wrong reason, and the
+    # shared values reach their field rules: each named check fails rather than hanging the run.
+    _twice = "holds a non-empty container reached twice (shared or cyclic)"
     _cyc = []
     _cyc.append(_cyc)
-    check("imported-record-cyclic-value-refused", _imp_refused(
-        _imp_md(**dict([("import", _imp_table(unparsed=_cyc))])), "import.unparsed must be", registered_vendors=REG))
+    _cyc_dict = {}
+    _cyc_dict["self"] = _cyc_dict
+    _shared = ["Decided at the March sync"]
+    _dag = ["leaf"]
+    for _ in range(12):
+        _dag = [_dag, _dag]
+    for _name, _rec, _field in (
+            ("cyclic-list", _imp_md(**dict([("import", _imp_table(unparsed=_cyc))])), "'import'"),
+            ("cyclic-vendor-dict", _imp_md(**{"x-aiqt": _cyc_dict}), "'x-aiqt'"),
+            ("shared-in-field", _imp_md(**dict([("import", _imp_table(unparsed=[_shared, _shared]))])), "'import'"),
+            ("shared-doubling", _imp_md(**{"x-aiqt": {"lane": _dag}}), "'x-aiqt'"),
+            ("shared-across-fields", _imp_md(**dict([("import", _imp_table(unparsed=_shared)),
+                                                    ("x-aiqt", {"lane": _shared})])), None)):
+        _res = _imp_try(_rec, registered_vendors=REG)
+        check("imported-record-" + _name + "-cannot-eval", _unplain(_res, _md4 + "field ", "imported:MD-4")
+              and _twice in _res.findings[0]
+              and (_field is None or _res.findings[0].startswith(_md4 + "field " + _field + " " + _twice)))
+    # An empty container may be shared (CPython shares the empty tuple itself); it reaches its field rule.
+    _empty = []
+    check("imported-record-shared-empty-container-ok", _imp_ok(_imp_md(**{"x-aiqt": {"a": _empty, "b": _empty}}),
+                                                               registered_vendors=REG))
+
+    # Depth: every later repr, hash and comparison of a plain value recurses, so the walk refuses a value
+    # nested deeper than _PLAIN_MAX_DEPTH containers, with a labelled CANNOT-EVALUATE and never a raw
+    # RecursionError, on the normal label, the refusal label, a key, and the import-table renderer. The
+    # bound is exact (512 containers on a path is plain), and a document tomllib parses is not refused.
+    def _nest(levels, inner=None):
+        v = [] if inner is None else inner
+        for _ in range(levels - 1):
+            v = [v]
+        return v
+
+    _deeper = "holds a value nested deeper than {} containers".format(_PLAIN_MAX_DEPTH)
+    _very_deep = _nest(100000)
+    _deep_key = ()
+    for _ in range(1000):
+        _deep_key = (_deep_key,)
+    _deep_key_rec = _imp_md()
+    _deep_key_rec[_deep_key] = _Str("x")
+    for _name, _rec, _prefix in (
+            ("id", _imp_md(id=_very_deep), "imported record (unreadable id): field 'id' " + _deeper),
+            ("id-refusal-label", _imp_md(id=_very_deep, title=_Str("x")), "imported record (unreadable id): field "),
+            ("source", _imp_md(**dict([("import", _imp_table(source=_very_deep))])),
+             _md4 + "field 'import' " + _deeper),
+            ("key", _deep_key_rec, _md4 + "field <not a plain built-in value> "),
+            # 2 levels (the record and x-aiqt) plus 511: one past the bound.
+            ("bound-plus-one", _imp_md(**{"x-aiqt": {"lane": _nest(511)}}), _md4 + "field 'x-aiqt' " + _deeper)):
+        check("imported-record-deep-" + _name + "-cannot-eval", _unplain(
+            _imp_try(_rec, registered_vendors=REG), _prefix, None if _name.startswith("id") else "imported:MD-4"))
+    check("imported-record-deep-at-bound-ok", _imp_ok(_imp_md(**{"x-aiqt": {"lane": _nest(510)}}),
+                                                      registered_vendors=REG))
+    import tomllib
+    _parsed = tomllib.loads("lane = " + "[" * 400 + "]" * 400)
+    check("imported-record-deep-parsed-toml-ok", _imp_ok(_imp_md(**{"x-aiqt": _parsed}), registered_vendors=REG))
+    _found = []
+    try:
+        _validate_import_table(dict([("import", _imp_table(source=_very_deep, run=_very_deep))]),
+                               _imported_schema_fields(_MD), _found)
+    except Exception:
+        _found = None
+    check("imported-import-table-deep-operands-not-rendered", _found is not None
+          and any(f.startswith("import.source <not a plain built-in value> is not ") for f in _found)
+          and any(f.startswith("import.run <not a plain built-in value> is not ") for f in _found))
+    # A plain operand that is not a str is refused and rendered, as the import-table docstring says.
+    _found = []
+    _validate_import_table({"import": {"run": 42, "source": None}}, _imported_schema_fields(_MD), _found)
+    check("imported-import-table-plain-operands-rendered",
+          any(f.startswith("import.source None is not ") for f in _found)
+          and any(f.startswith("import.run 42 is not ") for f in _found))
+
+    # A timezone is plain only when the two objects it retains are: an exact datetime.timezone whose name is
+    # a str subclass, or whose offset is a timedelta subclass, is not plain, on a datetime or a time, as
+    # the id (the normal label), beside another non-plain field (the refusal label), or as import.source.
+    # Each subclass's own __repr__ would run if the date-time were rendered; it never does.
+    _tz_ran = []
+
+    class _TzName(str):
+        def __repr__(self):
+            _tz_ran.append("name")
+            raise RuntimeError("a timezone name ran its own __repr__")
+
+    class _TzOffset(datetime.timedelta):
+        def __repr__(self):
+            _tz_ran.append("offset")
+            raise RuntimeError("a timezone offset ran its own __repr__")
+
+    _tzwhy = "holds a date-time whose tzinfo is neither None nor exactly a datetime.timezone retaining"
+    for _zname, _zone in (("name", datetime.timezone(datetime.timedelta(hours=1), _TzName("CET"))),
+                          ("offset", datetime.timezone(_TzOffset(hours=1)))):
+        for _kind, _val in (("datetime", datetime.datetime(2025, 1, 5, 8, tzinfo=_zone)),
+                            ("time", datetime.time(8, tzinfo=_zone))):
+            for _where, _rec, _prefix, _rid in (
+                    ("id", _imp_md(id=_val), "imported record (unreadable id): field 'id' " + _tzwhy, None),
+                    ("id-refusal-label", _imp_md(id=_val, title=_Str("x")), "imported record (unreadable id): ",
+                     None),
+                    ("source", _imp_md(**dict([("import", _imp_table(source=_val))])),
+                     _md4 + "field 'import' " + _tzwhy, "imported:MD-4")):
+                check("imported-record-tz-" + _zname + "-" + _kind + "-" + _where + "-cannot-eval", _unplain(
+                    _imp_try(_rec, registered_vendors=REG), _prefix, _rid))
+    check("imported-record-tz-subclass-repr-never-ran", not _tz_ran)
+    # An exact timezone holding an exact name, and tomllib's own offset date-times, stay plain: each reaches
+    # its field rule (a TOML date-time is not the RFC 3339 string the field takes).
+    for _name, _val in (("named", datetime.datetime(2025, 1, 5, 8, tzinfo=datetime.timezone(
+            datetime.timedelta(hours=1), "CET"))),
+                        ("parsed-offset", tomllib.loads("t = 2025-01-05T08:00:00-07:00")["t"]),
+                        ("parsed-utc", tomllib.loads("t = 2025-01-05T08:00:00Z")["t"])):
+        check("imported-record-tz-" + _name + "-plain", _imp_refused(
+            _imp_md(created_at=_val), "created_at must be an RFC 3339", registered_vendors=REG))
+
+    # A foreign tzinfo on a time (not only on a datetime) is not plain, and its own __repr__ never runs.
+    class _ReprZone(datetime.tzinfo):
+        def utcoffset(self, dt):
+            return datetime.timedelta(0)
+
+        def __repr__(self):
+            raise RuntimeError("a foreign tzinfo ran its own __repr__")
+
+    check("imported-record-not-plain-foreign-tzinfo-time-cannot-eval", _unplain(_imp_try(
+        _imp_md(**dict([("import", _imp_table(source=datetime.time(8, tzinfo=_ReprZone())))])),
+        registered_vendors=REG), _md4 + "field 'import' " + _tzwhy, "imported:MD-4"))
+
+    # A str-subclass key is never compared with `id`: one whose own __eq__ raises, and one whose __eq__
+    # claims to be `id` (placed first, with a forged id), each leave the label on the record's real id.
+    class _EqRaisesKey(str):
+        __hash__ = str.__hash__
+
+        def __eq__(self, other):
+            raise RuntimeError("a record key ran its own __eq__")
+
+    class _EqLiesKey(str):
+        __hash__ = str.__hash__
+
+        def __eq__(self, other):
+            return True
+
+    _eq_raises_rec = _imp_md()
+    _eq_raises_rec[_EqRaisesKey("note")] = "x"
+    _eq_lies_rec = dict([(_EqLiesKey("zz"), "imported:MD-99")] + list(_imp_md().items()))
+    for _name, _rec in (("eq-raises", _eq_raises_rec), ("eq-lies", _eq_lies_rec)):
+        check("imported-record-not-plain-key-" + _name + "-cannot-eval", _unplain(
+            _imp_try(_rec, registered_vendors=REG), _md4 + "field <not a plain built-in value> holds a key",
+            "imported:MD-4"))
+
+    # Every admitted plain type is plain: each reaches the title rule (INVALID), never CANNOT-EVALUATE.
+    for _name, _val in (("date", datetime.date(2025, 1, 5)), ("time", datetime.time(8, 0)),
+                        ("set", set(["a"])), ("frozenset", frozenset(["a"])), ("none", None), ("tuple", ("a",)),
+                        ("float", 1.5), ("bool", True), ("list", ["a"]), ("dict", {"a": "b"})):
+        check("imported-record-plain-" + _name + "-reaches-field-rule", _imp_refused(
+            _imp_md(title=_val), "title must be a non-empty single line", registered_vendors=REG))
+
+    # A record holds only what a TOML document can: None, a tuple, a set, a frozenset or a non-str key in a
+    # registered x-<vendor> table, at any depth, or in a module field that no value rule reads, is INVALID;
+    # every TOML value type is VALID.
+    _no_toml = "field 'x-aiqt' holds a key or value no TOML document can"
+    for _name, _table in (("none", {"v": None}), ("tuple", {"v": ("t",)}), ("set", {"v": set(["a"])}),
+                          ("frozenset", {"v": frozenset()}), ("int-key", {1: "a"}), ("none-key", {None: "a"}),
+                          ("nested-none", {"a": [{"b": None}]}), ("nested-tuple-key", {"a": {("k",): "v"}})):
+        check("imported-vendor-table-" + _name + "-refused", _imp_refused(
+            _imp_md(**{"x-aiqt": _table}), _no_toml, registered_vendors=REG))
+    for _name, _val in (("none", None), ("tuple", ("t",)), ("set", set(["a"])), ("frozenset", frozenset()),
+                        ("int-key", {1: "a"}), ("nested-none", [None])):
+        check("imported-module-field-" + _name + "-refused", _imp_refused(
+            dict(_ar, digest=_val), "field 'digest' holds a key or value no TOML document can",
+            specs=_module_roster()))
+    check("imported-vendor-table-toml-values-ok", _imp_ok(_imp_md(**{"x-aiqt": tomllib.loads(
+        'a = "s"\nb = 1\nc = 1.5\nd = true\ne = 2025-01-05T08:00:00Z\nf = 2025-01-05T08:00:00\ng = 2025-01-05\n'
+        'h = 08:00:00\ni = [1, [2, "x"]]\nj = nan\nk = inf\n[[l]]\nm = {n = [{o = 1}]}\n')}), registered_vendors=REG))
 
     for _sha in (_IMP_SHA[:-1], _IMP_SHA + "0", "sha256:" + _IMP_SHA, _IMP_SHA[:-1] + "g", 0):
         check("imported-sha-refused-" + repr(_sha)[:24], _imp_refused(
