@@ -525,21 +525,50 @@ def _pinned_remove(rel, data, mode):
                 **{"source-poststate": dict(kind="file", mode=mode, sha256=_sha256(data))})
 
 
+class _Composition:
+    """ONE transaction's whole composition state in one object: the ordered op list, the staged bytes,
+    the directory bookkeeping and the seal. ApplyOps reaches all four only through its one `_state`
+    reference, so publishing a fork's state is a single attribute store (ApplyOps._adopt)."""
+
+    __slots__ = ("ops", "staged", "dirs", "sealed")
+
+    def __init__(self, ops, staged, dirs, sealed):
+        self.ops = ops
+        self.staged = staged
+        self.dirs = dirs
+        self.sealed = sealed
+
+
 class ApplyOps:
     """ONE adoption transaction's ordered op list and staged bytes, composed only through these methods
     against the live tree beneath `root_fd`: create-only publication, preserve-first archival, and a
     final inventory derived from the list itself. check_apply_ops re-proves every invariant over the
-    finished list, so a hand-built list is held to the same rules."""
+    finished list, so a hand-built list is held to the same rules. The composition state (ops, staged,
+    _dirs, sealed) is held in ONE _Composition behind the `_state` reference; the four names are
+    read-only views of it, so nothing rebinds one of them apart from the other three."""
 
     def __init__(self, root_fd, run_id, phase=None):
         self.root_fd = root_fd
         self.run_id = run_id
         self.phase = phase
         self.inventory = inventory_rel(run_id, phase)
-        self.ops = []
-        self.staged = {}
-        self._dirs = set()
-        self.sealed = False
+        self._state = _Composition([], {}, set(), False)
+
+    @property
+    def ops(self):
+        return self._state.ops
+
+    @property
+    def staged(self):
+        return self._state.staged
+
+    @property
+    def _dirs(self):
+        return self._state.dirs
+
+    @property
+    def sealed(self):
+        return self._state.sealed
 
     def _mkdirs(self, rel):
         parts = rel.split("/")[:-1]
@@ -599,23 +628,35 @@ class ApplyOps:
     def _fork(self):
         """An isolated copy of this transaction's composition state (ops, staged bytes, directory
         bookkeeping, seal) over the SAME live tree, so a multi-op pass composes into it and publishes
-        through _adopt only once the whole pass succeeds; a refusal part-way leaves this one untouched."""
+        through _adopt only once the whole pass succeeds; a refusal part-way leaves this one untouched.
+        The op list, staged map and directory set are copied one level (the composing methods only
+        append to them, and staged values are immutable bytes); the seal is carried over, so a sealed
+        transaction's fork refuses every create exactly as the transaction itself does."""
         work = ApplyOps(self.root_fd, self.run_id, self.phase)
-        work.ops = list(self.ops)
-        work.staged = dict(self.staged)
-        work._dirs = set(self._dirs)
-        work.sealed = self.sealed
+        state = self._state
+        work._state = _Composition(list(state.ops), dict(state.staged), set(state.dirs), state.sealed)
         return work
 
     def _adopt(self, work):
-        """Publish a fork's finished composition state as this transaction's own, in one rebinding."""
-        self.ops, self.staged, self._dirs, self.sealed = work.ops, work.staged, work._dirs, work.sealed
+        """Publish a fork's finished composition state as this transaction's own by ONE attribute store,
+        `self._state = work._state`: ops, staged bytes, directory bookkeeping and seal travel together
+        in the fork's _Composition, so this method has no instruction boundary at which the caller holds
+        part of the fork's state. An exception or interruption raised at any instruction up to that
+        store leaves the full entry state; one raised after it leaves the full new state (pinned by an
+        opcode-level fault at every instruction of this method and of compose_preservation, an
+        AdoptApplyError and a KeyboardInterrupt alike). The store itself runs no Python code (no
+        __setattr__ and no `_state` descriptor), so nothing can raise part-way through it; that is
+        inferred from the interpreter, not observed. The boundary that remains: a fault after the store
+        and before the caller receives the return value raises with the full new state already
+        published, so an exception alone does not tell the caller which of the two states it holds. The
+        fork shares the published _Composition afterwards and is discarded by its one caller."""
+        self._state = work._state
 
     def seal(self):
         """Create this transaction's inventory, derived from its own op list, as its final op."""
         data = emit_inventory(self.run_id, derive_rows(self.run_id, self.ops, self.staged))
         self.create(self.inventory, data)
-        self.sealed = True
+        self._state.sealed = True
 
 
 def _classify_source(run_id, label, row):
@@ -675,9 +716,14 @@ def compose_preservation(ops, plan):
     op here (a non-occupying move is preserved at its move destination by move-file, not by this pass).
     Every source the pass archives must record exactly archive_rel(run_id, path) as its preservation, or
     the plan is refused. A drifted, absent or unreadable source, or an occupied archive destination,
-    refuses through ApplyOps.preserve. Only after the whole pass succeeds is the isolated state published to
-    the caller's ApplyOps (ApplyOps._adopt); on ANY refusal, at classification or at composition, the
-    caller's ops, staged bytes and directory bookkeeping stay exactly as they were on entry. Returns the
+    refuses through ApplyOps.preserve. Only after the whole pass succeeds, and its accounting is built, is
+    the isolated state published to the caller's ApplyOps, by one attribute store (ApplyOps._adopt); on ANY
+    refusal, at classification or at composition, the caller's ops, staged bytes, directory bookkeeping
+    and seal stay exactly as they were on entry, and an exception or interruption at any instruction of
+    this function or of ApplyOps._adopt leaves either that full entry state or the full new state, never
+    part of it (a fault after the store raises with the new state already published; see ApplyOps._adopt;
+    a fault inside a composing method lands on the fork, never on the caller). A sealed caller's fork
+    stays sealed, so a pass that would compose any op over it refuses with the seal reason. Returns the
     (path, action) accounting of every row in plan order, the action one of "preserved",
     "archived-removed" or "none"; raises AdoptApplyError on every refusal. DISCLOSED-RESIDUAL: the pass
     holds only the rows it reads. It does not re-run validate_plan or check the approval binding
@@ -713,8 +759,9 @@ def compose_preservation(ops, plan):
             work.archive_occupying(path, digest)
         elif action == "preserved":
             work.preserve(path, digest)
+    accounting = [(path, action) for path, _digest, action in classified]
     ops._adopt(work)
-    return [(path, action) for path, _digest, action in classified]
+    return accounting
 
 
 def check_apply_ops(run_id, phase, ops, staged):
@@ -3262,15 +3309,18 @@ def _self_test_checks():
         directory bookkeeping, seal."""
         return [dict(op) for op in ops.ops], dict(ops.staged), set(ops._dirs), ops.sealed
 
-    def entry_compose(root, plan):
-        """(accounting, refusal, entry state, final state) of the pass over an ApplyOps that already holds
-        one composed bundle create (with its mkdirs) before the pass runs."""
+    def entry_compose(root, plan, sealed_entry=False, run_pass=attempt):
+        """(accounting, refusal, entry state, final state) of the pass, run through `run_pass`, over an
+        ApplyOps that already holds one composed bundle create (with its mkdirs) before the pass runs,
+        and that is also sealed by its inventory first when `sealed_entry`."""
         root_fd = _open_product_root(root)
         try:
             held = ApplyOps(root_fd, rid)
             held.create(evidence_home_rel(rid) + "/before-the-pass.txt", b"composed before the pass\n")
+            if sealed_entry:
+                held.seal()
             entry = ops_state(held)
-            acct, why = attempt(compose_preservation, held, plan)
+            acct, why = run_pass(compose_preservation, held, plan)
             return acct, why, entry, ops_state(held)
         finally:
             store._close_fd_exc_safe(root_fd)
@@ -3460,7 +3510,9 @@ def _self_test_checks():
     # isolated state, then a LATER source refuses at its live read; the caller's ApplyOps, which already
     # held a composed create before the pass, keeps exactly its entry ops, staged bytes, directory
     # bookkeeping and seal. A success over the same held state publishes the entry ops followed by the
-    # pass's own, one op per path.
+    # pass's own, one op per path. Publication is ONE reference switch: a fault injected at every
+    # instruction of the pass and of ApplyOps._adopt leaves the full entry state or the full new state,
+    # never part of it; and a sealed caller's pass refuses with the seal reason, its state unchanged.
     import errno
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
         root = pres_fixture(temp)
@@ -3496,6 +3548,56 @@ def _self_test_checks():
               == [("create", todo_copy), ("remove", todo), ("create", old_copy)]
               and len(paths) == len(set(paths)) and set(final[1]) == set(entry[1]) | {todo_copy, old_copy}
               and final[2] >= entry[2] and snapshot(root) == before)
+        published = final
+        publication_codes = (compose_preservation.__code__, ApplyOps._adopt.__code__)
+
+        def faulting_pass(fault, at, sites):
+            """A run_pass that traces compose_preservation and ApplyOps._adopt opcode by opcode, recording
+            each instruction site, and raises `fault` at the instruction numbered `at` (none when -1)."""
+            def run(fn, *args):
+                def trace(frame, event, arg):
+                    if frame.f_code not in publication_codes:
+                        return None
+                    frame.f_trace_opcodes = True
+                    if event == "opcode":
+                        sites.append((frame.f_code, frame.f_lasti))
+                        if len(sites) - 1 == at:
+                            raise fault("injected publication fault")
+                    return trace
+                prior_trace = sys.gettrace()
+                sys.settrace(trace)
+                try:
+                    return fn(*args), None
+                except (AdoptApplyError, KeyboardInterrupt) as exc:
+                    return None, "{}: {}".format(type(exc).__name__, exc)
+                finally:
+                    sys.settrace(prior_trace)
+            return run
+
+        sites = []
+        acct, why, entry, final = entry_compose(root, pres_plan(occupying, migrate),
+                                                run_pass=faulting_pass(AdoptApplyError, -1, sites))
+        traced = list(sites)
+        check("preservation-publication-trace-reaches-the-switch",
+              why is None and final == published
+              and any(code is ApplyOps._adopt.__code__ for code, _lasti in traced))
+        for fault in (AdoptApplyError, KeyboardInterrupt):
+            outcomes = []
+            for at in range(len(traced)):
+                sites = []
+                acct, why, entry, final = entry_compose(root, pres_plan(occupying, migrate),
+                                                        run_pass=faulting_pass(fault, at, sites))
+                fired = why == "{}: injected publication fault".format(fault.__name__) and acct is None
+                outcomes.append("entry" if fired and final == entry
+                                else "new" if fired and final == published else "partial")
+            check("preservation-publication-fault-at-every-instruction-all-or-nothing-"
+                  + fault.__name__, len(outcomes) == len(traced) and "partial" not in outcomes
+                  and "entry" in outcomes and "new" in outcomes and snapshot(root) == before)
+        acct, why, entry, final = entry_compose(root, pres_plan(occupying, migrate), sealed_entry=True)
+        check("preservation-sealed-entry-refused-with-entry-state",
+              acct is None and entry[3] is True
+              and "the transaction is sealed by its inventory; nothing may follow it" in (why or "")
+              and final == entry and snapshot(root) == before)
     rf = dispatch(schema.canonical_op("retire-file"))
     check("preservation-retire-file-stays-not-yet-executable",
           OP_HANDLERS["retire-file"] is _not_yet_executable and rf.status == CANNOT
