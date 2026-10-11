@@ -109,7 +109,14 @@ def _bootstrap():
     top for exactly this reason -- an eager top-level import failed before main()'s contract could apply.
     Idempotent: a re-import of an already-loaded module is a cheap no-op, so main() may call it on every
     invocation. Returns EXIT_OK on success, or EXIT_MALFORMED with a located diagnostic naming the helper
-    that could not be brought in."""
+    that could not be brought in; the variable parts of that diagnostic (the helper name or the read
+    error's text) are rendered through _init_inert, the one init escaper, so no raw, shell-live value is
+    printed on the way to any verb. A bootstrap failure OTHER than ImportError or OSError (for example a
+    SyntaxError in an installed helper) is not mapped here and surfaces as Python's own traceback: it
+    runs before init dispatch and outside _cmd_init's rendering boundary, a window _cmd_init and
+    OPF-QUICKSTART state. Both mapped arms render their variable parts AT this print (the init suite
+    drives a hostile ImportError, a nameless hostile ImportError and a hostile OSError through them
+    and requires each printed line inert, QA round 13 C)."""
     global _opf_store, _opf_schema, _opf_release, _opf_changelog, _opf_check
     global _opf_emit, _opf_views, _opf_fuzz, _opf_observe, _opf_absorb
     global _opf_worklog, _opf_write_guard, _opf_record, _opf_adopt_apply, _opf_adopt_plan
@@ -130,11 +137,14 @@ def _bootstrap():
         import _opf_adopt_apply  # OPF-ADOPT U1+U5: the apply shell (the three finish ops execute)
         import _opf_adopt_plan   # OPF-ADOPT K9a: read-only investigation + plan freeze (the adopt planner)
     except ImportError as exc:
-        print("opf: cannot bootstrap: {} (cannot evaluate)".format(exc.name or exc), file=sys.stderr)
+        print("opf: cannot bootstrap: {} (cannot evaluate)".format(
+            _init_inert(exc.name or str(exc))), file=sys.stderr)
         return EXIT_MALFORMED
     except OSError as exc:
-        print("opf: cannot bootstrap: a helper module could not be read ({!r}) (cannot evaluate)".format(
-            exc), file=sys.stderr)
+        print("opf: cannot bootstrap: a helper module could not be read "
+              "({}: {}) (cannot evaluate)".format(
+                  _init_inert(type(exc).__name__), _init_inert(str(exc))),
+              file=sys.stderr)
         return EXIT_MALFORMED
     return EXIT_OK
 
@@ -13959,16 +13969,16 @@ def _init_inventory(root_fd):
     an observation, not a filesystem snapshot: concurrent changes after enumeration remain possible.
     """
     journal = _opf_store._journal
-    report = {"entries": [], "complete": False}
+    rows = []
+    report = {"entries": rows, "complete": False}
     name_bytes = 0
 
     def add(relpath, st):
         nonlocal name_bytes
         name_bytes += len(os.fsencode(relpath))
-        if (len(report["entries"]) >= _INIT_MAX_ENTRIES
-                or name_bytes > _INIT_MAX_NAME_BYTES):
+        if len(rows) >= _INIT_MAX_ENTRIES or name_bytes > _INIT_MAX_NAME_BYTES:
             raise RuntimeError("foreign inventory exceeds entry/path-byte bounds")
-        report["entries"].append({"path": relpath, "kind": _init_kind(st)})
+        rows.append({"path": relpath, "kind": _init_kind(st)})
 
     def walk(fd, prefix, depth):
         with os.scandir(fd) as entries:
@@ -14002,7 +14012,7 @@ def _init_inventory(root_fd):
         report["complete"] = True
     except Exception as exc:  # noqa: BLE001  an incomplete inventory never licenses a write
         report["error"] = ascii(exc)
-    report["entries"].sort(key=lambda row: row["path"])
+    rows.sort(key=lambda row: row["path"])
     return report
 
 
@@ -14117,6 +14127,1234 @@ def _init_unignored(git, repo, root, paths):
             "({}). Check out or fetch the blob and retry.".format(sorted(unavailable)))
 
 
+def _init_glob_escape(text):
+    """Escape git wildmatch metacharacters so a repo-relative prefix is matched LITERALLY inside
+    a :(glob) pathspec: a store root whose directory is literally named "[x]" or "*" must not
+    have its name read as a pattern (the ls-files/ls-tree candidates neutralize the same class
+    with --literal-pathspecs, which :(glob) itself does not honour; backslash escaping is the
+    wildmatch-documented neutralization)."""
+    return "".join("\\" + ch if ch in "*?[]\\" else ch for ch in text)
+
+
+# The BARE-COMMAND alphabet: ASCII letters, digits, and . / - _ ONLY. A printed command
+# hint (the restore checkout, the staging add, the render hint) interpolates its values
+# bare, with no quoting at all, so a command is printed ONLY when every value in it
+# consists solely of these characters (_init_bare): such a word a POSIX shell cannot
+# split, substitute, quote, redirect or continue, on any physical line (shlex.quote is
+# retired: it kept a newline-holding value syntactically quoted while the quoted value's
+# middle physical lines ran standalone when the output was pasted line by line, QA
+# round 6 MAJOR). The escape names in this region are spelled in words because the CLI
+# self-test's import structural check re-decodes this whole file under a planted
+# raw_unicode_escape declaration, to which a raw backslash-u sequence in any comment or
+# docstring is itself an escape: well-formed it would decode to another character,
+# truncated it fails the decode.
+_INIT_BARE_SAFE = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789./-_")
+
+
+def _init_exact_str(value):
+    """The EXACT built-in str that every value and exception text init renders
+    or formats into a line, and every line it writes, is converted to first, as
+    are the text a rendering proof compares and each argument token before the
+    argument loop compares or gates it (QA round 14, requirement A: str() may
+    return a str SUBCLASS, and a subclass overriding __eq__, __hash__, __iter__
+    or __format__ decided what the rendering proof compared, what the renderer
+    iterated and what str.format printed, while the characters it carried
+    reached the output raw; QA round 15, requirement C: the argument loop
+    compared and gated tokens it had not converted, so a token whose own __eq__
+    answered "--root" acted as --root). Init's other comparisons (of a
+    sibling module's result, such as a resolver status, and of its own
+    bookkeeping) read their operands as they come and are not claimed here. An
+    instance of str or of any str subclass is
+    copied out through the BASE str.__str__ slot, which returns an exact str of
+    the same characters and never calls the subclass's own __str__; any other
+    value goes through str() once, and whatever that returns, a str subclass
+    included, is copied out the same way. The result's type is exactly str, so
+    the comparison, hashing, iteration and formatting init then applies to it
+    are the built-in ones, never a subclass's."""
+    if type(value) is str:
+        return value
+    if not issubclass(type(value), str):
+        value = str(value)
+    return str.__str__(value)
+
+
+def _init_bare(value):
+    """True when every character of value is in the bare-command alphabet: only such a
+    value may be interpolated into a printed command hint, because a hint carries its
+    values with no quoting at all. This is a gate, not a renderer: a value that fails
+    it is never escaped into a command (an escaped command could still carry a live
+    shell substitution or split across physical lines, QA round 6 MAJOR); the command
+    is withheld instead and the value is printed on a detail line through
+    _init_inert. The value is read as its exact str (_init_exact_str), so a str
+    subclass cannot pass the gate by what its own iteration yields."""
+    return all(ch in _INIT_BARE_SAFE for ch in _init_exact_str(value))
+
+
+# The FIXED rendering alphabet (QA round 8 BLOCKER 1: the round-8 widening to
+# "readable" punctuation let "!" reach output raw, where interactive bash history
+# expansion replays a prior history line, and zsh glob qualifiers and fish command
+# substitution execute code; the round-7 alphabet is restored and is FIXED): ASCII
+# letters, digits and . / - _ ONLY. Every other character, the SPACE included, every
+# quote, "!", "$", the backquote, "(", ")", braces, "~", "#", "=", every separator,
+# redirection and glob character, every control or format character and every
+# non-ASCII character, is rendered as a backslash escape of its code point.
+# Readability of a rendered value is NOT a goal that may widen this set: characters
+# one shell merely groups or ignores are live syntax in another (csh-lineage history
+# expansion acts on "!" INSIDE double quotes), so the only safe set is the one no
+# known interactive shell acts on anywhere in a word. The init suite's runtime paste
+# test drives hostile values through every init exit path and runs every printed
+# line alone through a POSIX sh and an interactive bash with a primed history line,
+# in a non-empty directory, to hold exactly that.
+_INIT_INERT_SAFE = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789./-_")
+
+
+def _init_inert(value):
+    """THE one renderer for every value (path, argument, commit id, exception text, JSON
+    report string) interpolated into any line init prints (QA rounds 6, 7 and 8): the
+    safe alphabet is FIXED and narrow, ASCII letters, digits and . / - _ only, and
+    every character outside it, the space included, becomes a backslash-x, backslash-u
+    or backslash-U escape of its code point, so the rendered form holds nothing an
+    interactive shell acts on (QA round 8 BLOCKER 1: the widened round-8 set let "!"
+    through raw, and bash history expansion replays the user's history even inside
+    double quotes; readability is not a goal that may widen the set). ascii() and
+    repr() are NOT inert for this purpose: each leaves "$" and the backquote raw inside
+    the quoted Python literal it yields, where a POSIX shell keeps them live when the
+    printed line is pasted (QA rounds 5 and 6 MAJOR). A value proven bare by _init_bare
+    renders unchanged. A rendered value is for reconstruction by hand (each escape
+    names one code point); it is never for pasting into a shell. Any value is
+    first converted to its exact str (_init_exact_str; QA round 14, requirement
+    A), so the characters iterated and tested here are the value's own and a
+    str subclass's __str__, __iter__, __eq__ or __hash__ never decides them; the
+    result is a join of exact str pieces, itself an exact str."""
+
+    def escape(ch):
+        code = ord(ch)
+        if code < 0x100:
+            return "\\x{:02x}".format(code)
+        if code < 0x10000:
+            return "\\u{:04x}".format(code)
+        return "\\U{:08x}".format(code)
+
+    text = _init_exact_str(value)
+    return "".join(ch if ch in _INIT_INERT_SAFE else escape(ch) for ch in text)
+
+
+def _init_echo(line, err=False):
+    """THE one output route for opf init (QA round 7, requirement B; QA round 9: the
+    permitted-CALL allowlist is replaced by a permitted-REFERENCE allowlist): every
+    line _cmd_init or any opf.py function it reaches prints goes through this
+    emitter. The init suite's route gate (check_opf_init._init_route_violations)
+    computes the set of opf.py functions reachable from _cmd_init and, in every one
+    of them except this emitter, requires EVERY name and attribute-chain REFERENCE
+    (a callee, an argument, a callback keyword such as key= or default=, a default,
+    anything spelled at all) to resolve to a name the function itself binds, to a
+    reachable module-level definition, or to an entry in a reviewed roster SCOPED
+    to the one function the real source uses it in; an unresolvable (computed)
+    reference is a violation, as is any reference to print, builtins, stdout,
+    stderr, write, writelines, warnings or logging, any import of or assignment to
+    a name that shadows a rostered external base (builtins and the five pinned
+    module imports) at module level or inside a reachable function, any rebinding
+    of this emitter or of the renderers, str.__new__ spelled anywhere outside
+    _InitRestoreLine itself, any assert statement in any reachable function, any
+    departure of _cmd_init from the pinned last-resort boundary shape and any
+    raise or assert inside it, any raise in _init_main outside the one handled
+    try unless it constructs _InitPriorStoreRefusal with no raise ... from cause
+    (an escaping cause would print raw in a chained traceback; _cmd_init's
+    last-resort boundary catches whatever escapes while _init_main runs, so no
+    traceback is printed between init dispatch and that boundary's guarded
+    report -- an interrupt landing in the boundary's own few statements, or
+    after _cmd_init returns on the dispatcher's return path, can still surface
+    Python's own traceback, the windows _cmd_init and QUICKSTART state, and the
+    first of them can chain the caught exception's raw text into that
+    traceback -- and
+    the init suite pins that wrapper's exact bytes), and any
+    _InitRestoreLine or _InitPriorStoreRefusal construction whose template (the
+    remedy template included) is not a string literal or a name that the
+    constructing function's OWN scope binds only by plain assignments of string
+    literals, with no nested def, lambda or match capture binding (QA round 10
+    MAJOR 2: the round-9 rule counted a binding a match capture hid from it and
+    a nested-def binding that did not bind the outer read). A
+    spelled output route (subprocess.run, os.system, os.write, os.writev, open,
+    Path(...).write_text, sys.exit, SystemExit, input, traceback, pprint,
+    sys.displayhook, an alias to an out-of-graph helper, an import alias such as
+    from os import writev as ascii, or a spelled callback such as
+    sorted(..., key=os.system)) is therefore refused because the reference is not
+    allowed where it appears. RESIDUAL (D-STATIC-PIN-RESIDUAL, stated exactly): a
+    static reference check cannot see what an ALLOWED reference does at runtime
+    with hostile VALUES (an allowed method spelling invoked on a rebound object),
+    code in ANOTHER MODULE (the sibling _opf_* modules the init path calls into,
+    whose own output and introspection this gate never parses), or INTROSPECTION
+    reached through allowed spellings at runtime; no introspection spelling
+    (getattr, globals, vars, __import__) is itself in any roster, but a hostile
+    sibling module is out of this gate's scope. Construction-side spellings the
+    gate does not read (a rendered-type subclass or construction in ANOTHER
+    module, one minted through introspection or type() at runtime, or any other
+    spelling of a construction the reference scan cannot see) are the same
+    residual. What such code hands to init's OWN prints is COVERED AT THE
+    OUTPUT, not chased statically: every value and exception text init
+    renders or formats into a line, and every line this emitter writes, is
+    first converted to an exact built-in str (_init_exact_str; QA round 14,
+    requirement A: a str subclass returned by str() overrode __eq__, __iter__
+    or __format__ and printed raw past the round-13 checks; QA round 15,
+    requirement C pins this emitter's own conversion), a JSON event line
+    passes through unrendered only a value whose type is exactly int, float,
+    bool or None and renders every other value that is not a list, tuple or
+    dict as text (_init_inert_json; QA round 15, requirement A: a tuple from a
+    sibling module's stat result, or one a str subclass's reflected __radd__
+    made of the root-binding text, printed its strings raw), the rendering
+    constructors
+    format only registered templates (_INIT_TEMPLATES) and render anything else
+    as a value, and the refusal handler accepts a message or restore line only
+    with its constructor's rendering proof, re-rendering everything else at the
+    point of output (QA round 13, requirements A and E). NOT covered, and
+    stated: output such code writes by itself rather than through this
+    emitter, and in-process rebinding of init's own functions or forgery of
+    the private rendering proofs. The suite's runtime paste test over
+    every init exit path is the primary guard for what the printed lines themselves
+    can do."""
+    stream = sys.stderr if err else sys.stdout
+    stream.write(_init_exact_str(line) + "\n")
+
+
+def _init_inert_json(value):
+    """Prepare a report for json.dumps so that every string in it went through
+    _init_inert, KEYS included, and FAIL CLOSED on every other type (QA round 15,
+    requirement A: the round-14 walk returned unchanged any value that was not a
+    str, list or dict, so a tuple reaching a report, a sibling module's stat
+    st_size or a root binding that a str subclass's reflected __radd__ turned
+    into a tuple, was serialised by json.dumps as an array of its raw strings).
+    A value whose type is EXACTLY int, float, bool or None passes unchanged; a
+    list, tuple or dict is walked into a new built-in list or dict, every item
+    through this function and every KEY rendered as text through _init_inert
+    whatever its type (every key the init reports bind today is a fixed literal,
+    so rendering keys usually changes no output byte; the init suite drives one
+    hostile key through this arm to hold it); and EVERY other value, a str or
+    str subclass, an int or float subclass, bytes or any other object, is
+    rendered through _init_inert as a value, which reads a str by its exact
+    characters and converts anything else once through str().
+    json.dumps alone is NOT shell-inert: it escapes quotes and control characters but
+    leaves "$" and "`" raw inside the JSON double quotes, exactly the double-quote context
+    in which a POSIX shell keeps substitutions live, so a pasted event line whose root or
+    foreign-entry name carries $(...) could execute it (QA round 5). An escaped value
+    reads back as a Python string literal."""
+    kind = type(value)
+    if value is None or kind is bool or kind is int or kind is float:
+        return value
+    if isinstance(value, (list, tuple)):
+        return [_init_inert_json(item) for item in value]
+    if isinstance(value, dict):
+        return {_init_inert(key): _init_inert_json(item)
+                for key, item in value.items()}
+    return _init_inert(value)
+
+
+# The REGISTERED rendering templates (QA round 13, requirement A: render at the
+# output, so no construction path prints raw). Every template the real init
+# source passes to _InitRestoreLine or _InitPriorStoreRefusal is spelled once at
+# its construction site, where the route gate pins it as a string literal or a
+# literal-only-bound name, and once here, byte-identically. The rendering
+# constructors FORMAT a template only when it is a member of this set: any other
+# template value, whatever construction route supplied it (a local or
+# module-level subclass inheriting a constructor included; QA round 12 MAJOR: a
+# declared subclass of _InitPriorStoreRefusal escaped the gate's
+# constructor-name rule and its message, a hostile value in the template
+# position, printed raw), is treated as a VALUE and rendered through
+# _init_inert, never formatted. Formatting an untrusted template is refused for
+# a second reason too: a str.format replacement field can traverse attributes of
+# its arguments, so an unregistered template must never reach format at all. A
+# drift between a construction site and this set is loud twice over: the suite's
+# template-sync check reads every construction site from the AST and requires
+# membership here, and the fail-safe rendering changes output bytes the suite
+# compares in full.
+_INIT_TEMPLATES = frozenset([
+    "",
+    ("  git -C {} --no-replace-objects --literal-pathspecs checkout {} -- "
+     "{}"),
+    ("  git -C {} --no-replace-objects --literal-pathspecs checkout {} -- "
+     "{} {}"),
+    ("a prior store exists in this repository's git history: commit {} on "
+     "HEAD's first-parent line holds {} or a store manifest {} (spec 4.3, "
+     "4.5), and spec 8.2 forbids restarting its counters at zero (record "
+     "ids would be reissued). Remedy: {remedy}, or re-adopt the ancestry "
+     "with opf adopt. Plain opf init refuses whenever this scan of HEAD's "
+     "first-parent line finds a prior store, and a store that never reached "
+     "a tree on HEAD's first-parent line (for example one created and "
+     "deleted on a side branch, merged or not) is not detected (adoption "
+     "across such side lines is opf adopt's authority); the scan checks the "
+     "root's current path only (a store committed under another directory, "
+     "for example before a rename, is not detected)"),
+    "opf init:   additional commit: {}",
+    "opf init:   additional restore path: {}",
+    "opf init:   commit: {}",
+    "opf init:   missing store path: {}",
+    "opf init:   repository: {}",
+    "opf init:   restore path: {}",
+    ("opf init: additional restore command (shell-ready; it restores the "
+     "remaining store path from the newest first-parent tree that holds "
+     "it):"),
+    ("opf init: restore command (shell-ready; it restores only the store "
+     "paths its commit holds, and the additional command below restores the "
+     "other named store path as git checks it out from its own commit):"),
+    ("opf init: restore command (shell-ready; it restores the named store "
+     "paths as git checks them out from that commit):"),
+    ("opf init: restore command withheld: a value in it holds a character "
+     "outside the bare-command alphabet A-Za-z0-9 . / - _ and an escaped "
+     "command could still carry a live shell substitution or split across "
+     "physical lines, so no command is printed. Restore each path named "
+     "below from the commit named above it, in the repository named below, "
+     "by your own means, reading each rendered value literally: the safe "
+     "alphabet is ASCII letters, digits and . / - _ only, and every other "
+     "character, the space included, is written as a backslash escape of "
+     "its code point:"),
+    ("opf init: the restore is PARTIAL: the .working tree the command or "
+     "lines above restore lacks each store path below, so no command or "
+     "path printed above provides it (this scan treats a first-level "
+     ".working subdirectory as a machine store only when it directly holds "
+     "manifest.toml or counters.toml, in that tree or in this line's "
+     "first-parent history at or before the named commit; a store found "
+     "either way is expected to hold both files, and a subdirectory holding "
+     "only other files or only deeper directories is neither expected nor "
+     "named; a structural file counts at its rename destination instead of "
+     "its old path only when the recorded destination blob id equals the "
+     "source blob id (an exact byte-identical move; git's similarity score "
+     "of 100 alone does not prove that, since reordered lines also score "
+     "100), no older first-parent record touched the destination, and the "
+     "renaming commit's tree holds no structural file under the source "
+     "subdirectory, so a machine subdirectory renamed whole with git mv is "
+     "complete at its new path, while any other pairing git's rename "
+     "detection reports, for example a store deleted beside a similar store "
+     "created in the same commit, or a pairing whose bytes were rearranged, "
+     "reads as a deletion of its source, which stays expected, fail-safe); "
+     "supply each missing path by your own means, or re-adopt with opf "
+     "adopt:"),
+    ("restore the store paths the lines below name, from the {} named below "
+     "(no command is printed: a value in it would hold a character outside "
+     "the bare-command alphabet)"),
+    ("restore the store paths the restore command below names, from that "
+     "commit"),
+    ("restore the store paths the restore commands below name, from the "
+     "commits they name (this history deleted the store across more than "
+     "one commit, so one command cannot restore every store path)"),
+    "{}",
+])
+
+
+class _InitRestoreLine(str):
+    """One physical line of a prior-store refusal's restore and detail block: a str
+    whose CONSTRUCTOR renders (QA round 7, requirement B). The template is a string
+    literal, or a name the constructing function's own scope binds only by plain
+    assignments of string literals, with no nested def, lambda or match capture
+    binding (the route gate refuses any other construction; QA round 10 MAJOR 2:
+    the round-9 rule counted bindings it could not see or that did not bind the
+    read), is FORMATTED only when it is a member of the registered-template set
+    _INIT_TEMPLATES (QA round 13, requirement A: a subclass inheriting this
+    constructor carried a hostile value in the template position, which no
+    constructor-name rule reads; an unregistered template is now itself rendered
+    through _init_inert as a value and never formatted, with the rendered values
+    following after literal spaces), and EVERY value is rendered through _init_inert
+    before it is formatted in, with no exception and no pass-through of any kind (QA
+    round 9, requirement B: the round-8 constructor passed a value of the exact
+    _InitRestoreLine type through unrendered, and str.__new__ could mint such a value
+    around a raw string); a value already proven bare renders unchanged, so rendering
+    it again is the identity, and every bare-word restore command stays
+    byte-identical. A line this constructor produced carries a private slot marker
+    set only here, AFTER its values were rendered: the marker proves that the
+    VALUES formatted into the line went through this constructor's renderer (the
+    template's own shape is the route gate's charge, never the marker's), it is
+    what the refusal constructor and the refusal handler accept, and an instance
+    minted around this constructor (str.__new__) lacks the slot and is
+    re-rendered wherever it arrives."""
+
+    __slots__ = ("_opf_line_rendered",)
+
+    def __new__(cls, template, *values):
+        rendered = [_init_inert(value) for value in values]
+        if type(template) is str and template in _INIT_TEMPLATES:
+            line = str.__new__(cls, template.format(*rendered))
+        else:
+            # Fail-safe (QA round 13, requirement A): an unregistered template,
+            # whatever construction route supplied it, is itself a VALUE and is
+            # rendered, never formatted; the rendered values follow after
+            # literal spaces, so the line still carries what was passed, inert.
+            line = str.__new__(cls, " ".join(
+                [_init_inert(template)] + rendered))
+        line._opf_line_rendered = True
+        return line
+
+
+def _init_line_rendered(line):
+    """True only for a line the _InitRestoreLine constructor produced, proven by the
+    private slot that constructor sets after rendering every value: never a type
+    check (QA round 9, requirement B: a str.__new__-minted instance of the exact
+    type carried a raw value through the round-8 type-based pass-through). A minted
+    instance has no slot value, and anything else fails the type test, so the
+    caller re-renders both."""
+    if type(line) is not _InitRestoreLine:
+        return False
+    try:
+        return line._opf_line_rendered is True
+    except AttributeError:
+        return False
+
+
+def _init_refusal_message(exc):
+    """The caught prior-store refusal's message, PROVEN rendered, or re-rendered
+    HERE, at the point of output (QA round 13, requirement A; QA round 14,
+    requirement A). The live text is first converted to an EXACT built-in str
+    (_init_exact_str): str(exc) may return a str subclass, whose own __eq__
+    faked the round-13 comparison below and whose __format__ or __iter__
+    changed what the handler printed, raw, past an untouched constructor proof.
+    The real constructor binds the composed, fully rendered message to a
+    private attribute AFTER rendering it; this accepts the exact text only when
+    that attribute is itself an exact str and EQUALS it under the built-in str
+    equality, so a construction route that never ran the real constructor (a
+    subclass overriding __init__, a minted instance, any other exception type
+    smuggled to the handler) and a message swapped in after construction (a
+    reassigned exc.args) are both rendered through _init_inert here, never
+    printed raw. Equality, not mere presence, because the proof must cover the
+    exact characters printed. Either way the return value is an exact str, so
+    the handler formats those characters and nothing a subclass chooses.
+    Deliberate in-process forgery of the private attribute around raw text,
+    and in-process rebinding of these functions, are hostile code already
+    running in this interpreter, the stated D-STATIC-PIN-RESIDUAL."""
+    text = _init_exact_str(exc)
+    try:
+        proven = exc._opf_rendered_message
+    except AttributeError:
+        return _init_inert(text)
+    if type(proven) is str and proven == text:
+        return text
+    return _init_inert(text)
+
+
+class _InitPriorStoreRefusal(RuntimeError):
+    """A DEFINITE prior-store ancestry finding (spec 8.2), as opposed to a cannot-evaluate:
+    _cmd_init reports it under a REFUSED prefix in the finding's own words, then prints
+    restore_lines (a label line and a restore command alone on its line, twice when the store
+    was deleted across two commits, or withheld-command detail lines when the repository
+    path or a restored path is not bare (_init_bare), plus
+    missing-store-path detail lines naming each structural store file the restorable
+    .working tree lacks). The exit code is the
+    same 2 either way; only the reporting wording distinguishes the two verdicts.
+    The CONSTRUCTOR renders (QA rounds 7 and 9, requirement B): the message is
+    template.format over values EACH rendered through _init_inert, with no
+    pass-through of any kind (the template and the remedy template are string
+    literals or literal-only-bound names, pinned by the route gate, and each is
+    FORMATTED only when it is a member of the registered-template set
+    _INIT_TEMPLATES: an unregistered one, a subclass inheriting this constructor
+    included, is itself rendered as a value and never formatted, QA round 13,
+    requirement A); the composed message is then bound to the private rendering
+    proof the refusal handler checks at the point of output; the remedy
+    prose is formatted here from its own pinned template over its own rendered
+    values, gains the fixed PARTIAL clause when partial is true, and fills the
+    template's {remedy} field, so no composed prose is ever passed back through the
+    renderer as a value; and every restore_lines entry that does not carry the
+    _InitRestoreLine constructor's rendering proof (_init_line_rendered, a private
+    slot a minted instance of the exact type lacks; QA round 9, requirement B) is
+    re-rendered through that constructor, so a raw value bound into any channel is
+    escaped at construction, never printed raw."""
+
+    def __init__(self, template, values, restore_lines,
+                 remedy_template="", remedy_values=(), partial=False):
+        rendered_remedy = [_init_inert(value) for value in remedy_values]
+        if type(remedy_template) is str and remedy_template in _INIT_TEMPLATES:
+            remedy = remedy_template.format(*rendered_remedy)
+        else:
+            # Fail-safe (QA round 13, requirement A): an unregistered remedy
+            # template is itself a value and renders, never formats.
+            remedy = " ".join(
+                [_init_inert(remedy_template)] + rendered_remedy)
+        if partial:
+            remedy = remedy + (
+                ", and the restore is PARTIAL (the missing-store-path lines below "
+                "name structural store files the restored .working tree lacks)")
+        rendered = [_init_inert(value) for value in values]
+        if type(template) is str and template in _INIT_TEMPLATES:
+            message = template.format(*rendered, remedy=remedy)
+        else:
+            # The same fail-safe for the message template: the remedy, itself
+            # rendered or literal either way above, follows after a literal
+            # space so nothing passed in is dropped.
+            message = " ".join(
+                [_init_inert(template)] + rendered
+                + ([remedy] if remedy else []))
+        super().__init__(message)
+        # The rendering PROOF the refusal handler accepts at the point of
+        # output (QA round 13, requirement A): set only AFTER the message was
+        # composed from rendered parts, and checked there by VALUE equality
+        # with the live str(exc), so a message swapped in afterwards (a
+        # reassigned exc.args) no longer matches and is re-rendered.
+        self._opf_rendered_message = message
+        self.restore_lines = [
+            line if _init_line_rendered(line) else _InitRestoreLine("{}", line)
+            for line in restore_lines]
+
+
+def _init_history_rels(prefix):
+    """The repo-relative committed-pointer and .working paths for a root at repo-relative prefix.
+
+    git reports and matches repo-relative paths with "/" on EVERY platform, so the ancestry
+    pathspecs, the ls-tree name comparisons, and the <commit>:<path> form are built with POSIX
+    separators (as_posix), never str(Path), which yields backslashes on Windows and would
+    silently match nothing there. A separate function so check_opf_init can pin the separator
+    choice on POSIX hosts too, by passing a PureWindowsPath prefix."""
+    pointer_path = prefix / _opf_store.POINTER_REL
+    working_path = prefix / _opf_store.WORKING_DIRNAME
+    return (pointer_path.as_posix(), working_path.as_posix())
+
+
+def _init_no_prior_store(git, repo, root):
+    """Refuse initialization where the first-parent history of HEAD shows a prior store (spec 8.2).
+
+    counters.toml holds monotonic high-water values that MUST NOT be reset, and only a genuinely
+    first adoption may start its counters at zero (spec 8.2): a fresh init over a line whose
+    history held a store would restart every namespace at zero and let record ids be reissued.
+    The committed paths that identify a store are the committed pointer .opf.toml (spec 4.3) and
+    a store manifest one level below .working/ (.working/<subdir>/manifest.toml, spec 4.4/4.5).
+    Presence of the PATH suffices, deliberately without reading the blob: a legacy [devprocess]
+    manifest proves prior ancestry exactly as a current one does (spec 4.5 refuses it as
+    unsupported-older-store, never reads it as absent), and no blob content could downgrade the
+    refusal. A found ancestor REFUSES, naming the newest first-parent commit whose tree held a
+    store and the remedy (restore that commit's store, or `opf adopt`); it never passes silently.
+    Each restore command, carried in restore_lines and printed alone on a line after the REFUSED
+    line, names only the store paths its commit's tree holds (git checkout fails outright on a
+    pathspec the commit lacks) and runs under --no-replace-objects, the neutralization every
+    read of this scan already runs under, because checkout honours replacement refs: without the
+    flag a replacement ref could substitute other bytes for the named commit's (QA round 4), and
+    under --literal-pathspecs as the staging hint is. A history that deleted the store across
+    MORE than one commit leaves the named commit's tree holding only part of the store: the
+    store path it lacks is probed one step the same way (its newest first-parent change at or
+    before the named commit, else that change's first parent), and a found holder is printed
+    as a second, ADDITIONAL restore command. A deletion split INSIDE .working (QA round 5
+    MAJOR; QA round 6 MAJOR; QA round 7 for the store definition) is probed structurally
+    through working_gaps: a first-level subdirectory of the restored .working tree is a
+    machine store only when it directly holds manifest.toml or counters.toml, in that
+    tree or in a first-parent commit at or before the named commit; each store found
+    either way must hold BOTH structural files in the restored tree, and a subdirectory
+    holding only other files or only deeper directories is neither expected nor named
+    (QA round 7 MAJOR 2: an adopter-kept non-store file such as notes/plan.md must not
+    make the restore read as PARTIAL); every expected file the tree lacks makes the
+    remedy say the restore is PARTIAL and name that missing path on its own detail line,
+    in words that state only what the scan observed (the restored tree lacks the path),
+    never that the path once existed or was deleted (QA round 6 MEDIUM: the counters of
+    a manifest-only history never existed).
+    No remedy text ever claims to restore the whole store: each command is labelled with
+    exactly the store paths its commit's tree holds, as git checks them out (the adopter's
+    own attributes and filters apply to a checkout, so the written bytes need not equal
+    the committed blob's), and a file outside the two probed structural names that an
+    earlier commit deleted inside .working is not detected. Commands are printed ONLY when
+    the repository path and every restored path are BARE (_init_bare: every character in
+    the bare-command alphabet A-Za-z0-9 . / - _; commit ids are validated hex, which
+    always are): such a command holds no character a
+    POSIX shell could split, substitute, quote or continue, on any physical line
+    (shlex.quote is retired here: it kept a newline-holding root syntactically quoted
+    while the quoted value's middle physical lines ran standalone when the output was
+    pasted line by line, QA round 6 MAJOR). Otherwise NO command is printed at all: the
+    refusal instead names the repository, commit(s) and path(s) on detail lines rendered
+    through _init_inert, the one renderer every value in this function's output goes
+    through at construction (the _InitRestoreLine and _InitPriorStoreRefusal
+    constructors render; ascii() is never used for output: it leaves "$" and the
+    backquote raw inside the quoted literal it yields, QA round 5 MAJOR).
+
+    SCOPE: the scan follows HEAD's FIRST-PARENT line only, the same line the adoption reader
+    proves an ancestral counters seed on (_opf_init_operation.read_ancestral_counter_seed,
+    decision 6). A store that never reached a tree on HEAD's first-parent line (for example one
+    created and deleted on a side branch, merged or not) is NOT detected: it left no mainline
+    state whose counters this init could restart, and distinguishing first adoption from
+    re-adoption across such side lines is the section 14 adoption investigation's authority, not
+    init's. PATH SCOPE: the scan checks the root's current path only (a store committed under
+    another directory, for example before a rename, is not detected): every pathspec is built
+    from the root's present repo-relative prefix, and a pathspec history walk does not follow
+    renames. The refusal text, the successful init output and OPF-QUICKSTART.md state both
+    limits in the same words.
+
+    FAIL-CLOSED BOUNDARIES: an unborn HEAD (rev-parse --verify --quiet rc 1, the _observe_prior
+    convention) has no history and PROCEEDS; a SHALLOW repository's truncated history cannot
+    prove the absence of a prior store (the clipped commits may hold one, and the pathspec walk
+    stops silently at the shallow boundary) and is a cannot-evaluate REFUSAL; a git read that
+    fails, times out, overflows its output bound, or answers in an unexpected shape refuses the
+    same way, never passes. A legacy info/grafts file can rewrite parent links inside EVERY
+    rev-list walk and, unlike a replacement ref, is NOT neutralized by --no-replace-objects, so
+    a graft could cut the very parent link that reaches a prior store; ANY entry at the grafts
+    path (the refusal names what it found: a regular file and its size, a symbolic link and its
+    target, or another kind), and a grafts path whose lstat fails other than as not-found, is
+    therefore a cannot-evaluate REFUSAL too, the
+    stance the adoption reader already takes (_opf_init_observe.graft_snapshot: preserved,
+    never interpreted). Refusing is chosen over neutralizing (GIT_GRAFT_FILE pointed at an
+    empty file) deliberately: a grafted repository's ancestry has been locally rewritten, so
+    neither the grafted nor the raw parent line is one this check can vouch for; the shared
+    hardened runner takes no per-call environment; and the refusal does not depend on a
+    deprecated variable staying honoured (git deprecates grafts in favour of replace refs,
+    which this scan already neutralizes). Every read goes through _opf_observe._run_git
+    (absolute git binary, explicit -C binding to this repository, allowlist-scrubbed
+    environment with every ambient GIT_* variable dropped, --no-replace-objects, lazy fetch
+    suppressed) over raw commit/tree data; no working-tree or index view is consulted."""
+    pointer_rel, working_rel = _init_history_rels(root.relative_to(repo))
+
+    def read(args, ok=(0,)):
+        result = _opf_observe._run_git(git, repo, args)
+        if not result.completed or result.rc not in ok:
+            raise RuntimeError(
+                "git history preflight: `git {}` could not answer ({}); a prior-store ancestry "
+                "that cannot be read never passes".format(
+                    " ".join(args),
+                    result.err if not result.completed
+                    else "rc {}: {}".format(result.rc, result.err)))
+        return result
+
+    def oid(raw):
+        text = raw.decode("ascii", errors="replace")
+        if len(text) not in (40, 64) or any(c not in "0123456789abcdef" for c in text):
+            raise RuntimeError(
+                "git history preflight: unexpected object id {}; refusing".format(ascii(raw)))
+        return text
+
+    def tree_store_paths(commit):
+        """The store paths the commit's raw tree holds, empty when it holds no store identifier
+        (the pointer blob, or a store-manifest path): the pointer when it is a blob, and .working
+        when it is a tree beside that pointer or holds a store manifest. These are exactly the
+        paths the remedy restores. Raises on any read it cannot complete: a missing tree object
+        (a filtered partial clone, say) is a refusal, never absence. The two destination paths
+        are passed as --literal-pathspecs, the same neutralization _init_untracked uses, so a
+        metacharacter-named prefix stays a path; ls-tree of an entry that is simply absent still
+        answers rc 0 with no output, which IS a proven absence."""
+        probe = read(["--literal-pathspecs", "ls-tree", "-z", commit, "--",
+                      pointer_rel, working_rel])
+        has_pointer = has_working = False
+        for entry in probe.out.split(b"\0"):
+            if not entry:
+                continue
+            meta, tab, name = entry.partition(b"\t")
+            fields = meta.split(b" ")
+            if tab != b"\t" or len(fields) != 3:
+                raise RuntimeError("git history preflight: unparseable ls-tree entry {}; "
+                                   "refusing".format(ascii(entry)))
+            if name == os.fsencode(pointer_rel) and fields[1] == b"blob":
+                has_pointer = True
+            if name == os.fsencode(working_rel) and fields[1] == b"tree":
+                has_working = True
+        held = [pointer_rel] if has_pointer else []
+        if has_working and has_pointer:
+            held.append(working_rel)
+        elif has_working:
+            listing = read(["ls-tree", "-r", "-z", "--name-only",
+                            commit + ":" + working_rel])
+            manifest = os.fsencode(_opf_store.MANIFEST_NAME)
+            for name in listing.out.split(b"\0"):
+                parts = name.split(b"/")
+                if len(parts) == 2 and parts[0] and parts[1] == manifest:
+                    held.append(working_rel)
+                    break
+        return held
+
+    def working_gaps(commit):
+        """Structural store files a checkout of <commit>:.working would still LACK, as
+        repo-relative paths (QA rounds 5, 6 and 7): a .working tree counts as a held
+        store path while a counters.toml or manifest.toml inside it was already absent
+        from it, so a restore of that tree exits 0 with spec 8.2's high-water counters
+        still missing. A first-level subdirectory of that tree is a machine STORE only
+        when it directly holds manifest.toml or counters.toml (spec 4.4/4.5, spec 8.2),
+        observed in the tree itself or in any first-parent commit at or before <commit>
+        (one `log` walk over the same escaped glob pathspecs as the main scan, read
+        under the shared hardened runner and its output bound, whose overflow refuses
+        like every other unreadable answer), so a machine subdirectory deleted WHOLE in
+        an earlier commit is still disclosed. The walk reads --raw (with --no-abbrev)
+        with rename detection, newest first, and its records are parsed from git's NUL-delimited
+        token stream positionally, by record arity, so a byte a committed filename may
+        legally hold (QA round 9 codex MEDIUM: the 0x01 header sentinel) never splits
+        a record: a header is read only at a record boundary, where every path token
+        was already consumed. A structural file whose NEWEST first-parent change at or
+        before <commit> renamed it counts at its destination INSTEAD OF its old path
+        only when the record's destination blob id EQUALS its source blob id, as the
+        --raw record carries both (git's similarity score of 100 does NOT prove the
+        bytes unchanged: the score is computed over a multiset of line hashes, so
+        reordered lines still score 100 while the blobs differ, QA round 10 MINOR 3),
+        no older first-parent record touched the destination path, and the
+        renaming commit's own tree holds no structural file under the source
+        subdirectory (one ls-tree probe per rename record, read like every other
+        answer here); so a machine subdirectory renamed whole with git mv survives
+        complete at its new name and does not read as a PARTIAL restore (QA round 8
+        MINOR 4), while ANY other pairing git's similarity-based rename detection
+        reports, for example a store deleted while a similar store was created in the
+        same commit (QA round 9 MEDIUM 2: that store's loss went unreported), reads
+        as a deletion of its source, which stays expected, FAIL-SAFE: the doubtful
+        case is disclosed as missing, never silently absorbed. A rename whose
+        destination the pathspecs exclude is reported by git as a deletion of its
+        source and stays disclosed, and a copy record never releases its source
+        (the source was not changed by a copy). Each store found either way is expected
+        to hold BOTH structural files; each expected file the tree lacks is returned.
+        A subdirectory holding only other files, or only deeper directories, is neither
+        expected nor named (QA round 7 MAJOR 2: an adopter-kept .working/notes/plan.md
+        is not a store, and reporting its structural files as missing was a false
+        PARTIAL). The caller reports each returned path as a PARTIAL restore in words
+        that assert only this observed lack, never a prior existence or deletion (QA
+        round 6 MEDIUM: the counters of a manifest-only history never existed). Only
+        the two structural filenames are probed: a tree in which some OTHER file was
+        deleted by an earlier commit is not detected, which is one reason no printed
+        remedy ever claims to restore the whole store. Called only for a commit whose
+        tree holds .working. Entry names are fsdecoded (surrogateescape, never
+        raising); the returned paths are DESCRIPTIVE mentions only, always rendered
+        through _init_inert at construction of the lines that carry them. The
+        stream itself must end with the terminating NUL of its last token, and
+        every record's modes, status and object ids must be mutually consistent
+        with the shapes git's documented --raw format prints, the file types of
+        its two sides included (a T only between different file types; an M, R
+        or C only between regular files or two sides of one non-regular mode,
+        the non-regular R or C exact only; an executable-bit change keeps the
+        file type): the derivation is stated at the parse below (QA round 13 B;
+        QA round 14 B). A stream or record outside those shapes refuses like
+        every other unreadable answer, fail-closed, before any record can
+        release a rename source."""
+        listing = read(["ls-tree", "-r", "-z", "--name-only",
+                        commit + ":" + working_rel])
+        names = set(listing.out.split(b"\0")) - {b""}
+        required = (os.fsencode(_opf_store.MANIFEST_NAME),
+                    os.fsencode(_opf_check.COUNTERS_NAME))
+        stores = set()
+        for name in names:
+            parts = name.split(b"/")
+            if len(parts) == 2 and parts[0] and parts[1] in required:
+                stores.add(parts[0])
+        touched = read(["log", "--first-parent", "--format=%x01%H", "--raw",
+                        "--no-abbrev", "--find-renames", "-z", commit, "--"]
+                       + [":(glob)" + _init_glob_escape(working_rel) + "/*/"
+                          + _init_glob_escape(os.fsdecode(want)) for want in required])
+        prefix = os.fsencode(working_rel) + b"/"
+
+        def structural(entry):
+            # The (subdir, filename) parts of a structural store path under the
+            # .working prefix; a listed path outside that prefix refuses (no glob
+            # pathspec above can match one), and a prefixed path that is not exactly
+            # <subdir>/<structural-name> returns None.
+            if not entry.startswith(prefix):
+                raise RuntimeError(
+                    "git history preflight: unexpected --name-status entry {} outside "
+                    "the pathspec prefix; refusing".format(ascii(entry)))
+            rel = entry[len(prefix):]
+            parts = rel.split(b"/")
+            if len(parts) == 2 and parts[0] and parts[1] in required:
+                return parts
+            return None
+
+        # PARSE: git's -z output is one NUL-delimited token stream; a committed
+        # path may hold ANY byte but NUL and the separator slash, the 0x01 header
+        # sentinel included (QA round 9 codex MEDIUM: splitting the whole stream on
+        # 0x01 split such a path in half and refused a previously supported
+        # disclosure), so the stream is split on NUL alone and read POSITIONALLY: a
+        # header (the 0x01-led token the %x01%H format prints) is accepted only at
+        # a record boundary, where the arity of every prior record has already
+        # consumed its path tokens, and a path token is consumed by arity, never
+        # inspected as a header or meta token. Each --raw meta token is
+        # ":<old mode> <new mode> <old blob id> <new blob id> <status>", exactly
+        # five space-separated fields (both blob ids validated like every other
+        # object id here), and the record's path tokens follow by status arity.
+        # git prints one newline between a header's NUL and the commit's first
+        # record, so the token at a boundary may carry one leading newline (and
+        # carries ONLY the next header after it when a listed commit has no
+        # records). Any other or unparseable token shape refuses. The stream
+        # must END with the terminating NUL of its last token (QA round 13 B:
+        # -z terminates every token, headers included, so a non-empty stream
+        # without a final NUL is truncated or not git's, and reading its tail
+        # as a complete token could hand a cut record to the resolver).
+        if touched.out and not touched.out.endswith(b"\0"):
+            raise RuntimeError(
+                "git history preflight: --raw output lacks its terminating NUL "
+                "({}); refusing".format(ascii(touched.out[-32:])))
+        tokens = touched.out.split(b"\0")
+        if tokens and tokens[-1] == b"":
+            tokens.pop()
+        commits = []   # (commit id, records, touched paths), newest first
+        index = 0
+        while index < len(tokens):
+            boundary = tokens[index]
+            if boundary[:1] == b"\n":
+                boundary = boundary[1:]
+            if boundary[:1] == b"\x01":
+                commits.append((oid(boundary[1:]), [], set()))
+                index += 1
+                continue
+            if not commits:
+                raise RuntimeError(
+                    "git history preflight: --raw output does not begin "
+                    "with a commit header ({}); refusing".format(ascii(boundary)))
+            records = commits[-1][1]
+            paths = commits[-1][2]
+            meta = boundary
+            fields = meta.split(b" ")
+            if meta[:1] != b":" or len(fields) != 5:
+                raise RuntimeError(
+                    "git history preflight: unparseable --raw record {}; "
+                    "refusing".format(ascii(meta)))
+            status = fields[4]
+            # DERIVATION (git-diff(1), RAW OUTPUT FORMAT; QA round 13 B): git
+            # prints each record as ":<src mode> <dst mode> <src id> <dst id>
+            # <status>", each mode %06o. A mode is 000000 EXACTLY on the side a
+            # record has no file on -- the src of a creation (A), the dst of a
+            # deletion (D) -- and on that side alone; every side that has a
+            # file carries one of the tree-entry modes git documents and
+            # writes, 100644 or 100755 (regular file), 120000 (symbolic link)
+            # or 160000 (gitlink). A tree's 040000 is NOT accepted: this walk
+            # reads git log's recursive, blob-level record stream, which never
+            # prints a tree record. The object id is the all-zero id exactly
+            # where the mode is 000000 (a log over committed trees never
+            # prints the out-of-sync all-zero id a worktree diff can). A
+            # rename or copy status is its letter followed by git's
+            # three-digit similarity score (%c%03d, 000 to 100). Any record
+            # outside these shapes -- a mode outside the documented set (an
+            # ancient loose mode such as 100664 included: refusing one is a
+            # cannot-evaluate, fail-closed), a 000000 on a side the status
+            # says has a file, a zero id beside a non-zero mode or the
+            # reverse, a malformed score -- is not a shape this scan can vouch
+            # for and REFUSES (QA round 12 E and QA round 13 B: the round-11
+            # parser checked none of this, so junk modes, zero-mode rename
+            # sides carrying non-zero ids, and malformed scores all passed,
+            # and a malformed rename record could release a source).
+            raw_modes = (b"000000", b"100644", b"100755", b"120000", b"160000")
+            src_mode, dst_mode = fields[0][1:], fields[1]
+            for mode in (src_mode, dst_mode):
+                if mode not in raw_modes:
+                    raise RuntimeError(
+                        "git history preflight: --raw record with a mode "
+                        "outside git's documented set {}; refusing".format(
+                            ascii(meta)))
+            if status[:1] in (b"R", b"C"):
+                score = status[1:]
+                if (len(score) != 3 or any(c not in b"0123456789" for c in score)
+                        or score > b"100"):
+                    raise RuntimeError(
+                        "git history preflight: --raw rename/copy status with a "
+                        "malformed similarity score {}; refusing".format(
+                            ascii(status)))
+            if status[:1] == b"A":
+                absent = (True, False)
+            elif status[:1] == b"D":
+                absent = (False, True)
+            elif status[:1] in (b"M", b"T", b"R", b"C"):
+                absent = (False, False)
+            else:
+                raise RuntimeError(
+                    "git history preflight: unexpected --raw status {}; "
+                    "refusing".format(ascii(status)))
+            # The blob ids are validated like every other object id this scan
+            # reads, fail-closed, and each side's id and mode must agree with
+            # the status per the derivation above; a rename record releases
+            # its source below ONLY when the ids are EQUAL and not the
+            # all-zero id, because git's similarity score of 100 does not
+            # prove the bytes unchanged (QA round 10 MINOR 3: reordered lines
+            # score 100 while the blobs differ).
+            old_blob = oid(fields[2])
+            new_blob = oid(fields[3])
+            if ((src_mode == b"000000", dst_mode == b"000000") != absent
+                    or (src_mode == b"000000") != (set(old_blob) == {"0"})
+                    or (dst_mode == b"000000") != (set(new_blob) == {"0"})):
+                raise RuntimeError(
+                    "git history preflight: --raw record whose modes, status "
+                    "and object ids are not mutually consistent {}; "
+                    "refusing".format(ascii(meta)))
+            # FILE TYPES (QA round 14 B; git-diff(1) RAW OUTPUT FORMAT and
+            # git's diffcore, each relationship below pinned by the suite's
+            # real-git fixtures): a present side's file type is REGULAR
+            # (100644 or 100755, which differ in the executable bit alone),
+            # SYMBOLIC LINK (120000) or GITLINK (160000). git prints T exactly
+            # when the two sides' file types differ, and M only when they
+            # agree (an executable-bit change alone is M 100644 100755, never
+            # T). Its rename and copy detection scores similarity between
+            # REGULAR files only and pairs a symbolic link or gitlink only by
+            # an EXACT match of the same mode and the same object id (score
+            # 100), so an R or C record joins two regular files (git mv plus
+            # chmod prints R100 100644 100755) or two sides of one
+            # non-regular mode with equal ids and score 100, and a regular
+            # file moved into a symbolic link of identical bytes prints a D
+            # and an A, never an R. A record outside these relationships (an
+            # R, C or M between a regular file and a symbolic link or gitlink,
+            # or between a symbolic link and a gitlink; a T between sides of
+            # one file type; an inexact R or C between non-regular sides) is
+            # not a record git emits, so it REFUSES here, at the parse,
+            # before any record is resolved and before any rename source can
+            # be released (codex round-13 MEDIUM: an R100 from a regular
+            # file to a symbolic link or gitlink with equal ids released its
+            # source).
+            regular = (b"100644", b"100755")
+            same_type = ((src_mode in regular and dst_mode in regular)
+                         or src_mode == dst_mode)
+            if status[:1] == b"T":
+                type_ok = not same_type
+            elif status[:1] == b"M":
+                type_ok = same_type
+            elif status[:1] in (b"R", b"C"):
+                type_ok = same_type and (
+                    src_mode in regular
+                    or (old_blob == new_blob and status[1:] == b"100"))
+            else:
+                type_ok = True
+            if not type_ok:
+                raise RuntimeError(
+                    "git history preflight: --raw record whose status does not "
+                    "match the file types of its two sides {}; "
+                    "refusing".format(ascii(meta)))
+            same_blob = old_blob == new_blob and set(old_blob) != {"0"}
+            if status[:1] in (b"R", b"C"):
+                if index + 2 > len(tokens) - 1:
+                    raise RuntimeError(
+                        "git history preflight: truncated rename record {}; "
+                        "refusing".format(ascii(status)))
+                records.append((status, tokens[index + 1], tokens[index + 2],
+                                same_blob))
+                paths.add(tokens[index + 1])
+                paths.add(tokens[index + 2])
+                index += 3
+            elif status in (b"A", b"M", b"D", b"T"):
+                if index + 1 > len(tokens) - 1:
+                    raise RuntimeError(
+                        "git history preflight: truncated --raw record "
+                        "{}; refusing".format(ascii(status)))
+                records.append((status, None, tokens[index + 1], same_blob))
+                paths.add(tokens[index + 1])
+                index += 2
+            else:
+                raise RuntimeError(
+                    "git history preflight: unexpected --raw status {}; "
+                    "refusing".format(ascii(status)))
+
+        def source_left(commit_id, subdir):
+            # True when the renaming commit's OWN tree still holds a structural
+            # file under the rename's source subdirectory: the move was partial,
+            # so the source stays a store, fail-safe. Read like every other answer
+            # here; --literal-pathspecs keeps a metacharacter-named subdirectory a
+            # path.
+            probe2 = read(["--literal-pathspecs", "ls-tree", "-z", commit_id, "--",
+                           working_rel + "/" + os.fsdecode(subdir) + "/"
+                           + os.fsdecode(required[0]),
+                           working_rel + "/" + os.fsdecode(subdir) + "/"
+                           + os.fsdecode(required[1])])
+            return len(probe2.out.split(b"\0")) > 1
+
+        # RESOLVE, newest first: the first record seen for a path is that path's
+        # newest change at or before <commit> and decides it. A rename record
+        # releases its SOURCE, counting the file at its destination only (QA
+        # round 8 MINOR 4: git mv of a machine subdirectory must not read as
+        # PARTIAL), ONLY when the record is R100 AND its destination blob id
+        # EQUALS its source blob id (QA round 10 MINOR 3: the similarity score
+        # is computed over a multiset of line hashes, so reordered lines still
+        # score 100 while the bytes differ; blob identity, never the score, is
+        # what releases the source), its destination is
+        # itself a structural store path that NO OLDER first-parent record
+        # touched, and the renaming commit's tree holds no structural file under
+        # the source subdirectory (source_left); otherwise the source reads as
+        # DELETED and its subdirectory stays expected, FAIL-SAFE (QA round 9
+        # MEDIUM 2: git pairs by content similarity, so a store deleted beside a
+        # similar store created in the same commit read as a rename and the
+        # deleted store's loss went unreported). A rename whose destination falls
+        # outside the glob pathspecs is reported by git as a plain deletion of the
+        # source (pathspec filtering precedes rename pairing), so a store moved
+        # OUT of .working still reads as deleted and stays disclosed; a copy
+        # record counts its destination and never decides or releases its source
+        # (a copy does not change the source).
+        decided = set()
+        for position, commit_entry in enumerate(commits):
+            for status, old_path, new_path, same_blob in commit_entry[1]:
+                if old_path is not None:
+                    new_parts = structural(new_path)
+                    old_parts = structural(old_path)
+                    if new_parts is not None and new_path not in decided:
+                        decided.add(new_path)
+                        stores.add(new_parts[0])
+                    if status[:1] == b"C" or old_parts is None:
+                        continue
+                    if old_path in decided:
+                        continue
+                    decided.add(old_path)
+                    touched_older = any(
+                        new_path in older[2]
+                        for older in commits[position + 1:])
+                    if not (status == b"R100" and same_blob
+                            and new_parts is not None
+                            and not touched_older
+                            and not source_left(commit_entry[0], old_parts[0])):
+                        stores.add(old_parts[0])
+                else:
+                    parts = structural(new_path)
+                    if parts is not None and new_path not in decided:
+                        decided.add(new_path)
+                        stores.add(parts[0])
+        expected = {store + b"/" + want for store in stores for want in required}
+        missing = {working_rel + "/" + os.fsdecode(rel)
+                   for rel in expected - names}
+        return sorted(missing)
+
+    head = read(["rev-parse", "--verify", "--quiet", "HEAD"], ok=(0, 1))
+    if head.rc == 1:
+        return   # unborn HEAD: no commit exists, so no history can hold a prior store
+    shallow = read(["rev-parse", "--is-shallow-repository"]).out.strip()
+    if shallow == b"true":
+        raise RuntimeError(
+            "cannot evaluate prior-store ancestry: this repository is SHALLOW, so the "
+            "first-parent history of HEAD is truncated and a prior store, whose counters "
+            "spec 8.2 forbids restarting, cannot be ruled out; unshallow the clone "
+            "(git fetch --unshallow) and retry")
+    if shallow != b"false":
+        raise RuntimeError("git history preflight: unexpected --is-shallow-repository answer "
+                           "{}; refusing".format(ascii(shallow)))
+    grafts_raw = read(["rev-parse", "--git-path", "info/grafts"]).out
+    try:
+        grafts_text = grafts_raw.decode("utf-8", "strict")
+    except UnicodeError:
+        raise RuntimeError("git history preflight: undecodable info/grafts path {}; "
+                           "refusing".format(ascii(grafts_raw)))
+    if not grafts_text.endswith("\n") or "\n" in grafts_text[:-1] or "\0" in grafts_text:
+        raise RuntimeError("git history preflight: malformed info/grafts path {}; "
+                           "refusing".format(ascii(grafts_raw)))
+    grafts_path = grafts_text[:-1]
+    if not os.path.isabs(grafts_path):
+        grafts_path = os.path.join(str(repo), grafts_path)
+    try:
+        grafts_st = os.lstat(grafts_path)
+    except FileNotFoundError:
+        pass   # proven absent: the walk below reads ungrafted parent links
+    except OSError as exc:
+        raise RuntimeError(
+            "cannot evaluate prior-store ancestry: lstat of the legacy grafts path {} failed "
+            "({}), which this scan does not take as proof that no grafts file is present; "
+            "grafts that git can read at that path may rewrite parent links in every history "
+            "walk and hide a prior store whose counters spec 8.2 forbids restarting; "
+            "refusing".format(ascii(grafts_path), ascii(exc)))
+    else:
+        # Name exactly what was found; whether git can read it, and whether it rewrites any
+        # parent link, is not interpreted here (an empty file or a dangling link rewrites
+        # nothing today, yet a later write through it could), so every kind refuses alike.
+        kind = _init_kind(grafts_st)
+        if kind == "file":
+            found = "a regular file of {} byte(s)".format(grafts_st.st_size)
+        elif kind == "symlink":
+            found = "a symbolic link to {}".format(ascii(os.readlink(grafts_path)))
+        else:
+            found = "an entry of kind {}".format(kind)
+        raise RuntimeError(
+            "cannot evaluate prior-store ancestry: found {} at the legacy grafts path {}; "
+            "git consults that path in every history walk, where grafts it can read may "
+            "rewrite parent links (--no-replace-objects does not neutralize them), and this "
+            "scan never interprets grafts, so a prior store, whose counters spec 8.2 forbids "
+            "restarting, cannot be ruled out; convert or remove it (git replace "
+            "--convert-graft-file turns a grafts file into replace refs, which this scan "
+            "already ignores) and retry".format(found, ascii(grafts_path)))
+    specs = [":(literal)" + pointer_rel,
+             ":(glob)" + _init_glob_escape(working_rel) + "/*/"
+             + _init_glob_escape(_opf_store.MANIFEST_NAME)]
+    newest_raw = read(["rev-list", "--first-parent", "--max-count=1", "HEAD", "--"]
+                      + specs).out.strip()
+    if not newest_raw:
+        return   # no first-parent commit ever changed a store-identifying path: no prior store
+    newest = oid(newest_raw)
+    ancestor = newest
+    held = tree_store_paths(newest)
+    if not held:
+        # The newest first-parent change to a store path whose own tree holds no store
+        # identifier is a deletion, so its first parent's tree held one (a parentless root
+        # commit can only ADD, so it always holds what it changed).
+        ancestor = oid(read(["rev-parse", "--verify", "--quiet",
+                             newest + "^1"]).out.strip())
+        held = tree_store_paths(ancestor)
+        if not held:
+            raise RuntimeError(
+                "git history preflight: commit {} changed a store path yet neither its tree "
+                "nor its first parent's holds a store identifier; refusing rather than "
+                "guessing".format(newest))
+    # A SPLIT deletion can leave the newest holding tree PARTIAL (QA round 4 MEDIUM 1): with
+    # .working deleted in one commit and the pointer in a later one (or the reverse), the
+    # commit named above holds only one store path while an older first-parent tree still
+    # holds the other, so a command restoring only what the named commit holds would quietly
+    # leave the counters deleted while exiting 0. Each store path the named commit lacks is
+    # therefore probed with its own single-hit first-parent walk from that commit, under the
+    # same one-step parent convention as the main walk (a hit whose own tree lacks the marker
+    # is a deletion, so its first parent's tree is read; a parentless hit can only ADD, so its
+    # tree lacking a REAL marker means none existed). A holder found there becomes a second,
+    # ADDITIONAL restore command, and the first command's label says it restores only the
+    # store paths its own commit holds. A probe that finds no real holder (nothing at or
+    # before the named commit ever
+    # held the path, or only a non-store entry such as a committed directory at the pointer
+    # path changed it) omits only this additional disclosure, never the refusal.
+    extra_commit = None
+    extra_paths = []
+    for marker, spec in ((pointer_rel, specs[0]), (working_rel, specs[1])):
+        if marker in held:
+            continue
+        hit_raw = read(["rev-list", "--first-parent", "--max-count=1", ancestor, "--",
+                        spec]).out.strip()
+        if not hit_raw:
+            continue   # proven: no first-parent tree at or before the named commit held it
+        hit = oid(hit_raw)
+        holder = hit
+        if marker not in tree_store_paths(hit):
+            parent = read(["rev-parse", "--verify", "--quiet", hit + "^1"], ok=(0, 1))
+            if parent.rc == 1:
+                continue   # a parentless commit only ADDS; lacking the marker, it added none
+            holder = oid(parent.out.strip())
+            if marker not in tree_store_paths(holder):
+                continue   # a non-store change at the path, not a restorable store
+        extra_commit = holder
+        extra_paths.append(marker)
+    # A split deletion can also happen INSIDE .working (QA round 5 MAJOR): both markers
+    # survive into the named tree while a counters.toml or manifest.toml under .working was
+    # deleted in an earlier commit, so the commands below would exit 0 with spec 8.2's
+    # high-water counters still deleted. Whichever named commit's tree the remedy restores
+    # .working from is probed structurally (working_gaps), and each missing file makes the
+    # remedy say the restore is PARTIAL and name that path on its own detail line.
+    gaps = []
+    if working_rel in held:
+        gaps = working_gaps(ancestor)
+    elif working_rel in extra_paths:
+        gaps = working_gaps(extra_commit)
+    # Every value interpolated below is rendered through _init_inert by the
+    # _InitRestoreLine and _InitPriorStoreRefusal constructors, never ascii() (ascii()
+    # is not shell-inert: it leaves "$" and the backquote raw inside the quoted literal
+    # it yields, QA round 5 MAJOR); the renderer escapes every character a POSIX shell
+    # could act on, and the commit ids are already validated hex (oid), which renders
+    # unchanged. Restore commands are printed ONLY when the repository path and every
+    # restored path are BARE (_init_bare: every character in A-Za-z0-9 . / - _): every
+    # word of such a command is then a bare literal the shell cannot split, substitute,
+    # quote or continue, on any physical line, so the command needs no quoting at all
+    # (shlex.quote is retired: it kept a newline-holding value syntactically quoted
+    # while its middle physical lines ran standalone when the output was pasted line by
+    # line, QA round 6 MAJOR). The printed command carries exactly two of the scan's
+    # neutralizations: --literal-pathspecs keeps git from reading a path as a pattern,
+    # and --no-replace-objects keeps a replacement ref from substituting another
+    # commit's bytes for the named one's (QA round 4 MEDIUM: checkout honours
+    # replacement refs; the scan's own reads already run under that flag). The scan's
+    # OTHER neutralizations, listed exactly (QA round 5 MINOR), transfer to no printed
+    # command: the grafts refusal (any entry at the legacy grafts path refused above,
+    # before any command is built); the allowlist environment scrub with
+    # GIT_NO_LAZY_FETCH=1, -c core.fsmonitor=false and --no-pager, which guard only the
+    # scan's own child processes (the pasted command runs as the user's git in the
+    # user's environment, where a checkout may legitimately lazy-fetch the blobs it
+    # restores and the user's own pager and fsmonitor configuration applies); and
+    # -c core.commitGraph=false, which guards the scan's rev-list and rev-parse walks
+    # against a commit-graph's cached data, and is not needed in the printed command
+    # because a checkout named by a FULL commit id reads the commit object itself,
+    # never the graph's cached tree (QA round 5, verified against a tree-substituted
+    # commit-graph). For any OTHER value (a space, a quote, a control or format
+    # character, an undecodable byte: anything outside the bare-command alphabet) NO
+    # command is printed at all (QA round 4 MINOR 2; QA round 6 MAJOR): an escaped
+    # command could keep a substitution live under the shell's quote reading or split
+    # across physical lines, so the refusal instead names the repository, the commits
+    # and the paths on rendered detail lines.
+    def checkout_line(commit_id, paths):
+        # Every word here is PROVEN bare by the gate below, so each renders
+        # unchanged through the constructor; the separating spaces come from one
+        # string-literal template per path arity (the renderer's fixed alphabet
+        # escapes a space inside a VALUE, and no composed line is ever passed back
+        # through the renderer as a value, QA round 9, requirement B), and a
+        # smuggled non-bare word would render visibly rather than run.
+        if len(paths) == 1:
+            return _InitRestoreLine(
+                "  git -C {} --no-replace-objects --literal-pathspecs checkout "
+                "{} -- {}", str(repo), commit_id, paths[0])
+        if len(paths) == 2:
+            return _InitRestoreLine(
+                "  git -C {} --no-replace-objects --literal-pathspecs checkout "
+                "{} -- {} {}", str(repo), commit_id, paths[0], paths[1])
+        raise RuntimeError(
+            "git history preflight: unexpected restore path count {}; "
+            "refusing".format(len(paths)))
+
+    if all(_init_bare(value) for value in [str(repo)] + held + extra_paths):
+        if extra_commit:
+            remedy_template = (
+                "restore the store paths the restore commands below name, from the "
+                "commits they name (this history deleted the store across more than "
+                "one commit, so one command cannot restore every store path)")
+            restore_lines = [_InitRestoreLine(
+                "opf init: restore command (shell-ready; it restores only the store "
+                "paths its commit holds, and the additional command below restores the "
+                "other named store path as git checks it out from its own commit):")]
+        else:
+            remedy_template = (
+                "restore the store paths the restore command below names, from that "
+                "commit")
+            restore_lines = [_InitRestoreLine(
+                "opf init: restore command (shell-ready; it restores the named store "
+                "paths as git checks them out from that commit):")]
+        remedy_values = ()
+        restore_lines.append(checkout_line(ancestor, held))
+        if extra_commit:
+            restore_lines += [
+                _InitRestoreLine(
+                    "opf init: additional restore command (shell-ready; it restores "
+                    "the remaining store path from the newest first-parent tree that "
+                    "holds it):"),
+                checkout_line(extra_commit, extra_paths)]
+    else:
+        remedy_template = (
+            "restore the store paths the lines below name, from the {} named below "
+            "(no command is printed: a value in it would hold a character outside "
+            "the bare-command alphabet)")
+        remedy_values = ("commits" if extra_commit else "commit",)
+        restore_lines = (
+            [_InitRestoreLine(
+                "opf init: restore command withheld: a value in it holds a character "
+                "outside the bare-command alphabet A-Za-z0-9 . / - _ and an escaped "
+                "command could still carry a live shell substitution or split across "
+                "physical lines, so no command is printed. Restore each path named "
+                "below from the commit named above it, in the repository named below, "
+                "by your own means, reading each rendered value literally: the safe "
+                "alphabet is ASCII letters, digits and . / - _ only, and every other "
+                "character, the space included, is written as a backslash escape of "
+                "its code point:"),
+             _InitRestoreLine("opf init:   repository: {}", str(repo)),
+             _InitRestoreLine("opf init:   commit: {}", ancestor)]
+            + [_InitRestoreLine("opf init:   restore path: {}", path)
+               for path in held])
+        if extra_commit:
+            restore_lines += (
+                [_InitRestoreLine("opf init:   additional commit: {}", extra_commit)]
+                + [_InitRestoreLine("opf init:   additional restore path: {}", path)
+                   for path in extra_paths])
+    if gaps:
+        restore_lines += (
+            [_InitRestoreLine(
+                "opf init: the restore is PARTIAL: the .working tree the command or "
+                "lines above restore lacks each store path below, so no command or "
+                "path printed above provides it (this scan treats a first-level "
+                ".working subdirectory as a machine store only when it directly holds "
+                "manifest.toml or counters.toml, in that tree or in this line's "
+                "first-parent history at or before the named commit; a store found "
+                "either way is expected to hold both files, and a subdirectory "
+                "holding only other files or only deeper directories is neither "
+                "expected nor named; a structural file counts at its rename "
+                "destination instead of its old path only when the recorded "
+                "destination blob id equals the source blob id (an exact "
+                "byte-identical move; git's similarity score of 100 alone does "
+                "not prove that, since reordered lines also score 100), no older "
+                "first-parent record touched the destination, and the renaming "
+                "commit's tree holds no structural file under the source "
+                "subdirectory, so a machine subdirectory renamed whole with git "
+                "mv is complete at its new path, while any other pairing git's "
+                "rename detection reports, for example a store deleted beside a "
+                "similar store created in the same commit, or a pairing whose "
+                "bytes were rearranged, reads as a deletion of its source, which "
+                "stays expected, fail-safe); "
+                "supply each missing path by your own means, or re-adopt with opf "
+                "adopt:")]
+            + [_InitRestoreLine("opf init:   missing store path: {}", path)
+               for path in gaps])
+    raise _InitPriorStoreRefusal(
+        "a prior store exists in this repository's git history: commit {} on HEAD's "
+        "first-parent line holds {} or a store manifest {} (spec 4.3, 4.5), and spec "
+        "8.2 forbids restarting its counters at zero (record ids would be reissued). "
+        "Remedy: {remedy}, or re-adopt the ancestry with opf adopt. Plain opf init "
+        "refuses whenever this scan of HEAD's first-parent line finds a prior store, "
+        "and a store that never reached a tree on HEAD's first-parent line (for "
+        "example one created and deleted on a side branch, merged or not) is not "
+        "detected (adoption across such side lines is opf adopt's authority); the "
+        "scan checks the root's current path only (a store committed under another "
+        "directory, for example before a rename, is not detected)",
+        (ancestor, pointer_rel,
+         working_rel + "/<subdir>/" + _opf_store.MANIFEST_NAME),
+        restore_lines, remedy_template=remedy_template,
+        remedy_values=remedy_values, partial=len(gaps) > 0)
+
+
 def _init_same_root(root, root_fd):
     check_fd = _opf_store._open_dir_nofollow(root)
     try:
@@ -14182,34 +15420,71 @@ def _init_observed(root_fd, directories, payloads):
     return rows
 
 
-def _cmd_init(rest):
+def _init_main(rest):
     """Create validated store sources and a pointer, without git writes or rendering.
 
     Preflight is read-only. Publication is create-only and deliberately not transactional: a
     later failure reports observed planned paths and leaves them for review. Enumeration, root
     identity checks, and final rereads do not serialize concurrent writers or directory renames.
     No lock, lease, rollback, adoption policy, or whole-store success verdict is supplied here.
+    Every failure path prints rendered text through the two handlers below; the second catches
+    BaseException, so a non-Exception raised while the try body runs (an interrupt or SystemExit after
+    publication started) still reports the partial-publication disclosure before returning rendered (QA
+    round 12 C). The disclosure is itself guarded (QA round 13 D; QA round 14 D; QA round 15 B: the
+    guard is the handler's first statement, so the publication test runs inside it too), with its
+    windows stated exactly. Once publication has started, a SECOND interrupt raised anywhere from the
+    publication test through the cannot-evaluate line and the detail report (the root re-check, the
+    observation pass, the JSON event line) drops whatever of those had not yet printed, and a fixed
+    fallback line plus the fixed "publication may be partial" sentence still print. The handler's
+    ENTRY is outside the guard: CPython raises a line event for the except clause that binds the
+    caught exception and for the guard's own try line, and an interrupt injected on either through a
+    trace function escapes to _cmd_init's boundary, which prints only its rendered last-resort line,
+    so no partial-publication sentence prints (whether a real asynchronous signal can be delivered on
+    those two lines is not exercised). A further interrupt landing in the fallback (its publication
+    test or its print, a third) or in the fixed sentence (a third, or a second one landing there
+    directly) escapes to _cmd_init's boundary the same way: landing in the fallback, it leaves no
+    partial-publication sentence printed at all; landing in the fixed sentence, the lines already
+    printed before it (the cannot-evaluate line and detail, or the fallback line, which says the
+    report failed and asks for a review of the created paths) stay printed while the sentence itself
+    may not print. Before publication starts, a second interrupt landing in the cannot-evaluate line
+    or the "no publication attempted" line is caught by the same guard, which prints a fixed line
+    saying a second failure interrupted the report and no publication was attempted; nothing was
+    published there, so no disclosure is owed, and a further interrupt landing in that fixed line
+    escapes to the boundary the same way. Whatever escapes the handlers (an interrupt during the
+    argument loop above the try, for one) is caught by _cmd_init's last-resort rendering boundary (QA
+    round 10 MAJOR 1); the windows that boundary itself does not cover are stated there and in
+    QUICKSTART.
     """
     root = None
     i = 0
     while i < len(rest):
-        tok = rest[i]
+        # Each token is read as its exact str before it is compared or gated (QA
+        # round 15, requirement C: a str subclass whose own __eq__ answered
+        # "--root" acted as --root).
+        tok = _init_exact_str(rest[i])
         if tok == "--root":
             if i + 1 >= len(rest):
-                print("opf init: --root requires a directory argument", file=sys.stderr)
+                _init_echo("opf init: --root requires a directory argument", err=True)
                 return EXIT_MALFORMED
             if root is not None:
-                print("opf init: --root given more than once", file=sys.stderr)
+                _init_echo("opf init: --root given more than once", err=True)
                 return EXIT_MALFORMED
-            val = rest[i + 1]
+            val = _init_exact_str(rest[i + 1])
             if val == "" or val.startswith("-"):
-                print("opf init: --root requires a non-empty directory argument, not {!r}".format(val),
-                      file=sys.stderr)
+                # The rejected value is rendered inert, never {!r}: repr of a value
+                # holding a single quote and no double quote is a DOUBLE-quoted literal
+                # in which $(...) stays live when the printed line reaches a POSIX shell
+                # (QA round 6 MAJOR). An empty value renders as nothing; the sentence
+                # names that case.
+                _init_echo("opf init: --root requires a non-empty directory argument, "
+                           "not the inert-escaped value {} (an empty value shows as "
+                           "nothing here)".format(_init_inert(val)), err=True)
                 return EXIT_MALFORMED
             root = val
             i += 2
         else:
-            print("opf init: unrecognized argument {!r}".format(tok), file=sys.stderr)
+            _init_echo("opf init: unrecognized argument, inert-escaped: {}".format(
+                _init_inert(tok)), err=True)
             return EXIT_MALFORMED
     root = root if root is not None else "."
     root_fd = None
@@ -14218,7 +15493,6 @@ def _cmd_init(rest):
     publishing = False
     stage = "preflight"
     try:
-        import shlex
         import _opf_init
 
         journal = _opf_store._journal
@@ -14229,8 +15503,13 @@ def _cmd_init(rest):
 
         inventory = _init_inventory(root_fd)
         if inventory["entries"] or not inventory["complete"]:
-            print(json.dumps(dict(inventory, event="foreign-content", root=str(root)),
-                             sort_keys=True))
+            # Report strings are inert-escaped, keys included (QA round 5): a raw root or
+            # foreign-entry name inside a printed JSON string sits in exactly the
+            # double-quote context where a POSIX shell keeps $(...) and `...` live on paste.
+            _init_echo(json.dumps(_init_inert_json(dict(inventory,
+                                                        event="foreign-content",
+                                                        root=str(root))),
+                                  sort_keys=True))
         if not inventory["complete"]:
             raise RuntimeError("foreign .working inventory incomplete; refusing initialization")
 
@@ -14253,7 +15532,7 @@ def _cmd_init(rest):
             # CANNOT-EVALUATE result as permission to initialize a partial store.
             raise RuntimeError("store resolution refused: {}".format(res.detail))
 
-        stage = "building and validating source payloads"
+        stage = "building-and-validating-source-payloads"
         working = _opf_store.WORKING_DIRNAME
         machine = working + "/" + _opf_store.DEFAULT_MACHINE_SUBDIR
         documents = [
@@ -14274,7 +15553,7 @@ def _cmd_init(rest):
             payloads["CHANGELOG.md"] = b"# Changelog\n"
         directories = [working, machine]
 
-        stage = "checking the destination inventory"
+        stage = "checking-the-destination-inventory"
         for relpath in directories + list(payloads):
             journal._check_rel(relpath)
             if journal._lstat_contained(root_fd, relpath) is not None:
@@ -14288,11 +15567,13 @@ def _cmd_init(rest):
         # index_paths carries for _init_untracked's prior-state detection is a path init never creates
         # and adopters legitimately gitignore, so it must not make init refuse.
         _init_unignored(git, repo, root, set(directories) | set(payloads))
+        stage = "checking-git-history-for-a-prior-store"
+        _init_no_prior_store(git, repo, root)
         _init_same_root(root, root_fd)
 
         publishing = True
         for relpath in directories:
-            stage = "creating directory " + relpath
+            stage = "creating-directory-" + relpath
             pfd, name = journal._open_parent(root_fd, relpath)
             try:
                 os.mkdir(name, 0o755, dir_fd=pfd)
@@ -14300,11 +15581,11 @@ def _cmd_init(rest):
             finally:
                 _opf_store._close_fd_exc_safe(pfd)
         for relpath, data in payloads.items():
-            stage = "creating " + relpath
+            stage = "creating-" + relpath
             _init_same_root(root, root_fd)
             _init_create(root_fd, relpath, data)
 
-        stage = "observing published source paths"
+        stage = "observing-published-source-paths"
         observed = _init_observed(root_fd, directories, payloads)
         if any(row["state"] != (
                 "directory" if row["path"] in directories else "matches-payload")
@@ -14316,52 +15597,200 @@ def _cmd_init(rest):
         }
         if (not final_inventory["complete"]
                 or {row["path"] for row in final_inventory["entries"]} != expected_working):
-            print(json.dumps(dict(final_inventory, event="post-publish-inventory", root=str(root)),
-                             sort_keys=True))
+            _init_echo(json.dumps(_init_inert_json(dict(final_inventory,
+                                                        event="post-publish-inventory",
+                                                        root=str(root))),
+                                  sort_keys=True))
             raise RuntimeError("working inventory changed during publication")
         if journal._lstat_at(root_fd, _opf_store.LOCAL_POINTER_REL) is not None:
             raise RuntimeError("local pointer appeared during publication")
         _init_same_root(root, root_fd)
         _init_untracked(git, repo, root, index_paths)
 
-        print("opf init: store SOURCES created and {} pointer written.".format(
-            _opf_store.POINTER_REL))
-        print(json.dumps({"event": "created", "root": str(root), "paths": list(payloads)},
-                         sort_keys=True))
-        print("opf init: these created paths are NOT yet git-tracked (final index read).")
-        print("Review the created files, then stage the reviewed paths:")
-        print("  git -C {} --literal-pathspecs add -- {}".format(
-            shlex.quote(str(root)), " ".join(shlex.quote(path) for path in payloads)))
-        print("opf init: ignore eligibility, including the global and system core.excludesFile, was checked")
-        print("  before creation; a later ignore or config change can still affect staging (git add -f).")
-        print("Commit the reviewed init paths, then materialize the Markdown views:")
-        print("  opf render --write --root {}".format(shlex.quote(str(root))))
-        print("opf init: exit 0 means valid sources were created; tracking and rendering are pending.")
-        return EXIT_OK
-    except Exception as exc:  # noqa: BLE001  includes InitError and residual I/O/import errors
-        print("opf init: cannot evaluate at {} during {}: {}; exit 2".format(
-            ascii(str(root)), stage, ascii(exc)), file=sys.stderr)
-        if publishing and root_fd is not None:
-            try:
-                _init_same_root(root, root_fd)
-                binding = "same-root"
-            except Exception as binding_exc:
-                binding = "cannot-confirm-root: " + ascii(binding_exc)
-            print(json.dumps({
-                "event": "partial-publication",
-                "root": str(root),
-                "scope": "opened-root-descriptor",
-                "root_binding": binding,
-                "paths": _init_observed(root_fd, directories, payloads),
-            }, sort_keys=True), file=sys.stderr)
-            print("opf init: publication may be partial; review the observed state. No rollback performed.",
-                  file=sys.stderr)
+        _init_echo("opf init: store SOURCES created and {} pointer written.".format(
+            _init_inert(_opf_store.POINTER_REL)))
+        _init_echo(json.dumps(_init_inert_json(
+            {"event": "created", "root": str(root), "paths": list(payloads)}),
+            sort_keys=True))
+        _init_echo("opf init: these created paths are NOT yet git-tracked (final index read).")
+        # The staging and render hints are printed ONLY when the root and every created
+        # path are BARE (_init_bare): every word of each hint is then a
+        # bare literal no POSIX shell can split, substitute, quote or continue, on any
+        # physical line. shlex.quote is retired here (QA round 6 MAJOR): it kept a
+        # newline-holding root syntactically quoted while the quoted value's middle
+        # physical lines ran standalone when the output was pasted line by line. For any
+        # other root the hints are withheld and the root is named rendered on a detail
+        # line.
+        if all(_init_bare(value) for value in [str(root)] + list(payloads)):
+            _init_echo("Review the created files, then stage the reviewed paths:")
+            _init_echo("  git -C {} --literal-pathspecs add -- {}".format(
+                _init_inert(str(root)),
+                " ".join(_init_inert(path) for path in payloads)))
+            _init_echo("opf init: ignore eligibility, including the global and system core.excludesFile, was checked")
+            _init_echo("  before creation; a later ignore or config change can still affect staging (git add -f).")
+            _init_echo("Commit the reviewed init paths, then materialize the Markdown views:")
+            _init_echo("  opf render --write --root {}".format(_init_inert(str(root))))
         else:
-            print("opf init: preflight refused; no publication attempted.", file=sys.stderr)
+            _init_echo("opf init: staging and render command hints withheld: a value in "
+                       "them holds a character")
+            _init_echo("  outside the bare-command alphabet A-Za-z0-9 . / - _ and an "
+                       "escaped command could still carry")
+            _init_echo("  a live shell substitution or split across physical lines, so "
+                       "no command is printed.")
+            _init_echo("  Review the created files, stage and commit the created paths "
+                       "the event line above")
+            _init_echo("  names (git add), then materialize the Markdown views (opf "
+                       "render --write), in the")
+            _init_echo("  root named below, by your own means, reading the rendered "
+                       "root literally: the safe alphabet is")
+            _init_echo("  ASCII letters, digits and . / - _ only, and every other "
+                       "character, the space included, is")
+            _init_echo("  written as a backslash escape of its code point:")
+            _init_echo("opf init:   root: " + _init_inert(str(root)))
+            _init_echo("opf init: ignore eligibility, including the global and system core.excludesFile, was checked")
+            _init_echo("  before creation; a later ignore or config change can still affect staging (git add -f).")
+        _init_echo("opf init: prior-store history was checked on HEAD's first-parent line only: a store")
+        _init_echo("  that never reached a tree on HEAD's first-parent line (for example one created and")
+        _init_echo("  deleted on a side branch, merged or not) is not detected (see opf adopt), and")
+        _init_echo("  the scan checks the root's current path only (a store committed under another")
+        _init_echo("  directory, for example before a rename, is not detected).")
+        _init_echo("opf init: exit 0 means valid sources were created; tracking and rendering are pending.")
+        return EXIT_OK
+    except _InitPriorStoreRefusal as exc:
+        # A DEFINITE finding, not an evaluation failure: reported as REFUSED in its own
+        # words. It is raised only by the read-only ancestry preflight, so publication
+        # never started. The message is NOT trusted by type (QA round 13, requirement
+        # A: this handler catches subclasses too, and a subclass inheriting or
+        # overriding the constructor carried a raw value): _init_refusal_message
+        # accepts it at this point of output only with the constructor's rendering
+        # proof, by value equality with the live str(exc), and renders it through
+        # _init_inert otherwise (never ascii(), which leaves a raw dollar sign and
+        # backquote inside the quoted literal it yields, QA round 5 MAJOR). The
+        # restore lines are read defensively (a subclass that never ran the real
+        # constructor may carry none) and each is accepted only with the
+        # _InitRestoreLine constructor's rendering proof (_init_line_rendered, a
+        # private slot set after every value was rendered; never a type check, QA
+        # round 9, requirement B: str.__new__ minted an exact-type instance around a
+        # raw value); any other entry (a raw string or minted instance smuggled onto
+        # the caught exception after construction) is re-rendered through that
+        # constructor here, never printed raw. The suite's runtime paste test holds
+        # these properties at runtime.
+        _init_echo("opf init: REFUSED at {} during {}: {}; exit 2".format(
+            _init_inert(str(root)), _init_inert(stage),
+            _init_refusal_message(exc)), err=True)
+        try:
+            caught_lines = list(exc.restore_lines)
+        except Exception:
+            caught_lines = []
+        for line in caught_lines:
+            _init_echo(line if _init_line_rendered(line)
+                       else _InitRestoreLine("{}", line), err=True)
+        _init_echo("opf init: preflight refused; no publication attempted.", err=True)
+        return EXIT_MALFORMED
+    except BaseException as exc:  # noqa: BLE001  InitError and residual errors, plus a non-Exception (interrupt or SystemExit) after publication started, so the partial-publication disclosure below runs before this returns rendered (QA round 12 C)
+        # Every interpolation is rendered inert AT THE PRINT (QA round 5; QA round 6):
+        # the root, the stage token and the exception text through _init_inert, whose
+        # raising sites may quote path-derived values with ascii() (not shell-inert on its
+        # own); the exception TYPE is printed by name around the escaped text, the
+        # readable part ascii(exc) used to carry. The handler's FIRST statement
+        # enters the disclosure guard, so the publication test, the cannot-evaluate
+        # line and the detail report all run inside it (QA round 14 D: a second
+        # interrupt landing in the first print escaped past the guard; QA round 15
+        # B: one landing on the publication test, which the round-14 handler ran
+        # before entering the guard, escaped the same way and dropped the
+        # partial-publication sentence).
+        try:
+            if publishing and root_fd is not None:
+                _init_echo("opf init: cannot evaluate at {} during {}: {}({}); exit 2".format(
+                    _init_inert(str(root)), _init_inert(stage),
+                    _init_inert(type(exc).__name__), _init_inert(str(exc))), err=True)
+                try:
+                    _init_same_root(root, root_fd)
+                    binding = "same-root"
+                except Exception as binding_exc:
+                    # The exception text is an exact str BEFORE the concatenation
+                    # (QA round 15, requirement A: ascii() may return the str
+                    # subclass repr() returned, whose reflected __radd__ decided
+                    # the result); the report renders it once, at the output.
+                    binding = "cannot-confirm-root: " + _init_exact_str(ascii(binding_exc))
+                _init_echo(json.dumps(_init_inert_json({
+                    "event": "partial-publication",
+                    "root": str(root),
+                    "scope": "opened-root-descriptor",
+                    "root_binding": binding,
+                    "paths": _init_observed(root_fd, directories, payloads),
+                }), sort_keys=True), err=True)
+            else:
+                _init_echo("opf init: cannot evaluate at {} during {}: {}({}); exit 2".format(
+                    _init_inert(str(root)), _init_inert(stage),
+                    _init_inert(type(exc).__name__), _init_inert(str(exc))), err=True)
+                _init_echo("opf init: preflight refused; no publication attempted.", err=True)
+                return EXIT_MALFORMED
+        except BaseException:  # noqa: BLE001  a SECOND interrupt anywhere from the publication test through the detail report must not drop the fixed disclosure below (QA round 13 D; QA round 14 D; QA round 15 B)
+            if not (publishing and root_fd is not None):
+                _init_echo("opf init: a second failure interrupted this report; "
+                           "preflight refused; no publication attempted.", err=True)
+                return EXIT_MALFORMED
+            _init_echo("opf init: the cannot-evaluate line or the partial-publication "
+                       "detail could not be reported (a second failure while the "
+                       "report itself ran); review the created paths yourself.",
+                       err=True)
+        _init_echo("opf init: publication may be partial; review the observed state. No rollback performed.",
+                   err=True)
         return EXIT_MALFORMED
     finally:
         if root_fd is not None:
             _opf_store._journal._close_fd_quietly(root_fd)
+
+
+def _cmd_init(rest):
+    """Run _init_main under ONE last-resort rendering boundary (QA round 10 MAJOR 1).
+
+    The round-9 argument loop sat outside the rendering handlers, so an assert, a
+    raise ... from (whose cause a chained traceback prints), or an implicit
+    exception (a subscript's KeyError or IndexError) raised there printed a raw
+    argv value on descriptor 2 inside an escaping Python traceback. _init_main now
+    carries the whole command, its own two rendering handlers included; whatever
+    still escapes it, BaseException included, is caught here and reported through
+    the one emitter with the exception type name and text BOTH rendered through
+    _init_inert, and the report itself is guarded: if printing it fails, nothing
+    more is printed, because a failing print would otherwise raise out of this
+    handler with the original exception chained, and Python prints a chained
+    traceback with every message raw. PROVED BY THIS SHAPE (the route gate pins
+    the shape, the init suite pins these exact bytes): every exception _init_main
+    lets escape is caught here and reported rendered, so from init dispatch onward
+    opf init reports a rendered line and exits 2 rather than printing a Python
+    traceback (a KeyboardInterrupt, or a mutant's SystemExit, raised while
+    _init_main runs reports the same way and exits 2). Three windows this boundary
+    does NOT cover, stated so no wording claims more than the code provides: an
+    asynchronous interrupt that lands in this handler's own few statements (after
+    the guarded report, at the return) can still escape, and because it arrives
+    while the caught exception is still being handled, Python's traceback then
+    CHAINS that exception (its type and its raw, unrendered text, then "During
+    handling of the above exception, another exception occurred"; QA round 14
+    C), so this window can print an init value raw; any failure BEFORE
+    init dispatch is outside this boundary entirely (a bootstrap fault other than
+    the ImportError or OSError _bootstrap maps to a rendered cannot-evaluate, for
+    example a SyntaxError in an installed helper, or an interrupt before or during
+    dispatch, surfaces as Python's own traceback or signal); and an interrupt
+    AFTER this function returns, in the dispatcher's own return and sys.exit
+    statements, escapes as Python's traceback of those dispatcher lines (that
+    traceback shows the dispatcher's source lines and the interrupt type; by
+    then no exception is being handled, so it interpolates no init value: this
+    qualifier holds for this post-return window only). What a static scan
+    still cannot prove is stated in _init_echo's docstring (D-STATIC-PIN-RESIDUAL)."""
+    try:
+        return _init_main(rest)
+    except BaseException as exc:  # noqa: BLE001  the last-resort rendering boundary
+        try:
+            _init_echo(
+                "opf init: cannot evaluate: {}({}); exit 2 (reported by the "
+                "last-resort boundary, which prints nothing else)".format(
+                    _init_inert(type(exc).__name__), _init_inert(str(exc))),
+                err=True)
+        except BaseException:  # noqa: BLE001  a failing report must not re-raise
+            pass
+        return EXIT_MALFORMED
 
 
 # --- opf upgrade: the store-schema upgrade to the tooling spec_version (spec 9.2) ---------------------
@@ -17869,7 +19298,8 @@ def _retained_close_offpath_self_test():
                     os.unlink(str(fresh / name))
             with mock.patch.object(this, "_init_repo", lambda root: ("git", root)), \
                     mock.patch.object(this, "_init_untracked", lambda *args: None), \
-                    mock.patch.object(this, "_init_unignored", lambda *args: None):
+                    mock.patch.object(this, "_init_unignored", lambda *args: None), \
+                    mock.patch.object(this, "_init_no_prior_store", lambda *args: None):
                 return _cmd_init(["--root", str(fresh)])
 
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):

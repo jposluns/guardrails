@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "a9aa473de3b2117410336317f80c6c9709564047592432444f5d28093683fde7"
+tree-sha256 = "4c128124c75f8a68f960b85b6ced7a72a5aa3cf7b82d315c46a9302c99f5c27c"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -61,8 +61,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 270257
-sha256 = "3842ad09142b41299f8552bee33e9ae9f7b452afd89755d04200d9f97adfb488"
+bytes = 275242
+sha256 = "476a96a79e7a4908b8ff89f34d4a86200948b5038faea9cd9fab93536fdc56f4"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -801,8 +801,8 @@ sha256 = "c24eca7f5f6af796c69a0796d6f99586bbce90c6b9a11d2e60232f1942440c8c"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 457308
-sha256 = "6957ebe017ffa17567d68625d0d3f6f010d5e8807ac2f96c217f3e68c7e31b57"
+bytes = 459003
+sha256 = "c38dba305118902146d695bb19bbbc31ee46fca639061d467ddac429873b052b"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -2336,8 +2336,8 @@ sha256 = "001c5c3f13e7a7b0bc8c283ca1770545d7ba27cb734eff6517b6c03a868225ee"
 
 [[sources]]
 path = "ENFORCEMENT.md"
-bytes = 263181
-sha256 = "3e595d7d0064080d66c2af167a9c82ab47d5815e8af7e7b6fde24ec2371d071b"
+bytes = 264876
+sha256 = "a388be1714a8511168d73b154b065db216ebd7eb17314bcc314af99e0cbaf58d"
 
 [[sources]]
 path = "GEMINI.md"
@@ -2621,8 +2621,8 @@ sha256 = "4b84f78ec791853cb78451535cde86650060628bc5f48f1f55a6f0d6f87b26ec"
 
 [[sources]]
 path = "opf/spec/OPF-QUICKSTART.md"
-bytes = 9434
-sha256 = "3af785c6ebe1a2ea68e865e27099ce19b10a0490fbd9d74ff633769a11e90ae1"
+bytes = 16288
+sha256 = "d52a9e62b500b123aa1adf45d0916bf2deedb0d6300936a849c1208561619cdf"
 
 [[sources]]
 path = "opf/spec/OPF-SPEC.md"
@@ -2661,8 +2661,8 @@ sha256 = "bce604363058fb63f4a7348bf7e3327a69b462c83c89199258c05a4be92f4241"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_apply.py"
-bytes = 214684
-sha256 = "d7674d80bd1f1710d705f4a752b0037c62be07b397ca0ad0282a2a9ee22bb9ab"
+bytes = 247650
+sha256 = "1f7582ee15ad979c0d8d4e9cf083c3e6fd2a444cd07378bbea22917d3abbec0d"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_hook.py"
@@ -2966,8 +2966,8 @@ sha256 = "2ae433b086e2678c50df497c0447ae314c020444b0338c6ecd95e719c54c2e4f"
 
 [[sources]]
 path = "opf/tools/check_opf_init.py"
-bytes = 73619
-sha256 = "82d2baa0eee0b1adba6fc1615b6d3cbcf0f4a46cd1bc1d96bffd5726193583e4"
+bytes = 410101
+sha256 = "e4fa81ce4d9390c920596e91b398bb049da4fddcbe57f8f4e6abd8282779393a"
 
 [[sources]]
 path = "opf/tools/check_opf_init_contract.py"
@@ -2996,8 +2996,8 @@ sha256 = "3835b5ad43abfc4097115b44e394087524d418cf42a72aaab37a5df6cbac1907"
 
 [[sources]]
 path = "opf/tools/check_opf_record.py"
-bytes = 337360
-sha256 = "e814ede8e8e5e092654405a35c3581ed2fd9ade1640586ad19279918ef3fd080"
+bytes = 343727
+sha256 = "ed316806b2465babbf7af70b2f054638aa7d4e7b58e038e8f841519155f1cca4"
 
 [[sources]]
 path = "opf/tools/check_opf_upgrade.py"
@@ -3006,8 +3006,8 @@ sha256 = "ac02a68f8ed5520ee2caeaac5e4849d4a87cf0d40a9dbe10ff9f4309832c902a"
 
 [[sources]]
 path = "opf/tools/opf.py"
-bytes = 1042224
-sha256 = "3662798290f67e13c65cbd8371c6da18587936ca745b40a8c335b052d046c63c"
+bytes = 1136708
+sha256 = "3ef99adb998f8ec08afc4837c9220aee94fcc1e31228578a4acaaa4027c7d8d8"
 
 [[sources]]
 path = "opf/tools/run_all_checks.sh"
@@ -3126,8 +3126,8 @@ sha256 = "e5760448ade9fc0d5f59b9a6761e07f5e0e122157379ae7fcc0aa1fc59f0d0c2"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 315897
-sha256 = "2a59fdfc2350365cf1ac4fb4723ef93c14a89f8fdce3b37d063ff9bb9be5d32f"
+bytes = 317592
+sha256 = "44b6bbf49329a9c834b374ee1d25bcf02178edd16f7b9808706212c5f4a8c211"
 
 [[sources]]
 path = "site/evidence.html"
@@ -3286,8 +3286,8 @@ sha256 = "496fde836fc7e0c57d254ccbb66e2229ea782f841608d546c80164ea2e787eae"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
-bytes = 185283
-sha256 = "acb14676e67989fa529a2b3de3a17a334eb1e711c97a38dbd2647b6ca45b0108"
+bytes = 221127
+sha256 = "5fc7fb52652bfe3caa064bc5fe1c0b84fb27e62d5546677aba953197d58420aa"
 
 [[sources]]
 path = "tools/check_clauses.py"
