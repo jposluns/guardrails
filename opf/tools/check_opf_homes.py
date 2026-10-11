@@ -17,14 +17,25 @@ transport, so a sentence on another upgrade, such as a future worklog-generation
 none. A retired sentence is quoted, to say it no longer applies, in one exact form, a retired-text
 quotation block: a block quote whose first line is exactly "> Retired text, quoted and not in
 force:", with no ">" line directly above it, followed by at least one more line that opens with
-">"; the block ends at the first line that does not open with ">". The retired-text check and the
-pins read a section without these blocks, so a quotation neither restores a fragment nor stands in
-for a pin; each fails closed on text split around a block, which the retired-text check reads as
-joined and the pins read as apart. Any other form is operative text: a different, indented or inline lead-in, a lead-in
-inside an earlier block quote, a line after the block (which CommonMark may render inside the
+">"; the block ends at the first line that does not open with ">". That first line must be
+rendered text: CommonMark opens a paragraph there (as the informative guard's block reading below
+finds it), so it is not in fenced or indented code or a lazy continuation of an earlier quote, and
+no raw HTML block opens above it anywhere in the document, since an HTML comment can hide it. The
+retired-text check and the pins read a section without these blocks, so a quotation neither
+restores a fragment nor stands in for a pin; each fails closed on text split around a block, which
+the retired-text check reads as joined and the pins read as apart (a pin holding the marker the
+pins read in a block's place is missing). The registry tiles a block through its own marker (_Q),
+an entry that holds the block as written and matches only one of its section's blocks, so the
+quoted text stays tiled, never satisfies a pin and is not keyword-linted. Everything else is
+operative text, which the retired-text check reads twice, as written and with each line's leading
+block-quote markers removed, so a sentence wrapped across ">" lines is read joined: a different,
+indented or inline lead-in, a lead-in with text after it, a lead-in inside an earlier block quote,
+in code or below a raw HTML block, a line after the block (which CommonMark may render inside the
 quote as a lazy continuation), and a sentence that negates the quotation are all read, and a
-fragment there is red. Residual: the check is section-scoped, so a fragment planted in another
-section is caught only by the self-test's tiling of a tiled section. Section 9.1 stays untiled
+fragment there, on one line or wrapped, is red. Residual: the check removes no other markup, so a
+fragment broken by emphasis, a link, a character reference or inline HTML is not found there; and
+the check is section-scoped, so a fragment planted in another section is caught only by the
+self-test's tiling of a tiled section. Section 9.1 stays untiled
 over its lowercase-may profile rule, but its implementation-class paragraph is pinned sentence
 by sentence (_PINNED), so deleting or rewording a pinned sentence there turns the gate red;
 the rest of 9.1, and additions to it, stay unprotected. Appendix E stays untiled too, and its
@@ -249,6 +260,19 @@ class _Descriptive(str):
 
 
 _D = _Descriptive
+
+
+class _Quoted(str):
+    """Pin marker: a retired-text quotation block (module docstring) as written, normalized like
+    a pin, its lead-in and ">" markers included. The pin check matches it against the section's
+    quotation blocks alone, never against operative text, so it is missing wherever its block is
+    not read as a quotation, and no other pin reads the quoted text. Tiling reads it like any pin,
+    so the quoted text stays tiled. The section 2 keyword lint skips it: quoted text is not in
+    force."""
+    __slots__ = ()
+
+
+_Q = _Quoted
 # Section 2 keywords, case-sensitive and whole-word: a lowercase "must" is not a keyword.
 _KEYWORD = re.compile(r"\b(?:MUST|SHOULD|MAY)\b")
 # Scope each wording check to its operative section, never a whole-document negative scan.
@@ -1100,7 +1124,7 @@ _CONTRACT = {
         _D('A mistyped or altered token makes the store undiscoverable, which resolves to cannot-evaluate (fail-closed), never to a silent empty store.'),
         "The token is stable within a base-schema major line; a store-breaking rename MUST ship only with the tested opf upgrade migration (section 9.2), which rewrites the base table and token in place so no existing adopter's manifest is stranded.",
         _D('That in-place rewrite covers only a bump that ships an upgrade.'),
-        _D('The bump to the homes-2 declaration ships none (section 9.2), so no store-breaking rename can ship with it: a homes-2 manifest carries the same [opf] base table, and a homes-1 store, which homes 2 does not migrate (section 4.2), keeps its manifest as it is.'),
+        _D('The bump to the homes-2 declaration ships none (section 9.2), so no store-breaking rename can ship with it: a homes-2 manifest keeps the [opf] base table name and the opf discovery token, and the bump leaves unchanged the manifest of a homes-1 store, which homes 2 does not migrate (section 4.2).'),
         _D('The retired 1.0.0 token devprocess is recognized by opf upgrade, purely to carry a legacy store forward, and by a fresh-only implementation (section 16.1), purely to refuse that store by name.'),
         _D('- A fresh-only implementation (section 16.1) proves tested admission and refusal behaviour, not authenticated history: a version declaration and the absence of listed legacy state cannot prove that a store was never upgraded or hand-rewritten, and the closed legacy-state list catches only what it lists.'),
         _D('It does not list a legacy staging run under .working/staging/import/ or .working/staging/ingest/ that carries no legacy-format inventory, a legacy .archive/ entry that section 9.2 leaves in place with a standing finding, or a legacy run archive outside .working/, which only the import_status item reaches.'),
@@ -1162,7 +1186,8 @@ _PINNED = {
 # there, no OPF control area is relocated for the homes generation, and no legacy journal is
 # transported. These fragments of the retired homes-migration text are the one negative check, scoped
 # to their own sections: the default entry is red where one reappears there, outside a retired-text
-# quotation block, so restoring one does not wait for the self-test's tiling equality. Each fragment
+# quotation block, on one line or wrapped across quoted lines, so restoring one does not wait for the
+# self-test's tiling equality. Each fragment
 # names homes or legacy journal transport. Retired sentences that name neither are not fragments,
 # since a future worklog-generation upgrade could state them again: "The owning writer or migration
 # MUST derive each inventory" (4.2), "The migration MUST refuse a store resolved outside the product
@@ -1224,58 +1249,104 @@ def surface_findings(texts=None):
     return findings
 
 
-def _sections(text):
+def _section_spans(text):
     # Every heading bounds a section, so a numbered section never swallows an appendix; the
     # preamble before the first heading is registered as section "0", and an appendix under its
-    # letter ("E" for Appendix E).
+    # letter ("E" for Appendix E). Each body is a (start, end) span of text.
     bounds = list(re.finditer(r"^#{2,3} .*$", text, re.MULTILINE))
-    sections = dict()
+    spans = dict()
     if bounds:
-        sections["0"] = text[:bounds[0].start()]
+        spans["0"] = (0, bounds[0].start())
     for i, m in enumerate(bounds):
         number = re.match(r"^#{2,3} (?:([0-9]+(?:\.[0-9]+)?)\.?|Appendix ([A-Z]):) ", m.group(0))
         if number:
             end = bounds[i + 1].start() if i + 1 < len(bounds) else len(text)
-            sections[number.group(1) or number.group(2)] = text[m.end():end]
-    return sections
+            spans[number.group(1) or number.group(2)] = (m.end(), end)
+    return spans
+
+
+def _sections(text):
+    return {section: text[start:end] for section, (start, end) in _section_spans(text).items()}
 
 
 # The exact first line of a retired-text quotation block (module docstring).
 _RETIRED_QUOTATION = "> Retired text, quoted and not in force:"
+# What the pins read in place of a quotation block; a pin holding it is missing, so no pin spans one.
+_QUOTATION_JOINT = "[retired-text quotation]"
+# A line's leading block-quote markers, nested ones included. The retired-text check also reads
+# operative text with them removed, so a sentence wrapped across ">" lines is read joined.
+_QUOTE_MARKERS = re.compile(r"^(?:[ \t]*>)+", re.MULTILINE)
 
 
-def _operative(body, joint):
-    # A section body, normalized, with each retired-text quotation block replaced by joint. Each check
-    # fails closed: the pins pass a marker that no pin holds, so a pin split around a block is missing,
-    # and the retired-text check passes "", so a fragment split around a block is still read.
+def _normalized(text):
+    return " ".join(text.replace("`", "").split())
+
+
+def _rendered_lines(text):
+    # The offsets of the lines at which CommonMark opens a paragraph (_heading_bounds) with no raw
+    # HTML block opening on an earlier line, so a lead-in there is rendered text: never code, a lazy
+    # continuation, or a line an HTML comment or another raw HTML block may hide. A text that holds
+    # no lead-in is not parsed.
+    if _RETIRED_QUOTATION not in text:
+        return frozenset()
+    _headings, html_lines, _unread, _titles, paragraphs = _heading_bounds(text)
+    first_html = min(html_lines, default=None)
+    return frozenset(start for start, _texts, number in paragraphs
+                     if first_html is None or number < first_html)
+
+
+def _read_section(body, rendered):
+    # A section body's readings, each normalized: the pins' (each retired-text quotation block
+    # replaced by _QUOTATION_JOINT), the retired-text check's (each block removed, then read as
+    # written and with _QUOTE_MARKERS removed) and each block's. rendered holds the body offsets of
+    # the lines _rendered_lines admits. Each check fails closed: a pin split around a block is
+    # missing, and a fragment split around one is read joined.
     lines = body.split("\n")
-    kept = []
-    i = 0
+    kept, blocks = [], []
+    i = at = 0
     while i < len(lines):
-        if (lines[i] == _RETIRED_QUOTATION and (i == 0 or not lines[i - 1].startswith(">"))
+        if (lines[i] == _RETIRED_QUOTATION and at in rendered
+                and (i == 0 or not lines[i - 1].startswith(">"))
                 and i + 1 < len(lines) and lines[i + 1].startswith(">")):
-            i += 1
-            while i < len(lines) and lines[i].startswith(">"):
-                i += 1
-            kept.append(joint)
+            j = i + 1
+            while j < len(lines) and lines[j].startswith(">"):
+                j += 1
+            blocks.append(_normalized("\n".join(lines[i:j])))
+            kept.append(None)
+            at += sum(len(line) + 1 for line in lines[i:j])
+            i = j
             continue
         kept.append(lines[i])
+        at += len(lines[i]) + 1
         i += 1
-    return " ".join("\n".join(kept).replace("`", "").split())
+    written = "\n".join("" if line is None else line for line in kept)
+    pins = _normalized("\n".join(_QUOTATION_JOINT if line is None else line for line in kept))
+    return pins, (_normalized(written), _normalized(_QUOTE_MARKERS.sub("", written))), tuple(blocks)
+
+
+def _readings(text):
+    # Each section's readings (_read_section), keyed like _sections.
+    rendered = _rendered_lines(text)
+    return {section: _read_section(text[start:end], {at - start for at in rendered if start <= at < end})
+            for section, (start, end) in _section_spans(text).items()}
 
 
 def contract_findings(text):
     sections = _sections(text)
+    readings = _readings(text)
     findings = []
     for section, fragments in list(_CONTRACT.items()) + list(_PINNED.items()):
-        body = _operative(sections.get(section, ""), "[retired-text quotation]")
+        pins, _retired, blocks = readings.get(section, _read_section("", ()))
         for fragment in fragments:
-            if fragment not in body:
+            if isinstance(fragment, _Quoted):
+                if fragment not in blocks:
+                    findings.append("spec {} missing retired-text quotation: {}".format(section, fragment))
+            elif fragment not in pins or _QUOTATION_JOINT in fragment:
                 findings.append("spec {} missing contract: {}".format(section, fragment))
     for section, fragments in _RETIRED.items():
-        body = _operative(sections.get(section, ""), "")
+        _pins, retired, _blocks = readings.get(section, _read_section("", ()))
         for fragment in fragments:
-            if fragment in body:
+            if any(fragment in reading for reading in retired):
                 findings.append("spec {} restores retired homes-migration text: {}".format(section, fragment))
     layout = sections.get("4.2", "")
     reservation = sections.get("4.4", "")
@@ -1304,6 +1375,8 @@ def keyword_findings(contract=None):
     findings = []
     for section, fragments in contract.items():
         for fragment in fragments:
+            if isinstance(fragment, _Quoted):
+                continue  # quoted text is not in force; the pin check matches it to its block
             keyword = _KEYWORD.search(fragment) is not None
             if isinstance(fragment, _Descriptive):
                 if keyword:
@@ -3751,6 +3824,9 @@ def _self_test_vectors():
     # deleting that single operative occurrence in place (never a replace-all) turns the gate
     # red with the pin's own finding.
     from unittest.mock import patch
+
+    def tiles(spec, section):
+        return " ".join(_CONTRACT[section]) == _normalized(_sections(spec)[section])
     for section, fragments in _CONTRACT.items():
         body = _sections(text)[section]
         normalized_body = " ".join(body.replace("`", "").split())
@@ -3760,14 +3836,18 @@ def _self_test_vectors():
         # (the rendered gitignore block), which stay covered by the unmutated spec-contract check.
         check("spec-pin-control-" + section, lambda c=control, p=pin_prefix: not any(
             f.startswith(p) for f in contract_findings(c)))
-        check("spec-tile-" + section, lambda s=section, n=normalized_body:
-              " ".join(_CONTRACT[s]) == n)
+        check("spec-tile-" + section, lambda s=section: tiles(text, s))
         # Mutate the registry itself: per-pin deletion tests cannot notice a dropped pin, but
         # the tiling equality does.
         with patch.dict(_CONTRACT, {section: _CONTRACT[section][1:]}):
-            check("spec-tile-dropped-pin-" + section, lambda s=section, n=normalized_body:
-                  " ".join(_CONTRACT[s]) != n)
+            check("spec-tile-dropped-pin-" + section, lambda s=section: not tiles(text, s))
         for fragment in fragments:
+            if isinstance(fragment, _Quoted):
+                # A quotation block flattened onto one line is no block: the control reports it.
+                check("spec-quotation-flip-" + section + "-" + fragment, lambda c=control, f=(
+                    "spec " + section + " missing retired-text quotation: " + fragment):
+                    f in contract_findings(c))
+                continue
             mutated_body = normalized_body.replace(fragment, "", 1)
             mutated = text.replace(body, "\n\n" + mutated_body + "\n\n", 1)
             finding = pin_prefix + ": " + fragment
@@ -4333,11 +4413,12 @@ def _self_test_vectors():
                 check("spec-homes2-no-homes-migration-pin-restored-" + section + "-" + starts[0],
                       lambda a=anchored, o=old, p=prefix: a and all(
                           p + f in found for found in [contract_findings(text)] for f in o))
-    # The default entry refuses each retired fragment in its own section: the live section holds none,
-    # each fragment occurs in the retired pins or text above and names homes or legacy journal
-    # transport, and planting it at the end of its section turns the gate red with its own finding.
-    # Each fragment is paired: the same text in the exact retired-text quotation form is not a
-    # restoration, and every near miss of that form, a negated sentence included, still is.
+    # The default entry refuses each retired fragment in its own section: the live section holds none
+    # outside a registered quotation, each fragment occurs in the retired pins or text above and names
+    # homes or legacy journal transport, and planting it at the end of its section turns the gate red
+    # with its own finding. Each fragment is paired: the same text in the exact retired-text quotation
+    # form is not a restoration, and every near miss of that form, a negated sentence included, still
+    # is, as is the fragment wrapped across lines in operative text.
     retired_text = " ".join(" ".join(old) for _s, _p, old in no_homes_migration) + " " + retired
     # Emptying or narrowing the registry would retire its vectors silently: its shape is pinned.
     check("spec-retired-registry", lambda: tuple(_RETIRED) == ("4.2", "9.2", "15") and
@@ -4351,11 +4432,49 @@ def _self_test_vectors():
         ("no-quote-line", "> Retired text, quoted and not in force:\n{}"),
         ("lazy", "> Retired text, quoted and not in force:\n> Quoted.\n{}"),
         ("inside-quote", "> Note.\n> Retired text, quoted and not in force:\n> {}"),
+        ("inside-quote-paragraph", "> Note.\n>\n> Retired text, quoted and not in force:\n> {}"),
         ("negated", 'The retired sentence "{}" no longer applies; homes 2 has no homes migration.'),
+        # Each of these breaks one condition alone: the lead-in indented, text after it, or a
+        # trailing space; the line after it opens with ">" and the line above it is blank.
+        ("indented-lead-in", "  > Retired text, quoted and not in force:\n> {}"),
+        ("lead-in-extra", "> Retired text, quoted and not in force: See section 4.2.\n> {}"),
+        ("lead-in-trailing-space", "> Retired text, quoted and not in force: \n> {}"),
+        # The lead-in in the exact form but not rendered as text: hidden by an HTML comment (with
+        # and without a blank line above), in fenced code, or a lazy continuation of an earlier quote.
+        ("comment-hidden", "<!--\n> Retired text, quoted and not in force:\n> -->\n> {}"),
+        ("comment-hidden-blank", "<!--\n\n> Retired text, quoted and not in force:\n> -->\n> {}"),
+        ("after-html-block", "<div>\n</div>\n\n> Retired text, quoted and not in force:\n> {}"),
+        ("fenced", "```\n> Retired text, quoted and not in force:\n> {}\n```"),
+        ("fenced-blank", "~~~\n\n> Retired text, quoted and not in force:\n> {}\n~~~"),
+        ("lazy-above", "> Note.\nA lazy continuation line.\n> Retired text, quoted and not in force:\n> {}"),
+    )
+    # A fragment wrapped across lines in operative text is read joined, with each line's block-quote
+    # markers removed: in an ordinary or nested quote, a quote in a list item, a near miss of the
+    # lead-in, a quote after a quotation block, and a lazy line.
+    wrapped = (
+        ("quote", "> This requirement is in force:\n> {}\n> {}"),
+        ("nested", "> > {}\n> > {}"),
+        ("spaced", "   > {}\n   >   {}"),
+        ("list", "- > {}\n  > {}"),
+        ("paragraphs", "> {}\n>\n> {}"),
+        ("lead-in", "> Retired text, not in force:\n> {}\n> {}"),
+        ("after-quotation", _RETIRED_QUOTATION + "\n> Quoted.\n\n> {}\n> {}"),
+        ("lazy", "> {}\n{}"),
     )
 
     def planted(body, block):
         return text.replace(body, body.rstrip("\n") + "\n\n" + block + "\n\n", 1)
+
+    def retired_absent(spec, section, fragment):
+        # The retired-text check's readings hold no fragment, and the section as written holds one
+        # only inside a quotation the registry tiles (_Q).
+        return not any(fragment in reading for reading in _readings(spec)[section][1]) and (
+            fragment not in _normalized(_sections(spec)[section]) or any(
+                fragment in q for q in _CONTRACT[section] if isinstance(q, _Quoted)))
+
+    def halves(fragment):
+        words = fragment.split(" ")
+        return " ".join(words[:len(words) // 2]), " ".join(words[len(words) // 2:])
 
     def restores(found, section):
         return [f for f in found if f.startswith("spec {} restores retired ".format(section))]
@@ -4363,8 +4482,8 @@ def _self_test_vectors():
         body = _sections(text)[section]
         for fragment in fragments:
             finding = "spec {} restores retired homes-migration text: {}".format(section, fragment)
-            check("spec-retired-absent-" + section + "-" + fragment, lambda b=body, f=fragment:
-                  f not in " ".join(b.replace("`", "").split()))
+            check("spec-retired-absent-" + section + "-" + fragment, lambda s=section, f=fragment:
+                  retired_absent(text, s, f))
             check("spec-retired-flip-" + section + "-" + fragment,
                   lambda b=body, f=finding, frag=fragment: text.count(b) == 1 and
                   f in contract_findings(text.replace(b, b.rstrip("\n") + "\n" + frag + "\n\n", 1)))
@@ -4377,6 +4496,10 @@ def _self_test_vectors():
                 check("spec-retired-near-miss-" + form + "-" + section + "-" + fragment,
                       lambda b=body, f=finding, block=shape.format(fragment): text.count(b) == 1 and
                       f in contract_findings(planted(b, block)))
+            for form, shape in wrapped:
+                check("spec-retired-wrapped-" + form + "-" + section + "-" + fragment,
+                      lambda b=body, f=finding, frag=fragment, block=shape.format(*halves(fragment)):
+                      text.count(b) == 1 and frag not in block and f in contract_findings(planted(b, block)))
             if section != "15":
                 check("spec-retired-known-" + section + "-" + fragment,
                       lambda frag=fragment: frag in retired_text)
@@ -4392,6 +4515,68 @@ def _self_test_vectors():
                  + "\n> " + transport)
     check("spec-retired-quotation-reported-green", lambda b=body: text.count(b) == 1 and
           contract_findings(planted(b, explained)) == contract_findings(text))
+    # The same quotation landed through the registry: with the explanation pinned (_D) and the block
+    # tiled (_Q), every predicate is green together, the default entry (main), the section tiling,
+    # the pins, the keyword lint and the retired-text absence; the block's quoted text stays out of
+    # the pins and the retired-text check. Each registry shortcut is red: the block registered as an
+    # ordinary pin (missing, since no pin reads quoted text) or as _D (missing, and a keyword on a
+    # descriptive pin), the _Q entry without its block in the spec, the block in a near-miss form,
+    # and the _Q entry without its ">" markers (tiling).
+    landed = planted(body, explained)
+    quotation = _normalized(_RETIRED_QUOTATION + "\n> " + transport)
+    registry = _CONTRACT["4.2"] + (_D("Homes 2 has no homes migration, so this rule no longer applies."),
+                                   _Q(quotation))
+    missing = "spec 4.2 missing retired-text quotation: " + quotation
+    import io
+    from contextlib import redirect_stdout
+    with tempfile.TemporaryDirectory(prefix="opf-homes-quotation-") as tmp:
+        landed_spec = Path(tmp) / "OPF-SPEC.md"
+        landed_spec.write_text(landed, encoding="utf-8")
+        module = sys.modules[__name__]
+        with patch.dict(_CONTRACT, {"4.2": registry}), patch.object(module, "SPEC", landed_spec):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                landed_rc = main([])
+            check("spec-retired-quotation-landed", lambda r=landed_rc, out=buf.getvalue():
+                  r == 0 and out == "" and tiles(landed, "4.2") and not contract_findings(landed)
+                  and not keyword_findings() and retired_absent(landed, "4.2", transport)
+                  and transport in _normalized(_sections(landed)["4.2"])
+                  and not any(transport in reading for reading in _readings(landed)["4.2"][1])
+                  and transport not in _readings(landed)["4.2"][0]
+                  and _readings(landed)["4.2"][2] == (quotation,))
+            check("spec-retired-quotation-landed-unregistered-spec", lambda:
+                  missing in contract_findings(text) and not tiles(text, "4.2"))
+            near = planted(body, explained.replace(_RETIRED_QUOTATION, "  " + _RETIRED_QUOTATION, 1))
+            check("spec-retired-quotation-landed-near-miss", lambda: missing in contract_findings(near) and
+                  restores(contract_findings(near), "4.2") and not retired_absent(near, "4.2", transport))
+        for shortcut, entry in (("plain", str(quotation)), ("descriptive", _D(quotation))):
+            with patch.dict(_CONTRACT, {"4.2": registry[:-1] + (entry,)}):
+                check("spec-retired-quotation-landed-" + shortcut, lambda e=entry, s=shortcut:
+                      tiles(landed, "4.2") and "spec 4.2 missing contract: " + e in contract_findings(landed)
+                      and (s == "plain" or any(e in f for f in keyword_findings())))
+        with patch.dict(_CONTRACT, {"4.2": registry[:-1] + (_Q(_RETIRED_QUOTATION + " " + transport),)}):
+            check("spec-retired-quotation-landed-no-markers", lambda: not tiles(landed, "4.2")
+                  and any(f.startswith("spec 4.2 missing retired-text quotation: ")
+                          for f in contract_findings(landed)))
+    # A pin holding the marker the pins read in place of a block is missing, so no registry edit lets
+    # a pin span a block.
+    spanning = text.replace(body, body.rstrip("\n") + "\n\nBefore.\n\n" + _RETIRED_QUOTATION
+                            + "\n> Quoted.\n\nAfter.\n\n", 1)
+    with patch.dict(_CONTRACT, {"4.2": _CONTRACT["4.2"] + (_D("Before. " + _QUOTATION_JOINT + " After."),)}):
+        check("spec-retired-quotation-joint-pin", lambda: "spec 4.2 missing contract: Before. "
+              + _QUOTATION_JOINT + " After." in contract_findings(spanning))
+    # A lead-in with no ">" line after it opens no block: it is operative text the pins read, so a
+    # sentence around it reads it, and a fragment split around it is not joined.
+    check("spec-retired-quotation-lead-in-alone", lambda: _read_section(
+        "\nA.\n" + _RETIRED_QUOTATION + "\nB.\n", {4})[0] == "A. " + _RETIRED_QUOTATION + " B."
+        and _read_section("\nA.\n" + _RETIRED_QUOTATION + "\n> B.\n", {4})[0] == "A. " + _QUOTATION_JOINT)
+    # Two quotation blocks in one section are each read as one, the second found at its own offset;
+    # a near miss after a block is still read.
+    second = _RETIRED_QUOTATION + "\n> " + _RETIRED["4.2"][0] + "\n\nBetween.\n\n" + _RETIRED_QUOTATION
+    check("spec-retired-quotation-two-blocks", lambda b=body: not restores(contract_findings(planted(
+        b, second + "\n> " + transport)), "4.2") and restores(contract_findings(planted(
+            b, second.replace("\n\n" + _RETIRED_QUOTATION, "\n\n " + _RETIRED_QUOTATION) + "\n> "
+            + transport)), "4.2"))
     # A quotation block is not in force, so a pin moved into one is missing; the same pin moved into a
     # near miss of the form is operative text and still present.
     pin = _pin("4.2", "Homes 2 has no homes migration:")
@@ -5275,9 +5460,6 @@ def _self_test_vectors():
     # The default entry runs the informative guard: over a spec with a planted violation,
     # main([]) is red with the guard's own finding, so unwiring informative_findings from
     # main() is a named failure here; the unmodified baseline stays green with no output.
-    import io
-    from contextlib import redirect_stdout
-    module = sys.modules[__name__]
     with tempfile.TemporaryDirectory(prefix="opf-homes-main-") as tmp:
         planted_spec = Path(tmp) / "OPF-SPEC.md"
         planted_spec.write_text(text.replace(
@@ -5307,6 +5489,9 @@ def _self_test_vectors():
         ("A phase inventory MAY be published.", False),
         (_D("The closed kind vocabulary is import."), False),
         (_D("A lease MUST NOT be seized."), True),
+        # A quotation entry is not linted, with a keyword or without one.
+        (_Q("> Retired text, quoted and not in force: > A lease MUST NOT be seized."), False),
+        (_Q("> Retired text, quoted and not in force: > A lease is never seized."), False),
     )
     for fragment, red in lint_cases:
         check("keyword-lint-case-{!r}".format(str(fragment)), lambda f=fragment, r=red:

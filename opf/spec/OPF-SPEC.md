@@ -2639,8 +2639,8 @@ The gates in this standard are strong where they are strong and say so where the
   which rewrites the base table and token in place so no existing adopter's manifest is stranded.
   That in-place rewrite covers only a bump that ships an upgrade. The bump to the homes-2
   declaration ships none (section 9.2), so no store-breaking rename can ship with it: a homes-2
-  manifest carries the same `[opf]` base table, and a homes-1 store, which homes 2 does not migrate
-  (section 4.2), keeps its manifest as it is.
+  manifest keeps the `[opf]` base table name and the `opf` discovery token, and the bump leaves
+  unchanged the manifest of a homes-1 store, which homes 2 does not migrate (section 4.2).
   The retired 1.0.0 token `devprocess` is recognized by `opf upgrade`, purely to carry a legacy store
   forward, and by a fresh-only implementation (section 16.1), purely to refuse that store by name.
 - A fresh-only implementation (section 16.1) proves tested admission and refusal behaviour, not
