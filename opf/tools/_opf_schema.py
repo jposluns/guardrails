@@ -4406,9 +4406,11 @@ def self_test():
     # a walk over a shared one could repeat without bound. The walk has no depth bound, so with its visited
     # set removed it would never end on a cycle: each vector runs in a bounded child process
     # (_opf_emit.run_bounded) and returns a short token from there, and the shared values, which are
-    # finite, reach their field rules, so each named check fails rather than hanging the run. The
-    # self-test borrows no process-wide timer, handler or signal mask: run_bounded installs its bounds in
-    # the child alone (the caller-timer vector at the end holds this).
+    # finite, reach their field rules, so each named check fails rather than hanging the run. run_bounded
+    # arms its timer, resets and unblocks SIGALRM, and sets its memory limit in the child alone. The
+    # caller-timer vector at the end checks that the self-test leaves a caller's timer, SIGALRM handler and
+    # signal mask as they were only within the coverage boundary stated there: a borrow its spies do not
+    # see passes it when it leaves them as that vector expects to find them.
     import _opf_emit
 
     def _in_child(thunk):
@@ -4531,7 +4533,10 @@ def self_test():
     # _bounded_display is _safe_display, byte for byte, for a plain value whose repr exists and fits the
     # budget, and for the oversized ints below, alone or reached before the cut (each renders as an
     # oversized marker under the default int-to-str limit); a value whose repr exists and does not fit is
-    # cut at exactly the budget.
+    # cut at exactly the budget. Two exceptions, each pinned below: a date-time whose timezone name is
+    # longer than the budget, alone or reached before the cut, renders as a fixed text in its place, and
+    # with the int-to-str limit lifted an int of more than _DISPLAY_INT_BITS bits renders as an oversized
+    # marker.
     _cet = datetime.timezone(datetime.timedelta(hours=1), "CET")
     _render_same = (
         "plain", "it's", 'say "hi"', "a\nb\u2028\U000e0001", "", 0, -7, 1 << 64, 1.5, float("nan"), float("-inf"),
@@ -4623,9 +4628,11 @@ def self_test():
     check("imported-bounded-display-not-plain-marked", _bounded_display(
         [_ReprRaisesStr("x"), datetime.datetime(2025, 1, 5, tzinfo=_ReprZoneRan()), {"k": _ReprListRan([1])}])
         == "[{0}, {0}, {{'k': {0}}}]".format(_NOT_PLAIN_MARK) and not _ran)
-    check("imported-bounded-display-long-zone-name", _bounded_display(datetime.datetime(
-        2025, 1, 5, tzinfo=datetime.timezone(datetime.timedelta(hours=1), "Z" * (_DISPLAY_BUDGET + 1))))
-        == "<a date-time whose timezone name exceeds {} characters>".format(_DISPLAY_BUDGET))
+    _long_zone = datetime.datetime(
+        2025, 1, 5, tzinfo=datetime.timezone(datetime.timedelta(hours=1), "Z" * (_DISPLAY_BUDGET + 1)))
+    _zone_mark = "<a date-time whose timezone name exceeds {} characters>".format(_DISPLAY_BUDGET)
+    check("imported-bounded-display-long-zone-name", _bounded_display(_long_zone) == _zone_mark
+          and _bounded_display([_long_zone, 1]) == "[" + _zone_mark + ", 1]")
     # A str is sliced to the budget before its repr is taken, so rendering a huge one costs the budget, not
     # its length.
     import tracemalloc
@@ -4747,6 +4754,23 @@ def self_test():
           and _specs_roster_error({_over: _bi_spec}) == (
               "the type-spec roster names a type absent from the section-8.1 taxonomy: " + repr(_over)
               + " (fail-closed)"))
+    # The same names reach the clean validators' findings uncut through each call site whose message a
+    # finding carries (the gated-snapshot, type-specific and proposed-from sites drop theirs), so a switch
+    # to the bounded renderer at those call sites shows too.
+    _over_state = ("status state " + repr(_over) + " is not a backlog_item state "
+                   "['active', 'done', 'dropped', 'open']")
+    _over_roster = ("the type-spec roster names a type absent from the section-8.1 taxonomy: " + repr(_over)
+                    + " (fail-closed)")
+    check("clean-validators-long-name-uncut",
+          ("status: " + _over_state) in validate_record(envelope("backlog_item", 1, _over)).findings
+          and validate_record(envelope("backlog_item", 1, "open"), specs={_over: _bi_spec}).findings
+          == [_over_roster]
+          and ("from-status: " + _over_state) in validate_transition(
+              "backlog_item", _over, "open", "maintainer").findings
+          and ("to-status: " + _over_state) in validate_transition(
+              "backlog_item", "open", _over, "maintainer").findings
+          and validate_transition("backlog_item", "open", "active", "maintainer",
+                                  specs={_over: _bi_spec}).findings == [_over_roster])
     # A plain operand that is not a str is refused and rendered, as the import-table docstring says.
     _found = []
     _validate_import_table({"import": {"run": 42, "source": None}}, _imported_schema_fields(_MD), _found)
@@ -5088,26 +5112,33 @@ def self_test():
     _imp_adv("huge-id", _imp_pd(id=_huge))
     _imp_adv("huge-link", _imp_md(links=[{"rel": _huge, "id": _huge}]))
 
-    # The self-test borrows no process-wide timer, as far as the two legs below observe. A caller arms
-    # ITIMER_REAL with an interval and installs a SIGALRM handler; the timer must keep counting down through
-    # the whole self-test with its interval kept, and the handler and the signal mask must stay as they
-    # were, never cancelled, restarted, delivered early or replaced. The caller is a bounded child that runs
-    # this self-test in-process (that nested run skips this vector) and returns KEPT only when both legs
-    # hold. The elapsed leg: the countdown left is the armed one less the time elapsed since, within a
-    # 0.05-second reading tolerance. The call leg: while spies replace the signal, setitimer and alarm
+    # The caller-timer vector. A caller arms ITIMER_REAL with an interval and installs a SIGALRM handler;
+    # the timer must keep counting down through the whole self-test with its interval kept, and the handler
+    # and the signal mask must stay as they were, never cancelled, restarted, delivered early or replaced.
+    # The caller is a bounded child that runs this self-test in-process (that nested run skips this vector)
+    # and returns KEPT only when every clause holds, else LOST and the failed clauses by name. The clauses:
+    # handler (the caller's handler is still installed), mask (the signal mask is unchanged), fired (the
+    # caller's handler never ran), calls (the call leg), interval (still 7), and the elapsed leg's floor and
+    # ceiling (the countdown left is the armed one less the time elapsed since, within a 0.05-second
+    # reading tolerance either way). The call leg: while spies replace the signal, setitimer and alarm
     # attributes of both the signal module and _signal, the run makes no call through any of them
     # (run_bounded makes those calls in its own child alone, which sets that child's timer and records
     # nothing here). Arming in the child replaces its own run_bounded timer; the parent-owned run_bounded
     # deadline still bounds it.
-    # Coverage boundary: the call leg sees only a call that looks one of those six attributes up while the
-    # spies are in place. A borrow through a function bound before the spies (an alias, or a name imported
-    # from either module) or by another route (ctypes, an extension module) is invisible to it, and the
-    # elapsed leg catches such a borrow only when it costs the countdown more than the tolerance. So a
-    # borrow through an alias that restores the timer verbatim within about 0.05 seconds passes, and so
-    # does one that takes its own window off the countdown it restores, at any length. The two residual
-    # vectors below assert that both pass: a check that closes them turns them red, and this boundary is
-    # then restated. The _signal vector asserts that the call leg sees a borrow through _signal, and the
-    # slow-restore vector that the elapsed leg sees an alias borrow that restores verbatim after 0.3 seconds.
+    # Coverage boundary: the call leg sees a call only when it looks one of those six attributes up while
+    # the spies are in place. The signal module's signal function is a wrapper that looks _signal.signal up
+    # at each call, so a call through it is seen however it was bound, an alias or a name imported before
+    # the spies included. A call through any other of the six functions bound before the spies (an alias,
+    # or a name imported from either module) is invisible to the call leg, and so is a change made by
+    # another route (pthread_sigmask, ctypes, an extension module). The other clauses catch such a borrow
+    # only by the trace it leaves: a handler or mask left changed, the caller's handler run, the interval
+    # changed, or the countdown off by more than the tolerance. So a borrow through an alias that restores
+    # the timer verbatim within about 0.05 seconds passes, and so does one that takes its own window off the
+    # countdown it restores, of any length, while no SIGALRM reaches the caller's handler in that window.
+    # The two residual vectors below assert that both pass: a check that closes them turns them red, and
+    # this boundary is then restated. Each clause, and each of the six spies, has a vector below that goes
+    # red without it: the every-spy vector requires each of the six calls it makes by name, and each other
+    # clause has a borrow that fails it and no other clause.
     if not _SELF_TEST_NESTED:
         import _signal
         import contextlib
@@ -5152,15 +5183,30 @@ def self_test():
             before = time.monotonic()
             remaining, interval = signal.getitimer(signal.ITIMER_REAL)
             after = time.monotonic()
-            kept = (signal.getsignal(signal.SIGALRM) is _caller_alarm and _mask() == mask and not fired
-                    and not calls and interval == 7
-                    and 3600 - (after - start) - 0.05 <= remaining <= 3600 - (before - armed) + 0.05)
-            return "KEPT" if kept else "LOST code={} remaining={:.3f} interval={} fired={} calls={}".format(
-                code, remaining, interval, len(fired), ",".join(sorted(set(calls))))
+            clauses = (("handler", signal.getsignal(signal.SIGALRM) is _caller_alarm),
+                       ("mask", _mask() == mask), ("fired", not fired), ("calls", not calls),
+                       ("interval", interval == 7),
+                       ("floor", 3600 - (after - start) - 0.05 <= remaining),
+                       ("ceiling", remaining <= 3600 - (before - armed) + 0.05))
+            failed = [name for name, held in clauses if not held]
+            if not failed:
+                return "KEPT"
+            return "LOST code={} failed={} remaining={:.3f} interval={} fired={} calls={}".format(
+                code, ",".join(failed), remaining, interval, len(fired), ",".join(sorted(set(calls))))
 
         def _timer_vector(workload):
             return _opf_emit.run_bounded(lambda: _caller_timer_kept(workload), timeout_s=300,
                                          mem_bytes=2 * 1024 ** 3)
+
+        def _lost_on(workload, failed, calls=""):
+            # True when one of up to three runs is LOST with exactly these failed clauses and these calls: a
+            # host stall inside a borrow can cost the countdown more than the tolerance, which adds an
+            # elapsed clause (the elapsed leg working as stated).
+            for _ in range(3):
+                seen = _timer_vector(workload)
+                if seen.startswith("LOST code=0 failed=" + failed + " ") and seen.endswith(" calls=" + calls):
+                    return True
+            return False
 
         check("self-test-keeps-caller-timer", _timer_vector(self_test) == "KEPT")
 
@@ -5174,10 +5220,10 @@ def self_test():
         check("self-test-caller-timer-sees-_signal-borrow", _seen.startswith("LOST code=0 ")
               and _seen.endswith(" calls=_signal.setitimer,_signal.signal"))
         # The residual, recorded, not a detection: a borrow through aliases bound before the spies passes
-        # both legs when it restores the timer verbatim at once, or when it restores the countdown less its
+        # every clause when it restores the timer verbatim at once, or when it restores the countdown less its
         # own window. Each vector takes up to three attempts, since a host stall inside the borrow can cost
         # the countdown more than the tolerance, which is the elapsed leg working as stated.
-        _alias_handler, _alias_timer = _signal.signal, _signal.setitimer
+        _alias_handler, _alias_timer, _alias_wrapper = _signal.signal, _signal.setitimer, signal.signal
 
         def _alias_quick_restore():
             prior = _alias_handler(_signal.SIGALRM, _signal.SIG_IGN)
@@ -5203,9 +5249,64 @@ def self_test():
             _alias_timer(_signal.ITIMER_REAL, *saved)
             return 0
 
-        _seen = _timer_vector(_alias_slow_restore)
         check("self-test-caller-timer-elapsed-leg-sees-alias-slow-restore",
-              _seen.startswith("LOST code=0 ") and _seen.endswith(" calls="))
+              _lost_on(_alias_slow_restore, "ceiling"))
+
+        # A run through all six spied attributes, each required by name; a borrow through the signal.signal
+        # wrapper bound before the spies, seen through _signal.signal; and a borrow for each clause the
+        # vectors above leave unpinned, each failing that clause and no other. The slow-restore and shortening
+        # borrows each leave the countdown 0.3 seconds off, so a tolerance widened past that turns one red.
+        def _every_spied_call():
+            saved = _alias_timer(_signal.ITIMER_REAL, 10)
+            signal.alarm(0)
+            _signal.alarm(0)
+            _signal.setitimer(_signal.ITIMER_REAL, *signal.setitimer(_signal.ITIMER_REAL, 10))
+            _alias_timer(_signal.ITIMER_REAL, *saved)
+            _signal.signal(_signal.SIGALRM, signal.signal(_signal.SIGALRM, _signal.SIG_IGN))
+            return 0
+
+        def _alias_wrapper_swap():
+            _alias_wrapper(signal.SIGALRM, _alias_wrapper(signal.SIGALRM, signal.SIG_IGN))
+            return 0
+
+        def _alias_handler_left():
+            _alias_handler(_signal.SIGALRM, _signal.SIG_IGN)
+            return 0
+
+        def _mask_left():
+            signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGUSR2})
+            return 0
+
+        def _alias_fires_caller_handler():
+            began = time.monotonic()
+            saved = _alias_timer(_signal.ITIMER_REAL, 0.001)
+            time.sleep(0.1)
+            _alias_timer(_signal.ITIMER_REAL, saved[0] - (time.monotonic() - began), saved[1])
+            return 0
+
+        def _alias_interval_changed():
+            began = time.monotonic()
+            saved = _alias_timer(_signal.ITIMER_REAL, 10)
+            _alias_timer(_signal.ITIMER_REAL, saved[0] - (time.monotonic() - began), 5)
+            return 0
+
+        def _alias_shortened():
+            began = time.monotonic()
+            saved = _alias_timer(_signal.ITIMER_REAL, 10)
+            _alias_timer(_signal.ITIMER_REAL, saved[0] - (time.monotonic() - began) - 0.3, saved[1])
+            return 0
+
+        _all_six = "_signal.alarm,_signal.setitimer,_signal.signal,signal.alarm,signal.setitimer,signal.signal"
+        for _name, _borrow, _failed, _calls in (
+                ("every-spied-call", _every_spied_call, "calls", _all_six),
+                ("prebound-signal-wrapper", _alias_wrapper_swap, "calls", "_signal.signal"),
+                ("alias-handler-left", _alias_handler_left, "handler", ""),
+                ("mask-left", _mask_left, "mask", ""),
+                ("alias-fires-caller-handler", _alias_fires_caller_handler, "fired", ""),
+                ("alias-interval-changed", _alias_interval_changed, "interval", ""),
+                ("alias-shortened", _alias_shortened, "floor", "")):
+            check("self-test-caller-timer-" + _failed + "-clause-sees-" + _name,
+                  _lost_on(_borrow, _failed, _calls))
 
     if failures:
         print("OPF-SCHEMA SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked))
