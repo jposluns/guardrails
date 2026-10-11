@@ -1379,12 +1379,18 @@ def _config_injection_lane(base):
 # opf derives from its cleanup grace and the waits of _FixtureProcess's
 # close-out, which opf._watchdog_closeout_vectors() checks against the real
 # close-out code under a virtual clock), and its watchdog isolation
-# self-test also runs once at top level. opf._watchdog_declared_seconds()
-# returns that sequential sum, read from the runner's own tables by
-# _derive_member_bound() before any lane runs, so a budget, grace or wait
-# raised there raises this bound with it; the derivation vector below
-# restates how the sum combines its terms, and the probe also runs opf's
-# close-out vector and returns its faults. The margin is a STATED
+# self-test also runs once at top level, with no leg bound around it, so
+# each of that run's fixture calls is priced as a leg is: its process
+# bound plus the close-out allowance after it (a passing call's budget
+# would assume the call ends inside its timeout).
+# opf._watchdog_declared_seconds() returns that sequential sum, read from
+# the runner's own tables by _derive_member_bound() before any lane runs,
+# so a budget, grace or wait raised there raises this bound with it; the
+# derivation vector below restates how the sum combines its terms, and the
+# probe also runs opf's close-out vector and returns its faults.
+# _install_member_bound() installs the bound only when that restatement
+# matches and the fault list is empty; otherwise it exits 2 with the bound
+# unset, so no member launches under it. The margin is a STATED
 # allowance, not a derivation, and covers only this: interpreter start, and
 # the opf self-tests and other members that declare no end-to-end budget
 # (their own internal timeouts are not summed: a disclosed residual). The
@@ -1404,21 +1410,27 @@ _MEMBER_BOUND_SECONDS = None  # set once by _derive_member_bound(); None refuses
 # The derivation vector: a synthetic two-leg plan evaluated by opf's own
 # derivation in the probe, against the rule restated here: every leg's
 # bound, plus every leg's close-out allowance (the value the probe reads
-# from opf), plus the isolation self-test's budget. Every term is positive,
-# so omitting any one changes the total; the isolation budget (7 s) is not
-# a multiple of the 5 s cleanup grace. The close-out allowance itself is
-# checked by opf's close-out vector, whose faults the probe returns beside
-# the total (want: none).
+# from opf), plus, for each fixture call of the top-level isolation run
+# (3 calls here), its process bound (7 s) plus that close-out allowance.
+# Every term is positive, so omitting any one changes the total; the
+# isolation timeout (7 s) is not a multiple of the 5 s cleanup grace. The
+# isolation leg's budget (39 s: three passing calls, each 7 s + the 5 s
+# grace + the 1 s receipt allowance) differs from that priced term, so a
+# derivation that prices the top-level run as passing calls misses the
+# total. The close-out allowance itself is checked by opf's close-out
+# vector, whose faults the probe returns beside the total (want: none).
 _DERIVATION_VECTOR_PLAN = dict(
     bounds=dict([("vector-leg-a", 1000.0), ("vector-leg-b", 100.0)]),
     budgets=dict([("vector-leg-a", 970.0), ("vector-leg-b", 70.0),
-                  ("blocked-isolation", 7.0)]))
+                  ("blocked-isolation", 39.0)]),
+    isolation=dict(calls=3, timeout=7.0))
 
 
 def _derivation_vector_want(closeout):
     plan = _DERIVATION_VECTOR_PLAN
+    isolation = plan["isolation"]
     return (sum(plan["bounds"].values()) + len(plan["bounds"]) * closeout
-            + plan["budgets"]["blocked-isolation"])
+            + isolation["calls"] * (isolation["timeout"] + closeout))
 
 
 def _derive_member_bound(run=subprocess.run):
@@ -1580,11 +1592,23 @@ def _member_rc_or_refuse(member, env):
     return rc
 
 
-def _install_member_bound():
-    """Derive and install the per-member bound; return opf's declared worst
-    case and the derivation vector's (got, want)."""
+def _install_member_bound(run=subprocess.run):
+    """Derive the per-member bound and install it only when the derivation
+    holds: opf's total over the synthetic plan equals the rule restated
+    here, and opf's close-out vector returned no faults. Otherwise exit 2
+    (cannot evaluate) with the bound left unset, so no member launches
+    under an allowance the probe itself rejected. Returns opf's declared
+    worst case and the derivation vector's (got, want). `run` is the
+    probe's launch (scripted by the vectors)."""
     global _MEMBER_BOUND_SECONDS
-    declared, _MEMBER_BOUND_SECONDS, vector = _derive_member_bound()
+    declared, bound, vector = _derive_member_bound(run=run)
+    (got, faults), (want, _none) = vector
+    if got != want or faults:
+        _cannot_evaluate_exit(["the per-member bound's derivation was rejected (opf's total "
+                               "over the synthetic plan {!r}, the rule restated here {!r}; "
+                               "close-out vector faults: {}): no member runs under it".format(
+                                   got, want, "; ".join(faults) or "none")])
+    _MEMBER_BOUND_SECONDS = bound
     return declared, vector
 
 
@@ -1595,6 +1619,12 @@ _MEMBER_BOUND_EXPECTED = [
     ("clean", (7.5, 7.5 + _MEMBER_BOUND_MARGIN_SECONDS,
                ((3.25, []), (_derivation_vector_want(0.5), [])))),
     ("unset-bound", 2, True), ("unset-launch", 2, True, 0),
+    # A rejected derivation (well-formed, but with close-out faults, or a
+    # total that misses the restated rule) leaves the bound unset and
+    # reaches no launch; an accepted one installs it and launches under it.
+    ("closeout-faults", 2, True, None, 2, 0), ("vector-mismatch", 2, True, None, 2, 0),
+    ("install-clean", "returned", 7.5 + _MEMBER_BOUND_MARGIN_SECONDS, 0, 1,
+     7.5 + _MEMBER_BOUND_MARGIN_SECONDS),
 ]
 
 
@@ -1602,8 +1632,11 @@ def _member_bound_vectors():
     """Red-on-revert vectors for the bound's derivation-failure exit and its
     unset (None) refusal, through scripted probe launches: every unreadable,
     non-finite, non-positive, incomplete or malformed derivation is an attributed exit
-    2 naming the derivation, a clean one installs declared + margin, and a
-    member launch reached with no bound derived exits 2 before launching."""
+    2 naming the derivation, a clean one installs declared + margin, a
+    member launch reached with no bound derived exits 2 before launching,
+    and a well-formed derivation whose close-out fault list is not empty,
+    or whose total misses the restated rule, exits 2 at installation with
+    the bound unset, so a member launch after it exits 2 before launching."""
     import contextlib
     import io
     import json
@@ -1659,6 +1692,33 @@ def _member_bound_vectors():
         code, text = refused(lambda: _run_config_member(_VECTOR_MEMBER, dict(os.environ)))
         got.append(("unset-launch", code, "before the per-member bound was derived" in text,
                     len(calls)))
+        want = _derivation_vector_want(0.5)
+
+        def launcher(launches):
+            def run(argv, **kwargs):
+                launches.append(kwargs.get("timeout"))
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            return run
+
+        for label, effect in (
+                ("closeout-faults", payload(vector=want,
+                                            closeout_faults=["close-out vector armed: overrun"])),
+                ("vector-mismatch", payload()),
+                ("install-clean", payload(vector=want))):
+            _MEMBER_BOUND_SECONDS = None
+            subprocess.run = real_run
+            code, text = refused(lambda: _install_member_bound(run=scripted((0, effect))))
+            installed, launches = _MEMBER_BOUND_SECONDS, []
+            subprocess.run = launcher(launches)
+            launch, _text = refused(
+                lambda: _run_config_member(_VECTOR_MEMBER, dict(os.environ)))
+            if label == "install-clean":
+                got.append((label, code[0] if isinstance(code, tuple) else code, installed,
+                            launch[1] if isinstance(launch, tuple) else launch, len(launches),
+                            launches[0] if launches else None))
+                continue
+            got.append((label, code, "per-member bound's derivation was rejected" in text,
+                        installed, launch, len(launches)))
     finally:
         subprocess.run = real_run
         _MEMBER_BOUND_SECONDS = saved
