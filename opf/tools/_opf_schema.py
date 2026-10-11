@@ -109,10 +109,11 @@ unit is that schema release for the record model and DEFINES the following where
     appears twice (shared or cyclic). Anything else is CANNOT-EVALUATE, since its own methods could
     answer a lookup, a hash, a comparison, a format or a repr with caller code. Depth alone is never
     refused, since tomllib nests tables to any depth through a dotted key or a table header; instead
-    every finding renders a record value, and every name a caller's `specs` roster or
-    `registered_kinds` control supplies (a module type's states and fields, a roster key, a registered
-    kind), through a renderer that is iterative and stops at a fixed character budget, so no rendering
-    overflows the stack or exceeds that budget plus the cut marker. A record also holds only TOML value
+    every finding renders a record value, and every name other than a section-8.1 type name that a
+    caller's `specs` roster or `registered_kinds` control supplies (a module type's states and fields,
+    a roster key, a registered kind), through a renderer that is iterative and stops at a fixed
+    character budget, so no rendering overflows the stack or exceeds that budget plus the cut marker. A
+    record also holds only TOML value
     types (spec 4.4): None, a tuple, a set, a frozenset or a non-str key anywhere in it, a registered
     `x-<vendor>` table and a module field no value rule reads included, is INVALID, and so is a
     date-time in a form no TOML date-time takes (a time with a tzinfo, a nonzero fold, or an offset that
@@ -1463,11 +1464,13 @@ def _bounded_display(value):
     container that emitted its opening, so the steps, the stack and the output all grow at most in
     proportion to the budget, whatever the value's depth, width or sharing (a shared or cyclic value
     renders as the tree it unfolds to, up to the cut). Every imported-record finding renders a record
-    value, and every name a caller's `specs` roster or `registered_kinds` control supplies (a module
-    type's states and fields, a roster key, a registered kind), through it, directly or through
-    _plain_display. Only a value already confined to a fixed vocabulary is rendered raw: a two-letter
-    namespace, a required or exempt imported envelope field name, a section-8.1 type name, an actor kind
-    that ACTOR_KINDS holds, and a well-formed series id (_SERIES_ID_RE, at most _MAX_ID_DIGITS digits)."""
+    value, and every name other than a section-8.1 type name that a caller's `specs` roster or
+    `registered_kinds` control supplies (a module type's states and fields, a roster key, a registered
+    kind), through it, directly or through _plain_display. Only a value already confined to a fixed
+    vocabulary is rendered raw: a two-letter namespace, a required or exempt imported envelope field
+    name, a section-8.1 type name, an actor kind that ACTOR_KINDS holds, a well-formed series id
+    (_SERIES_ID_RE, at most _MAX_ID_DIGITS digits), and a well-formed import run id (_IMPORT_RUN_PATTERN,
+    of one fixed length)."""
     if type(value) is int and _display_int(value) is None:
         return "<oversized-int: {} bits>".format(int.bit_length(value))
     out, size, stack = [], 0, [(_DISPLAY_VALUE, value)]
@@ -2039,8 +2042,9 @@ def validate_imported_record(record, expected_type=None, specs=None, registered_
     a dict whose every key and nested value is exactly a plain built-in type, a tree as a parsed record
     is, so no method of a record value (a lookup, a hash, a comparison, a format, a repr, a startswith)
     runs during validation. Its depth is not bounded, since tomllib nests tables to any depth through a
-    dotted key or a table header; instead every finding renders a record value, and every name a caller's
-    `specs` roster or `registered_kinds` control supplies, through _bounded_display, so no rendering
+    dotted key or a table header; instead every finding renders a record value, and every name other
+    than a section-8.1 type name that a caller's `specs` roster or `registered_kinds` control supplies,
+    through _bounded_display, so no rendering
     overflows the stack and each takes at most _DISPLAY_BUDGET characters and the cut marker (a finding
     may render more than one value, and every finding repeats the label, which renders the id). Every
     field then holds only TOML value types, each date-time in a TOML form (_is_toml_value, spec 4.4), a
@@ -4524,8 +4528,10 @@ def self_test():
           and any(f.startswith("import.source " + _deep_list + " is not ") for f in _found)
           and any(f.startswith("import.run " + _deep_list + " is not ") for f in _found))
 
-    # _bounded_display is _safe_display, byte for byte, for a plain value whose rendering fits the budget,
-    # its oversized-int markers included, and is cut at exactly the budget otherwise.
+    # _bounded_display is _safe_display, byte for byte, for a plain value whose repr exists and fits the
+    # budget, and for the oversized ints below, alone or reached before the cut (each renders as an
+    # oversized marker under the default int-to-str limit); a value whose repr exists and does not fit is
+    # cut at exactly the budget.
     _cet = datetime.timezone(datetime.timedelta(hours=1), "CET")
     _render_same = (
         "plain", "it's", 'say "hi"', "a\nb\u2028\U000e0001", "", 0, -7, 1 << 64, 1.5, float("nan"), float("-inf"),
@@ -4732,6 +4738,15 @@ def self_test():
               None, "state 'open' may not carry '/proposed' for a backlog_item (spec 8.4/8.5)")
           and _specs_roster_error({"not_a_type": _bi_spec}) == (
               "the type-spec roster names a type absent from the section-8.1 taxonomy: 'not_a_type' (fail-closed)"))
+    # A name over the display budget appears there uncut, as its repr, so a switch to the bounded renderer
+    # (which would cut it) shows.
+    _over = "x" * (_DISPLAY_BUDGET + 808)
+    check("clean-status-and-roster-long-name-uncut",
+          parse_status(_over, _bi_spec) == (None, "status state " + repr(_over) + " is not a backlog_item state "
+                                            "['active', 'done', 'dropped', 'open']")
+          and _specs_roster_error({_over: _bi_spec}) == (
+              "the type-spec roster names a type absent from the section-8.1 taxonomy: " + repr(_over)
+              + " (fail-closed)"))
     # A plain operand that is not a str is refused and rendered, as the import-table docstring says.
     _found = []
     _validate_import_table({"import": {"run": 42, "source": None}}, _imported_schema_fields(_MD), _found)
@@ -5073,22 +5088,34 @@ def self_test():
     _imp_adv("huge-id", _imp_pd(id=_huge))
     _imp_adv("huge-link", _imp_md(links=[{"rel": _huge, "id": _huge}]))
 
-    # The self-test borrows no process-wide timer: a caller's armed ITIMER_REAL keeps counting down through
-    # the whole self-test with its interval kept, and its SIGALRM handler and signal mask stay as they were,
-    # never cancelled, restarted, delivered early or replaced. The caller is a bounded child: it installs a
-    # handler, arms the timer with an interval, runs this self-test in-process (that nested run skips this
-    # vector), and returns KEPT only when the countdown left is the armed one less the time elapsed since
-    # (elapsed-aware), within a 0.05-second reading tolerance, and the run made no in-process call to
-    # signal.signal, signal.setitimer or signal.alarm, so a borrow that restores the timer verbatim after
-    # a short window is caught too (run_bounded makes those calls in its own child alone). Arming there
-    # replaces the child's own run_bounded timer; the parent-owned run_bounded deadline still bounds it.
+    # The self-test borrows no process-wide timer, as far as the two legs below observe. A caller arms
+    # ITIMER_REAL with an interval and installs a SIGALRM handler; the timer must keep counting down through
+    # the whole self-test with its interval kept, and the handler and the signal mask must stay as they
+    # were, never cancelled, restarted, delivered early or replaced. The caller is a bounded child that runs
+    # this self-test in-process (that nested run skips this vector) and returns KEPT only when both legs
+    # hold. The elapsed leg: the countdown left is the armed one less the time elapsed since, within a
+    # 0.05-second reading tolerance. The call leg: while spies replace the signal, setitimer and alarm
+    # attributes of both the signal module and _signal, the run makes no call through any of them
+    # (run_bounded makes those calls in its own child alone, which sets that child's timer and records
+    # nothing here). Arming in the child replaces its own run_bounded timer; the parent-owned run_bounded
+    # deadline still bounds it.
+    # Coverage boundary: the call leg sees only a call that looks one of those six attributes up while the
+    # spies are in place. A borrow through a function bound before the spies (an alias, or a name imported
+    # from either module) or by another route (ctypes, an extension module) is invisible to it, and the
+    # elapsed leg catches such a borrow only when it costs the countdown more than the tolerance. So a
+    # borrow through an alias that restores the timer verbatim within about 0.05 seconds passes, and so
+    # does one that takes its own window off the countdown it restores, at any length. The two residual
+    # vectors below assert that both pass: a check that closes them turns them red, and this boundary is
+    # then restated. The _signal vector asserts that the call leg sees a borrow through _signal, and the
+    # slow-restore vector that the elapsed leg sees an alias borrow that restores verbatim after 0.3 seconds.
     if not _SELF_TEST_NESTED:
+        import _signal
         import contextlib
         import io
         import signal
         import time
 
-        def _caller_timer_kept():
+        def _caller_timer_kept(workload):
             global _SELF_TEST_NESTED
             _SELF_TEST_NESTED = True
             fired = []
@@ -5100,12 +5127,13 @@ def self_test():
                 return signal.pthread_sigmask(signal.SIG_BLOCK, ()) if hasattr(signal, "pthread_sigmask") else None
 
             calls = []
-            real = {name: getattr(signal, name) for name in ("signal", "setitimer", "alarm") if hasattr(signal, name)}
+            real = {(module, name): getattr(module, name) for module in (signal, _signal)
+                    for name in ("signal", "setitimer", "alarm") if hasattr(module, name)}
 
-            def _spy(name):
+            def _spy(key):
                 def call(*args, **kwargs):
-                    calls.append(name)
-                    return real[name](*args, **kwargs)
+                    calls.append(key[0].__name__ + "." + key[1])
+                    return real[key](*args, **kwargs)
                 return call
 
             signal.signal(signal.SIGALRM, _caller_alarm)
@@ -5113,14 +5141,14 @@ def self_test():
             start = time.monotonic()
             signal.setitimer(signal.ITIMER_REAL, 3600, 7)
             armed = time.monotonic()
-            for name in real:
-                setattr(signal, name, _spy(name))
+            for key in real:
+                setattr(key[0], key[1], _spy(key))
             try:
                 with contextlib.redirect_stdout(io.StringIO()):
-                    code = self_test()
+                    code = workload()
             finally:
-                for name, fn in real.items():
-                    setattr(signal, name, fn)
+                for key, fn in real.items():
+                    setattr(key[0], key[1], fn)
             before = time.monotonic()
             remaining, interval = signal.getitimer(signal.ITIMER_REAL)
             after = time.monotonic()
@@ -5130,8 +5158,54 @@ def self_test():
             return "KEPT" if kept else "LOST code={} remaining={:.3f} interval={} fired={} calls={}".format(
                 code, remaining, interval, len(fired), ",".join(sorted(set(calls))))
 
-        check("self-test-keeps-caller-timer", _opf_emit.run_bounded(
-            _caller_timer_kept, timeout_s=300, mem_bytes=2 * 1024 ** 3) == "KEPT")
+        def _timer_vector(workload):
+            return _opf_emit.run_bounded(lambda: _caller_timer_kept(workload), timeout_s=300,
+                                         mem_bytes=2 * 1024 ** 3)
+
+        check("self-test-keeps-caller-timer", _timer_vector(self_test) == "KEPT")
+
+        def _module_borrow():
+            prior = _signal.signal(_signal.SIGALRM, _signal.SIG_IGN)
+            _signal.setitimer(_signal.ITIMER_REAL, *_signal.setitimer(_signal.ITIMER_REAL, 10))
+            _signal.signal(_signal.SIGALRM, prior)
+            return 0
+
+        _seen = _timer_vector(_module_borrow)
+        check("self-test-caller-timer-sees-_signal-borrow", _seen.startswith("LOST code=0 ")
+              and _seen.endswith(" calls=_signal.setitimer,_signal.signal"))
+        # The residual, recorded, not a detection: a borrow through aliases bound before the spies passes
+        # both legs when it restores the timer verbatim at once, or when it restores the countdown less its
+        # own window. Each vector takes up to three attempts, since a host stall inside the borrow can cost
+        # the countdown more than the tolerance, which is the elapsed leg working as stated.
+        _alias_handler, _alias_timer = _signal.signal, _signal.setitimer
+
+        def _alias_quick_restore():
+            prior = _alias_handler(_signal.SIGALRM, _signal.SIG_IGN)
+            _alias_timer(_signal.ITIMER_REAL, *_alias_timer(_signal.ITIMER_REAL, 10))
+            _alias_handler(_signal.SIGALRM, prior)
+            return 0
+
+        def _alias_compensated_restore():
+            began = time.monotonic()
+            saved = _alias_timer(_signal.ITIMER_REAL, 10)
+            time.sleep(0.2)
+            _alias_timer(_signal.ITIMER_REAL, saved[0] - (time.monotonic() - began), saved[1])
+            return 0
+
+        for _name, _borrow in (("alias-quick-restore", _alias_quick_restore),
+                               ("alias-compensated-restore", _alias_compensated_restore)):
+            check("self-test-caller-timer-residual-unseen-" + _name,
+                  any(_timer_vector(_borrow) == "KEPT" for _ in range(3)))
+
+        def _alias_slow_restore():
+            saved = _alias_timer(_signal.ITIMER_REAL, 10)
+            time.sleep(0.3)
+            _alias_timer(_signal.ITIMER_REAL, *saved)
+            return 0
+
+        _seen = _timer_vector(_alias_slow_restore)
+        check("self-test-caller-timer-elapsed-leg-sees-alias-slow-restore",
+              _seen.startswith("LOST code=0 ") and _seen.endswith(" calls="))
 
     if failures:
         print("OPF-SCHEMA SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked))
