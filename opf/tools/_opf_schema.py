@@ -100,7 +100,12 @@ unit is that schema release for the record model and DEFINES the following where
     may not take the reduced worklog envelope or claim an `import`, `unrecorded` or `x-<vendor>` field;
     the validator then reads only fresh copies of the checked entries, so a supplied spec cannot widen a
     baseline grammar, during or after the check. `import.source` must lie under
-    `.working/imported/import/<run-id>/originals/` of the record's own `import.run` (spec 8.3, 8.8).
+    `.working/imported/import/<run-id>/originals/` of the record's own `import.run` (spec 8.3, 8.8),
+    matched exactly (anchored, case-sensitive, through the `/` after `originals`) on exact strings. A
+    record must be plain throughout before any of it is read: exactly a dict whose every key and nested
+    value is exactly a str, int, float, bool, date-time, list or dict, as a TOML parser yields, or None,
+    a tuple or a set. A subclass or any other object is CANNOT-EVALUATE, since its own methods could
+    answer a lookup, a hash, a comparison, a format or a repr with caller code.
 """
 import sys
 
@@ -1290,12 +1295,56 @@ def _check_closed_table(table, allowed, where, findings):
                 where, _safe_display(key)))
 
 
+# The exact built-in types a plain value is made of: what a TOML parser yields (str, int, float, bool, the
+# date-time types, list and dict), plus None, a tuple and a set, which a field rule refuses by name. Each
+# is compared by identity, so no metaclass comparison runs.
+_PLAIN_SCALAR_TYPES = (str, int, float, bool, type(None), datetime.datetime, datetime.date, datetime.time)
+_PLAIN_COLLECTION_TYPES = (dict, list, tuple, set, frozenset)
+
+
+def _is_plain_value(value):
+    """True when value, and every key and member nested in it, is exactly one of the plain built-in types
+    above, and every date-time's tzinfo is None or exactly a datetime.timezone. type() reads the real
+    type, never an advertised `__class__`, and each container is read through its built-in type's own
+    iterator, so the walk runs no caller code. A subclass or any other object is not plain: its own
+    methods (a lookup, a hash, a comparison, a format, a repr, a startswith) could answer a later check
+    with caller code. The walk is iterative and reads each container once, so a cycle ends it."""
+    stack, seen = [value], set()
+    while stack:
+        v = stack.pop()
+        t = type(v)
+        if any(t is p for p in _PLAIN_SCALAR_TYPES):
+            if (t is datetime.datetime or t is datetime.time) and not (
+                    v.tzinfo is None or type(v.tzinfo) is datetime.timezone):
+                return False
+            continue
+        if not any(t is p for p in _PLAIN_COLLECTION_TYPES):
+            return False
+        if id(v) in seen:
+            continue
+        seen.add(id(v))
+        if t is dict:
+            for key, member in dict.items(v):
+                stack.append(key)
+                stack.append(member)
+        else:
+            stack.extend(t.__iter__(v))
+    return True
+
+
+def _plain_display(value):
+    """_safe_display of a plain value (_is_plain_value); any other value is named by a fixed marker and
+    never rendered, so its own __repr__ cannot run or forge the message."""
+    return _safe_display(value) if _is_plain_value(value) else "<not a plain built-in value>"
+
+
 def _is_imported_source(value):
-    """True when value is the canonical store-relative path of a preserved original, spelled from
-    `.working/` (spec 8.3): the store's canonical file-operand grammar (no empty, `.` or `..` component, no
-    absolute, drive or backslash form, no control character) beneath `.working/`. An aliased spelling is
-    refused, never normalized."""
-    if not isinstance(value, str) or not value.startswith(WORKING_DIRNAME + "/"):
+    """True when value is exactly a str and the canonical store-relative path of a preserved original,
+    spelled from `.working/` (spec 8.3): the store's canonical file-operand grammar (no empty, `.` or `..`
+    component, no absolute, drive or backslash form, no control character) beneath `.working/`. An aliased
+    spelling is refused, never normalized, and so is a str subclass, whose own methods could answer these
+    checks and the source binding."""
+    if type(value) is not str or not value.startswith(WORKING_DIRNAME + "/"):
         return False
     try:
         _home_file(value)
@@ -1307,39 +1356,45 @@ def _is_imported_source(value):
 def _validate_import_table(record, schema_fields, findings):
     """Validate the `import` provenance table (spec 8.3). Returns the ordering key of a valid
     `imported_at`, or None when it is absent or invalid (the record is then INVALID already, so the
-    historical-timestamp bound is never silently skipped on a VALID record)."""
+    historical-timestamp bound is never silently skipped on a VALID record). The table must be exactly a
+    dict. Its provenance operands `source` and `run` are read from it once and must each be exactly a
+    str; every check below, the source binding included, reads only those captured values, through
+    built-in operations, so no method of a caller-supplied value runs (a format that names another run
+    or raises, a startswith that forges the match), and an operand that is not exactly a str is refused
+    and never rendered."""
     if "import" not in record:
         findings.append("missing required field: import (the provenance table, spec 8.3)")
         return None
     imp = record.get("import")
-    if not isinstance(imp, dict):
+    if type(imp) is not dict:
         findings.append("import must be a table {source, source_sha256, run, imported_at, ...} (spec 8.3)")
         return None
     _check_closed_table(imp, IMPORT_KEYS, "import", findings)
     for k in IMPORT_REQUIRED_KEYS:
         if k not in imp:
             findings.append("missing required field: import.{} (spec 8.3)".format(k))
-    source_ok = "source" in imp and _is_imported_source(imp.get("source"))
+    source, run = imp.get("source"), imp.get("run")
+    source_ok = _is_imported_source(source)
     if "source" in imp and not source_ok:
         findings.append("import.source {} is not a canonical store-relative path spelled from {}/ "
-                        "(spec 8.3)".format(_safe_display(imp.get("source")), WORKING_DIRNAME))
+                        "(spec 8.3)".format(_plain_display(source), WORKING_DIRNAME))
     if "source_sha256" in imp and not (isinstance(imp.get("source_sha256"), str)
                                        and _SOURCE_SHA256_RE.match(imp.get("source_sha256"))):
         findings.append("import.source_sha256 {} is not 64 lowercase hexadecimal digits (spec 8.3)".format(
             _safe_display(imp.get("source_sha256"))))
-    run_ok = isinstance(imp.get("run"), str) and re.fullmatch(_IMPORT_RUN_PATTERN, imp.get("run"))
+    run_ok = type(run) is str and re.fullmatch(_IMPORT_RUN_PATTERN, run) is not None
     if "run" in imp and not run_ok:
         findings.append("import.run {} is not an imp-<YYYYMMDD>T<HHMMSS>Z-<hash16> run id (spec 8.3)".format(
-            _safe_display(imp.get("run"))))
+            _plain_display(run)))
     if source_ok and run_ok:
         # The preserved original is the exact file under its own import run's evidence bundle (spec 8.3,
-        # 8.8), so a canonical path elsewhere under .working/, or under another run, is refused. The
-        # canonical grammar above already refuses an empty <source-path> after the prefix.
-        originals = evidence_run("import", imp.get("run")) + "/originals/"
-        if not imp.get("source").startswith(originals):
+        # 8.8), so a canonical path elsewhere under .working/, or under another run, is refused. The match
+        # is exact: anchored at the start, case-sensitive, and through the `/` after originals, on the two
+        # exact strs captured above. The canonical grammar above already refuses an empty <source-path>.
+        originals = evidence_run("import", run) + "/originals/"
+        if not str.startswith(source, originals):
             findings.append("import.source {} does not lie under {}, the preserved originals of the "
-                            "record's own import.run (spec 8.3/8.8)".format(
-                                _safe_display(imp.get("source")), originals))
+                            "record's own import.run (spec 8.3/8.8)".format(_safe_display(source), originals))
     imported_at = None
     if "imported_at" in imp:
         if _valid_timestamp(imp.get("imported_at")):
@@ -1694,13 +1749,38 @@ def _imported_specs_control(specs):
     return None, roster
 
 
+def _imported_not_plain(record):
+    """The CANNOT-EVALUATE result for a table that is not plain (_is_plain_value). Nothing is looked up in
+    it: its entries are read through dict's own items(), the id is the value under the exact-str key
+    `id`, and the label shows that id only when the id is plain itself, else calls it unreadable, so
+    neither the label nor the finding runs caller code. The finding names the first field, in table
+    order, whose key or value is not plain."""
+    ids = [v for k, v in dict.items(record) if type(k) is str and k == "id"]
+    if not ids:
+        label, rid = "imported record (no id)", None
+    elif _is_plain_value(ids[0]):
+        label, rid = "imported record {}".format(_safe_display(ids[0])), ids[0]
+    else:
+        label, rid = "imported record (unreadable id)", None
+    if type(record) is not dict:
+        why = "the record is a subclass of a table, not exactly one, so its own methods could answer each read"
+    else:
+        key = next(k for k, v in dict.items(record) if not (_is_plain_value(k) and _is_plain_value(v)))
+        why = ("field {} holds a key or value that is not exactly a plain built-in type, so its own methods "
+               "could answer a check".format(_plain_display(key)))
+    return RecordValidation(CANNOT_EVALUATE, ["{}: {} (a parsed record holds none; fail-closed)".format(
+        label, why)], rid=rid)
+
+
 def validate_imported_record(record, expected_type=None, specs=None, registered_vendors=frozenset(),
                              registered_kinds=None):
     """Validate one parsed imported record against the closed imported envelope (spec 8.3). Pure: it reads
     no file and no clock. Returns a RecordValidation; every finding, a control refusal included, begins
-    `imported record <id>: ` and so names the record by its id, with exactly two exceptions, the inputs
-    that have no id to give: a table without an `id` key is labelled `imported record (no id): `, and a
-    non-table input yields the single finding `imported record is not a table (fail-closed)`.
+    `imported record <id>: ` and so names the record by its id, with exactly three exceptions, the inputs
+    that have no readable id to give: a table without an `id` key is labelled `imported record (no id): `,
+    a table that is not plain and whose own `id` is not plain is labelled `imported record (unreadable
+    id): `, and a non-table input yields the single finding `imported record is not a table
+    (fail-closed)`.
 
     The imported envelope: `id` an `imported:<NS>-<n>` id bound to the record's type, `type` (required for
     every type, the worklog included), a one-line `title`, `status` from the type's legal state set
@@ -1712,17 +1792,20 @@ def validate_imported_record(record, expected_type=None, specs=None, registered_
     field of the type's schema carries exactly one closed-reason `unrecorded` row; supplied fields keep
     their declared types and vocabularies; historical timestamps are no later than `imported_at`;
     `proposed_from` is never carried; unknown keys fail. The importer-only legacy_fragment (LF) is
-    refused (spec 8.1/8.2). A supplied `specs` roster is checked in full before use, and only fresh
+    refused (spec 8.1/8.2). Before any of the record is read, it must be plain (_is_plain_value): exactly
+    a dict whose every key and nested value is exactly a plain built-in type, as a parsed record is, so
+    no method of a record value (a lookup, a hash, a comparison, a format, a repr, a startswith) runs
+    during validation. A supplied `specs` roster is checked in full before use, and only fresh
     copies of its checked entries are read (_imported_specs_control). Every control is judged by its
     real type, never by an advertised `__class__`, and a collection control is read once, through its
     built-in base's own iterator (_control_members). A worklog record judges the `registered_kinds`
     control whether or not it supplies `kind`.
 
-    Outcome: CANNOT-EVALUATE when the input is not a table, the `specs` or `expected_type` control is
-    malformed (a `specs` entry also when it contradicts its authoritative definition), or the record's
-    type cannot be identified; INVALID when an identified record violates the envelope, or the
-    `registered_vendors` control (or, on a worklog, the `registered_kinds` control) is malformed, as
-    validate_record judges them; VALID otherwise.
+    Outcome: CANNOT-EVALUATE when the input is not a table or is not plain, the `specs` or
+    `expected_type` control is malformed (a `specs` entry also when it contradicts its authoritative
+    definition), or the record's type cannot be identified; INVALID when an identified record violates
+    the envelope, or the `registered_vendors` control (or, on a worklog, the `registered_kinds` control)
+    is malformed, as validate_record judges them; VALID otherwise.
 
     Not checked here. Each item but the last needs evidence beyond this one record (other records, the
     store, the preserved original, the source or the import run); the last needs a definition this unit
@@ -1756,6 +1839,10 @@ def validate_imported_record(record, expected_type=None, specs=None, registered_
         # No id is available to label a non-table input: the one finding without an id (see above). type()
         # reads the real type, so an object that only advertises dict as its __class__ is not a table.
         return RecordValidation(CANNOT_EVALUATE, ["imported record is not a table (fail-closed)"])
+    if not _is_plain_value(record):
+        # Before any lookup: a dict subclass's own get, or a value's own hash, format or repr, could raise
+        # or answer a check with a value it does not hold.
+        return _imported_not_plain(record)
     rid = record.get("id")
     label = "imported record {}".format(_safe_display(rid) if "id" in record else "(no id)")
 
@@ -3702,6 +3789,12 @@ def self_test():
         except Exception:
             return None
 
+    # A record that is not plain is one labelled CANNOT-EVALUATE finding, refused before any read.
+    def _unplain(res, prefix, rid):
+        return (res is not None and res.status == CANNOT_EVALUATE and res.id == rid and len(res.findings) == 1
+                and res.findings[0].startswith(prefix)
+                and res.findings[0].endswith("(a parsed record holds none; fail-closed)"))
+
     class _LyingStr(str):
         def __hash__(self):
             raise RuntimeError("a control member ran its own hash")
@@ -3767,9 +3860,10 @@ def self_test():
 
     # The checked roster cannot be widened after the check: only fresh copies of the checked entries are
     # read. The review reproduction, a vendors control whose own __iter__ rebinds the caller's spec,
-    # never runs that code; a record value whose own __hash__ rebinds the caller's spec after the check
-    # (its `type` is hashed at the roster lookup) changes nothing read; and the copy owns its own
-    # transitions dict, so a later write to the caller's dict changes nothing either.
+    # never runs that code; a record value whose own __hash__ would rebind the caller's spec (its `type`
+    # is hashed at the roster lookup) never runs either, since a record that is not plain is refused
+    # before any read; and the copy owns its own transitions dict, so a later write to the caller's dict
+    # changes nothing either.
     _mut_md = _copy.copy(_MD)
 
     class _Mutator(list):
@@ -3790,8 +3884,8 @@ def self_test():
 
     _hook_res = _imp_try(_imp_md(status="bogus", type=_HookType("maintainer_decision")),
                          specs=dict(maintainer_decision=_hook_md), registered_vendors=REG)
-    check("imported-roster-not-widened-by-record-code", _hook_res is not None and _hook_res.status == INVALID
-          and any("status state 'bogus'" in f for f in _hook_res.findings))
+    check("imported-roster-not-widened-by-record-code", _hook_md.states == _MD.states and _unplain(
+        _hook_res, "imported record 'imported:MD-4': field 'type' holds", "imported:MD-4"))
     _cp_md = _copy.copy(_MD)
     _cp_md.transitions = {}
     _cp_err, _cp_roster = _imported_specs_control(dict(maintainer_decision=_cp_md))
@@ -3835,6 +3929,11 @@ def self_test():
                 states=frozenset(["staged", "review", "promoted", "rejected"]))
     _ar_rich = dict(_ar, status="promoted")
     check("imported-module-rich-spec-ok", _imp_ok(_ar_rich, specs=_module_roster(**_ART)))
+
+    class _LeRaises(frozenset):
+        def __le__(self, other):
+            raise RuntimeError("a roster member ran its own __le__")
+
     _art_bad = [("name", dict(name=_Str("artifact"))), ("namespace", dict(namespace=_Str(_ART["namespace"]))),
                 ("initial", dict(initial=_Str("staged")))]
     _art_bad += [(_slot, {_slot: _FSet(_ART[_slot])})
@@ -3851,7 +3950,13 @@ def self_test():
         ("proposable", dict(proposable=_ART["proposable"] | {"elsewhere"})),
         ("gated", dict(gated=frozenset(["staged"]))),
         ("gated", dict(gated=frozenset(["promoted"]))),
-        ("reduced", dict(reduced=0))]
+        ("reduced", dict(reduced=0)),
+        # A transitions destination is an exact frozenset of exact strs, like every other set slot: an
+        # equal-valued frozenset subclass, one whose own __le__ raises, and a str-subclass member.
+        ("transitions", dict(transitions=dict(_ART["transitions"], staged=_FSet(["review", "rejected"])))),
+        ("transitions", dict(transitions=dict(_ART["transitions"], staged=_LeRaises(["review", "rejected"])))),
+        ("transitions", dict(transitions=dict(_ART["transitions"],
+                                              staged=frozenset([_Str("review"), "rejected"]))))]
     for _j, (_slot, _over) in enumerate(_art_bad):
         check("imported-module-spec-malformed-{}-{}-cannot-eval".format(_slot, _j), _imp_ctrl(
             _ar_rich, _module_roster(**dict(_ART, **_over)), "malformed or missing " + _slot))
@@ -3921,6 +4026,112 @@ def self_test():
         source=_own + "/originals/docs/2024/DECISIONS.md")})))
     check("imported-source-own-other-run-ok", _imp_ok(_imp_pd(**{"import": _imp_table(
         run=_OTHER_RUN, source=".working/imported/import/" + _OTHER_RUN + "/originals/DECISIONS.md")})))
+    # The binding is exact: anchored at the start, case-sensitive, and through the `/` after originals.
+    # The record's own prefix later in a path (also inside another run's originals), a run directory that
+    # merely contains the record's run, a case-changed spelling, and the prefix without its separator are
+    # each refused for that reason; a nested original that names another run's prefix inside the record's
+    # own originals validates.
+    for _src in (".working/x/" + _own + "/originals/DECISIONS.md",
+                 ".working/imported/import/" + _OTHER_RUN + "/originals/" + _own + "/originals/DECISIONS.md",
+                 ".working/imported/import/" + _OTHER_RUN + "/originals/" + _IMP_RUN + "/originals/DECISIONS.md",
+                 ".working/imported/import/x" + _IMP_RUN + "/originals/DECISIONS.md",
+                 ".working/IMPORTED/import/" + _IMP_RUN + "/originals/DECISIONS.md",
+                 ".working/imported/IMPORT/" + _IMP_RUN + "/originals/DECISIONS.md",
+                 ".working/imported/import/" + _IMP_RUN.upper() + "/originals/DECISIONS.md",
+                 _own + "/ORIGINALS/DECISIONS.md", _own + "/Originals/DECISIONS.md",
+                 _own + "/originals", _own + "/originalsDECISIONS.md"):
+        check("imported-source-inexact-binding-refused-" + _src, _imp_refused(
+            _imp_pd(**dict([("import", _imp_table(source=_src))])),
+            "the preserved originals of the record's own import.run"))
+    check("imported-source-nested-foreign-prefix-ok", _imp_ok(_imp_pd(**dict([("import", _imp_table(
+        source=_own + "/originals/.working/imported/import/" + _OTHER_RUN + "/originals/DECISIONS.md"))]))))
+
+    # The review reproductions on the binding's operands: a run whose own __format__ names another run
+    # (formerly VALID) or raises (formerly a raw RuntimeError), and a source whose own startswith forges
+    # the match (formerly VALID). A record holding one is not plain and is refused before any read; the
+    # import-table rule itself, handed one directly, refuses it by its exact type, never rendering it,
+    # running its code or binding it.
+    class _RunRedirect(str):
+        def __format__(self, spec):
+            return _OTHER_RUN
+
+    class _RunRaises(str):
+        def __format__(self, spec):
+            raise RuntimeError("a record value ran its own __format__")
+
+    class _SourceRedirect(str):
+        def startswith(self, prefix, *args):
+            return prefix != "/"
+
+    _under_other = ".working/imported/import/" + _OTHER_RUN + "/originals/DECISIONS.md"
+    for _name, _op, _over in (
+            ("run-redirect", "import.run", dict(run=_RunRedirect(_IMP_RUN), source=_under_other)),
+            ("run-raises", "import.run", dict(run=_RunRaises(_IMP_RUN))),
+            ("source-redirect", "import.source", dict(source=_SourceRedirect(".working/outside.md")))):
+        check("imported-source-binding-" + _name + "-cannot-eval", _unplain(
+            _imp_try(_imp_md(**dict([("import", _imp_table(**_over))])), registered_vendors=REG),
+            "imported record 'imported:MD-4': field 'import' holds", "imported:MD-4"))
+        _found = []
+        try:
+            _validate_import_table(dict([("import", _imp_table(**_over))]), _imported_schema_fields(_MD), _found)
+        except Exception:
+            _found = None
+        check("imported-import-table-" + _name + "-refused", _found is not None
+              and any(f.startswith(_op + " <not a plain built-in value> is not ") for f in _found)
+              and not any("does not lie under" in f for f in _found))
+    _found = []
+    _validate_import_table(dict([("import", _Dict(_imp_table()))]), _imported_schema_fields(_MD), _found)
+    check("imported-import-table-dict-subclass-refused", any(f.startswith("import must be a table") for f in _found))
+
+    # A hostile record, as opposed to a hostile control. Each review reproduction (a dict subclass whose
+    # own get raises, or reports a status it does not hold; a `type` whose own __hash__ raises; an `id`
+    # whose own __repr__ raises) is CANNOT-EVALUATE before any read, and so is an equal-valued subclass
+    # at the top, nested in a value or as a key, and a date-time with a foreign tzinfo. The label shows
+    # the id only when the id is plain.
+    class _GetRaises(dict):
+        def get(self, *args):
+            raise RuntimeError("a record ran its own get")
+
+    class _GetLies(dict):
+        def get(self, key, default=None):
+            return "recorded" if key == "status" else dict.get(self, key, default)
+
+    class _HashRaisesStr(str):
+        def __hash__(self):
+            raise RuntimeError("a record value ran its own hash")
+
+    class _Zone(datetime.tzinfo):
+        def utcoffset(self, dt):
+            return datetime.timedelta(0)
+
+    _md4 = "imported record 'imported:MD-4': "
+    _key_rec = _imp_md()
+    _key_rec[_Str("summary")] = _key_rec.pop("summary")
+    _ref = dict(kind="path", locator=_Str("DECISIONS.md"), note="original entry")
+    for _name, _rec, _prefix, _rid in (
+            ("get-raises", _GetRaises(_imp_md()), _md4 + "the record is a subclass", "imported:MD-4"),
+            ("get-lies", _GetLies(_imp_md(status="bogus")), _md4 + "the record is a subclass", "imported:MD-4"),
+            ("equal-valued-record", _Dict(_imp_md()), _md4 + "the record is a subclass", "imported:MD-4"),
+            ("type-hash-raises", _imp_md(type=_HashRaisesStr("maintainer_decision")), _md4 + "field 'type' holds",
+             "imported:MD-4"),
+            ("id-repr-raises", _imp_md(id=_ReprRaisesStr("imported:MD-4")),
+             "imported record (unreadable id): field 'id' holds", None),
+            ("equal-valued-title", _imp_md(title=_Str("Prefer additive migrations")), _md4 + "field 'title' holds",
+             "imported:MD-4"),
+            ("nested-value", _imp_md(refs=[_ref]), _md4 + "field 'refs' holds", "imported:MD-4"),
+            ("key", _key_rec, _md4 + "field <not a plain built-in value> holds", "imported:MD-4"),
+            ("foreign-tzinfo", _imp_md(created_at=datetime.datetime(2025, 1, 5, tzinfo=_Zone())),
+             _md4 + "field 'created_at' holds", "imported:MD-4"),
+            ("no-id", dict((k, v) for k, v in _imp_md(title=_Str("x")).items() if k != "id"),
+             "imported record (no id): field 'title' holds", None)):
+        check("imported-record-not-plain-" + _name + "-cannot-eval", _unplain(
+            _imp_try(_rec, registered_vendors=REG), _prefix, _rid))
+    # A cyclic value ends the walk, since each container is read once, and reaches its own field rule.
+    _cyc = []
+    _cyc.append(_cyc)
+    check("imported-record-cyclic-value-refused", _imp_refused(
+        _imp_md(**dict([("import", _imp_table(unparsed=_cyc))])), "import.unparsed must be", registered_vendors=REG))
+
     for _sha in (_IMP_SHA[:-1], _IMP_SHA + "0", "sha256:" + _IMP_SHA, _IMP_SHA[:-1] + "g", 0):
         check("imported-sha-refused-" + repr(_sha)[:24], _imp_refused(
             _imp_pd(**{"import": _imp_table(source_sha256=_sha)}), "import.source_sha256"))
