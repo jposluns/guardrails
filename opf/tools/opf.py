@@ -1161,12 +1161,13 @@ _COMPLETION_LAUNCH_TIMEOUT = 10
 # supervision, the leg reports the _WATCHDOG_CANNOT_EVALUATE outcome below
 # with what it observed, never a pass (_watchdog_tree_case).
 _TREE_STARTUP_BACKSTOP = 60
-# The nested-orders vectors' short backstop, used only by the seven vectors
+# The nested-orders vectors' short backstop, used only by the eight vectors
 # whose schedule needs a REAL backstop expiry (a subject that never
 # publishes or publishes a malformed marker; an uninstalled or blind
 # observer; an unshifted guardian clock; a guardian held asleep or busy
-# before READY): there it is the stimulus, so each pays this wait instead
-# of _TREE_STARTUP_BACKSTOP.
+# before READY; a guardian that publishes READY only after the caller's
+# first READY check): there it is the stimulus, so each pays this wait
+# instead of _TREE_STARTUP_BACKSTOP.
 _TREE_VECTOR_BACKSTOP = 5
 # The exact stdout marker a completion leg prints (with its cause) when a
 # backstop, not the leg's stimulus, ended the exercise, or the stimulus
@@ -1187,19 +1188,439 @@ def _deadline_case_budget(timeout_s=_DEADLINE_CASE_TIMEOUT):
             + _DEADLINE_RECEIPT_ALLOWANCE)
 
 
-def _watchdog_leg_closeout_seconds():
-    """The longest close-out one regression leg's launch may add AFTER its
-    process bound, derived from the declared cleanup grace: when the bound
-    expires, _run_fixture_process raises and _FixtureProcess.close() still
-    makes its bounded cleanup waits, in sequence: the launcher-completion
-    wait (2 x grace, _close_coordinated), the guardian collection wait
-    (2 x grace), the post-escalation collection wait (1 x grace) and the
-    subject exit proof on its pidfd (1 x grace), all in _finish_close. It
-    is the SUM of every bounded wait on that sequence, so it is an upper
-    bound on any single path (no path makes all four: an unlaunched leg
-    has no subject to prove gone)."""
+# Two literals of _opf_emit's close-out code, named here for the close-out
+# derivation and checked against that code by _watchdog_closeout_vectors:
+# the sleep between polls of each close-out polling loop (the startup READY
+# poll waits the same 5 ms), and _FixtureProcess._recv_subject's poll for
+# the subject receipt.
+_FIXTURE_POLL_SLEEP = 0.005
+_FIXTURE_RECEIPT_WAIT = 0.5
+
+
+def _watchdog_closeout_paths():
+    """The close-out paths one regression leg's launch (run_status_owned,
+    through _opf_emit._run_fixture_process) can take AFTER its process
+    bound expires, each as the timed waits the caller makes on it, in
+    order: (wait, limit in seconds, polling sleeps it can overrun). A
+    polling loop checks its deadline before each sleep, so it ends at most
+    one _FIXTURE_POLL_SLEEP after its limit; a poll or an Event wait ends
+    at its limit. G below is _opf_emit._FIXTURE_CLEANUP_GRACE.
+
+    armed (start() succeeded): the run loop's last poll; close() reads the
+    subject receipt (_recv_subject, up to _FIXTURE_RECEIPT_WAIT), waits 2G
+    to collect the guardian, escalates (_fixture_group_pinned confirms the
+    frozen guardian within G, then _fixture_verify_group_kill watches the
+    group within G), waits G more to collect, and proves the subject's exit
+    on its pidfd within G. armed-interrupted: the same, except that an
+    exception escaping that last collection hands the still uncollected
+    guardian to _interrupt_collect TWICE (from _finish_close, then from
+    _close_masked), and each reap waits G. ownership-lost: the same,
+    except that the guardian is reaped elsewhere during that collection and
+    _ownership_lost_refusal proves the subject's exit within G.
+    poll-collected: the run loop's poll collects a failed guardian and
+    reads the receipt, then close() proves the subject's exit within G.
+    startup-timeout (no READY by the deadline) and launch-timeout (no
+    completed launch by then): start() raises, so close() runs TWICE, once
+    in start() and once in _run_fixture_process's finally, and each run
+    that cannot collect the killed guardian waits 2G, escalates, then waits
+    G. launch-timeout adds start()'s launch wait, which lasts at least G
+    (so it ends up to G after the deadline when start() begins less than G
+    before it), and close()'s 2G wait for the launcher. launch-interrupted:
+    launch-timeout with an exception escaping each close()'s last
+    collection, so each close() adds two interrupt-owner reaps, as in
+    armed-interrupted. startup-cancelled: startup-timeout with a
+    cancellation raised as the first close() releases the launcher (where a
+    signal whose handler flag tripped before close() masked SIGINT and
+    SIGTERM can surface), so that close() also runs _interrupt_collect once,
+    whose reap waits G.
+
+    Not counted, so outside the allowance: time in which the host does not
+    run the caller (no wait), the untimed reap in _start() of a guardian
+    that ended its READY channel, a cancellation raised at any other point,
+    and exceptions another thread raises into the caller (the regression
+    runner starts none)."""
     import _opf_emit
-    return (2 + 2 + 1 + 1) * _opf_emit._FIXTURE_CLEANUP_GRACE
+    grace, receipt = _opf_emit._FIXTURE_CLEANUP_GRACE, _FIXTURE_RECEIPT_WAIT
+    run_loop = ("the run loop's last poll", 0.0, 1)
+    collection = ("guardian collection", 2 * grace, 1)
+    escalated = ("post-escalation collection", grace, 1)
+    armed = (run_loop, ("subject receipt", receipt, 0), collection,
+             ("group pin", grace, 1), ("verification census", grace, 1), escalated)
+    unarmed = (collection, escalated)
+    startup = (("the startup READY poll", 0.0, 1),)
+    reap = ("interrupt-owner reap", grace, 1)
+    launch = (("start()'s launch wait past the deadline", grace, 0),
+              ("close()'s launcher wait", 2 * grace, 0))
+    return dict([
+        ("armed", armed + (("subject exit proof", grace, 0),)),
+        ("armed-interrupted", armed + (reap, reap)),
+        ("ownership-lost", armed + (("ownership-lost exit proof", grace, 0),)),
+        ("poll-collected", (run_loop, ("subject receipt", receipt, 0),
+                            ("subject exit proof", grace, 0))),
+        ("startup-timeout", startup + unarmed + unarmed),
+        ("startup-cancelled", startup + unarmed + (reap,) + unarmed),
+        ("launch-timeout", launch + unarmed + unarmed),
+        ("launch-interrupted", launch + 2 * (unarmed + (reap, reap))),
+    ])
+
+
+def _watchdog_path_seconds(path):
+    """One close-out path's total: each wait's limit plus one
+    _FIXTURE_POLL_SLEEP for each sleep it can overrun."""
+    return sum(limit + sleeps * _FIXTURE_POLL_SLEEP for _wait, limit, sleeps in path)
+
+
+def _watchdog_leg_closeout_seconds():
+    """The close-out allowance one regression leg's launch gets after its
+    process bound: the LONGEST total among _watchdog_closeout_paths. It is a
+    maximum over those derived paths, not a sum over every wait in close();
+    _watchdog_closeout_vectors runs the real close-out code along each path
+    and refuses a path whose waits outrun its total."""
+    return max(_watchdog_path_seconds(path) for path in _watchdog_closeout_paths().values())
+
+
+def _watchdog_closeout_vectors():
+    """The close-out derivation's red-on-revert check: runs the REAL
+    close-out code (_run_fixture_process, _FixtureProcess's start, poll and
+    close, and every helper they reach, in a private copy of _opf_emit
+    loaded from its file) once along each
+    path of _watchdog_closeout_paths, under a virtual clock, each schedule
+    holding that path's waits to (nearly) their limits. Only boundaries are
+    scripted, and only for the calling thread: time.monotonic and
+    time.sleep, select.poll, socket.recv_fds, signal.pidfd_send_signal, and
+    os.waitpid, waitid, getpgid, kill and listdir, plus os.read, write and
+    close on the vector's own descriptor numbers (process and descriptor
+    numbers above any pid_max and any descriptor a host issues), and the
+    copy's /proc stat read, pidfd open and _FixtureProcess construction
+    (its launcher thread is never started). Nothing is forked,
+    and a real process or descriptor reaching a scripted signal, wait or
+    stat boundary is refused, never passed through. Returns the faults: a
+    schedule that did not end as its path does; one whose virtual time
+    after the deadline exceeds its path's total or the allowance
+    (_watchdog_leg_closeout_seconds) (a wait left out of the derivation, or
+    a limit raised in _opf_emit); one that would still fit
+    with any single nonzero wait removed from its path (the schedule fell
+    short of that wait, so it could not expose the wait's removal); and a
+    path without a schedule or a schedule without a path."""
+    import errno
+    import importlib.util
+    import io
+    import select
+    import signal
+    import socket
+    import threading
+    import time
+    from contextlib import ExitStack
+    from unittest.mock import patch
+    # A private copy of _opf_emit, loaded from its file and never registered
+    # in sys.modules (as _opf_emit loads its own close harness): a caller
+    # that replaced the shared module's launcher or helpers (the launcher
+    # matrix's exit-37 injection) never reaches the code this runs, and only
+    # the copy's own attributes are scripted.
+    spec = importlib.util.spec_from_file_location(
+        "_opf_emit_closeout_vector", Path(__file__).resolve().parent / "_opf_emit.py")
+    emit = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(emit)
+
+    grace, tick = emit._FIXTURE_CLEANUP_GRACE, _FIXTURE_POLL_SLEEP
+    owner = threading.get_ident()
+    base_pid, base_fd = 1 << 23, 1 << 30  # above any pid_max (2**22) and any descriptor
+    guardian, subject, member = base_pid + 1, base_pid + 2, base_pid + 3
+    control_fd, peer_fd = base_fd, base_fd + 1
+    real_process, real_listdir = emit._FixtureProcess, os.listdir
+    world = {}
+
+    class Refused(AssertionError):
+        """A scripted boundary reached with a real process or descriptor."""
+
+    def refuse(what):
+        world.setdefault("refused", []).append(what)
+        raise Refused(what)
+
+    def fd_of(pid):
+        return base_fd + 16 + pid - base_pid
+
+    def pid_of(fd):
+        pid = fd - base_fd - 16 + base_pid
+        if pid not in (guardian, subject, member):
+            refuse("a signal through descriptor %r" % (fd,))
+        return pid
+
+    def advance(seconds):
+        world["now"] += seconds
+        if world["now"] > world["origin"] + 600:
+            refuse("the virtual clock ran away")
+
+    def last_poll_of(name, flag=None):
+        # True at the last polls before the deadline of the _opf_emit loop
+        # `name` that made this call, read from that loop's own state, so a
+        # schedule follows the limit the code itself sets.
+        frame = sys._getframe(2)
+        while frame is not None and frame.f_globals.get("__name__") != emit.__name__:
+            frame = frame.f_back
+        return (frame is not None and frame.f_code.co_name == name
+                and (flag is None or frame.f_locals.get(flag) is True)
+                and world["now"] >= frame.f_locals["deadline"] - 2 * tick)
+
+    class Endpoint:
+        """The control socket or its peer: a descriptor number only."""
+
+        def __init__(self, fd):
+            self.fd = fd
+
+        def fileno(self):
+            return self.fd
+
+        def close(self):
+            self.fd = -1
+
+        def setblocking(self, flag):
+            pass
+
+    class Gate:
+        """threading.Event for _go and _launched on the virtual clock: a
+        timed wait on a closed gate runs to its limit and opens the gate as
+        it ends when the next entry of `opens` says so (the launcher has
+        then recorded the guardian); set() raises the scripted cancellation
+        on call number `raise_on`."""
+
+        def __init__(self, opened, opens=(), raise_on=None):
+            self.opened, self.opens, self.raise_on, self.calls = opened, list(opens), raise_on, 0
+
+        def is_set(self):
+            return self.opened
+
+        def set(self):
+            self.calls += 1
+            if self.calls == self.raise_on:
+                world["cancelled"] = KeyboardInterrupt("close-out vector cancellation")
+                raise world["cancelled"]
+            self.opened = True
+
+        def wait(self, timeout=None):
+            if not self.opened:
+                if timeout is None:
+                    refuse("an untimed Event wait")
+                advance(timeout)
+                if self.opens.pop(0):
+                    self.opened = True
+                    world["child"].pid, world["child"].pidfd = guardian, fd_of(guardian)
+            return self.opened
+
+    def readiness(fd):
+        # "now", "end" (at the poll's limit) or None (never).
+        if fd == control_fd and not world["child"].armed:
+            return "now" if world["ready"] == "pending" else None
+        if fd == control_fd:
+            return "end" if world["receipt"] == "end" else None
+        return None  # the subject's pidfd: the subject never exits
+
+    class Poller:
+        def __init__(self):
+            self.fds = []
+
+        def register(self, target, mask=None):
+            fd = target if isinstance(target, int) else target.fileno()
+            if fd < 0:
+                raise ValueError("file descriptor cannot be a negative integer (%d)" % fd)
+            self.fds.append(fd)
+
+        def poll(self, timeout=None):
+            if timeout is None or timeout < 0:
+                refuse("an untimed poll")
+            ready = [fd for fd in self.fds if readiness(fd) == "now"]
+            if not ready:
+                advance(timeout / 1000)
+                ready = [fd for fd in self.fds if readiness(fd) == "end"]
+            return [(fd, select.POLLIN) for fd in ready]
+
+    def recv_fds(sock, bufsize, maxfds, flags=0):
+        if sock.fileno() != control_fd or world["receipt"] != "end":
+            refuse("an unscripted receipt read")
+        world["receipt"] = "taken"
+        return str(subject).encode(), [fd_of(subject)], 0, None
+
+    def record(pid, sig):
+        if pid == guardian and sig == signal.SIGSTOP:
+            world["stopped"] = world["now"]
+
+    def pidfd_send_signal(fd, sig, *rest):
+        record(pid_of(fd), sig)
+
+    def kill(pid, sig):
+        if pid not in (guardian, subject, member):
+            refuse("os.kill(%r)" % (pid,))
+        record(pid, sig)
+
+    def waitpid(pid, options):
+        if pid != guardian:
+            refuse("os.waitpid(%r)" % (pid,))
+        if world["reaped"]:
+            raise ChildProcessError(errno.ECHILD, "No child processes")
+        mode, now = world["collect"], world["now"]
+        if mode == "failed-early" and now >= world["deadline"] - tick:
+            world["reaped"] = True
+            return guardian, 1 << 8  # exit status 1: a failed guardian
+        if mode in ("late", "raise", "echild") and last_poll_of("_finish_close", "escalated"):
+            if mode == "raise":
+                raise OSError(errno.EINVAL, "close-out vector: injected collection failure")
+            world["reaped"] = True
+            if mode == "echild":
+                raise ChildProcessError(errno.ECHILD, "close-out vector: reaped elsewhere")
+            return guardian, int(signal.SIGKILL)  # raw status: killed by SIGKILL
+        return 0, 0
+
+    def waitid(idtype, ident, options):
+        if ident != guardian:
+            refuse("os.waitid(%r)" % (ident,))
+        if world["reaped"]:
+            raise ChildProcessError(errno.ECHILD, "No child processes")
+        return None
+
+    def getpgid(pid):
+        if pid not in (guardian, subject, member):
+            refuse("os.getpgid(%r)" % (pid,))
+        return guardian if pid == guardian else subject
+
+    def read(fd, length):
+        if fd != control_fd:
+            refuse("os.read(%r)" % (fd,))
+        if world["ready"] == "pending":
+            world["ready"] = "read"
+            return b"R"
+        return b""
+
+    def listdir(path="."):
+        if path != "/proc":
+            return real_listdir(path)
+        return [str(pid) for pid in (guardian, subject, member)
+                if pid != guardian or not world["reaped"]]
+
+    def stat_fields(target):
+        pid = int(target)
+        if pid == guardian:
+            if world["reaped"]:
+                return None
+            # Frozen, but its stop confirmed only at the group pin's last polls.
+            frozen = world.get("stopped") is not None and last_poll_of("_fixture_group_pinned")
+            return [b"T" if frozen else b"R", str(os.getpid()).encode(), str(guardian).encode()]
+        if pid in (subject, member):
+            return [b"S", str(guardian).encode(), str(subject).encode()]
+        refuse("a /proc read of %r" % (target,))
+
+    def pidfd_open(pid):
+        if pid not in (guardian, subject, member):
+            refuse("a pidfd for %r" % (pid,))
+        return fd_of(pid)
+
+    def construct(deadline, keep_fds=(), subject=None):
+        # The attributes _FixtureProcess.__init__ sets, without its socket
+        # pair, receipt file or launcher thread.
+        opens = world["spec"].get("launched", ())
+        child = object.__new__(real_process)
+        vars(child).update(
+            deadline=deadline, pid=None, pidfd=None, status=None, subject_pid=None,
+            subject_pidfd=None, armed=False, collected=False, timed_out=False,
+            unresolved=False, cleaned=False, _subject_kill=None, _subject_skipped=None,
+            keep_fds=tuple(keep_fds), subject=subject, _launcher="close-out vector",
+            _launch_error=None, _failure=None, _launch_lock=threading.Lock(),
+            _go=Gate(False, raise_on=2 if world["spec"].get("cancel") else None),
+            _launched=Gate(not opens, opens), _cancelled=False, _abandoned=False,
+            control=Endpoint(control_fd), peer=Endpoint(peer_fd), report=io.BytesIO(),
+            _launch_masked=set())
+        if not opens:
+            child.pid, child.pidfd = guardian, fd_of(guardian)
+        world["child"], world["deadline"] = child, deadline
+        return child
+
+    def scoped(real, fake, ours=None):
+        def call(*args, **kwargs):
+            if (threading.get_ident() == owner and "now" in world
+                    and (ours is None or (type(args[0]) is int and args[0] >= base_fd))):
+                return fake(*args, **kwargs)
+            return real(*args, **kwargs)
+        return call
+
+    boundaries = (
+        (time, "monotonic", lambda: world["now"], None), (time, "sleep", advance, None),
+        (select, "poll", Poller, None), (socket, "recv_fds", recv_fds, None),
+        (signal, "pidfd_send_signal", pidfd_send_signal, None), (os, "waitpid", waitpid, None),
+        (os, "waitid", waitid, None), (os, "getpgid", getpgid, None), (os, "kill", kill, None),
+        (os, "listdir", listdir, None), (emit, "_fixture_stat_fields", stat_fields, None),
+        (emit, "_fixture_pidfd", pidfd_open, None), (emit, "_FixtureProcess", construct, None),
+        (os, "read", read, True), (os, "write", lambda fd, data: len(data), True),
+        (os, "close", lambda fd: None, True))
+    unreaped = (emit.ChildStatusUnavailable, "not collected after escalation")
+    schedules = dict([
+        ("armed", dict(ready=True, receipt="end", collect="late",
+                       end=(emit.ChildStatusUnavailable,
+                            "escalation could not confirm subject exit"))),
+        ("armed-interrupted", dict(ready=True, receipt="end", collect="raise",
+                                   end=(OSError, "injected collection failure"))),
+        ("ownership-lost", dict(ready=True, receipt="end", collect="echild",
+                                end=(emit.ChildStatusUnavailable, "exit not confirmed"))),
+        ("poll-collected", dict(ready=True, receipt="end", collect="failed-early",
+                                end=(emit.ChildStatusUnavailable,
+                                     "guardian failure could not confirm subject exit"))),
+        ("startup-timeout", dict(end=unreaped)),
+        ("startup-cancelled", dict(cancel=True, end=unreaped)),
+        # start() begins just before its deadline, so the launch wait's
+        # floor (G) runs past it; the launcher finishes only as close()'s
+        # own launcher wait ends.
+        ("launch-timeout", dict(launched=(False, True), timeout=0.001, end=unreaped)),
+        ("launch-interrupted", dict(launched=(False, True), timeout=0.001, collect="raise",
+                                    end=(OSError, "injected collection failure"))),
+    ])
+    paths, allowance = _watchdog_closeout_paths(), _watchdog_leg_closeout_seconds()
+    faults = ["close-out vector %s: a path without a schedule, or a schedule without a path"
+              % label for label in sorted(set(paths) ^ set(schedules))]
+    with ExitStack() as stack:
+        for target, name, fake, ours in boundaries:
+            stack.enter_context(patch.object(target, name,
+                                             scoped(getattr(target, name), fake, ours)))
+        for label in [label for label in paths if label in schedules]:
+            spec = schedules[label]
+            world.clear()
+            world.update(origin=1000.0, ready="pending" if spec.get("ready") else None,
+                         receipt=spec.get("receipt"), collect=spec.get("collect", "never"),
+                         reaped=False, spec=spec, deadline=None)
+            world["now"] = world["origin"]
+            try:
+                emit._run_fixture_process(["close-out-vector"], timeout=spec.get("timeout", 1.0))
+            except BaseException as exc:  # noqa: BLE001 - the scripted cancellation is one
+                if (isinstance(exc, (KeyboardInterrupt, SystemExit))
+                        and exc is not world.get("cancelled")):
+                    raise
+                end = exc
+            else:
+                end = None
+            now = world.pop("now")  # the boundaries are inert from here
+            kind, fragment = spec["end"]
+            total = _watchdog_path_seconds(paths[label])
+            if world.get("refused"):
+                faults.append("close-out vector %s: refused boundary use: %s"
+                              % (label, "; ".join(world["refused"])))
+                continue
+            if not (isinstance(end, kind) and fragment in str(end)):
+                faults.append("close-out vector %s: ended in %r, not the path's %s (%s)"
+                              % (label, end, kind.__name__, fragment))
+                continue
+            if spec.get("cancel") and world.get("cancelled") is None:
+                faults.append("close-out vector %s: the scripted cancellation never ran" % label)
+                continue
+            elapsed = now - world["deadline"]
+            if elapsed > min(total, allowance) + 1e-6:
+                faults.append("close-out vector %s: %.3f s after the deadline, above the path's "
+                              "derived %.3f s or the allowance %.3f s"
+                              % (label, elapsed, total, allowance))
+                continue
+            faults.extend(
+                "close-out vector %s: %.3f s after the deadline would still fit the path without "
+                "its %s (%.3f s): the schedule fell short of that wait"
+                % (label, elapsed, wait, total - limit - sleeps * tick)
+                for wait, limit, sleeps in paths[label]
+                if limit and elapsed <= total - limit - sleeps * tick)
+    return faults
 
 
 def _watchdog_finite_seconds(value):
@@ -3307,7 +3728,9 @@ def _watchdog_tree_case(mode, order="event-first", backstop=_TREE_STARTUP_BACKST
     code regression, never reported as host scheduling: the observer never
     ran, or polled long after both markers were published without parsing
     them; a malformed marker; cleanup with neither trigger; a guardian
-    blocked before READY; and a guardian that ran its expiry after a
+    asleep before READY (no READY byte in its channel before or after its
+    state sample: one published between them is the host's scheduling,
+    not a startup hang); and a guardian that ran its expiry after a
     stimulus mounted before the caller's deadline without ever applying the
     clock shift.
 
@@ -3332,7 +3755,10 @@ def _watchdog_tree_case(mode, order="event-first", backstop=_TREE_STARTUP_BACKST
     uninstalled and observe_parse=False installs one that never parses the
     markers (harness defects); clock_shift=False disables the guardian's
     clock shift (a code regression); startup_stall "blocked" or "runnable"
-    holds the guardian before READY, asleep or busy. `facts`, when given,
+    holds the guardian before READY, asleep or busy, and "ready-late" holds
+    it until the caller's first READY check is done, then lets it publish
+    READY and block reading GO before the caller samples its state (the
+    READY-publication interleaving). `facts`, when given,
     records what the exercise observed, so each vector can tell a schedule
     that was established from one this host never produced."""
     import select
@@ -3357,6 +3783,7 @@ def _watchdog_tree_case(mode, order="event-first", backstop=_TREE_STARTUP_BACKST
         markers = [Path(directory, name) for name in ("subject", "descendant")]
         expire, shifted = Path(directory, "expire"), Path(directory, "shifted")
         release, stalled = Path(directory, "release"), Path(directory, "stalled")
+        checked = Path(directory, "checked")
         # Deliberate fork/session escape is a tree-cleanup stimulus, not a verdict.
         subject = ("import os, time; from pathlib import Path; "
                    "pid = os.fork(); "
@@ -3409,29 +3836,66 @@ def _watchdog_tree_case(mode, order="event-first", backstop=_TREE_STARTUP_BACKST
             except (FileNotFoundError, ValueError):
                 return []
 
+        def ready_check(child):
+            # One look at the control socket that consumes nothing: "ready"
+            # when the READY byte waits there unread, "empty" when nothing
+            # does, "other" when something else does or the look fails. The
+            # caller reads no more once its startup deadline passes, so a
+            # READY byte, once written, stays until close().
+            try:
+                readable = select.poll()
+                readable.register(child.control, select.POLLIN)
+                if not readable.poll(0):
+                    return "empty"
+                pending = child.control.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT)
+            except (OSError, ValueError):
+                return "other"
+            return "ready" if pending == b"R" else "other"
+
+        def proc_state(pid):
+            try:
+                return Path("/proc", str(pid), "stat").read_text(
+                    encoding="ascii").rpartition(")")[2].split()[0]
+            except (OSError, IndexError):
+                return None
+
         def startup_state(child):
             # Sampled when the leg's guardian missed READY, BEFORE close()
-            # kills it: a READY byte already waiting means the caller was
-            # late; a guardian asleep (state S) with none written is blocked
-            # in a startup that makes no blocking call before READY.
+            # kills it. The READY check and the state sample are separate
+            # observations, and between them the guardian can publish READY
+            # and then block, normally, reading GO. So READY is checked
+            # again AFTER the sample: still absent then, the guardian had not
+            # published it when sampled, and only a guardian asleep (state
+            # S) in that window is blocked in its startup, which makes no
+            # blocking call before READY.
             if child.pid is None or not child.timed_out:
                 return "unlaunched", ("the guardian launch itself had not completed (no code "
                                       "regression established)")
-            readable = select.poll()
-            readable.register(child.control, select.POLLIN)
-            if readable.poll(0):
-                try:
-                    pending = child.control.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT)
-                except OSError:
-                    pending = None
-                if pending == b"R":
-                    return "late-caller", ("it HAD signalled READY, but the caller did not read "
-                                           "it in time: host scheduling")
-            try:
-                state = Path("/proc", str(child.pid), "stat").read_text(
-                    encoding="ascii").rpartition(")")[2].split()[0]
-            except (OSError, IndexError):
+            before = ready_check(child)
+            if before == "ready":
+                return "late-caller", ("it HAD signalled READY, but the caller did not read "
+                                       "it in time: host scheduling")
+            if startup_stall == "ready-late":
+                # Vector only: the guardian publishes READY only once this
+                # first check is done; wait (bounded) until it has and is
+                # asleep reading GO, so the state sample below falls between.
+                checked.touch()
+                facts["published-late"] = hold(
+                    lambda: ready_check(child) == "ready" and proc_state(child.pid) == "S")
+            state = proc_state(child.pid)
+            after = ready_check(child)
+            if after == "ready":
+                return "late-ready", ("it published READY after the caller's first READY check "
+                                      "(it was in state {} at the sample taken between the "
+                                      "two checks), so the sample does not place it in its "
+                                      "startup: host scheduling".format(state))
+            if state is None:
                 return "unreadable", "its state was unreadable (no code regression established)"
+            if state == "S" and (before, after) != ("empty", "empty"):
+                return "S-unplaced", ("it was asleep (state S), but the READY checks around that "
+                                      "sample found {} and {}, not an empty channel, so its "
+                                      "startup location is not established (no code regression "
+                                      "established)".format(before, after))
             if state == "R":
                 return state, ("it was runnable (state R), not blocked: host scheduling, or a "
                                "busy startup loop, which this sample cannot tell apart")
@@ -3471,10 +3935,16 @@ def _watchdog_tree_case(mode, order="event-first", backstop=_TREE_STARTUP_BACKST
 
         def stalled_subreaper():
             # Vector only (startup_stall): the guardian, before READY, holds
-            # asleep or busy past the backstop; close() then kills it.
+            # asleep or busy past the backstop ("blocked", "runnable"), or
+            # until the caller's first READY check is done ("ready-late");
+            # close() then kills it.
             if os.getpid() != leg:
                 stalled.touch()
                 until = real_clock() + backstop + _WATCHDOG_LAUNCH_MARGIN
+                if startup_stall == "ready-late":
+                    while not checked.exists() and real_clock() < until:
+                        select.poll().poll(5)
+                    return real_subreaper()
                 if startup_stall == "blocked":
                     select.poll().poll(int((until - real_clock()) * 1000))
                 while real_clock() < until:
@@ -3553,6 +4023,14 @@ def _watchdog_tree_case(mode, order="event-first", backstop=_TREE_STARTUP_BACKST
                             except ProcessLookupError:
                                 pass
                         facts["held"] = hold(lambda: not guardian_running(pid) and gone(pids))
+                    if order in ("self-exit-after-snapshot", "killed-after-snapshot"):
+                        # Seen gone BEFORE its deadline, the guardian left
+                        # supervision before it: its unshifted clock (these
+                        # orders mount no `expire`) never reached the
+                        # deadline, so it cannot have taken its expiry
+                        # branch, whatever the host's scheduling.
+                        facts["held-early"] = (facts["held"]
+                                               and real_clock() < launched[-1].deadline)
                     if order == "no-stimulus":
                         backstop_now()
                     elif order == "killed-after-snapshot":
@@ -3624,7 +4102,8 @@ def _watchdog_tree_case(mode, order="event-first", backstop=_TREE_STARTUP_BACKST
                 if state == "S":
                     raise AssertionError(
                         "the leg's fixture guardian was alive and BLOCKED (state S) at the {} s "
-                        "startup backstop without having signalled READY; its startup makes no "
+                        "startup backstop, with no READY byte in its channel either before or "
+                        "after that sample, so it had not signalled READY; its startup makes no "
                         "blocking call before READY, so this is a code regression (a guardian "
                         "startup hang), not host scheduling: {}".format(backstop, mode))
                 return ("cannot-evaluate", "the leg's fixture guardian never signalled READY "
@@ -3754,6 +4233,9 @@ def _watchdog_tree_vectors():
             unexplained(label, established, facts, repr(out.strip()))
 
     def expect_failure(label, phrase, established, mode, **tree):
+        # A pass or a CANNOT-EVALUATE is a code regression only when the
+        # vector's schedule was established; otherwise the host never
+        # produced it, and the vector holds no verdict.
         facts = {}
         try:
             verdict, out = run(mode, tree, facts)
@@ -3763,7 +4245,7 @@ def _watchdog_tree_vectors():
                                      % (label, exc)) from exc
             return
         if verdict != "cannot-evaluate":
-            raise AssertionError("tree vector %s: %s, not refused: %r" % (label, verdict, out))
+            out = "%s, not refused: %s" % (verdict, out)
         unexplained(label, established, facts, repr(out.strip()))
 
     def held(facts):
@@ -3774,6 +4256,12 @@ def _watchdog_tree_vectors():
 
     def live_then_held(facts):
         return live(facts) and held(facts)
+
+    def live_then_held_early(facts):
+        # The guardian was seen gone before its own deadline (see
+        # _watchdog_tree_case): a ~backstop host stall that let it expire
+        # first does not establish the schedule.
+        return live(facts) and held(facts) and facts.get("held-early") is True
 
     # Both scheduling orders: event-first is the real nested-timeout and
     # nested-cancel legs; cleanup-first (the guardian's backstop and its
@@ -3798,13 +4286,13 @@ def _watchdog_tree_vectors():
     # snapshot and the cancel's cleanup was not killed by cleanup; only the
     # SIGKILL status check refuses it.
     expect_failure("self-exit/cancel", "tree cleanup did not kill a running subject",
-                   live_then_held, "nested-cancel", order="self-exit-after-snapshot")
+                   live_then_held_early, "nested-cancel", order="self-exit-after-snapshot")
     # Pass condition (2), nested-timeout: a guardian that left supervision
     # without its own expiry (its subject tree killed from outside) while
     # the caller's deadline passed between collection and its overdue
     # check; only the timed_out check refuses it.
     expect_failure("killed/timeout", "left supervision without its own expiry",
-                   live_then_held, "nested-timeout", order="killed-after-snapshot")
+                   live_then_held_early, "nested-timeout", order="killed-after-snapshot")
     # A guardian clock that never applies the shift expires only at the
     # real deadline, after a stimulus mounted well before it.
     expect_failure("shift-absent/timeout", "the guardian clock shift is absent",
@@ -3835,6 +4323,15 @@ def _watchdog_tree_vectors():
     expect_unevaluated("startup-runnable", "never signalled READY",
                        lambda facts: facts.get("startup") == "R",
                        "nested-timeout", backstop=_TREE_VECTOR_BACKSTOP, startup_stall="runnable")
+    # The READY-publication interleaving: the caller's first READY check
+    # finds nothing, the guardian then publishes READY and blocks reading
+    # GO, and only then is its state (S) sampled. Host scheduling, never a
+    # startup hang: without the READY re-check after the sample, this is
+    # the "BLOCKED (state S)" failure, raised out of this leg.
+    expect_unevaluated("startup-ready-late",
+                       "published READY after the caller's first READY check",
+                       lambda facts: facts.get("published-late") is True,
+                       "nested-timeout", backstop=_TREE_VECTOR_BACKSTOP, startup_stall="ready-late")
     if unestablished:
         print(_WATCHDOG_CANNOT_EVALUATE + " (tree vectors: schedule not established: "
               + "; ".join(unestablished) + ")")
@@ -13731,11 +14228,11 @@ def _watchdog_regression_self_test(plan_only=False):
         # derived, never a flat constant under the sanctioned wait.
         ("nested-timeout", _deadline_case_budget(_TREE_STARTUP_BACKSTOP)),
         ("nested-cancel", _deadline_case_budget(_TREE_STARTUP_BACKSTOP)),
-        # nested-orders runs fifteen tree exercises, one fixture launch each:
-        # eight at the startup backstop and the seven real-expiry vectors at
+        # nested-orders runs sixteen tree exercises, one fixture launch each:
+        # eight at the startup backstop and the eight real-expiry vectors at
         # their short backstop, each charged its allowance.
         ("nested-orders", 8 * _deadline_case_budget(_TREE_STARTUP_BACKSTOP)
-         + 7 * _deadline_case_budget(_TREE_VECTOR_BACKSTOP)),
+         + 8 * _deadline_case_budget(_TREE_VECTOR_BACKSTOP)),
         ("no-signal-echild", 15), ("guardian-error", 48), ("empty-children", 48),
         ("bounded-diagnostics", 66), ("cleanup-budget", 21), ("deadline-flips", 77),
         ("subject-setup", 22), ("overdue-success", 161.0 + 0.01), ("launch-ownership", 60),
@@ -14359,6 +14856,11 @@ def _watchdog_regression_self_test(plan_only=False):
             got = _watchdog_run_legs([(label, "", 1) for label in outcomes], scripted(outcomes))
         if got != want:
             flip_missed.append("leg aggregate %r -> %r, want %r" % (sorted(outcomes), got, want))
+    # The close-out allowance every leg adds to the declared total
+    # (_watchdog_declared_seconds): the real close-out code, run along each
+    # derived path under a virtual clock, must fit that path's total and
+    # reach each of its waits.
+    flip_missed.extend(_watchdog_closeout_vectors())
     floor = _watchdog_bound_faults(live, budgets)
     if floor or flip_missed:
         print("opf watchdog regressions: FAIL (process bound below a leg's own budget: %s; "

@@ -1374,63 +1374,70 @@ def _config_injection_lane(base):
 # end-to-end budget is opf/tools/opf.py --self-test: its watchdog regression
 # runner launches its legs one at a time, each under its own process bound
 # (declared budget + launch margin; the poll-masked leg alone is 2954 + 30 s)
-# and, after that bound, each leg's own close-out (the bounded cleanup waits
-# _FixtureProcess.close() makes once the bound expires, derived from the
-# declared cleanup grace by opf._watchdog_leg_closeout_seconds()), and its
-# watchdog isolation self-test also runs once at top level.
-# opf._watchdog_declared_seconds() returns that sequential sum, read from
-# the runner's own tables by _derive_member_bound() before any lane runs, so
-# a budget or grace raised there raises this bound with it; the derivation
-# vector below restates the rule term by term, so dropping any term fails a
-# check. The margin is a STATED allowance, not a derivation, and covers only
-# this: interpreter start, and the opf self-tests and other members that
-# declare no end-to-end budget (their own internal timeouts are not summed:
-# a disclosed residual). The bound is a LIVENESS bound only: its expiry is
-# never member evidence (see MemberTimeout below). An outer bound may sit
-# below it and then ends the run first: GitHub's hosted-runner job limit,
-# documented as 6 hours, ends a hosted CI job long before this bound (about
-# 11 hours) can fire, so in hosted CI this bound's attributed exit 2 is not
-# reached and a hung member ends as the job's own unattributed failure
-# (still red). The attribution serves runs without such a limit.
+# and, after that bound, each leg's own close-out allowance
+# (opf._watchdog_leg_closeout_seconds(): the longest of the close-out paths
+# opf derives from its cleanup grace and the waits of _FixtureProcess's
+# close-out, which opf._watchdog_closeout_vectors() checks against the real
+# close-out code under a virtual clock), and its watchdog isolation
+# self-test also runs once at top level. opf._watchdog_declared_seconds()
+# returns that sequential sum, read from the runner's own tables by
+# _derive_member_bound() before any lane runs, so a budget, grace or wait
+# raised there raises this bound with it; the derivation vector below
+# restates how the sum combines its terms, and the probe also runs opf's
+# close-out vector and returns its faults. The margin is a STATED
+# allowance, not a derivation, and covers only this: interpreter start, and
+# the opf self-tests and other members that declare no end-to-end budget
+# (their own internal timeouts are not summed: a disclosed residual). The
+# bound is a LIVENESS bound only: its expiry is never member evidence (see
+# MemberTimeout below). An outer bound may sit below it and then ends the
+# run first: GitHub's hosted-runner job limit, documented as 6 hours, ends a
+# hosted CI job long before this bound (more than 11 hours) can fire, so in
+# hosted CI this bound's attributed exit 2 is not reached and a hung member
+# ends as the job's own unattributed failure (still red). The attribution
+# serves runs without such a limit.
 _MEMBER_BOUND_MARGIN_SECONDS = 1200
 # The derivation probe imports opf and builds the runner's tables, nothing
 # else: a deliberately short fast-fail bound, its expiry attributed (exit 2
 # naming the derivation), never member evidence.
 _MEMBER_BOUND_PROBE_SECONDS = 120
 _MEMBER_BOUND_SECONDS = None  # set once by _derive_member_bound(); None refuses every launch
-# The derivation vector: a synthetic plan whose terms differ by orders of
-# magnitude, evaluated by opf's own derivation in the probe, against the
-# rule restated here: every leg's bound, plus every leg's close-out (the
-# 2 + 2 + 1 + 1 cleanup-grace waits of _FixtureProcess.close), plus the
-# isolation self-test's budget. Omitting any term changes the total.
+# The derivation vector: a synthetic two-leg plan evaluated by opf's own
+# derivation in the probe, against the rule restated here: every leg's
+# bound, plus every leg's close-out allowance (the value the probe reads
+# from opf), plus the isolation self-test's budget. Every term is positive,
+# so omitting any one changes the total; the isolation budget (7 s) is not
+# a multiple of the 5 s cleanup grace. The close-out allowance itself is
+# checked by opf's close-out vector, whose faults the probe returns beside
+# the total (want: none).
 _DERIVATION_VECTOR_PLAN = dict(
     bounds=dict([("vector-leg-a", 1000.0), ("vector-leg-b", 100.0)]),
     budgets=dict([("vector-leg-a", 970.0), ("vector-leg-b", 70.0),
-                  ("blocked-isolation", 10.0)]))
-_LEG_CLOSEOUT_GRACES = 2 + 2 + 1 + 1
+                  ("blocked-isolation", 7.0)]))
 
 
-def _derivation_vector_want(grace):
+def _derivation_vector_want(closeout):
     plan = _DERIVATION_VECTOR_PLAN
-    return (sum(plan["bounds"].values())
-            + len(plan["bounds"]) * _LEG_CLOSEOUT_GRACES * grace
+    return (sum(plan["bounds"].values()) + len(plan["bounds"]) * closeout
             + plan["budgets"]["blocked-isolation"])
 
 
 def _derive_member_bound(run=subprocess.run):
     """Return (declared, bound, vector): opf's declared sequential worst
-    case, the per-member bound above it, and (opf's total over the
-    synthetic _DERIVATION_VECTOR_PLAN, the total the rule restated here
-    requires); or exit 2 (cannot evaluate) when the declared budget cannot
-    be read: no member may run under a guessed bound. `run` is the launch
-    (scripted by the vectors)."""
+    case, the per-member bound above it, and ((opf's total over the
+    synthetic _DERIVATION_VECTOR_PLAN, the faults of opf's close-out
+    vector), (the total the rule restated here requires, no faults)); or
+    exit 2 (cannot evaluate) when the declared budget cannot be read: no
+    member may run under a guessed bound. `run` is the launch (scripted by
+    the vectors)."""
     import json
     import math
-    code = ("import json, sys; sys.path.insert(0, sys.argv[1]); import opf, _opf_emit; "
+    code = ("import json, sys; sys.path.insert(0, sys.argv[1]); import opf; "
             "rc = opf._bootstrap(); "
             "print(json.dumps(dict(declared=opf._watchdog_declared_seconds(), "
             "vector=opf._watchdog_declared_seconds(json.loads(sys.argv[2])), "
-            "grace=_opf_emit._FIXTURE_CLEANUP_GRACE)) if rc == 0 else 'bootstrap rc %d' % rc)")
+            "closeout=opf._watchdog_leg_closeout_seconds(), "
+            "closeout_faults=opf._watchdog_closeout_vectors())) "
+            "if rc == 0 else 'bootstrap rc %d' % rc)")
     payload, detail = None, ""
     try:
         child = run([sys.executable, "-I", "-B", "-c", code, str(ROOT / "opf" / "tools"),
@@ -1444,18 +1451,20 @@ def _derive_member_bound(run=subprocess.run):
         detail = "still running when its {} s bound killed it".format(_MEMBER_BOUND_PROBE_SECONDS)
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
         detail = "; ".join(part for part in (detail, str(exc)) if part)
-    values = None
+    values = faults = None
     if isinstance(payload, dict):
-        values = [payload.get(key) for key in ("declared", "vector", "grace")]
-        if not all(type(value) in (int, float) and math.isfinite(value) and value > 0
-                   for value in values):
+        values = [payload.get(key) for key in ("declared", "vector", "closeout")]
+        faults = payload.get("closeout_faults")
+        if not (all(type(value) in (int, float) and math.isfinite(value) and value > 0
+                    for value in values)
+                and type(faults) is list and all(type(fault) is str for fault in faults)):
             values = None
     if values is None:
         _cannot_evaluate_exit(["the per-member bound cannot be derived from opf's declared "
                                "budgets ({}): no member runs under a guessed bound".format(detail)])
-    declared, vector, grace = values
+    declared, vector, closeout = values
     return (declared, declared + _MEMBER_BOUND_MARGIN_SECONDS,
-            (vector, _derivation_vector_want(grace)))
+            ((vector, faults), (_derivation_vector_want(closeout), [])))
 
 
 def _member_bound():
@@ -1476,7 +1485,9 @@ def _cannot_evaluate_exit(lines, lane=None):
     result WHOLE (exit code and its hook, fsmonitor and exposure evidence,
     so an exit 0 with evidence prints too), except that results with exit 0
     and no evidence at all are counted on one line rather than listed. A
-    member its bound killed prints on its own refusal line instead."""
+    member its bound killed prints on its own refusal line instead, with
+    the hook, fsmonitor and exposure evidence it left before the kill
+    (_refuse_member_timeouts)."""
     if FAILURES:
         print("SELF-TEST FINDINGS COLLECTED BEFORE THE CANNOT-EVALUATE EXIT:", file=sys.stderr)
         for failure in FAILURES:
@@ -1542,18 +1553,23 @@ def _refuse_member_timeouts(results):
     """FAIL CLOSED, DISTINCTLY, on every member its bound killed: exit 2
     through _cannot_evaluate_exit (findings already collected and the lane's
     uncompared member results print first), one line per killed member with
-    the bound, the elapsed time and the load average, never computing
+    the bound, the elapsed time, the load average and, for a lane result,
+    the hook, fsmonitor and exposure evidence the member left before the
+    kill (observed, so printed; still no verdict), never computing
     got-vs-want findings over a lane that holds no verdict for those members
     (three such false exposure findings observed 2026-10-10 at loadavg ~21)."""
-    rows = sorted((argv, value[0]) for argv, value in results.items()
-                  if isinstance(value[0], MemberTimeout))
+    rows = sorted(((argv, value) for argv, value in results.items()
+                   if isinstance(value[0], MemberTimeout)), key=lambda row: row[0])
     if not rows:
         return
     _cannot_evaluate_exit([
         "{} was still running when the {:.0f} s per-member bound killed it (elapsed {:.0f} s, "
-        "loadavg {}): this lane holds no exposure verdict for it".format(
-            " ".join(argv), sentinel.bound, sentinel.elapsed, os.getloadavg())
-        for argv, sentinel in rows], lane=results)
+        "loadavg {}): this lane holds no exposure verdict for it{}".format(
+            " ".join(argv), value[0].bound, value[0].elapsed, os.getloadavg(),
+            "; observed before the kill (no verdict): " + ", ".join(
+                "{}={!r}".format(field, item)
+                for field, item in zip(_LANE_RESULT_FIELDS[1:], value[1:])) if value[1:] else "")
+        for argv, value in rows], lane=results)
 
 
 def _member_rc_or_refuse(member, env):
@@ -1575,8 +1591,9 @@ def _install_member_bound():
 _MEMBER_BOUND_EXPECTED = [
     ("rc-1", 2, True), ("bootstrap-refused", 2, True), ("timeout", 2, True),
     ("oserror", 2, True), ("not-json", 2, True), ("non-finite", 2, True), ("zero", 2, True),
-    ("missing-term", 2, True), ("bool", 2, True),
-    ("clean", (7.5, 7.5 + _MEMBER_BOUND_MARGIN_SECONDS, (3.25, _derivation_vector_want(0.5)))),
+    ("missing-term", 2, True), ("bool", 2, True), ("faults-not-list", 2, True),
+    ("clean", (7.5, 7.5 + _MEMBER_BOUND_MARGIN_SECONDS,
+               ((3.25, []), (_derivation_vector_want(0.5), [])))),
     ("unset-bound", 2, True), ("unset-launch", 2, True, 0),
 ]
 
@@ -1584,7 +1601,7 @@ _MEMBER_BOUND_EXPECTED = [
 def _member_bound_vectors():
     """Red-on-revert vectors for the bound's derivation-failure exit and its
     unset (None) refusal, through scripted probe launches: every unreadable,
-    non-finite, non-positive or incomplete derivation is an attributed exit
+    non-finite, non-positive, incomplete or malformed derivation is an attributed exit
     2 naming the derivation, a clean one installs declared + margin, and a
     member launch reached with no bound derived exits 2 before launching."""
     import contextlib
@@ -1593,7 +1610,8 @@ def _member_bound_vectors():
     global _MEMBER_BOUND_SECONDS
 
     def payload(**values):
-        return json.dumps(dict(dict(declared=7.5, vector=3.25, grace=0.5), **values))
+        return json.dumps(dict(dict(declared=7.5, vector=3.25, closeout=0.5, closeout_faults=[]),
+                               **values))
 
     def scripted(effect, calls=None):
         def run(argv, **kwargs):
@@ -1620,8 +1638,10 @@ def _member_bound_vectors():
             ("oserror", OSError(5, "vector")), ("not-json", (0, "36000.0")),
             ("non-finite", (0, payload(declared=float("nan")))),
             ("zero", (0, payload(declared=0))),
-            ("missing-term", (0, json.dumps(dict(declared=7.5, grace=0.5)))),
-            ("bool", (0, payload(grace=True))),
+            ("missing-term", (0, json.dumps(dict(declared=7.5, closeout=0.5,
+                                                 closeout_faults=[])))),
+            ("bool", (0, payload(closeout=True))),
+            ("faults-not-list", (0, payload(closeout_faults="none"))),
             ("clean", (0, payload()))):
         code, text = refused(lambda: _derive_member_bound(run=scripted(effect)))
         if label == "clean":
@@ -1651,7 +1671,7 @@ _MEMBER_TIMEOUT_EXPECTED = [
     ("signal", "int", None, False), ("exit-2", "int", None, False),
     ("oserror", "str", None, False), ("clean", "int", None, False),
     ("direct-bound-kill", 2),
-    ("findings-printed-first", 2, True, True, True, True, True),
+    ("findings-printed-first", 2, True, True, True, True, True, True),
     ("wiring", ["_config_results", "_member_rc_or_refuse"], True),
 ]
 
@@ -1662,7 +1682,8 @@ def _member_timeout_vectors():
     2 (through the pool's _refuse_member_timeouts and the direct
     _member_rc_or_refuse alike); a nonzero exit, a signal status and an
     OSError stay member evidence; the exit prints findings already collected
-    and the lane's uncompared results BEFORE its own line; and every
+    and the lane's uncompared results BEFORE its own line, and a killed
+    member's own hook, fsmonitor and exposure evidence ON it; and every
     _run_config_member call site sits behind the refusal (the pool runner
     refuses its whole results map)."""
     import contextlib
@@ -1706,7 +1727,8 @@ def _member_timeout_vectors():
     FAILURES.append(sentinel)
     try:
         lane = dict([
-            (_VECTOR_MEMBER, (MemberTimeout(_VECTOR_MEMBER, 2.0, 1.0), b"", b"", b"")),
+            (_VECTOR_MEMBER, (MemberTimeout(_VECTOR_MEMBER, 2.0, 1.0), b"killed-hook\n",
+                              b"killed-fsmonitor\n", b"killed-home\n")),
             (("tools/vector_other.py", "--self-test"), (1, b"", b"", b"home\n")),
             (("tools/vector_hooked.py", "--self-test"), (0, b"hook-ran\n", b"fsmonitor-ran\n", b"")),
             (("tools/vector_clean.py", "--self-test"), (0, b"", b"", b""))])
@@ -1722,7 +1744,9 @@ def _member_timeout_vectors():
                        "hook=b'hook-ran\\n', fsmonitor=b'fsmonitor-ran\\n', exposure=b''")
         < refusal,
         -1 < text.find("UNCOMPARED LANE RESULTS: 1 other member(s) exited 0") < refusal,
-        "vector_clean" not in text and refusal > -1))
+        "vector_clean" not in text and refusal > -1,
+        -1 < refusal < text.find("observed before the kill (no verdict): hook=b'killed-hook\\n', "
+                                 "fsmonitor=b'killed-fsmonitor\\n', exposure=b'killed-home\\n'")))
     # This module's own loaded source (no new file-read site: the read-API
     # allowlist in tools/check_ci_parity.py stays as reviewed).
     tree = ast.parse(inspect.getsource(sys.modules[__name__]))
