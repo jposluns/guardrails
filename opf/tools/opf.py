@@ -5545,6 +5545,68 @@ def _watchdog_bound_faults(bounds, budgets):
     return faults
 
 
+# The completion legs priced from a stated derivation (the comment above the
+# re-priced budgets in _watchdog_regression_self_test), and the one margin
+# each budget may carry above its derivation.
+_WATCHDOG_DERIVED_LEGS = ("cleanup-reaped", "no-signal-echild", "nested-timeout",
+                          "nested-cancel", "subject-orphan", "escalation-subject",
+                          "close-cancel", "census-exception", "drain-adopted",
+                          "reaped-subject-retry")
+_WATCHDOG_DERIVATION_MARGIN = 1
+
+
+def _watchdog_derivation_faults(source, budgets):
+    """The derivation rule for the re-priced completion legs: in `source` (the
+    runner's own text), each derivation comment line `#   <leg>[, <leg>]: ...`
+    opens a block that must end in exactly one marker [derived: T + ... = N s]
+    whose terms sum to N, every _WATCHDOG_DERIVED_LEGS leg must have exactly one
+    block, and each leg's declared budget must equal N plus
+    _WATCHDOG_DERIVATION_MARGIN: a budget below its derivation, or above it by
+    more than the stated margin, is a fault. Returns the faults."""
+    import math
+    import re
+    head = re.compile(r"\s*#   ([a-z][a-z-]*(?:, [a-z][a-z-]*)*): ")
+    marker = re.compile(r"\[derived: ([0-9.]+(?: \+ [0-9.]+)*) = ([0-9.]+) s\]")
+    blocks, current = [], None
+    for line in source.splitlines():
+        opened = head.match(line)
+        if opened is not None:
+            current = (opened.group(1).split(", "), [])
+            blocks.append(current)
+        if current is not None:
+            if not line.lstrip().startswith("#"):
+                current = None
+                continue
+            current[1].append(line.lstrip()[1:].strip())
+    faults, seen = [], {}
+    for legs, lines in blocks:
+        found = marker.findall(" ".join(lines))
+        for leg in legs:
+            seen.setdefault(leg, []).append(found)
+    for leg in _WATCHDOG_DERIVED_LEGS:
+        entries = seen.get(leg, [])
+        if len(entries) != 1 or len(entries[0]) != 1:
+            faults.append("completion-%s: %d derivation block(s) carrying %s marker(s), "
+                          "want exactly one block with one [derived: ...] marker" % (
+                              leg, len(entries), [len(found) for found in entries]))
+            continue
+        terms, total = entries[0][0]
+        derived = float(total)
+        if not math.isclose(math.fsum(float(term) for term in terms.split(" + ")), derived,
+                            abs_tol=1e-9):
+            faults.append("completion-%s: derivation terms %s do not sum to %s" % (
+                leg, terms, total))
+            continue
+        budget = budgets.get("completion-" + leg)
+        if not _watchdog_finite_seconds(budget):
+            faults.append("completion-%s: no usable declared budget for its derivation" % leg)
+        elif not math.isclose(budget, derived + _WATCHDOG_DERIVATION_MARGIN, abs_tol=1e-9):
+            faults.append("completion-%s: declared budget %ss is not its derivation %ss plus "
+                          "the stated %ss margin" % (leg, budget, total,
+                                                     _WATCHDOG_DERIVATION_MARGIN))
+    return faults
+
+
 # Runtime accounting of a watchdog leg's bounded waits. Static source analysis
 # cannot soundly bound these legs (data-dependent `while` loops, helpers
 # resolved at run time, callees outside the leg's own source), so the budget
@@ -19222,7 +19284,7 @@ def _watchdog_regression_self_test():
         ("pdeathsig", 32), ("escalation-subject", 924 + 1), ("escalate-reaped", 784),
         ("poll-collected", 1266), ("close-cancel", 1227 + 1), ("escalate-degraded", 784),
         ("poll-masked", 2954), ("unpinned-kill", 600), ("census-verify", 630),
-        ("census-exception", 1230 + 1), ("receipt-high-fd", 10)))
+        ("census-exception", 1235 + 1), ("receipt-high-fd", 10)))
     # The ten completion legs train 2 added or re-priced (merged 2026-10-11)
     # are priced from their PERMITTED PATHS, never from a measured run: each
     # base is the UPPER bound of every wait the leg's own thread or a thread
@@ -19242,28 +19304,43 @@ def _watchdog_regression_self_test():
     # escalation's two /proc census loops (_fixture_group_pinned and
     # _fixture_verify_group_kill, g each) and the g it reaps for after
     # that escalation. Every _bounded_wait is priced at its bound even
-    # where its child is already proven exited. The margin of 1 s is float
+    # where its child is already proven exited. A wait made in a forked
+    # child is never counted (the charge is pid-gated: a child charges no
+    # ledger); a wait a HELPER makes in the leg process (a census loop, a
+    # helper's own _bounded_wait) is counted exactly like the leg's own,
+    # and a helper loop is left out only where the derivation names why no
+    # passing path reaches it. The margin of 1 s is float
     # summation plus the at most one tick (0.005 s, or 0.05 s for the
     # nested legs' file gate) each fixed-tick or deadline-guarded loop can
     # sleep past its bound, under 0.5 s on every leg here; it is no timing
-    # allowance.
+    # allowance. Each derivation ends in a marker [derived: T + ... = N s]
+    # that _watchdog_derivation_faults checks before any leg runs: the
+    # marker's terms must sum to N, each of these ten legs must carry
+    # exactly one marker, and the declared budget must be N plus this 1 s
+    # margin, so a budget below its derivation (or above it by more than
+    # the stated margin) fails the runner.
     #   cleanup-reaped: start() 5 + one _bounded_wait 15 + close() launch
     #     wait 10 (the guardian is marked collected, so no reap loop) = 30.
+    #     [derived: 5 + 15 + 10 = 30 s]
     #   no-signal-echild: start() 5 + two _bounded_wait 30 + close() 10
-    #     (collected, no reap loop) = 45.
+    #     (collected, no reap loop) = 45. [derived: 5 + 30 + 10 = 45 s]
     #   nested-timeout, nested-cancel: the run_status_owned(timeout=2)
     #     fixture allowance 11 (its own waits are suppressed under it) +
     #     _zombie_survival_control's two _bounded_wait 30 + the file-gate
     #     release loop (30 s bound, 0.05 s tick) 30 = 71.
+    #     [derived: 11 + 30 + 30 = 71 s]
     #   subject-orphan: five fixture holds 1500, five launch_held 30 s
     #     deadlines 150 and 30 s selects 150, eight await_state deadlines
     #     240, Flip A's 30 s deadline 30 and five close() launch waits at
     #     g = 1 (10) = 2080, plus five close() collections at 5 g = 25:
-    #     2105.
+    #     2105 (hold()'s 120 s deadline runs in the forked subject and
+    #     charges nothing). [derived: 1500 + 150 + 150 + 240 + 30 + 10 +
+    #     25 = 2105 s]
     #   escalation-subject: two fixture holds 600, nine 30 s deadlines 270,
     #     two 20 s worker joins 40 and two close() launch waits at g = 1 (4)
     #     = 914, plus the two worker-thread close() collections at 5 g = 10:
     #     924 (the 30 s rescue join runs only on a path the leg fails).
+    #     [derived: 600 + 270 + 40 + 4 + 10 = 924 s]
     #   close-cancel: start() 1 x 4 (g patched to 1), 30 x 3 and 300 (leg
     #     4) = 394; four wedged-fork gate waits 240; the interrupted launch
     #     waits 2, 2, 10 and 10 (Flip B's priced although its interrupt
@@ -19275,17 +19352,47 @@ def _watchdog_regression_self_test():
     #     Flip B's interrupt-owner collection (its g loop and one escalation's
     #     two census loops, 3 g = 15), Flip A's hygiene _bounded_wait 15 and
     #     three abandoned-launch _await_exit at g = 1 on the launcher thread
-    #     (3) = 133. 1094 + 133 = 1227.
-    #   census-exception: thirty-four 30 s deadlines 1020 + fourteen
-    #     _bounded_wait calls in the leg process 210 = 1230 (the forked
-    #     children's waits charge no ledger).
+    #     (3) = 133. 1094 + 133 = 1227. [derived: 394 + 240 + 24 + 32 + 150
+    #     + 180 + 4 + 70 + 100 + 15 + 15 + 3 = 1227 s]
+    #   census-exception: thirty-four 30 s deadlines in the leg process
+    #     1020: frozen_pair's await_file, await_state and await_pgid in
+    #     each of its five complete calls (legs 1, 1f, 2, 4 and 8) 15, its
+    #     leg-1k call's await_file and its leg-1m call's three (the
+    #     await_pgid deadline opens before the injected getpgid fault) 4,
+    #     and fifteen more awaits (legs 1, 1k, 1l, 1m, 4, 6 and 9 one each,
+    #     legs 1f, 2, 5 and 8 two each) 15. Fourteen _bounded_wait at 15 s
+    #     in the leg process 210: thirteen direct calls (legs 1, 1f, 1g,
+    #     1h, 1i, 1l, 3, 4, 5, 6, 7, 8 and 10) 195, plus the one in
+    #     _pidfd_handoff_fork_send's refusal path, which leg 1p takes in the
+    #     leg process 15. Leg 1f's _fixture_verify_group_kill raw loop at
+    #     its whole bound g = 5: leg 1f reaches it through the real
+    #     _fixture_escalate_subject call, whose "tree" outcome the leg
+    #     requires, and its sub-tick sleeps are covered by a deadline only
+    #     when timing allows. 1020 + 210 + 5 = 1235. Not counted, each with
+    #     its reason: leg 1h's await_state and _bounded_wait(departed) and
+    #     every guardian- or sender-side wait run in a forked child (no
+    #     ledger); _fixture_group_pinned's loop, reached in legs 1, 1f, 2
+    #     and 8, leaves on its first read without sleeping on every passing
+    #     path, because frozen_pair's await_state already confirmed the
+    #     guardian stopped ("T") and nothing continues it before the call
+    #     (were it not stopped, the pin refuses and each of those legs
+    #     fails); the verify loop runs only after a "tree" census, which no
+    #     other leg reaches (legs 1, 2 and 8 inject a raising census, legs
+    #     4 and 5 a raising freeze, and the model legs patch the census or
+    #     the pin, pass no guardian, or raise at the freeze); the
+    #     _finish_close reap loop needs a pid AND collected False, which no
+    #     fake supplies and no single generated deviation produces; and
+    #     _reap_pidfd's and the handoff receive's select.poll waits are not
+    #     registered primitives. [derived: 1020 + 210 + 5 = 1235 s]
     #   drain-adopted: two 30 s raw polls (0.005 s tick) 60 + drains whose
     #     loops run to deadlines 1.5 s and 10 s = 71.5.
+    #     [derived: 60 + 1.5 + 10 = 71.5 s]
     #   reaped-subject-retry: two 30 s raw polls 60, drains of 1.0, 0.5,
     #     0.5 and 1.0 s = 3, three _bounded_wait 45, and the startup probe's
     #     _start() launch wait 5 and its _await_exit to the same 5 s
     #     deadline 5 = 118 (its SIGKILL branch reads the pidfd the probe
     #     object never has, so the leg cannot pass along it).
+    #     [derived: 60 + 3 + 45 + 5 + 5 = 118 s]
     budgets.update((("completion-drain-adopted", 71.5 + 1),
                     ("completion-reaped-subject-retry", 118 + 1)))
     # The isolation matrix: 31 timer cases, each one 180 s fixture call.
@@ -19848,11 +19955,30 @@ def _watchdog_regression_self_test():
         if (not _watchdog_bound_faults(dict(probe=bad), dict(probe=10))
                 or not _watchdog_bound_faults(dict(probe=10 ** 6), dict(probe=bad))):
             flip_missed.append("non-finite floor input %r" % (bad,))
+    # The re-priced legs' budgets against their stated derivations, and
+    # three flips the check must refuse: a derivation raised above its
+    # declared budget, a budget raised past derivation plus margin, and a
+    # leg whose marker is removed.
+    runner_source = inspect.getsource(_watchdog_regression_self_test)
+    # Assembled, never one literal, so the marker occurs once: in the comment.
+    derived_marker = "[derived: 1020 + 210 + 5 = %d s]" % 1235
+    for flip, flip_source, flip_budgets in (
+            ("derivation above budget", runner_source.replace(
+                derived_marker, "[derived: 1020 + 210 + 6 = 1236 s]"), budgets),
+            ("budget past derivation plus margin", runner_source,
+             dict(budgets, **{"completion-census-exception": 1235 + 2})),
+            ("marker removed", runner_source.replace(derived_marker, ""), budgets)):
+        if (runner_source.count(derived_marker) != 1
+                or not _watchdog_derivation_faults(flip_source, flip_budgets)):
+            flip_missed.append("derivation flip not refused: " + flip)
     floor = _watchdog_bound_faults(live, budgets)
-    if floor or flip_missed:
+    derivation = _watchdog_derivation_faults(runner_source, budgets)
+    if floor or derivation or flip_missed:
         print("opf watchdog regressions: FAIL (process bound below a leg's own budget: %s; "
+              "budget not its stated derivation plus margin: %s; "
               "floor vectors not refused: %s)" % (
-                  "; ".join(floor) or "none", ", ".join(flip_missed) or "none"))
+                  "; ".join(floor) or "none", "; ".join(derivation) or "none",
+                  ", ".join(flip_missed) or "none"))
         return EXIT_FINDING
     failed = False
     for label, code, timeout in cases:

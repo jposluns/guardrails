@@ -8,6 +8,13 @@ Legs, in order:
   switch         the single source keeps documentation-check at its decided value (DOCUMENTATION_CHECK
                  below, true since the declarations unit switched it on), so turning the documentation
                  check off is a finding (exit 1) and a reviewed change to this gate, never a silent pass.
+  launched       LAUNCHED_SURFACES (the warn-only standalone hook scripts the source leg holds to exit 1)
+                 is reconciled against the hooks manifest, HOOKS_MANIFEST_REL: for every [[hook]] row
+                 with a `script` key, both its core source and its plugin copy (HOOK_SCRIPT_DIRS) must
+                 be listed, and every listed entry must be one of those, so a script hook the list
+                 omits, or a stale entry, is a finding (exit 1). A missing, unreadable or unparseable
+                 manifest, or a `script` value that is not a plain .py file name, is cannot-evaluate.
+                 It reads the manifest's script keys only; tools/gen_hooks.py validates the rest.
   pins           every `python-version:` interpreter pin in .github/workflows/*.yml, in PIN_FILES (the
                  shipped adopter CI template and its inline copy) and in every local action file (each
                  action.yml or action.yaml under the tree outside SKIPPED_DIR_NAMES, and the target of
@@ -498,6 +505,12 @@ LAUNCHED_SURFACES = (".aiqt/core/hooks/scripts/clock-inject.py",
                      ".aiqt/core/hooks/scripts/future-stamp-write.py",
                      "plugin/aiqt-guardrails-hooks/hooks/scripts/clock-inject.py",
                      "plugin/aiqt-guardrails-hooks/hooks/scripts/future-stamp-write.py")
+# The launched leg holds LAUNCHED_SURFACES equal to the hooks manifest's script rows: each `script` file
+# name under its core source directory and under the plugin copy tools/gen_hooks.py renders
+# (gen_hooks.PLUGIN_ROOT_REL + "/hooks/scripts/").
+HOOKS_MANIFEST_REL = ".aiqt/core/hooks/manifest.toml"
+HOOK_SCRIPT_DIRS = (".aiqt/core/hooks/scripts/", "plugin/aiqt-guardrails-hooks/hooks/scripts/")
+HOOK_SCRIPT_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*\.py")
 MODES_NAME = "FLOOR_FAIL_OPEN_MODES"
 MODE_RE = re.compile(r"[a-z][a-z0-9_]*")
 DENY_PROBE_MODE = "floor_deny_probe"
@@ -627,6 +640,33 @@ def load_source(root):
     return {"floor": (int(match.group(1)), int(match.group(2))), "surfaces": tuple(surfaces),
             "nonblocking": frozenset(nonblocking), "completeness": data["completeness-check"],
             "documentation": data["documentation-check"]}
+
+
+def launched_findings(root):
+    """The launched leg: LAUNCHED_SURFACES against the hooks manifest's script rows, both ways."""
+    try:
+        data = tomllib.loads(_read_text(root / HOOKS_MANIFEST_REL))
+    except tomllib.TOMLDecodeError as exc:
+        raise CannotEvaluate("{}: does not parse: {}".format(HOOKS_MANIFEST_REL, exc))
+    rows = data.get("hook", [])
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        raise CannotEvaluate("{}: hook must be an array of tables".format(HOOKS_MANIFEST_REL))
+    scripts = set()
+    for row in rows:
+        if "script" not in row:
+            continue
+        name = row["script"]
+        if not isinstance(name, str) or not HOOK_SCRIPT_RE.fullmatch(name):
+            raise CannotEvaluate("{}: script {!r} is not a plain .py file name".format(
+                HOOKS_MANIFEST_REL, name))
+        scripts.add(name)
+    expected = set(directory + name for name in scripts for directory in HOOK_SCRIPT_DIRS)
+    findings = ["{}: the script hook {} renders {}, which LAUNCHED_SURFACES does not list, so the source "
+                "leg does not hold its guard to exit 1".format(HOOKS_MANIFEST_REL, rel.rsplit("/", 1)[1], rel)
+                for rel in sorted(expected - set(LAUNCHED_SURFACES))]
+    findings.extend("LAUNCHED_SURFACES lists {}, which no {} script row renders (a stale entry)".format(
+        rel, HOOKS_MANIFEST_REL) for rel in sorted(set(LAUNCHED_SURFACES) - expected))
+    return findings
 
 
 def source_findings(source):
@@ -1739,6 +1779,7 @@ def evaluate(root):
         findings = []
         findings.extend(source_findings(source))
         findings.extend(switch_findings(source))
+        findings.extend(launched_findings(root))
         findings.extend(pin_findings(root, floor))
         findings.extend(guard_findings(root, source["surfaces"], floor, source["nonblocking"]))
         findings.extend(dynamic_findings(root, source["surfaces"], floor, source["nonblocking"]))
@@ -1752,8 +1793,8 @@ def evaluate(root):
         return 2, ["CANNOT EVALUATE: {}".format(exc)]
     if findings:
         return 1, ["FAIL: " + finding for finding in findings]
-    return 0, ["PASS: python floor {}.{} ({}): source, pins, guard, dynamic and fallback legs over {} "
-               "guarded surface(s); completeness check {}, documentation and claims checks {}".format(
+    return 0, ["PASS: python floor {}.{} ({}): source, launched, pins, guard, dynamic and fallback legs "
+               "over {} guarded surface(s); completeness check {}, documentation and claims checks {}".format(
                    floor[0], floor[1], SOURCE_REL, len(source["surfaces"]),
                    "ON" if source["completeness"] else "OFF (completeness-check = false)",
                    "ON" if source["documentation"] else "OFF (documentation-check = false)")]
@@ -1770,6 +1811,7 @@ _EXECUTED_SET = set()
 REVERT_CALLS = (
     ("source", "source_findings(source)"),
     ("switch", "switch_findings(source)"),
+    ("launched", "launched_findings(root)"),
     ("pins", "pin_findings(root, floor)"),
     ("guard", "guard_findings(root, source[\"surfaces\"], floor, source[\"nonblocking\"])"),
     ("dynamic", "dynamic_findings(root, source[\"surfaces\"], floor, source[\"nonblocking\"])"),
@@ -1827,9 +1869,18 @@ def _fixture(base, source=None, workflow_pin="3.14", template_pin="3.14", files=
            "          python-version: '{}'\n".format(template_pin))
     _write(root, PIN_FILES[1], "TEMPLATE = \"\"\"\n          python-version: '{}'\n\"\"\"\n".format(
         template_pin))
+    _write(root, HOOKS_MANIFEST_REL, _hooks_manifest())
     for rel, text in (files or {}).items():
         _write(root, rel, text)
     return root
+
+
+def _hooks_manifest(scripts=("clock-inject.py", "future-stamp-write.py")):
+    """A hooks manifest whose script rows name `scripts`, beside one handler row."""
+    rows = ['[[hook]]\nid = "dispatcher-row"\nhandler = "demo"\n']
+    rows.extend('[[hook]]\nid = "row-{}"\nscript = {}\n'.format(number, json.dumps(name))
+                for number, name in enumerate(scripts))
+    return "\n".join(rows)
 
 
 def _entry(guard, before="", after="open(\"RAN\", \"w\").close()\n"):
@@ -2195,8 +2246,8 @@ def _self_test_cases(base):
            "as '3.10'".format(WORKFLOWS_REL)])
 
     check("guard/canonical-passes", evaluate(_fixture(base, source=listed, files=demo)), (0, [
-        "PASS: python floor 3.14 ({}): source, pins, guard, dynamic and fallback legs over 1 guarded "
-        "surface(s); completeness check OFF (completeness-check = false), documentation and claims "
+        "PASS: python floor 3.14 ({}): source, launched, pins, guard, dynamic and fallback legs over 1 "
+        "guarded surface(s); completeness check OFF (completeness-check = false), documentation and claims "
         "checks ON".format(SOURCE_REL)]))
     guard_marker = "canonical floor guard"
     for check_id, text in (
@@ -2226,6 +2277,20 @@ def _self_test_cases(base):
                                         files={rel: _entry(guard_text(name, floor))}))
         got.append((listed_ok[0], code, _has(lines, "warn-only plugin hook script(s) " + rel)))
     check("source/launched-surface-unlisted-cannot-evaluate", got, [(0, 2, True)] * len(LAUNCHED_SURFACES))
+    # The launched leg (its unlisted-script finding is revert/launched-leg): a LAUNCHED_SURFACES entry no
+    # manifest script row renders is a stale-entry finding; a missing manifest, or a script value that is
+    # not a plain file name, is cannot-evaluate.
+    code, lines = evaluate(_fixture(base, files={HOOKS_MANIFEST_REL: _hooks_manifest(("clock-inject.py",))}))
+    check("launched/stale-entry-finding", (code, [line for line in lines if "stale entry" in line]), (1, [
+        "FAIL: LAUNCHED_SURFACES lists {}, which no {} script row renders (a stale entry)".format(
+            rel, HOOKS_MANIFEST_REL) for rel in LAUNCHED_SURFACES if rel.endswith("/future-stamp-write.py")]))
+    manifestless = _fixture(base)
+    os.remove(manifestless / HOOKS_MANIFEST_REL)
+    code, lines = evaluate(manifestless)
+    check("launched/manifest-missing-cannot-evaluate", (code, _has(lines, HOOKS_MANIFEST_REL)), (2, True))
+    code, lines = evaluate(_fixture(base, files={HOOKS_MANIFEST_REL: _hooks_manifest(
+        ("clock-inject.py", "future-stamp-write.py", "../escape.py"))}))
+    check("launched/path-script-cannot-evaluate", (code, _has(lines, "not a plain .py file name")), (2, True))
     for check_id, source, text in (
             ("guard/nonblocking-exit-2-finding", nonblocking, _entry(good)),
             ("guard/unlisted-exit-1-finding", listed, good_nonblocking)):
@@ -2816,6 +2881,9 @@ def _red_on_revert(base, good):
                         files=_declared("3.13")),
          "decided floor"),
         ("switch", dict(source=_source_text(documentation=False)), "documentation-check is false"),
+        ("launched", dict(files={HOOKS_MANIFEST_REL: _hooks_manifest(
+            ("clock-inject.py", "future-stamp-write.py", "new-hook.py"))}),
+         "the script hook new-hook.py renders .aiqt/core/hooks/scripts/new-hook.py"),
         ("pins", dict(workflow_pin="3.12"), "quality.yml:6: python-version '3.12' differs"),
         ("guard", dict(source=listed, files={"tools/demo.py": _entry(good, before="import os\n")}),
          "canonical floor guard"),
@@ -2841,6 +2909,7 @@ def _red_on_revert(base, good):
         results[leg] = (intact_rc, named, _gate_run(_fixture(base, **kwargs), mutants[leg])[0])
     check("revert/source-leg", results["source"], (1, True, 0))
     check("revert/switch-leg", results["switch"], (1, True, 0))
+    check("revert/launched-leg", results["launched"], (1, True, 0))
     check("revert/pins-leg", results["pins"], (1, True, 0))
     check("revert/guard-leg", results["guard"], (1, True, 0))
     check("revert/dynamic-leg", results["dynamic"], (1, True, 0))
