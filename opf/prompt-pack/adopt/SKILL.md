@@ -137,7 +137,12 @@ frozen plan marks each source `occupying = true` or `occupying = false`.
   so before the adopter chooses it.
 - **move**: relocate it to a named destination outside the managed store, or by default to
   `.working/archive/moved/<source-path>`, after the green completion check. An occupied
-  destination is a collision, never an overwrite.
+  destination is a collision, never an overwrite. A named destination whose file name is
+  `opf.yml`, `opf-ci.sh`, `pre-commit` or `install.sh`, in any mix of upper and lower case,
+  refuses with exit 2 when you plan, unless it lies beneath `.working/archive/moved/`. Those
+  are the enforcement launcher names, and a moved file is never checked as an enforcement
+  member. Take the default destination, or give the file another name such as
+  `pre-commit.old`.
 
 The reserved store control area (`.working/archive`, `imported`, `staging`, `journals`) is never
 adopter content, and no decision may name it.
@@ -357,7 +362,10 @@ How to fill it:
 - `product` is `opf` for standalone OPF, or `aiqt` when OPF is adopted as part of AIQT.
 - `sources` and `targets` repeat exactly what you investigated.
 - One `[[decisions]]` row per candidate, with exactly `path`, `disposition` and the `actor` who
-  chose it. A `move` row may add `destination`; without one it takes the default.
+  chose it. A `move` row may add `destination`; without one it takes the default. A
+  `destination` whose file name is one of the four launcher names below, in any case, refuses
+  with exit 2 unless it lies beneath `.working/archive/moved/`; use the default or another file
+  name.
 - `bindings` carries exactly `revision`, `release`, `prompt_pack`, `enforcement` and
   `skip_policy`. `anchor_sha256` must equal `manifest_sha256`. `skip_policy` is `no-skip` or
   `attributed-skip`.
@@ -386,8 +394,14 @@ How to fill it:
   `install.sh`, in any row and in any mix of upper and lower case (`PRE-COMMIT` or `Pre-Commit`
   too), as that file, whichever of `install-pack`, `plant-governance` or `enable-hook` installs
   it. If the path it runs lies outside `opf/` or above the product root, or no `install-pack` or
-  `plant-governance` operation in the plan creates that path, the plan refuses with exit 2. A
-  hook at the former `.opf/hooks/pre-commit`, for example, would run `tools/opf.py`, outside the
+  `plant-governance` operation in the plan creates that path, the plan refuses with exit 2. The
+  `ci` row must still name members whose file names are exactly `opf.yml` and `opf-ci.sh`, and
+  the `pre-commit` row members named exactly `pre-commit` and `install.sh`, in lower case as the
+  pack ships them. A case variant such as `INSTALL.SH` is still treated as that launcher: what
+  it runs is resolved and checked, and a file written under that name must be named in a row.
+  But it does not meet this requirement, nor stand in for a file a launcher runs, which is named
+  at its exact path. A hook at the former `.opf/hooks/pre-commit`, for example, would run
+  `tools/opf.py`, outside the
   mirror. In a `ci` or `pre-commit` row, each file that one of those files runs must be named in
   the same row too, so the hook beside `install.sh` and the recipe the workflow runs are checked
   in turn; a row that leaves one out refuses with exit 2. Every other installed file in that row
@@ -403,26 +417,36 @@ How to fill it:
   `.husky/pre-commit`. The one exception is a `move-file` destination under the store's Move
   archive, `.working/archive/moved/`, where a `move` decision files an old hook away: moving the
   former `.opf/hooks/pre-commit` there is accepted. A file moved there is not checked, so do not
-  run it from there. The copy the plan keeps of a retired, migrated or occupying source is not
-  an operation's write and is not checked either. The planner applies this check only when every
-  row's member list is well formed and an `install-pack`, `plant-governance` or `enable-hook`
-  operation installs each member path, whatever its digest. Otherwise that defect refuses the
-  plan with exit 1, unless the plan is refused with exit 2 for another reason first. Any other
-  defect does not hold the check back, so a plan that also has, say, a member digest that no
+  run it from there. A `move` destination under one of the four names anywhere else is refused
+  before the plan is built (exit 2), because no row can name a moved file: a member must be
+  installed by an `install-pack`, `plant-governance` or `enable-hook` operation, which would then
+  write that path a second time. The copy the plan keeps of a retired, migrated or occupying
+  source is not an operation's write and is not checked by this rule either. The planner applies
+  this check, like every other exit-2 check in this paragraph, only when every operation row is
+  well formed; this check also needs every row's member list to be well formed, with an
+  `install-pack`, `plant-governance` or `enable-hook` operation installing each member path,
+  whatever its digest. Otherwise those defects refuse the plan with exit 1, unless the plan is
+  refused with exit 2 for another reason first. No other defect holds the check back, so a plan
+  whose operation rows are well formed but which also has, say, a member digest that no
   operation installs can refuse with exit 2 before its exit-1 findings are reported. Two paths
   that differ only in case and end in one of the four names, where the plan writes at least one
-  of them and the other is written too or is a source that stays in place at apply, refuse with
-  exit 1, because a case-insensitive filesystem holds them as one file. The planner never reads
+  of them (a copy the plan keeps of a source counts as written here) and the other is written
+  too or is a source that stays in place at apply, refuse with exit 1, because a
+  case-insensitive filesystem holds them as one file. That exit-1 refusal is reported only when
+  the exit-2 checks above find nothing, so a variant the plan writes that no row names refuses
+  with exit 2 instead whenever the check above applies. The planner never reads
   member bytes, so it cannot see a renamed copy of one of those files outside the `ci` and
   `pre-commit` rows (in another platform's row, or written but named in no row), nor one
   installed at a path that a file in the row runs, such as hook bytes installed as
   `opf/tools/opf.py`. Its case comparison is Python's `str.casefold`, which some filesystems'
-  case rules do not match. A `ci` row that names no workflow, or a `pre-commit` row that names
-  no `install.sh`, refuses with exit 2 when an operation still writes that file, outside the
-  Move archive exception, no row names it, and every row's member list is well formed with each
-  member path installed as described above. Otherwise it refuses with exit 1, unless the plan is
-  refused with exit 2 for another reason first: for example, when another platform's row names
-  that file instead, or when some row names a member path that no operation installs.
+  case rules do not match. A `ci` row that names no `opf.yml`, or a `pre-commit` row that names
+  no `install.sh`, spelled exactly so, refuses with exit 2 when an operation writes a file under
+  that name, in any case, outside the Move archive exception, no row names that file, every
+  operation row is well formed, and every row's member list is well formed with each member path
+  installed as described above. Otherwise it refuses with exit 1, unless the plan is refused
+  with exit 2 for another reason first. Neither another platform's row naming that file instead,
+  nor a row naming a member path that no operation installs, nor a malformed operation row is an
+  exit-2 reason on its own.
 - Compatibility with earlier worksheets: the samples in prompt pack 0.4.0 and 0.4.1 named only
   the workflow in the `ci` row, placed the pre-commit hook alone at `.opf/hooks/pre-commit`, and
   listed that path in `targets`. A plan from such a worksheet now refuses with exit 2, because
@@ -469,13 +493,16 @@ Run `opf adopt plan --inputs <worksheet> --root <product root>`:
   enforcement member that no `install-pack`, `plant-governance` or `enable-hook` row installs
   with the same path and digest; an `anchor_sha256` that differs from `manifest_sha256`; and a
   `move` destination the frozen plan refuses, such as one inside the store tree but not beneath
-  `.working/archive/moved/`, or one that another effect of the plan also writes. Fix the
-  worksheet and rerun.
+  `.working/archive/moved/`, or one that another effect of the plan also writes (a destination
+  under a launcher name outside `.working/archive/moved/` refuses with exit 2 first, as below).
+  Fix the worksheet and rerun.
 - Exit 2: cannot-evaluate. A worksheet that is unreadable, malformed or carries an unknown key
   refuses here. So do the decision-row faults the planner finds before it freezes the plan: a
   missing or unknown key, an unknown disposition or a field it does not take (a `retire` with a
   `destination`), an empty actor, a path that is not a candidate or that two rows name, a
-  `keep` of an occupying candidate, and a `move` destination with no observed absence. So do a
+  `keep` of an occupying candidate, a `move` destination with no observed absence, and a `move`
+  destination whose file name is `opf.yml`, `opf-ci.sh`, `pre-commit` or `install.sh`, in any
+  case, outside `.working/archive/moved/` (take the default or another file name). So do a
   value outside its closed vocabulary (an operation name, `product`, `skip_policy`, or an
   enforcement `platform`, `means` or residual) and a planner binding rule, such as a missing
   `init-store` row or `render-views` members that are not exactly the declared views.
