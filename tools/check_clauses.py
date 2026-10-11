@@ -137,12 +137,17 @@ gen_manifest.py at build time).
                                 sentence or clause, or a run of them, found exactly once in the rule body
     reason    = "..."           why the text needs no clause row (a definition, a cross-reference, a
                                 rationale, an example, a scope note); never empty
-  The file is required, at the default path as when named with --exemptions: an absent file (a dangling
-  symlink included) or an unreadable one is malformed input (exit 2), never read as no exemption, because
-  the file carries findings of its own (a stale, repeated, redundant or reasonless exemption) that reading
-  it as empty would hide. A file that is not TOML, a top-level key other than `exempt`, and a row whose
-  keys are not exactly these three or whose values are not strings (or whose corpus-id is not a
-  well-formed corpus-id) are malformed input (exit 2) too.
+  The file is required, at the default path as when named with --exemptions, and must hold the `exempt`
+  key: an absent file (a dangling symlink included), an unreadable one, and one with no `exempt` key (an
+  empty file, a comment-only file, a symlink to /dev/null) are malformed input (exit 2), never read as no
+  exemption, because the file carries findings of its own (a stale, repeated, redundant or reasonless
+  exemption) that reading it as empty would hide. An intentionally empty register is the explicit
+  `exempt = []`. A file that is not TOML, a top-level key other than `exempt`, and a row whose keys are not
+  exactly these three or whose values are not strings (or whose corpus-id is not a well-formed corpus-id)
+  are malformed input (exit 2) too. RESIDUAL, disclosed: the gate cannot detect a valid replacement of the
+  exemption content; rows removed, or an `exempt = []` written in place of the register, read as the
+  reviewed register. Removing a row a unit needs still surfaces that unit as uncovered (exit 1), but a
+  removed stale, repeated, redundant or reasonless row leaves no trace, since removing it is its remedy.
 
 LEGS (all run at the default step-1 invocation; none needs a manifest):
   ID SCHEME (7.1):      every rule corpus-id under rules-dir appears in the inventory; every clause-id is
@@ -185,32 +190,49 @@ LEGS (all run at the default step-1 invocation; none needs a manifest):
                         unit it names (redundant). This closes the hole an id-only completeness leaves:
                         removing a passage's clause rows and their id-history rows together while the
                         passage stays in the rule is now a finding, not a clean pass.
-                        CANNOT EVALUATE (exit 2, never a pass): an absent or unreadable exemptions file; a
-                        rule file that cannot be read or is not UTF-8; a body with no frontmatter; a title
+                        CANNOT EVALUATE (exit 2, never a pass): an absent or unreadable exemptions file, or
+                        one with no `exempt` key; a rule file that cannot be read or is not UTF-8; a rule
+                        file holding a carriage return anywhere (CommonMark reads a bare CR as a line ending,
+                        and the splitter cuts lines at LF only); a body with no frontmatter; a title
                         heading with no blank line after it; a line the splitter cannot classify; a
                         paragraph that ends with an opener still open (an inch mark, a stray backtick); and
                         a unit with no letter (str.isalpha) or decimal digit (str.isdecimal), so an
                         underscore or punctuation alone is no sentence.
                         A line the splitter cannot classify is one that may start a Markdown block where it
-                        stands (CommonMark 0.31.2, read conservatively), so a wrapped line of prose that
-                        merely begins with '#', '<' or a number is still prose. On ANY line: an ATX heading
-                        other than the title (one to six '#' then a space, a tab or the line end); a bullet
-                        item ('-', '*' or '+' then a space, a tab or the line end); an ordered item numbered
-                        1 (up to eight leading zeros, '1', then '.' or ')' and a space, a tab or the line
-                        end), the only number that can interrupt a paragraph; a blockquote ('>'); a table
-                        row ('|'); a code fence (``` or ~~~); an HTML block start that can interrupt a
-                        paragraph ('<!' or '<?', or an opening or closing tag whose name is one of the HTML
-                        block names in _HTML_BLOCK_TAGS: CommonMark's kind 1 and kind 6 names, plus meta
-                        and source); a thematic break or setext underline (three or more of '-' '*' '_'
-                        '=' with optional spaces or tabs, or a run of only '=' or only '-'); and an
-                        indented line (a leading space or tab). On a PARAGRAPH'S FIRST LINE also: an
-                        ordered item of any number (one to nine digits); a line holding one tag and nothing
-                        else (HTML block kind 7); and a line that opens with '[', has ']:' later on it and
-                        so may be a link reference definition. The class is wider than CommonMark on purpose:
-                        an empty list item, a '|' line no table follows, and an indented continuation line
-                        are refused although CommonMark reads them as paragraph text; and a line such as
-                        '> 5 minutes is a fault.' or '+ 1 to the count.' is refused because CommonMark
-                        reads it as a blockquote or a list item.
+                        stands (CommonMark 0.31.2, the GFM table and the vendored parser's reading of
+                        whitespace, read conservatively), so a wrapped line of prose that merely begins with
+                        '#', '<' or a number is still prose. These, and only these, are refused; 'whitespace'
+                        below is any character str.isspace admits, a form feed and a no-break space included.
+                        On ANY line: an ATX heading other than the title (one to six '#' then whitespace or
+                        the line end); a bullet item ('-', '*' or '+' then whitespace or the line end); an
+                        ordered item numbered 1 (up to eight leading zeros, '1', then '.' or ')' and
+                        whitespace or the line end), the only number that can interrupt a paragraph; a
+                        blockquote ('>'); a line that opens with '|' (a table row, or a delimiter row with a
+                        leading pipe); a GFM table delimiter row with no leading pipe (a line of only '-',
+                        ':', '|' and whitespace that opens with '-', or with ':' and holds a '-', such as
+                        '--|--' or ':-- | --:'); a code fence (``` or ~~~); an HTML block start that can
+                        interrupt a paragraph ('<!' or '<?', or an opening or closing tag whose name is one
+                        of the HTML block names in _HTML_BLOCK_TAGS: CommonMark's kind 1 and kind 6 names,
+                        plus meta and source); a thematic break or setext underline (three or more of '-'
+                        '*' '_' '=' with optional whitespace, or a run of only '=' or only '-'); and a line
+                        that opens with whitespace (an indented line). On a PARAGRAPH'S FIRST LINE also: an
+                        ordered item of any number (one to nine digits); a line that opens with '<' and then
+                        a letter or '/', and ends with '>' before any trailing whitespace, which holds every
+                        HTML block of kind 7 (one complete open or closing tag and nothing else, a quoted
+                        attribute value holding '<' or '>' included); and a line that opens with '[' and so
+                        may be a link reference definition: one with ']:' later on it, or one with no
+                        unescaped ']' on it, whose label may close on a later line.
+                        The class is wider than CommonMark on purpose: an empty list item, a '|' line no
+                        table follows, a delimiter-shaped line no table header precedes, and an indented
+                        continuation line are refused although CommonMark and GFM read them as paragraph
+                        text; whitespace other than a space or a tab counts where CommonMark counts only
+                        those two (the vendored parser reads a heading after '#' and a no-break space, and
+                        a heading, list item or blockquote after a leading form feed); as a paragraph's first
+                        line, '<b>bold</b>' and '<path> or <ref>' are refused though they hold more than one
+                        tag, '[See the note]: it holds.' is refused though no destination follows, and '[the
+                        note' is refused when its bracket closes on a later line with no ':' after it; and a
+                        line such as '> 5 minutes is a fault.' or '+ 1 to the count.' is refused because
+                        CommonMark reads it as a blockquote or a list item.
                         RESIDUAL, disclosed: coverage is positional, not semantic. A unit counts as covered
                         when any row's resolved text contains it, whatever obligation that row names, and an
                         exemption's reason is read by a reviewer, never judged by the gate. The title
@@ -1020,18 +1042,21 @@ _HTML_BLOCK_TAGS = ("address|article|aside|base|basefont|blockquote|body|caption
                     "tfoot|th|thead|title|tr|track|ul")
 # a body line the splitter cannot classify wherever it stands, markup the WHOLE-CLAUSE EDGES grammar does not
 # model and a line that can start a Markdown block even inside a paragraph: a heading (other than the
-# title), a bullet item, an ordered item numbered 1, a blockquote, a table row, a code fence, an HTML block
-# start, a thematic break or setext underline, and any indented line (an indented code block or a nested
-# item)
+# title), a bullet item, an ordered item numbered 1, a blockquote, a line that opens with '|', a GFM table
+# delimiter row with no leading pipe, a code fence, an HTML block start, a thematic break or setext
+# underline, and any line that opens with whitespace (an indented code block or a nested item); whitespace
+# is any \s character, wider than CommonMark's space and tab, since the vendored parser counts more of it
 _UNCLASSIFIABLE_LINE_RE = re.compile(
-    r"(?:#{1,6}(?:[ \t]|$)|[-*+](?:[ \t]|$)|0{0,8}1[.)](?:[ \t]|$)|>|\||```|~~~|<[!?]"
-    r"|</?(?:" + _HTML_BLOCK_TAGS + r")(?:[ \t>]|/>|$)"
-    r"|(?:[-*_=][ \t]*){3,}$|(?:=+|-+)[ \t]*$|[ \t])", re.IGNORECASE)
+    r"(?:#{1,6}(?:\s|$)|[-*+](?:\s|$)|0{0,8}1[.)](?:\s|$)|>|\||```|~~~|<[!?]"
+    r"|</?(?:" + _HTML_BLOCK_TAGS + r")(?:[\s>]|/>|$)"
+    r"|(?:[-*_=]\s*){3,}$|(?:=+|-+)\s*$|(?:-|:[:|\s]*-)[-:|\s]*$|\s)", re.IGNORECASE)
 # a line the splitter cannot classify as the first line of a paragraph, where it starts a block though it
-# would continue one: an ordered item of any number, a line holding one tag and nothing else, and a link
-# reference definition ('[label]:'), which renders as no text
+# would continue one: an ordered item of any number; a line that opens with '<' and a letter or '/' and ends
+# with '>', which holds every one-tag line (HTML block kind 7), a quoted '<' or '>' in it included, and more;
+# and a line that opens with '[' and may be a link reference definition, which renders as no text: one with
+# ']:' later on it, or one with no unescaped ']' on it, whose label may close on a later line
 _UNCLASSIFIABLE_FIRST_LINE_RE = re.compile(
-    r"(?:[0-9]{1,9}[.)](?:[ \t]|$)|</?[A-Za-z][A-Za-z0-9-]*(?:[ \t][^<>]*)?/?>[ \t]*$|\[.*\]:)")
+    r"(?:[0-9]{1,9}[.)](?:\s|$)|<[A-Za-z/].*>\s*$|\[.*\]:|\[(?:[^\\\]]|\\.)*\\?$)")
 _CUT_CANDIDATE_RE = re.compile(r"\s+|;")  # a boundary has whitespace at it or sits right before a ';'
 
 
@@ -1074,9 +1099,15 @@ def rule_units(source, where):
     EDGES grammar reads as a boundary (_is_boundary) at enclosure depth 0 (_enclosures): the very test both
     edges of a row's canonical-text must pass, so a row's occurrence is always a run of whole units. A bare
     ';' between two clauses is no unit. Text the grammar does not model raises GateError (cannot evaluate,
-    exit 2): no frontmatter, a title with no blank line after it, a line _UNCLASSIFIABLE_LINE_RE matches, a
-    paragraph that ends with an opener still open, and a unit with no letter or digit (_has_letter_or_digit).
-    A line _UNCLASSIFIABLE_FIRST_LINE_RE matches is refused only as a paragraph's first line."""
+    exit 2): a carriage return anywhere in the source (CommonMark reads a bare CR as a line ending, and the
+    lines here are cut at LF only), no frontmatter, a title with no blank line after it, a line
+    _UNCLASSIFIABLE_LINE_RE matches, a paragraph that ends with an opener still open, and a unit with no
+    letter or digit (_has_letter_or_digit). A line _UNCLASSIFIABLE_FIRST_LINE_RE matches is refused only as a
+    paragraph's first line."""
+    if "\r" in source:
+        raise GateError("{} line {}: a carriage return, which CommonMark reads as a line ending, so the "
+                        "text-coverage splitter, which cuts lines at LF only, cannot classify the text; cannot "
+                        "evaluate".format(where, source.count("\n", 0, source.index("\r")) + 1))
     if not source.startswith("---\n") or source.find(_FRONTMATTER_CLOSE, 4) == -1:
         raise GateError("{}: no frontmatter, so the text-coverage leg cannot find the rule body; cannot "
                         "evaluate".format(where))
@@ -1124,13 +1155,16 @@ def rule_units(source, where):
 
 
 def load_exemptions(path):
-    """Parse the clause exemptions into their list of row tables. The file is required: an absent file (a
-    dangling symlink included) is a GateError (exit 2), never read as no exemption, because the file carries
-    findings of its own (a stale, repeated, redundant or reasonless exemption) that reading it as empty
-    would hide. Every other unreadable or malformed input is a GateError (exit 2) too: not readable, not
-    TOML, a top-level key other than `exempt`, an `exempt` that is not an array of tables, a row whose keys
-    are not exactly corpus-id, text and reason, a value that is not a string, or a corpus-id that is not a
-    well-formed corpus-id."""
+    """Parse the clause exemptions into their list of row tables. The file is required and must hold the
+    `exempt` key: an absent file (a dangling symlink included) and a file with no `exempt` key (an empty
+    file, a comment-only file, a symlink to /dev/null) are a GateError (exit 2), never read as no exemption,
+    because the file carries findings of its own (a stale, repeated, redundant or reasonless exemption) that
+    reading it as empty would hide; an intentionally empty register is the explicit `exempt = []`. Every
+    other unreadable or malformed input is a GateError (exit 2) too: not readable, not TOML, a top-level key
+    other than `exempt`, an `exempt` that is not an array of tables, a row whose keys are not exactly
+    corpus-id, text and reason, a value that is not a string, or a corpus-id that is not a well-formed
+    corpus-id. The gate cannot detect a valid replacement of the content: rows removed, or `exempt = []`
+    written in place of the register, read as the reviewed register."""
     try:
         data = load_toml(path)
     except FileNotFoundError:
@@ -1141,7 +1175,11 @@ def load_exemptions(path):
     if set(data) - {"exempt"}:
         raise GateError("clause exemptions {}: the only top-level key is 'exempt' (found {})".format(
             path, sorted(data)))
-    rows = data.get("exempt", [])
+    if "exempt" not in data:
+        raise GateError("clause exemptions {} has no 'exempt' key (an empty or comment-only file), which is "
+                        "never read as no exemption; an intentionally empty register is the explicit "
+                        "'exempt = []'".format(path))
+    rows = data["exempt"]
     if not isinstance(rows, list):
         raise GateError("clause exemptions {}: 'exempt' is not an array of tables".format(path))
     for i, row in enumerate(rows, 1):
@@ -1652,11 +1690,15 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
     except GateError:
         pass
     # A line that may start a Markdown block where it stands is refused; a wrapped prose line that merely
-    # begins with '#', a number or '<' continues its paragraph. An ordered item of any number and a lone tag
-    # are refused only as a paragraph's first line.
+    # begins with '#', a number or '<' continues its paragraph. An ordered item of any number, a line that
+    # opens with a tag and ends with '>' (a quoted '<' or '>' in an attribute value included), and a line that
+    # may open a link reference definition (its label closed by ']:' or left open to a later line) are
+    # refused only as a paragraph's first line. Each refusal must be the classifier's ("markup"), not a
+    # later refusal such as a unit with no letter or digit.
     head = "---\ncorpus-id: cprobe\n---\n\n# Title words\n\n"
     for line in ("#507 and its review.", "<path> only after a backup.", "2) when unsure.", "3.",
-                 "<b>bold</b> stays inline.", "1234567890. is no list."):
+                 "<b>bold</b> stays inline.", "1234567890. is no list.", '<span title="a>b">',
+                 "[foo\nbar]: /url", "<b>bold</b>"):
         try:
             rule_units(head + "See the start of the PR\n" + line + "\n", "probe")
         except GateError as exc:
@@ -1664,19 +1706,36 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
     for line in ("# Beta heading", "###### Beta", "- beta item", "* beta item", "+ beta item", "1. beta item",
                  "01) beta item", "> beta quote", "| beta | cell |", "```", "~~~", "<!-- beta -->", "<?beta?>",
                  "<!DOCTYPE html>", "<div>beta</div>", "</DIV>", "<pre>", "---", "***", "___", "===", "=", "--",
-                 "    beta indented", "\tbeta indented"):
+                 "    beta indented", "\tbeta indented", "#", "*", "+", "<div/>", "--|--", ":-- | --:", "-|-",
+                 "\x0c# beta heading", "\x0c- beta item", "#\xa0beta heading", "-\x0cbeta item", "-\xa0-\xa0-",
+                 "_\xa0_\xa0_"):
         for text in (line + "\n", "See the start of the PR\n" + line + "\n"):
             try:
                 rule_units(head + text, "probe")
                 failures.append("rule_units: the block line {!r} was not refused in {!r}".format(line, text))
-            except GateError:
-                pass
-    for line in ("2) when unsure.", "7. beta item", "<path>", "</span>", '<a href="x">', "[foo]: /url"):
+            except GateError as exc:
+                if "markup" not in str(exc):
+                    failures.append("rule_units: the block line {!r} in {!r} was refused for another reason: "
+                                    "{}".format(line, text, exc))
+    for line in ("2) when unsure.", "7. beta item", "<path>", "</span>", '<a href="x">', "[foo]: /url",
+                 '<custom data=">">', '<span title="a>b">', "<a href='x>y'>", '<span title="a<b">', "<a>\x0c",
+                 "<b>bold</b>", "[foo\nbar]: /url", "[foo\\]\nbar]: /url", "[foo\nbar\nbaz]: /url"):
+        for text in (line + "\n", line + "\nAlpha holds.\n"):
+            try:
+                rule_units(head + text, "probe")
+                failures.append("rule_units: {!r} as a paragraph's first line was not refused".format(text))
+            except GateError as exc:
+                if "markup" not in str(exc):
+                    failures.append("rule_units: {!r} as a paragraph's first line was refused for another "
+                                    "reason: {}".format(text, exc))
+    # A carriage return is a CommonMark line ending the LF-only splitter does not see: a cannot-evaluate.
+    for text in ("Alpha holds.\r# Beta heading\n", "Alpha holds.\r\n", "Alpha holds.\r- push to main.\n"):
         try:
-            rule_units(head + line + "\n", "probe")
-            failures.append("rule_units: {!r} as a paragraph's first line was not refused".format(line))
-        except GateError:
-            pass
+            rule_units(head + text, "probe")
+            failures.append("rule_units: the carriage return in {!r} was not refused".format(text))
+        except GateError as exc:
+            if "carriage return" not in str(exc):
+                failures.append("rule_units: {!r} was refused for another reason: {}".format(text, exc))
     # A unit needs a letter or a decimal digit; an underscore (which the regex class \w admits), punctuation
     # or a symbol alone is none.
     for text, want in (("_", False), ("__ -- ...", False), ("\u00b2", False), ("a", True), ("7", True),
@@ -1686,6 +1745,7 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
 
     # --- end-to-end fixture cases (a synthetic corpus per fail mode in a private tempdir) ----------
     import copy
+    import os
     import shutil
     import tempfile
 
@@ -2732,6 +2792,8 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
 
             two = ["Alpha holds the lease.", "Beta logs every wait."]
             uncovered = "lies inside no clause row"
+            devnull_link = base_tmp / "devnull-exemptions.toml"
+            devnull_link.symlink_to(os.devnull)
             cover_vectors = [
                 ("both sentences carry a row", "ccova1", two, [(0, two[0]), (1, two[1])], {}, 0, ""),
                 ("a passage stays while its clause row and id-history row are removed", "ccova2", two,
@@ -2851,6 +2913,41 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
                  {"lines": ["---", "corpus-id: ccovn15", "origin: pack", "slug: fixture", "---", "", "# Fixture rule",
                            "", two[0], "#507 and its review.", "2) when unsure.", "<path> only after a backup."]},
                  0, ""),
+                ("a paragraph that opens with a tag whose quoted value holds '>' is refused, even exempted",
+                 "ccovn16", [two[0]], [(0, two[0])],
+                 {"lines": ["---", "corpus-id: ccovn16", "origin: pack", "slug: fixture", "---", "", "# Fixture rule",
+                            "", two[0], "", '<custom data=">">', "Hidden."],
+                  "exemptions": [{"corpus-id": "ccovn16", "text": '<custom data=">">\nHidden.',
+                                  "reason": "A rationale."}]}, 2, "cannot classify"),
+                ("a link reference definition whose label spans lines is refused, even exempted", "ccovn17",
+                 [two[0]], [(0, two[0])],
+                 {"lines": ["---", "corpus-id: ccovn17", "origin: pack", "slug: fixture", "---", "", "# Fixture rule",
+                            "", two[0], "", "[foo", "bar]: /url"],
+                  "exemptions": [{"corpus-id": "ccovn17", "text": "[foo\nbar]: /url", "reason": "A rationale."}]},
+                 2, "cannot classify"),
+                ("a bare carriage return in a rule body is a cannot-evaluate, even exempted", "ccovn18",
+                 [two[0]], [(0, two[0])],
+                 {"lines": ["---", "corpus-id: ccovn18", "origin: pack", "slug: fixture", "---", "", "# Fixture rule",
+                            "", two[0], "", "Beta waits.\r# Beta heading"],
+                  "exemptions": [{"corpus-id": "ccovn18", "text": "Beta waits.", "reason": "A rationale."},
+                                 {"corpus-id": "ccovn18", "text": "# Beta heading", "reason": "A rationale."}]},
+                 2, "carriage return"),
+                ("a GFM table delimiter row with no leading pipe is refused, even exempted", "ccovn19",
+                 [two[0]], [(0, two[0])],
+                 {"lines": ["---", "corpus-id: ccovn19", "origin: pack", "slug: fixture", "---", "", "# Fixture rule",
+                            "", two[0], "", "Alpha a | b", ":-- | --:"],
+                  "exemptions": [{"corpus-id": "ccovn19", "text": "Alpha a | b\n:-- | --:",
+                                  "reason": "A rationale."}]}, 2, "cannot classify"),
+                ("an empty exemptions file", "ccovn20", two, [(0, two[0]), (1, two[1])], {"exemptions_text": ""},
+                 2, "no 'exempt' key"),
+                ("a comment-only exemptions file", "ccovn21", two, [(0, two[0]), (1, two[1])],
+                 {"exemptions_text": "# nothing exempted\n"}, 2, "no 'exempt' key"),
+                ("an exemptions file that is a symlink to the null device", "ccovn22", two,
+                 [(0, two[0]), (1, two[1])], {"exemptions_path": devnull_link}, 2, "no 'exempt' key"),
+                ("an explicit empty register with every sentence covered", "ccovn23", two,
+                 [(0, two[0]), (1, two[1])], {"exemptions_text": "exempt = []\n"}, 0, ""),
+                ("an explicit empty register leaves an uncovered sentence a finding", "ccovn24", two, [(0, two[0])],
+                 {"exemptions_text": "exempt = []\n"}, 1, uncovered),
             ]
             for label, corpus, obligations, covered, extra, want, needle in cover_vectors:
                 got, out = _cover(corpus, obligations, covered, **extra)
@@ -2942,7 +3039,13 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
               "absent exemptions file is a cannot-evaluate, so deleting it cannot hide a stale exemption; an "
               "underscore-only unit, uncovered or exempted, is a cannot-evaluate; an opener left open at the end "
               "of a paragraph that is not the last, or of a file with no final newline, is a cannot-evaluate; "
-              "and wrapped prose lines that begin with '#', a number or '<' pass while block markup is refused)"
+              "and wrapped prose lines that begin with '#', a number or '<' pass while each listed block start "
+              "is refused; and the round-3 reproductions hold: a paragraph's first line that opens with a tag "
+              "and ends with '>' (a quoted '<' or '>' included) and one that may open a link reference "
+              "definition whose label spans lines are refused, a carriage return is a cannot-evaluate, a GFM "
+              "table delimiter row with no leading pipe is refused, an exemptions file with no exempt key "
+              "(empty, comment-only, a symlink to the null device) is a cannot-evaluate, and an explicit "
+              "exempt = [] reads as no exemption)"
               .format(core))
     else:
         print("SELF-TEST PASS (PARTIAL): {}; the end-to-end fixture cases were SKIPPED (no writable temp "

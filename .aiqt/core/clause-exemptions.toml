@@ -2,8 +2,12 @@
 # Every sentence or clause of every rule under .aiqt/core/rules/ lies inside a clause row's
 # canonical-text in .aiqt/core/clauses.toml or is named here, byte-exact, with the reason it needs
 # no row. An entry with no reason, an entry whose text no longer occurs in its rule (stale), and an
-# entry whose text a clause row already covers (redundant) each fail the gate. The file is required:
-# the gate refuses (exit 2) when it is absent or unreadable, so deleting it never hides a finding.
+# entry whose text a clause row already covers (redundant) each fail the gate. The file is required
+# and must hold the exempt key: the gate refuses (exit 2) when it is absent, unreadable, or has no
+# exempt key (an empty or comment-only file), so deleting or emptying it is never read as no
+# exemption. An intentionally empty register is the explicit `exempt = []`. The gate cannot detect a
+# valid replacement of this content: rows removed, or `exempt = []` written in place of the register,
+# read as the reviewed register, so review every change to this file.
 # Author-maintained; review an entry whenever its rule changes.
 
 [[exempt]]
@@ -164,7 +168,7 @@ reason = "Restates vfxcmt.1 (confirm the fix is in its commit before claiming it
 [[exempt]]
 corpus-id = "vfxcmt"
 text = "Uncommitted work outside the declared review set does not block the dispatch."
-reason = "Scope bound on vfxcmt.9's cleanliness check; the obligation it states, never widening the dispatch into a whole-tree cleanliness demand the declaration did not make, is carried by vfxcmt.5."
+reason = "Scope bound restating vfxcmt.9, whose cleanliness check runs over each declared path, so uncommitted work outside the declared set is outside that check; it adds no obligation."
 
 [[exempt]]
 corpus-id = "vfxcmt"
