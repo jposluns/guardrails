@@ -383,24 +383,46 @@ How to fill it:
   The sample names only that entry point. The modules it imports sit beside it in the release's
   `opf/tools/` directory, which a later install step mirrors; that step is not executable in
   this build. The planner treats a member named `opf.yml`, `opf-ci.sh`, `pre-commit` or
-  `install.sh`, in any row, as that file, whichever of `install-pack`, `plant-governance` or
-  `enable-hook` installs it. If the path it runs lies outside `opf/` or above the product root,
-  or no `install-pack` or `plant-governance` operation in the plan creates that path, the plan
-  refuses with exit 2. A hook at the former `.opf/hooks/pre-commit`, for example, would run
-  `tools/opf.py`, outside the mirror. In a `ci` or `pre-commit` row, each file that one of
-  those files runs must be named in the same row too, so the hook beside `install.sh` and the
-  recipe the workflow runs are checked in turn; a row that leaves one out refuses with exit 2.
-  Every other installed file in that row must be one that a file named as above in the same row
-  runs; any other refuses with exit 2, because the planner cannot tell what it runs. A file any
-  of those three operations installs under one of the four names must be named in some row, or
-  the plan refuses with exit 2, so a launcher the plan installs is never left out while a decoy
-  is named. Give no other platform's member one of those four names. The planner never reads
+  `install.sh`, in any row and in any mix of upper and lower case (`PRE-COMMIT` or `Pre-Commit`
+  too), as that file, whichever of `install-pack`, `plant-governance` or `enable-hook` installs
+  it. If the path it runs lies outside `opf/` or above the product root, or no `install-pack` or
+  `plant-governance` operation in the plan creates that path, the plan refuses with exit 2. A
+  hook at the former `.opf/hooks/pre-commit`, for example, would run `tools/opf.py`, outside the
+  mirror. In a `ci` or `pre-commit` row, each file that one of those files runs must be named in
+  the same row too, so the hook beside `install.sh` and the recipe the workflow runs are checked
+  in turn; a row that leaves one out refuses with exit 2. Every other installed file in that row
+  must be one that a file named as above in the same row runs; any other refuses with exit 2,
+  because the planner cannot tell what it runs. A file named as above in another platform's row
+  must still run a file the plan creates in `opf/`, but that file need not be named in any row;
+  give no other platform's member one of those four names. Every file that any operation in the
+  plan writes under one of the four names, in any case, must be named in some row, or the plan
+  refuses with exit 2, so a launcher the plan writes is never left out while a decoy is named.
+  That covers each file that `install-pack`, `init-store`, `render-views`, `create-file`,
+  `plant-governance` or `record-adoption` creates, each `move-file` destination, and each file
+  that `enable-hook` or `repoint-consumer` rewrites, such as `.git/hooks/pre-commit` or
+  `.husky/pre-commit`. The one exception is a `move-file` destination under the store's Move
+  archive, `.working/archive/moved/`, where a `move` decision files an old hook away: moving the
+  former `.opf/hooks/pre-commit` there is accepted. A file moved there is not checked, so do not
+  run it from there. The copy the plan keeps of a retired, migrated or occupying source is not
+  an operation's write and is not checked either. The planner applies this check only when every
+  row's member list is well formed and an `install-pack`, `plant-governance` or `enable-hook`
+  operation installs each member path, whatever its digest. Otherwise that defect refuses the
+  plan with exit 1, unless the plan is refused with exit 2 for another reason first. Any other
+  defect does not hold the check back, so a plan that also has, say, a member digest that no
+  operation installs can refuse with exit 2 before its exit-1 findings are reported. Two paths
+  that differ only in case and end in one of the four names, where the plan writes at least one
+  of them and the other is written too or is a source that stays in place at apply, refuse with
+  exit 1, because a case-insensitive filesystem holds them as one file. The planner never reads
   member bytes, so it cannot see a renamed copy of one of those files outside the `ci` and
-  `pre-commit` rows (in another platform's row, or installed but named in no row), nor one
+  `pre-commit` rows (in another platform's row, or written but named in no row), nor one
   installed at a path that a file in the row runs, such as hook bytes installed as
-  `opf/tools/opf.py`. Otherwise, a `ci` row that names no workflow, or a `pre-commit` row that
-  names no `install.sh`, refuses with exit 1, or with exit 2 if the plan still installs that
-  file.
+  `opf/tools/opf.py`. Its case comparison is Python's `str.casefold`, which some filesystems'
+  case rules do not match. A `ci` row that names no workflow, or a `pre-commit` row that names
+  no `install.sh`, refuses with exit 2 when an operation still writes that file, outside the
+  Move archive exception, no row names it, and every row's member list is well formed with each
+  member path installed as described above. Otherwise it refuses with exit 1, unless the plan is
+  refused with exit 2 for another reason first: for example, when another platform's row names
+  that file instead, or when some row names a member path that no operation installs.
 - Compatibility with earlier worksheets: the samples in prompt pack 0.4.0 and 0.4.1 named only
   the workflow in the `ci` row, placed the pre-commit hook alone at `.opf/hooks/pre-commit`, and
   listed that path in `targets`. A plan from such a worksheet now refuses with exit 2, because
