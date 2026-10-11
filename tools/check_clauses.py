@@ -192,8 +192,16 @@ LEGS (all run at the default step-1 invocation; none needs a manifest):
                         passage stays in the rule is now a finding, not a clean pass.
                         CANNOT EVALUATE (exit 2, never a pass): an absent or unreadable exemptions file, or
                         one with no `exempt` key; a rule file that cannot be read or is not UTF-8; a rule
-                        file holding a carriage return anywhere (CommonMark reads a bare CR as a line ending,
-                        and the splitter cuts lines at LF only); a body with no frontmatter; a title
+                        file holding, anywhere (frontmatter, line start or mid-line), a character the
+                        vendored renderer reads as a line ending, since the splitter cuts lines at LF only:
+                        that class is exactly a carriage return (alone or before LF) and a form feed, which
+                        _preprocess_text in opf/tools/_vendor/marko/source.py rewrites to LF before the
+                        parser reads lines, cut at LF only (CommonMark reads a carriage return as a line
+                        ending too); no other character ends a line there or in CommonMark, so a vertical
+                        tab, U+0085, U+2028 and U+2029 stay inside their line; a checked line (the title is
+                        never checked) holding '<!' or '<?' anywhere (an inline HTML comment, processing
+                        instruction, declaration or CDATA section, which the vendored renderer passes through
+                        as raw HTML that a browser does not show); a body with no frontmatter; a title
                         heading with no blank line after it; a line the splitter cannot classify; a
                         paragraph that ends with an opener still open (an inch mark, a stray backtick); and
                         a unit with no letter (str.isalpha) or decimal digit (str.isdecimal), so an
@@ -202,7 +210,7 @@ LEGS (all run at the default step-1 invocation; none needs a manifest):
                         stands (CommonMark 0.31.2, the GFM table and the vendored parser's reading of
                         whitespace, read conservatively), so a wrapped line of prose that merely begins with
                         '#', '<' or a number is still prose. These, and only these, are refused; 'whitespace'
-                        below is any character str.isspace admits, a form feed and a no-break space included.
+                        below is any character str.isspace admits, a no-break space and a vertical tab included.
                         On ANY line: an ATX heading other than the title (one to six '#' then whitespace or
                         the line end); a bullet item ('-', '*' or '+' then whitespace or the line end); an
                         ordered item numbered 1 (up to eight leading zeros, '1', then '.' or ')' and
@@ -210,36 +218,47 @@ LEGS (all run at the default step-1 invocation; none needs a manifest):
                         blockquote ('>'); a line that opens with '|' (a table row, or a delimiter row with a
                         leading pipe); a GFM table delimiter row with no leading pipe (a line of only '-',
                         ':', '|' and whitespace that opens with '-', or with ':' and holds a '-', such as
-                        '--|--' or ':-- | --:'); a code fence (``` or ~~~); an HTML block start that can
-                        interrupt a paragraph ('<!' or '<?', or an opening or closing tag whose name is one
-                        of the HTML block names in _HTML_BLOCK_TAGS: CommonMark's kind 1 and kind 6 names,
-                        plus meta and source); a thematic break or setext underline (three or more of '-'
-                        '*' '_' '=' with optional whitespace, or a run of only '=' or only '-'); and a line
-                        that opens with whitespace (an indented line). On a PARAGRAPH'S FIRST LINE also: an
-                        ordered item of any number (one to nine digits); a line that opens with '<' and then
-                        a letter or '/', and ends with '>' before any trailing whitespace, which holds every
-                        HTML block of kind 7 (one complete open or closing tag and nothing else, a quoted
-                        attribute value holding '<' or '>' included); and a line that opens with '[' and so
-                        may be a link reference definition: one with ']:' later on it, or one with no
-                        unescaped ']' on it, whose label may close on a later line.
+                        '--|--' or ':-- | --:'), and any line the vendored GFM table reads as a delimiter
+                        row (_is_table_delimiter_row: cut at each unescaped '|', an empty first and last
+                        cell dropped, every cell left BEGINS with '-' or ':-', such as '--x|--y'); a code
+                        fence (``` or ~~~); an HTML block start that can interrupt a paragraph ('<!' or '<?',
+                        or an opening or closing tag whose name is one of the HTML block names in
+                        _HTML_BLOCK_TAGS: CommonMark's kind 1 and kind 6 names, plus meta and source); a
+                        thematic break or setext underline (three or more of '-' '*' '_' '=' with optional
+                        whitespace, or a run of only '=' or only '-'); and a line that opens with whitespace
+                        (an indented line). On a PARAGRAPH'S FIRST LINE also: an ordered item of any number
+                        (one to nine decimal digits, any the vendored parser's \\d admits, so an Arabic-Indic
+                        '\u0661.' too); a line that opens with '<' and then a letter or '/', and ends with
+                        '>' before any trailing whitespace, which holds every HTML block of kind 7 (one
+                        complete open or closing tag and nothing else, a quoted attribute value holding '<'
+                        or '>' included); and a line that opens with '[' and so may be a link reference
+                        definition: one with ']:' later on it, or one with no unescaped ']' on it, whose
+                        label may close on a later line.
                         The class is wider than CommonMark on purpose: an empty list item, a '|' line no
                         table follows, a delimiter-shaped line no table header precedes, and an indented
                         continuation line are refused although CommonMark and GFM read them as paragraph
                         text; whitespace other than a space or a tab counts where CommonMark counts only
-                        those two (the vendored parser reads a heading after '#' and a no-break space, and
-                        a heading, list item or blockquote after a leading form feed); as a paragraph's first
-                        line, '<b>bold</b>' and '<path> or <ref>' are refused though they hold more than one
-                        tag, '[See the note]: it holds.' is refused though no destination follows, and '[the
-                        note' is refused when its bracket closes on a later line with no ':' after it; and a
-                        line such as '> 5 minutes is a fault.' or '+ 1 to the count.' is refused because
-                        CommonMark reads it as a blockquote or a list item.
+                        those two (the vendored parser reads a heading after '#' and a no-break space or a
+                        vertical tab, and a setext underline with a trailing no-break space); a line whose
+                        every '|'-separated cell begins with '-' or ':-', such as '--force is the flag.', is
+                        refused wherever it stands, though only a header line holding a '|' with as many
+                        cells above it makes it a delimiter row; '<!' or '<?' inside a code span is refused,
+                        though a renderer shows it; as a paragraph's first line, '<b>bold</b>' and '<path> or
+                        <ref>' are refused though they hold more than one tag, '[See the note]: it holds.' is
+                        refused though no destination follows, and '[the note' is refused when its bracket
+                        closes on a later line with no ':' after it; and a line such as '> 5 minutes is a
+                        fault.' or '+ 1 to the count.' is refused because CommonMark reads it as a blockquote
+                        or a list item.
                         RESIDUAL, disclosed: coverage is positional, not semantic. A unit counts as covered
                         when any row's resolved text contains it, whatever obligation that row names, and an
                         exemption's reason is read by a reviewer, never judged by the gate. The title
                         heading is never checked, so an obligation written only as the title passes. The
                         units come from the WHOLE-CLAUSE EDGES grammar, so a cut it reads where no sentence
                         ends (an abbreviation, a list number) splits one sentence into two units, each of
-                        which must then be covered or exempted.
+                        which must then be covered or exempted. Inline raw HTML other than '<!' and '<?' (a
+                        tag mid-line, such as a span with a hidden attribute, or a script or style element
+                        opened mid-line) is read as text its unit holds; whether a renderer shows it is not
+                        judged.
 
 DEFERRED manifest-SOURCES leg (7.2 + round-10 R10-2 / gemini R9-4): the leg that cross-checks each row's
 source-digest against the manifest's SOURCES entry is OFF by default and reads no manifest. It runs only
@@ -1033,6 +1052,17 @@ EXEMPTIONS_REL = ".aiqt/core/clause-exemptions.toml"
 EXEMPTION_KEYS = frozenset({"corpus-id", "text", "reason"})
 _FRONTMATTER_CLOSE = "\n---\n"  # gen_rules.parse_source's closing fence
 _TITLE_RE = re.compile(r"# \S")  # the one heading a rule body opens with: its title, not an obligation
+# the characters the vendored renderer reads as a line ending: _preprocess_text in
+# opf/tools/_vendor/marko/source.py rewrites CRLF, a bare CR and a form feed to LF, and the parser then cuts lines
+# at LF only, so no other character ends a line there; the LF-only splitter refuses each, wherever it stands
+_RENDERER_LINE_BREAKS = (("\r", "carriage return"), ("\f", "form feed"))
+# an inline HTML comment, processing instruction, declaration or CDATA section, which the vendored renderer
+# passes through as raw HTML that a browser does not show, so its text would sit in a unit unseen
+_HIDDEN_INLINE_RE = re.compile(r"<[!?]")
+# the vendored GFM table's row splitter and delimiter-cell test (TableRow in
+# opf/tools/_vendor/marko/ext/gfm/elements.py), for _is_table_delimiter_row
+_TABLE_CELL_SPLIT_RE = re.compile(r"\s*(?<!\\)\|\s*")
+_TABLE_DELIMITER_CELL_RE = re.compile(r":?-+:?")
 # CommonMark's HTML block kind 1 and kind 6 tag names (a superset: meta and source as well), the tags that
 # open an HTML block even in the middle of a paragraph
 _HTML_BLOCK_TAGS = ("address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|"
@@ -1050,14 +1080,28 @@ _UNCLASSIFIABLE_LINE_RE = re.compile(
     r"(?:#{1,6}(?:\s|$)|[-*+](?:\s|$)|0{0,8}1[.)](?:\s|$)|>|\||```|~~~|<[!?]"
     r"|</?(?:" + _HTML_BLOCK_TAGS + r")(?:[\s>]|/>|$)"
     r"|(?:[-*_=]\s*){3,}$|(?:=+|-+)\s*$|(?:-|:[:|\s]*-)[-:|\s]*$|\s)", re.IGNORECASE)
-# a line the splitter cannot classify as the first line of a paragraph, where it starts a block though it
-# would continue one: an ordered item of any number; a line that opens with '<' and a letter or '/' and ends
-# with '>', which holds every one-tag line (HTML block kind 7), a quoted '<' or '>' in it included, and more;
-# and a line that opens with '[' and may be a link reference definition, which renders as no text: one with
-# ']:' later on it, or one with no unescaped ']' on it, whose label may close on a later line
+# a line the splitter cannot classify as the first line of a paragraph, where it starts a block though it would
+# continue one: an ordered item of any number (any \d digits, as the vendored parser reads them); a line that opens
+# with '<' and a letter or '/' and ends with '>', which holds every one-tag line (HTML block kind 7), a quoted '<' or
+# '>' in it included, and more; and a line that opens with '[' and may be a link reference definition, which renders
+# as no text: one with ']:' later on it, or one with no unescaped ']' on it, whose label may close on a later line
 _UNCLASSIFIABLE_FIRST_LINE_RE = re.compile(
-    r"(?:[0-9]{1,9}[.)](?:\s|$)|<[A-Za-z/].*>\s*$|\[.*\]:|\[(?:[^\\\]]|\\.)*\\?$)")
+    r"(?:\d{1,9}[.)](?:\s|$)|<[A-Za-z/].*>\s*$|\[.*\]:|\[(?:[^\\\]]|\\.)*\\?$)")
 _CUT_CANDIDATE_RE = re.compile(r"\s+|;")  # a boundary has whitespace at it or sits right before a ';'
+
+
+def _is_table_delimiter_row(line):
+    """True when the vendored GFM table reads line as a delimiter row (TableRow.match): the stripped line is
+    cut at each unescaped '|' with the whitespace around it, an empty first and an empty last cell are
+    dropped, at least one cell is left, and every cell BEGINS with '-' or ':-' (a prefix match, so '--x|--y'
+    qualifies though GFM wants only '-' and ':' in a cell). Below a header line holding a '|' with as many
+    cells, such a line makes a table, so the splitter refuses it wherever it stands."""
+    cells = _TABLE_CELL_SPLIT_RE.split(line.strip())
+    if cells and not cells[0]:
+        cells.pop(0)
+    if cells and not cells[-1]:
+        cells.pop()
+    return bool(cells) and all(_TABLE_DELIMITER_CELL_RE.match(cell) for cell in cells)
 
 
 def _has_letter_or_digit(text):
@@ -1099,15 +1143,19 @@ def rule_units(source, where):
     EDGES grammar reads as a boundary (_is_boundary) at enclosure depth 0 (_enclosures): the very test both
     edges of a row's canonical-text must pass, so a row's occurrence is always a run of whole units. A bare
     ';' between two clauses is no unit. Text the grammar does not model raises GateError (cannot evaluate,
-    exit 2): a carriage return anywhere in the source (CommonMark reads a bare CR as a line ending, and the
-    lines here are cut at LF only), no frontmatter, a title with no blank line after it, a line
-    _UNCLASSIFIABLE_LINE_RE matches, a paragraph that ends with an opener still open, and a unit with no
-    letter or digit (_has_letter_or_digit). A line _UNCLASSIFIABLE_FIRST_LINE_RE matches is refused only as a
-    paragraph's first line."""
-    if "\r" in source:
-        raise GateError("{} line {}: a carriage return, which CommonMark reads as a line ending, so the "
-                        "text-coverage splitter, which cuts lines at LF only, cannot classify the text; cannot "
-                        "evaluate".format(where, source.count("\n", 0, source.index("\r")) + 1))
+    exit 2): anywhere in the source, a character the vendored renderer reads as a line ending
+    (_RENDERER_LINE_BREAKS: a carriage return or a form feed), since the lines here are cut at LF only; no
+    frontmatter; a title with no blank line after it; a line _UNCLASSIFIABLE_LINE_RE matches or
+    _is_table_delimiter_row accepts; a checked line holding '<!' or '<?' (_HIDDEN_INLINE_RE); a paragraph that
+    ends with an opener still open; and a unit with no letter or digit (_has_letter_or_digit). A line
+    _UNCLASSIFIABLE_FIRST_LINE_RE matches is refused only as a paragraph's first line."""
+    breaks = [(source.index(char), name) for char, name in _RENDERER_LINE_BREAKS if char in source]
+    if breaks:
+        at, name = min(breaks)
+        raise GateError("{} line {}: a {} ({!r}), which the vendored renderer reads as a line ending (CommonMark "
+                        "reads a carriage return as one too), so the text-coverage splitter, which cuts lines at "
+                        "LF only, cannot classify the text; cannot evaluate".format(
+                            where, source.count("\n", 0, at) + 1, name, source[at]))
     if not source.startswith("---\n") or source.find(_FRONTMATTER_CLOSE, 4) == -1:
         raise GateError("{}: no frontmatter, so the text-coverage leg cannot find the rule body; cannot "
                         "evaluate".format(where))
@@ -1121,9 +1169,14 @@ def rule_units(source, where):
                                     where, number, line))
             if first and _TITLE_RE.match(line):
                 text_start, after_title = offset + len(line), True
-            elif _UNCLASSIFIABLE_LINE_RE.match(line) or (para_start and _UNCLASSIFIABLE_FIRST_LINE_RE.match(line)):
+            elif (_UNCLASSIFIABLE_LINE_RE.match(line) or _is_table_delimiter_row(line)
+                  or (para_start and _UNCLASSIFIABLE_FIRST_LINE_RE.match(line))):
                 raise GateError("{} line {}: the text-coverage splitter cannot classify {!r} (markup "
                                 "the sentence grammar does not model); cannot evaluate".format(where, number, line))
+            elif _HIDDEN_INLINE_RE.search(line):
+                raise GateError("{} line {}: the text-coverage splitter cannot classify {!r} (an inline HTML "
+                                "comment, processing instruction or declaration, '<!' or '<?', whose text a "
+                                "renderer does not show); cannot evaluate".format(where, number, line))
             first = para_start = False
         else:
             after_title, para_start = False, True
@@ -1698,7 +1751,7 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
     head = "---\ncorpus-id: cprobe\n---\n\n# Title words\n\n"
     for line in ("#507 and its review.", "<path> only after a backup.", "2) when unsure.", "3.",
                  "<b>bold</b> stays inline.", "1234567890. is no list.", '<span title="a>b">',
-                 "[foo\nbar]: /url", "<b>bold</b>"):
+                 "[foo\nbar]: /url", "<b>bold</b>", "\u0661. Beta holds.", "the <span hidden>draft</span> text."):
         try:
             rule_units(head + "See the start of the PR\n" + line + "\n", "probe")
         except GateError as exc:
@@ -1707,8 +1760,10 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
                  "01) beta item", "> beta quote", "| beta | cell |", "```", "~~~", "<!-- beta -->", "<?beta?>",
                  "<!DOCTYPE html>", "<div>beta</div>", "</DIV>", "<pre>", "---", "***", "___", "===", "=", "--",
                  "    beta indented", "\tbeta indented", "#", "*", "+", "<div/>", "--|--", ":-- | --:", "-|-",
-                 "\x0c# beta heading", "\x0c- beta item", "#\xa0beta heading", "-\x0cbeta item", "-\xa0-\xa0-",
-                 "_\xa0_\xa0_"):
+                 "\xa0# beta heading", "\x0b- beta item", "#\xa0beta heading", "#\x0bbeta heading",
+                 "-\xa0beta item", "*\xa0beta item", "+\x0bbeta item", "-\xa0-\xa0-", "_\xa0_\xa0_", "=\xa0",
+                 "==\xa0", "=\x0b", "1.\xa0Beta holds.", "01)\x0bBeta holds.", "<div\xa0data=x>", "</div\x0b>",
+                 "--x|--y", "-x | :-y", "--force is the flag.", ":|-"):
         for text in (line + "\n", "See the start of the PR\n" + line + "\n"):
             try:
                 rule_units(head + text, "probe")
@@ -1718,8 +1773,9 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
                     failures.append("rule_units: the block line {!r} in {!r} was refused for another reason: "
                                     "{}".format(line, text, exc))
     for line in ("2) when unsure.", "7. beta item", "<path>", "</span>", '<a href="x">', "[foo]: /url",
-                 '<custom data=">">', '<span title="a>b">', "<a href='x>y'>", '<span title="a<b">', "<a>\x0c",
-                 "<b>bold</b>", "[foo\nbar]: /url", "[foo\\]\nbar]: /url", "[foo\nbar\nbaz]: /url"):
+                 '<custom data=">">', '<span title="a>b">', "<a href='x>y'>", '<span title="a<b">', "<a>\xa0",
+                 "<b>bold</b>", "[foo\nbar]: /url", "[foo\\]\nbar]: /url", "[foo\nbar\nbaz]: /url",
+                 "2.\xa0Beta holds.", "2)\x0bBeta holds.", "\u0661. Alpha holds.", "\u0967\u0968) Alpha holds."):
         for text in (line + "\n", line + "\nAlpha holds.\n"):
             try:
                 rule_units(head + text, "probe")
@@ -1728,14 +1784,50 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
                 if "markup" not in str(exc):
                     failures.append("rule_units: {!r} as a paragraph's first line was refused for another "
                                     "reason: {}".format(text, exc))
-    # A carriage return is a CommonMark line ending the LF-only splitter does not see: a cannot-evaluate.
-    for text in ("Alpha holds.\r# Beta heading\n", "Alpha holds.\r\n", "Alpha holds.\r- push to main.\n"):
+    # A carriage return and a form feed are line endings to the vendored renderer (marko's _preprocess_text) that
+    # the LF-only splitter does not see: a cannot-evaluate wherever one stands, inside a line, at a line's start,
+    # at its end, in the title and in the frontmatter, so a heading, list item or comment cannot hide behind one.
+    breaks = []
+    for char, needle in (("\r", "carriage return"), ("\x0c", "form feed")):
+        for body in ("Alpha holds.{}# Beta heading\n", "Alpha holds.{}\n", "Alpha holds.{}- push to main.\n",
+                     "Beta waits.{}<!-- hidden -->\n", "Alpha holds.\n1.{}Beta holds.\n", "2.{}Beta holds.\n",
+                     "Alpha holds.\n<div{}data=x>\n", "Alpha holds\n={}\n", "{}Beta waits.\n",
+                     "{}# Beta heading\n", "{}- beta item\n", "{}> beta quote\n"):
+            breaks.append((head + body.format(char), needle))
+        breaks.append(("---\ncorpus-id: cprobe{}\n---\n\n# Title words\n\nAlpha holds.\n".format(char), needle))
+        breaks.append(("---\ncorpus-id: cprobe\n---\n\n# Title{}words\n\nAlpha holds.\n".format(char), needle))
+    breaks.append((head + "Alpha holds.\r\n", "carriage return"))
+    for text, needle in breaks:
         try:
-            rule_units(head + text, "probe")
-            failures.append("rule_units: the carriage return in {!r} was not refused".format(text))
+            rule_units(text, "probe")
+            failures.append("rule_units: the {} in {!r} was not refused".format(needle, text))
         except GateError as exc:
-            if "carriage return" not in str(exc):
+            if needle not in str(exc):
                 failures.append("rule_units: {!r} was refused for another reason: {}".format(text, exc))
+    # No other character ends a line for the vendored renderer or for CommonMark: a vertical tab, U+0085, U+2028
+    # and U+2029 stay inside their line, which the renderer reads as one paragraph.
+    for char in ("\x0b", "\x85", "\u2028", "\u2029", "\x1c"):
+        try:
+            rule_units(head + "Alpha holds.{}Beta waits.\n".format(char), "probe")
+        except GateError as exc:
+            failures.append("rule_units: {!r} inside a line was refused: {}".format(char, exc))
+    # An inline HTML comment, processing instruction, declaration or CDATA section passes through as raw HTML a
+    # browser does not show, so '<!' or '<?' anywhere in a body line is refused, on a first or a wrapped line.
+    for line in ("Alpha holds <!-- hidden words --> today.", "Alpha holds <!--", "Alpha holds <?php hidden ?> today.",
+                 "Alpha holds <![CDATA[hidden]]> today.", "Alpha holds <!X hidden> today.", "Use `<!--` here."):
+        for text in (line + "\n", "See the start of the PR\n" + line + "\nhidden words --> today.\n"):
+            try:
+                rule_units(head + text, "probe")
+                failures.append("rule_units: the inline '<!' or '<?' in {!r} was not refused".format(text))
+            except GateError as exc:
+                if "does not show" not in str(exc):
+                    failures.append("rule_units: {!r} was refused for another reason: {}".format(text, exc))
+    # The delimiter-row test is the vendored GFM table's own: every '|'-separated cell begins with '-' or ':-'.
+    for line, want in (("--x|--y", True), (":-- | --:", True), ("|--|", True), ("-", True), ("--force is it.", True),
+                       ("a | --", False), ("-- | a", False), ("--||--", False), (":|-", False), ("--\\|x", True),
+                       ("", False), ("|", False)):
+        if _is_table_delimiter_row(line) != want:
+            failures.append("_is_table_delimiter_row({!r}) is not {}".format(line, want))
     # A unit needs a letter or a decimal digit; an underscore (which the regex class \w admits), punctuation
     # or a symbol alone is none.
     for text, want in (("_", False), ("__ -- ...", False), ("\u00b2", False), ("a", True), ("7", True),
@@ -2948,6 +3040,25 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
                  [(0, two[0]), (1, two[1])], {"exemptions_text": "exempt = []\n"}, 0, ""),
                 ("an explicit empty register leaves an uncovered sentence a finding", "ccovn24", two, [(0, two[0])],
                  {"exemptions_text": "exempt = []\n"}, 1, uncovered),
+                ("a form feed in a rule body is a cannot-evaluate, even exempted", "ccovn25",
+                 [two[0]], [(0, two[0])],
+                 {"lines": ["---", "corpus-id: ccovn25", "origin: pack", "slug: fixture", "---", "", "# Fixture rule",
+                            "", two[0], "", "Beta waits.\x0c# Beta heading"],
+                  "exemptions": [{"corpus-id": "ccovn25", "text": "Beta waits.", "reason": "A rationale."},
+                                 {"corpus-id": "ccovn25", "text": "# Beta heading", "reason": "A rationale."}]},
+                 2, "form feed"),
+                ("an inline HTML comment in a rule body is refused, even exempted", "ccovn26",
+                 [two[0]], [(0, two[0])],
+                 {"lines": ["---", "corpus-id: ccovn26", "origin: pack", "slug: fixture", "---", "", "# Fixture rule",
+                            "", two[0], "", "Alpha holds <!-- hidden words --> today."],
+                  "exemptions": [{"corpus-id": "ccovn26", "text": "Alpha holds <!-- hidden words --> today.",
+                                  "reason": "A rationale."}]}, 2, "does not show"),
+                ("a delimiter row the vendored table reads, with letters after its dashes, is refused, even exempted",
+                 "ccovn27", [two[0]], [(0, two[0])],
+                 {"lines": ["---", "corpus-id: ccovn27", "origin: pack", "slug: fixture", "---", "", "# Fixture rule",
+                            "", two[0], "", "Alpha a | b", "--x|--y"],
+                  "exemptions": [{"corpus-id": "ccovn27", "text": "Alpha a | b\n--x|--y",
+                                  "reason": "A rationale."}]}, 2, "cannot classify"),
             ]
             for label, corpus, obligations, covered, extra, want, needle in cover_vectors:
                 got, out = _cover(corpus, obligations, covered, **extra)
@@ -3045,7 +3156,13 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
               "definition whose label spans lines are refused, a carriage return is a cannot-evaluate, a GFM "
               "table delimiter row with no leading pipe is refused, an exemptions file with no exempt key "
               "(empty, comment-only, a symlink to the null device) is a cannot-evaluate, and an explicit "
-              "exempt = [] reads as no exemption)"
+              "exempt = [] reads as no exemption; and the round-4 reproductions hold: a form feed and a carriage "
+              "return, each a line ending to the vendored renderer, are a cannot-evaluate inside a line, at a "
+              "line start, in the title and in the frontmatter, while a vertical tab, U+0085, U+2028 and U+2029 "
+              "stay prose; an inline '<!' or '<?' is refused; a line the vendored GFM table reads as a delimiter "
+              "row ('--x|--y') is refused; an ordered item in non-ASCII decimal digits is refused as a paragraph's "
+              "first line; and each whitespace-widened block start has a no-break-space or vertical-tab vector "
+              "the classifier itself refuses)"
               .format(core))
     else:
         print("SELF-TEST PASS (PARTIAL): {}; the end-to-end fixture cases were SKIPPED (no writable temp "
