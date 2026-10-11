@@ -2828,10 +2828,16 @@ def _regen_fixture_manifest(root, case, failures, env):
 
 def _edit_clause_consistently(repo):
     """Edit ONE clause's canonical-text CONSISTENTLY: pick a clause that is the sole coverer of every line
-    in its span (so no sibling window breaks), rewrite those source lines, and recompute the whole-file
-    source-digest for every clause in that source. The head tree then passes the authoritative check_clauses
-    (the delta gate now runs it in non-genesis, round-4 finding 2), while the predecessor keeps the original
-    text so clause_text_leg still sees a real text change. Returns the edited clause-id, or None."""
+    in its span (so no sibling window breaks) and whose text occurs once in its window, rewrite ONLY that
+    clause's own characters, and recompute the whole-file source-digest for every clause in that source.
+    The rest of its start-line and end-line (the tail of the sentence before it, the head of the one after
+    it) is kept byte for byte, and the new text keeps the old one's line count, first word and final
+    character, so the edited row still covers its whole source span with whole-sentence or whole-clause
+    edges (check_clauses WHOLE-CLAUSE EDGES). Overwriting the whole start-line instead would cut the
+    sentence before the clause short and leave a row that begins inside a clause. The head tree then passes
+    the authoritative check_clauses (the delta gate now runs it in non-genesis, round-4 finding 2), while the
+    predecessor keeps the original text so clause_text_leg still sees a real text change. Returns the
+    edited clause-id, or None."""
     import hashlib
     import re
     import tomllib
@@ -2851,15 +2857,21 @@ def _edit_clause_consistently(repo):
             continue
         if all(sum(1 for (a, b) in spans[sp] if isinstance(a, int) and a <= L <= b) == 1
                for L in range(s, e + 1)):
-            target = c
-            break
+            window = "\n".join((repo / sp).read_text(encoding="utf-8").split("\n")[s - 1:e])
+            if c["canonical-text"].strip() and window.count(c["canonical-text"]) == 1:
+                target = c
+                break
     if target is None:
         return None
     sp, s, e = target["source-path"], target["start-line"], target["end-line"]
-    new_lines = ["EDITEDBYE2ETESTXYZ{}".format(k) for k in range(e - s + 1)]
+    old_text = target["canonical-text"]
+    new_lines = ["EDITEDBYE2ETESTXYZ{}".format(k) for k in range(len(old_text.split("\n")))]
+    new_lines[0] = old_text.split()[0] + " " + new_lines[0]
+    new_lines[-1] += old_text[-1]
     srcp = repo / sp
     src_lines = srcp.read_text(encoding="utf-8").split("\n")
-    src_lines[s - 1:e] = new_lines
+    window = "\n".join(src_lines[s - 1:e])
+    src_lines[s - 1:e] = window.replace(old_text, "\n".join(new_lines)).split("\n")
     new_src = "\n".join(src_lines)
     srcp.write_text(new_src, encoding="utf-8")
     new_dig = hashlib.sha256(new_src.encode("utf-8")).hexdigest()
@@ -2869,7 +2881,7 @@ def _edit_clause_consistently(repo):
         if 'source-path = "{}"'.format(sp) in b:
             b = re.sub(r'source-digest = "[0-9a-f]{64}"', 'source-digest = "{}"'.format(new_dig), b)
         if 'clause-id = "{}"'.format(target["clause-id"]) in b:
-            esc = "\\n".join(new_lines)
+            esc = "\\n".join(line.replace("\\", "\\\\") for line in new_lines)
             b = re.sub(r'canonical-text = "[^"]*"',
                        lambda _m: 'canonical-text = "{}"'.format(esc), b, count=1)
         out.append("[[clause]]" + b)
