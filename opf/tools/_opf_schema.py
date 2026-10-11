@@ -8,7 +8,7 @@ It extends U1's conventions (the VALID/INVALID/CANNOT-EVALUATE outcome model, th
 discipline, the section-8.1 type->namespace taxonomy) rather than duplicating them; U1's roster and
 namespace helpers are imported, not re-declared.
 
-Four things live here, all from OPF-SPEC.md section 8 (with the release triad's worklog shape from 6.2):
+Five things live here, all from OPF-SPEC.md section 8 (with the release triad's worklog shape from 6.2):
 
   1. THE RECORD ENVELOPE (spec 8.3). Every record carries a closed envelope (id, type, status, title,
      created_at, updated_at, actor.kind, and optional actor.id, summary, links, refs); types add their
@@ -39,6 +39,11 @@ Four things live here, all from OPF-SPEC.md section 8 (with the release triad's 
      counters are accepted only when a caller passes `imported_namespaces` (validate_counters) or
      `imported_series=True` (the allocation and checking helpers), each series on its own number line.
      With neither, every helper keeps its clean-only behaviour, so an imported id or counter is a finding.
+
+  5. THE IMPORTED ENVELOPE (spec 8.3). validate_imported_record is a pure validator for one imported
+     record: the closed imported envelope (an `imported:<NS>-<n>` id, no `/proposed`, an importer actor
+     with an id), the closed `import` provenance table, and the `unrecorded` missingness contract (exactly
+     one closed-reason row per omitted non-exempt field). It is not yet wired into the doctor.
 
 Every malformed, unknown, illegal, or unidentifiable input fails closed to an INVALID or CANNOT-EVALUATE
 outcome, never a silent VALID (spec 3 "Fail closed"; the check-fails-closed-on-unreadable rule: a
@@ -76,6 +81,15 @@ unit is that schema release for the record model and DEFINES the following where
   - `counters.toml` shape is DEFINED HERE as an optional top-level `schema` int plus a `[counters]`
     table of `<NS> = <non-negative int>` (mirroring version.toml's `schema = 1` marker); the spec fixes
     the semantics (one monotonic high-water per namespace) but not the file layout.
+  - The IMPORTED ENVELOPE (spec 8.3) leaves these gaps, DEFINED HERE: `import.span` is a byte range, so
+    its two integers are non-negative and ordered; the contribution `delivery.sent_at`/`receipted_at`
+    instants are bound by `imported_at` like the four named historical timestamps (the spec 8.8 refusal
+    of a historical timestamp later than the run clock); a standalone imported `done` is legal history,
+    so its `links` stay exempt from missingness while a reference's `refs` and a worklog's `summary` do
+    not; an imported link must target the imported series (spec 8.6 refuses an imported-to-clean link);
+    and supplied fields are held to their declared types and vocabularies only, so the current
+    state-conditional placement rules (the pending_decision bundle, finding severity while open, the
+    contribution delivery stages) are not applied to history.
 """
 import sys
 
@@ -102,6 +116,7 @@ from _opf_store import (  # noqa: E402
     VALID, INVALID, CANNOT_EVALUATE, BASELINE_TYPES, MODULE_TYPES, IMPORTER_TYPES,
     _valid_extension_namespace,
     _str_token_set, _is_str_token_control, _is_item_collection, _safe_display,
+    WORKING_DIRNAME, _HOME_RUN_PREFIXES, _HOME_RUN_SUFFIX, _home_file,
 )
 
 # The one schema version this unit understands (mirrors version.toml / worklog.toml / counters.toml
@@ -1205,6 +1220,424 @@ def validate_record(record, expected_type=None, specs=None, registered_vendors=f
     _validate_type_specific(record, spec, findings, standing_auth)
 
     return RecordValidation(INVALID if findings else VALID, findings, rtype, rid)
+
+
+# --- the imported-record validator (spec 8.3, the imported envelope) ----------------------------------
+
+# The closed missingness reasons of an `unrecorded` row (spec 8.3). _opf_adopt's import policy carries the
+# same tuple (MISSINGNESS_REASONS); the self-test asserts the two stay equal.
+IMPORTED_MISSINGNESS_REASONS = ("not_recorded_in_source", "unparsed", "ambiguous", "conflicting",
+                                "not_applicable")
+# The members every imported record MUST carry (spec 8.3). None of them may be waived through missingness.
+IMPORTED_REQUIRED_KEYS = ("id", "type", "title", "status", "actor", "import")
+# The optional envelope fields an imported record may omit without a missingness row (spec 8.3), each only
+# where the type's own schema does not require it; registered `x-<vendor>` tables are exempt too.
+IMPORTED_EXEMPT_FIELDS = frozenset({"proposed_from", "summary", "links", "refs"})
+# The exempt fields a type's own schema requires, so omitting one there owes a row (spec 8.3): the worklog
+# requires its summary (spec 6.2) and a reference its captured refs (spec 8.6). A standalone imported
+# `done` is legal history (spec 8.3), so its `links` stay exempt.
+_IMPORTED_TYPE_REQUIRED = {"worklog": frozenset({"summary"}), "reference": frozenset({"refs"})}
+# The historical timestamps (spec 8.3): optional, RFC 3339 UTC when present, and no later than the import
+# clock instant. The contribution delivery instants are held to the same clock (the spec 8.8 refusal of a
+# historical timestamp later than the run clock).
+IMPORTED_HISTORICAL_TIMESTAMPS = ("created_at", "updated_at", "date", "decided_at")
+_IMPORTED_DELIVERY_TIMESTAMPS = ("sent_at", "receipted_at")
+# The type fields a supplied value must keep as a non-blank string (their clean declared type, spec 8.3).
+_IMPORTED_TEXT_FIELDS = ("severity", "decision", "decided_by", "classification", "action", "recipient",
+                         "dedup_class", "content_digest", "context", "rationale")
+# The closed `import` provenance table (spec 8.3) and its required members.
+IMPORT_KEYS = frozenset({"source", "source_sha256", "run", "imported_at", "span", "history", "unparsed"})
+IMPORT_REQUIRED_KEYS = ("source", "source_sha256", "run", "imported_at")
+UNRECORDED_ROW_KEYS = frozenset({"field", "reason"})
+HISTORY_ROW_KEYS = frozenset({"field", "value"})
+# `source_sha256` is 64 lowercase hexadecimal digits (spec 8.3); an uppercase digit is refused.
+_SOURCE_SHA256_RE = re.compile(r"^[0-9a-f]{64}\Z")
+# The import run id `imp-<YYYYMMDD>T<HHMMSS>Z-<hash16>` (spec 8.3), composed from the store's import-home
+# grammar so the two cannot drift. Like the store, this checks shape, not calendar validity.
+_IMPORT_RUN_PATTERN = _HOME_RUN_PREFIXES["import"] + _HOME_RUN_SUFFIX
+
+
+def _imported_schema_fields(spec):
+    """The fields of a type's schema an imported record of that type may carry or account for (spec 8.3):
+    the full envelope plus the type's own fields, or, for the worklog, the imported envelope's id, type,
+    title, status and actor plus the worklog fields (spec 6.2)."""
+    if spec.reduced:
+        return frozenset({"id", "type", "title", "status", "actor"}) | WORKLOG_KEYS
+    return ENVELOPE_KEYS | spec.extra_keys
+
+
+def _check_closed_table(table, allowed, where, findings):
+    """Report each key of an imported sub-table outside its closed keyset, in table order, each rendered
+    through _safe_display (the _check_keyset idiom), so the report is deterministic and an oversized or
+    control-bearing key cannot crash it or forge a line."""
+    for key in table:
+        if key not in allowed:
+            findings.append("{} unknown key {} (schemas are closed; spec 8.3)".format(
+                where, _safe_display(key)))
+
+
+def _is_imported_source(value):
+    """True when value is the canonical store-relative path of a preserved original, spelled from
+    `.working/` (spec 8.3): the store's canonical file-operand grammar (no empty, `.` or `..` component, no
+    absolute, drive or backslash form, no control character) beneath `.working/`. An aliased spelling is
+    refused, never normalized."""
+    if not isinstance(value, str) or not value.startswith(WORKING_DIRNAME + "/"):
+        return False
+    try:
+        _home_file(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _validate_import_table(record, schema_fields, findings):
+    """Validate the `import` provenance table (spec 8.3). Returns the ordering key of a valid
+    `imported_at`, or None when it is absent or invalid (the record is then INVALID already, so the
+    historical-timestamp bound is never silently skipped on a VALID record)."""
+    if "import" not in record:
+        findings.append("missing required field: import (the provenance table, spec 8.3)")
+        return None
+    imp = record.get("import")
+    if not isinstance(imp, dict):
+        findings.append("import must be a table {source, source_sha256, run, imported_at, ...} (spec 8.3)")
+        return None
+    _check_closed_table(imp, IMPORT_KEYS, "import", findings)
+    for k in IMPORT_REQUIRED_KEYS:
+        if k not in imp:
+            findings.append("missing required field: import.{} (spec 8.3)".format(k))
+    if "source" in imp and not _is_imported_source(imp.get("source")):
+        findings.append("import.source {} is not a canonical store-relative path spelled from {}/ "
+                        "(spec 8.3)".format(_safe_display(imp.get("source")), WORKING_DIRNAME))
+    if "source_sha256" in imp and not (isinstance(imp.get("source_sha256"), str)
+                                       and _SOURCE_SHA256_RE.match(imp.get("source_sha256"))):
+        findings.append("import.source_sha256 {} is not 64 lowercase hexadecimal digits (spec 8.3)".format(
+            _safe_display(imp.get("source_sha256"))))
+    if "run" in imp and not (isinstance(imp.get("run"), str)
+                             and re.fullmatch(_IMPORT_RUN_PATTERN, imp.get("run"))):
+        findings.append("import.run {} is not an imp-<YYYYMMDD>T<HHMMSS>Z-<hash16> run id (spec 8.3)".format(
+            _safe_display(imp.get("run"))))
+    imported_at = None
+    if "imported_at" in imp:
+        if _valid_timestamp(imp.get("imported_at")):
+            imported_at = _instant_key(imp.get("imported_at"))
+        else:
+            findings.append("import.imported_at must be an RFC 3339 UTC timestamp (spec 8.3)")
+    if "span" in imp:
+        span = imp.get("span")
+        # An informational byte range (spec 8.3): two integers, defined here as non-negative and ordered.
+        if not (isinstance(span, list) and len(span) == 2 and all(type(n) is int and n >= 0 for n in span)
+                and span[0] <= span[1]):
+            findings.append("import.span must be an array of two non-negative integers [start, end] with "
+                            "start <= end (spec 8.3)")
+    if "history" in imp:
+        history = imp.get("history")
+        if not isinstance(history, list):
+            findings.append("import.history must be an array of {field, value} tables (spec 8.3)")
+            history = []
+        for i, row in enumerate(history):
+            where = "import.history[{}]".format(i)
+            if not isinstance(row, dict):
+                findings.append("{} must be a {{field, value}} table (spec 8.3)".format(where))
+                continue
+            if set(row) != HISTORY_ROW_KEYS:
+                findings.append("{} must hold exactly the two keys field and value, has {} key(s) "
+                                "(spec 8.3)".format(where, len(row)))
+            field = row.get("field")
+            if not isinstance(field, str) or field not in schema_fields:
+                findings.append("{}.field {} names no field of the type's schema (spec 8.3)".format(
+                    where, _safe_display(field)))
+            if not isinstance(row.get("value"), str):
+                findings.append("{}.value must be the verbatim source value as a string (spec 8.3)".format(
+                    where))
+    if "unparsed" in imp:
+        unparsed = imp.get("unparsed")
+        if not (isinstance(unparsed, list) and all(isinstance(s, str) for s in unparsed)):
+            findings.append("import.unparsed must be an array of strings (spec 8.3)")
+    return imported_at
+
+
+def _validate_unrecorded(record, spec, schema_fields, findings):
+    """The missingness contract (spec 8.3): `unrecorded` holds exactly one closed-reason row for each
+    omitted field of the type's schema that is not exempt, and no row that repeats a field, claims a
+    supplied field absent, names a field outside the schema, names an exempt field, or waives a required
+    imported envelope field."""
+    exempt = IMPORTED_EXEMPT_FIELDS - _IMPORTED_TYPE_REQUIRED.get(spec.name, frozenset())
+    rows = record.get("unrecorded", [])
+    if not isinstance(rows, list):
+        findings.append("unrecorded must be an array of {field, reason} tables (spec 8.3)")
+        rows = []
+    seen = set()
+    for i, row in enumerate(rows):
+        where = "unrecorded[{}]".format(i)
+        if not isinstance(row, dict):
+            findings.append("{} must be a {{field, reason}} table (spec 8.3)".format(where))
+            continue
+        _check_closed_table(row, UNRECORDED_ROW_KEYS, where, findings)
+        reason = row.get("reason")
+        if not isinstance(reason, str) or reason not in IMPORTED_MISSINGNESS_REASONS:
+            findings.append("{}.reason {} is not one of {} (spec 8.3)".format(
+                where, _safe_display(reason), list(IMPORTED_MISSINGNESS_REASONS)))
+        field = row.get("field")
+        if not isinstance(field, str):
+            findings.append("{}.field must be a string naming a field of the type's schema "
+                            "(spec 8.3)".format(where))
+            continue
+        if field in seen:
+            findings.append("{} repeats the field {!r}: unrecorded holds exactly one row per omitted "
+                            "field (spec 8.3)".format(where, field))
+            continue
+        seen.add(field)
+        if field.startswith("x-"):
+            findings.append("{} names the x-<vendor> extension {!r}, which is exempt from missingness "
+                            "and MUST be refused (spec 8.3)".format(where, field))
+        elif field not in schema_fields:
+            findings.append("{} names {!r}, which is no field of the {} schema (spec 8.3)".format(
+                where, field, spec.name))
+        elif field in IMPORTED_REQUIRED_KEYS:
+            findings.append("{} names the required imported envelope field {!r}, which missingness "
+                            "cannot waive (spec 8.3)".format(where, field))
+        elif field in exempt:
+            findings.append("{} names the exempt optional envelope field {!r}, which MUST be refused "
+                            "(spec 8.3)".format(where, field))
+        elif field in record:
+            findings.append("{} claims the supplied field {!r} absent (spec 8.3)".format(where, field))
+    for field in sorted(schema_fields):
+        if field in record or field in exempt or field in IMPORTED_REQUIRED_KEYS or field in seen:
+            continue
+        findings.append("the omitted field {!r} of the {} schema has no unrecorded row "
+                        "(spec 8.3)".format(field, spec.name))
+
+
+def _validate_imported_links(record, spec, findings):
+    """The optional imported `links` (spec 8.3, 8.6): each a closed {rel, id} table, rel from the closed
+    vocabulary, and id an imported-series id over IMPORTED_NAMESPACES, since an imported-to-clean link MUST
+    be refused (spec 8.6). The relation type constraints hold: `exemplifies` targets a preference_pattern,
+    and a done record's `receipt_of` targets a backlog_item, at most once."""
+    if "links" not in record:
+        return
+    links = record.get("links")
+    if not isinstance(links, list):
+        findings.append("links must be an array of {rel, id} tables")
+        return
+    receipts = 0
+    for i, link in enumerate(links):
+        where = "links[{}]".format(i)
+        if not isinstance(link, dict):
+            findings.append("{} must be a {{rel, id}} table".format(where))
+            continue
+        _check_closed_table(link, LINK_KEYS, where, findings)
+        rel = link.get("rel")
+        if not isinstance(rel, str) or rel not in LINK_RELS:
+            findings.append("{}.rel {} is not one of {} (spec 8.6)".format(
+                where, _safe_display(rel), list(LINK_RELS)))
+            rel = None
+        shape = parse_series_id(link.get("id"))
+        if shape is None:
+            findings.append("{}.id {} is not a well-formed id (spec 8.2)".format(
+                where, _safe_display(link.get("id"))))
+            continue
+        if shape[0] == shape[1]:
+            findings.append("{}.id {!r} is a clean-series id: an imported-to-clean link MUST be refused "
+                            "(spec 8.6)".format(where, link.get("id")))
+        elif shape[1] not in IMPORTED_NAMESPACES:
+            findings.append("{}.id {!r} uses namespace {!r}, which the imported series refuses "
+                            "(spec 8.1/8.2)".format(where, link.get("id"), shape[1]))
+        if rel == "exemplifies" and shape[1] != BASELINE_TYPES["preference_pattern"]:
+            findings.append("{} exemplifies must target a preference_pattern ({} namespace) "
+                            "(spec 8.6)".format(where, BASELINE_TYPES["preference_pattern"]))
+        if rel == "receipt_of" and spec.name == "done":
+            receipts += 1
+            if shape[1] != BASELINE_TYPES["backlog_item"]:
+                findings.append("{} a done record's receipt_of must target a backlog_item ({} "
+                                "namespace) (spec 8.1/8.5)".format(where, BASELINE_TYPES["backlog_item"]))
+    if receipts > 1:
+        findings.append("a done record carries at most one receipt_of link (one-to-one receipt, spec 8.5), "
+                        "has {}".format(receipts))
+
+
+def _validate_imported_values(record, spec, findings, registered_kinds, imported_at):
+    """Supplied fields keep their declared value types and vocabularies (spec 8.3), and every historical
+    timestamp is RFC 3339 UTC and no later than `imported_at`. An omission is the missingness contract's
+    business, so no bundle or required-field rule fires on an absence; the current state-conditional
+    placement rules (resolution bundles, transition obligations) are not applied to history (spec 8.3)."""
+    if "title" in record and not _is_single_line(record.get("title")):
+        findings.append("title must be a non-empty single line (spec 8.3)")
+    if "summary" in record:
+        if spec.reduced:
+            if not _is_single_line(record.get("summary")):
+                findings.append("a worklog summary must be a non-empty single line (spec 6.2)")
+        elif not isinstance(record.get("summary"), str):
+            findings.append("summary must be a string when present")
+    for k in IMPORTED_HISTORICAL_TIMESTAMPS:
+        if k not in record:
+            continue
+        if not _valid_timestamp(record.get(k)):
+            findings.append("{} must be an RFC 3339 UTC timestamp (spec 8.3)".format(k))
+        elif imported_at is not None and _instant_key(record.get(k)) > imported_at:
+            findings.append("{} is later than import.imported_at: a historical timestamp is never later "
+                            "than the import clock instant (spec 8.3)".format(k))
+    if (_valid_timestamp(record.get("created_at")) and _valid_timestamp(record.get("updated_at"))
+            and _instant_key(record.get("updated_at")) < _instant_key(record.get("created_at"))):
+        findings.append("updated_at must not precede created_at (spec 8.3)")
+    for k in _IMPORTED_TEXT_FIELDS:
+        if k in record and (not isinstance(record.get(k), str) or not record.get(k).strip()):
+            findings.append("{}.{} must be a non-empty string when supplied (spec 8.3)".format(
+                spec.name, k))
+    if "detail" in record and not isinstance(record.get("detail"), str):
+        findings.append("worklog detail must be a string when present")
+    if "kind" in record:
+        allowed_kinds = set(WORKLOG_KINDS)
+        if registered_kinds is not None:
+            # The manifest control, judged as _validate_worklog judges it: malformed fails closed to the
+            # built-ins with a finding, never splatting a bare string or crashing on an unhashable element.
+            if isinstance(registered_kinds, (list, tuple)) and all(
+                    isinstance(k, str) and k for k in registered_kinds):
+                allowed_kinds |= set(registered_kinds)
+            else:
+                findings.append("registered worklog kinds must be a list of non-empty strings")
+        if not isinstance(record.get("kind"), str) or record.get("kind") not in allowed_kinds:
+            findings.append("worklog kind {} is not one of {} (spec 6.2)".format(
+                _safe_display(record.get("kind")), sorted(allowed_kinds)))
+    if "scopes" in record:
+        scopes = record.get("scopes")
+        if not isinstance(scopes, list) or not scopes:
+            findings.append("block.scopes must be a non-empty array of record IDs (spec 8.5)")
+            scopes = []
+        for s in scopes:
+            # Either series may be scoped; an imported id is held to IMPORTED_NAMESPACES (spec 8.1/8.2).
+            shape = parse_series_id(s)
+            if shape is None or shape[1] not in (IMPORTED_NAMESPACES if shape[0] != shape[1]
+                                                 else RECORD_NAMESPACES):
+                findings.append("block.scopes entry {} is not a record id of a section 8.1 type "
+                                "(spec 8.1/8.2)".format(_safe_display(s)))
+    if "delivery" in record:
+        delivery = record.get("delivery")
+        if not isinstance(delivery, dict):
+            findings.append("contribution.delivery must be a table {channel, ref, sent_at, ...} (spec 8.5)")
+        else:
+            _check_closed_table(delivery, DELIVERY_KEYS, "contribution.delivery", findings)
+            for k in ("channel", "ref", "receipt_ref"):
+                if k in delivery and (not isinstance(delivery.get(k), str) or not delivery.get(k).strip()):
+                    findings.append("contribution.delivery.{} must be a non-empty string".format(k))
+            for k in _IMPORTED_DELIVERY_TIMESTAMPS:
+                if k not in delivery:
+                    continue
+                if not _valid_timestamp(delivery.get(k)):
+                    findings.append("contribution.delivery.{} must be an RFC 3339 UTC timestamp".format(k))
+                elif imported_at is not None and _instant_key(delivery.get(k)) > imported_at:
+                    findings.append("contribution.delivery.{} is later than import.imported_at "
+                                    "(spec 8.3/8.8)".format(k))
+    if spec.name == "reference" and record.get("refs") == []:
+        findings.append("a reference's supplied refs must hold at least one ref (spec 8.6); an absent "
+                        "capture is an unrecorded row")
+    _validate_imported_links(record, spec, findings)
+    _validate_refs(record, findings)
+
+
+def validate_imported_record(record, expected_type=None, specs=None, registered_vendors=frozenset(),
+                             registered_kinds=None):
+    """Validate one parsed imported record against the closed imported envelope (spec 8.3). Pure: it reads
+    no file and no clock. Returns a RecordValidation whose every finding names the record by its id.
+
+    The imported envelope: `id` an `imported:<NS>-<n>` id bound to the record's type, `type` (required for
+    every type, the worklog included), a one-line `title`, `status` from the type's legal state set
+    without `/proposed`, `actor.kind = "importer"` with an `actor.id` naming the importing assistant, and
+    the closed `import` provenance table (`source` spelled from `.working/`, `source_sha256` as 64
+    lowercase hex digits, an `imp-` `run` id, an RFC 3339 UTC `imported_at`, and optional `span`,
+    `history` rows of exactly {field, value}, and `unparsed`). Every omitted non-exempt field of the
+    type's schema carries exactly one closed-reason `unrecorded` row; supplied fields keep their declared
+    types and vocabularies; historical timestamps are no later than `imported_at`; `proposed_from` is never
+    carried; unknown keys fail. The importer-only legacy_fragment (LF) is refused (spec 8.1/8.2).
+
+    Outcome: CANNOT-EVALUATE when the roster or `expected_type` control is malformed, the input is not a
+    table, or its type cannot be identified; INVALID when an identified record violates the envelope;
+    VALID otherwise. The cross-record checks (C-IMPORTED-IDS counters and no-deletion, the
+    C-IMPORTED-PROVENANCE digest re-read, C-LINKS resolution, and the C-IMPORTED-SEGREGATION firewall
+    beyond the per-record imported-to-clean link refusal) are not this function's."""
+    if specs is None:
+        specs = BASELINE_SPECS
+    else:
+        roster_error = _specs_roster_error(specs)
+        if roster_error is not None:
+            return RecordValidation(CANNOT_EVALUATE, [roster_error])
+    if not isinstance(record, dict):
+        return RecordValidation(CANNOT_EVALUATE, ["imported record is not a table (fail-closed)"])
+    rid = record.get("id")
+    label = "imported record {}".format(_safe_display(rid) if "id" in record else "(no id)")
+
+    def named(findings):
+        return ["{}: {}".format(label, f) for f in findings]
+
+    if expected_type is not None and not isinstance(expected_type, str):
+        return RecordValidation(CANNOT_EVALUATE, named(
+            ["expected_type must be a string or None (fail-closed)"]))
+    findings = []
+    if not _is_str_token_control(registered_vendors):
+        findings.append("registered_vendors must be a collection of x-<vendor> strings (fail-closed)")
+    registered_vendors = _str_token_set(registered_vendors)
+    tval = record.get("type")
+    if isinstance(tval, str) and tval:
+        rtype = tval
+        if expected_type is not None and tval != expected_type:
+            findings.append("type {!r} does not match the expected type {!r} (spec 8.3)".format(
+                tval, expected_type))
+    elif expected_type is not None:
+        # Every imported record carries `type`, the worklog included (spec 8.3): never substitute it.
+        findings.append("missing or non-string required field: type (spec 8.3)")
+        rtype = expected_type
+    else:
+        return RecordValidation(CANNOT_EVALUATE, named(
+            ["the record has no `type` and no expected type: cannot identify it"]))
+    if rtype in IMPORTER_TYPES:
+        # New imports use the imported series and verbatim `unparsed` text, never LF quarantine.
+        findings.append("type {!r} is the importer-only LF quarantine type, which the imported series "
+                        "refuses (spec 8.1/8.2)".format(rtype))
+        return RecordValidation(INVALID, named(findings), rtype, rid)
+    spec = specs.get(rtype)
+    if spec is None:
+        findings.append("{!r} is not a supported record type (baseline: {})".format(
+            rtype, ", ".join(sorted(_safe_display(s) for s in specs))))
+        return RecordValidation(INVALID, named(findings), rtype, rid)
+
+    shape = parse_series_id(rid)
+    if "id" not in record:
+        findings.append("missing required field: id")
+    elif shape is None or shape[0] == shape[1]:
+        findings.append("id {} is not an imported-series imported:<NS>-<n> id (spec 8.2/8.3)".format(
+            _safe_display(rid)))
+    elif shape[1] not in IMPORTED_NAMESPACES:
+        findings.append("id namespace {!r} is refused by the imported series, which carries no LF "
+                        "(spec 8.1/8.2)".format(shape[1]))
+    elif shape[1] != spec.namespace:
+        findings.append("id namespace {!r} is not the {!r} namespace bound to type {!r} "
+                        "(spec 8.2)".format(shape[1], spec.namespace, rtype))
+
+    schema_fields = _imported_schema_fields(spec)
+    _check_keyset(record, schema_fields | {"import", "unrecorded"}, registered_vendors, findings)
+    if "proposed_from" in record:
+        findings.append("an imported record never carries proposed_from, since its status never takes "
+                        "/proposed (spec 8.3)")
+    for k in ("title", "status"):
+        if k not in record:
+            findings.append("missing required field: {}".format(k))
+    if "status" in record:
+        parsed, err = parse_status(record.get("status"), spec)
+        if err is not None:
+            findings.append("status: {}".format(err))
+        elif parsed[1] is not None:
+            findings.append("imported status {!r} takes /proposed; an imported status is a legal state "
+                            "without it (spec 8.3)".format(record.get("status")))
+    actor_kind = _validate_actor(record, findings)
+    if actor_kind is not None and actor_kind != "importer":
+        findings.append("actor.kind {!r} is not 'importer': an imported record is importer-authored "
+                        "(spec 8.3)".format(actor_kind))
+    if isinstance(record.get("actor"), dict) and "id" not in record.get("actor"):
+        findings.append("missing required field: actor.id, naming the importing assistant (spec 8.3)")
+
+    imported_at = _validate_import_table(record, schema_fields, findings)
+    _validate_unrecorded(record, spec, schema_fields, findings)
+    _validate_imported_values(record, spec, findings, registered_kinds, imported_at)
+    return RecordValidation(INVALID if findings else VALID, named(findings), rtype, rid)
 
 
 # --- the transition validator (spec 8.4, 8.5) --------------------------------------------------------
@@ -2815,6 +3248,326 @@ def self_test():
     check("imported-next-id-proof-names-imported-control",
           "imported_namespaces" in str(_alloc_error(
               lambda: next_id(dict(BI=3), "imported:BI", imported_series=True))))
+
+    # ----- The imported-record validator (spec 8.3, the imported envelope). Valid imported PD and MD
+    # records pass; each refused vector differs from its valid base by the one deviation its rule refuses,
+    # and the finding that rule raises is named, so a vector refused for an unrelated reason does not count.
+    _IMP_AT = "2026-08-12T09:14:02Z"
+    _IMP_RUN = "imp-20260812T091402Z-0123456789abcdef"
+    _IMP_SHA = "0123456789abcdef" * 4
+    _IMP_ACTOR = {"kind": "importer", "id": "import-assistant"}
+
+    def _imp_table(**over):
+        t = {"source": ".working/imported/import/" + _IMP_RUN + "/originals/DECISIONS.md",
+             "source_sha256": _IMP_SHA, "run": _IMP_RUN, "imported_at": _IMP_AT}
+        t.update(over)
+        return t
+
+    def _imp_pd(**over):
+        # decided_at survives only as a date, so it is an `unparsed` omission whose verbatim source value
+        # rides import.history (spec 8.3: a UTC midnight is never fabricated); summary is an exempt omission.
+        r = {"id": "imported:PD-1", "type": "pending_decision", "status": "decided",
+             "title": "Keep the legacy ledger read-only", "created_at": "2025-03-01T10:00:00Z",
+             "actor": dict(_IMP_ACTOR), "decision": "The legacy ledger stays read-only",
+             "decided_by": "maintainer",
+             "unrecorded": [{"field": "updated_at", "reason": "not_recorded_in_source"},
+                            {"field": "decided_at", "reason": "unparsed"}],
+             "import": _imp_table(span=[0, 120], history=[{"field": "decided_at", "value": "2025-03-02"}],
+                                  unparsed=["Decided at the March sync; no time recorded."])}
+        r.update(over)
+        return r
+
+    def _imp_md(**over):
+        r = {"id": "imported:MD-4", "type": "maintainer_decision", "status": "recorded",
+             "title": "Prefer additive migrations", "created_at": "2025-01-05T08:00:00Z",
+             "updated_at": "2025-01-05T08:00:00+00:00", "actor": dict(_IMP_ACTOR),
+             "decision": "Additive migrations only", "summary": "Recorded in the old decision log",
+             "links": [{"rel": "exemplifies", "id": "imported:PP-2"}],
+             "refs": [{"kind": "path", "locator": "DECISIONS.md", "note": "original entry"}],
+             "x-aiqt": {"lane": "history"}, "import": _imp_table()}
+        r.update(over)
+        return r
+
+    def _imp_refused(rec, needle, **kw):
+        res = validate_imported_record(rec, **kw)
+        return res.status == INVALID and any(needle in f for f in res.findings)
+
+    def _imp_ok(rec, **kw):
+        res = validate_imported_record(rec, **kw)
+        return res.status == VALID and not res.findings
+
+    _pd_rows = _imp_pd()["unrecorded"]
+    _pd_res = validate_imported_record(_imp_pd())
+    check("imported-valid-pd", _pd_res.status == VALID and not _pd_res.findings
+          and _pd_res.id == "imported:PD-1" and _pd_res.type == "pending_decision")
+    check("imported-valid-md", _imp_ok(_imp_md(), registered_vendors=REG))
+    check("imported-missing-unrecorded-row-refused", _imp_refused(
+        _imp_pd(unrecorded=_pd_rows[1:]), "'updated_at' of the pending_decision schema has no unrecorded row"))
+    check("imported-absent-unrecorded-refused", _imp_refused(
+        {k: v for k, v in _imp_pd().items() if k != "unrecorded"}, "has no unrecorded row"))
+    check("imported-exempt-summary-row-refused", _imp_refused(
+        _imp_pd(unrecorded=_pd_rows + [{"field": "summary", "reason": "not_recorded_in_source"}]),
+        "exempt optional envelope field 'summary'"))
+    check("imported-duplicate-row-refused", _imp_refused(
+        _imp_pd(unrecorded=_pd_rows + [{"field": "updated_at", "reason": "ambiguous"}]),
+        "repeats the field 'updated_at'"))
+    check("imported-proposed-status-refused", _imp_refused(_imp_pd(status="decided/proposed"), "takes /proposed"))
+    check("imported-maintainer-actor-refused", _imp_refused(
+        _imp_pd(actor={"kind": "maintainer", "id": "import-assistant"}), "is not 'importer'"))
+    check("imported-uppercase-sha-refused", _imp_refused(
+        _imp_pd(**{"import": _imp_table(source_sha256=_IMP_SHA.upper())}), "not 64 lowercase"))
+    check("imported-timestamp-after-import-refused", _imp_refused(
+        _imp_pd(created_at="2026-08-12T09:14:03Z"), "created_at is later than import.imported_at"))
+    check("imported-timestamp-at-import-instant-ok", _imp_ok(_imp_pd(created_at="2026-08-12T09:14:02+00:00")))
+    check("imported-unknown-key-refused", _imp_refused(_imp_pd(colour="teal"), "unknown key 'colour'"))
+    check("imported-three-key-history-row-refused", _imp_refused(
+        _imp_pd(**{"import": _imp_table(history=[{"field": "decided_at", "value": "2025-03-02",
+                                                    "note": "date only"}])}),
+        "exactly the two keys field and value"))
+
+    # LF: refused under the baseline roster and under a roster that registers a legacy_fragment spec, so
+    # the refusal is the rule's own and not an unsupported-type side effect (spec 8.1/8.2).
+    _lf_spec = object.__new__(TypeSpec)
+    for _slot, _val in (("name", "legacy_fragment"), ("namespace", IMPORTER_TYPES["legacy_fragment"]),
+                        ("initial", "quarantined"), ("working", frozenset()),
+                        ("terminal", frozenset(("quarantined",))), ("transitions", dict()),
+                        ("proposable", frozenset()), ("gated", frozenset()), ("extra_keys", frozenset()),
+                        ("reduced", False), ("states", frozenset(("quarantined",)))):
+        setattr(_lf_spec, _slot, _val)
+    _lf_roster = dict(BASELINE_SPECS, legacy_fragment=_lf_spec)
+    _lf_rec = {"id": "imported:LF-1", "type": "legacy_fragment", "status": "quarantined",
+               "title": "A legacy fragment", "created_at": TS, "updated_at": TS, "actor": dict(_IMP_ACTOR),
+               "import": _imp_table()}
+    check("imported-lf-roster-reconciles", _specs_roster_error(_lf_roster) is None)
+    check("imported-lf-type-refused-extended-roster", _imp_refused(_lf_rec, "importer-only LF", specs=_lf_roster))
+    check("imported-lf-type-refused-baseline", _imp_refused(_lf_rec, "importer-only LF"))
+    check("imported-lf-namespace-refused", _imp_refused(_imp_pd(id="imported:LF-1"), "carries no LF"))
+
+    # Every finding names the record; malformed input is a refusing failure, never a silent absence.
+    _named = validate_imported_record(_imp_pd(colour="teal", status="decided/proposed"))
+    check("imported-findings-name-record", _named.status == INVALID and len(_named.findings) == 2
+          and all(f.startswith("imported record 'imported:PD-1': ") for f in _named.findings))
+    _noid = validate_imported_record({k: v for k, v in _imp_pd().items() if k != "id"})
+    check("imported-missing-id-refused", _noid.status == INVALID
+          and any(f.startswith("imported record (no id): missing required field: id") for f in _noid.findings))
+    for _bad in (None, [], "imported:PD-1", 7):
+        check("imported-non-table-cannot-eval-" + type(_bad).__name__,
+              validate_imported_record(_bad).status == CANNOT_EVALUATE)
+    check("imported-untyped-cannot-eval", validate_imported_record(
+        {k: v for k, v in _imp_pd().items() if k != "type"}).status == CANNOT_EVALUATE)
+    check("imported-untyped-with-expected-refused", _imp_refused(
+        {k: v for k, v in _imp_pd().items() if k != "type"}, "required field: type",
+        expected_type="pending_decision"))
+    check("imported-expected-type-mismatch-refused", _imp_refused(
+        _imp_pd(), "does not match the expected type", expected_type="finding"))
+    check("imported-expected-type-nonstring-cannot-eval", validate_imported_record(
+        _imp_pd(), expected_type=["pending_decision"]).status == CANNOT_EVALUATE)
+    check("imported-misbound-roster-cannot-eval", validate_imported_record(
+        _imp_pd(), specs={"pending_decision": BASELINE_SPECS["finding"]}).status == CANNOT_EVALUATE)
+    check("imported-unsupported-type-refused", _imp_refused(_imp_pd(type="artifact"), "not a supported"))
+    check("imported-bad-vendors-control-refused", _imp_refused(_imp_pd(), "registered_vendors must be",
+                                                               registered_vendors="x-aiqt"))
+
+    # The envelope: imported-series id bound to the type, no proposed_from, importer actor with an id.
+    check("imported-clean-id-refused", _imp_refused(_imp_pd(id="PD-1"), "not an imported-series"))
+    check("imported-id-namespace-mismatch-refused", _imp_refused(_imp_pd(id="imported:BI-1"),
+                                                                 "not the 'PD' namespace"))
+    check("imported-proposed-from-refused", _imp_refused(_imp_pd(proposed_from="open"), "never carries proposed_from"))
+    check("imported-illegal-state-refused", _imp_refused(_imp_pd(status="active"), "status: status state"))
+    check("imported-missing-title-refused", _imp_refused(
+        {k: v for k, v in _imp_pd().items() if k != "title"}, "missing required field: title"))
+    check("imported-multiline-title-refused", _imp_refused(_imp_pd(title="one\ntwo"), "single line"))
+    check("imported-missing-actor-id-refused", _imp_refused(_imp_pd(actor={"kind": "importer"}),
+                                                            "actor.id, naming the importing assistant"))
+    check("imported-blank-actor-id-refused", _imp_refused(_imp_pd(actor={"kind": "importer", "id": " "}),
+                                                          "actor.id must be a non-empty string"))
+
+    # The import provenance table (spec 8.3): closed, its four members required, each in its grammar.
+    check("imported-missing-import-refused", _imp_refused(
+        {k: v for k, v in _imp_pd().items() if k != "import"}, "missing required field: import"))
+    check("imported-import-not-table-refused", _imp_refused(_imp_pd(**{"import": ["x"]}), "import must be a table"))
+    check("imported-import-unknown-key-refused", _imp_refused(
+        _imp_pd(**{"import": _imp_table(digest="x")}), "import unknown key 'digest'"))
+    for _k in ("source", "source_sha256", "run", "imported_at"):
+        check("imported-import-missing-" + _k, _imp_refused(
+            _imp_pd(**{"import": {k: v for k, v in _imp_table().items() if k != _k}}),
+            "missing required field: import." + _k))
+    for _src in ("DECISIONS.md", "/.working/x.md", ".working/", ".working", ".working/a/../b.md",
+                 ".working/./b.md", ".working//b.md", ".working\\b.md", ".working/b\n.md", "working/b.md", 7):
+        check("imported-source-refused-" + repr(_src), _imp_refused(
+            _imp_pd(**{"import": _imp_table(source=_src)}), "import.source"))
+    check("imported-source-other-working-path-ok", _imp_ok(_imp_pd(**{"import": _imp_table(
+        source=".working/imported/adoption/legacy/NOTES.md")})))
+    for _sha in (_IMP_SHA[:-1], _IMP_SHA + "0", "sha256:" + _IMP_SHA, _IMP_SHA[:-1] + "g", 0):
+        check("imported-sha-refused-" + repr(_sha)[:24], _imp_refused(
+            _imp_pd(**{"import": _imp_table(source_sha256=_sha)}), "import.source_sha256"))
+    for _run in ("adopt-20260812T091402Z-0123456789abcdef", "imp-20260812T091402-0123456789abcdef",
+                 "imp-20260812T091402Z-0123456789ABCDEF", "imp-20260812T091402Z-0123456789abcde",
+                 _IMP_RUN + "\n", "../" + _IMP_RUN, None):
+        check("imported-run-refused-" + repr(_run)[:28], _imp_refused(
+            _imp_pd(**{"import": _imp_table(run=_run)}), "import.run"))
+    import datetime as _dt
+    for _at in ("2026-08-12T09:14:02+05:30", "2026-08-12 09:14:02Z", "2026-02-30T00:00:00Z",
+                _dt.datetime(2026, 8, 12, tzinfo=_dt.timezone.utc)):
+        check("imported-imported-at-refused-" + repr(_at)[:28], _imp_refused(
+            _imp_pd(**{"import": _imp_table(imported_at=_at)}), "import.imported_at must be"))
+    for _span in ([1], [1, 2, 3], [5, 2], [-1, 3], [True, 3], [0, 1.5], "0-3", (0, 3)):
+        check("imported-span-refused-" + repr(_span), _imp_refused(
+            _imp_pd(**{"import": _imp_table(span=_span)}), "import.span"))
+    check("imported-span-empty-range-ok", _imp_ok(_imp_pd(**{"import": _imp_table(span=[4, 4])})))
+    for _hist, _needle in (
+            ({"field": "decided_at"}, "import.history must be an array"),
+            (["decided_at"], "must be a {field, value} table"),
+            ([{"field": "decided_at"}], "exactly the two keys"),
+            ([{"field": "colour", "value": "teal"}], "names no field"),
+            ([{"field": "decided_at", "value": 20250302}], "value must be the verbatim")):
+        check("imported-history-refused-" + _needle, _imp_refused(
+            _imp_pd(**{"import": _imp_table(history=_hist)}), _needle))
+    for _unp in ("text", ["ok", 3], [["nested"]]):
+        check("imported-unparsed-refused-" + repr(_unp), _imp_refused(
+            _imp_pd(**{"import": _imp_table(unparsed=_unp)}), "import.unparsed"))
+    check("imported-empty-history-unparsed-ok", _imp_ok(
+        _imp_pd(**{"import": _imp_table(history=[], unparsed=[])})))
+
+    # Missingness (spec 8.3): closed rows, closed reasons, schema fields only, never a supplied, required,
+    # exempt or extension field; every closed reason is accepted.
+    for _reason in IMPORTED_MISSINGNESS_REASONS:
+        check("imported-reason-ok-" + _reason, _imp_ok(_imp_pd(unrecorded=[
+            {"field": "updated_at", "reason": _reason}, _pd_rows[1]])))
+    for _rows, _needle in (
+            ({"field": "updated_at"}, "unrecorded must be an array"),
+            (_pd_rows + ["updated_at"], "must be a {field, reason} table"),
+            ([{"field": "updated_at", "reason": "lost"}, _pd_rows[1]], ".reason 'lost' is not one of"),
+            ([{"field": "updated_at"}, _pd_rows[1]], ".reason None is not one of"),
+            ([dict(_pd_rows[0], note="x"), _pd_rows[1]], "unknown key 'note'"),
+            (_pd_rows + [{"field": 3, "reason": "unparsed"}], ".field must be a string"),
+            (_pd_rows + [{"field": "colour", "reason": "unparsed"}], "no field of the pending_decision"),
+            (_pd_rows + [{"field": "severity", "reason": "unparsed"}], "no field of the pending_decision"),
+            (_pd_rows + [{"field": "title", "reason": "unparsed"}], "missingness cannot waive"),
+            (_pd_rows + [{"field": "proposed_from", "reason": "not_applicable"}], "exempt optional"),
+            (_pd_rows + [{"field": "links", "reason": "not_applicable"}], "exempt optional"),
+            (_pd_rows + [{"field": "x-aiqt", "reason": "not_applicable"}], "x-<vendor> extension"),
+            (_pd_rows + [{"field": "created_at", "reason": "ambiguous"}], "claims the supplied field")):
+        check("imported-unrecorded-refused-" + _needle, _imp_refused(_imp_pd(unrecorded=_rows), _needle))
+
+    # Historical timestamps and supplied values keep their declared types (spec 8.3).
+    check("imported-decided-at-after-import-refused", _imp_refused(
+        _imp_pd(decided_at="2026-09-01T00:00:00Z", unrecorded=_pd_rows[:1]), "decided_at is later than"))
+    check("imported-decided-at-supplied-ok", _imp_ok(
+        _imp_pd(decided_at="2025-03-02T09:00:00Z", unrecorded=_pd_rows[:1])))
+    check("imported-date-only-timestamp-refused", _imp_refused(
+        _imp_pd(decided_at="2025-03-02", unrecorded=_pd_rows[:1]), "decided_at must be an RFC 3339"))
+    check("imported-updated-before-created-refused", _imp_refused(
+        _imp_pd(updated_at="2025-02-01T00:00:00Z", unrecorded=_pd_rows[1:]), "must not precede"))
+    check("imported-blank-decision-refused", _imp_refused(_imp_pd(decision=" "), "decision must be a non-empty"))
+    check("imported-summary-nonstring-refused", _imp_refused(_imp_md(summary=3), "summary must be a string",
+                                                             registered_vendors=REG))
+    check("imported-unregistered-vendor-refused", _imp_refused(_imp_md(), "not registered"))
+    # Open-state history keeps its supplied decision text (no current bundle rule applies to history).
+    check("imported-history-bundle-not-applied", _imp_ok(_imp_pd(status="open")))
+
+    # Links (spec 8.6): imported-to-imported only, closed vocabulary and the relation type constraints.
+    for _links, _needle in (
+            ([{"rel": "relates", "id": "MD-1"}], "imported-to-clean link"),
+            ([{"rel": "relates", "id": "imported:LF-1"}], "imported series refuses"),
+            ([{"rel": "blesses", "id": "imported:MD-1"}], ".rel 'blesses' is not one of"),
+            ([{"rel": "exemplifies", "id": "imported:MD-1"}], "exemplifies must target"),
+            ([{"rel": "relates", "id": "imported:MD-1", "why": "x"}], "unknown key 'why'"),
+            ([{"rel": "relates", "id": "imported:MD-01"}], "is not a well-formed id"),
+            ("imported:MD-1", "links must be an array")):
+        check("imported-links-refused-" + _needle, _imp_refused(_imp_md(links=_links), _needle,
+                                                                registered_vendors=REG))
+
+    # Per-type exemptions (spec 8.3): an imported worklog row carries the full imported envelope and owes
+    # a row for an omitted summary; a reference owes one for omitted refs; a standalone done is legal.
+    _wl = {"id": "imported:WL-3", "type": "worklog", "status": "recorded", "title": "Legacy fix entry",
+           "actor": dict(_IMP_ACTOR), "date": "2024-11-02T00:00:00Z", "kind": "fixed",
+           "summary": "Fixed the stale view", "unrecorded": [{"field": "detail", "reason": "not_applicable"}],
+           "import": _imp_table()}
+    _wl_nosum = {k: v for k, v in _wl.items() if k != "summary"}
+    check("imported-valid-worklog", _imp_ok(_wl, expected_type="worklog"))
+    check("imported-worklog-summary-row-ok", _imp_ok(dict(_wl_nosum, unrecorded=_wl["unrecorded"] + [
+        {"field": "summary", "reason": "not_recorded_in_source"}])))
+    check("imported-worklog-summary-omitted-refused", _imp_refused(_wl_nosum, "'summary' of the worklog schema"))
+    check("imported-worklog-proposed-refused", _imp_refused(dict(_wl, status="recorded/proposed"), "status:"))
+    check("imported-worklog-created-at-unknown", _imp_refused(dict(_wl, created_at=TS), "unknown key 'created_at'"))
+    check("imported-worklog-bad-kind-refused", _imp_refused(dict(_wl, kind="merged"), "worklog kind 'merged'"))
+    check("imported-worklog-registered-kind-ok", _imp_ok(dict(_wl, kind="perf"), registered_kinds=["perf"]))
+    check("imported-worklog-bad-kinds-control-refused", _imp_refused(dict(_wl, kind="p"), "registered worklog kinds",
+                                                                     registered_kinds="perf"))
+    check("imported-worklog-multiline-summary-refused", _imp_refused(dict(_wl, summary="a\nb"), "single line"))
+    _rf = {"id": "imported:RF-2", "type": "reference", "status": "recorded", "title": "Old design note",
+           "created_at": TS, "updated_at": TS, "actor": dict(_IMP_ACTOR), "import": _imp_table()}
+    check("imported-reference-refs-omitted-refused", _imp_refused(_rf, "'refs' of the reference schema"))
+    check("imported-reference-refs-row-ok", _imp_ok(dict(_rf, unrecorded=[
+        {"field": "refs", "reason": "not_recorded_in_source"}])))
+    check("imported-reference-empty-refs-refused", _imp_refused(dict(_rf, refs=[]), "at least one ref"))
+    _dn = {"id": "imported:DN-5", "type": "done", "status": "recorded", "title": "Shipped the importer",
+           "created_at": TS, "updated_at": TS, "actor": dict(_IMP_ACTOR), "import": _imp_table()}
+    check("imported-standalone-done-ok", _imp_ok(_dn))
+    check("imported-done-receipt-ok", _imp_ok(dict(_dn, links=[{"rel": "receipt_of", "id": "imported:BI-5"}])))
+    check("imported-done-receipt-target-refused", _imp_refused(
+        dict(_dn, links=[{"rel": "receipt_of", "id": "imported:FN-5"}]), "must target a backlog_item"))
+    check("imported-done-two-receipts-refused", _imp_refused(dict(_dn, links=[
+        {"rel": "receipt_of", "id": "imported:BI-5"}, {"rel": "receipt_of", "id": "imported:BI-6"}]),
+        "at most one receipt_of"))
+    _cn = {"id": "imported:CN-1", "type": "contribution", "status": "sent", "title": "Upstream patch",
+           "created_at": TS, "updated_at": TS, "actor": dict(_IMP_ACTOR), "recipient": "peer",
+           "dedup_class": "patch", "content_digest": "abc",
+           "delivery": {"channel": "mail", "ref": "msg-1", "sent_at": TS}, "import": _imp_table()}
+    check("imported-valid-contribution", _imp_ok(_cn))
+    check("imported-delivery-after-import-refused", _imp_refused(dict(_cn, delivery=dict(
+        _cn["delivery"], sent_at="2026-08-13T00:00:00Z")), "delivery.sent_at is later than"))
+    check("imported-delivery-unknown-key-refused", _imp_refused(dict(_cn, delivery=dict(
+        _cn["delivery"], via="x")), "contribution.delivery unknown key 'via'"))
+    check("imported-delivery-omitted-row-owed", _imp_refused(
+        {k: v for k, v in _cn.items() if k != "delivery"}, "'delivery' of the contribution schema"))
+    _bl = {"id": "imported:BL-1", "type": "block", "status": "active", "title": "Hold the release",
+           "created_at": TS, "updated_at": TS, "actor": dict(_IMP_ACTOR),
+           "scopes": ["imported:BI-1", "BI-2"], "import": _imp_table()}
+    check("imported-valid-block", _imp_ok(_bl))
+    for _sc in ([], ["imported:LF-1"], ["ZZ-1"], "BI-1", [7]):
+        check("imported-block-scopes-refused-" + repr(_sc), _imp_refused(dict(_bl, scopes=_sc), "block.scopes"))
+
+    # The missingness reasons equal the adopt import policy's (one vocabulary). The adopt layer is imported
+    # here, lazily, so this core module takes no load-time edge on it.
+    import _opf_adopt
+    check("imported-reasons-match-adopt-policy",
+          tuple(_opf_adopt.MISSINGNESS_REASONS) == IMPORTED_MISSINGNESS_REASONS)
+
+    # Adversarial sweep: a non-string, non-table, unhashable or oversized value (or an oversized-int key) at
+    # every record, import, row and actor position is a structured refusal, never a crash and never VALID.
+    _huge = 10 ** 5000
+    _adv = (None, True, _huge, {"k": [1]}, [[]])
+
+    def _imp_adv(name, rec):
+        try:
+            res = validate_imported_record(rec, registered_vendors=REG)
+        except Exception as exc:   # an uncontrolled exception is a fail-open crash: record it, never raise
+            check("imported-adv-no-crash-" + name + "-" + type(exc).__name__, False)
+            return
+        check("imported-adv-refused-" + name, res.status in (INVALID, CANNOT_EVALUATE) and bool(res.findings))
+
+    _adv_paths = [(k,) for k in _imp_pd()] + [("import", k) for k in _imp_pd()["import"]] + [
+        ("unrecorded", 0, "field"), ("unrecorded", 0, "reason"), ("import", "history", 0, "field"),
+        ("import", "history", 0, "value"), ("import", "unparsed", 0), ("import", "span", 0),
+        ("actor", "kind"), ("actor", "id")]
+    for _path in _adv_paths:
+        for _j, _val in enumerate(_adv):
+            _rec = _imp_pd()
+            _node = _rec
+            for _step in _path[:-1]:
+                _node = _node[_step]
+            _node[_path[-1]] = _val
+            _imp_adv("/".join(str(s) for s in _path) + "#" + str(_j), _rec)
+    for _where in ("record", "import", "row", "history", "actor"):
+        _rec = _imp_pd()
+        _target = {"record": _rec, "import": _rec["import"], "row": _rec["unrecorded"][0],
+                   "history": _rec["import"]["history"][0], "actor": _rec["actor"]}[_where]
+        _target[_huge] = 1
+        _imp_adv("huge-key-" + _where, _rec)
+    _imp_adv("huge-id", _imp_pd(id=_huge))
+    _imp_adv("huge-link", _imp_md(links=[{"rel": _huge, "id": _huge}]))
 
     if failures:
         print("OPF-SCHEMA SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked))
