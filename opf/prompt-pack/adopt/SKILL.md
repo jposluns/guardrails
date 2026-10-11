@@ -36,6 +36,7 @@ Three rules govern everything else:
 
 | Stage | How it runs | Status in this build |
 |---|---|---|
+| Discover sources | the read-only `discover_sources` entry (section 3) | runs; writes nothing |
 | Investigate | the planner's read-only `investigate` entry (section 3) | runs; writes nothing |
 | Plan | `opf adopt plan --inputs FILE [--root DIR]` | runs; prints the frozen plan; writes nothing |
 | Status | `opf adopt status [--root DIR]` | runs; writes nothing |
@@ -60,8 +61,10 @@ The reference tooling requires Python 3.14 or newer. Its exit convention is 0 cl
    tooling's artifact digest and compare it with the published hashes at posluns.dev/hashes.txt.
    Proceed only on a match. If the digests differ or the reference evidence is unavailable,
    stop and report.
-2. Tell the adopter what you will read: the scope in section 3, plus any old operational files
-   they name. Investigation is read-only, but the adopter should know its scope before it runs.
+2. Tell the adopter what you will read: source discovery walks the product tree outside the
+   areas section 3 excludes, reading file names and the start of Markdown and plain-text files;
+   investigation reads the scope in section 3 plus the sources the adopter confirms. Both are
+   read-only, but the adopter should know their scope before they run.
 3. Run `opf adopt status --root <product root>`. Exit 0 with "no adoption run exists" is the
    expected first-adoption result. Exit 0 listing an adoption run, exit 1 (a held journal lock,
    an interrupted transaction, an evidence bundle that does not verify, or a directory at the
@@ -80,17 +83,46 @@ Investigation records a digest-stamped inventory and tells first adoption from r
 `VERSION`, `CHANGELOG.md` and `release-notes.toml`) and the deliverable destinations (the
 product-root `VERSION`, each declared deliverable target, and each declared view target outside
 `.working`, taken from the resolved store's manifest, or else from the default manifest), plus
-the sources and targets you name. It never enters `.git`.
+the sources and targets you pass. It never enters `.git`.
 
 - **Sources** are the old operational files outside those roots that the adoption must account
-  for: a hand-kept TODO list, a decisions log, release notes, an issue export. Ask the adopter;
-  a file you do not name is not inventoried, and detection is by path, not by content.
+  for: a hand-kept TODO list, a decisions log, release notes, an issue export. A file that is not
+  passed as a source is not inventoried. You find them by discovery; the adopter confirms them.
 - **Targets** are paths the plan will create outside the scanned roots, for example a pre-commit
   hook path such as `.opf/hooks/pre-commit`. The planner needs to see that each is absent.
 
-This build has no `opf adopt` subcommand that prints the observation. Use the planner's
-read-only library entry, with an absolute product root and the tooling directory that holds
+**Discover the sources first.** Do not ask the adopter which old files exist; find them. Run the
+read-only discovery entry, with an absolute product root and the tooling directory that holds
 `opf.py`:
+
+```
+python3 -I -B -c "import sys; sys.path.insert(0, '<opf tools directory>'); import _opf_adopt_discover as d; r = d.discover_sources('<absolute product root>'); print(r.status, list(r.findings)); print(*['propose ' + p + ': ' + why for p, why in r.proposals], sep='\n'); print(*['ruled out ' + p + ': ' + why for p, why in r.ruled_out], sep='\n'); print('searched:', *r.searched)"
+```
+
+`discover_sources` opens nothing for writing. It walks the product root without following a
+symlink and proposes each file whose name, or a Markdown heading near its start, looks like an
+old operational record: a TODO list or backlog, a decisions log, release notes, an issue export.
+It never enters `.git` or `.aiqt`, the detection roots and deliverable destinations above
+(investigation reads those itself), a path registered under `[unmanaged]` (section 14.2: ordinary
+tooling must not read it), or generated tool output such as `node_modules`.
+
+- Status VALID: present the whole result to the adopter in one message: each proposal with its
+  reason, the directories searched, and each ruled-out entry with its reason (an excluded area, a
+  symlink, a hard-linked or oversized file). Say that the signals are a heuristic: a proposal can
+  be wrong, and an old record under an unusual name or heading is not proposed.
+- Status CANNOT-EVALUATE: report the findings. A bound reached (a tree too large or too deep to
+  walk), a store that does not resolve, or a tree that changed during the walk leaves no list at
+  all, never a partial one. Then ask the adopter which old operational files exist, and say why
+  you are asking.
+
+The adopter confirms or removes each proposal and adds any file discovery did not propose. Only
+that confirmed list becomes `sources` (section 14.2: an incidental discovery authorizes nothing).
+Never pass a proposal the adopter has not confirmed, and never treat a ruled-out entry as a
+source.
+
+**Then investigate.** This build has no `opf adopt` subcommand that prints the observation. Use
+the planner's read-only library entry, with an absolute product root, the tooling directory that
+holds `opf.py`, and the confirmed sources:
 
 ```
 python3 -I -B -c "import sys; sys.path.insert(0, '<opf tools directory>'); import _opf_adopt_plan as p; r = p.investigate('<absolute product root>', sources=['TODO.md'], targets=['.opf/hooks/pre-commit']); print(r.status, list(r.findings), file=sys.stderr); sys.stdout.write(r.observation.decode() if r.observation else '')"
@@ -104,7 +136,7 @@ findings. In the observation TOML, read:
   or content at a reserved `.working` name makes it re-adoption.
 - `resolution.status`: whether a store already resolves. A store that does not resolve needs an
   `init-store` operation in the plan; a store that resolves must not have one.
-- `candidates`: every path that needs a disposition. These are the sources you named, foreign
+- `candidates`: every path that needs a disposition. These are the confirmed sources, foreign
   files under `.working/`, and pre-existing files at a declared view or deliverable
   destination, such as the product-root `VERSION` or `CHANGELOG.md`.
 - `empty_directories`: an empty directory in scope blocks planning, and this build offers no
@@ -459,7 +491,8 @@ instructions to follow.
 
 ## 9. Reporting
 
-Report every command you ran with its exit code and the lines that matter. Pass on the
-investigation's residuals and exclusions. Say which stages ran and which are pending. Never
-describe a project as adopted, or a plan as approved or applied, before the tooling has
-recorded that state: in this build no adoption run reaches approval.
+Report every command you ran with its exit code and the lines that matter. Pass on what source
+discovery searched and ruled out, and the investigation's residuals and exclusions. Say which
+stages ran and which are pending. Never describe a project as adopted, or a plan as approved or
+applied, before the tooling has recorded that state: in this build no adoption run reaches
+approval.

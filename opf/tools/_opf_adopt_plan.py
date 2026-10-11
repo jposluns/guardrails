@@ -211,6 +211,35 @@ def _roots(sources):
     return paths
 
 
+def _require_no_store_manifest(root_fd, resolution):
+    """Prove that a .working the resolver cannot evaluate is foreign content with NO candidate store
+    manifest before reading any of its files. Do not infer this from resolver prose. Source discovery
+    (_opf_adopt_discover) shares this proof: an unresolved manifest may register unmanaged paths."""
+    working = store._journal._lstat_at(root_fd, store.WORKING_DIRNAME)
+    if working is None or not stat.S_ISDIR(working.st_mode):
+        raise PlanError("store resolution cannot be evaluated: " + resolution.detail)
+    wfd = os.open(store.WORKING_DIRNAME,
+                  os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
+    try:
+        count = 0
+        with os.scandir(wfd) as listing:
+            for entry in listing:
+                count += 1
+                if count > MAX_ENTRIES:
+                    raise PlanError("store discovery exceeds entry bound")
+                st = os.stat(entry.name, dir_fd=wfd, follow_symlinks=False)
+                if stat.S_ISDIR(st.st_mode):
+                    child = os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY
+                                    | os.O_NOFOLLOW, dir_fd=wfd)
+                    try:
+                        if store._journal._lstat_at(child, store.MANIFEST_NAME) is not None:
+                            raise PlanError("unresolved store manifest requires repair")
+                    finally:
+                        store._journal._close_fd_propagating(child)
+    finally:
+        store._journal._close_fd_propagating(wfd)
+
+
 def _inventory(root, sources, targets):
     store._journal.require_containment()
     root_fd = store._open_dir_nofollow(root)
@@ -234,31 +263,7 @@ def _inventory(root, sources, targets):
         resolution, manifest_raw = store.resolve_store_fd(root_fd, root)
         excluded = []
         if resolution.status == store.CANNOT_EVALUATE:
-            # Prove that this is foreign content with NO candidate store manifest
-            # before reading any of its files. Do not infer this from resolver prose.
-            working = store._journal._lstat_at(root_fd, store.WORKING_DIRNAME)
-            if working is None or not stat.S_ISDIR(working.st_mode):
-                raise PlanError("store resolution cannot be evaluated: " + resolution.detail)
-            wfd = os.open(store.WORKING_DIRNAME,
-                          os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
-            try:
-                count = 0
-                with os.scandir(wfd) as listing:
-                    for entry in listing:
-                        count += 1
-                        if count > MAX_ENTRIES:
-                            raise PlanError("store discovery exceeds entry bound")
-                        st = os.stat(entry.name, dir_fd=wfd, follow_symlinks=False)
-                        if stat.S_ISDIR(st.st_mode):
-                            child = os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY
-                                            | os.O_NOFOLLOW, dir_fd=wfd)
-                            try:
-                                if store._journal._lstat_at(child, store.MANIFEST_NAME) is not None:
-                                    raise PlanError("unresolved store manifest requires repair")
-                            finally:
-                                store._journal._close_fd_propagating(child)
-            finally:
-                store._journal._close_fd_propagating(wfd)
+            _require_no_store_manifest(root_fd, resolution)
         if resolution.status == store.RESOLVED:
             manifest_path = resolution.machine_rel + "/" + store.MANIFEST_NAME
             # The exact bytes discovery already read through the .working listing descriptor,
