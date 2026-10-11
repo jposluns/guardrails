@@ -20,11 +20,29 @@ failure this gate exists to catch); there is deliberately no accept, update, or 
   check_selftest_execution.py --self-test    synthetic manifests and fake runners assert every leg fires
 
 The child is launched [sys.executable, -I, -B, -c, <shim>, <runner's directory>, <runner>, <private
-abs path>]: the shim imports tools/_selftest_exit_report.py from beside the runner and hands it
-control, so that module's observation hooks (its audit hook, threading.excepthook wrapper, and
-threading._shutdown wrapper) are installed BEFORE any runner statement, import-time included, and the
-runner then executes as __main__ (the real sys.modules["__main__"] for the whole run, exit handlers
-included) with [<runner>, --execution-report, <private abs path>] as its argv.
+abs path>, <row args>...]: the shim imports tools/_selftest_exit_report.py from beside the runner and
+hands it control, so that module's observation hooks (its audit hook, threading.excepthook wrapper,
+and threading._shutdown wrapper) are installed BEFORE any runner statement, import-time included, and
+the runner then executes as __main__ (the real sys.modules["__main__"] for the whole run, exit handlers
+included) with [<runner>, <row args>..., --execution-report, <private abs path>] as its argv; a row
+with no args key launches exactly as before, with [<runner>, --execution-report, <private abs path>].
+
+SPLIT SUITES. A [[suite]] row may carry one optional key beyond id, runner and expected-check-ids:
+args, a non-empty array of literal arguments forwarded to the runner's launch ahead of the gate's own
+--execution-report pair. Each argument must be a string of at most ROW_ARG_MAX characters matching
+ROW_ARG_RE (printable ASCII from a closed set: a letter or digit first, or one or two dashes and then
+one; no whitespace, quote, shell, glob or expansion character, and no leading '/', '.', '@' or '~'),
+and an argument that names the gate's own --execution-report option, attaches a value to it, or
+abbreviates it (an argparse-style runner resolves a unique prefix to the full option) is refused, so
+no row can redirect or suppress the report this gate reconciles; any other shape (a non-array, an
+empty array, a non-string element) is refused too. Rows whose runners resolve (os.path.realpath) to
+one path form a GROUP: before any launch, every row of the requested suite's group must carry args
+that no other row of the group carries, the rows' expected sets must be pairwise disjoint, and their
+union must equal the runner's static check() set exactly; a gap, an overlap, an extra id, a missing
+or repeated args list, or a runner path that cannot be resolved is cannot-evaluate. A single-row
+group is held, as before, to expected set == static set, with the same diagnostics. The runtime layer
+then reconciles the launched row's executed set against that row's own expected set, so a runner that
+ignores its arguments and runs every check is an extra-id finding (exit 1).
 The child runs with
 cwd at the repo root and a git-neutral environment built in two layers: HOME and XDG_CONFIG_HOME are
 pinned to a fresh empty directory, so the per-user global config, ignore, and attributes surfaces are
@@ -106,7 +124,9 @@ or extra check id, or a set-complete child that itself reported assertion failur
 cannot-evaluate (an unreadable, malformed, or suite-missing expectation manifest; a runner that is
 absent, non-regular, a symlink, or escapes the repo; runner source that does not parse or carries an
 unresolvable, aliased (a non-call check reference), comprehension-bound, or duplicate check id; a
-static source-to-manifest set mismatch; an unconfirmable repo
+static source-to-manifest set mismatch (for rows that share a runner, a group whose expected sets do
+not partition the static set, or whose args are missing or repeated); a malformed or
+evidence-redirecting args list; an unresolvable runner path; an unconfirmable repo
 root; unavailable temp storage; a launch failure; a child return code outside {0, 1}; a child error
 stream that differs by any byte from the suite's declared bytes; or an invalid, unfinalized, or
 exit-status-mismatched report).
@@ -146,7 +166,14 @@ reconcile still proves the executed set independently. Repo-root confirmation is
 proxy anchored to this gate's own file, not a full git-identity check; and the static scan and the
 launch read the runner's source at two moments, so a concurrent same-user writer between them is
 outside this repo's sole-orchestrator threat model (the runtime layer still reconciles what
-actually ran). The fail-closed child contract has two permitted residuals. First, a destructor fault
+actually ran). The group rule proves a PARTITION of the static set for the requested suite's group
+only, once per invocation: it does not prove that every row of a group is ever launched (a row never
+run leaves its ids unexecuted, outside this gate, whose launch roster is the parity gate's surface),
+nor that the runner's handling of its args selects the declared subset other than through the runtime
+reconcile of the row actually launched; and a runner reached through a hard link or a byte copy under
+another path resolves to another path, so it forms its own group, held alone to the whole static set
+(fail-safe: an undetected group member can only be refused, never pass with a subset). The
+fail-closed child contract has two permitted residuals. First, a destructor fault
 at late interpreter teardown can pass silently. The residual is a CLASS, not a list of placements: a
 destructor of an object whose last reference is held by interpreter-level state that CPython clears
 after it has dropped sys.stderr (for example the codec search registry (codecs.register), audit
@@ -185,6 +212,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -207,6 +235,17 @@ except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships to
 
 MANIFEST_TOP_KEYS = {"format-version", "suite"}
 SUITE_ROW_KEYS = {"id", "runner", "expected-check-ids"}
+# The one optional row key: literal arguments forwarded to the runner's launch ahead of the gate's own
+# --execution-report pair (_row_args_problem holds the accepted shape).
+SUITE_ROW_OPTIONAL_KEYS = {"args"}
+# One forwarded argument: printable ASCII from a closed set (no whitespace, quote, shell, glob or
+# expansion character), starting with a letter or digit, or with one or two dashes and then one (so
+# no leading '/', '.', '@' or '~', and no bare '-' or '--' end-of-options marker).
+ROW_ARG_RE = re.compile(r"(?:--?)?[A-Za-z0-9][A-Za-z0-9._,:=/+-]*")
+ROW_ARG_MAX = 200
+# The gate's own evidence option: no forwarded argument may name it, attach a value to it, or
+# abbreviate it.
+REPORT_OPTION = "--execution-report"
 REPORT_KEYS = {"format_version", "suite", "check_ids", "exit_code", "finalized"}
 REPORT_FORMAT_VERSION = 2
 # Per suite id, the exact bytes (a bytes value) the child's WHOLE error stream must equal on a run that
@@ -275,8 +314,10 @@ def _manifest_rows(data, manifest_path):
     seen_ids = set()
     for index, row in enumerate(suites):
         where = "{}: suite[{}]".format(manifest_path, index)
-        if not isinstance(row, dict) or set(row) != SUITE_ROW_KEYS:
-            _cannot("{}: keys must be exactly {}".format(where, sorted(SUITE_ROW_KEYS)))
+        if (not isinstance(row, dict) or not SUITE_ROW_KEYS <= set(row)
+                or not set(row) <= SUITE_ROW_KEYS | SUITE_ROW_OPTIONAL_KEYS):
+            _cannot("{}: keys must be exactly {} (optionally also {})".format(
+                where, sorted(SUITE_ROW_KEYS), sorted(SUITE_ROW_OPTIONAL_KEYS)))
             return None
         sid = row["id"]
         if not isinstance(sid, str) or not sid or _has_ctrl(sid):
@@ -305,7 +346,33 @@ def _manifest_rows(data, manifest_path):
                 _cannot("{}: duplicate expected check id {!r}".format(where, cid))
                 return None
             row_seen.add(cid)
+        if "args" in row:
+            problem = _row_args_problem(row["args"])
+            if problem is not None:
+                _cannot("{}: {}".format(where, problem))
+                return None
     return suites
+
+
+def _row_args_problem(args):
+    """None when args is a forwardable argument list, else the reason it is refused: a non-empty array
+    of strings, each at most ROW_ARG_MAX characters and matching ROW_ARG_RE, none naming, carrying a
+    value for, or abbreviating the gate's own REPORT_OPTION (a runner resolving a unique prefix, as
+    argparse does, would otherwise read it as that option and redirect or suppress the report)."""
+    if not isinstance(args, list) or not args:
+        return "args must be a non-empty array of strings (omit the key for no arguments)"
+    for arg in args:
+        if type(arg) is not str:
+            return "args element {!r} is not a string".format(arg)
+        if len(arg) > ROW_ARG_MAX or not ROW_ARG_RE.fullmatch(arg):
+            return ("args element {!r} is not a literal argument (at most {} characters from "
+                    "[A-Za-z0-9._,:=/+-], a letter or digit first, or one or two dashes and then "
+                    "one)".format(arg, ROW_ARG_MAX))
+        name = arg.split("=", 1)[0]
+        if name.startswith("--") and (REPORT_OPTION.startswith(name) or name.startswith(REPORT_OPTION)):
+            return ("args element {!r} names, abbreviates, or attaches a value to the gate's own {} "
+                    "option".format(arg, REPORT_OPTION))
+    return None
 
 
 def _runner_path(root, runner):
@@ -329,6 +396,49 @@ def _runner_path(root, runner):
         _cannot("runner {} escapes the repo root {}".format(path, root))
         return None
     return path
+
+
+def _runner_group(root, suites, row):
+    """The rows whose runner resolves to the same path as row's (row included, in manifest order), or
+    None after printing (the caller exits 2 and NEVER launches). Membership is by resolved path, so
+    two spellings of one runner form one group; a runner path that cannot be resolved is
+    cannot-evaluate, never a guess that it names some other file."""
+    try:
+        key = os.path.realpath(Path(root) / row["runner"], strict=False)
+        return [other for other in suites
+                if os.path.realpath(Path(root) / other["runner"], strict=False) == key]
+    except (OSError, ValueError, RuntimeError) as exc:
+        _cannot("cannot resolve the runner paths that group suite {!r} with the rows sharing its "
+                "runner: {}".format(row["id"], exc))
+        return None
+
+
+def _group_problems(group, source_set):
+    """The group rule for two or more rows that share one runner, as diagnostic lines (none when it
+    holds): every row carries args, no two rows carry the same args, the rows' expected sets are
+    pairwise disjoint, and their union equals the runner's static check() set exactly."""
+    lines, launches, owners = [], {}, {}
+    for row in group:
+        if "args" not in row:
+            lines.append("  suite {} shares its runner but carries no args, so its launch cannot "
+                         "differ from the others'".format(row["id"]))
+        else:
+            launch = tuple(row["args"])
+            if launch in launches:
+                lines.append("  suites {} and {} carry the same args {}".format(
+                    launches[launch], row["id"], list(launch)))
+            else:
+                launches[launch] = row["id"]
+        for cid in row["expected-check-ids"]:
+            owners.setdefault(cid, []).append(row["id"])
+    for cid in sorted(owners):
+        if len(owners[cid]) > 1:
+            lines.append("  overlap: {} registered by suites {}".format(cid, ", ".join(owners[cid])))
+    for cid in sorted(source_set - set(owners)):
+        lines.append("  gap: source check registered by no suite of the group: {}".format(cid))
+    for cid in sorted(set(owners) - source_set):
+        lines.append("  extra: registered id has no source check(): {}".format(cid))
+    return lines
 
 
 class _CheckIdVisitor(ast.NodeVisitor):
@@ -553,10 +663,11 @@ def _stderr_fault(blob, suite_id):
 
 def run_suite(root, suite_id):
     """Validate the manifest, statically reconcile the runner's source check() set against it BEFORE
-    any launch, then launch the registered runner with a private report path, forward its full
-    output, require an error stream byte-identical to the suite's declared bytes (empty unless
-    declared), and reconcile the executed set from the report finalized at the child's exit. Returns
-    the gate exit code."""
+    any launch (the whole set for a single-row runner; for rows that share a runner, the group
+    partition), then launch the registered runner with the row's args and a private report path,
+    forward its full output, require an error stream byte-identical to the suite's declared bytes
+    (empty unless declared), and reconcile the executed set from the report finalized at the child's
+    exit. Returns the gate exit code."""
     root = Path(root)
     manifest_path = root / "tools" / "selftest_checks.toml"
     suites = _manifest_suites(manifest_path)
@@ -570,12 +681,25 @@ def run_suite(root, suite_id):
     runner = _runner_path(root, row["runner"])
     if runner is None:
         return 2
+    group = _runner_group(root, suites, row)
+    if group is None:
+        return 2
     source_ids, error = _source_check_ids(runner)
     if error is not None:
         _cannot(error)
         return 2
     source_set = set(source_ids)
-    if source_set != expected:
+    if len(group) > 1:
+        problems = _group_problems(group, source_set)
+        if problems:
+            _cannot("suite {}: the {} rows of {} sharing its runner do not partition the runner's "
+                    "static check() set; rows that share a runner need pairwise distinct args, "
+                    "pairwise disjoint expected sets, and a union equal to the source set exactly "
+                    "before any launch".format(suite_id, len(group), manifest_path))
+            for line in problems:
+                print(line, file=sys.stderr)
+            return 2
+    elif source_set != expected:
         _cannot("suite {}: the runner's static check() set does not match {}; the manifest must "
                 "mirror the source exactly before any launch".format(suite_id, manifest_path))
         for cid in sorted(source_set - expected):
@@ -603,13 +727,15 @@ def run_suite(root, suite_id):
             return 2
         # The bootstrap shim: the helper module beside the runner installs the observation hooks
         # BEFORE any runner statement (import-time included), then runs the runner as __main__ with
-        # the [<runner>, --execution-report, <path>] argv it expects (_bootstrap_main documents the
-        # shim's own argv contract). A raw launch of the runner would leave its import-time and
-        # pre-arm code outside the hooks, the round-2 pre-arm thread gap.
+        # the [<runner>, <row args>..., --execution-report, <path>] argv it expects (_bootstrap_main
+        # documents the shim's own argv contract; the row's args, validated by _row_args_problem,
+        # follow the report path here and are absent for a row with no args key). A raw launch of
+        # the runner would leave its import-time and pre-arm code outside the hooks, the round-2
+        # pre-arm thread gap.
         bootstrap = ("import sys; sys.path.insert(0, sys.argv[1]); "
                      "import _selftest_exit_report; _selftest_exit_report._bootstrap_main()")
         command = [sys.executable, "-I", "-B", "-c", bootstrap,
-                   str(runner.parent), str(runner), report_path]
+                   str(runner.parent), str(runner), report_path] + list(row.get("args", ()))
         # Git-neutral, interpreter-neutral child environment. The git side has two layers. Layer
         # one, GIT_*: drop every ambient GIT_*
         # variable, then pin the global and system config surfaces to os.devnull, so a hostile
@@ -700,6 +826,30 @@ def _manifest_text(ids=None, runner="tools/fake_runner.py", header="format-versi
     rendered = ", ".join('"{}"'.format(cid) for cid in (GOOD_IDS if ids is None else ids))
     return (header + '\n\n[[suite]]\nid = "demo"\nrunner = "' + runner
             + '"\nexpected-check-ids = [' + rendered + ']\n')
+
+
+def _group_text(rows, runner="tools/fake_runner.py", header="format-version = 1\n"):
+    """A manifest of several [[suite]] rows, each (suite id, ids, args[, runner]): args None omits the
+    key, a list renders as a TOML array, and a str is raw TOML text (a malformed value)."""
+    text = header
+    for row in rows:
+        sid, ids, args = row[:3]
+        text += "\n[[suite]]\nid = {}\nrunner = {}\nexpected-check-ids = {}\n".format(
+            json.dumps(sid), json.dumps(row[3] if len(row) > 3 else runner), json.dumps(ids))
+        if args is not None:
+            text += "args = {}\n".format(args if isinstance(args, str) else json.dumps(args))
+    return text
+
+
+def _lane_body(lanes):
+    """A fake runner tail that records its argv beside itself, then reports, under the suite id its
+    lane maps to, the ids of the lane its --lane argument names (lane None with no --lane)."""
+    return ("open(os.path.join(here, 'argv.json'), 'w').write(json.dumps(sys.argv))\n"
+            "_lanes = {!r}\n"
+            "_lane = sys.argv[sys.argv.index('--lane') + 1] if '--lane' in sys.argv else None\n"
+            "_suite, _ids = _lanes[_lane]\n"
+            "_selftest_exit_report.arm(report, _suite, _ids)\n"
+            "_selftest_exit_report.exit_with(0)\n".format(lanes))
 
 
 def _report_body(ids, rc, suite="demo", before_exit=""):
@@ -853,7 +1003,7 @@ def self_test():
                 "sys.path.insert(0, here)\n"
                 "import _selftest_exit_report\n"
                 "open(os.path.join(here, 'launched.marker'), 'w').close()\n"
-                "report = sys.argv[2]\n"
+                "report = sys.argv[-1]\n"
                 + (dead_checks(GOOD_IDS) if source_block is None else source_block)
                 + runner_body, encoding="utf-8")
         return root
@@ -866,6 +1016,15 @@ def self_test():
 
     def launched(root):
         return (root / "tools" / "launched.marker").exists()
+
+    def recorded_argv(root):
+        """The argv the fake runner recorded, consumed so that the next run must record afresh."""
+        path = root / "tools" / "argv.json"
+        if not path.exists():
+            return None
+        argv = json.loads(path.read_text(encoding="utf-8"))
+        path.unlink()
+        return argv
 
     try:
         # 1: exact match -> 0 with the machine-derived PASS line
@@ -1693,6 +1852,123 @@ def self_test():
         expect("st/stderr-undeclared-newline", _stderr_fault(b"\n", "demo") is None, False)
         expect("st/stderr-undeclared-empty", _stderr_fault(b"", "demo"), None)
 
+        # 27 (split suites): rows that share a runner form a group whose expected sets must be pairwise
+        # disjoint and union to the runner's static check() set exactly, each row carrying args no
+        # other row of the group carries, forwarded ahead of the gate's own --execution-report pair
+        # (the child records its argv); a gap, an overlap, an extra id, a missing or repeated args
+        # list, an unresolvable runner path, and a malformed or evidence-redirecting argument are each
+        # refused 2 before any launch; two spellings of one runner form one group; a singleton row
+        # is held to the whole set as before, its behaviour byte-identical beside a split group
+        lanes = {"one": ("demo-one", ["a/one"]), "two": ("demo-two", ["a/two", "a/three"]),
+                 None: ("demo", GOOD_IDS)}
+        one, two = ["--lane", "one"], ["--lane", "two"]
+        split = [("demo-one", ["a/one"], one), ("demo-two", ["a/two", "a/three"], two)]
+        root = build(_group_text(split), _lane_body(lanes))
+        runner_path = str(root / "tools" / "fake_runner.py")
+        for sid, lane, count in (("demo-one", "one", 1), ("demo-two", "two", 2)):
+            code, out, err = run(root, sid)
+            expect("st/group-{}-passes".format(lane), (code, err), (0, ""))
+            expect("st/group-{}-pass-line".format(lane),
+                   "PASS: suite {} executed {} unique registered checks".format(sid, count) in out, True)
+            argv = recorded_argv(root)
+            expect("st/group-{}-args-forwarded".format(lane),
+                   (argv[:-1], os.path.isabs(argv[-1])) if argv else None,
+                   ([runner_path, "--lane", lane, "--execution-report"], True))
+        valid_args = ["--lane-free", "-v", "--shard=1/3", "x.y_z", "A:B,C+D"]
+        root = build(_group_text([("demo", GOOD_IDS, valid_args)]), _lane_body(lanes))
+        code, _out, err = run(root)
+        expect("st/args-singleton-passes", (code, err), (0, ""))
+        argv = recorded_argv(root)
+        expect("st/args-singleton-forwarded", argv[:-1] if argv else None,
+               [str(root / "tools" / "fake_runner.py")] + valid_args + ["--execution-report"])
+        gap_named = "gap: source check registered by no suite of the group: a/three"
+        for label, rows, sids, named in (
+                ("gap", [("demo-one", ["a/one"], one), ("demo-two", ["a/two"], two)],
+                 ("demo-one", "demo-two"), gap_named),
+                ("overlap", [("demo-one", ["a/one", "a/two"], one),
+                             ("demo-two", ["a/two", "a/three"], two)],
+                 ("demo-one", "demo-two"), "overlap: a/two registered by suites demo-one, demo-two"),
+                ("extra", [("demo-one", ["a/one"], one),
+                           ("demo-two", ["a/two", "a/three", "a/rogue"], two)],
+                 ("demo-one", "demo-two"), "extra: registered id has no source check(): a/rogue"),
+                ("args-missing", [("demo-one", ["a/one"], None),
+                                  ("demo-two", ["a/two", "a/three"], two)],
+                 ("demo-one", "demo-two"), "suite demo-one shares its runner but carries no args"),
+                ("args-repeated", [("demo-one", ["a/one"], one),
+                                   ("demo-two", ["a/two", "a/three"], one)],
+                 ("demo-two",), "suites demo-one and demo-two carry the same args"),
+                ("respelled-runner-gap", [("demo-one", ["a/one"], one),
+                                          ("demo-two", ["a/two"], two, "tools/./fake_runner.py")],
+                 ("demo-one", "demo-two"), gap_named)):
+            for sid in sids:
+                root = build(_group_text(rows), _lane_body(lanes))
+                code, _out, err = run(root, sid)
+                expect("st/group-{}-{}-2".format(label, sid), code, 2)
+                expect("st/group-{}-{}-named".format(label, sid),
+                       ("do not partition" in err, named in err), (True, True))
+                expect("st/group-{}-{}-no-launch".format(label, sid), launched(root), False)
+        root = build(_group_text(split[:1] + [("demo-two", ["a/two", "a/three"], two,
+                                                "tools/unresolvable_runner.py")]), _lane_body(lanes))
+        real_realpath = os.path.realpath
+
+        def failing_realpath(path, *args, **kwargs):
+            if "unresolvable_runner" in str(path):
+                raise OSError("realpath refused by the self-test")
+            return real_realpath(path, *args, **kwargs)
+        os.path.realpath = failing_realpath
+        try:
+            code, _out, err = run(root, "demo-one")
+        finally:
+            os.path.realpath = real_realpath
+        expect("st/group-unresolvable-runner-2", code, 2)
+        expect("st/group-unresolvable-runner-named", "realpath refused by the self-test" in err, True)
+        expect("st/group-unresolvable-runner-no-launch", launched(root), False)
+        for label, value in (
+                ("string", '"--lane"'), ("empty", "[]"), ("int", "[1]"), ("bool", "[true]"),
+                ("float", "[1.5]"), ("nested", '[["--lane"]]'), ("table", "[{lane = 1}]"),
+                ("empty-string", '[""]'), ("report-option", '["--execution-report"]'),
+                ("report-option-attached", '["--execution-report=/tmp/elsewhere.json"]'),
+                ("report-option-abbreviated", '["--exec"]'),
+                ("report-option-abbreviated-attached", '["--exec=/tmp/elsewhere.json"]'),
+                ("report-option-suffixed", '["--execution-reports"]'),
+                ("end-of-options", '["--"]'), ("lone-dash", '["-"]'), ("triple-dash", '["---lane"]'),
+                ("expansion", '["$HOME"]'), ("glob", '["*"]'), ("whitespace", '["a b"]'),
+                ("control", '["a\\u0001"]'), ("newline", '["a\\n"]'), ("absolute", '["/tmp/x"]'),
+                ("relative-dot", '["./x"]'), ("at-file", '["@args.txt"]'), ("tilde", '["~"]'),
+                ("quote", '["a\'b"]'), ("non-ascii", '["caf\\u00e9"]'),
+                ("over-long", json.dumps(["a" * (ROW_ARG_MAX + 1)]))):
+            root = build(_group_text([("demo", GOOD_IDS, value)]), _report_body(GOOD_IDS, 0))
+            code, _out, err = run(root)
+            expect("st/args-{}-2".format(label), code, 2)
+            expect("st/args-{}-named".format(label), "suite[0]: args" in err, True)
+            expect("st/args-{}-no-launch".format(label), launched(root), False)
+        code, _out, err = run(build(_group_text([("demo", GOOD_IDS, ["a" * ROW_ARG_MAX])]),
+                                    _report_body(GOOD_IDS, 0)))
+        expect("st/args-at-length-bound-passes", (code, err), (0, ""))
+        # the singleton row, run alone and beside a split group of another runner: its return code,
+        # output, error stream and recorded argv are byte-identical (root paths normalized), on a
+        # pass and on a static mismatch
+        for label, ids, want in (("pass", GOOD_IDS, 0), ("mismatch", ["a/one", "a/two"], 2)):
+            seen = []
+            for beside in (False, True):
+                text = _manifest_text(ids=ids)
+                if beside:
+                    text += _group_text(split, runner="tools/split_runner.py", header="")
+                root = build(text, _lane_body(lanes))
+                if beside:
+                    (root / "tools" / "split_runner.py").write_bytes(
+                        (root / "tools" / "fake_runner.py").read_bytes())
+                code, out, err = run(root)
+                argv = recorded_argv(root)
+                prefix = str(root)
+                seen.append((code, out.replace(prefix, "<root>"), err.replace(prefix, "<root>"),
+                             [arg.replace(prefix, "<root>") for arg in argv[:-1]] if argv else None))
+            expect("st/singleton-{}-code".format(label), seen[0][0], want)
+            expect("st/singleton-{}-byte-identical-beside-group".format(label), seen[1], seen[0])
+            if want == 0:
+                expect("st/singleton-{}-argv-unchanged".format(label), seen[0][3],
+                       ["<root>/tools/fake_runner.py", "--execution-report"])
+
         # Round 3 (FIX E note): leg 19 witnesses run_suite's mkdtemp guard; self_test's own base
         # tempdir guard above cannot be witnessed from inside this self-test without circularity,
         # and the runner's FAILURES-before-report-write-OSError ordering has no cheap hermetic
@@ -1750,7 +2026,12 @@ def self_test():
           "witnesses the disclosed late-teardown residual class (a faulting destructor held by the "
           "codec search registry, by an audit hook, or in a cycle anchored on a sys attribute, "
           "passes while its marker shows it ran) while refusing a faulting cycle anchored on a "
-          "module global or a class attribute")
+          "module global or a class attribute, and, for rows that share a runner, passes each row "
+          "of a group that partitions the static set with its own args forwarded ahead of the "
+          "report option, while refusing before any launch a gap, an overlap, an extra id, a "
+          "missing or repeated args list, an unresolvable runner path, and a malformed or "
+          "evidence-redirecting argument, a singleton row behaving byte-identically beside a "
+          "split group")
     return 0
 
 

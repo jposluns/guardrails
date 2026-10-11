@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "e9c3bb3d867eb2412e1672339bc62a0ae1f64c97ee9c1f23f3b729aebe81afdb"
+tree-sha256 = "d7bfe4cdb848ea58eb774aad0ca8d5ffdacef187ef6e67a45386d1ddc950099a"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -61,8 +61,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 270207
-sha256 = "f309bcb59c13510508f702c94ef91f668960d2d7bb186fc13c8bd366e49afea5"
+bytes = 271688
+sha256 = "0f169c6bca2bf759215e28c30ebf83bbcef7d78c0c654bec3316f86a8fb2e043"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -801,8 +801,8 @@ sha256 = "c24eca7f5f6af796c69a0796d6f99586bbce90c6b9a11d2e60232f1942440c8c"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 457308
-sha256 = "6957ebe017ffa17567d68625d0d3f6f010d5e8807ac2f96c217f3e68c7e31b57"
+bytes = 460270
+sha256 = "25beabce2ca67ec764fc040ea9db1ae228a286d5d813bbaeb1c55748127352ef"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -2336,8 +2336,8 @@ sha256 = "001c5c3f13e7a7b0bc8c283ca1770545d7ba27cb734eff6517b6c03a868225ee"
 
 [[sources]]
 path = "ENFORCEMENT.md"
-bytes = 263181
-sha256 = "3e595d7d0064080d66c2af167a9c82ab47d5815e8af7e7b6fde24ec2371d071b"
+bytes = 264662
+sha256 = "a661169f3060b6742a5315a54e933042cc65954b9ff5e4233e03e117bfd284a1"
 
 [[sources]]
 path = "GEMINI.md"
@@ -3126,8 +3126,8 @@ sha256 = "e5760448ade9fc0d5f59b9a6761e07f5e0e122157379ae7fcc0aa1fc59f0d0c2"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 315897
-sha256 = "2a59fdfc2350365cf1ac4fb4723ef93c14a89f8fdce3b37d063ff9bb9be5d32f"
+bytes = 317378
+sha256 = "6a5c79cf6c38da461779d1b2fb23891a334dd2656dea945d0d687638989f61af"
 
 [[sources]]
 path = "site/evidence.html"
@@ -3236,8 +3236,8 @@ sha256 = "4855c97f48b02272421a816f7de12466cab7b20731085b6c0d63d24742236bdd"
 
 [[sources]]
 path = "tools/_selftest_exit_report.py"
-bytes = 35583
-sha256 = "ca5ea6b83c586c0e111eb4fe5fe9dc7d35c0787b84c0584b04757fe6ff00eb20"
+bytes = 35962
+sha256 = "50ba7641dfc3dcdae1618dbfc7398ce8402f57574ed7279081d5e041be28abbd"
 
 [[sources]]
 path = "tools/_standards.py"
@@ -3306,8 +3306,8 @@ sha256 = "7c39892ff85304722c9b8f613f6e588d54e1bd33dd96d8b007887bae52b74921"
 
 [[sources]]
 path = "tools/check_entry_guard.py"
-bytes = 42764
-sha256 = "e301658202dd46f64f2b91e2894a83a497c990ad8f0b89db0584a066c5cd0f17"
+bytes = 43775
+sha256 = "759fe605dd9c98908b671b27445c0f9f6f66a8383acdc6ef3318153e60c89b58"
 
 [[sources]]
 path = "tools/check_footer.py"
@@ -3461,8 +3461,8 @@ sha256 = "bd5533148006969c626b6bea6e574fb6090244355f0e73e150d7b22fbcfe18dd"
 
 [[sources]]
 path = "tools/check_selftest_execution.py"
-bytes = 113079
-sha256 = "31b7d5a2086fc8148fd45c6fed6fcfce86723b7d0f1764197cca487abcc67d29"
+bytes = 131557
+sha256 = "2d862d79bc1493f4f90dcb8d22448b5a6e26a777a89ae0785636d36bfae1d2df"
 
 [[sources]]
 path = "tools/check_site.py"
