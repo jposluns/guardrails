@@ -4410,7 +4410,8 @@ def self_test():
     # arms its timer, resets and unblocks SIGALRM, and sets its memory limit in the child alone. The
     # caller-timer vector at the end checks that the self-test leaves a caller's timer, SIGALRM handler and
     # signal mask as they were only within the coverage boundary stated there: a borrow its spies do not
-    # see passes it when it leaves them as that vector expects to find them.
+    # see passes it exactly when the run reaches the clauses stated there within that vector's run_bounded
+    # deadline and the other six all hold, the caller's handler never having run among them.
     import _opf_emit
 
     def _in_child(thunk):
@@ -5134,11 +5135,11 @@ def self_test():
     # only by the trace it leaves: a handler or mask left changed, the caller's handler run, the interval
     # changed, or the countdown off by more than the tolerance. So a borrow through an alias that restores
     # the timer verbatim within about 0.05 seconds passes, and so does one that takes its own window off the
-    # countdown it restores, of any length, while no SIGALRM reaches the caller's handler in that window.
-    # The two residual vectors below assert that both pass: a check that closes them turns them red, and
-    # this boundary is then restated. Each clause, and each of the six spies, has a vector below that goes
-    # red without it: the every-spy vector requires each of the six calls it makes by name, and each other
-    # clause has a borrow that fails it and no other clause.
+    # countdown it restores, of any length within the run_bounded deadline, while no SIGALRM reaches the
+    # caller's handler in that window. The two residual vectors below assert that both pass: a check that
+    # closes them turns them red, and this boundary is then restated. Each clause, and each of the six spies,
+    # has a vector below that goes red without it: the every-spy vector requires each of the six calls it
+    # makes by name, and each other clause has a borrow that fails it and no other clause.
     if not _SELF_TEST_NESTED:
         import _signal
         import contextlib
@@ -5194,16 +5195,22 @@ def self_test():
             return "LOST code={} failed={} remaining={:.3f} interval={} fired={} calls={}".format(
                 code, ",".join(failed), remaining, interval, len(fired), ",".join(sorted(set(calls))))
 
-        def _timer_vector(workload):
-            return _opf_emit.run_bounded(lambda: _caller_timer_kept(workload), timeout_s=300,
-                                         mem_bytes=2 * 1024 ** 3)
+        def _timer_vector(workload, usr2=None):
+            # usr2 (SIG_BLOCK or SIG_UNBLOCK) sets SIGUSR2's membership in the child's mask before the
+            # caller samples it, so a mask vector starts from a stated mask, not the one the child inherits.
+            def _caller():
+                if usr2 is not None:
+                    signal.pthread_sigmask(usr2, {signal.SIGUSR2})
+                return _caller_timer_kept(workload)
+            return _opf_emit.run_bounded(_caller, timeout_s=300, mem_bytes=2 * 1024 ** 3)
 
-        def _lost_on(workload, failed, calls=""):
+        def _lost_on(workload, failed, calls="", usr2=None):
             # True when one of up to three runs is LOST with exactly these failed clauses and these calls: a
             # host stall inside a borrow can cost the countdown more than the tolerance, which adds an
-            # elapsed clause (the elapsed leg working as stated).
+            # elapsed clause (the elapsed leg working as stated). The retries make a stall-caused failure
+            # less likely, not impossible: a stall in all three runs still fails the vector.
             for _ in range(3):
-                seen = _timer_vector(workload)
+                seen = _timer_vector(workload, usr2)
                 if seen.startswith("LOST code=0 failed=" + failed + " ") and seen.endswith(" calls=" + calls):
                     return True
             return False
@@ -5254,8 +5261,15 @@ def self_test():
 
         # A run through all six spied attributes, each required by name; a borrow through the signal.signal
         # wrapper bound before the spies, seen through _signal.signal; and a borrow for each clause the
-        # vectors above leave unpinned, each failing that clause and no other. The slow-restore and shortening
-        # borrows each leave the countdown 0.3 seconds off, so a tolerance widened past that turns one red.
+        # vectors above leave unpinned, each failing that clause and no other. The mask borrow runs once from
+        # SIGUSR2 unblocked and once from it blocked, so its verdict does not rest on the caller's mask.
+        # What the two elapsed-leg borrows pin: the slow-restore borrow leaves the countdown over the
+        # ceiling's reference by 0.3 seconds plus any stall between its two timer calls, and the shortening
+        # borrow leaves it under the floor's by 0.3 seconds plus any stall between its began reading and its
+        # first timer call, each less the short gaps between adjacent clock and timer readings in the run. A
+        # tolerance widened to T turns a vector red exactly when that offset is at most T in all three of its
+        # runs: a tolerance at or below about 0.3 seconds is not pinned at all (0.25 passes), and one above
+        # that is pinned only when no run stalls its borrow by more than about T less 0.3 seconds.
         def _every_spied_call():
             saved = _alias_timer(_signal.ITIMER_REAL, 10)
             signal.alarm(0)
@@ -5273,9 +5287,15 @@ def self_test():
             _alias_handler(_signal.SIGALRM, _signal.SIG_IGN)
             return 0
 
-        def _mask_left():
-            signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGUSR2})
-            return 0
+        def _mask_left(start):
+            # Toggles SIGUSR2's membership in the mask it finds, so it leaves the mask changed whatever the
+            # mask was (a fork starts with none pending, so the unblock has none to deliver). Its code is 0
+            # only when it finds the start its vector set, so each vector runs the branch it names.
+            def _borrow():
+                held = signal.SIGUSR2 in signal.pthread_sigmask(signal.SIG_BLOCK, ())
+                signal.pthread_sigmask(signal.SIG_UNBLOCK if held else signal.SIG_BLOCK, {signal.SIGUSR2})
+                return 0 if held == (start == signal.SIG_BLOCK) else 1
+            return _borrow
 
         def _alias_fires_caller_handler():
             began = time.monotonic()
@@ -5301,12 +5321,15 @@ def self_test():
                 ("every-spied-call", _every_spied_call, "calls", _all_six),
                 ("prebound-signal-wrapper", _alias_wrapper_swap, "calls", "_signal.signal"),
                 ("alias-handler-left", _alias_handler_left, "handler", ""),
-                ("mask-left", _mask_left, "mask", ""),
                 ("alias-fires-caller-handler", _alias_fires_caller_handler, "fired", ""),
                 ("alias-interval-changed", _alias_interval_changed, "interval", ""),
                 ("alias-shortened", _alias_shortened, "floor", "")):
             check("self-test-caller-timer-" + _failed + "-clause-sees-" + _name,
                   _lost_on(_borrow, _failed, _calls))
+        for _name, _start in (("mask-left", signal.SIG_UNBLOCK),
+                              ("mask-left-sigusr2-blocked", signal.SIG_BLOCK)):
+            check("self-test-caller-timer-mask-clause-sees-" + _name,
+                  _lost_on(_mask_left(_start), "mask", "", _start))
 
     if failures:
         print("OPF-SCHEMA SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked))
