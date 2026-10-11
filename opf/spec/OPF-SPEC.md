@@ -1488,7 +1488,7 @@ ceiling's refusal at the end of this section, a fresh-only implementation at its
 admission check; a fresh-only implementation that supports a version below the reserved homes-2
 declaration (section 4.2) MUST NOT apply the ceiling's homes-2 recognition and MUST refuse that
 declaration under section 16.1. The
-upgrade MUST be idempotent. Every upgrade is a schema-level bump and MUST be additive, using atomic
+upgrade MUST be idempotent. A schema-level bump MUST be additive, using atomic
 replacement of existing files, create-only writes for new index files, and regeneration of declared
 views through exclusively created temporary files followed by atomic rename. These writes are
 sequential, with recovery scope held in memory, not a durable transaction journal. The upgrade MUST
@@ -2637,6 +2637,10 @@ The gates in this standard are strong where they are strong and say so where the
   (fail-closed), never to a silent empty store. The token is stable within a base-schema major line;
   a store-breaking rename MUST ship only with the tested `opf upgrade` migration (section 9.2),
   which rewrites the base table and token in place so no existing adopter's manifest is stranded.
+  That in-place rewrite covers only a bump that ships an upgrade. The bump to the homes-2
+  declaration ships none (section 9.2), so no store-breaking rename can ship with it: a homes-2
+  manifest carries the same `[opf]` base table, and a homes-1 store, which homes 2 does not migrate
+  (section 4.2), keeps its manifest as it is.
   The retired 1.0.0 token `devprocess` is recognized by `opf upgrade`, purely to carry a legacy store
   forward, and by a fresh-only implementation (section 16.1), purely to refuse that store by name.
 - A fresh-only implementation (section 16.1) proves tested admission and refusal behaviour, not

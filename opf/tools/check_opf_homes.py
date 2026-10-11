@@ -12,7 +12,19 @@ tiled section. The live residuals are additions to untiled sections (for example
 and 13), a default-gate run without the self-test, and an addition landed together with a
 matching registry edit, which review of registry changes catches. One addition is red under the
 default entry alone: a retired homes-migration fragment (_RETIRED) restored in its own section,
-since homes 2 has no homes migration (spec 4.2). Section 9.1 stays untiled
+since homes 2 has no homes migration (spec 4.2). Each fragment names homes or legacy journal
+transport, so a sentence on another upgrade, such as a future worklog-generation upgrade, matches
+none. A retired sentence is quoted, to say it no longer applies, in one exact form, a retired-text
+quotation block: a block quote whose first line is exactly "> Retired text, quoted and not in
+force:", with no ">" line directly above it, followed by at least one more line that opens with
+">"; the block ends at the first line that does not open with ">". The retired-text check and the
+pins read a section without these blocks, so a quotation neither restores a fragment nor stands in
+for a pin; each fails closed on text split around a block, which the retired-text check reads as
+joined and the pins read as apart. Any other form is operative text: a different, indented or inline lead-in, a lead-in
+inside an earlier block quote, a line after the block (which CommonMark may render inside the
+quote as a lazy continuation), and a sentence that negates the quotation are all read, and a
+fragment there is red. Residual: the check is section-scoped, so a fragment planted in another
+section is caught only by the self-test's tiling of a tiled section. Section 9.1 stays untiled
 over its lowercase-may profile rule, but its implementation-class paragraph is pinned sentence
 by sentence (_PINNED), so deleting or rewording a pinned sentence there turns the gate red;
 the rest of 9.1, and additions to it, stay unprotected. Appendix E stays untiled too, and its
@@ -703,7 +715,7 @@ _CONTRACT = {
         'Every requirement of this section on an upgrade, its deltas, preconditions, report, refusals, and remedies binds an upgrade-capable implementation; a fresh-only implementation implements none of them and MUST instead refuse under section 16.1.',
         "Every implementation class MUST apply the version ceiling's refusal at the end of this section, a fresh-only implementation at its section 16.1 admission check; a fresh-only implementation that supports a version below the reserved homes-2 declaration (section 4.2) MUST NOT apply the ceiling's homes-2 recognition and MUST refuse that declaration under section 16.1.",
         'The upgrade MUST be idempotent.',
-        'Every upgrade is a schema-level bump and MUST be additive, using atomic replacement of existing files, create-only writes for new index files, and regeneration of declared views through exclusively created temporary files followed by atomic rename.',
+        'A schema-level bump MUST be additive, using atomic replacement of existing files, create-only writes for new index files, and regeneration of declared views through exclusively created temporary files followed by atomic rename.',
         _D('These writes are sequential, with recovery scope held in memory, not a durable transaction journal.'),
         'The upgrade MUST run under the store consistency contract and the single-writer lease (section 5.7).',
         'It MUST fail closed on an unresolvable store, a declared spec_version ABOVE the tooling, a divergence, a held lease, or any populated state that contradicts its preconditions; it MUST NOT lower the fail-closed floor.',
@@ -1087,6 +1099,8 @@ _CONTRACT = {
         _D('- The base discovery token opf is a single exact string carried in every adopter manifest.'),
         _D('A mistyped or altered token makes the store undiscoverable, which resolves to cannot-evaluate (fail-closed), never to a silent empty store.'),
         "The token is stable within a base-schema major line; a store-breaking rename MUST ship only with the tested opf upgrade migration (section 9.2), which rewrites the base table and token in place so no existing adopter's manifest is stranded.",
+        _D('That in-place rewrite covers only a bump that ships an upgrade.'),
+        _D('The bump to the homes-2 declaration ships none (section 9.2), so no store-breaking rename can ship with it: a homes-2 manifest carries the same [opf] base table, and a homes-1 store, which homes 2 does not migrate (section 4.2), keeps its manifest as it is.'),
         _D('The retired 1.0.0 token devprocess is recognized by opf upgrade, purely to carry a legacy store forward, and by a fresh-only implementation (section 16.1), purely to refuse that store by name.'),
         _D('- A fresh-only implementation (section 16.1) proves tested admission and refusal behaviour, not authenticated history: a version declaration and the absence of listed legacy state cannot prove that a store was never upgraded or hand-rewritten, and the closed legacy-state list catches only what it lists.'),
         _D('It does not list a legacy staging run under .working/staging/import/ or .working/staging/ingest/ that carries no legacy-format inventory, a legacy .archive/ entry that section 9.2 leaves in place with a standing finding, or a legacy run archive outside .working/, which only the import_status item reaches.'),
@@ -1144,26 +1158,29 @@ _PINNED = {
     ),
 }
 
-# Homes 2 is fresh-only (spec 4.2): no homes-1 store is migrated, no OPF control area is relocated for
-# the homes generation, and no legacy journal is transported. These fragments of the retired
-# homes-migration text are the one negative check, scoped to their own sections: the default entry is
-# red where one reappears there, so restoring one does not wait for the self-test's tiling equality.
+# Homes 2 has no homes migration (spec 4.2 and 9.2): a store is at homes 2 only when it is created
+# there, no OPF control area is relocated for the homes generation, and no legacy journal is
+# transported. These fragments of the retired homes-migration text are the one negative check, scoped
+# to their own sections: the default entry is red where one reappears there, outside a retired-text
+# quotation block, so restoring one does not wait for the self-test's tiling equality. Each fragment
+# names homes or legacy journal transport. Retired sentences that name neither are not fragments,
+# since a future worklog-generation upgrade could state them again: "The owning writer or migration
+# MUST derive each inventory" (4.2), "The migration MUST refuse a store resolved outside the product
+# root", "Every destination MUST be digest-verified before its source is removed." and "Both kinds of
+# upgrade MUST run" (9.2). Restored in place of the current text they stay red through the pins they
+# displace (the no-homes-migration vectors below); restored beside it, through the tiling equality.
 _RETIRED = {
     "4.2": (
         "which requires the homes migration (opf upgrade) to be available.",
         "The homes-2 requirements in sections 4.2, 9.2, 12, 14.1, 14.2, and 15 describe the target contract",
         "Homes-2 init and upgrade MUST render this managed block",
-        "The owning writer or migration MUST derive each inventory",
         "Legacy journal transport MUST preserve bytes through the migration's receipt binding.",
     ),
     "9.2": (
         "The homes-generation upgrade targets spec_version",
         "denotes legacy homes for migration",
         "The homes-generation target does not itself change",
-        "The migration MUST refuse a store resolved outside the product root",
         "A homes-generation bump MUST additionally relocate OPF control areas",
-        "Every destination MUST be digest-verified before its source is removed.",
-        "Both kinds of upgrade MUST run",
         "the homes-generation relocation path, the homes-2 path included",
     ),
     "15": (
@@ -1223,16 +1240,40 @@ def _sections(text):
     return sections
 
 
+# The exact first line of a retired-text quotation block (module docstring).
+_RETIRED_QUOTATION = "> Retired text, quoted and not in force:"
+
+
+def _operative(body, joint):
+    # A section body, normalized, with each retired-text quotation block replaced by joint. Each check
+    # fails closed: the pins pass a marker that no pin holds, so a pin split around a block is missing,
+    # and the retired-text check passes "", so a fragment split around a block is still read.
+    lines = body.split("\n")
+    kept = []
+    i = 0
+    while i < len(lines):
+        if (lines[i] == _RETIRED_QUOTATION and (i == 0 or not lines[i - 1].startswith(">"))
+                and i + 1 < len(lines) and lines[i + 1].startswith(">")):
+            i += 1
+            while i < len(lines) and lines[i].startswith(">"):
+                i += 1
+            kept.append(joint)
+            continue
+        kept.append(lines[i])
+        i += 1
+    return " ".join("\n".join(kept).replace("`", "").split())
+
+
 def contract_findings(text):
     sections = _sections(text)
     findings = []
     for section, fragments in list(_CONTRACT.items()) + list(_PINNED.items()):
-        body = " ".join(sections.get(section, "").replace("`", "").split())
+        body = _operative(sections.get(section, ""), "[retired-text quotation]")
         for fragment in fragments:
             if fragment not in body:
                 findings.append("spec {} missing contract: {}".format(section, fragment))
     for section, fragments in _RETIRED.items():
-        body = " ".join(sections.get(section, "").replace("`", "").split())
+        body = _operative(sections.get(section, ""), "")
         for fragment in fragments:
             if fragment in body:
                 findings.append("spec {} restores retired homes-migration text: {}".format(section, fragment))
@@ -4224,7 +4265,7 @@ def _self_test_vectors():
     with patch.dict(_CONTRACT, {"4.2": pins[:at0] + (retired,) + pins[at0 + 2:]}):
         check("spec-homes2-no-migration-pin-restored", lambda:
               len(at) == 1 and "spec 4.2 missing contract: " + retired in contract_findings(text))
-    # Homes 2 is fresh-only throughout sections 4.2 and 9.2: neither carries a homes migration, a
+    # Homes 2 has no homes migration anywhere in sections 4.2 and 9.2: neither carries one, a
     # homes-generation relocation of OPF control areas, legacy journal transport or a homes-2 upgrade
     # path. Each row names a run of current pins by prefix and the retired pins it replaced. Restoring
     # the retired text in the spec in place of the run turns the gate red with every current pin's
@@ -4236,7 +4277,7 @@ def _self_test_vectors():
         return found[0] if len(found) == 1 else start
     gitignore = _pin("4.2", "Homes-2 init, and any upgrade ")
     archive = _pin("9.2", "The upgrade MUST NOT write the adoption archive ")
-    fresh_only = (
+    no_homes_migration = (
         ("4.2", ("The homes-2 requirements in sections 4.2, 12,",), (
             "The homes-2 requirements in sections 4.2, 9.2, 12, 14.1, 14.2, and 15 describe the target "
             "contract, not an activated runtime guarantee.",)),
@@ -4258,7 +4299,7 @@ def _self_test_vectors():
             'The migration MUST refuse a store resolved outside the product root until a multi-root '
             'coordinator exists.')),
         ("9.2", ("The bump to the homes-2 declaration",), ()),
-        ("9.2", ("Every upgrade is a schema-level bump",), (
+        ("9.2", ("A schema-level bump MUST be additive",), (
             'A purely schema-level bump MUST be additive, using atomic replacement of existing files, '
             'create-only writes for new index files, and regeneration of declared views through '
             'exclusively created temporary files followed by atomic rename.',)),
@@ -4273,7 +4314,7 @@ def _self_test_vectors():
             "Both upgrade kinds, on the schema-level path and the homes-generation relocation path, the "
             "homes-2 path included, alike, MUST NOT write the adoption archive ", 1),)),
     )
-    for section, starts, old in fresh_only:
+    for section, starts, old in no_homes_migration:
         pins = _CONTRACT[section]
         at = [i for i, f in enumerate(pins) if f.startswith(starts[0])]
         at0 = at[0] if len(at) == 1 else len(pins)
@@ -4283,22 +4324,41 @@ def _self_test_vectors():
         anchored = len(at) == 1 and len(run) == len(starts) and all(
             f.startswith(s) for f, s in zip(run, starts)) and normalized_body.count(" ".join(run)) == 1
         prefix = "spec " + section + " missing contract: "
-        check("spec-homes2-fresh-only-spec-restored-" + section + "-" + starts[0],
+        check("spec-homes2-no-homes-migration-spec-restored-" + section + "-" + starts[0],
               lambda a=anchored, r=run, o=old, b=body, nb=normalized_body, p=prefix: a and all(
                   p + f in found for found in [contract_findings(text.replace(
                       b, "\n\n" + nb.replace(" ".join(r), " ".join(o), 1) + "\n\n", 1))] for f in r))
         if old:
             with patch.dict(_CONTRACT, {section: pins[:at0] + old + pins[at0 + len(starts):]}):
-                check("spec-homes2-fresh-only-pin-restored-" + section + "-" + starts[0],
+                check("spec-homes2-no-homes-migration-pin-restored-" + section + "-" + starts[0],
                       lambda a=anchored, o=old, p=prefix: a and all(
                           p + f in found for found in [contract_findings(text)] for f in o))
     # The default entry refuses each retired fragment in its own section: the live section holds none,
-    # each fragment occurs in the retired pins or text above, and planting it at the end of its
-    # section turns the gate red with its own finding.
-    retired_text = " ".join(" ".join(old) for _s, _p, old in fresh_only) + " " + retired
+    # each fragment occurs in the retired pins or text above and names homes or legacy journal
+    # transport, and planting it at the end of its section turns the gate red with its own finding.
+    # Each fragment is paired: the same text in the exact retired-text quotation form is not a
+    # restoration, and every near miss of that form, a negated sentence included, still is.
+    retired_text = " ".join(" ".join(old) for _s, _p, old in no_homes_migration) + " " + retired
     # Emptying or narrowing the registry would retire its vectors silently: its shape is pinned.
     check("spec-retired-registry", lambda: tuple(_RETIRED) == ("4.2", "9.2", "15") and
-          tuple(map(len, _RETIRED.values())) == (5, 8, 1))
+          tuple(map(len, _RETIRED.values())) == (4, 5, 1))
+    near_misses = (
+        ("plain", "Retired text, quoted and not in force:\n{}"),
+        ("inline", "> Retired text, quoted and not in force: {}"),
+        ("lead-in", "> Retired text, not in force:\n> {}"),
+        ("case", "> retired text, quoted and not in force:\n> {}"),
+        ("indented", "  > Retired text, quoted and not in force:\n  > {}"),
+        ("no-quote-line", "> Retired text, quoted and not in force:\n{}"),
+        ("lazy", "> Retired text, quoted and not in force:\n> Quoted.\n{}"),
+        ("inside-quote", "> Note.\n> Retired text, quoted and not in force:\n> {}"),
+        ("negated", 'The retired sentence "{}" no longer applies; homes 2 has no homes migration.'),
+    )
+
+    def planted(body, block):
+        return text.replace(body, body.rstrip("\n") + "\n\n" + block + "\n\n", 1)
+
+    def restores(found, section):
+        return [f for f in found if f.startswith("spec {} restores retired ".format(section))]
     for section, fragments in _RETIRED.items():
         body = _sections(text)[section]
         for fragment in fragments:
@@ -4308,9 +4368,70 @@ def _self_test_vectors():
             check("spec-retired-flip-" + section + "-" + fragment,
                   lambda b=body, f=finding, frag=fragment: text.count(b) == 1 and
                   f in contract_findings(text.replace(b, b.rstrip("\n") + "\n" + frag + "\n\n", 1)))
+            check("spec-retired-homes-term-" + section + "-" + fragment, lambda frag=fragment:
+                  "homes" in frag.lower() or "legacy journal transport" in frag.lower())
+            check("spec-retired-quoted-" + section + "-" + fragment, lambda b=body, s=section, frag=fragment:
+                  text.count(b) == 1 and not restores(contract_findings(planted(
+                      b, _RETIRED_QUOTATION + "\n> " + frag)), s))
+            for form, shape in near_misses:
+                check("spec-retired-near-miss-" + form + "-" + section + "-" + fragment,
+                      lambda b=body, f=finding, block=shape.format(fragment): text.count(b) == 1 and
+                      f in contract_findings(planted(b, block)))
             if section != "15":
                 check("spec-retired-known-" + section + "-" + fragment,
                       lambda frag=fragment: frag in retired_text)
+    # The reported false positive, paired: an explanatory sentence quoting the retired journal transport
+    # rule is operative text and red; the same rule in a quotation block, with the explanation kept as
+    # its own paragraph above it, is not a restoration.
+    transport = "Legacy journal transport MUST preserve bytes through the migration's receipt binding."
+    body = _sections(text)["4.2"]
+    check("spec-retired-quotation-reported-red", lambda b=body: text.count(b) == 1 and
+          restores(contract_findings(planted(b, 'The retired sentence "' + transport + '" no longer '
+                                             'applies; homes 2 has no homes migration.')), "4.2"))
+    explained = ("Homes 2 has no homes migration, so this rule no longer applies.\n\n" + _RETIRED_QUOTATION
+                 + "\n> " + transport)
+    check("spec-retired-quotation-reported-green", lambda b=body: text.count(b) == 1 and
+          contract_findings(planted(b, explained)) == contract_findings(text))
+    # A quotation block is not in force, so a pin moved into one is missing; the same pin moved into a
+    # near miss of the form is operative text and still present.
+    pin = _pin("4.2", "Homes 2 has no homes migration:")
+    normalized_body = " ".join(body.replace("`", "").split())
+    unpinned = text.replace(body, "\n\n" + normalized_body.replace(pin, "", 1) + "\n\n", 1)
+    unpinned_body = _sections(unpinned)["4.2"]
+
+    def moved(block):
+        return unpinned.replace(unpinned_body, unpinned_body.rstrip("\n") + "\n\n" + block + "\n\n", 1)
+    check("spec-retired-quotation-pin-moved", lambda: normalized_body.count(pin) == 1 and
+          "spec 4.2 missing contract: " + pin in contract_findings(moved(_RETIRED_QUOTATION + "\n> " + pin)))
+    check("spec-retired-quotation-pin-near-miss", lambda: normalized_body.count(pin) == 1 and
+          "spec 4.2 missing contract: " + pin in contract_findings(unpinned) and
+          "spec 4.2 missing contract: " + pin not in contract_findings(moved(
+              "Retired text, quoted and not in force:\n" + pin)))
+    # Text split around a quotation block fails closed for both checks: a pin split there is missing,
+    # and a retired fragment split there is still red.
+    words = pin.split(" ")
+    split_pin = " ".join(words[:4]) + "\n\n" + _RETIRED_QUOTATION + "\n> Quoted.\n\n" + " ".join(words[4:])
+    check("spec-retired-quotation-pin-split", lambda: len(words) > 4 and
+          "spec 4.2 missing contract: " + pin in contract_findings(moved(split_pin)) and
+          "spec 4.2 missing contract: " + pin not in contract_findings(moved(split_pin.replace(
+              "\n\n" + _RETIRED_QUOTATION + "\n> Quoted.\n\n", " ", 1))))
+    halves = transport.split(" MUST ", 1)
+    check("spec-retired-quotation-fragment-split", lambda b=body: text.count(b) == 1 and len(halves) == 2 and
+          "spec 4.2 restores retired homes-migration text: " + transport in contract_findings(planted(
+              b, halves[0] + " MUST\n\n" + _RETIRED_QUOTATION + "\n> Quoted.\n\n" + halves[1])))
+    # Retired sentences that name neither homes nor legacy journal transport are not fragments: a
+    # future worklog-generation upgrade stating them again in its section is not a restoration.
+    for section, sentence in (
+            ("4.2", "The owning writer or migration MUST derive each inventory from the run's transaction "
+                    "record or receipt and MUST publish it exclusively with the retained bytes."),
+            ("9.2", "A worklog-generation bump MUST additionally move the worklog ledger as a versioned, "
+                    "journaled, fail-closed relocation. Every destination MUST be digest-verified before its "
+                    "source is removed. Both kinds of upgrade MUST run under the store consistency contract "
+                    "and the single-writer lease (section 5.7). The migration MUST refuse a store resolved "
+                    "outside the product root until a multi-root coordinator exists.")):
+        body = _sections(text)[section]
+        check("spec-retired-generic-" + section, lambda b=body, s=section, n=sentence: text.count(b) == 1
+              and not restores(contract_findings(planted(b, n)), s))
     # Appendix E guard: every informative section is keyword-free, the guard sees Appendix E,
     # and planting a requirement keyword there, in prose, a bare code span, or a fenced block,
     # turns the gate red with that keyword's finding; the quotation form (a code span holding
