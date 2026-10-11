@@ -2747,7 +2747,7 @@ def t28_spec15_sentence(fx):
     flat = " ".join(spec15_text().split())
     assert "## 15. Genericization boundary" in flat, "T28 the spec 15 heading is present"
     section = flat.partition("## 15. Genericization boundary")[2]
-    assert "Only homes migration MAY read explicitly inventoried OPF artefacts" in section, \
+    assert "OPF MUST NOT read OPF artefacts from former `.aiqt/` locations" in section, \
         "T28 the spec 15 anchor is present"
     assert SPEC15_SENTENCE in section, "T28 the spec 15 probe sentence is present"
 

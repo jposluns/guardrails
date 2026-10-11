@@ -2080,8 +2080,9 @@ scope, expiry) with adopter-supplied vocabularies. The location patterns of sect
 described generically; no pattern names a real repository, host account, or internal system. Import
 and adoption provenance, including originals under `imported/` and retired files under `archive/`,
 MUST stay inside the adopter's own repositories. In homes 2, `.aiqt/` is AIQT-owned material, not an
-OPF state home; OPF operates without it. Only homes migration MAY read explicitly inventoried OPF
-artefacts from former `.aiqt/` locations, without touching unrelated AIQT material.
+OPF state home; OPF operates without it. On a homes-2 store, OPF MUST NOT read OPF artefacts from
+former `.aiqt/` locations or touch unrelated AIQT material, since homes 2 has no homes migration
+(section 4.2).
 A no-follow existence probe of a former `.aiqt/` location, used only to refuse an operation, is
 not a read of that material.
 Experimental fields MUST ride registered
