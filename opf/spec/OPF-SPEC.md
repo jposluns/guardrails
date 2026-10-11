@@ -106,8 +106,9 @@ the section 16.1 admission check and its refusal evidence. Homes 2 is a separate
 The homes-2 contract below is for `spec_version = "2.0.0"` and `[opf].homes = 2`.
 The current reference tooling reserves these names and implements their homes-2 boundary checks. It still
 supports `1.2.0` and initializes legacy homes (generation 1, with no `homes` key); writers retain their
-legacy paths until homes 2 is activated, which requires the homes migration (`opf upgrade`) to be
-available. The section 9 manifest example
+legacy paths until homes 2 is activated. Homes 2 has no homes migration: a store is at homes 2 only
+when it is created there, no homes-1 store is migrated to homes 2, and once homes 2 is activated
+`opf upgrade` MUST refuse a homes-1 store by name rather than migrate it. The section 9 manifest example
 describes the 1.3.0 target on legacy homes. The homes-2 requirements in sections 4.2, 9.2, 12,
 14.1, 14.2, and 15 describe the target contract, not an activated runtime guarantee.
 

@@ -277,7 +277,8 @@ _CONTRACT = {
         _D('Homes 2 is a separate, later activation.'),
         _D('The homes-2 contract below is for spec_version = "2.0.0" and [opf].homes = 2.'),
         _D('The current reference tooling reserves these names and implements their homes-2 boundary checks.'),
-        _D('It still supports 1.2.0 and initializes legacy homes (generation 1, with no homes key); writers retain their legacy paths until homes 2 is activated, which requires the homes migration (opf upgrade) to be available.'),
+        _D('It still supports 1.2.0 and initializes legacy homes (generation 1, with no homes key); writers retain their legacy paths until homes 2 is activated.'),
+        'Homes 2 has no homes migration: a store is at homes 2 only when it is created there, no homes-1 store is migrated to homes 2, and once homes 2 is activated opf upgrade MUST refuse a homes-1 store by name rather than migrate it.',
         _D('The section 9 manifest example describes the 1.3.0 target on legacy homes.'),
         _D('The homes-2 requirements in sections 4.2, 9.2, 12, 14.1, 14.2, and 15 describe the target contract, not an activated runtime guarantee.'),
         _D('<product repository root>/ .opf.toml # committed store pointer (section 4.3) CHANGELOG.md # curated public changelog (deliverable; section 6.3) VERSION # deterministic render from version.toml (deliverable) .working/ # the store; present here under the default in-repo configuration <store repository root>/ # the product repository itself, by default .working/ README.md # ownership and regeneration note (deliverable) WORKLOG.md # deterministic render of worklog.toml VERSION.md # optional human view of version.toml TODO.md BACKLOG.md PIPELINE.md DONE.md FINDINGS.md DECISIONS.md BLOCKS.md HANDOFF.md REFERENCES.md CONTRIBUTIONS.md DECISIONS.toml # machine projection (deterministic; section 10.5) <TYPE>-INDEX.md ...'),
@@ -4162,6 +4163,32 @@ def _self_test_vectors():
               'It is an inspection of the bytes the release ships,'),
             )),
     ))
+    # Homes 2 has no homes migration (maintainer decision, 2026-10-10). The spec sentence and its pin
+    # disagree red either way: a reworded spec clause, the retired migration clause restored in the
+    # spec under the current pins, or the retired pin restored under the current spec.
+    spec_vectors("4.2", (
+            ('Homes 2 has no homes migration:', (
+             ('no homes-1 store is migrated to homes 2,',
+              'a homes-1 store is migrated to homes 2 by opf upgrade,'),
+             ('MUST refuse a homes-1 store by name rather than migrate it.',
+              'MAY migrate a homes-1 store.'),
+            )),
+    ))
+    retired = _D('It still supports 1.2.0 and initializes legacy homes (generation 1, with no homes key); '
+                 'writers retain their legacy paths until homes 2 is activated, which requires the homes '
+                 'migration (opf upgrade) to be available.')
+    pins = _CONTRACT["4.2"]
+    at = [i for i, f in enumerate(pins) if f.startswith('It still supports 1.2.0 ')]
+    body = _sections(text)["4.2"]
+    normalized_body = " ".join(body.replace("`", "").split())
+    check("spec-homes2-no-migration-spec-restored", lambda i=at[0]:
+          len(at) == 1 and pins[i + 1].startswith('Homes 2 has no homes migration:') and
+          normalized_body.count(pins[i] + " " + pins[i + 1]) == 1 and
+          "spec 4.2 missing contract: " + pins[i + 1] in contract_findings(text.replace(
+              body, "\n\n" + normalized_body.replace(pins[i] + " " + pins[i + 1], retired, 1) + "\n\n", 1)))
+    with patch.dict(_CONTRACT, {"4.2": pins[:at[0]] + (retired,) + pins[at[0] + 2:]}):
+        check("spec-homes2-no-migration-pin-restored", lambda:
+              "spec 4.2 missing contract: " + retired in contract_findings(text))
     # Appendix E guard: every informative section is keyword-free, the guard sees Appendix E,
     # and planting a requirement keyword there, in prose, a bare code span, or a fenced block,
     # turns the gate red with that keyword's finding; the quotation form (a code span holding
