@@ -592,23 +592,25 @@ def _open_root_fd(root):
 # with EACCES and turned every store beneath it into CANNOT-EVALUATE. Where os.O_PATH is absent the walk
 # keeps the previous O_RDONLY open for every component, so a search-only ancestor still fails EACCES there
 # (disclosed residual, see _open_dir_nofollow). The symlink refusal is NOT weakened: O_PATH|O_NOFOLLOW on a
-# symlink opens the link object itself, and the paired O_DIRECTORY then refuses it with ENOTDIR (verified
-# on Linux, where the O_RDONLY|O_DIRECTORY|O_NOFOLLOW open refuses a symlink the same way; older kernels
-# report ELOOP), so a symlinked component still never resolves, with or without O_PATH.
+# symlink opens the link object itself, and the paired O_DIRECTORY then refuses it. The refusal is accepted
+# as either errno of the no-follow pair, ENOTDIR or ELOOP, at an O_PATH step and an O_RDONLY step alike
+# (current Linux reports ENOTDIR for both; the self-test pins the pair, never one errno per access mode),
+# so a symlinked component still never resolves, with or without O_PATH.
 _WALK_O_TRAVERSE = getattr(os, "O_PATH", os.O_RDONLY)
 
 
 def _open_dir_nofollow(abspath, *, traverse_only=False):
     """Open an ABSOLUTE directory path as a dir fd by walking each component from the filesystem root with
-    O_DIRECTORY|O_NOFOLLOW, so a symlinked store root OR any symlinked ancestor is refused (ENOTDIR at an
-    O_PATH step, ELOOP at an O_RDONLY step; see _WALK_O_TRAVERSE) rather than silently followed off-tree,
-    matching the contained no-follow discipline (spec 4.5, 17; the symlink-resolution rule). INTERMEDIATE
-    components are opened with _WALK_O_TRAVERSE (O_PATH, search permission only, where it exists), so an
-    ancestor with search but no read permission no longer fails the walk; the FINAL component is opened
-    O_RDONLY as before, so the caller receives a READABLE descriptor. With traverse_only=True the final
-    component too is opened _WALK_O_TRAVERSE, for a caller that only TRAVERSES the result (fstat, or
-    dir_fd-relative lookups, which need search permission only) and never reads it, so a search-only
-    directory can itself be opened and probed; such a descriptor is NOT readable where O_PATH exists.
+    O_DIRECTORY|O_NOFOLLOW, so a symlinked store root OR any symlinked ancestor is refused (either errno of
+    the no-follow pair, ENOTDIR or ELOOP, at an O_PATH step and an O_RDONLY step alike; see _WALK_O_TRAVERSE)
+    rather than silently followed off-tree, matching the contained no-follow discipline (spec 4.5, 17; the
+    symlink-resolution rule). INTERMEDIATE components are opened with _WALK_O_TRAVERSE (O_PATH, search
+    permission only, where it exists), so an ancestor with search but no read permission no longer fails the
+    walk; the FINAL component is opened O_RDONLY as before, so the caller receives a READABLE descriptor. With
+    traverse_only=True the final component too is opened _WALK_O_TRAVERSE, for a caller that only TRAVERSES
+    the result (fstat, or dir_fd-relative lookups, which need search permission only) and never reads it, so a
+    search-only directory can itself be opened and probed; such a descriptor is NOT readable where O_PATH
+    exists.
     Where os.O_PATH is absent every component keeps the previous O_RDONLY open and a search-only ancestor
     still refuses EACCES (disclosed residual; the refusal direction is fail-closed, never fail-open).
     `Path.resolve()` is deliberately NOT used to resolve a pointer target: it canonicalizes symlinks
@@ -2689,8 +2691,9 @@ def self_test():
         # Symlink refusal is NOT relaxed by the O_PATH steps, leaf and intermediate alike. The errno is
         # pinned to the no-follow pair {ENOTDIR, ELOOP}: with O_DIRECTORY|O_NOFOLLOW a symlink refuses as
         # ENOTDIR on current Linux (verified: O_PATH and O_RDONLY modes alike, the link object is not a
-        # directory) and as ELOOP on kernels that report the no-follow refusal first; both are refusals,
-        # and anything else (above all a successful open, the symlink-following defect) fails this check.
+        # directory); ELOOP is accepted as the pair's other no-follow refusal (no kernel reporting it was
+        # exercised); both are refusals, and anything else (above all a successful open, the
+        # symlink-following defect) fails this check.
         (_ta / "real" / "sub").mkdir(parents=True)
         os.symlink("real", _ta / "lnk")
 

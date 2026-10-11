@@ -15574,7 +15574,9 @@ def _adopt_read_inputs(path):
     validation), never duplicated here. The read is BOUNDED, the planner's own read discipline: a
     no-follow, nonblocking open (every component is walked from the filesystem root with O_NOFOLLOW, the
     store root's _opf_store._open_dir_nofollow walk, so a symlinked parent, ancestor or final component
-    refuses; and a FIFO returns at once rather than blocking), a SINGLY-LINKED (st_nlink == 1) regular file
+    refuses; and a FIFO returns at once rather than blocking; the parent is opened traverse_only, since it
+    is only the dir_fd of the worksheet open and never listed, so a worksheet in a search-only directory
+    reads as a plain open of it does), a SINGLY-LINKED (st_nlink == 1) regular file
     only (a hardlinked worksheet is a second name for another inode, refused class-consistent with the
     engine's own single-link control reads), and the planner's per-file byte bound
     (_opf_adopt_plan.MAX_FILE_BYTES) checked on the opened fd and again by the journal's capped reader, so
@@ -15585,7 +15587,7 @@ def _adopt_read_inputs(path):
     cap = _opf_adopt_plan.MAX_FILE_BYTES
     try:
         parent, name = os.path.split(path if os.path.isabs(path) else os.path.join(os.getcwd(), path))
-        pfd = _opf_store._open_dir_nofollow(parent)
+        pfd = _opf_store._open_dir_nofollow(parent, traverse_only=True)   # a dir_fd only, never read
         fd = None
         try:
             fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=pfd)
@@ -17173,6 +17175,43 @@ def _cli_self_test():
                         failures.append("adopt plan with {} worksheet: rc={!r} (expected 2 + {!r})".format(
                             label, rc, needle))
 
+                # The worksheet's PARENT is only the dir_fd of the worksheet open, never listed, so it is opened
+                # traverse_only: a worksheet in a search-only (0111) directory reads as a plain open of it does.
+                # Red without traverse_only (the readable parent open refuses EACCES). Mode bits do not bind
+                # uid 0, so that run discloses a skip; without os.O_PATH the walk keeps its documented O_RDONLY
+                # fallback, so the EACCES refusal is asserted there instead (fail-closed, never relaxed).
+                _so_dir = os.path.join(abase, "searchonly")
+                _so_ws = os.path.join(_so_dir, "inputs.toml")
+                try:
+                    os.mkdir(_so_dir)
+                    with open(_so_ws, "w", encoding="utf-8") as fh:
+                        fh.write('schema = 1\nproduct = "opf"\n'
+                                 'expected_observation_digest = "sha256:' + "0" * 64 + '"\n' + bindings_toml)
+                except OSError as exc:
+                    print("opf cli self-test: harness error: could not build the adopt --inputs search-only "
+                          "fixture ({})".format(exc), file=sys.stderr)
+                    return EXIT_MALFORMED
+                if hasattr(os, "geteuid") and os.geteuid() == 0:
+                    print("opf cli self-test: DISCLOSED SKIP: adopt --inputs search-only parent vector not run "
+                          "(uid 0 is not bound by mode bits)", file=sys.stderr)
+                else:
+                    os.chmod(_so_dir, 0o111)
+                    try:
+                        try:
+                            _so_out = sorted(_adopt_read_inputs(_so_ws))
+                        except ValueError as exc:
+                            _so_out = str(exc)
+                    finally:
+                        os.chmod(_so_dir, 0o755)
+                    if hasattr(os, "O_PATH"):
+                        if not isinstance(_so_out, list) or "bindings" not in _so_out:
+                            failures.append("adopt --inputs worksheet in a search-only (0111) directory: "
+                                            "expected it read as a plain open reads it, got {!r}".format(_so_out))
+                    elif not isinstance(_so_out, str) or "[Errno 13]" not in _so_out:
+                        failures.append("adopt --inputs worksheet in a search-only (0111) directory without "
+                                        "os.O_PATH: expected the documented EACCES refusal, got {!r}".format(
+                                            _so_out))
+
                 # Round-5 defect 2 (K9a fix 5): a parent-directory close that reports an error inside
                 # the --inputs open must not leak the just-opened worksheet fd. Inject the failure at
                 # the REAL close (the number is still released, as on Linux); the read still fails
@@ -17183,8 +17222,8 @@ def _cli_self_test():
                 _wl_real_close = os.close
                 _wl_seen = {}
 
-                def _wl_walk(path):
-                    fd = _wl_real_walk(path)
+                def _wl_walk(path, **kwargs):
+                    fd = _wl_real_walk(path, **kwargs)
                     _wl_seen["pfd"] = fd
                     return fd
 

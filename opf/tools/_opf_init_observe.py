@@ -335,13 +335,14 @@ class GitObjects:
         # dir_fd-relative no-follow stat of the final name), never read, so each is
         # opened with the shared walk's traverse mode (_opf_store._WALK_O_TRAVERSE:
         # O_PATH, search permission only, where it exists; the old O_RDONLY where
-        # not). A search-only ancestor (mode 0711) is then classifiable instead of
-        # EACCES-refusing, and a symlinked component still refuses (ENOTDIR under
-        # O_PATH|O_DIRECTORY|O_NOFOLLOW; see _opf_store._WALK_O_TRAVERSE).
+        # not), the filesystem root included (traverse_only=True). A search-only
+        # ancestor (mode 0711), or a search-only "/", is then classifiable instead
+        # of EACCES-refusing, and a symlinked component still refuses (either errno
+        # of the no-follow pair, ENOTDIR or ELOOP; see _opf_store._WALK_O_TRAVERSE).
         fd = None
         identities = []
         try:
-            fd = _opf_store._open_dir_nofollow("/")
+            fd = _opf_store._open_dir_nofollow("/", traverse_only=True)
             for component in parent.split("/"):
                 if not component:
                     continue

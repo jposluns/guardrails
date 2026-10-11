@@ -989,7 +989,13 @@ def _validate_ctl_dir_fd(fd, label):
 
 
 def _open_dir_at(parent_fd, name, label):
-    """Open a directory component beneath an already-trusted dir fd, no-follow."""
+    """Open a directory component beneath an already-trusted dir fd, no-follow. The descriptor is
+    READABLE (_DIR_OPEN_FLAGS, O_RDONLY) on purpose, not the shared walk's traverse mode: every
+    _DIR_OPEN_FLAGS open (this one, the staging-leftover listing in _remove_staging_garbage, and
+    _opf_init_substrate._list_dir_fresh) runs beneath a root already trusted (the store, product,
+    control or git root) on a directory that is then listed, read or written beneath, validated as
+    a control directory, or confirmed by the open itself (the store root's .git directory), never an
+    out-of-store ancestor that is only traversed."""
     try:
         return os.open(name, _DIR_OPEN_FLAGS, dir_fd=parent_fd)
     except OSError as exc:
@@ -1353,7 +1359,10 @@ def _bind_repository_view(toplevel, ident, rel, store_ident):
     or normalization-insensitive filesystem a store addressed by any other spelling of that path
     refuses rather than keying a second home, whatever spelling getcwd gives git; and the
     components, opened no-follow beneath the toplevel, must lead to `store_ident`, the store root's
-    own identity."""
+    own identity. Residual (disclosed): a search-only directory BETWEEN the git toplevel and the
+    store refuses at the readable _open_dir_at in _bind_repository_view (listing it needs read
+    permission, so it is inherent); a directory above the toplevel and an own-repository store
+    below one both work."""
     with _FdOwner() as owner:
         fd = owner.adopt(_open_path_dir_nofollow(toplevel, "git toplevel"))
         st = _fstat_or_refuse(fd, "git toplevel {}".format(toplevel))
