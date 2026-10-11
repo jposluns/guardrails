@@ -49,8 +49,11 @@ variables, the allowlist unit checks covering the rest of the GIT_-prefixed fami
   selftest_git_fixture_env.py                              exit 0 on pass, 1 on assertion failure
   selftest_git_fixture_env.py --execution-report ABS_PATH  also write the executed check IDs as JSON
 
-Exit 2 is a harness/setup error, including bad arguments, no git binary, no writable temp directory,
-a failed report write, or an unreadable, malformed, or suite-missing expectation manifest.
+Exit 2 is a harness/setup error or a cannot-evaluate, including bad arguments, no git binary, no
+writable temp directory, a failed report write, an unreadable, malformed, or suite-missing
+expectation manifest, a per-member bound that cannot be derived from opf's declared budgets, and a
+registered member or lifecycle probe still running when its bound killed it (no verdict exists for
+it; the findings already collected print first).
 """
 import sys
 
@@ -1364,73 +1367,137 @@ def _config_injection_lane(base):
     return system_results
 
 
-# The per-member execution bound, sized per the kill-timeout rule: a bound
-# meant to let a member FINISH sits above that member's own end-to-end budget
-# plus a margin, never at it. The slowest registered member (opf/tools/opf.py
-# --self-test) measured 240-300 s alone on a quiet 16-CPU host (loadavg ~8,
-# 2026-10-10); each lane runs members four wide on an already loaded shared
-# host, where the same member overran the old flat 1200 s bound (observed
-# 2026-10-10 at loadavg ~21). 2400 s is >=8x the measured quiet base. The
-# bound stays a LIVENESS bound only: its expiry is never member evidence (see
-# MemberTimeout below), so raising it trades only detection latency.
-_MEMBER_BOUND_SECONDS = 2400
+# The per-member execution bound, DERIVED per the kill-timeout rule: a bound
+# meant to let a member FINISH sits above that member's own declared
+# end-to-end budget plus a margin, never at or under it, and is never sized
+# from a measured runtime. The only registered member that declares an
+# end-to-end budget is opf/tools/opf.py --self-test: its watchdog regression
+# runner launches its legs one at a time, each under its own process bound
+# (declared budget + launch margin; the poll-masked leg alone is 2954 + 30 s),
+# and its watchdog isolation self-test also runs once at top level.
+# opf._watchdog_declared_seconds() returns that sequential sum, read from
+# the runner's own tables by _derive_member_bound() before any lane runs, so
+# a budget raised there raises this bound with it. The margin is a STATED
+# allowance, not a derivation: it covers interpreter start and the opf
+# self-tests and other members that declare no end-to-end budget (their
+# own internal timeouts are not summed: a disclosed residual). The bound is
+# a LIVENESS bound only: its expiry is never member evidence (see
+# MemberTimeout below). An outer bound such as a CI job timeout may sit
+# below it; it then ends the run first.
+_MEMBER_BOUND_MARGIN_SECONDS = 1200
+# The derivation probe imports opf and builds the runner's tables, nothing
+# else: a deliberately short fast-fail bound, its expiry attributed (exit 2
+# naming the derivation), never member evidence.
+_MEMBER_BOUND_PROBE_SECONDS = 120
+_MEMBER_BOUND_SECONDS = None  # set once by _derive_member_bound(); None refuses every launch
+
+
+def _derive_member_bound():
+    """Return (declared, bound): opf's declared sequential worst case and the
+    per-member bound above it, or exit 2 (cannot evaluate) when the
+    declared budget cannot be read: no member may run under a guessed
+    bound."""
+    import math
+    code = ("import sys; sys.path.insert(0, sys.argv[1]); import opf; "
+            "rc = opf._bootstrap(); "
+            "print(repr(float(opf._watchdog_declared_seconds())) if rc == 0 else 'bootstrap rc %d' % rc)")
+    try:
+        child = subprocess.run([sys.executable, "-I", "-B", "-c", code, str(ROOT / "opf" / "tools")],
+                               cwd=ROOT, capture_output=True, text=True, errors="replace",
+                               timeout=_MEMBER_BOUND_PROBE_SECONDS)
+        declared = float(child.stdout.strip()) if child.returncode == 0 else None
+        detail = "rc {}: {}".format(child.returncode, (child.stdout + child.stderr).strip()[-400:])
+    except subprocess.TimeoutExpired:
+        declared, detail = None, "still running when its {} s bound killed it".format(
+            _MEMBER_BOUND_PROBE_SECONDS)
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        declared, detail = None, str(exc)
+    if declared is None or not math.isfinite(declared) or declared <= 0:
+        _cannot_evaluate_exit(["the per-member bound cannot be derived from opf's declared "
+                               "budgets ({}): no member runs under a guessed bound".format(detail)])
+    return declared, declared + _MEMBER_BOUND_MARGIN_SECONDS
+
+
+def _member_bound():
+    if _MEMBER_BOUND_SECONDS is None:
+        _cannot_evaluate_exit(["a member launch was reached before the per-member bound "
+                               "was derived (harness defect)"])
+    return _MEMBER_BOUND_SECONDS
+
+
+def _cannot_evaluate_exit(lines, lane=None):
+    """Exit 2 (the suite's cannot-evaluate/harness exit; the execution gate
+    refuses it as 'no verdict'), FIRST printing every finding already
+    collected and, for a lane, every member result not yet compared, so a
+    real failure observed before the refusal is never hidden by it."""
+    if FAILURES:
+        print("SELF-TEST FINDINGS COLLECTED BEFORE THE CANNOT-EVALUATE EXIT:", file=sys.stderr)
+        for failure in FAILURES:
+            print("  - " + failure, file=sys.stderr)
+    for argv, value in sorted((lane or {}).items()):
+        if not isinstance(value[0], MemberTimeout) and value[0] != 0:
+            print("SELF-TEST UNCOMPARED LANE RESULT: {}: {!r}".format(
+                " ".join(argv), value[0]), file=sys.stderr)
+    for line in lines:
+        print("SELF-TEST CANNOT EVALUATE: " + line, file=sys.stderr)
+    sys.exit(2)
 
 
 class MemberTimeout:
-    """A registered member STILL RUNNING when _MEMBER_BOUND_SECONDS killed it.
+    """A registered member STILL RUNNING when its per-member bound killed it.
     Recorded as this sentinel and refused by _refuse_member_timeouts as the
     suite's distinct cannot-evaluate (exit 2, the harness-error exit that
     check_selftest_execution already treats as 'no verdict'), NEVER as member
     evidence: an exposure finding must mean a member RAN and showed the wrong
     behaviour, not that a loaded host kept one from finishing."""
 
-    def __init__(self, member, elapsed):
+    def __init__(self, member, elapsed, bound):
         self.member = member
         self.elapsed = elapsed
+        self.bound = bound
 
     def __repr__(self):
-        return "cannot-evaluate: still running at {:.0f} s (bound {} s)".format(
-            self.elapsed, _MEMBER_BOUND_SECONDS)
+        return "cannot-evaluate: still running at {:.0f} s (bound {:.0f} s)".format(
+            self.elapsed, self.bound)
 
 
 def _run_config_member(member, env):
     import time
+    bound = _member_bound()
     started = time.monotonic()
     try:
         proc = subprocess.run([sys.executable, "-I", "-B", str(ROOT / member[0]), *member[1:]],
                               cwd=ROOT, env=env, capture_output=True, text=True, errors="replace",
-                              timeout=_MEMBER_BOUND_SECONDS)
+                              timeout=bound)
         if proc.returncode:
             print("CONFIG-INJECTION {}:\n{}".format(member, proc.stdout + proc.stderr),
                   file=sys.stderr)
         return proc.returncode
     except subprocess.TimeoutExpired:
         # Ordered BEFORE the generic SubprocessError arm: a kill at the bound
-        # is scheduling, not evidence. Every other failure (OSError, a signal,
-        # a nonzero exit) stays member evidence and still becomes a finding.
-        return MemberTimeout(member, time.monotonic() - started)
+        # is no member verdict. Every other failure (OSError, a signal, a
+        # nonzero exit) stays member evidence and still becomes a finding.
+        return MemberTimeout(member, time.monotonic() - started, bound)
     except (OSError, subprocess.SubprocessError) as exc:
         return str(exc)
 
 
 def _refuse_member_timeouts(results):
-    """FAIL CLOSED, DISTINCTLY, on every member its bound killed: print one
-    line per member with the bound, the elapsed time and the load average,
-    then exit 2 (the suite's cannot-evaluate/harness exit; the execution gate
-    refuses it as 'no verdict'), never compute got-vs-want findings over a
-    lane that holds no verdict for those members (three such false exposure
-    findings observed 2026-10-10 at loadavg ~21)."""
+    """FAIL CLOSED, DISTINCTLY, on every member its bound killed: exit 2
+    through _cannot_evaluate_exit (findings already collected and the lane's
+    uncompared member results print first), one line per killed member with
+    the bound, the elapsed time and the load average, never computing
+    got-vs-want findings over a lane that holds no verdict for those members
+    (three such false exposure findings observed 2026-10-10 at loadavg ~21)."""
     rows = sorted((argv, value[0]) for argv, value in results.items()
                   if isinstance(value[0], MemberTimeout))
     if not rows:
         return
-    for argv, sentinel in rows:
-        print("SELF-TEST CANNOT EVALUATE: {} was still running when the {} s "
-              "per-member bound killed it (elapsed {:.0f} s, loadavg {}): this "
-              "lane holds no exposure verdict for it".format(
-                  " ".join(argv), _MEMBER_BOUND_SECONDS, sentinel.elapsed,
-                  os.getloadavg()), file=sys.stderr)
-    sys.exit(2)
+    _cannot_evaluate_exit([
+        "{} was still running when the {:.0f} s per-member bound killed it (elapsed {:.0f} s, "
+        "loadavg {}): this lane holds no exposure verdict for it".format(
+            " ".join(argv), sentinel.bound, sentinel.elapsed, os.getloadavg())
+        for argv, sentinel in rows], lane=results)
 
 
 def _member_rc_or_refuse(member, env):
@@ -1439,6 +1506,148 @@ def _member_rc_or_refuse(member, env):
     rc = _run_config_member(member, env)
     _refuse_member_timeouts({member: (rc,)})
     return rc
+
+
+def _install_member_bound():
+    """Derive and install the per-member bound; return opf's declared worst case."""
+    global _MEMBER_BOUND_SECONDS
+    declared, _MEMBER_BOUND_SECONDS = _derive_member_bound()
+    return declared
+
+
+_VECTOR_MEMBER = ("tools/vector_member.py", "--self-test")
+_MEMBER_TIMEOUT_EXPECTED = [
+    ("bound-kill", "MemberTimeout", 2, True), ("exit-1", "int", None, False),
+    ("signal", "int", None, False), ("exit-2", "int", None, False),
+    ("oserror", "str", None, False), ("clean", "int", None, False),
+    ("direct-bound-kill", 2),
+    ("findings-printed-first", 2, True, True, True),
+    ("wiring", ["_config_results", "_member_rc_or_refuse"], True),
+]
+
+
+def _member_timeout_vectors():
+    """Red-on-revert vectors for the member-bound refusal, through scripted
+    launches: only a bound kill becomes MemberTimeout and an attributed exit
+    2 (through the pool's _refuse_member_timeouts and the direct
+    _member_rc_or_refuse alike); a nonzero exit, a signal status and an
+    OSError stay member evidence; the exit prints findings already collected
+    and the lane's uncompared results BEFORE its own line; and every
+    _run_config_member call site sits behind the refusal (the pool runner
+    refuses its whole results map)."""
+    import contextlib
+    import inspect
+    import io
+    got = []
+
+    def scripted(effect):
+        def run(argv, **kwargs):
+            if isinstance(effect, BaseException):
+                raise effect
+            return subprocess.CompletedProcess(argv, effect, "", "")
+        return run
+
+    def refused(call):
+        stream = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(stream):
+                call()
+        except SystemExit as exc:
+            return exc.code, stream.getvalue()
+        return None, stream.getvalue()
+
+    real_run = subprocess.run
+    try:
+        for label, effect in (("bound-kill", subprocess.TimeoutExpired(["vector"], 1)),
+                              ("exit-1", 1), ("signal", -9), ("exit-2", 2),
+                              ("oserror", OSError(5, "vector")), ("clean", 0)):
+            subprocess.run = scripted(effect)
+            with contextlib.redirect_stderr(io.StringIO()):
+                value = _run_config_member(_VECTOR_MEMBER, dict(os.environ))
+            code, text = refused(lambda: _refuse_member_timeouts({_VECTOR_MEMBER: (value,)}))
+            got.append((label, type(value).__name__, code,
+                        " ".join(_VECTOR_MEMBER) in text and "per-member bound" in text))
+        subprocess.run = scripted(subprocess.TimeoutExpired(["vector"], 1))
+        got.append(("direct-bound-kill",
+                    refused(lambda: _member_rc_or_refuse(_VECTOR_MEMBER, dict(os.environ)))[0]))
+    finally:
+        subprocess.run = real_run
+    sentinel = "vector/collected-finding: got 1, want 0"
+    FAILURES.append(sentinel)
+    try:
+        lane = {_VECTOR_MEMBER: (MemberTimeout(_VECTOR_MEMBER, 2.0, 1.0),),
+                ("tools/vector_other.py", "--self-test"): (1,)}
+        code, text = refused(lambda: _refuse_member_timeouts(lane))
+    finally:
+        FAILURES.remove(sentinel)
+    refusal = text.find("SELF-TEST CANNOT EVALUATE")
+    got.append(("findings-printed-first", code, -1 < text.find(sentinel) < refusal,
+                -1 < text.find("UNCOMPARED LANE RESULT: tools/vector_other.py --self-test: 1")
+                < refusal, refusal > -1))
+    # This module's own loaded source (no new file-read site: the read-API
+    # allowlist in tools/check_ci_parity.py stays as reviewed).
+    tree = ast.parse(inspect.getsource(sys.modules[__name__]))
+    callers, pool_refuses = set(), False
+    for top in tree.body:
+        if not isinstance(top, ast.FunctionDef) or top.name == "_member_timeout_vectors":
+            continue  # this vector's own scripted calls are not a launch site
+        for node in ast.walk(top):
+            if isinstance(node, ast.Call) and _call_name(node) == "_run_config_member":
+                callers.add(top.name)
+        if top.name == "_config_results":
+            pool_refuses = any(
+                isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call)
+                and _call_name(stmt.value) == "_refuse_member_timeouts"
+                and [ast.unparse(arg) for arg in stmt.value.args] == ["results"]
+                for stmt in top.body)
+    got.append(("wiring", sorted(callers), pool_refuses))
+    return got
+
+
+_LIFECYCLE_TIMEOUT_EXPECTED = [
+    ("bound-kill-entered", 2, True, True), ("bound-kill-import", 2, True, True),
+    ("exit-1", (1, "not json", "")), ("oserror", "[Errno 5] vector"),
+    ("clean", (0, [[], True])),
+]
+
+
+def _lifecycle_timeout_vectors():
+    """Red-on-revert vectors for the lifecycle probe, through scripted
+    launches: a probe still running at its bound is an attributed exit 2
+    naming the probe and the last stage it reported; a nonzero exit, an
+    unparsable payload and an OSError stay lifecycle evidence."""
+    import contextlib
+    import io
+
+    def scripted(effect):
+        def run(argv, **kwargs):
+            if isinstance(effect, BaseException):
+                raise effect
+            return subprocess.CompletedProcess(argv, effect[0], effect[1], "")
+        return run
+
+    got = []
+    for label, effect, stage in (
+            ("bound-kill-entered", subprocess.TimeoutExpired(
+                ["vector"], 60, output="",
+                stderr="probe stage: imported\nprobe stage: entered\n"),
+             "after it entered and before its delegate vector_delegate was reached"),
+            ("bound-kill-import", subprocess.TimeoutExpired(["vector"], 60),
+             "before its module import finished"),
+            ("exit-1", (1, "not json"), None), ("oserror", OSError(5, "vector"), None),
+            ("clean", (0, "[[], true]"), None)):
+        stream = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(stream):
+                value = _lifecycle_probe("", "vector_module", "vector_entry", "vector_delegate",
+                                         {}, run=scripted(effect))
+        except SystemExit as exc:
+            text = stream.getvalue()
+            got.append((label, exc.code, "lifecycle probe vector_module.vector_entry" in text,
+                        stage is not None and stage in text))
+            continue
+        got.append((label, value))
+    return got
 
 
 def _manifest_setup_failures(base):
@@ -1699,6 +1908,49 @@ def _opf_lifecycle_graph_checks():
     check("env/opf-lifecycle-bypass-denied", denial, expected_denial)
 
 
+# The lifecycle probe's bound: a deliberately short FAST-FAIL deadline (the
+# kill-timeout rule's stated exception), not a completion budget. The probe's
+# whole intended work is one module import plus the entry's own isolation
+# setup up to its FIRST delegate call, where the stub stops it; nothing it
+# is meant to run waits on anything. Its expiry is attributed: exit 2 naming
+# the probe and the last stage it reported (never a lifecycle finding,
+# which needs an observed wrong isolation, and never "scheduling" by
+# assumption: an entry that hangs before its delegate and a starved host
+# both end here, and the named stage is what distinguishes them).
+_LIFECYCLE_PROBE_SECONDS = 60
+
+
+def _lifecycle_probe(code, module, entry, delegate, env, run=None):
+    """Launch one lifecycle probe; return its observation (a (returncode,
+    payload) pair, (returncode, stdout, stderr) when the payload does not
+    parse, or the launch error's text, all lifecycle EVIDENCE), or exit 2
+    when the probe was still running at its bound."""
+    run = subprocess.run if run is None else run
+    try:
+        child = run([sys.executable, "-I", "-B", "-c", code,
+                     str(ROOT / "opf" / "tools"), module, entry, delegate],
+                    env=env, capture_output=True, text=True, timeout=_LIFECYCLE_PROBE_SECONDS)
+        try:
+            return (child.returncode, json.loads(child.stdout))
+        except ValueError:
+            return (child.returncode, child.stdout, child.stderr)
+    except subprocess.TimeoutExpired as exc:
+        partial = exc.stderr or ""
+        if isinstance(partial, bytes):
+            partial = partial.decode("utf-8", "replace")
+        stages = [line.split(":", 1)[1].strip() for line in partial.split("\n")
+                  if line.startswith("probe stage:")]
+        _cannot_evaluate_exit(["lifecycle probe {}.{} was still running when its {} s bound "
+                               "killed it, {} (loadavg {}): no lifecycle verdict exists".format(
+                                   module, entry, _LIFECYCLE_PROBE_SECONDS,
+                                   ("after it {} and before its delegate {} was reached".format(
+                                       stages[-1], delegate)) if stages
+                                   else "before its module import finished",
+                                   os.getloadavg())])
+    except (OSError, subprocess.SubprocessError) as exc:
+        return str(exc)
+
+
 def _opf_home_lifecycles(config_results):
     """Account for every registered OPF module and its observed command variants.
     Wrapped entries must isolate before delegation and restore after an exception.
@@ -1710,6 +1962,7 @@ def _opf_home_lifecycles(config_results):
         "import importlib, inspect, json, os, sys",
         "sys.path.insert(0, sys.argv[1])",
         "module = importlib.import_module(sys.argv[2])",
+        "print('probe stage: imported', file=sys.stderr, flush=True)",
         "entry, delegate = sys.argv[3:5]",
         "saved = dict(os.environ)",
         "seen = []",
@@ -1725,6 +1978,7 @@ def _opf_home_lifecycles(config_results):
         "    fn = getattr(module, entry)",
         "    args = [None for p in inspect.signature(fn).parameters.values()",
         "            if p.default is inspect.Parameter.empty]",
+        "    print('probe stage: entered', file=sys.stderr, flush=True)",
         "    fn(*args)",
         "except StopProbe:",
         "    pass",
@@ -1759,26 +2013,7 @@ def _opf_home_lifecycles(config_results):
         for entry, delegate in sorted(delegates.items()):
             env = dict(os.environ, HOME="/caller-home", XDG_CONFIG_HOME="/caller-xdg",
                        GIT_CONFIG_NOSYSTEM="0")
-            try:
-                child = subprocess.run(
-                    [sys.executable, "-I", "-B", "-c", code,
-                     str(ROOT / "opf" / "tools"), module, entry, delegate],
-                    env=env, capture_output=True, text=True, timeout=60)
-                try:
-                    got = (child.returncode, json.loads(child.stdout))
-                except ValueError:
-                    got = (child.returncode, child.stdout, child.stderr)
-            except subprocess.TimeoutExpired:
-                # A probe still running at its bound is scheduling, not a
-                # lifecycle verdict: the same distinct cannot-evaluate as
-                # _refuse_member_timeouts, never a problems[] finding.
-                print("SELF-TEST CANNOT EVALUATE: lifecycle probe {}.{} was "
-                      "still running when its 60 s bound killed it (loadavg "
-                      "{}): no lifecycle verdict exists".format(
-                          module, entry, os.getloadavg()), file=sys.stderr)
-                sys.exit(2)
-            except (OSError, subprocess.SubprocessError) as exc:
-                got = str(exc)
+            got = _lifecycle_probe(code, module, entry, delegate, env)
             results[module, entry] = got
     if not paths or not results:
         problems.append("no registered lifecycle observations")
@@ -4879,6 +5114,15 @@ def main(report_path=None):
                 ("trust/check-release-delta-archive-env", "tools/check_release_delta.py"),
         ):
             check(check_id, _archive_reads_use_caller_env(ROOT / member_rel), True)
+
+        # The per-member bound, derived from opf's declared budgets before any
+        # member launch, then the red-on-revert vectors for the refusal paths.
+        declared = _install_member_bound()
+        check("config/member-bound-derived", _MEMBER_BOUND_SECONDS > declared, True)
+        check("config/member-timeout-vectors", _member_timeout_vectors(),
+              _MEMBER_TIMEOUT_EXPECTED)
+        check("env/lifecycle-probe-timeout-vectors", _lifecycle_timeout_vectors(),
+              _LIFECYCLE_TIMEOUT_EXPECTED)
 
         _roster_checks()
         _opf_lifecycle_graph_checks()
