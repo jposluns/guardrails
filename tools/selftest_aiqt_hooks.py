@@ -108,13 +108,19 @@ floor synthesized in-tree, removed in the finally.
 
 It also covers the destructive-operation guard (destructive_guard, sechau/secrst) through synthetic payloads
 only (no submitted command runs): rm/unlink, truncate and dd of= operands outside scratch and outside every
-repository, the home directory, the repository root, ignored content, a nested repository, a submodule, an
-unresolvable operand, an xargs-fed path word and rm --no-preserve-root DENY, as do find -delete/-exec rm,
-mkfs/wipefs, shred, dropdb, a psql DROP, terraform/tofu destroy, kubectl delete and an unparseable command
-naming a recursive rm; a literal /tmp or TMPDIR path, a regenerable build directory, tracked clean content
-and the leading GUARDRAIL_ALLOW_DESTRUCTIVE opt-out ALLOW (some with a note), and untracked content in a
-repository is SNAPSHOT-THEN-ALLOWED. A mutant sweep removes each named rule from _DESTRUCT_RULES and requires
-every vector that names it to change outcome.
+repository, the home directory, the repository root, a linked worktree's .git file (and any .git component),
+ignored content, a nested repository, a submodule, an unresolvable operand, an xargs-fed path word and
+rm --no-preserve-root DENY, as do find -delete/-exec rm, mkfs/wipefs, shred, dropdb, a psql DROP,
+terraform/tofu destroy, kubectl delete, an unparseable command naming any in-scope destructive word (a
+here-string truncate/dd/kubectl among them), a quote-concatenated rm inside a substitution, an operand whose
+'..' follows a symlink (resolved the way the kernel resolves it), env -C/-S and sudo -D re-based or re-split
+wrapped commands, a conditional, backgrounded or wrapped cd followed by a relative operand, and busybox/toybox
+rm; a literal /tmp or TMPDIR path, a regenerable build DIRECTORY (an ordinary file so named is classified
+normally), tracked clean content (positive ls-files evidence required) and the leading
+GUARDRAIL_ALLOW_DESTRUCTIVE opt-out ALLOW (some with a note), a stopped wrapper walk (sudo docker rm) ALLOWS,
+and untracked content in a repository is SNAPSHOT-THEN-ALLOWED. A mutant sweep removes each named rule from
+_DESTRUCT_RULES and requires every vector that names it to change outcome; functional mutants cover the
+probe's tracked evidence and a fake clock that crosses the classification deadline mid-work.
 
   selftest_aiqt_hooks.py    exit 0 on SELF-TEST PASS, 1 on SELF-TEST FAIL, 2 on a harness/setup error
 """
@@ -1728,9 +1734,10 @@ def _test_destructive_guard(failures, tmp):
     """(dz-*) The destructive-operation guard (destructive_guard, sechau/secrst), driven only through
     synthetic payloads: no submitted command is executed, and every absolute target outside the fixture tree
     is a path this suite never creates. Fixtures: a working repo (a tracked clean src/pkg, an untracked file,
-    an ignored .env, and an ignored directory under each regenerable name), a repo holding a nested
-    repository and a committed gitlink, a clean repo whose tracked homedir stands in for HOME, and a
-    dedicated scratch root used as TMPDIR. Repository vectors see only that scratch root (the fixture tree
+    an untracked FILE named src/dist, an ignored .env, an ignored directory under each regenerable name, and
+    a symlink 'link' escaping to a plain directory outside every repo), a repo holding a nested repository
+    and a committed gitlink, a clean repo whose tracked homedir stands in for HOME plus a LINKED worktree of
+    it (its .git is a file), and a dedicated scratch root used as TMPDIR. Repository vectors see only that scratch root (the fixture tree
     may itself sit under /tmp or TMPDIR, which the guard treats as disposable); the scratch vectors use the
     guard's real scratch roots. Every vector names the one rule it depends on, and the mutant sweep removes
     that rule from _DESTRUCT_RULES and requires the vector's outcome to change, so no deny or allow vector
@@ -1772,6 +1779,15 @@ def _test_destructive_guard(failures, tmp):
         (clean / "homedir" / "profile").write_text("profile\n", encoding="utf-8")
         _git(clean, "add", "homedir/profile")
         _git(clean, "commit", "-q", "-m", "home", env_identity=True)
+        # a plain directory OUTSIDE every fixture repository (and outside the patched scratch root), the
+        # real location the dotdot vector's symlink escapes to
+        (base / "outside" / "sub").mkdir(parents=True)
+        os.symlink(str(base / "outside" / "sub"), str(repo / "link"))
+        # an ordinary untracked FILE carrying a regenerable NAME (.gitignore ignores only the dist/ DIR
+        # form), for the directory-type gate on the regenerable exception
+        (repo / "src" / "dist").write_text("built-file\n", encoding="utf-8")
+        # a LINKED worktree (its .git is a FILE pointing at clean's admin dir), for the git-admin rule
+        _git(clean, "worktree", "add", "--detach", str(base / "linked"))
     except (OSError, subprocess.SubprocessError) as exc:
         failures.append("(dz-fixture) could not build the destructive-guard fixtures: {}".format(exc))
         return
@@ -1833,6 +1849,34 @@ def _test_destructive_guard(failures, tmp):
         ("allow-optout-note", "optout", "GUARDRAIL_ALLOW_DESTRUCTIVE=1 rm -rf {}/appdata".format(absent), rp,
          "allow-note", {}),
         ("allow-dd-null", "benign-sink", "dd if=/dev/zero of=/dev/null count=1", rp, "allow", {}),
+        # (A) '..' resolves the way the kernel does: the symlink BEFORE it first, so the lexical collapse
+        # (rp/src/pkg, an allow-note) is a forgery; the real target is outside every repository and DENIES.
+        ("deny-dotdot-symlink", "dotdot", "rm -rf link/../src/pkg", rp, "deny", {}),
+        # (B) wrapper options that change the wrapped command's cwd or re-split a word.
+        ("deny-env-chdir", "wrapper-opts", "env -C {} rm -rf data".format(absent), rp, "deny", {}),
+        ("deny-env-split", "wrapper-opts", "env -S 'rm -rf {}/x'".format(absent), rp, "deny", {}),
+        ("deny-env-split-long", "wrapper-opts", "env --split-string='rm -rf {}/x'".format(absent), rp,
+         "deny", {}),
+        ("deny-sudo-chdir", "wrapper-opts", "sudo -D {} rm -rf data".format(absent), rp, "deny", {}),
+        # (H) the walk STOPS at the first non-wrapper word: docker's rm subcommand is not the shell's rm.
+        ("allow-wrapper-stop", "wrapper-opts", "sudo docker rm -f $CID", rp, "allow", {}),
+        ("deny-busybox", "wrappers", "busybox rm -rf {}/x".format(absent), rp, "deny", {}),
+        # (C) a cd that may not run in the parent shell must not move the inferred cwd: conditional (&&/||),
+        # backgrounded (&, a subshell), wrapped (command cd is modelled; time cd is not and fails closed).
+        ("deny-cd-conditional", "cd-flow", "false && cd {}/d && true; rm -rf relic".format(scratch), rp,
+         "deny", {}),
+        ("deny-cd-or", "cd-flow", "true || cd {}/d && rm -rf relic".format(scratch), rp, "deny", {}),
+        ("deny-cd-background", "cd-flow", "cd {}/d && true & rm -rf relic".format(scratch), rp, "deny", {}),
+        ("deny-cd-command", "cd-flow", "command cd {} && rm -rf data".format(absent), rp, "deny", {}),
+        ("deny-cd-wrapped", "cd-flow", "time cd {}/d && rm -rf relic".format(scratch), rp, "deny", {}),
+        # (E) a linked worktree's .git FILE is an administrative entry, never restorable content.
+        ("deny-worktree-gitfile", "git-admin", "rm -rf .git", str(base / "linked"), "deny", {}),
+        # (D) the lexer rejects a here-string, and the WIDE raw fallback must cover every in-scope word.
+        ("deny-herestring-truncate", "raw", "truncate -s 0 {}/d <<< x".format(absent), rp, "deny", {}),
+        ("deny-herestring-dd", "raw", "dd if=/dev/zero of={}/d <<< x".format(absent), rp, "deny", {}),
+        ("deny-herestring-kubectl", "raw", "kubectl delete namespace prod <<< x", rp, "deny", {}),
+        # (D) a quote-concatenated spelling inside a substitution scans as the word the shell runs.
+        ("deny-subst-concat", "subst", "echo \"$(r''m -rf {}/x)\"".format(absent), rp, "deny", {}),
     ] + [("allow-regenerable-" + name.strip("._"), "regenerable", "rm -rf " + name, rp, "allow", {})
          for name in regen]
     try:
@@ -1883,6 +1927,10 @@ def _test_destructive_guard(failures, tmp):
                  rp, "allow"),
                 ("dz-ls", "ls -la", rp, "allow"),
                 ("dz-kubectl-get", "kubectl get pods", rp, "allow"),
+                # (G) an ordinary untracked FILE named like a regenerable directory is classified normally
+                # (snapshot-then-allow), never name-allowed: the exception requires the DIRECTORY type.
+                # The pinned-code mutant (no type gate) returned a silent "allow" here.
+                ("dz-regenerable-file", "rm src/dist", rp, "allow-note"),
                 ("dz-psql-select", "psql -c 'SELECT 1'", rp, "allow")):
             got = run(command, cwd, {})
             if got != want:
@@ -1911,6 +1959,43 @@ def _test_destructive_guard(failures, tmp):
             aiqt_hooks._DESTRUCT_BUDGET = saved_budget
         if got != "deny":
             failures.append("(dz-budget) an operand reached past the time budget must deny; got {}".format(got))
+        # (E) POSITIVE tracked evidence: an EXISTING path git reports nothing about (every probe fact False,
+        # the stand-in for an administrative or otherwise invisible entry) must DENY, never earn a "git can
+        # restore it" note. The mutant is the pinned probe shape (no 'tracked' fact consulted): it allowed.
+        saved_probe = aiqt_hooks._destruct_probe
+        aiqt_hooks._destruct_probe = lambda top, rel, deadline=None: {
+            "ignored": False, "embedded": False, "untracked": False, "dirty": False, "gitlink": False,
+            "tracked": False}
+        try:
+            got = run("rm -rf src/pkg", rp, {})
+        finally:
+            aiqt_hooks._destruct_probe = saved_probe
+        if got != "deny":
+            failures.append("(dz-tracked-evidence) an existing path with no tracked listing must deny; "
+                            "got {}".format(got))
+        # (F) the WORK ITSELF crossing the deadline (a fake clock advancing 2 simulated seconds per reading,
+        # so the 6-second budget passes DURING classification, not before the first operand) must DENY the
+        # completed result. The dz-budget vector above only proves the cheap pre-operand check; the
+        # pinned-code mutant (no deadline threading, no completion check) returned "allow" here.
+        class _FakeClock:
+            def __init__(self):
+                self.now = 0.0
+
+            def __getattr__(self, name):
+                return getattr(saved_time, name)
+
+            def monotonic(self):
+                self.now += 2.0
+                return self.now
+        saved_time = aiqt_hooks.time
+        aiqt_hooks.time = _FakeClock()
+        try:
+            got = run("rm src/pkg/a.py", rp, {})
+        finally:
+            aiqt_hooks.time = saved_time
+        if got != "deny":
+            failures.append("(dz-deadline-crossed) a classification that finishes after the deadline must "
+                            "deny; got {}".format(got))
         for label, data, want in (
                 ("dz-missing-tool", {"hook_event_name": "PreToolUse", "tool_input": {"command": "rm -rf /"}},
                  "deny"),
@@ -10632,10 +10717,13 @@ def _main_isolated(monitor):
           "be self-declared through a guarded tool; the general Bash-write path stays the disclosed wrtscp "
           "residual. sechau/secrst (destructive_guard) DENIES-and-educates a destructive operation with no "
           "verified restore path (a path outside scratch and every repository, the home directory, a "
-          "repository root, ignored or nested-repository or submodule content, an unresolvable or xargs-fed "
-          "operand, find -delete, a device, database or cloud destroyer, an unparseable recursive rm), "
-          "SNAPSHOT-THEN-ALLOWS untracked repository content, and ALLOWS tracked clean content (a note on a "
-          "recursive delete), a literal scratch path, a regenerable build directory, and the leading opt-out "
+          "repository root, a .git administrative entry, ignored or nested-repository or submodule content, "
+          "an unresolvable or xargs-fed operand, a symlink-escaping '..' operand, a re-split or re-rooted or "
+          "cwd-shifted wrapper form it cannot model, find -delete, a device, database or cloud destroyer, an "
+          "unparseable command naming any in-scope destructive word), "
+          "SNAPSHOT-THEN-ALLOWS untracked repository content, and ALLOWS tracked clean content (positive "
+          "ls-files evidence, a note on a recursive delete), a literal scratch path, a regenerable build "
+          "directory (the directory type required), and the leading opt-out "
           "convention (with a note). A "
           "mis-wired PreToolUse event hard-blocks (exit 2). Historical note: several guards were "
           "originally ASK-based; this suite now asserts the no-ask outcomes above and the global "

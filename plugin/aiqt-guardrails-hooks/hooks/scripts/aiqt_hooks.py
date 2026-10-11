@@ -4056,15 +4056,17 @@ def _recovery_git(repo, args, env_extra=None, timeout=10):
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
 
 
-def _recovery_toplevel(repo):
+def _recovery_toplevel(repo, timeout=5):
     """The absolute repo TOPLEVEL for repo, via `git rev-parse --show-toplevel` (run through _recovery_git,
     so it inherits the discovery-env neutralization and targets the REAL repo). Returns the toplevel path, or
     None when git cannot resolve it (a non-zero return or an empty result: a bare repo, a broken git dir, or
     not a work tree) - the caller treats None as a snapshot failure. This matters because `status --porcelain`
     paths are repo-ROOT-relative while the session cwd can be a SUBDIR, so the size-estimate joins and the
-    inside-the-repo containment checks must anchor on the TOPLEVEL, not on the (possibly deeper) cwd."""
+    inside-the-repo containment checks must anchor on the TOPLEVEL, not on the (possibly deeper) cwd.
+    `timeout` (default 5) lets a deadline-bounded caller (destructive_guard) cap the discovery subprocess by
+    its remaining budget."""
     try:
-        result = _recovery_git(repo, ["rev-parse", "--show-toplevel"], timeout=5)
+        result = _recovery_git(repo, ["rev-parse", "--show-toplevel"], timeout=timeout)
     except (subprocess.SubprocessError, OSError, ValueError):
         # ValueError covers a UnicodeDecodeError raised by text-mode decoding of a non-UTF-8 toplevel path.
         return None
@@ -4086,7 +4088,7 @@ def _recovery_toplevel(repo):
     return top
 
 
-def _recovery_status_entries(repo, top):
+def _recovery_status_entries(repo, top, timeout=5):
     """(classes, total_bytes) from a read-only, config-forced porcelain probe of repo: `classes` is the
     set of covered classes among {'staged','tracked','untracked'} across every changed/untracked entry,
     and `total_bytes` is the summed on-disk size of those paths (a size-cap estimate; a missing path, e.g.
@@ -4094,10 +4096,11 @@ def _recovery_status_entries(repo, top):
     (the resolved toplevel), NOT the passed repo, which can be a subdir and would under-count the estimate.
     Parses the NUL-delimited `--porcelain -z` form, consuming the extra origin field of a rename/copy record.
     Raises subprocess.SubprocessError / OSError on a probe failure, or UnicodeDecodeError (a ValueError) when
-    a non-UTF-8 path cannot be decoded, which the caller turns into a snapshot fail (a graceful ASK)."""
+    a non-UTF-8 path cannot be decoded, which the caller turns into a snapshot fail (a graceful ASK).
+    `timeout` (default 5) lets a deadline-bounded caller cap the probe subprocess by its remaining budget."""
     result = _recovery_git(
         repo, ["-c", "status.showUntrackedFiles=all", "status", "--porcelain",
-               "--untracked-files=all", "-z"], env_extra={"GIT_OPTIONAL_LOCKS": "0"}, timeout=5)
+               "--untracked-files=all", "-z"], env_extra={"GIT_OPTIONAL_LOCKS": "0"}, timeout=timeout)
     if result.returncode != 0:
         raise subprocess.SubprocessError("status probe returned {}".format(result.returncode))
     classes = set()
@@ -4146,17 +4149,27 @@ def _path_is_within(candidate, parent):
         return True
 
 
-def _take_snapshot(repo, top, verb, what=None):
+def _take_snapshot(repo, top, verb, what=None, deadline=None):
     """Take an INERT git-DB snapshot of the working tree (tracked-modified + staged + untracked; ignored
     excluded) via a TEMPORARY GIT_INDEX_FILE normally outside the repo, protected by a private
     refs/aiqt-recovery/<utc-ts>-<pid> ref. `top` is the resolved repo TOPLEVEL (the containment anchor and
     the size-estimate root; the session cwd may be a subdir). In a NORMAL repo writes only git objects and
     that one ref; the real index, worktree, HEAD, and every branch are untouched (see the block comment above
     _SNAPSHOTTABLE_VERBS for the repo-config residual). `what` names the triggering operation in the
-    snapshot commit messages (default 'git <verb>'). Returns ('ok', info) with info =
-    {ref, sha, classes, restore}, or ('fail', reason)."""
+    snapshot commit messages (default 'git <verb>'). `deadline` (a time.monotonic instant, default None:
+    unbounded as before) lets a budgeted caller (destructive_guard) cap EVERY snapshot subprocess by its
+    remaining budget; a step reached past the deadline raises, failing the snapshot closed. Returns
+    ('ok', info) with info = {ref, sha, classes, restore}, or ('fail', reason)."""
+    def _left(cap):
+        if deadline is None:
+            return cap
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired("git (snapshot reached after the classification budget)", cap)
+        return min(cap, remaining)
+
     try:
-        classes, total = _recovery_status_entries(repo, top)
+        classes, total = _recovery_status_entries(repo, top, timeout=_left(5))
     except (subprocess.SubprocessError, OSError) as exc:
         return ("fail", "the working-tree status probe failed ({})".format(exc))
     except UnicodeDecodeError as exc:
@@ -4184,7 +4197,7 @@ def _take_snapshot(repo, top, verb, what=None):
         # snapshot would be built over an EMPTY index (write-tree would "succeed" on it and silently drop
         # staged-only content); fail closed so the caller DENIES rather than advertise a snapshot missing it.
         ri = _recovery_git(
-            repo, ["rev-parse", "--path-format=absolute", "--git-path", "index"], timeout=5)
+            repo, ["rev-parse", "--path-format=absolute", "--git-path", "index"], timeout=_left(5))
         if ri.returncode != 0:
             return ("fail", "the repository index path could not be resolved to seed the staged snapshot "
                             "(git rev-parse --git-path index failed)")
@@ -4200,7 +4213,7 @@ def _take_snapshot(repo, top, verb, what=None):
         # commit keeps its blobs reachable from the ref (GC-safe). Best-effort: if the pure-index write-tree
         # fails (e.g. unmerged index entries), the snapshot still captures the worktree overlay.
         staged_tree = ""
-        swt = _recovery_git(repo, ["write-tree"], env_extra=env, timeout=10)
+        swt = _recovery_git(repo, ["write-tree"], env_extra=env, timeout=_left(10))
         if swt.returncode == 0 and swt.stdout.strip():
             staged_tree = swt.stdout.strip()
         elif "staged" in classes:
@@ -4215,13 +4228,13 @@ def _take_snapshot(repo, top, verb, what=None):
             return ("fail", "the staged (index) state could not be captured (git write-tree on the pure "
                             "index failed) while staged content is present, so a staged-only discard would "
                             "be unrecoverable")
-        if _recovery_git(repo, ["add", "--all"], env_extra=env, timeout=20).returncode != 0:
+        if _recovery_git(repo, ["add", "--all"], env_extra=env, timeout=_left(20)).returncode != 0:
             return ("fail", "git add --all into the temp index failed")
-        wt = _recovery_git(repo, ["write-tree"], env_extra=env, timeout=10)
+        wt = _recovery_git(repo, ["write-tree"], env_extra=env, timeout=_left(10))
         if wt.returncode != 0 or not wt.stdout.strip():
             return ("fail", "git write-tree (temp index) failed")
         tree = wt.stdout.strip()
-        head = _recovery_git(repo, ["rev-parse", "--verify", "-q", "HEAD^{commit}"], timeout=5)
+        head = _recovery_git(repo, ["rev-parse", "--verify", "-q", "HEAD^{commit}"], timeout=_left(5))
         parent = head.stdout.strip() if head.returncode == 0 else ""
         # Build the staged-index commit only when the staged tree differs from the worktree overlay (else the
         # staged content is already captured by `tree`); it becomes the snapshot commit's second parent.
@@ -4231,7 +4244,7 @@ def _take_snapshot(repo, top, verb, what=None):
             if parent:
                 sct_args += ["-p", parent]
             sct_args += ["-m", "aiqt-guardrails staged (index) snapshot before {}".format(what or "git " + verb)]
-            sct = _recovery_git(repo, sct_args, timeout=10)
+            sct = _recovery_git(repo, sct_args, timeout=_left(10))
             # ROUND-6 FINDING 6: the staged (index) commit-tree status is now CHECKED. Distinct staged-only
             # content EXISTS here (staged_tree != tree, the worktree overlay), and it lives ONLY on this
             # commit's tree, so if commit-tree FAILS the staged tree object is unreferenced (GC-eligible) and
@@ -4249,7 +4262,7 @@ def _take_snapshot(repo, top, verb, what=None):
         if staged_commit:
             commit_args += ["-p", staged_commit]  # second parent: the pre-command staged (index) state
         commit_args += ["-m", "aiqt-guardrails recovery snapshot before {}".format(what or "git " + verb)]
-        ct = _recovery_git(repo, commit_args, timeout=10)
+        ct = _recovery_git(repo, commit_args, timeout=_left(10))
         if ct.returncode != 0 or not ct.stdout.strip():
             return ("fail", "git commit-tree failed")
         sha = ct.stdout.strip()
@@ -4262,7 +4275,7 @@ def _take_snapshot(repo, top, verb, what=None):
             datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ"), os.getpid())
         # The trailing "" is the expected OLD value: git makes this a CREATE-ONLY update that fails if the ref
         # already exists, so a colliding name returns non-zero -> ('fail') -> ASK, never an overwrite.
-        if _recovery_git(repo, ["update-ref", ref, sha, ""], timeout=5).returncode != 0:
+        if _recovery_git(repo, ["update-ref", ref, sha, ""], timeout=_left(5)).returncode != 0:
             return ("fail", "git update-ref for the recovery ref failed (a create-only collision or a "
                             "ref-store error), so no recovery point was written over a prior one")
     except (subprocess.SubprocessError, OSError, UnicodeDecodeError) as exc:
@@ -4328,7 +4341,7 @@ def _write_recovery_ledger(repo, top, verb, info):
         return False
 
 
-def _record_recovery(repo, verb, what=None):
+def _record_recovery(repo, verb, what=None, deadline=None):
     """Take a recovery snapshot and, on success, append the ledger (best-effort). Returns ('ok', info) or
     ('fail', reason). Called ONLY when the worktree is resolvable to the session cwd and the tree is NOT
     provably clean, so a snapshot is genuinely warranted. Resolves the repo TOPLEVEL ONCE (via _recovery_git,
@@ -4340,12 +4353,17 @@ def _record_recovery(repo, verb, what=None):
     can propagate to the dispatcher and crash the guard. The ledger write is OUTSIDE that boundary and
     separately best-effort: it runs only on a successful snapshot and any fault in it is swallowed, so it can
     NEVER downgrade a successful snapshot's ('ok', info) to a failure. `what` is passed through to
-    _take_snapshot for the snapshot commit messages (destructive_guard names a shell delete there)."""
+    _take_snapshot for the snapshot commit messages (destructive_guard names a shell delete there);
+    `deadline` (default None: unbounded, the git_discard behaviour) is passed through so a budgeted caller's
+    snapshot subprocesses are capped by the time remaining and a step past the deadline fails closed."""
     try:
-        top = _recovery_toplevel(repo)
+        if deadline is not None and time.monotonic() > deadline:
+            return ("fail", "the classification budget was exhausted before the snapshot could start")
+        top = _recovery_toplevel(repo, timeout=5 if deadline is None
+                                 else max(0.05, min(5, deadline - time.monotonic())))
         if not top:
             return ("fail", "the repository toplevel could not be resolved (a bare or broken git dir)")
-        result = _take_snapshot(repo, top, verb, what)
+        result = _take_snapshot(repo, top, verb, what, deadline)
     except Exception as exc:  # a snapshot-path fault -> graceful fail-to-ASK
         return ("fail", "the recovery snapshot could not be taken ({}: {})".format(
             type(exc).__name__, exc))
@@ -6532,10 +6550,10 @@ def protected_line(data):
 # --- sechau/secrst: a destructive operation outside git's reach ---------------------------------------
 # The destructive-operation guard (destructive_guard). It follows git_discard's recover-then-allow model for
 # shell deletion and the other destructive command families git_discard does not see: content git can
-# restore (tracked and clean) is ALLOWED, untracked non-ignored content inside a repository is
-# SNAPSHOT-THEN-ALLOWED through the same refs/aiqt-recovery/ snapshot (_record_recovery), a literal scratch
-# path or a regenerable build directory is ALLOWED, and everything else in the destructive class is DENIED
-# and educated. NO-ASK posture: no path returns an ask.
+# restore (tracked and clean, with POSITIVE ls-files evidence) is ALLOWED, untracked non-ignored content
+# inside a repository is SNAPSHOT-THEN-ALLOWED through the same refs/aiqt-recovery/ snapshot
+# (_record_recovery), a literal scratch path or a regenerable build DIRECTORY is ALLOWED, and everything
+# else in the destructive class is DENIED and educated. NO-ASK posture: no path returns an ask.
 #
 # _DESTRUCT_RULES names every rule the guard applies. Each deny or allow vector the self-test exercises
 # depends on exactly one named rule, and the self-test proves that by removing one name at a time from this
@@ -6543,16 +6561,43 @@ def protected_line(data):
 # every name; nothing reads it from the environment.
 _DESTRUCT_RULES = frozenset((
     "rm", "truncate", "dd", "benign-sink", "find", "format", "shred", "dropdb", "sql", "terraform",
-    "kubectl", "wrappers", "xargs", "cd", "subst", "unresolvable", "no-preserve-root", "home", "scratch",
-    "repo-root", "regenerable", "ignored", "embedded", "gitlink", "snapshot", "clean", "optout", "raw"))
+    "kubectl", "wrappers", "wrapper-opts", "xargs", "cd", "cd-flow", "subst", "unresolvable",
+    "no-preserve-root", "home", "scratch", "repo-root", "regenerable", "ignored", "embedded", "gitlink",
+    "git-admin", "dotdot", "snapshot", "clean", "optout", "raw"))
 # The leading opt-out, matching GUARDRAIL_ALLOW_DISCARD's convention (bash last-wins, falsy values below).
 _DESTRUCT_OPTOUT_RE = re.compile(r"^GUARDRAIL_ALLOW_DESTRUCTIVE=(.*)$")
-# Words that stand in front of the real command (privilege, scheduling, and shell control-flow words). The
-# guard does not model their options: after one, it takes the first later token that names a destructive
-# command or another of these words.
+# Words that stand in front of the real command (privilege, scheduling, multiplexer, and shell control-flow
+# words). Each wrapper's VALUE-CONSUMING options are modelled (the tables below); the options that re-base
+# the wrapped command's relative operands (env -C/--chdir, sudo -D/--chdir) move the inferred cwd, and the
+# options that re-split or re-root what follows (env -S/--split-string, sudo/doas -R/--chroot) DENY when
+# anything destructive follows. The walk STOPS at the first word that is none of a wrapper, an assignment,
+# an option, or an option value: that word is the effective command (sudo docker rm ... runs docker, not
+# rm), and the remaining words are raw-scanned so unclassifiable destructive text still DENIES.
 _DESTRUCT_WRAPPERS = frozenset((
     "sudo", "doas", "command", "exec", "builtin", "env", "nice", "nohup", "time", "timeout", "stdbuf",
-    "ionice", "chrt", "setsid", "xargs", "!", "{", "if", "then", "elif", "else", "do", "while", "until"))
+    "ionice", "chrt", "setsid", "busybox", "toybox", "xargs", "!", "{", "if", "then", "elif", "else",
+    "do", "while", "until"))
+# Per-wrapper short option letters that CONSUME a value (the attached remainder of the cluster, else the
+# next word) and long option names that consume the NEXT word when given without '='. An option letter or
+# name absent here is read as a plain flag; a consuming option this table misses can hide the real command
+# behind its value, a disclosed residual (the raw stop-scan in _destruct_effective is the backstop for
+# destructive text behind such a value).
+_DESTRUCT_WRAPPER_ARG_OPTS = {
+    "sudo": "aCcDghpRrTtUu", "doas": "aCu", "env": "CSu", "nice": "n", "ionice": "cnp",
+    "chrt": "p", "stdbuf": "ioe", "timeout": "ks", "xargs": "adEeIiLlnPs", "exec": "a",
+}
+_DESTRUCT_WRAPPER_LONG_ARG_OPTS = {
+    "sudo": frozenset(("close-from", "command-timeout", "group", "host", "other-user", "prompt",
+                       "role", "type", "user")),
+    "env": frozenset(("unset",)),
+    "nice": frozenset(("adjustment",)),
+    "ionice": frozenset(("class", "classdata", "pid")),
+    "timeout": frozenset(("kill-after", "signal")),
+    "stdbuf": frozenset(("input", "output", "error")),
+    "xargs": frozenset(("arg-file", "delimiter", "max-args", "max-chars", "max-lines", "max-procs")),
+}
+# timeout's DURATION and chrt's PRIORITY are bare positional operands ahead of the wrapped command.
+_DESTRUCT_NUMERIC_RE = re.compile(r"^[0-9][0-9.smhd]*$")
 # Command words whose operands name files the command destroys or overwrites; each operand is classified.
 _DESTRUCT_PATH_WORDS = frozenset(("rm", "unlink", "truncate", "dd"))
 # Command words that always deny: their target is a device, a database, or remote state, none of which has a
@@ -6573,11 +6618,29 @@ _DESTRUCT_REGENERABLE = frozenset(("node_modules", "__pycache__", ".pytest_cache
 _DESTRUCT_BUDGET = 6.0
 _RM_LONG_OPTS = ("recursive", "force", "interactive", "one-file-system", "no-preserve-root", "preserve-root",
                  "dir", "verbose", "help", "version")
-# The unparseable-command fallback: a raw recursive rm, a find -delete, or an always-deny command word.
+# The narrow raw scan: a raw recursive rm, a find -delete, or an always-deny command word. Used by the
+# substitution scan (its disclosed scope) and as the stop-scan backstop behind a wrapper walk.
 _RAW_DESTRUCT_RE = re.compile(
     r"(?:^|[\s;&|()`'\"/\\])rm\s(?:[^\n;&|]*?\s)?(?:-[A-Za-z]*[rR]|--rec)"
     r"|(?:^|[\s;&|()`'\"/\\])find\s[^\n;&|]*\s-delete\b"
     r"|(?:^|[\s;&|()`'\"/\\])(?:mkfs[.\w]*|mke2fs|mkswap|wipefs|shred|dropdb)(?=$|[\s;&|()`'\"])")
+# The WIDE raw scan for a command the LEXER cannot parse (and for a wrapper option that re-splits or
+# re-roots what follows): the fallback cannot classify operands at all, so EVERY in-scope command word
+# DENIES there, not only a recursive rm: rm/unlink in any form, truncate, dd with an of= sink, kubectl
+# delete, terraform/tofu destroy, a SQL client beside DROP or TRUNCATE, plus the narrow scan's names.
+_RAW_DESTRUCT_WIDE_RE = re.compile(
+    r"(?:^|[\s;&|()`'\"/\\])(?:rm|unlink|truncate|shred|dropdb|mke2fs|mkswap|wipefs|mkfs[.\w]*)"
+    r"(?=$|[\s;&|()`'\"])"
+    r"|(?:^|[\s;&|()`'\"/\\])dd\s[^\n;&|]*\bof="
+    r"|(?:^|[\s;&|()`'\"/\\])find\s[^\n;&|]*\s-delete\b"
+    r"|(?:^|[\s;&|()`'\"/\\])kubectl\s[^\n;&|]*\bdelete(?=$|[\s;&|()`'\"])"
+    r"|(?:^|[\s;&|()`'\"/\\])(?:terraform|tofu)\s[^\n;&|]*-?destroy\b"
+    r"|(?:^|[\s;&|()`'\"/\\])(?:psql|mysql|mariadb|sqlite3)(?=[\s;&|()`'\"])[^\n;&|]*"
+    r"(?i:\bdrop\b|\btruncate\b)")
+# Quote and escape characters removed before a raw scan, so a quote-concatenated spelling (r''m, "r"m,
+# r\m) scans as the word the shell actually runs. Removal only JOINS fragments, so it can over-match a
+# quoted mention (the safe direction) and never under-matches a real spelling.
+_DESTRUCT_QUOTE_STRIP = dict.fromkeys(map(ord, "'\"\\"))
 _DESTRUCT_ALTS = (
     "This guard cannot verify human authorization (rule sechau) or a verified restore path (rule secrst) "
     "for it. Safe next steps: hold, and ask the human operator in the conversation to run it or to authorize "
@@ -6601,20 +6664,156 @@ def _destruct_is_target_word(word):
             or word in _DESTRUCT_WRAPPERS)
 
 
-def _destruct_effective(argv):
-    """(index, via_xargs): the index of the segment's effective command word after leading assignments and
-    any wrapper or control-flow word, or len(argv) when there is none; via_xargs is True when xargs stood in
-    front, so the command receives operands this guard cannot see."""
+def _destruct_raw_text(text):
+    r"""Raw text prepared for a fallback scan: the bodies of QUOTED heredocs removed first (literal prose),
+    then every quote and backslash removed, so a quote-concatenated spelling (r''m, "r"m, r\m) scans as the
+    word the shell actually runs. Removal only joins fragments: it can over-match a quoted mention (the
+    safe direction) and never hides a real spelling."""
+    return _strip_quoted_heredoc_bodies(text).translate(_DESTRUCT_QUOTE_STRIP)
+
+
+def _destruct_abs(token):
+    """Collapse an ABSOLUTE operand the way the kernel resolves it: a '..' component applies only AFTER the
+    symlink before it is resolved (os.path.realpath walks components left to right), so 'repo/link/../x' is
+    judged at the real target the shell will touch, never at the lexically collapsed forgery. A dot-dot-free
+    path keeps the cheaper lexical collapse (the classifier realpaths it before judging anyway)."""
+    if "dotdot" in _DESTRUCT_RULES and ".." in token.split("/"):
+        return os.path.realpath(token)
+    return "/" + os.path.normpath(token).lstrip("/")
+
+
+def _destruct_left(deadline, cap):
+    """The subprocess timeout for one slow classification step: cap, bounded by the time left to the guard
+    deadline (a small positive floor keeps subprocess.run valid; the caller checks the deadline around the
+    call, so the floor cannot stretch the budget materially)."""
+    if deadline is None:
+        return cap
+    return max(0.05, min(cap, deadline - time.monotonic()))
+
+
+def _destruct_chdir(cwd, value, opaque):
+    """The wrapped command's working directory after a modelled env -C / sudo -D directory change: the
+    literal value (absolute, or joined to the current cwd), or None (UNKNOWN, so a later relative operand
+    DENIES) when the value is missing, opaque, or relative with no known cwd."""
+    if not value or opaque:
+        return None
+    if os.path.isabs(value):
+        return _destruct_abs(value)
+    if not cwd:
+        return None
+    return _destruct_abs(os.path.join(cwd, value))
+
+
+def _destruct_wrapper_stop(word, tok, trailing):
+    """The deny detail for a wrapper option this guard cannot model through: env -S/--split-string re-splits
+    one word into a command line of its own, and sudo/doas -R/--chroot re-roots every path the wrapped
+    command touches. Returns a deny detail when the trailing words name anything destructive (either raw
+    scan over the quote-decoded words), else None: the walk stops and nothing in scope follows."""
+    if _RAW_DESTRUCT_WIDE_RE.search(trailing) or _RAW_DESTRUCT_RE.search(trailing):
+        return ("the {} option {!r} makes the following words run {} this guard cannot model, and they name "
+                "a destructive operation, so their real targets cannot be classified".format(
+                    word, tok[:40], "as a re-split command line" if word == "env" else "under a chroot"))
+    return None
+
+
+def _destruct_peel_one(seg, i, cwd):
+    """Walk ONE wrapper word's own assignments, options and option values to its operand (the wrapped
+    command). Returns (index_of_the_wrapped_command, cwd_for_it, deny_detail_or_None). A modelled
+    env -C/--chdir or sudo -D/--chdir re-bases the wrapped command's relative operands (an unresolvable
+    directory makes the cwd unknown); env -S/--split-string and sudo/doas -R/--chroot are unmodellable and
+    DENY when anything destructive follows (_destruct_wrapper_stop); an option value is consumed so it is
+    never mistaken for the wrapped command; timeout and chrt skip their bare numeric positional operands."""
+    argv = seg.argv
+    word = _destruct_word(argv[i])
+    shorts = _DESTRUCT_WRAPPER_ARG_OPTS.get(word, "")
+    longs = _DESTRUCT_WRAPPER_LONG_ARG_OPTS.get(word, frozenset())
+    j = i + 1
+    while j < len(argv):
+        tok = argv[j]
+        if tok == "--":
+            return j + 1, cwd, None
+        if _ENV_ASSIGN_RE.match(tok):
+            j += 1
+            continue
+        if word in ("timeout", "chrt") and _DESTRUCT_NUMERIC_RE.match(tok):
+            j += 1
+            continue
+        if tok.startswith("--") and len(tok) > 2:
+            name, eq, inline = tok[2:].partition("=")
+            if (word == "env" and name == "split-string") or (word in ("sudo", "doas") and name == "chroot"):
+                trailing = " ".join([inline] + argv[j + 1:])
+                return len(argv), cwd, _destruct_wrapper_stop(word, tok, trailing)
+            if name == "chdir" and word in ("env", "sudo"):
+                if eq:
+                    cwd = _destruct_chdir(cwd, inline, seg.argv_opaque[j])
+                    j += 1
+                elif j + 1 < len(argv):
+                    cwd = _destruct_chdir(cwd, argv[j + 1], seg.argv_opaque[j + 1])
+                    j += 2
+                else:
+                    return len(argv), cwd, None
+                continue
+            if not eq and name in longs:
+                j += 2
+                continue
+            j += 1
+            continue
+        if tok.startswith("-") and len(tok) > 1:
+            consumed, letter, value, v_opaque = 1, "", None, False
+            for pos in range(1, len(tok)):
+                ch = tok[pos]
+                if ch in shorts:
+                    letter = ch
+                    if pos + 1 < len(tok):
+                        value, v_opaque = tok[pos + 1:], seg.argv_opaque[j]
+                    elif j + 1 < len(argv):
+                        value, v_opaque, consumed = argv[j + 1], seg.argv_opaque[j + 1], 2
+                    break
+                if not ch.isalnum():
+                    break
+            if (word == "env" and letter == "S") or (word in ("sudo", "doas") and letter == "R"):
+                trailing = " ".join([value or ""] + argv[j + consumed:])
+                return len(argv), cwd, _destruct_wrapper_stop(word, tok, trailing)
+            if (word == "env" and letter == "C") or (word == "sudo" and letter == "D"):
+                cwd = _destruct_chdir(cwd, value, v_opaque)
+            j += consumed
+            continue
+        return j, cwd, None
+    return len(argv), cwd, None
+
+
+def _destruct_effective(seg, cwd):
+    """(index, via_xargs, cwd, deny_detail): the index of the segment's effective command word after leading
+    assignments and any wrapper or control-flow word, or len(argv) when there is none; via_xargs is True
+    when xargs stood in front, so the command receives operands this guard cannot see; cwd is the working
+    directory the wrapped command's relative operands resolve against (re-based by a modelled env -C /
+    sudo -D, None when a directory change cannot be resolved); deny_detail is set when a wrapper form
+    cannot be classified while destructive text follows (fail closed). The walk STOPS at the first word
+    that is neither a wrapper, an assignment, an option, nor an option value: that word is the effective
+    command (sudo docker rm ... runs docker, not the shell's rm), and the remaining words are raw-scanned
+    so unclassifiable destructive text behind an unmodelled form still DENIES rather than pass unexamined."""
+    argv = seg.argv
     i = _command_word_index(argv)
     via_xargs = False
     while i < len(argv) and "wrappers" in _DESTRUCT_RULES and _destruct_word(argv[i]) in _DESTRUCT_WRAPPERS:
         if _destruct_word(argv[i]) == "xargs" and "xargs" in _DESTRUCT_RULES:
             via_xargs = True
-        j = i + 1
-        while j < len(argv) and not _destruct_is_target_word(_destruct_word(argv[j])):
-            j += 1
-        i = j
-    return i, via_xargs
+        if "wrapper-opts" not in _DESTRUCT_RULES:
+            j = i + 1
+            while j < len(argv) and not _destruct_is_target_word(_destruct_word(argv[j])):
+                j += 1
+            i = j
+            continue
+        i, cwd, detail = _destruct_peel_one(seg, i, cwd)
+        if detail:
+            return i, via_xargs, cwd, detail
+        if i < len(argv) and not _destruct_is_target_word(_destruct_word(argv[i])):
+            if _RAW_DESTRUCT_RE.search(" ".join(argv[i:])):
+                return i, via_xargs, cwd, (
+                    "the wrapped command {!r} is not one this guard models, while the words after it name a "
+                    "destructive operation it cannot classify".format(argv[i][:80]))
+            break
+    return i, via_xargs, cwd, None
 
 
 def _rm_operands(args):
@@ -6679,7 +6878,7 @@ def _destruct_resolve(token, opaque, leading_tilde, cwd):
         if not cwd:
             return None
         token = os.path.join(cwd, token)
-    return "/" + os.path.normpath(token).lstrip("/")
+    return _destruct_abs(token)
 
 
 def _destruct_scratch_roots():
@@ -6696,24 +6895,28 @@ def _destruct_scratch_roots():
     return roots
 
 
-def _destruct_probe(top, rel):
+def _destruct_probe(top, rel, deadline=None):
     """Facts about the content under rel in the repository top, from one read-only, config-forced status
     probe (untracked and ignored entries listed per file) and one ls-files read: a dict with 'ignored',
     'embedded' (an untracked nested repository, which git reports as a directory), 'untracked', 'dirty' (a
-    staged or unstaged tracked change), and 'gitlink' (a submodule or other gitlink). None when either probe
-    fails."""
+    staged or unstaged tracked change), 'gitlink' (a submodule or other gitlink), and 'tracked' (POSITIVE
+    evidence: ls-files lists at least one tracked entry under rel, the precondition for any "git can
+    restore it" claim). None when either probe fails. Each probe's subprocess timeout is capped by the time
+    left to the guard deadline, so a slow repository cannot run the hook past its platform timeout."""
     pathspec = ["--", rel]
     try:
         status = _recovery_git(
             top, ["--literal-pathspecs", "-c", "status.showUntrackedFiles=all", "status", "--porcelain", "-z",
                   "--untracked-files=all", "--ignored"] + pathspec,
-            env_extra={"GIT_OPTIONAL_LOCKS": "0"}, timeout=5)
-        listing = _recovery_git(top, ["--literal-pathspecs", "ls-files", "-s", "-z"] + pathspec, timeout=5)
+            env_extra={"GIT_OPTIONAL_LOCKS": "0"}, timeout=_destruct_left(deadline, 5))
+        listing = _recovery_git(top, ["--literal-pathspecs", "ls-files", "-s", "-z"] + pathspec,
+                                timeout=_destruct_left(deadline, 5))
     except (subprocess.SubprocessError, OSError, ValueError):
         return None
     if status.returncode != 0 or listing.returncode != 0:
         return None
     facts = {"ignored": False, "embedded": False, "untracked": False, "dirty": False,
+             "tracked": any(len(rec) >= 4 for rec in listing.stdout.split("\0")),
              "gitlink": any(rec.startswith("160000 ") for rec in listing.stdout.split("\0"))}
     fields = status.stdout.split("\0")
     i = 0
@@ -6734,11 +6937,15 @@ def _destruct_probe(top, rel):
     return facts
 
 
-def _destruct_classify_path(path, recursive):
-    """Classify one resolved operand path. Returns ('allow', None), ('note', detail) for content git can
-    restore, ('snap', top) for uncommitted content a recovery snapshot of the repository top can hold, or
-    ('deny', detail). The rules run in this order, and anything no allow rule covers denies. A path that
-    does not exist inside a repository reads as clean (nothing to restore) and allows without a note."""
+def _destruct_classify_path(path, recursive, deadline=None):
+    """Classify one resolved operand path. Returns ('allow', None), ('note', detail) for content git has
+    POSITIVE evidence it can restore (the path is listed as tracked), ('snap', top) for uncommitted content
+    a recovery snapshot of the repository top can hold, or ('deny', detail). The rules run in this order,
+    and anything no allow rule covers denies. A path that does not EXIST inside a repository reads as clean
+    (nothing to destroy) and allows without a note; a path that exists while git lists nothing tracked under
+    it (a linked worktree's .git file, an assume-unchanged mark) DENIES, and a .git component anywhere under
+    the toplevel DENIES outright (an administrative entry, never restorable content). Every slow step
+    (repository discovery, the status and ls-files probes) runs under the remaining guard deadline."""
     real = os.path.realpath(path)
     home = os.environ.get("HOME")
     if "home" in _DESTRUCT_RULES and home and os.path.isabs(home):
@@ -6751,7 +6958,10 @@ def _destruct_classify_path(path, recursive):
     anchor = real
     while not os.path.isdir(anchor) and anchor != "/":
         anchor = os.path.dirname(anchor)
-    top = _recovery_toplevel(anchor)
+    if deadline is not None and time.monotonic() > deadline:
+        return ("deny", "the classification of {} ran past the guard's {}-second budget before its "
+                        "repository could be discovered".format(path, _DESTRUCT_BUDGET))
+    top = _recovery_toplevel(anchor, timeout=_destruct_left(deadline, 5))
     if not top:
         return ("deny", "{} is outside any git repository and outside scratch, so no restore path is "
                         "known".format(path))
@@ -6759,9 +6969,15 @@ def _destruct_classify_path(path, recursive):
     if "repo-root" in _DESTRUCT_RULES and _path_is_within(top, real):
         return ("deny", "{} is the root of the repository {} (or contains it), so the delete would also "
                         "remove its history".format(path, top))
-    if "regenerable" in _DESTRUCT_RULES and os.path.basename(real) in _DESTRUCT_REGENERABLE:
+    rel = os.path.relpath(real, top)
+    if "git-admin" in _DESTRUCT_RULES and ".git" in rel.split(os.sep):
+        return ("deny", "{} is or holds the repository's .git administrative entry (a linked worktree's "
+                        ".git file, or the administrative directory), which is never restorable content; "
+                        "losing it severs the worktree from its history".format(path))
+    if ("regenerable" in _DESTRUCT_RULES and os.path.basename(real) in _DESTRUCT_REGENERABLE
+            and os.path.isdir(real) and not os.path.islink(real)):
         return ("allow", None)
-    facts = _destruct_probe(top, os.path.relpath(real, top))
+    facts = _destruct_probe(top, rel, deadline)
     if facts is None:
         return ("deny", "the status probe of {} in {} failed, so its content cannot be classified"
                         .format(path, top))
@@ -6779,10 +6995,18 @@ def _destruct_classify_path(path, recursive):
             return ("snap", top)
         return ("deny", "{} holds uncommitted content".format(path))
     if "clean" in _DESTRUCT_RULES:
-        if recursive and os.path.lexists(real):
+        if not os.path.lexists(real):
+            return ("allow", None)
+        if ("git-admin" in _DESTRUCT_RULES and not facts["tracked"] and not facts["ignored"]
+                and not facts["embedded"] and not facts["gitlink"]):
+            # the path EXISTS yet git reported NOTHING about it (nothing tracked, nothing in status): the
+            # administrative/invisible case (a linked worktree's .git file), so there is no positive
+            # evidence any restore is possible; a fact-bearing path was already judged by the rules above
+            return ("deny", "{} exists but git lists nothing tracked under it, so this guard has no "
+                            "positive evidence that git can restore it".format(path))
+        if recursive:
             return ("note", "{} is tracked and clean in {}, so git can restore it (git -C {} checkout "
-                            "HEAD -- {})".format(path, top, shlex.quote(top),
-                                                 shlex.quote(os.path.relpath(real, top))))
+                            "HEAD -- {})".format(path, top, shlex.quote(top), shlex.quote(rel)))
         return ("allow", None)
     return ("deny", "{} has no restore path this guard verified".format(path))
 
@@ -6793,13 +7017,16 @@ def _destruct_segment(seg, cwd, deadline):
     denies unclassified."""
     argv = seg.argv
     if ("subst" in _DESTRUCT_RULES and seg.opaque_shell and ("`" in seg.raw or "$(" in seg.raw)
-            and _RAW_DESTRUCT_RE.search(_strip_quoted_heredoc_bodies(seg.raw))):
+            and _RAW_DESTRUCT_RE.search(_destruct_raw_text(seg.raw))):
         # a backtick or quoted $( ) substitution is one opaque word to the lexer, so its body is scanned raw
-        # (quoted heredoc bodies, such as a commit message written through $(cat <<'EOF' ...), are prose)
+        # with quotes and escapes removed (a quote-concatenated r''m scans as the rm the shell runs); quoted
+        # heredoc bodies, such as a commit message written through $(cat <<'EOF' ...), stay excluded as prose
         return [("deny", "a command substitution in {!r} names a recursive rm, a find -delete, or a device, file "
                          "system, or database destroyer, whose targets this guard cannot classify"
                          .format(seg.raw.strip()[:160]))]
-    idx, via_xargs = _destruct_effective(argv)
+    idx, via_xargs, cwd, wrapped = _destruct_effective(seg, cwd)
+    if wrapped:
+        return [("deny", wrapped)]
     if idx >= len(argv):
         return []
     word = _destruct_word(argv[idx])
@@ -6855,22 +7082,41 @@ def _destruct_segment(seg, cwd, deadline):
             verdicts.append(("deny", "the {} operand {!r} is a variable, glob, substitution, or relative path "
                                      "this guard cannot resolve to a literal target".format(word, args[k])))
         else:
-            verdicts.append(_destruct_classify_path(path, recursive))
+            verdict = _destruct_classify_path(path, recursive, deadline)
+            if verdict[0] != "deny" and time.monotonic() > deadline:
+                # the work itself crossed the deadline: a result completed after it is not trusted (the
+                # platform would be deciding the call by then, not this guard), so it DENIES (fail closed)
+                verdict = ("deny", "the classification of the {} operand {!r} completed only after the "
+                                   "guard's {}-second budget".format(word, args[k], _DESTRUCT_BUDGET))
+            verdicts.append(verdict)
     return verdicts
 
 
-def _destruct_next_cwd(seg, cwd, depth):
-    """The working directory after a segment. A literal 'cd DIR' joined by '&&' outside any subshell moves
-    it; any other cd, pushd, or popd makes it unknown (None), so a later relative operand cannot resolve."""
+def _destruct_next_cwd(seg, cwd, depth, prev_sep):
+    """The working directory after a segment. A literal 'cd DIR' moves it ONLY when every condition holds:
+    the segment is reached UNCONDITIONALLY in the parent shell (it follows '', ';' or '&', never '&&', '||'
+    or a pipe, whose cd may be skipped or run in a subshell), it is joined forward by '&&' outside any
+    subshell, the cd stands bare or behind only a 'command'/'builtin' prefix, and DIR is one literal,
+    non-option word. Any other directory change - a conditional cd, a pushd or popd, or a cd/pushd/popd
+    named ANYWHERE behind a wrapper this guard does not model through (time cd DIR, env cd DIR) - makes the
+    cwd UNKNOWN (None), so a later relative operand cannot resolve and DENIES (fail closed). The caller
+    separately voids a cwd moved inside a backgrounded list (its cd ran in a subshell)."""
     argv = seg.argv
     idx = _command_word_index(argv)
-    if idx >= len(argv) or _command_word(argv) not in ("cd", "pushd", "popd") or "cd" not in _DESTRUCT_RULES:
+    if "cd-flow" in _DESTRUCT_RULES:
+        while idx < len(argv) and _destruct_word(argv[idx]) in ("command", "builtin"):
+            idx += 1
+    if idx >= len(argv) or _destruct_word(argv[idx]) not in ("cd", "pushd", "popd") or "cd" not in _DESTRUCT_RULES:
+        if ("cd" in _DESTRUCT_RULES and "cd-flow" in _DESTRUCT_RULES
+                and any(_destruct_word(tok) in ("cd", "pushd", "popd") for tok in argv[idx:])):
+            return None  # a directory change hides behind a word this guard does not model through
         return cwd
     rest = argv[idx + 1:]
-    if (_command_word(argv) == "cd" and seg.sep_after == "&&" and depth == 0 and len(rest) == 1
+    if (_destruct_word(argv[idx]) == "cd" and seg.sep_after == "&&" and depth == 0 and len(rest) == 1
             and not seg.argv_opaque[idx + 1] and not rest[0].startswith("-")
-            and (cwd or os.path.isabs(rest[0]))):
-        return "/" + os.path.normpath(os.path.join(cwd or "/", rest[0])).lstrip("/")
+            and (cwd or os.path.isabs(rest[0]))
+            and ("cd-flow" not in _DESTRUCT_RULES or prev_sep in ("", ";", "&"))):
+        return _destruct_abs(os.path.join(cwd or "/", rest[0]))
     return None
 
 
@@ -6881,25 +7127,42 @@ def destructive_guard(data):
     ask.
 
     Each lexed segment (the shared quote/redirect-aware lexer, _lex_command) is resolved past leading assignments,
-    wrapper words (sudo, env, nice, timeout, xargs, ...) and control-flow words to its effective command word.
-    rm and unlink, truncate, and dd's of= target are PATH words: each operand is resolved to a literal absolute
-    path (relative operands against the payload cwd, tracked through a literal 'cd DIR &&') and classified, in
-    order: the home directory or an ancestor of it DENIES; a literal path strictly under /tmp or the process
-    TMPDIR ALLOWS; a path outside every git repository DENIES; the repository root (or an ancestor of it)
-    DENIES; a regenerable build directory (node_modules, __pycache__, .pytest_cache, build, dist, target)
+    wrapper words (sudo, env, nice, timeout, busybox, xargs, ...) and control-flow words to its effective command
+    word. Each wrapper's value-consuming options are modelled: env -C/--chdir and sudo -D/--chdir re-base the
+    wrapped command's relative operands (an unresolvable directory makes the cwd unknown, so they DENY), while
+    env -S/--split-string and sudo/doas -R/--chroot cannot be modelled through and DENY when anything destructive
+    follows. The walk stops at the first word that is none of a wrapper, an assignment, an option or its value:
+    that word is the effective command (sudo docker rm ... runs docker, not rm), and the remaining words are
+    raw-scanned so unclassifiable destructive text still DENIES. rm and unlink, truncate, and dd's of= target are
+    PATH words: each operand is resolved to a literal absolute path and classified. A relative operand resolves
+    against the payload cwd, moved only by a literal, UNCONDITIONALLY-REACHED 'cd DIR &&' in the parent shell
+    (bare or behind command/builtin); a conditional cd (after && or ||), a cd inside a pipeline, subshell or
+    backgrounded list, a pushd/popd, or a cd behind any other word makes the cwd UNKNOWN, so later relative
+    operands DENY. A '..' component is resolved the way the kernel resolves it (the symlink before it first,
+    os.path.realpath), so 'repo/link/../x' is judged at the real target the shell will touch. Each resolved
+    path is classified, in order: the home directory or an ancestor of it DENIES; a literal path strictly under
+    /tmp or the process TMPDIR ALLOWS; a path outside every git repository DENIES; the repository root (or an
+    ancestor of it) DENIES; a .git component under the toplevel (a linked worktree's .git file, the
+    administrative directory) DENIES; a regenerable build DIRECTORY (node_modules, __pycache__, .pytest_cache,
+    build, dist, target; the directory type is required, an ordinary file so named is classified normally)
     ALLOWS; content holding an ignored file, a nested repository, or a submodule DENIES; uncommitted (untracked
     or modified) content is SNAPSHOT-THEN-ALLOWED through the git_discard recovery layer (refs/aiqt-recovery/,
     the same ledger), and DENIED when the snapshot cannot be made; tracked, clean content ALLOWS (a recursive
-    delete with a note naming the git restore command). An operand that is a variable, glob, brace, command
-    substitution, ~user form, or a relative path with no known cwd DENIES, as does every operand of an xargs-fed
-    path word, rm --no-preserve-root, and dd to a device other than /dev/null, /dev/stdout or /dev/stderr. find
-    -delete and find -exec rm, mkfs and wipefs, shred, dropdb, a psql/mysql/mariadb/sqlite3 argument carrying
-    DROP or TRUNCATE, terraform or tofu destroy, and kubectl delete always DENY: a database, a device, or remote
-    state has no restore path this guard can verify. An unparseable command (a lexer ValueError), and a segment
-    carrying a backtick or quoted $( ) substitution (one opaque word to the lexer), is scanned raw (quoted
-    heredoc bodies excluded) and DENIES when its text names a recursive rm, a find -delete, or an always-deny
-    word; otherwise an unparseable command ALLOWS. An unquoted $( ) body is lexed as its own segment and
-    classified like any other.
+    delete with a note naming the git restore command), where "tracked" requires POSITIVE evidence (ls-files
+    lists the path); an EXISTING path git lists nothing tracked under DENIES. An operand that is a variable,
+    glob, brace, command substitution, ~user form, or a relative path with no known cwd DENIES, as does every
+    operand of an xargs-fed path word, rm --no-preserve-root, and dd to a device other than /dev/null,
+    /dev/stdout or /dev/stderr. find -delete and find -exec rm, mkfs and wipefs, shred, dropdb, a
+    psql/mysql/mariadb/sqlite3 argument carrying DROP or TRUNCATE, terraform or tofu destroy, and kubectl delete
+    always DENY: a database, a device, or remote state has no restore path this guard can verify. An unparseable
+    command (a lexer ValueError, e.g. a here-string) is scanned raw with quotes and escapes stripped (quoted
+    heredoc bodies excluded) and DENIES when its text names ANY in-scope command word (rm or unlink in any form,
+    truncate, dd with of=, find -delete, kubectl delete, terraform/tofu destroy, a SQL client beside
+    DROP/TRUNCATE, or an always-deny word): the fallback cannot classify operands, so in-scope words there never
+    pass unexamined; otherwise an unparseable command ALLOWS. A segment carrying a backtick or quoted $( )
+    substitution (one opaque word to the lexer) gets the narrower quote-stripped scan (a recursive rm, find
+    -delete, or an always-deny word, so a quote-concatenated r''m is seen). An unquoted $( ) body is lexed as
+    its own segment and classified like any other.
 
     OPT-OUT: a truthy GUARDRAIL_ALLOW_DESTRUCTIVE leading the segment's own command (bash last-wins; '', 0, false,
     no, off are falsy) skips that segment with a note. It is a CONVENTION the assistant can type, so it records
@@ -6912,17 +7175,24 @@ def destructive_guard(data):
     Write-tool overwrite; a non-recursive rm inside a backtick or quoted $( ) substitution; mv or cp over an
     existing file and a shell '>' redirect (bash_absolute_paths covers only a relative one); a SQL file given
     with -f, a database client other than those named, and row-level DELETE or UPDATE; content git cannot see as
-    changed (assume-unchanged or skip-worktree marks) is read as clean. A verified restore path is provable only
-    for git-recoverable content, so database, device, and cloud destruction always deny. FALSE POSITIVES
-    (accepted cost): every glob or variable operand denies (rm *.o, rm -f "$tmp"), every path word outside a
-    repository and outside scratch denies, an ignored file inside a repository denies (rm .env), an xargs-fed rm
-    denies, and every kubectl delete denies.
+    changed (assume-unchanged or skip-worktree marks) is read as tracked and clean when ls-files lists it; a
+    wrapper option the finite tables miss that consumes a value can make that value read as the effective
+    command, so a destructive command behind such a value is seen only by the raw stop-scan (destructive TEXT
+    there still denies). A verified restore path is provable only for git-recoverable content, so database,
+    device, and cloud destruction always deny. FALSE POSITIVES (accepted cost): every glob or variable operand
+    denies (rm *.o, rm -f "$tmp"), every path word outside a repository and outside scratch denies, an ignored
+    file inside a repository denies (rm .env), an xargs-fed rm denies, every kubectl delete denies, any cd that
+    is conditional, piped, subshelled or backgrounded (and any cd/pushd/popd token behind an unmodelled word,
+    even a non-command like 'echo cd') makes later relative operands deny, an unparseable command that merely
+    MENTIONS an in-scope word denies, and env -S / sudo -R deny whenever destructive text follows.
 
     FAIL POSTURE: a missing tool_name or an unreadable command DENIES (fail closed); a non-Bash tool ALLOWS; a
-    failed status probe and an operand reached after the _DESTRUCT_BUDGET deadline DENY; a mis-wired event
-    hard-blocks. The recovery snapshot runs after classification under its own git timeouts, so a slow snapshot
-    can still outlast the plugin's 10-second hook timeout, and the platform, not this guard, then decides the
-    call."""
+    failed status probe DENIES; one deadline (_DESTRUCT_BUDGET) covers the whole classification: repository
+    discovery, the status and ls-files probes and the recovery snapshot run with subprocess timeouts capped by
+    the time remaining, an operand reached after the deadline DENIES, and a classification or snapshot result
+    COMPLETED after the deadline also DENIES (a late result is the platform's to decide, not this guard's); a
+    mis-wired event hard-blocks. Non-subprocess work (path resolution, existence checks) is not individually
+    bounded, the remaining overrun residual."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: destructive_guard wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))
@@ -6941,11 +7211,14 @@ def destructive_guard(data):
     try:
         segments = _lex_command(command)
     except ValueError:
-        if "raw" in _DESTRUCT_RULES and _RAW_DESTRUCT_RE.search(_strip_quoted_heredoc_bodies(command)):
+        raw = _destruct_raw_text(command)
+        if "raw" in _DESTRUCT_RULES and (_RAW_DESTRUCT_WIDE_RE.search(raw) or _RAW_DESTRUCT_RE.search(raw)):
             return _deny("AIQT rules sechau/secrst: the command could not be parsed by the shell lexer and its "
-                         "text names a recursive rm, a find -delete, or a device, file system, or database "
-                         "destroyer, so this guard cannot classify its targets; it is denied rather than run "
-                         "(fail closed). Re-issue it as a parseable command with literal targets. {}"
+                         "text names an in-scope destructive command (rm or unlink, truncate, dd with of=, a "
+                         "find -delete, kubectl delete, terraform destroy, a SQL DROP or TRUNCATE, or a "
+                         "device, file system, or database destroyer), so this guard cannot classify its "
+                         "targets; it is denied rather than run (fail closed). Re-issue it as a parseable "
+                         "command with literal targets. {}"
                          .format(_DESTRUCT_ALTS),
                          "AIQT guardrail: denied an unparseable command naming a destructive operation "
                          "(rules sechau, secrst).")
@@ -6955,6 +7228,8 @@ def destructive_guard(data):
     verdicts = []
     notes = []
     depth = 0
+    prev_sep = ""
+    cwd_boundary = cwd
     deadline = time.monotonic() + _DESTRUCT_BUDGET
     for seg in segments:
         idx = _command_word_index(seg.argv)
@@ -6970,7 +7245,16 @@ def destructive_guard(data):
                          "secrst) and is not proof of either.".format(" ".join(seg.argv[idx:])[:200]))
         else:
             verdicts.extend(_destruct_segment(seg, cwd, deadline))
-        cwd = _destruct_next_cwd(seg, cwd, depth)
+        cwd = _destruct_next_cwd(seg, cwd, depth, prev_sep)
+        if "cd-flow" in _DESTRUCT_RULES:
+            if seg.sep_after == "&":
+                if cwd != cwd_boundary:
+                    cwd = None  # a cwd moved inside a backgrounded list: its cd ran in a subshell, so the
+                    # parent shell's cwd is not what the move computed; fail closed to UNKNOWN
+                cwd_boundary = cwd
+            elif seg.sep_after in ("", ";"):
+                cwd_boundary = cwd  # a list boundary: later '&' backgrounds only what follows it
+        prev_sep = seg.sep_after
         depth += {"(": 1, ")": -1}.get(seg.sep_after, 0)
     denies = [detail for kind, detail in verdicts if kind == "deny"]
     if denies:
@@ -6979,13 +7263,28 @@ def destructive_guard(data):
                      "AIQT guardrail: denied a destructive operation with no verified restore path (rules "
                      "sechau, secrst); see the reason for the safe next step.")
     for top in sorted({detail for kind, detail in verdicts if kind == "snap"}):
-        snap = _record_recovery(top, "rm", what="a shell delete")
+        if time.monotonic() > deadline:
+            return _deny("AIQT rules sechau/secrst: the delete would remove uncommitted content in {}, and the "
+                         "guard's {}-second budget was exhausted before a recovery snapshot could be attempted, "
+                         "so it would be unrecoverable; denied (fail closed). Retry, or commit or copy the "
+                         "content first. {}".format(top, _DESTRUCT_BUDGET, _DESTRUCT_ALTS),
+                         "AIQT guardrail: denied an unrecoverable delete; the classification budget was "
+                         "exhausted before the recovery snapshot (rules sechau, secrst).")
+        snap = _record_recovery(top, "rm", what="a shell delete", deadline=deadline)
         if snap[0] != "ok":
             return _deny("AIQT rules sechau/secrst: the delete would remove uncommitted content in {} and no "
                          "recovery snapshot could be created ({}), so it would be unrecoverable; denied. "
                          "Commit or copy the content first, then retry. {}".format(top, snap[1], _DESTRUCT_ALTS),
                          "AIQT guardrail: denied an unrecoverable delete; no recovery snapshot could be "
                          "created (rules sechau, secrst).")
+        if time.monotonic() > deadline:
+            return _deny("AIQT rules sechau/secrst: the recovery snapshot of {} completed only after the "
+                         "guard's {}-second budget (the snapshot itself was saved: {}), so the decision "
+                         "cannot be trusted to land inside the platform hook timeout; denied (fail closed). "
+                         "Retry the command. {}".format(top, _DESTRUCT_BUDGET, snap[1].get("ref"),
+                                                        _DESTRUCT_ALTS),
+                         "AIQT guardrail: denied a delete whose recovery snapshot completed only after the "
+                         "classification budget (rules sechau, secrst).")
         notes.append("The delete removes uncommitted content in {}. {}".format(top, _recovery_pointer(snap[1])))
     notes.extend(detail for kind, detail in verdicts if kind == "note")
     if notes:
