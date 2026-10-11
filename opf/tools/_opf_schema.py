@@ -89,7 +89,15 @@ unit is that schema release for the record model and DEFINES the following where
     not; an imported link must target the imported series (spec 8.6 refuses an imported-to-clean link);
     and supplied fields are held to their declared types and vocabularies only, so the current
     state-conditional placement rules (the pending_decision bundle, finding severity while open, the
-    contribution delivery stages) are not applied to history.
+    contribution delivery stages) are not applied to history. For the same reason the clean envelope's
+    `updated_at`-not-before-`created_at` rule is NOT applied to an imported record: spec 8.3 bounds a
+    historical timestamp only by its RFC 3339 UTC form and the import clock, the spec 8.8 import refusal
+    list names no ordering, and a conforming imported series must reach doctor VALID, so a source whose
+    own two timestamps disagree is preserved as recorded rather than refused. A caller-supplied `specs`
+    roster is held to more than the shared name/namespace reconciliation: every member the imported
+    validator reads must have its exact built-in shape, a baseline entry must equal BASELINE_SPECS, and a
+    module or importer entry may not take the reduced worklog envelope or claim an `import`, `unrecorded`
+    or `x-<vendor>` field, so a supplied spec cannot widen a baseline grammar.
 """
 import sys
 
@@ -114,7 +122,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # shape helpers; reuse them rather than re-declaring (match-surrounding-code, single source of truth).
 from _opf_store import (  # noqa: E402
     VALID, INVALID, CANNOT_EVALUATE, BASELINE_TYPES, MODULE_TYPES, IMPORTER_TYPES,
-    _valid_extension_namespace,
+    RESERVED_EXCLUDED_TYPES, _valid_extension_namespace,
     _str_token_set, _is_str_token_control, _is_item_collection, _safe_display,
     WORKING_DIRNAME, _HOME_RUN_PREFIXES, _HOME_RUN_SUFFIX, _home_file,
 )
@@ -145,6 +153,9 @@ IMPORTED_NAMESPACES = (
     frozenset(BASELINE_TYPES.values())
     | frozenset(ns for ns, _module in MODULE_TYPES.values())
 )
+# The namespace the section 8.1 roster reserves UNASSIGNED (bound to no type). U1 records it only in a
+# comment, so it is named here for the imported-series refusal message.
+_RESERVED_UNASSIGNED_NAMESPACES = frozenset({"CL"})
 
 
 # The section-8.1 taxonomy as one name -> normative-namespace map (baseline + module-tier + importer). A
@@ -1440,8 +1451,8 @@ def _validate_imported_links(record, spec, findings):
             findings.append("{}.id {!r} is a clean-series id: an imported-to-clean link MUST be refused "
                             "(spec 8.6)".format(where, link.get("id")))
         elif shape[1] not in IMPORTED_NAMESPACES:
-            findings.append("{}.id {!r} uses namespace {!r}, which the imported series refuses "
-                            "(spec 8.1/8.2)".format(where, link.get("id"), shape[1]))
+            findings.append("{}.id {!r} uses namespace {!r}, which the imported series refuses: {}".format(
+                where, link.get("id"), shape[1], _imported_namespace_refusal(shape[1])))
         if rel == "exemplifies" and shape[1] != BASELINE_TYPES["preference_pattern"]:
             findings.append("{} exemplifies must target a preference_pattern ({} namespace) "
                             "(spec 8.6)".format(where, BASELINE_TYPES["preference_pattern"]))
@@ -1476,25 +1487,25 @@ def _validate_imported_values(record, spec, findings, registered_kinds, imported
         elif imported_at is not None and _instant_key(record.get(k)) > imported_at:
             findings.append("{} is later than import.imported_at: a historical timestamp is never later "
                             "than the import clock instant (spec 8.3)".format(k))
-    if (_valid_timestamp(record.get("created_at")) and _valid_timestamp(record.get("updated_at"))
-            and _instant_key(record.get("updated_at")) < _instant_key(record.get("created_at"))):
-        findings.append("updated_at must not precede created_at (spec 8.3)")
+    # No updated_at/created_at ordering is imposed on history (see the module docstring): spec 8.3 bounds
+    # these only by form and the import clock, so a source's disagreeing timestamps are kept as recorded.
     for k in _IMPORTED_TEXT_FIELDS:
         if k in record and (not isinstance(record.get(k), str) or not record.get(k).strip()):
             findings.append("{}.{} must be a non-empty string when supplied (spec 8.3)".format(
                 spec.name, k))
     if "detail" in record and not isinstance(record.get("detail"), str):
         findings.append("worklog detail must be a string when present")
+    allowed_kinds = set(WORKLOG_KINDS)
+    if registered_kinds is not None:
+        # The manifest control, judged as _validate_worklog judges it: for every worklog entry, whether or
+        # not it supplies `kind`, and a malformed control fails closed to the built-ins with a finding,
+        # never splatting a bare string or crashing on an unhashable element.
+        if isinstance(registered_kinds, (list, tuple)) and all(
+                isinstance(k, str) and k for k in registered_kinds):
+            allowed_kinds |= set(registered_kinds)
+        elif spec.reduced:
+            findings.append("registered worklog kinds must be a list of non-empty strings")
     if "kind" in record:
-        allowed_kinds = set(WORKLOG_KINDS)
-        if registered_kinds is not None:
-            # The manifest control, judged as _validate_worklog judges it: malformed fails closed to the
-            # built-ins with a finding, never splatting a bare string or crashing on an unhashable element.
-            if isinstance(registered_kinds, (list, tuple)) and all(
-                    isinstance(k, str) and k for k in registered_kinds):
-                allowed_kinds |= set(registered_kinds)
-            else:
-                findings.append("registered worklog kinds must be a list of non-empty strings")
         if not isinstance(record.get("kind"), str) or record.get("kind") not in allowed_kinds:
             findings.append("worklog kind {} is not one of {} (spec 6.2)".format(
                 _safe_display(record.get("kind")), sorted(allowed_kinds)))
@@ -1534,10 +1545,121 @@ def _validate_imported_values(record, spec, findings, registered_kinds, imported
     _validate_refs(record, findings)
 
 
+def _imported_namespace_refusal(ns):
+    """Why the imported series refuses `ns`, a namespace outside IMPORTED_NAMESPACES, stated for that
+    namespace: the importer-only LF, the reserved-excluded TX, the reserved-unassigned CL, or one bound to
+    no type at all (spec 8.1/8.2)."""
+    for name, bound in IMPORTER_TYPES.items():
+        if ns == bound:
+            return ("it is the namespace of the importer-only {} quarantine type, and the imported series "
+                    "carries no LF (spec 8.1/8.2)".format(name))
+    for name, bound in RESERVED_EXCLUDED_TYPES.items():
+        if ns == bound:
+            return ("it is reserved for the {} type, which is excluded from the adopter standard "
+                    "(spec 8.1)".format(name))
+    if ns in _RESERVED_UNASSIGNED_NAMESPACES:
+        return "it is reserved unassigned and bound to no record type (spec 8.1)"
+    return "it is bound to no record type in the section 8.1 taxonomy (spec 8.1/8.2)"
+
+
+_NO_SLOT = object()
+
+
+def _is_str_frozenset(value):
+    """True when value is exactly a frozenset whose members are all exact non-empty strs, so membership and
+    equality over it run no caller-supplied code."""
+    return type(value) is frozenset and all(type(m) is str and m for m in value)
+
+
+def _imported_spec_shape_error(key, spec):
+    """The first structural defect of one roster entry as the imported validator would read it, or None.
+    The entry must be exactly a TypeSpec (a subclass could answer attribute reads with its own code), and
+    every slot must hold its exact built-in shape: `name`, `namespace` and `initial` strings; `working`,
+    `terminal`, `proposable`, `gated` and `extra_keys` frozensets of strings; `states` the non-empty union
+    of initial, working and terminal, no state holding the `/` qualifier separator; `transitions` a dict
+    from a state to a frozenset of states; `proposable` within `states`, `gated` within the non-terminal
+    proposable states (the TypeSpec construction rule); and `reduced` a bool."""
+    if type(spec) is not TypeSpec:
+        return "the type-spec roster entry {!r} is not exactly a TypeSpec (fail-closed)".format(key)
+    v = {slot: getattr(spec, slot, _NO_SLOT) for slot in TypeSpec.__slots__}
+
+    def bad(slot):
+        return "the type-spec roster entry {!r} has a malformed or missing {} (fail-closed)".format(key, slot)
+
+    for slot in ("name", "namespace", "initial"):
+        if type(v[slot]) is not str or not v[slot]:
+            return bad(slot)
+    for slot in ("working", "terminal", "proposable", "gated", "extra_keys", "states"):
+        if not _is_str_frozenset(v[slot]):
+            return bad(slot)
+    states = v["states"]
+    if states != frozenset({v["initial"]}) | v["working"] | v["terminal"] or any("/" in st for st in states):
+        return bad("states")
+    if type(v["transitions"]) is not dict or not all(
+            type(src) is str and src in states and _is_str_frozenset(dst) and dst <= states
+            for src, dst in dict.items(v["transitions"])):
+        return bad("transitions")
+    if not v["proposable"] <= states:
+        return bad("proposable")
+    if not v["gated"] <= v["proposable"] - v["terminal"]:
+        return bad("gated")
+    if type(v["reduced"]) is not bool:
+        return bad("reduced")
+    return None
+
+
+def _imported_specs_control(specs):
+    """Validate a caller-supplied `specs` roster fully before validate_imported_record reads it. Returns
+    (None, roster) on success, where roster is a plain-dict snapshot of the checked entries (so a mapping
+    subclass cannot answer a later lookup differently), else (message, None) naming the first defect.
+
+    The shared _specs_roster_error reconciles each key, name and namespace against the section-8.1
+    taxonomy; this adds what that leaves open. Every entry is first held to its exact structural shape
+    (_imported_spec_shape_error), so no malformed member reaches a membership test or a comparison and
+    raises. A BASELINE type's entry must then equal its authoritative BASELINE_SPECS definition in every
+    slot (states, transitions, proposable and gated states, fields, envelope), so a supplied spec cannot
+    admit a state, a field or an envelope the spec does not give that type. A module or importer entry
+    has no authoritative definition in this unit, so beyond its shape it may not take the reduced worklog
+    envelope (spec 8.3 gives it to the worklog alone) and its fields may not name `import`, `unrecorded`
+    or an `x-<vendor>` table, each of which would bypass the imported envelope's own rules."""
+    if not isinstance(specs, dict):
+        return "the type-spec roster is not a mapping (fail-closed)", None
+    entries = list(dict.items(specs))
+    for key, spec in entries:
+        if type(key) is not str:
+            return "the type-spec roster contains a non-string key (fail-closed)", None
+        err = _imported_spec_shape_error(key, spec)
+        if err is not None:
+            return err, None
+    roster = dict(entries)
+    err = _specs_roster_error(roster)
+    if err is not None:
+        return err, None
+    for key, spec in entries:
+        base = BASELINE_SPECS.get(key)
+        if base is not None:
+            for slot in TypeSpec.__slots__:
+                if getattr(spec, slot) != getattr(base, slot):
+                    return ("the type-spec roster entry {!r} contradicts the baseline {} definition's {} "
+                            "(spec 8.5; fail-closed)".format(key, key, slot)), None
+            continue
+        if spec.reduced:
+            return ("the type-spec roster entry {!r} takes the reduced envelope, which spec 8.3 gives the "
+                    "worklog alone (fail-closed)".format(key)), None
+        for field in sorted(spec.extra_keys):
+            if field in ("import", "unrecorded") or field.startswith("x-"):
+                return ("the type-spec roster entry {!r} declares the field {!r}, which the imported "
+                        "envelope reserves (spec 8.3/8.7; fail-closed)".format(key, field)), None
+    return None, roster
+
+
 def validate_imported_record(record, expected_type=None, specs=None, registered_vendors=frozenset(),
                              registered_kinds=None):
     """Validate one parsed imported record against the closed imported envelope (spec 8.3). Pure: it reads
-    no file and no clock. Returns a RecordValidation whose every finding names the record by its id.
+    no file and no clock. Returns a RecordValidation; every finding, a control refusal included, begins
+    `imported record <id>: ` and so names the record by its id, with exactly two exceptions, the inputs
+    that have no id to give: a table without an `id` key is labelled `imported record (no id): `, and a
+    non-table input yields the single finding `imported record is not a table (fail-closed)`.
 
     The imported envelope: `id` an `imported:<NS>-<n>` id bound to the record's type, `type` (required for
     every type, the worklog included), a one-line `title`, `status` from the type's legal state set
@@ -1547,20 +1669,36 @@ def validate_imported_record(record, expected_type=None, specs=None, registered_
     `history` rows of exactly {field, value}, and `unparsed`). Every omitted non-exempt field of the
     type's schema carries exactly one closed-reason `unrecorded` row; supplied fields keep their declared
     types and vocabularies; historical timestamps are no later than `imported_at`; `proposed_from` is never
-    carried; unknown keys fail. The importer-only legacy_fragment (LF) is refused (spec 8.1/8.2).
+    carried; unknown keys fail. The importer-only legacy_fragment (LF) is refused (spec 8.1/8.2). A
+    supplied `specs` roster is checked in full before use (_imported_specs_control); a worklog record
+    judges the `registered_kinds` control whether or not it supplies `kind`.
 
-    Outcome: CANNOT-EVALUATE when the roster or `expected_type` control is malformed, the input is not a
-    table, or its type cannot be identified; INVALID when an identified record violates the envelope;
-    VALID otherwise. The cross-record checks (C-IMPORTED-IDS counters and no-deletion, the
-    C-IMPORTED-PROVENANCE digest re-read, C-LINKS resolution, and the C-IMPORTED-SEGREGATION firewall
-    beyond the per-record imported-to-clean link refusal) are not this function's."""
-    if specs is None:
-        specs = BASELINE_SPECS
-    else:
-        roster_error = _specs_roster_error(specs)
-        if roster_error is not None:
-            return RecordValidation(CANNOT_EVALUATE, [roster_error])
+    Outcome: CANNOT-EVALUATE when the input is not a table, the `specs` or `expected_type` control is
+    malformed (a `specs` entry also when it contradicts its authoritative definition), or the record's
+    type cannot be identified; INVALID when an identified record violates the envelope; VALID otherwise.
+
+    Not checked here, because one record alone cannot show it:
+      - the cross-record checks: C-IMPORTED-IDS counters and no-deletion, C-LINKS resolution over both
+        series, and the C-IMPORTED-SEGREGATION firewall beyond the per-record imported-to-clean link
+        refusal (spec 8.3, 8.6);
+      - C-IMPORTED-PROVENANCE, which re-reads the preserved original and verifies `source_sha256`, and the
+        spec 8.8 binding of `import.source` to `.working/imported/import/<run-id>/originals/` of its own
+        `import.run`: only the spec 8.3 path grammar (a canonical path spelled from `.working/`) is
+        checked, so a well-formed path under another directory or another run passes here;
+      - that import time did not stand in for event time (spec 8.3): a historical timestamp equal to
+        `imported_at` is accepted, since only the source shows whether it was copied from the clock;
+      - that no UTC midnight was fabricated from a date-only value (spec 8.3): a `T00:00:00Z` value is
+        indistinguishable from a recorded midnight without the original;
+      - that unmappable source text was retained in `import.unparsed` rather than dropped (spec 8.3), and
+        any byte-level coverage or semantic fidelity, which spec 8.3 says are not machine-proven;
+      - that `imported_at` was read from the writer's clock (spec 8.3), and the run-level import
+        refusals of spec 8.8 (adoption receipt and plan scope, bound-item drift, the recomputed source
+        size and digest, replay identity, the type being enabled in the manifest);
+      - immutability after publication and correction only by a fresh run that keeps the old evidence
+        and links `supersedes` or `corrects` (spec 8.3, 8.8), which needs the record's history;
+      - C-CONTAINMENT's recognition of the imported managed leaves (spec 8.3), a store-layout check."""
     if not isinstance(record, dict):
+        # No id is available to label a non-table input: the one finding without an id (see above).
         return RecordValidation(CANNOT_EVALUATE, ["imported record is not a table (fail-closed)"])
     rid = record.get("id")
     label = "imported record {}".format(_safe_display(rid) if "id" in record else "(no id)")
@@ -1568,9 +1706,15 @@ def validate_imported_record(record, expected_type=None, specs=None, registered_
     def named(findings):
         return ["{}: {}".format(label, f) for f in findings]
 
+    if specs is None:
+        specs = BASELINE_SPECS
+    else:
+        roster_error, specs = _imported_specs_control(specs)
+        if roster_error is not None:
+            return RecordValidation(CANNOT_EVALUATE, named([roster_error]), rid=rid)
     if expected_type is not None and not isinstance(expected_type, str):
         return RecordValidation(CANNOT_EVALUATE, named(
-            ["expected_type must be a string or None (fail-closed)"]))
+            ["expected_type must be a string or None (fail-closed)"]), rid=rid)
     findings = []
     if not _is_str_token_control(registered_vendors):
         findings.append("registered_vendors must be a collection of x-<vendor> strings (fail-closed)")
@@ -1587,7 +1731,7 @@ def validate_imported_record(record, expected_type=None, specs=None, registered_
         rtype = expected_type
     else:
         return RecordValidation(CANNOT_EVALUATE, named(
-            ["the record has no `type` and no expected type: cannot identify it"]))
+            ["the record has no `type` and no expected type: cannot identify it"]), rid=rid)
     if rtype in IMPORTER_TYPES:
         # New imports use the imported series and verbatim `unparsed` text, never LF quarantine.
         findings.append("type {!r} is the importer-only LF quarantine type, which the imported series "
@@ -1606,8 +1750,8 @@ def validate_imported_record(record, expected_type=None, specs=None, registered_
         findings.append("id {} is not an imported-series imported:<NS>-<n> id (spec 8.2/8.3)".format(
             _safe_display(rid)))
     elif shape[1] not in IMPORTED_NAMESPACES:
-        findings.append("id namespace {!r} is refused by the imported series, which carries no LF "
-                        "(spec 8.1/8.2)".format(shape[1]))
+        findings.append("id namespace {!r} is refused by the imported series: {}".format(
+            shape[1], _imported_namespace_refusal(shape[1])))
     elif shape[1] != spec.namespace:
         findings.append("id namespace {!r} is not the {!r} namespace bound to type {!r} "
                         "(spec 8.2)".format(shape[1], spec.namespace, rtype))
@@ -3288,12 +3432,20 @@ def self_test():
         r.update(over)
         return r
 
+    # An uncontrolled exception fails the vector rather than aborting the run, so a mutant that turns a
+    # structured refusal into a crash reds the named check.
     def _imp_refused(rec, needle, **kw):
-        res = validate_imported_record(rec, **kw)
+        try:
+            res = validate_imported_record(rec, **kw)
+        except Exception:
+            return False
         return res.status == INVALID and any(needle in f for f in res.findings)
 
     def _imp_ok(rec, **kw):
-        res = validate_imported_record(rec, **kw)
+        try:
+            res = validate_imported_record(rec, **kw)
+        except Exception:
+            return False
         return res.status == VALID and not res.findings
 
     _pd_rows = _imp_pd()["unrecorded"]
@@ -3342,6 +3494,16 @@ def self_test():
     check("imported-lf-type-refused-extended-roster", _imp_refused(_lf_rec, "importer-only LF", specs=_lf_roster))
     check("imported-lf-type-refused-baseline", _imp_refused(_lf_rec, "importer-only LF"))
     check("imported-lf-namespace-refused", _imp_refused(_imp_pd(id="imported:LF-1"), "carries no LF"))
+    # Each refused namespace is refused for its own reason, on an id and on a link: only LF's names LF.
+    for _ns, _needle in (("TX", "reserved for the transaction type"), ("CL", "reserved unassigned"),
+                         ("ZZ", "bound to no record type in the section 8.1 taxonomy")):
+        _ns_id = "imported:" + _ns + "-1"
+        _ns_res = validate_imported_record(_imp_pd(id=_ns_id))
+        check("imported-namespace-refusal-reason-" + _ns, _ns_res.status == INVALID
+              and any(("id namespace " + repr(_ns)) in f and _needle in f and "LF" not in f
+                      for f in _ns_res.findings)
+              and _imp_refused(_imp_md(links=[{"rel": "relates", "id": _ns_id}]), _needle,
+                               registered_vendors=REG))
 
     # Every finding names the record; malformed input is a refusing failure, never a silent absence.
     _named = validate_imported_record(_imp_pd(colour="teal", status="decided/proposed"))
@@ -3362,8 +3524,118 @@ def self_test():
         _imp_pd(), "does not match the expected type", expected_type="finding"))
     check("imported-expected-type-nonstring-cannot-eval", validate_imported_record(
         _imp_pd(), expected_type=["pending_decision"]).status == CANNOT_EVALUATE)
-    check("imported-misbound-roster-cannot-eval", validate_imported_record(
-        _imp_pd(), specs={"pending_decision": BASELINE_SPECS["finding"]}).status == CANNOT_EVALUATE)
+    # A control refusal names the record too: the label and the result's id survive the early return.
+    def _imp_ctrl(rec, specs, needle, **kw):
+        try:
+            res = validate_imported_record(rec, specs=specs, **kw)
+        except Exception:
+            return False
+        return (res.status == CANNOT_EVALUATE and len(res.findings) == 1 and res.id == rec["id"]
+                and res.findings[0].startswith("imported record " + repr(rec["id"]) + ": ")
+                and needle in res.findings[0])
+
+    check("imported-misbound-roster-cannot-eval", _imp_ctrl(
+        _imp_pd(), {"pending_decision": BASELINE_SPECS["finding"]}, "contradicts its TypeSpec name"))
+    for _ctl in ([], [1], "pending_decision", 7):
+        check("imported-roster-not-mapping-named-" + repr(_ctl),
+              _imp_ctrl(_imp_pd(), _ctl, "roster is not a mapping"))
+    check("imported-roster-refusal-no-id-label", validate_imported_record(
+        {k: v for k, v in _imp_pd().items() if k != "id"}, specs=[]).findings
+        == ["imported record (no id): the type-spec roster is not a mapping (fail-closed)"])
+
+    # The roster is validated in full: a malformed member never reaches a membership test, and a baseline
+    # entry may not change its grammar (states, transitions, fields, envelope). The two review
+    # reproductions: `states = None` (formerly a TypeError) and a bogus state set (formerly VALID).
+    import copy as _copy
+    _MD = BASELINE_SPECS["maintainer_decision"]
+
+    def _md_roster(**slots):
+        sp = _copy.copy(_MD)
+        for _slot, _val in slots.items():
+            setattr(sp, _slot, _val)
+        return dict(maintainer_decision=sp)
+
+    class _Raises:
+        def __eq__(self, other):
+            raise RuntimeError("a control member ran its own comparison")
+        __ne__ = __eq__
+        __hash__ = object.__hash__
+
+    check("imported-roster-copy-of-baseline-ok", _imp_ok(_imp_md(), specs=_md_roster(), registered_vendors=REG))
+    check("imported-roster-states-none-cannot-eval", _imp_ctrl(
+        _imp_md(), _md_roster(states=None), "malformed or missing states", registered_vendors=REG))
+    check("imported-roster-bogus-state-cannot-eval", _imp_ctrl(
+        _imp_md(status="bogus"), _md_roster(states=frozenset(["bogus"])), "malformed or missing states",
+        registered_vendors=REG))
+    check("imported-roster-consistent-bogus-grammar-cannot-eval", _imp_ctrl(
+        _imp_md(status="bogus"), _md_roster(initial="bogus", terminal=frozenset(["bogus"]),
+                                            states=frozenset(["bogus"])),
+        "contradicts the baseline maintainer_decision definition's initial", registered_vendors=REG))
+    for _slot, _val in (("extra_keys", _MD.extra_keys | frozenset(["colour"])),
+                        ("proposable", frozenset(["recorded"])), ("reduced", True),
+                        ("transitions", dict(recorded=frozenset(["recorded"])))):
+        check("imported-roster-baseline-" + _slot + "-contradiction-cannot-eval", _imp_ctrl(
+            _imp_md(colour="teal"), _md_roster(**dict([(_slot, _val)])), "definition's " + _slot,
+            registered_vendors=REG))
+    for _j, (_slot, _val) in enumerate((
+            ("name", _Raises()), ("namespace", None), ("initial", ""), ("working", ["x"]),
+            ("terminal", None), ("proposable", None), ("gated", set(["recorded"])),
+            ("extra_keys", ("decision",)), ("extra_keys", frozenset([_Raises()])),
+            ("states", frozenset(["recorded", "a/b"])), ("transitions", []),
+            ("transitions", dict(recorded=set(["recorded"]))), ("transitions", dict([(_Raises(), frozenset())])),
+            ("proposable", frozenset(["elsewhere"])), ("reduced", 0), ("reduced", None))):
+        check("imported-roster-malformed-{}-{}-cannot-eval".format(_slot, _j), _imp_ctrl(
+            _imp_md(), _md_roster(**dict([(_slot, _val)])), "malformed or missing " + _slot,
+            registered_vendors=REG))
+    # A state carrying the `/` qualifier separator could never parse; refused even in a self-consistent set.
+    check("imported-roster-slash-state-cannot-eval", _imp_ctrl(
+        _imp_md(), _md_roster(initial="a/b", terminal=frozenset(["a/b"]), states=frozenset(["a/b"])),
+        "malformed or missing states", registered_vendors=REG))
+    _partial = object.__new__(TypeSpec)
+    _partial.name, _partial.namespace = "maintainer_decision", "MD"
+    check("imported-roster-missing-slot-cannot-eval", _imp_ctrl(
+        _imp_md(), dict(maintainer_decision=_partial), "malformed or missing initial", registered_vendors=REG))
+
+    class _SubSpec(TypeSpec):
+        __slots__ = ()
+
+    _sub = object.__new__(_SubSpec)
+    for _slot in TypeSpec.__slots__:
+        setattr(_sub, _slot, getattr(_MD, _slot))
+    check("imported-roster-subclass-cannot-eval", _imp_ctrl(
+        _imp_md(), dict(maintainer_decision=_sub), "not exactly a TypeSpec", registered_vendors=REG))
+    check("imported-roster-nonstring-key-cannot-eval", _imp_ctrl(
+        _imp_md(), dict([(1, _MD)]), "non-string key", registered_vendors=REG))
+
+    class _LyingRoster(dict):
+        def get(self, key, default=None):
+            return BASELINE_SPECS["finding"]
+
+    check("imported-roster-checked-snapshot-is-used",
+          _imp_ok(_imp_pd(), specs=_LyingRoster(pending_decision=BASELINE_SPECS["pending_decision"])))
+
+    # A module-tier entry (no authoritative definition here) is held to its shape and may not take the
+    # reduced envelope or declare a field the imported envelope reserves; a well-formed one validates.
+    def _module_roster(**slots):
+        sp = object.__new__(TypeSpec)
+        base = dict(name="artifact", namespace=MODULE_TYPES["artifact"][0], initial="recorded",
+                    working=frozenset(), terminal=frozenset(["recorded"]), transitions=dict(),
+                    proposable=frozenset(), gated=frozenset(), extra_keys=frozenset(["digest"]),
+                    reduced=False, states=frozenset(["recorded"]))
+        base.update(slots)
+        for _slot, _val in base.items():
+            setattr(sp, _slot, _val)
+        return dict(BASELINE_SPECS, artifact=sp)
+
+    _ar = dict(id="imported:AR-1", type="artifact", status="recorded", title="A legacy artifact",
+               created_at=TS, updated_at=TS, actor=dict(_IMP_ACTOR), digest="abc")
+    _ar["import"] = _imp_table()
+    check("imported-module-spec-ok", _imp_ok(_ar, specs=_module_roster()))
+    check("imported-module-spec-reduced-cannot-eval", _imp_ctrl(
+        _ar, _module_roster(reduced=True), "reduced envelope"))
+    for _field in ("x-aiqt", "import", "unrecorded"):
+        check("imported-module-spec-reserved-field-cannot-eval-" + _field, _imp_ctrl(
+            _ar, _module_roster(extra_keys=frozenset(["digest", _field])), "declares the field " + repr(_field)))
     check("imported-unsupported-type-refused", _imp_refused(_imp_pd(type="artifact"), "not a supported"))
     check("imported-bad-vendors-control-refused", _imp_refused(_imp_pd(), "registered_vendors must be",
                                                                registered_vendors="x-aiqt"))
@@ -3457,8 +3729,10 @@ def self_test():
         _imp_pd(decided_at="2025-03-02T09:00:00Z", unrecorded=_pd_rows[:1])))
     check("imported-date-only-timestamp-refused", _imp_refused(
         _imp_pd(decided_at="2025-03-02", unrecorded=_pd_rows[:1]), "decided_at must be an RFC 3339"))
-    check("imported-updated-before-created-refused", _imp_refused(
-        _imp_pd(updated_at="2025-02-01T00:00:00Z", unrecorded=_pd_rows[1:]), "must not precede"))
+    # A source whose updated_at precedes its created_at is kept as recorded: no ordering is imposed on
+    # history (see the module docstring), though the clean validator still refuses the same pair.
+    check("imported-updated-before-created-retained", _imp_ok(
+        _imp_pd(updated_at="2025-02-01T00:00:00Z", unrecorded=_pd_rows[1:])))
     check("imported-blank-decision-refused", _imp_refused(_imp_pd(decision=" "), "decision must be a non-empty"))
     check("imported-summary-nonstring-refused", _imp_refused(_imp_md(summary=3), "summary must be a string",
                                                              registered_vendors=REG))
@@ -3474,6 +3748,8 @@ def self_test():
             ([{"rel": "exemplifies", "id": "imported:MD-1"}], "exemplifies must target"),
             ([{"rel": "relates", "id": "imported:MD-1", "why": "x"}], "unknown key 'why'"),
             ([{"rel": "relates", "id": "imported:MD-01"}], "is not a well-formed id"),
+            (["imported:MD-1"], "links[0] must be a {rel, id} table"),
+            ([{"rel": "relates", "id": "imported:MD-1"}, 7], "links[1] must be a {rel, id} table"),
             ("imported:MD-1", "links must be an array")):
         check("imported-links-refused-" + _needle, _imp_refused(_imp_md(links=_links), _needle,
                                                                 registered_vendors=REG))
@@ -3496,6 +3772,17 @@ def self_test():
     check("imported-worklog-bad-kinds-control-refused", _imp_refused(dict(_wl, kind="p"), "registered worklog kinds",
                                                                      registered_kinds="perf"))
     check("imported-worklog-multiline-summary-refused", _imp_refused(dict(_wl, summary="a\nb"), "single line"))
+    check("imported-worklog-detail-ok", _imp_ok(dict(_wl, detail="Root cause: a stale cache", unrecorded=[])))
+    for _det in (7, ["a"], None):
+        check("imported-worklog-detail-type-refused-" + type(_det).__name__, _imp_refused(
+            dict(_wl, detail=_det, unrecorded=[]), "worklog detail must be a string"))
+    # The kinds control is judged for every worklog entry, as _validate_worklog judges it, so a malformed
+    # control is surfaced even when the entry omits `kind` under a missingness row.
+    _wl_nokind = dict({k: v for k, v in _wl.items() if k != "kind"},
+                      unrecorded=_wl["unrecorded"] + [dict(field="kind", reason="not_recorded_in_source")])
+    check("imported-worklog-kind-omitted-ok", _imp_ok(_wl_nokind, registered_kinds=["perf"]))
+    check("imported-worklog-kind-omitted-bad-kinds-control-refused", _imp_refused(
+        _wl_nokind, "registered worklog kinds", registered_kinds="perf"))
     _rf = {"id": "imported:RF-2", "type": "reference", "status": "recorded", "title": "Old design note",
            "created_at": TS, "updated_at": TS, "actor": dict(_IMP_ACTOR), "import": _imp_table()}
     check("imported-reference-refs-omitted-refused", _imp_refused(_rf, "'refs' of the reference schema"))
@@ -3520,6 +3807,18 @@ def self_test():
         _cn["delivery"], sent_at="2026-08-13T00:00:00Z")), "delivery.sent_at is later than"))
     check("imported-delivery-unknown-key-refused", _imp_refused(dict(_cn, delivery=dict(
         _cn["delivery"], via="x")), "contribution.delivery unknown key 'via'"))
+    check("imported-delivery-receipt-ok", _imp_ok(dict(_cn, delivery=dict(
+        _cn["delivery"], receipt_ref="ack-1", receipted_at=TS))))
+    for _k in ("sent_at", "receipted_at"):
+        for _bad in ("yesterday", "2026-08-01", 20260801):
+            check("imported-delivery-" + _k + "-format-refused-" + repr(_bad), _imp_refused(
+                dict(_cn, delivery=dict(_cn["delivery"], **dict([(_k, _bad)]))),
+                "contribution.delivery." + _k + " must be an RFC 3339"))
+    for _k in ("channel", "ref", "receipt_ref"):
+        for _bad in (" ", 7):
+            check("imported-delivery-" + _k + "-refused-" + repr(_bad), _imp_refused(
+                dict(_cn, delivery=dict(_cn["delivery"], **dict([(_k, _bad)]))),
+                "contribution.delivery." + _k + " must be a non-empty string"))
     check("imported-delivery-omitted-row-owed", _imp_refused(
         {k: v for k, v in _cn.items() if k != "delivery"}, "'delivery' of the contribution schema"))
     _bl = {"id": "imported:BL-1", "type": "block", "status": "active", "title": "Hold the release",
