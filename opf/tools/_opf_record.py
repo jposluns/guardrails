@@ -1915,8 +1915,8 @@ def _refuse_legacy_journal(ctx):
             JOURNAL_REL, exc))
     if st is not None:
         raise RecordError("a legacy record journal {} is present on a homes-2 store; it is never recovered "
-                          "in place: the homes migration transports it (spec 4.2). Nothing written "
-                          "(fail-closed)".format(JOURNAL_REL))
+                          "in place: homes 2 has no homes migration (spec 4.2), and the legacy journal is "
+                          "left unread and unchanged. Nothing written (fail-closed)".format(JOURNAL_REL))
 
 
 def _reconcile_capability_journal(ctx):

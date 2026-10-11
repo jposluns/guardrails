@@ -2422,7 +2422,8 @@ def t20_homes2_legacy_refused(fx):
         aiqt_before = subtree(root, ".aiqt")
         result = record_cli(env, root, CREATE)
         refused(result, "legacy record journal")
-        assert "never recovered" in result[2] and "homes migration transports it" in result[2], result[2][-800:]
+        assert "never recovered" in result[2] and "homes 2 has no homes migration (spec 4.2)" in result[2] \
+            and "left unread and unchanged" in result[2] and "transports" not in result[2], result[2][-800:]
         assert subtree(root, ".aiqt") == aiqt_before, "T20 the .aiqt subtree is byte-unchanged"
         assert not (Path(root) / ".working/journals").exists(), "T20 no typed journal home is created"
 

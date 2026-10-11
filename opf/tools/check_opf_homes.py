@@ -10,7 +10,9 @@ text, a pinned sentence neutralized by appended text included, stays green under
 entry alone; the self-test's per-section tiling equality turns red on any addition inside a
 tiled section. The live residuals are additions to untiled sections (for example 8.7, 9.1, 10
 and 13), a default-gate run without the self-test, and an addition landed together with a
-matching registry edit, which review of registry changes catches. Section 9.1 stays untiled
+matching registry edit, which review of registry changes catches. One addition is red under the
+default entry alone: a retired homes-migration fragment (_RETIRED) restored in its own section,
+since homes 2 has no homes migration (spec 4.2). Section 9.1 stays untiled
 over its lowercase-may profile rule, but its implementation-class paragraph is pinned sentence
 by sentence (_PINNED), so deleting or rewording a pinned sentence there turns the gate red;
 the rest of 9.1, and additions to it, stay unprotected. Appendix E stays untiled too, and its
@@ -280,7 +282,7 @@ _CONTRACT = {
         _D('It still supports 1.2.0 and initializes legacy homes (generation 1, with no homes key); writers retain their legacy paths until homes 2 is activated.'),
         'Homes 2 has no homes migration: a store is at homes 2 only when it is created there, no homes-1 store is migrated to homes 2, and once homes 2 is activated opf upgrade MUST refuse a homes-1 store by name rather than migrate it.',
         _D('The section 9 manifest example describes the 1.3.0 target on legacy homes.'),
-        _D('The homes-2 requirements in sections 4.2, 9.2, 12, 14.1, 14.2, and 15 describe the target contract, not an activated runtime guarantee.'),
+        _D('The homes-2 requirements in sections 4.2, 12, 14.1, 14.2, and 15, and the section 9.2 refusal of a homes-1 store, describe the target contract, not an activated runtime guarantee.'),
         _D('<product repository root>/ .opf.toml # committed store pointer (section 4.3) CHANGELOG.md # curated public changelog (deliverable; section 6.3) VERSION # deterministic render from version.toml (deliverable) .working/ # the store; present here under the default in-repo configuration <store repository root>/ # the product repository itself, by default .working/ README.md # ownership and regeneration note (deliverable) WORKLOG.md # deterministic render of worklog.toml VERSION.md # optional human view of version.toml TODO.md BACKLOG.md PIPELINE.md DONE.md FINDINGS.md DECISIONS.md BLOCKS.md HANDOFF.md REFERENCES.md CONTRIBUTIONS.md DECISIONS.toml # machine projection (deterministic; section 10.5) <TYPE>-INDEX.md ...'),
         _D('# optional 1:1 index mirrors (section 10.1) IMPORT-REPORT.md # legacy import report (pre-1.3.0 runs only; section 14.1) toml/ manifest.toml # store manifest and discovery marker (section 9) counters.toml # per-namespace ID high-water marks (section 8.2) version.toml # version and release ledger (section 6.1) worklog.toml # durable operational record (section 6.2) <type>.imported.index.toml # imported records per enabled type except LF (section 8.3) worklog.imported.toml # imported worklog, on its own ID number line lease.toml # single-writer lease, present only while held (section 5.7) init.toml # bootstrap provenance of a coupled init (section 9.2), if present backlog_item.index.toml # typed record files (section 8) done.index.toml finding.index.toml pending_decision.index.toml autonomous_decision.index.toml block.index.toml handoff.index.toml reference.index.toml contribution.index.toml maintainer_decision.index.toml preference_pattern.index.toml archive/ 2026/ archive.toml # enumerates rotated IDs and spans (section 12) done.index.toml worklog.toml archive/ moved/<source-path> # default Move destinations (section 14.2) adoption/<run-id>/ # retire preimages and archived occupying sources (section 14.2) imported/<kind>/<run-id>/ # durable originals, inventories, approvals and receipts (section 14) staging/<kind>/<run-id>/ # short-lived staging, evidence-gated reclamation (section 14.1) journals/<kind>/ # reserved recovery state, never a view or ordinary op target journal/ # crash-durable frames runs/<run-id>/transaction.toml # gate-readable projections allocations/<run-id>.toml # irrevocable ID reservations (section 8.2) When the store has been relocated, the .working/ tree lives at the store repository root exactly as drawn, and the product repository keeps only the pointer and the public deliverables.'),
         _D('The per-record layout (section 9) additionally places one file per record under .working/toml/<type>/, with each <type>.index.toml acting as the registry.'),
@@ -303,7 +305,7 @@ _CONTRACT = {
         _D('Record reserves record- with the same suffix; it is a journal-only kind that names just its journal home, journals/record/, never a staging or imported home.'),
         _D('Here hash16 is 16 lowercase hexadecimal characters; constructors check lexical shape, not calendar validity or filesystem safety.'),
         'File operands MUST use canonical contained relative paths: no empty, dot, or parent components, absolute/drive/backslash forms, control characters, or line separators.',
-        'Homes-2 init and upgrade MUST render this managed block into .working/.gitignore from the topology constants; the reference tooling provides the renderer and drift gate but installs no block: gitignore # >>> opf-managed >>> /journals/ /staging/ # <<< opf-managed <<< Durable imported/ and archive/ evidence MUST stay tracked.',
+        'Homes-2 init, and any upgrade of a store already at homes 2, MUST render this managed block into .working/.gitignore from the topology constants; the reference tooling provides the renderer and drift gate but installs no block: gitignore # >>> opf-managed >>> /journals/ /staging/ # <<< opf-managed <<< Durable imported/ and archive/ evidence MUST stay tracked.',
         'Installation MUST inspect effective ignore rules and the index first; tracked staging or journals MUST require an explicit reviewed untracking change, never silent index mutation.',
         _D('The block travels with the store and joins the indexed-ignore candidate set.'),
         _D('Gitignore is not access control: git add -f can stage ignored state.'),
@@ -317,7 +319,7 @@ _CONTRACT = {
         _D('Each evidence bundle .working/imported/<kind>/<run-id>/ carries its own inventories at its root: inventory.toml, plus a new inventory-<phase>.toml for each later phase, where <phase> is a lowercase letter followed by up to 31 lowercase letters or digits.'),
         _D('Each holds exactly format = "opf.evidence.inventory/v1" and a file array whose rows have exactly path (a canonical store-relative file path spelled from .working/), size (a nonnegative integer), and sha256 (64 lowercase hex digits).'),
         _D('A row may name a member of its own bundle other than a bundle-root inventory, a default Move destination under .working/archive/moved/, or, for an adoption bundle, a preserved file of the same run, a retire preimage or an archived occupying source, under .working/archive/adoption/<run-id>/.'),
-        "The owning writer or migration MUST derive each inventory from the run's transaction record or receipt and MUST publish it exclusively with the retained bytes.",
+        "The owning writer MUST derive each inventory from the run's transaction record or receipt and MUST publish it exclusively with the retained bytes.",
         'An inventory MUST NOT be rewritten, so a bundle stays immutable and an evidence commit changes only its bundle folder.',
         _D('An inventory is not a journal projection and remains available in a clone without journals.'),
         'A phase inventory MAY be published in the same transaction as the base inventory to claim the promotion receipt without creating a receipt/inventory digest cycle.',
@@ -337,7 +339,7 @@ _CONTRACT = {
         'Doctor MUST NOT consult a journal to decide partial status and makes no claim that a staged plan has a recoverable transaction.',
         "In homes 2, ordinary transaction operands, including those of an open transaction being recovered, MUST NOT equal, descend from, or contain journals/; a legacy store's transactions and recovery keep their legacy operand handling, and no shipped writer targets that home.",
         'Capability-bound journal APIs MUST derive their destinations from kind and run identity.',
-        "Legacy journal transport MUST preserve bytes through the migration's receipt binding.",
+        _D('Homes 2 has no legacy journal transport: no homes-1 journal is carried into journals/, and a homes-2 store is never recovered from one (section 15).'),
         _D('These comparisons are byte-exact: on a case-insensitive or normalizing filesystem, a differently cased or composed spelling can alias a reserved home and is not caught.'),
         'Discovery precedes the manifest, so it cannot know the generation: it MUST examine manifest.toml in every immediate subdirectory, including journals/, MUST fail closed on a reserved-name match or ambiguity, and MUST NOT read deeper there.',
     ),
@@ -691,25 +693,24 @@ _CONTRACT = {
         'The ledgers are exempt from the per-record layout: version.toml and worklog.toml MUST always be single files, written under the store lock (allocation of WL IDs still goes through counters.toml atomically).',
     ),
     "9.2": (
-        _D('The homes-generation upgrade targets spec_version = "2.0.0" with required integer [opf].homes = 2.'),
-        'Absent or 1 denotes legacy homes for migration; unknown future generations MUST be refused.',
-        _D('The homes-generation target does not itself change the runtime supported version or init format.'),
-        'The migration MUST refuse a store resolved outside the product root until a multi-root coordinator exists.',
+        _D('The homes-2 generation is declared by spec_version = "2.0.0" with required integer [opf].homes = 2, and a store is at homes 2 only when it is created there (section 4.2).'),
+        'Absent or 1 denotes legacy homes; unknown future generations MUST be refused.',
+        _D('The homes-2 declaration does not itself change the runtime supported version or init format.'),
+        'This section defines no homes-generation upgrade: no homes-1 store is migrated to homes 2 and no OPF control area is relocated for the homes generation, and once homes 2 is activated opf upgrade MUST refuse a homes-1 store by name rather than migrate it (section 4.2).',
         'Unproven legacy .archive/ entries MUST remain in place with a standing finding until dispositioned.',
         "A base-schema version bump MUST ship a tested, in-place store-schema upgrade (opf upgrade) in at least one published upgrade-capable implementation (section 16.1), the reference tooling, so that a store below the new version has an upgrade path once that upgrade activates; the path holds only within this section's preconditions and refusals and that implementation's disclosed residuals.",
+        _D('The bump to the homes-2 declaration (spec_version = "2.0.0" with [opf].homes = 2) is the one exception: it ships no upgrade, and a store below it has no upgrade path into homes 2 (section 4.2).'),
         'Every requirement of this section on an upgrade, its deltas, preconditions, report, refusals, and remedies binds an upgrade-capable implementation; a fresh-only implementation implements none of them and MUST instead refuse under section 16.1.',
         "Every implementation class MUST apply the version ceiling's refusal at the end of this section, a fresh-only implementation at its section 16.1 admission check; a fresh-only implementation that supports a version below the reserved homes-2 declaration (section 4.2) MUST NOT apply the ceiling's homes-2 recognition and MUST refuse that declaration under section 16.1.",
         'The upgrade MUST be idempotent.',
-        'A purely schema-level bump MUST be additive, using atomic replacement of existing files, create-only writes for new index files, and regeneration of declared views through exclusively created temporary files followed by atomic rename.',
+        'Every upgrade is a schema-level bump and MUST be additive, using atomic replacement of existing files, create-only writes for new index files, and regeneration of declared views through exclusively created temporary files followed by atomic rename.',
         _D('These writes are sequential, with recovery scope held in memory, not a durable transaction journal.'),
-        'A homes-generation bump MUST additionally relocate OPF control areas as a versioned, journaled, fail-closed relocation.',
-        'Every destination MUST be digest-verified before its source is removed.',
-        'Both kinds of upgrade MUST run under the store consistency contract and the single-writer lease (section 5.7).',
+        'The upgrade MUST run under the store consistency contract and the single-writer lease (section 5.7).',
         'It MUST fail closed on an unresolvable store, a declared spec_version ABOVE the tooling, a divergence, a held lease, or any populated state that contradicts its preconditions; it MUST NOT lower the fail-closed floor.',
         'Before any write it MUST enforce two fail-closed preconditions: it claims the single-writer lease (section 5.7) and holds it across the whole mutation, and it verifies the working tree is clean, including ignored files, over the planned schema and render destinations (store and product roots) and the index collision candidates, so the committed HEAD is a verified restore path for that scope; a held lease or a dirty store refuses, and a dirty store is asked to commit its own changes, never restored by the tool.',
         "After applying the schema delta, it MUST regenerate the declared views and MUST require a full doctor VALID before offering the uncommitted change for the adopter's own branch-and-merge.",
         'It MUST NOT stage or commit the change.',
-        "Both upgrade kinds, on the schema-level path and the homes-generation relocation path, the homes-2 path included, alike, MUST NOT write the adoption archive and MUST NOT overwrite, relocate or remove a plan-enumerated frozen source (section 14.2); a frozen source sits outside the planned schema and render destinations, so the clean-tree precondition does not read it, and the required doctor VALID grades it under the section 11 bounded treatment.",
+        "The upgrade MUST NOT write the adoption archive and MUST NOT overwrite, relocate or remove a plan-enumerated frozen source (section 14.2); a frozen source sits outside the planned schema and render destinations, so the clean-tree precondition does not read it, and the required doctor VALID grades it under the section 11 bounded treatment.",
         "An upgrade delta or manifest change that would declare a new view or managed store path at a registered [unmanaged] path or at a plan-enumerated frozen source MUST refuse, naming the collision; the remedy is the adopter's own fresh plan re-dispositioning that file (section 14.2).",
         'The manifest and counters rewrite MUST be a model regeneration through the canonical new-document emitter, never a textual round-trip edit, bounded by two guards: a precondition that re-emitting the UNCHANGED parsed model reproduces the on-disk bytes exactly (proving the file is canonical and comment-free, so nothing can be lost), failing closed otherwise; and a postcondition that the model diff equals exactly the allowed delta, failing closed otherwise.',
         _D('The allowed delta is expressed as ensure-present and ensure-absent over the whole 1.0.0 origin family, so a governance-enabled, a decision_support-enabled, a bare, and a view-omitting 1.0.0 store all migrate under one rule and the normative text cannot diverge from the tooling.'),
@@ -1143,6 +1144,33 @@ _PINNED = {
     ),
 }
 
+# Homes 2 is fresh-only (spec 4.2): no homes-1 store is migrated, no OPF control area is relocated for
+# the homes generation, and no legacy journal is transported. These fragments of the retired
+# homes-migration text are the one negative check, scoped to their own sections: the default entry is
+# red where one reappears there, so restoring one does not wait for the self-test's tiling equality.
+_RETIRED = {
+    "4.2": (
+        "which requires the homes migration (opf upgrade) to be available.",
+        "The homes-2 requirements in sections 4.2, 9.2, 12, 14.1, 14.2, and 15 describe the target contract",
+        "Homes-2 init and upgrade MUST render this managed block",
+        "The owning writer or migration MUST derive each inventory",
+        "Legacy journal transport MUST preserve bytes through the migration's receipt binding.",
+    ),
+    "9.2": (
+        "The homes-generation upgrade targets spec_version",
+        "denotes legacy homes for migration",
+        "The homes-generation target does not itself change",
+        "The migration MUST refuse a store resolved outside the product root",
+        "A homes-generation bump MUST additionally relocate OPF control areas",
+        "Every destination MUST be digest-verified before its source is removed.",
+        "Both kinds of upgrade MUST run",
+        "the homes-generation relocation path, the homes-2 path included",
+    ),
+    "15": (
+        "Only homes migration MAY read explicitly inventoried OPF artefacts from former .aiqt/ locations",
+    ),
+}
+
 # Plain-language surfaces restating the section 16.1 classes: sentence pins over tag-stripped,
 # whitespace-normalized text, so deleting or rewording a pinned sentence turns the gate red.
 # They are not specification sentences, so the section 2 keyword lint does not read them.
@@ -1203,6 +1231,11 @@ def contract_findings(text):
         for fragment in fragments:
             if fragment not in body:
                 findings.append("spec {} missing contract: {}".format(section, fragment))
+    for section, fragments in _RETIRED.items():
+        body = " ".join(sections.get(section, "").replace("`", "").split())
+        for fragment in fragments:
+            if fragment in body:
+                findings.append("spec {} restores retired homes-migration text: {}".format(section, fragment))
     layout = sections.get("4.2", "")
     reservation = sections.get("4.4", "")
     for name in store.RESERVED_MACHINE_SUBDIRS:
@@ -4179,16 +4212,105 @@ def _self_test_vectors():
                  'migration (opf upgrade) to be available.')
     pins = _CONTRACT["4.2"]
     at = [i for i, f in enumerate(pins) if f.startswith('It still supports 1.2.0 ')]
+    # A missing or repeated anchor fails inside each check, a named failure rather than a traceback.
+    at0 = at[0] if len(at) == 1 else len(pins)
     body = _sections(text)["4.2"]
     normalized_body = " ".join(body.replace("`", "").split())
-    check("spec-homes2-no-migration-spec-restored", lambda i=at[0]:
+    check("spec-homes2-no-migration-spec-restored", lambda i=at0:
           len(at) == 1 and pins[i + 1].startswith('Homes 2 has no homes migration:') and
           normalized_body.count(pins[i] + " " + pins[i + 1]) == 1 and
           "spec 4.2 missing contract: " + pins[i + 1] in contract_findings(text.replace(
               body, "\n\n" + normalized_body.replace(pins[i] + " " + pins[i + 1], retired, 1) + "\n\n", 1)))
-    with patch.dict(_CONTRACT, {"4.2": pins[:at[0]] + (retired,) + pins[at[0] + 2:]}):
+    with patch.dict(_CONTRACT, {"4.2": pins[:at0] + (retired,) + pins[at0 + 2:]}):
         check("spec-homes2-no-migration-pin-restored", lambda:
-              "spec 4.2 missing contract: " + retired in contract_findings(text))
+              len(at) == 1 and "spec 4.2 missing contract: " + retired in contract_findings(text))
+    # Homes 2 is fresh-only throughout sections 4.2 and 9.2: neither carries a homes migration, a
+    # homes-generation relocation of OPF control areas, legacy journal transport or a homes-2 upgrade
+    # path. Each row names a run of current pins by prefix and the retired pins it replaced. Restoring
+    # the retired text in the spec in place of the run turns the gate red with every current pin's
+    # finding; restoring the retired pins under the current spec turns it red with every retired pin's
+    # finding. A retired sentence restored beside the current text breaks spec-tile above, and the
+    # default entry refuses its _RETIRED fragment (below).
+    def _pin(section, start):
+        found = [f for f in _CONTRACT[section] if f.startswith(start)]
+        return found[0] if len(found) == 1 else start
+    gitignore = _pin("4.2", "Homes-2 init, and any upgrade ")
+    archive = _pin("9.2", "The upgrade MUST NOT write the adoption archive ")
+    fresh_only = (
+        ("4.2", ("The homes-2 requirements in sections 4.2, 12,",), (
+            "The homes-2 requirements in sections 4.2, 9.2, 12, 14.1, 14.2, and 15 describe the target "
+            "contract, not an activated runtime guarantee.",)),
+        ("4.2", ("Homes-2 init, and any upgrade ",), (gitignore.replace(
+            "Homes-2 init, and any upgrade of a store already at homes 2, MUST render",
+            "Homes-2 init and upgrade MUST render", 1),)),
+        ("4.2", ("The owning writer MUST derive",), (
+            "The owning writer or migration MUST derive each inventory from the run's transaction "
+            "record or receipt and MUST publish it exclusively with the retained bytes.",)),
+        ("4.2", ("Homes 2 has no legacy journal transport:",), (
+            "Legacy journal transport MUST preserve bytes through the migration's receipt binding.",)),
+        ("9.2", ("The homes-2 generation is declared by", "Absent or 1 denotes legacy homes;",
+                 "The homes-2 declaration does not", "This section defines no homes-generation upgrade:"), (
+            'The homes-generation upgrade targets spec_version = "2.0.0" with required integer '
+            '[opf].homes = 2.',
+            'Absent or 1 denotes legacy homes for migration; unknown future generations MUST be refused.',
+            'The homes-generation target does not itself change the runtime supported version or init '
+            'format.',
+            'The migration MUST refuse a store resolved outside the product root until a multi-root '
+            'coordinator exists.')),
+        ("9.2", ("The bump to the homes-2 declaration",), ()),
+        ("9.2", ("Every upgrade is a schema-level bump",), (
+            'A purely schema-level bump MUST be additive, using atomic replacement of existing files, '
+            'create-only writes for new index files, and regeneration of declared views through '
+            'exclusively created temporary files followed by atomic rename.',)),
+        ("9.2", ("The upgrade MUST run under the store consistency contract",), (
+            'A homes-generation bump MUST additionally relocate OPF control areas as a versioned, '
+            'journaled, fail-closed relocation.',
+            'Every destination MUST be digest-verified before its source is removed.',
+            'Both kinds of upgrade MUST run under the store consistency contract and the single-writer '
+            'lease (section 5.7).')),
+        ("9.2", ("The upgrade MUST NOT write the adoption archive ",), (archive.replace(
+            "The upgrade MUST NOT write the adoption archive ",
+            "Both upgrade kinds, on the schema-level path and the homes-generation relocation path, the "
+            "homes-2 path included, alike, MUST NOT write the adoption archive ", 1),)),
+    )
+    for section, starts, old in fresh_only:
+        pins = _CONTRACT[section]
+        at = [i for i, f in enumerate(pins) if f.startswith(starts[0])]
+        at0 = at[0] if len(at) == 1 else len(pins)
+        run = pins[at0:at0 + len(starts)]
+        body = _sections(text)[section]
+        normalized_body = " ".join(body.replace("`", "").split())
+        anchored = len(at) == 1 and len(run) == len(starts) and all(
+            f.startswith(s) for f, s in zip(run, starts)) and normalized_body.count(" ".join(run)) == 1
+        prefix = "spec " + section + " missing contract: "
+        check("spec-homes2-fresh-only-spec-restored-" + section + "-" + starts[0],
+              lambda a=anchored, r=run, o=old, b=body, nb=normalized_body, p=prefix: a and all(
+                  p + f in found for found in [contract_findings(text.replace(
+                      b, "\n\n" + nb.replace(" ".join(r), " ".join(o), 1) + "\n\n", 1))] for f in r))
+        if old:
+            with patch.dict(_CONTRACT, {section: pins[:at0] + old + pins[at0 + len(starts):]}):
+                check("spec-homes2-fresh-only-pin-restored-" + section + "-" + starts[0],
+                      lambda a=anchored, o=old, p=prefix: a and all(
+                          p + f in found for found in [contract_findings(text)] for f in o))
+    # The default entry refuses each retired fragment in its own section: the live section holds none,
+    # each fragment occurs in the retired pins or text above, and planting it at the end of its
+    # section turns the gate red with its own finding.
+    retired_text = " ".join(" ".join(old) for _s, _p, old in fresh_only) + " " + retired
+    # Emptying or narrowing the registry would retire its vectors silently: its shape is pinned.
+    check("spec-retired-registry", lambda: tuple(_RETIRED) == ("4.2", "9.2", "15") and
+          tuple(map(len, _RETIRED.values())) == (5, 8, 1))
+    for section, fragments in _RETIRED.items():
+        body = _sections(text)[section]
+        for fragment in fragments:
+            finding = "spec {} restores retired homes-migration text: {}".format(section, fragment)
+            check("spec-retired-absent-" + section + "-" + fragment, lambda b=body, f=fragment:
+                  f not in " ".join(b.replace("`", "").split()))
+            check("spec-retired-flip-" + section + "-" + fragment,
+                  lambda b=body, f=finding, frag=fragment: text.count(b) == 1 and
+                  f in contract_findings(text.replace(b, b.rstrip("\n") + "\n" + frag + "\n\n", 1)))
+            if section != "15":
+                check("spec-retired-known-" + section + "-" + fragment,
+                      lambda frag=fragment: frag in retired_text)
     # Appendix E guard: every informative section is keyword-free, the guard sees Appendix E,
     # and planting a requirement keyword there, in prose, a bare code span, or a fenced block,
     # turns the gate red with that keyword's finding; the quotation form (a code span holding
