@@ -89,20 +89,26 @@ refused on a constant descriptor of any int subtype (True and False included), p
 passed as the file= or fd= keyword, an opener= keyword on one is refused, and so is a
 descriptor-duplicating call (os.dup2, or fcntl.fcntl with F_DUPFD) whose first positional
 argument is a constant (these spelled refusals hold even at a recorded site); THREE PERMIT LISTS
-(train 2 round 36) then close the spelled class by construction, admitting only what this file
-does, derived from its own baseline walk: every occurrence of an output-capable callable (open
-or any .open method, io.FileIO, a bare fdopen, os.dup2, fcntl.fcntl, os.set_inheritable, any
-.write_text or .write_bytes method, subprocess.run: a call, a reference outside a callee position,
-a binding, a getattr literal naming one) must match an _OUTPUT_SITES row by qualname and exact
+(train 2 rounds 36 and 37) then admit, within the families they guard, only what this file
+does, derived from its own baseline walk: every occurrence of a GUARDED output-capable callable
+(open or any .open method, io.FileIO, a bare fdopen, os.dup2, fcntl.fcntl, os.set_inheritable,
+any .write_text or .write_bytes method, subprocess.run, and since round 37 every attribute
+_OUTPUT_METHODS names: the standard library's calls that write file content to a path or a
+descriptor, the shutil copy, move and archive functions, the Path copy and move methods,
+os.sendfile and the os descriptor writers; a call, a reference outside a callee position, a
+binding, a getattr literal naming one) must match an _OUTPUT_SITES row by qualname and exact
 source text, so a keyword, starred or ** argument, an opener or a constant descriptor in any
-slot, a flag held in a variable, a functools.partial or an alias is refused at any other site
-and at a recorded one alike (the one partial this file spells, functools.partial(os.dup2, fd,
-0), is a recorded row with its reason); every attribute store or del on any base, an exception
-or a name an except clause bound included, and every setattr or delattr call must match a
-_STORE_SITES row the same way, so code, __notes__, filename, filename2, strerror, msg and any
-attribute not yet named are refused on a caught exception without being listed; and every
-dunder attribute loaded, or named by a getattr literal, must be one _DUNDER_LOADS lists, so
-__notes__, __init__, __setstate__, __getattribute__, __globals__ and __class__ are refused;
+slot, a flag held in a variable, a functools.partial or an alias of a guarded callable is
+refused at any other site and at a recorded one alike (the one partial this file spells,
+functools.partial(os.dup2, fd, 0), is a recorded row with its reason); every attribute store
+or del on any base, an exception or a name an except clause bound included, and every setattr
+or delattr call must match a _STORE_SITES row by qualname and the exact text of the whole store
+statement (target, operation and value; round 37), so code, __notes__, filename, filename2,
+strerror, msg and any attribute no row records are refused on a caught exception, and so are a
+changed value and an augmented or annotated store at a recorded target; and every dunder
+attribute loaded, or named by a getattr literal, must be one _DUNDER_LOADS lists, so __notes__,
+__init__, __setstate__, __getattribute__, __globals__ and __class__ are refused (the permit
+lists hold only the families they guard: what passes them is named in residual (4));
 any binding of a name the emitter's int clamp or a
 gate depends on (type, int, str, isinstance, frozenset) is refused in every binding form; an
 attribute or subscript store rooted at a gate or a gate table is refused, and so is an
@@ -111,15 +117,17 @@ function-anatomy name or an exception's args, on any base; a decorated def of a
 gate is refused (the gate decorator allowlist is empty on purpose); every _emit call passes
 closed text and a constant err= (code= may be any expression: the emitter exits through an int
 clamp, and the store permit refuses a store of code, or of any attribute, on a caught
-SystemExit, so no spelled route of this module makes the interpreter print an exit value; a
-namespace route of residual (4) stays open); exception constructors and
+SystemExit outside its recorded statements; those two rules hold the emitter's own exit, not
+every route to a printed exit value: residual (4) names routes that reach sys.exit as a value,
+such as sys.exit read through the module _Overlay wraps); exception constructors and
 assert messages stay checked wherever they appear, since the interpreter prints an uncaught
 exception's text; each refused form carries a flip that fails when its rule is removed, with
 an independent flip per refused-attribute entry, per gate-table row, per enumerated module's
 bare reference and per accessor, descriptor, store and import condition (train 2 rounds 34 and
 35), each refused by a rule other than the permit lists, and _SITE_FLIPS pins the permit lists
 with a changed copy of every recorded row at its own qualname and a flip per refused class
-(round 36), and
+(round 36), plus a changed value at every recorded store target, an augmented and an annotated
+store at one, and a flip per _OUTPUT_METHODS name (round 37), and
 _check_closed_sites requires _PROTECTED_PROBES, an independent spelling-out of every protected
 name, to equal _PROTECTED_NAMES and probes _patched with each, so a dropped table row fails even
 where another rule overlaps it; the deliberate introspection sites of the test machinery itself
@@ -141,58 +149,82 @@ RESIDUALS the closed design does not cover: the interpreter's own traceback on a
 exception (a defect of this module, or a BaseException such as KeyboardInterrupt, which
 _preflight_exit re-raises on purpose) is outside the module's control and carries source paths
 and raw exception text; the entry point (main through the emitter's exit at the last line) does
-NOT catch it. _self_test_exit relays text that reaches it only as str() of exceptions this
-module raised and of leg messages built at closed construction sites (the walk checks every
-construction site; that relay and the other permitted unclosed-text sites are recorded in
-_CLOSED_SITE_EXCEPTIONS, each with its exact reference count and its reason; a channel
-reference outside the emitter has no such exception). The RESIDUALS of the allowlist, stated plainly: (1) the pin guards against ACCIDENTAL edits,
-not against a hostile author of this file, who could edit the enumerations, the recorded
+NOT catch it. _self_test_exit relays whatever texts its callers pass: the walk checks the
+construction sites of the texts this module's legs build, not who calls _self_test_exit or with
+what, so a new caller passing other text is residual (4) (that relay and the other permitted
+unclosed-text sites are recorded in _CLOSED_SITE_EXCEPTIONS, each with its exact reference count
+and its reason; a channel reference outside the emitter has no such exception). The RESIDUALS
+of the allowlist, stated plainly: (1) the pin guards against ACCIDENTAL edits, not against a
+hostile author of this file, who could edit the enumerations, the recorded
 exceptions and the check itself in one commit; review of the diff, not this gate, is the control
 for that. (2) Anything the interpreter does OUTSIDE this file is disclosed, not caught:
 sitecustomize and usercustomize, a patched or hostile stdlib, an audit hook, a logging handler
 another module configured, the interpreter's own traceback printer on an uncaught exception
-(with the raw text of the __cause__ chain), and this module's namespace reached at run time from
-another module. (3) An enumerated attribute is allowed, not proven harmless: subprocess.run is
-enumerated because this gate launches children, and a launch that does not capture its streams
+(with the raw text of the __cause__ chain), the interpreter's unraisable hook
+(sys.unraisablehook), which prints the raw text of an exception raised where none can
+propagate (a __del__ method, a finalizer) and leaves the exit status 0, and this module's
+namespace reached at run time from another module. (3) An enumerated attribute is allowed, not
+proven harmless: subprocess.run is enumerated because this gate launches children, and a
+launch that does not capture its streams
 writes to the inherited ones (_launch_recorder and _check_launches pin the launch keywords of
 the launches this module makes); io.FileIO is enumerated for the descriptor probe, whose
 descriptor is a non-constant expression the int-constant rule cannot see; os.dup2 and
 fcntl.fcntl with F_DUPFD are enumerated for that same probe, which duplicates a non-constant
-captured descriptor the constant-descriptor rule cannot see; sys._getframe, and
-Path with write_text and open, are enumerated introspection and file surfaces. Every
-output-capable one of these is admitted only at its _OUTPUT_SITES rows in their exact text,
-and an admitted text is not proven harmless: the non-constant values it passes (a launch's
-arguments, the sink and store paths, the captured descriptor) are not traced. (4) THE
-NAMESPACE AND INTROSPECTION ROUTES ARE OPEN, NOT CLOSED, and a static pin over Python source
-cannot close them. A value that has left a module (a subscript item, a call result, a caught
-exception, a frame) is an ordinary object whose attributes are not enumerated, and the running
-interpreter offers such an object many routes back into a live namespace or a stream: a
-frame's f_globals, f_locals and f_builtins (reached through sys._getframe, a traceback's
-tb_frame, a generator's gi_frame or a coroutine's cr_frame), a builtin's __self__ (the
-builtins module itself, whose attributes such as print no rule refuses), a class's
-__subclasses__ and a function's __code__ (dunders this file reads, so _DUNDER_LOADS admits
-them on any base), any getattr whose literal name is neither refused nor a dunder
-(getattr(frame, 'f_globals')), and a value such a route returns (a builtin reached
-through f_builtins, a class reached through __subclasses__), whose call no name rule sees. The
-permit lists refuse every spelled store, setattr, delattr, output-capable call and unlisted
-dunder load, so object.__getattribute__, a __globals__ read, an attribute store on a module
-held as a value and an open of a constant stream path (/dev/stderr) are refused; they do not
-refuse what a route above reaches without spelling it, and review of the diff, not this gate,
-is the control for that. (5) At run time a hostile stub could still mutate what no rule
-protects (a table reached through a container); _patched, the one deliberate mutator, refuses
+captured descriptor the constant-descriptor rule cannot see; shutil.copytree is enumerated to
+materialize the copy; sys._getframe, and Path with write_text and open, are enumerated
+introspection and file surfaces. Every output-capable one of these is admitted only at its
+_OUTPUT_SITES rows in their exact text, and an admitted text is not proven harmless: the
+non-constant values it passes (a launch's arguments, the sink, store and copy paths, the
+captured descriptor) are not traced. (4) THE NAMESPACE AND INTROSPECTION ROUTES ARE OPEN, NOT
+CLOSED, and a static pin over Python source cannot close them. A value that has left a module
+(a subscript item, a call result, a caught exception, a frame) is an ordinary object whose
+attributes are not enumerated, and the running interpreter offers such an object many routes
+back into a live namespace or a stream: a frame's f_globals, f_locals and f_builtins (reached
+through sys._getframe, a traceback's tb_frame, a generator's gi_frame or a coroutine's
+cr_frame), a builtin's __self__ (the module that defines the builtin: builtins for print or
+len, sys for sys._getframe, so sys._getframe.__self__ is sys, whose streams and exit no rule
+refuses when reached this way), a class's __subclasses__ and a function's __code__ (dunders
+this file reads, so _DUNDER_LOADS admits them on any base), any getattr whose literal name is
+neither refused nor a dunder (getattr(frame, 'f_globals')), and a value such a route returns (a
+builtin reached through f_builtins, a class reached through __subclasses__), whose call no name
+rule sees. These routes are NAMED RESIDUALS, with no rule of their own: (a) an output-capable
+call outside the guarded family (a write or writelines method on a value, such as a stream
+held by another object; a launch other than subprocess.run, such as a Popen reached through a
+value; any callable a route here returns); (b) an attribute load on a value that reaches a
+stream or an exit: a standard-library object's saved stream (the _old_targets that
+contextlib.redirect_stdout and redirect_stderr keep), a module read through _Overlay (the value
+_launch_recorder returns reads every attribute but run through to the subprocess module, whose
+own sys, os and Popen are reachable that way, sys.exit among them, so the interpreter prints
+the exit value passed), and a builtin's __self__ (sys._getframe.__self__); (c) a new caller of
+an in-file helper that reaches a recorded output or emitter site with new arguments
+(_write_copied_store or _write_fixture given a stream path, the subprocess.run wrapper
+_harness_watch returns, _materialize given another destination, _self_test_exit given other
+text): the permit lists pin a site's text, not who calls the function holding it or with
+what; (d) a call through a name bound at a recorded alias row (_launch_recorder's inner =
+subprocess.run row records the binding; a later call of inner is not a guarded site); (e) the
+interpreter's unraisable hook of residual (2). The permit lists refuse every spelled store,
+setattr and delattr outside its recorded statement, every spelled occurrence of a GUARDED
+output-capable callable outside its recorded site, and every unlisted dunder load, so
+object.__getattribute__, a __globals__ read, an attribute store on a module held as a value,
+and an open or write_text of a constant stream path (/dev/stderr) spelled at a site no row
+records are refused; they do not refuse a route above, (c) included (a recorded helper given
+such a path), and review of the diff, not this gate, is the control for that. (5) At run time
+a hostile stub could still mutate what no rule protects (a table reached through a
+container); _patched, the one deliberate mutator, refuses
 every protected name, _CLOSED_VOCABULARIES is a read-only mapping proxy (pinned at run time
 by _check_closed_sites), and the static rules refuse every spelled attribute store or del,
-setattr and delattr outside a recorded _STORE_SITES row (on top of the store rooted at a gate
-or a gate table, the attribute store of a protected, function-anatomy or exception-args name
+setattr and delattr outside a recorded _STORE_SITES statement (on top of the store rooted at a
+gate or a gate table, the attribute store of a protected, function-anatomy or exception-args name
 and the setattr or delattr on a gate, gate-table or protected target, refused even at a
 recorded site, and the accessor method spellings __setattr__ and __delattr__ refused as
 attribute doors on any base); a mutation through any route residual (4) names stays open.
 The walk does not check a raise of a bare name: re-raising prints, through the interpreter's
 traceback printer (residual (2)), whatever text the exception carries, which a checked
-construction site built or the host supplied (an OSError's raw text from the host); every
-spelled route that would ADD text to a caught exception (add_note, any attribute store or
-del, setattr or delattr, a dunder such as __init__, __setstate__ or __notes__) is refused by
-_REFUSED_ATTRS and the permit lists above. Nor does it see a BUILT exception
+construction site built or the host supplied (an OSError's raw text from the host); the spelled
+routes these rules name that would ADD text to a caught exception (add_note, an attribute store
+or del outside its recorded statement, setattr or delattr, a dunder such as __init__,
+__setstate__ or __notes__) are refused by _REFUSED_ATTRS and the permit lists above; a route
+residual (4) names stays open. Nor does it see a BUILT exception
 whose class name is neither a builtin exception's nor this module's; and where a diagnostic
 reports only a count (the attribution inventory's unpinned sites and unrecorded indirections),
 the offending keys are deliberately not printed. The canonical Python floor guard that opens this
@@ -339,17 +371,18 @@ _DYNAMIC_IMPORT_NAMES = ("importlib", "__import__")
 # whose dotted path is neither an enumerated entry nor a prefix of one is refused wherever it
 # appears. sys's and os's output and exit attributes are deliberately NOT here (_CHANNEL_ATTRS
 # reserves them to the one emitter and the exempted floor guard). Enumerated does not mean
-# output-free: subprocess.run, io.FileIO, sys._getframe and the Path surface are output-capable
-# or introspective rows this gate itself needs, each held by its own launch and probe checks,
-# the output-capable ones admitted only at their _OUTPUT_SITES rows, and stated in the module
-# docstring's residuals (3) and (4). A bare reference to
+# output-free: subprocess.run, io.FileIO, shutil.copytree, sys._getframe and the Path surface are
+# output-capable or introspective rows this gate itself needs, each held by its own launch and
+# probe checks, the output-capable ones admitted only at their _OUTPUT_SITES rows, and stated in
+# the module docstring's residuals (3) and (4). A bare reference to
 # any of these module names outside an attribute access is refused (an alias the walk cannot
 # follow), and an import of any module outside this enumeration, with an asname, or in dotted
 # form is refused outright.
 _MODULE_ATTRS = dict(
     ast=frozenset((
-        "Add", "Assert", "Assign", "AsyncFunctionDef", "Attribute", "BinOp", "Call", "ClassDef",
-        "Compare", "Constant", "Del", "ExceptHandler", "Expr", "FunctionDef", "GeneratorExp",
+        "Add", "AnnAssign", "Assert", "Assign", "AsyncFunctionDef", "Attribute", "AugAssign",
+        "BinOp", "Call", "ClassDef", "Compare", "Constant", "Del", "Delete", "ExceptHandler",
+        "Expr", "FunctionDef", "GeneratorExp",
         "Global", "If", "IfExp", "Import", "ImportFrom", "Lambda", "Load", "Lt", "MatchAs",
         "MatchMapping", "MatchStar", "Mod", "Name", "Nonlocal", "ParamSpec", "Raise", "Starred",
         "Store", "Subscript", "Tuple", "TypeVar", "TypeVarTuple", "alias", "arg", "dump",
@@ -375,9 +408,9 @@ _MODULE_ATTRS = dict(
 # (no asname); every other from-import is refused. The ("__future__", "annotations") row is
 # held for the floor-guard preamble controls (_FLOOR_GUARD_CONTROLS), which parse a module that
 # may open with it. What the three real rows bind is a stated residual: Path (whose instances
-# carry write_text and open), gettempdir and repo_root are not output channels of this process
-# by themselves, and a reference that writes through one is caught only where it spells a name
-# a rule refuses.
+# carry write_text, open, copy and move), gettempdir and repo_root are not output channels of
+# this process by themselves, and a reference that writes through one is caught only where it
+# spells a name a rule refuses or a guarded output-capable name the permit list does not record.
 _FROM_IMPORT_ALLOW = frozenset((("pathlib", "Path"), ("tempfile", "gettempdir"),
                                 ("_gen_common", "repo_root"), ("__future__", "annotations")))
 
@@ -434,23 +467,39 @@ _REFUSED_ACCESSOR_LITERALS = ("__code__", "__defaults__", "__kwdefaults__", "__g
 # captured descriptor, the stated residual of both (held by the probe's launch checks).
 _DESCRIPTOR_OPEN_NAMES = ("open", "FileIO", "fdopen")
 
-# THE PERMIT LISTS (train 2 round 36). Rounds 33 to 35 refused spellings one at a time, and each
-# review found more of the same class (a keyword, a starred or unpacked argument, a partial, a
-# flag held in a variable, another exception attribute); these lists close the SPELLED class by
-# construction instead: what this file does is recorded, derived from its own baseline walk, and
-# everything else is refused, so a spelling no rule names is refused without being listed.
+# THE PERMIT LISTS (train 2 rounds 36 and 37). Rounds 33 to 35 refused spellings one at a time,
+# and each review found more of the same class (a keyword, a starred or unpacked argument, a
+# partial, a flag held in a variable, another exception attribute); within the families they
+# guard, these lists record what this file does instead, derived from its own baseline walk, and
+# refuse every other occurrence, so a new spelling of a GUARDED call, store or dunder is refused
+# without a rule of its own. They do not close the spelled class: a spelled route outside the
+# guarded families (an output-capable call no family names, and the other routes the module
+# docstring's residual (4) names) passes them.
 # (1) _OUTPUT_FAMILY names the output-capable callables the enumerated rows allow (the open
 # builtin and any .open method, io.FileIO, a bare fdopen, os.dup2, fcntl.fcntl,
-# os.set_inheritable, any .write_text or .write_bytes method) and _OUTPUT_DOTTED adds
-# subprocess.run. Every occurrence of one, on any base and in any context (a call, a reference
-# outside a callee position, a binding, and a getattr whose literal name is one), is a site; its
-# text is ast.unparse of the call it is the callee of, else of the call or assignment that
-# receives it as an argument or value, else of the occurrence itself (a getattr site is the
-# getattr call). A site must match an _OUTPUT_SITES row by qualname and EXACT text, so a changed
-# argument, slot, keyword or spelling is refused, and so is any other site. (2) Every attribute
-# store or del on any base (an exception, a name an except clause bound, a module held as a
-# value, anything else) and every setattr or delattr call must match a _STORE_SITES row the same
-# way (the text of a del starts "del "). (3) Every dunder attribute loaded on any base, and every
+# os.set_inheritable, any .write_text or .write_bytes method), _OUTPUT_METHODS (round 37) the
+# standard library's calls that write file content to a path or a descriptor, matched as an
+# attribute name on any base or a getattr literal (derived from Python 3.14, the floor: the
+# shutil copy, copy2, copyfile, copyfileobj, copytree, move, make_archive and unpack_archive
+# functions, the Path copy, copy_into, move and move_into methods, and os.sendfile, pwrite,
+# pwritev, writev, splice, copy_file_range and eventfd_write; os.write and os._exit are channel
+# attributes, refused outside the emitter by a rule that holds even at a recorded site; copymode
+# and copystat copy metadata, and rename, renames and replace move a directory entry, writing no
+# content, so they stay outside; a bare name is not matched for these, since no import binds
+# one: every from-import is enumerated), and _OUTPUT_DOTTED adds subprocess.run. Every
+# occurrence of one, on any base and in any context (a call, a reference outside a callee
+# position, a binding, and a getattr whose literal name is one), is a site; its text is
+# ast.unparse of the call it is the callee of, else of the call or assignment that receives it
+# as an argument or value, else of the occurrence itself (a getattr site is the getattr call). A
+# site must match an _OUTPUT_SITES row by qualname and EXACT text, so a changed argument, slot,
+# keyword or spelling is refused, and so is any other site. (2) Every attribute store or del on
+# any base (an exception, a name an except clause bound, a module held as a value, anything
+# else) and every setattr or delattr call must match a _STORE_SITES row the same way; a store's
+# text is ast.unparse of its whole statement (round 37: target, operation and value, so a
+# changed value or an augmented or annotated store at a recorded target is refused; a del's text
+# starts "del "; a store outside an assignment or del statement, such as a for target, is its
+# target's text alone, which no row records). (3) Every dunder attribute loaded on any base,
+# and every
 # dunder literal a getattr names, must be one _DUNDER_LOADS lists (the dunders this file reads),
 # so __notes__, __init__, __setstate__, __getattribute__, __globals__, __class__ and any dunder
 # not yet named are refused. The rows of (1) and (2) go through _exception_ledger beside
@@ -461,6 +510,9 @@ _DESCRIPTOR_OPEN_NAMES = ("open", "FileIO", "fdopen")
 # that unparses a recorded site differently fails the check (a refutation, never a pass).
 _OUTPUT_FAMILY = ("open", "FileIO", "fdopen", "dup2", "fcntl", "set_inheritable", "write_text",
                   "write_bytes")
+_OUTPUT_METHODS = ("copy", "copy2", "copyfile", "copyfileobj", "copytree", "move", "make_archive",
+                   "unpack_archive", "copy_into", "move_into", "sendfile", "pwrite", "pwritev",
+                   "writev", "splice", "copy_file_range", "eventfd_write")
 _OUTPUT_DOTTED = ("subprocess.run",)
 _DUNDER_LOADS = ("__code__", "__dict__", "__func__", "__module__", "__name__", "__self__",
                  "__subclasses__", "__wrapped__")
@@ -527,8 +579,9 @@ def _emit(text=None, err=False, code=None):
     given, leaves the process: a value that is exactly an int (bool is not) is the exit status,
     and any other value exits 2, which is why a call site may pass any expression as `code` (the
     entry point passes main()); the walk's store permit refuses a store of code, or of any other
-    attribute, on a caught SystemExit, so no spelled route of this module makes the interpreter
-    print an exit value (a namespace route of the module docstring's residual (4) stays open)."""
+    attribute, on a caught SystemExit outside its recorded statements. That holds this emitter's
+    exit, not every route to a printed exit value: the module docstring's residual (4) names
+    routes that reach sys.exit as a value (sys.exit read through the module _Overlay wraps)."""
     stream = sys.stderr if err else sys.stdout
     if text is not None:
         stream.write(text + "\n")
@@ -2079,8 +2132,8 @@ def _expect_cannot(check, root, cause, label, injected=None):
     _CannotEvaluate naming `cause`: not pass, not refute a leg, not crash. A host failure that this
     call's own watch saw is cannot-evaluate (_HarnessFailure passes through); a _CannotEvaluate that
     check(root) raised, a nested watch's included, is judged by its cause. A check that refuted a
-    leg instead raises its own AssertionError as is (its text is closed by construction and the
-    attribution pins match on it)."""
+    leg instead raises its own AssertionError as is (its text is built at a construction site the
+    walk checks, and the attribution pins match on it)."""
     _result, got = _observed(label, lambda: check(root), injected)
     if got is None:
         raise AssertionError("{}: {} passed with nothing to evaluate".format(
@@ -2533,9 +2586,9 @@ def _check_env_canaries(root):
 # refutation), so a reference added beside a recorded site cannot ride its entry.
 _CLOSED_SITE_EXCEPTIONS = (
     ("_self_test_exit", "_emit", 2,
-     "relays refutation and cannot-evaluate text that reaches it only as str() of exceptions this "
-     "module raised and of leg messages built at closed sites; every construction site is checked "
-     "by this walk, so the relayed text is closed by construction"),
+     "relays the refutation and cannot-evaluate texts its callers pass; the walk checks the "
+     "construction sites of the texts this module's legs build, not who calls _self_test_exit or "
+     "with what: a new caller passing other text is residual (4)"),
     ("_check_attribution_inventory", "_CannotEvaluate", 2,
      "joins cannot-evaluate texts its own entries appended at closed sites above; no other text "
      "enters the list"),
@@ -2571,7 +2624,9 @@ _CLOSED_SITE_EXCEPTIONS = (
      "it writes nothing"),
     ("_launch_recorder", "subprocess", 1,
      "wraps the subprocess module in an _Overlay so a recorded launch is refused or recorded "
-     "before any child starts; the wrap replaces run alone and reads everything else through"),
+     "before any child starts; the wrap replaces run alone and reads everything else through, so "
+     "the subprocess module's own sys, os and Popen are reachable on the value it returns: "
+     "residual (4)"),
     ("_failing_harness", "tempfile", 1,
      "captures the tempfile module bound now so the stand-in can delegate to it; the stand-in "
      "raises only the fixed injected OSError"),
@@ -2590,18 +2645,27 @@ _OUTPUT_SITES = (
      "the member launch: stdout is the pipe and stderr the pipe or merged into it, so no child "
      "output reaches an inherited stream; _check_member_calls and _check_launches pin its "
      "arguments"),
+    ("_materialize", "shutil.copytree(opf_src, dest / 'opf', ignore=shutil.ignore_patterns("
+     "'__pycache__', '*.pyc'))", 1,
+     "copies the opf/ subtree to dest/opf; run() and the negative leg pass a dest that "
+     "tempfile.mkdtemp has just made, and copytree without dirs_exist_ok refuses a destination "
+     "that already exists; a new caller passing another dest is residual (4)"),
     ("_write_copied_store", "store.write_text(text, encoding='utf-8')", 1,
      "the negative leg's write of the flipped _opf_store.py into the scratch copy (the harness "
-     "watch observes it); store is the copy's path, built by _closure_legs"),
+     "watch observes it); store is the copy's path, built by _closure_legs; a new caller passing "
+     "another path is residual (4)"),
     ("_launch_recorder", "inner = subprocess.run", 1,
      "binds the real launcher once so the recorder refuses a launch's keywords and streams "
-     "before any child starts; the recorder adds stdin=DEVNULL"),
+     "before any child starts; the recorder adds stdin=DEVNULL; the row records the binding, "
+     "not the calls of inner, so another call of inner is residual (4)"),
     ("_write_fixture", "path.write_bytes(data)", 1,
-     "the one fixture writer: path is joined under the fixture's scratch base"),
+     "the one fixture writer: path is joined under the base its caller passes (this module's "
+     "callers pass a scratch directory, or no files); a new caller passing another base is "
+     "residual (4)"),
     ("_harness_watch", "watched('child process', subprocess.run, (OSError, "
      "subprocess.TimeoutExpired))", 1,
      "wraps the real launcher so a launch failure is attributed as a host failure; the wrapper "
-     "passes the caller's arguments through unchanged"),
+     "passes the caller's arguments through unchanged, so a new call of it is residual (4)"),
     ("_check_env_canaries", "open(sink, 'r+b')", 1,
      "opens the descriptor probe's sink file inside the scratch directory"),
     ("_check_env_canaries", "io.FileIO(fcntl.fcntl(low.fileno(), fcntl.F_DUPFD, 3), 'r+')", 1,
@@ -2625,28 +2689,30 @@ _OUTPUT_SITES = (
 )
 
 # The attribute stores this file makes (the module docstring's permit list (2), derived from
-# the file's own baseline walk), in the _OUTPUT_SITES shape with the store target's text: any
-# other attribute store or del on any base, and any setattr or delattr call, is refused (the
-# file makes none of the latter).
+# the file's own baseline walk), in the _OUTPUT_SITES shape with the EXACT ast.unparse text of
+# the whole store statement (target, operation and value, round 37): any other attribute store
+# or del on any base, a changed value or operation at a recorded target included, and any
+# setattr or delattr call, is refused (the file makes none of the latter).
 _STORE_SITES = (
-    ("_observed", "crash.__cause__", 1,
+    ("_observed", "crash.__cause__ = exc", 1,
      "chains the crash of the code under test to the AssertionError built at a closed site; "
      "the traceback printer's raw __cause__ text is residual (2)"),
-    ("_no_scratch_denied", "exc.errno", 1,
+    ("_no_scratch_denied", "exc.errno = errno.EACCES", 1,
      "sets the int errno.EACCES on the stubbed OSError built from a registered literal"),
-    ("_broken_copy_full", "exc.errno", 1,
+    ("_broken_copy_full", "exc.errno = errno.ENOSPC", 1,
      "sets the int errno.ENOSPC on the stubbed OSError built from a fixed literal"),
-    ("_rootless", "check.__name__", 1,
+    ("_rootless", "check.__name__ = fn.__name__", 1,
      "keeps the wrapped case's own function name on its check(root) wrapper"),
-    ("_rootless", "check.__wrapped__", 1,
+    ("_rootless", "check.__wrapped__ = fn", 1,
      "records the wrapped function so the attribution walk reaches the case's own code"),
-    ("_Overlay.__init__", "self._target", 1,
+    ("_Overlay.__init__", "self._target = target", 1,
      "binds the wrapped target on the overlay instance itself"),
-    ("_nth_call", "call.__name__", 1,
+    ("_nth_call", "call.__name__ = getattr(inner, '__name__', name)", 1,
      "keeps the patched callable's name on the pin's stand-in"),
-    ("_check_holder_rules", "foreign.__module__", 1,
+    ("_check_holder_rules", "foreign.__module__ = 'opf_closure_foreign_module (stubbed)'",
+     1,
      "marks the fixture's local holder classes as another module's"),
-    ("_check_holder_rules", "holder.fn", 1,
+    ("_check_holder_rules", "holder.fn = _check_holder_rules", 1,
      "stores this module's function on each local holder instance the fixture judges"),
 )
 
@@ -2920,41 +2986,60 @@ def _closed_output_violations(tree):
     _GATE_TABLE_NAMES name is refused, and so is an attribute store or del whose attribute
     name is a _PROTECTED_NAMES or _REFUSED_ACCESSOR_LITERALS name or an exception's args, on any
     base (these spelled rules, the descriptor rules above among them, refuse even at a recorded
-    site); THE PERMIT LISTS (see the comment above _OUTPUT_FAMILY) then refuse every occurrence
-    of an _OUTPUT_FAMILY or _OUTPUT_DOTTED callable (a call, a reference outside a callee
-    position, a binding, a getattr literal naming one) whose qualname and exact ast.unparse
-    text match no _OUTPUT_SITES row, every attribute store or del on any base and every setattr
-    or delattr call matching no _STORE_SITES row, and every dunder attribute load or getattr
-    dunder literal outside _DUNDER_LOADS, each with its _PERMIT_WHYS reason (the ledger in
-    _check_closed_sites matches the recorded rows, each to its exact count); a load of _emit outside a call's callee position is
+    site); THE PERMIT LISTS (see the comment above _OUTPUT_FAMILY) then refuse, within the
+    families they guard, every occurrence of an _OUTPUT_FAMILY, _OUTPUT_METHODS or
+    _OUTPUT_DOTTED callable (a call, a reference outside a callee position, a binding, a getattr
+    literal naming one) whose qualname and exact ast.unparse text match no _OUTPUT_SITES row,
+    every attribute store or del on any base whose qualname and exact statement text (target,
+    operation and value) match no _STORE_SITES row and every setattr or delattr call matching
+    none, and every dunder attribute load or getattr dunder literal outside _DUNDER_LOADS, each
+    with its _PERMIT_WHYS reason (the ledger in _check_closed_sites matches the recorded rows,
+    each to its exact count); a load of _emit outside a call's callee position is
     refused; and every _emit call must pass closed text (_closed_argument) as its at most one
     positional or text= argument, a True or False constant as err=, and no other keyword and no
     starred argument; code= may be any expression, because the emitter exits through an int
-    clamp and the store permit refuses a store on a caught SystemExit, so no spelled route of
-    this module makes the interpreter print an exit value. Exception constructors
+    clamp and the store permit refuses a store on a caught SystemExit outside its recorded
+    statements; that holds the emitter's exit, not every route to a printed exit value (sys.exit
+    read through the module _Overlay wraps is a named residual below). Exception constructors
     stay checked wherever they appear, the emitter included (the interpreter prints an uncaught
     exception's text): a call to a name in _EXCEPTION_NAMES, built or raised, whose positional
     or keyword argument is not closed; any other RAISED constructor, checked the same way; and
     an assert whose message is not closed. The deliberate introspection sites of this module's
     own machinery are recorded in _CLOSED_SITE_EXCEPTIONS, each with its exact reference
     count and a reason. Residuals are
-    stated in the module docstring: what the interpreter runs outside this file, the OPEN
-    namespace and introspection routes of residual (4) (frame namespaces, a builtin's __self__,
-    a class's __subclasses__, a getattr with an unrefused non-dunder literal, and what such a
-    route returns), the non-constant values the recorded output-capable rows pass
-    (subprocess.run, io.FileIO, os.dup2, fcntl.fcntl, os.set_inheritable, Path.write_text and
-    write_bytes: residual (3)), a raise of a bare name (re-raising prints the text the exception
-    carries, which a checked site built or the host supplied, through the traceback printer of
-    residual (2); the spelled routes that would add text to it are refused), and a BUILT
-    exception whose class name is not in _EXCEPTION_NAMES."""
+    stated in the module docstring: what the interpreter runs outside this file (its traceback
+    printer, and its unraisable hook, which prints an exception's raw text and leaves the exit
+    status 0: residual (2)), the OPEN namespace and introspection routes of residual (4) (frame
+    namespaces, a builtin's __self__ such as sys._getframe.__self__, which is sys, a class's
+    __subclasses__, a function's __code__, a getattr with an unrefused non-dunder literal, and
+    what such a route returns) and its NAMED RESIDUALS, which no rule here refuses: an
+    output-capable call outside the guarded family (a write or writelines method on a value, a
+    Popen reached through a value); an attribute load on a value that reaches a stream or an
+    exit (the _old_targets that contextlib.redirect_stdout and redirect_stderr keep, a module read
+    through _Overlay, a builtin's __self__); a new caller of an in-file helper reaching a
+    recorded output or emitter site with new arguments (_write_copied_store, _write_fixture, the
+    _harness_watch wrapper, _materialize, _self_test_exit); and a call through a name bound at a
+    recorded alias row (inner); the non-constant values the recorded output-capable rows pass
+    (subprocess.run, io.FileIO, os.dup2, fcntl.fcntl, os.set_inheritable, shutil.copytree,
+    Path.write_text and write_bytes: residual (3)), a raise of a bare name (re-raising prints the
+    text the exception carries, which a checked site built or the host supplied, through the
+    traceback printer of residual (2); the spelled routes these rules name that would add text
+    to it are refused), and a BUILT exception whose class name is not in _EXCEPTION_NAMES."""
     emitter_defs = [node for node in tree.body
                     if isinstance(node, ast.FunctionDef) and node.name == "_emit"]
     exempt_nodes = set()
     for emitter in emitter_defs:
         for node in ast.walk(emitter):
             exempt_nodes.add(id(node))
-    callee_funcs, attribute_bases, receivers = set(), set(), dict()
+    callee_funcs, attribute_bases, receivers, statements = set(), set(), dict(), dict()
     for node in ast.walk(tree):
+        if isinstance(node, (ast.Assign, ast.Delete)):
+            for target in node.targets:
+                for part in ast.walk(target):
+                    statements[id(part)] = node
+        if isinstance(node, (ast.AugAssign, ast.AnnAssign)):
+            for part in ast.walk(node.target):
+                statements[id(part)] = node
         if isinstance(node, ast.Call):
             callee_funcs.add(id(node.func))
             for part in [node.func] + node.args + [kw.value for kw in node.keywords]:
@@ -3087,12 +3172,13 @@ def _closed_output_violations(tree):
                 if ((isinstance(child, ast.Name) and child.id in _OUTPUT_FAMILY
                      and child.id not in _MODULE_ATTRS)
                         or (isinstance(child, ast.Attribute) and (
-                            child.attr in _OUTPUT_FAMILY or _callee_name(child) in _OUTPUT_DOTTED))):
+                            child.attr in _OUTPUT_FAMILY or child.attr in _OUTPUT_METHODS
+                            or _callee_name(child) in _OUTPUT_DOTTED))):
                     found.append((qualname, ast.unparse(receivers.get(id(child), child)),
                                   child.lineno, _PERMIT_WHYS["output"]))
                 if isinstance(child, ast.Attribute) and isinstance(child.ctx, (ast.Store, ast.Del)):
-                    found.append((qualname, ("del " if isinstance(child.ctx, ast.Del) else "")
-                                  + ast.unparse(child), child.lineno, _PERMIT_WHYS["store"]))
+                    found.append((qualname, ast.unparse(statements.get(id(child), child)),
+                                  child.lineno, _PERMIT_WHYS["store"]))
                 if (isinstance(child, ast.Attribute) and isinstance(child.ctx, ast.Load)
                         and len(child.attr) > 4 and child.attr.startswith("__")
                         and child.attr.endswith("__") and child.attr not in _DUNDER_LOADS):
@@ -3105,7 +3191,7 @@ def _closed_output_violations(tree):
                     if child.func.id != "getattr":
                         found.append((qualname, ast.unparse(child), child.lineno,
                                       _PERMIT_WHYS["store"]))
-                    elif named in _OUTPUT_FAMILY:
+                    elif named in _OUTPUT_FAMILY or named in _OUTPUT_METHODS:
                         found.append((qualname, ast.unparse(child), child.lineno,
                                       _PERMIT_WHYS["output"]))
                     elif (len(named) > 4 and named.startswith("__") and named.endswith("__")
@@ -3395,13 +3481,18 @@ _CLOSED_FLIPS = (
 # The permit-list flips (train 2 round 36), as (name, the _PERMIT_WHYS key of the permit list
 # that must refuse it, snippet): run through _exception_ledger against the real registries,
 # each must leave an unrecorded site refused for that list's reason. The rows to
-# "output-site-host-launch" put a changed copy of each _OUTPUT_SITES row at the row's own
+# "output-site-materialize" put a changed copy of each _OUTPUT_SITES row at the row's own
 # qualname (so a matcher that ignored the exact text would admit it), the rows to
-# "store-site-holder-fn" do the same for each _STORE_SITES row, and the rest give one flip per
-# refused class: for output-capable calls a keyword, starred, ** or positional opener argument,
+# "store-site-holder-fn" do the same for each _STORE_SITES row with a changed target, the rows
+# to "store-value-errno-annotated" (round 37) keep each row's qualname and target and change its
+# value, or the operation (augmented, annotated), so a matcher that compared the target alone
+# would admit them, and the rest give one flip per refused class: for output-capable calls a
+# keyword, starred, ** or positional opener argument,
 # a constant in any slot, a flag held in a variable, a functools.partial, an alias, a mapped or
-# getattr reference, a rebinding and a constant stream path; for stores an exception attribute
-# no rule names (code on a caught SystemExit, __notes__, filename, filename2, strerror, msg),
+# getattr reference, a rebinding and a constant stream path, and (round 37) one flip per
+# _OUTPUT_METHODS name, a getattr literal naming one and an alias of one; for stores an
+# exception attribute no rule names (code on a caught SystemExit, __notes__, filename,
+# filename2, strerror, msg),
 # through an except name, a built exception, a del, an augmented store, setattr and delattr; for
 # dunders a mutator or namespace door (__notes__, __init__, __setstate__, __globals__,
 # __getattribute__, __class__) loaded or named by a getattr literal.
@@ -3431,6 +3522,8 @@ _SITE_FLIPS = (
      "    def launch():\n        subprocess.run([sys.executable, '-I', '-B', str(tmp / "
      "'runner.py'), primary, tools, mode, where], cwd=str(tmp), env=env, "
      "stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=2, timeout=600)\n"),
+    ("output-site-materialize", "output",
+     "def _materialize():\n    shutil.copytree(opf_src, '/proc/self/fd', dirs_exist_ok=True)\n"),
     ("store-site-cause", "store", "def _observed():\n    crash.__context__ = exc\n"),
     ("store-site-errno-denied", "store", "def _no_scratch_denied():\n    exc.strerror = value\n"),
     ("store-site-errno-full", "store", "def _broken_copy_full():\n    exc.filename = value\n"),
@@ -3441,6 +3534,20 @@ _SITE_FLIPS = (
     ("store-site-call-name", "store", "def _nth_call():\n    inner.__name__ = name\n"),
     ("store-site-foreign-module", "store", "def _check_holder_rules():\n    holder.__module__ = value\n"),
     ("store-site-holder-fn", "store", "def _check_holder_rules():\n    foreign.fn = value\n"),
+    ("store-value-cause", "store", "def _observed():\n    crash.__cause__ = value\n"),
+    ("store-value-errno-denied", "store", "def _no_scratch_denied():\n    exc.errno = _args[0]\n"),
+    ("store-value-errno-full", "store", "def _broken_copy_full():\n    exc.errno = _src\n"),
+    ("store-value-rootless-name", "store", "def _rootless():\n    check.__name__ = value\n"),
+    ("store-value-rootless-wrapped", "store", "def _rootless():\n    check.__wrapped__ = value\n"),
+    ("store-value-overlay-target", "store",
+     "class _Overlay:\n    def __init__(self):\n        self._target = value\n"),
+    ("store-value-call-name", "store", "def _nth_call():\n    call.__name__ = name\n"),
+    ("store-value-foreign-module", "store",
+     "def _check_holder_rules():\n    foreign.__module__ = value\n"),
+    ("store-value-holder-fn", "store", "def _check_holder_rules():\n    holder.fn = value\n"),
+    ("store-value-errno-augmented", "store", "def _no_scratch_denied():\n    exc.errno += 0\n"),
+    ("store-value-errno-annotated", "store",
+     "def _no_scratch_denied():\n    exc.errno: int = errno.EACCES\n"),
     ("output-dup2-keyword", "output", "import os\nos.dup2(fd=2, fd2=handle.fileno())\n"),
     ("output-dup2-starred", "output", "import os\nos.dup2(*(2, handle.fileno()))\n"),
     ("output-open-starred", "output", "open(*(2,), 'w', closefd=False).write(value)\n"),
@@ -3470,6 +3577,32 @@ _SITE_FLIPS = (
     ("output-path-open", "output", "Path('/dev/fd/2').open('w').write(value)\n"),
     ("output-write-text-stream", "output", "Path('/dev/stderr').write_text(value)\n"),
     ("output-launch-inherited", "output", "import subprocess\nsubprocess.run(['echo', value])\n"),
+    ("output-path-copy", "output", "Path(source).copy('/dev/stdout')\n"),
+    ("output-path-copy-into", "output", "Path(source).copy_into('/proc/self/fd')\n"),
+    ("output-path-move", "output", "Path(source).move('/dev/stdout')\n"),
+    ("output-path-move-into", "output", "Path(source).move_into('/proc/self/fd')\n"),
+    ("output-copytree-descriptors", "output",
+     "import shutil\nshutil.copytree(source, '/proc/self/fd', dirs_exist_ok=True)\n"),
+    ("output-shutil-copy", "output", "import shutil\nshutil.copy(source, '/dev/stdout')\n"),
+    ("output-shutil-copy2", "output", "import shutil\nshutil.copy2(source, '/dev/stdout')\n"),
+    ("output-shutil-copyfile", "output", "import shutil\nshutil.copyfile(source, '/dev/stdout')\n"),
+    ("output-shutil-copyfileobj", "output", "import shutil\nshutil.copyfileobj(handle, held)\n"),
+    ("output-shutil-move", "output", "import shutil\nshutil.move(source, '/dev/stdout')\n"),
+    ("output-shutil-make-archive", "output",
+     "import shutil\nshutil.make_archive('/dev/stdout', 'tar', source)\n"),
+    ("output-shutil-unpack-archive", "output",
+     "import shutil\nshutil.unpack_archive(archive, '/proc/self/fd')\n"),
+    ("output-os-sendfile", "output",
+     "import os\nos.sendfile(descriptor, handle.fileno(), 0, size)\n"),
+    ("output-os-pwrite", "output", "import os\nos.pwrite(descriptor, data, 0)\n"),
+    ("output-os-pwritev", "output", "import os\nos.pwritev(descriptor, [data], 0)\n"),
+    ("output-os-writev", "output", "import os\nos.writev(descriptor, [data])\n"),
+    ("output-os-splice", "output", "import os\nos.splice(source_fd, descriptor, size)\n"),
+    ("output-os-copy-file-range", "output",
+     "import os\nos.copy_file_range(source_fd, descriptor, size)\n"),
+    ("output-os-eventfd-write", "output", "import os\nos.eventfd_write(descriptor, value)\n"),
+    ("output-copy-getattr-literal", "output", "copier = getattr(Path(source), 'copy')\n"),
+    ("output-copytree-alias", "output", "import shutil\nduplicate = shutil.copytree\n"),
     ("store-systemexit-code", "store", "try:\n    _emit(code=0)\nexcept BaseException as caught:\n"
      "    caught.code = value\n    raise\n"),
     ("store-except-filename", "store", "try:\n    probe()\nexcept OSError as caught:\n"
