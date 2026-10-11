@@ -1373,49 +1373,89 @@ def _config_injection_lane(base):
 # from a measured runtime. The only registered member that declares an
 # end-to-end budget is opf/tools/opf.py --self-test: its watchdog regression
 # runner launches its legs one at a time, each under its own process bound
-# (declared budget + launch margin; the poll-masked leg alone is 2954 + 30 s),
-# and its watchdog isolation self-test also runs once at top level.
+# (declared budget + launch margin; the poll-masked leg alone is 2954 + 30 s)
+# and, after that bound, each leg's own close-out (the bounded cleanup waits
+# _FixtureProcess.close() makes once the bound expires, derived from the
+# declared cleanup grace by opf._watchdog_leg_closeout_seconds()), and its
+# watchdog isolation self-test also runs once at top level.
 # opf._watchdog_declared_seconds() returns that sequential sum, read from
 # the runner's own tables by _derive_member_bound() before any lane runs, so
-# a budget raised there raises this bound with it. The margin is a STATED
-# allowance, not a derivation: it covers interpreter start and the opf
-# self-tests and other members that declare no end-to-end budget (their
-# own internal timeouts are not summed: a disclosed residual). The bound is
-# a LIVENESS bound only: its expiry is never member evidence (see
-# MemberTimeout below). An outer bound such as a CI job timeout may sit
-# below it; it then ends the run first.
+# a budget or grace raised there raises this bound with it; the derivation
+# vector below restates the rule term by term, so dropping any term fails a
+# check. The margin is a STATED allowance, not a derivation, and covers only
+# this: interpreter start, and the opf self-tests and other members that
+# declare no end-to-end budget (their own internal timeouts are not summed:
+# a disclosed residual). The bound is a LIVENESS bound only: its expiry is
+# never member evidence (see MemberTimeout below). An outer bound may sit
+# below it and then ends the run first: GitHub's hosted-runner job limit,
+# documented as 6 hours, ends a hosted CI job long before this bound (about
+# 11 hours) can fire, so in hosted CI this bound's attributed exit 2 is not
+# reached and a hung member ends as the job's own unattributed failure
+# (still red). The attribution serves runs without such a limit.
 _MEMBER_BOUND_MARGIN_SECONDS = 1200
 # The derivation probe imports opf and builds the runner's tables, nothing
 # else: a deliberately short fast-fail bound, its expiry attributed (exit 2
 # naming the derivation), never member evidence.
 _MEMBER_BOUND_PROBE_SECONDS = 120
 _MEMBER_BOUND_SECONDS = None  # set once by _derive_member_bound(); None refuses every launch
+# The derivation vector: a synthetic plan whose terms differ by orders of
+# magnitude, evaluated by opf's own derivation in the probe, against the
+# rule restated here: every leg's bound, plus every leg's close-out (the
+# 2 + 2 + 1 + 1 cleanup-grace waits of _FixtureProcess.close), plus the
+# isolation self-test's budget. Omitting any term changes the total.
+_DERIVATION_VECTOR_PLAN = dict(
+    bounds=dict([("vector-leg-a", 1000.0), ("vector-leg-b", 100.0)]),
+    budgets=dict([("vector-leg-a", 970.0), ("vector-leg-b", 70.0),
+                  ("blocked-isolation", 10.0)]))
+_LEG_CLOSEOUT_GRACES = 2 + 2 + 1 + 1
 
 
-def _derive_member_bound():
-    """Return (declared, bound): opf's declared sequential worst case and the
-    per-member bound above it, or exit 2 (cannot evaluate) when the
-    declared budget cannot be read: no member may run under a guessed
-    bound."""
+def _derivation_vector_want(grace):
+    plan = _DERIVATION_VECTOR_PLAN
+    return (sum(plan["bounds"].values())
+            + len(plan["bounds"]) * _LEG_CLOSEOUT_GRACES * grace
+            + plan["budgets"]["blocked-isolation"])
+
+
+def _derive_member_bound(run=subprocess.run):
+    """Return (declared, bound, vector): opf's declared sequential worst
+    case, the per-member bound above it, and (opf's total over the
+    synthetic _DERIVATION_VECTOR_PLAN, the total the rule restated here
+    requires); or exit 2 (cannot evaluate) when the declared budget cannot
+    be read: no member may run under a guessed bound. `run` is the launch
+    (scripted by the vectors)."""
+    import json
     import math
-    code = ("import sys; sys.path.insert(0, sys.argv[1]); import opf; "
+    code = ("import json, sys; sys.path.insert(0, sys.argv[1]); import opf, _opf_emit; "
             "rc = opf._bootstrap(); "
-            "print(repr(float(opf._watchdog_declared_seconds())) if rc == 0 else 'bootstrap rc %d' % rc)")
+            "print(json.dumps(dict(declared=opf._watchdog_declared_seconds(), "
+            "vector=opf._watchdog_declared_seconds(json.loads(sys.argv[2])), "
+            "grace=_opf_emit._FIXTURE_CLEANUP_GRACE)) if rc == 0 else 'bootstrap rc %d' % rc)")
+    payload, detail = None, ""
     try:
-        child = subprocess.run([sys.executable, "-I", "-B", "-c", code, str(ROOT / "opf" / "tools")],
-                               cwd=ROOT, capture_output=True, text=True, errors="replace",
-                               timeout=_MEMBER_BOUND_PROBE_SECONDS)
-        declared = float(child.stdout.strip()) if child.returncode == 0 else None
+        child = run([sys.executable, "-I", "-B", "-c", code, str(ROOT / "opf" / "tools"),
+                     json.dumps(_DERIVATION_VECTOR_PLAN)],
+                    cwd=ROOT, capture_output=True, text=True, errors="replace",
+                    timeout=_MEMBER_BOUND_PROBE_SECONDS)
         detail = "rc {}: {}".format(child.returncode, (child.stdout + child.stderr).strip()[-400:])
+        if child.returncode == 0:
+            payload = json.loads(child.stdout)
     except subprocess.TimeoutExpired:
-        declared, detail = None, "still running when its {} s bound killed it".format(
-            _MEMBER_BOUND_PROBE_SECONDS)
+        detail = "still running when its {} s bound killed it".format(_MEMBER_BOUND_PROBE_SECONDS)
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
-        declared, detail = None, str(exc)
-    if declared is None or not math.isfinite(declared) or declared <= 0:
+        detail = "; ".join(part for part in (detail, str(exc)) if part)
+    values = None
+    if isinstance(payload, dict):
+        values = [payload.get(key) for key in ("declared", "vector", "grace")]
+        if not all(type(value) in (int, float) and math.isfinite(value) and value > 0
+                   for value in values):
+            values = None
+    if values is None:
         _cannot_evaluate_exit(["the per-member bound cannot be derived from opf's declared "
                                "budgets ({}): no member runs under a guessed bound".format(detail)])
-    return declared, declared + _MEMBER_BOUND_MARGIN_SECONDS
+    declared, vector, grace = values
+    return (declared, declared + _MEMBER_BOUND_MARGIN_SECONDS,
+            (vector, _derivation_vector_want(grace)))
 
 
 def _member_bound():
@@ -1425,19 +1465,35 @@ def _member_bound():
     return _MEMBER_BOUND_SECONDS
 
 
+_LANE_RESULT_FIELDS = ("rc", "hook", "fsmonitor", "exposure")
+
+
 def _cannot_evaluate_exit(lines, lane=None):
     """Exit 2 (the suite's cannot-evaluate/harness exit; the execution gate
     refuses it as 'no verdict'), FIRST printing every finding already
     collected and, for a lane, every member result not yet compared, so a
-    real failure observed before the refusal is never hidden by it."""
+    real failure observed before the refusal is never hidden by it: each
+    result WHOLE (exit code and its hook, fsmonitor and exposure evidence,
+    so an exit 0 with evidence prints too), except that results with exit 0
+    and no evidence at all are counted on one line rather than listed. A
+    member its bound killed prints on its own refusal line instead."""
     if FAILURES:
         print("SELF-TEST FINDINGS COLLECTED BEFORE THE CANNOT-EVALUATE EXIT:", file=sys.stderr)
         for failure in FAILURES:
             print("  - " + failure, file=sys.stderr)
+    clean = 0
     for argv, value in sorted((lane or {}).items()):
-        if not isinstance(value[0], MemberTimeout) and value[0] != 0:
-            print("SELF-TEST UNCOMPARED LANE RESULT: {}: {!r}".format(
-                " ".join(argv), value[0]), file=sys.stderr)
+        if isinstance(value[0], MemberTimeout):
+            continue
+        if type(value[0]) is int and value[0] == 0 and not any(value[1:]):
+            clean += 1
+            continue
+        print("SELF-TEST UNCOMPARED LANE RESULT: {}: {}".format(" ".join(argv), ", ".join(
+            "{}={!r}".format(field, item) for field, item in zip(_LANE_RESULT_FIELDS, value))),
+            file=sys.stderr)
+    if clean:
+        print("SELF-TEST UNCOMPARED LANE RESULTS: {} other member(s) exited 0 with no hook, "
+              "fsmonitor or exposure evidence".format(clean), file=sys.stderr)
     for line in lines:
         print("SELF-TEST CANNOT EVALUATE: " + line, file=sys.stderr)
     sys.exit(2)
@@ -1509,10 +1565,84 @@ def _member_rc_or_refuse(member, env):
 
 
 def _install_member_bound():
-    """Derive and install the per-member bound; return opf's declared worst case."""
+    """Derive and install the per-member bound; return opf's declared worst
+    case and the derivation vector's (got, want)."""
     global _MEMBER_BOUND_SECONDS
-    declared, _MEMBER_BOUND_SECONDS = _derive_member_bound()
-    return declared
+    declared, _MEMBER_BOUND_SECONDS, vector = _derive_member_bound()
+    return declared, vector
+
+
+_MEMBER_BOUND_EXPECTED = [
+    ("rc-1", 2, True), ("bootstrap-refused", 2, True), ("timeout", 2, True),
+    ("oserror", 2, True), ("not-json", 2, True), ("non-finite", 2, True), ("zero", 2, True),
+    ("missing-term", 2, True), ("bool", 2, True),
+    ("clean", (7.5, 7.5 + _MEMBER_BOUND_MARGIN_SECONDS, (3.25, _derivation_vector_want(0.5)))),
+    ("unset-bound", 2, True), ("unset-launch", 2, True, 0),
+]
+
+
+def _member_bound_vectors():
+    """Red-on-revert vectors for the bound's derivation-failure exit and its
+    unset (None) refusal, through scripted probe launches: every unreadable,
+    non-finite, non-positive or incomplete derivation is an attributed exit
+    2 naming the derivation, a clean one installs declared + margin, and a
+    member launch reached with no bound derived exits 2 before launching."""
+    import contextlib
+    import io
+    import json
+    global _MEMBER_BOUND_SECONDS
+
+    def payload(**values):
+        return json.dumps(dict(dict(declared=7.5, vector=3.25, grace=0.5), **values))
+
+    def scripted(effect, calls=None):
+        def run(argv, **kwargs):
+            if calls is not None:
+                calls.append(argv)
+            if isinstance(effect, BaseException):
+                raise effect
+            return subprocess.CompletedProcess(argv, effect[0], effect[1], "")
+        return run
+
+    def refused(call):
+        stream = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(stream):
+                value = call()
+        except SystemExit as exc:
+            return exc.code, stream.getvalue()
+        return ("returned", value), stream.getvalue()
+
+    got = []
+    for label, effect in (
+            ("rc-1", (1, "")), ("bootstrap-refused", (0, "bootstrap rc 2")),
+            ("timeout", subprocess.TimeoutExpired(["vector"], 1)),
+            ("oserror", OSError(5, "vector")), ("not-json", (0, "36000.0")),
+            ("non-finite", (0, payload(declared=float("nan")))),
+            ("zero", (0, payload(declared=0))),
+            ("missing-term", (0, json.dumps(dict(declared=7.5, grace=0.5)))),
+            ("bool", (0, payload(grace=True))),
+            ("clean", (0, payload()))):
+        code, text = refused(lambda: _derive_member_bound(run=scripted(effect)))
+        if label == "clean":
+            got.append((label, code[1] if isinstance(code, tuple) else code))
+            continue
+        got.append((label, code, "per-member bound cannot be derived" in text))
+    saved = _MEMBER_BOUND_SECONDS
+    calls = []
+    real_run = subprocess.run
+    try:
+        _MEMBER_BOUND_SECONDS = None
+        code, text = refused(_member_bound)
+        got.append(("unset-bound", code, "before the per-member bound was derived" in text))
+        subprocess.run = scripted((0, ""), calls)
+        code, text = refused(lambda: _run_config_member(_VECTOR_MEMBER, dict(os.environ)))
+        got.append(("unset-launch", code, "before the per-member bound was derived" in text,
+                    len(calls)))
+    finally:
+        subprocess.run = real_run
+        _MEMBER_BOUND_SECONDS = saved
+    return got
 
 
 _VECTOR_MEMBER = ("tools/vector_member.py", "--self-test")
@@ -1521,7 +1651,7 @@ _MEMBER_TIMEOUT_EXPECTED = [
     ("signal", "int", None, False), ("exit-2", "int", None, False),
     ("oserror", "str", None, False), ("clean", "int", None, False),
     ("direct-bound-kill", 2),
-    ("findings-printed-first", 2, True, True, True),
+    ("findings-printed-first", 2, True, True, True, True, True),
     ("wiring", ["_config_results", "_member_rc_or_refuse"], True),
 ]
 
@@ -1575,22 +1705,32 @@ def _member_timeout_vectors():
     sentinel = "vector/collected-finding: got 1, want 0"
     FAILURES.append(sentinel)
     try:
-        lane = {_VECTOR_MEMBER: (MemberTimeout(_VECTOR_MEMBER, 2.0, 1.0),),
-                ("tools/vector_other.py", "--self-test"): (1,)}
+        lane = dict([
+            (_VECTOR_MEMBER, (MemberTimeout(_VECTOR_MEMBER, 2.0, 1.0), b"", b"", b"")),
+            (("tools/vector_other.py", "--self-test"), (1, b"", b"", b"home\n")),
+            (("tools/vector_hooked.py", "--self-test"), (0, b"hook-ran\n", b"fsmonitor-ran\n", b"")),
+            (("tools/vector_clean.py", "--self-test"), (0, b"", b"", b""))])
         code, text = refused(lambda: _refuse_member_timeouts(lane))
     finally:
         FAILURES.remove(sentinel)
     refusal = text.find("SELF-TEST CANNOT EVALUATE")
-    got.append(("findings-printed-first", code, -1 < text.find(sentinel) < refusal,
-                -1 < text.find("UNCOMPARED LANE RESULT: tools/vector_other.py --self-test: 1")
-                < refusal, refusal > -1))
+    got.append((
+        "findings-printed-first", code, -1 < text.find(sentinel) < refusal,
+        -1 < text.find("UNCOMPARED LANE RESULT: tools/vector_other.py --self-test: rc=1, "
+                       "hook=b'', fsmonitor=b'', exposure=b'home\\n'") < refusal,
+        -1 < text.find("UNCOMPARED LANE RESULT: tools/vector_hooked.py --self-test: rc=0, "
+                       "hook=b'hook-ran\\n', fsmonitor=b'fsmonitor-ran\\n', exposure=b''")
+        < refusal,
+        -1 < text.find("UNCOMPARED LANE RESULTS: 1 other member(s) exited 0") < refusal,
+        "vector_clean" not in text and refusal > -1))
     # This module's own loaded source (no new file-read site: the read-API
     # allowlist in tools/check_ci_parity.py stays as reviewed).
     tree = ast.parse(inspect.getsource(sys.modules[__name__]))
     callers, pool_refuses = set(), False
     for top in tree.body:
-        if not isinstance(top, ast.FunctionDef) or top.name == "_member_timeout_vectors":
-            continue  # this vector's own scripted calls are not a launch site
+        if not isinstance(top, ast.FunctionDef) or top.name in (
+                "_member_timeout_vectors", "_member_bound_vectors"):
+            continue  # the vectors' own scripted calls are not a launch site
         for node in ast.walk(top):
             if isinstance(node, ast.Call) and _call_name(node) == "_run_config_member":
                 callers.add(top.name)
@@ -5117,8 +5257,10 @@ def main(report_path=None):
 
         # The per-member bound, derived from opf's declared budgets before any
         # member launch, then the red-on-revert vectors for the refusal paths.
-        declared = _install_member_bound()
+        declared, derivation = _install_member_bound()
         check("config/member-bound-derived", _MEMBER_BOUND_SECONDS > declared, True)
+        check("config/member-bound-derivation-vector", derivation[0], derivation[1])
+        check("config/member-bound-vectors", _member_bound_vectors(), _MEMBER_BOUND_EXPECTED)
         check("config/member-timeout-vectors", _member_timeout_vectors(),
               _MEMBER_TIMEOUT_EXPECTED)
         check("env/lifecycle-probe-timeout-vectors", _lifecycle_timeout_vectors(),

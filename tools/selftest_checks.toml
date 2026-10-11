@@ -790,6 +790,8 @@ expected-check-ids = [
   "config/system-control",
   "config/xdg-malformed-control",
   "config/member-bound-derived",
+  "config/member-bound-derivation-vector",
+  "config/member-bound-vectors",
   "config/member-timeout-vectors",
   "env/lifecycle-probe-timeout-vectors",
   "env/lifecycle-path-removal-red",

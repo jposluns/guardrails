@@ -1161,10 +1161,12 @@ _COMPLETION_LAUNCH_TIMEOUT = 10
 # supervision, the leg reports the _WATCHDOG_CANNOT_EVALUATE outcome below
 # with what it observed, never a pass (_watchdog_tree_case).
 _TREE_STARTUP_BACKSTOP = 60
-# The nested-orders vectors' short backstop, used only by the two vectors
+# The nested-orders vectors' short backstop, used only by the seven vectors
 # whose schedule needs a REAL backstop expiry (a subject that never
-# publishes; an uninstalled observer): there it is the stimulus, so each
-# pays this wait instead of _TREE_STARTUP_BACKSTOP.
+# publishes or publishes a malformed marker; an uninstalled or blind
+# observer; an unshifted guardian clock; a guardian held asleep or busy
+# before READY): there it is the stimulus, so each pays this wait instead
+# of _TREE_STARTUP_BACKSTOP.
 _TREE_VECTOR_BACKSTOP = 5
 # The exact stdout marker a completion leg prints (with its cause) when a
 # backstop, not the leg's stimulus, ended the exercise, or the stimulus
@@ -1183,6 +1185,21 @@ def _deadline_case_budget(timeout_s=_DEADLINE_CASE_TIMEOUT):
     import _opf_emit
     return (max(timeout_s, _DEADLINE_EXECUTION_BOUND) + _opf_emit._FIXTURE_CLEANUP_GRACE
             + _DEADLINE_RECEIPT_ALLOWANCE)
+
+
+def _watchdog_leg_closeout_seconds():
+    """The longest close-out one regression leg's launch may add AFTER its
+    process bound, derived from the declared cleanup grace: when the bound
+    expires, _run_fixture_process raises and _FixtureProcess.close() still
+    makes its bounded cleanup waits, in sequence: the launcher-completion
+    wait (2 x grace, _close_coordinated), the guardian collection wait
+    (2 x grace), the post-escalation collection wait (1 x grace) and the
+    subject exit proof on its pidfd (1 x grace), all in _finish_close. It
+    is the SUM of every bounded wait on that sequence, so it is an upper
+    bound on any single path (no path makes all four: an unlaunched leg
+    has no subject to prove gone)."""
+    import _opf_emit
+    return (2 + 2 + 1 + 1) * _opf_emit._FIXTURE_CLEANUP_GRACE
 
 
 def _watchdog_finite_seconds(value):
@@ -3254,7 +3271,8 @@ def _watchdog_launcher_case(label, disposition):
 
 
 def _watchdog_tree_case(mode, order="event-first", backstop=_TREE_STARTUP_BACKSTOP,
-                        publish=True, observe_waits=True):
+                        publish=True, observe_waits=True, observe_parse=True,
+                        clock_shift=True, startup_stall=None, facts=None):
     """One nested-tree cleanup exercise (nested-timeout or nested-cancel).
     Returns ("pass", "") or ("cannot-evaluate", cause) and raises
     AssertionError on a definite failure.
@@ -3264,10 +3282,12 @@ def _watchdog_tree_case(mode, order="event-first", backstop=_TREE_STARTUP_BACKST
     wait poll that parsed both markers. nested-timeout makes the GUARDIAN's
     own expiry branch fire (its supervision loop's monotonic clock, and only
     that process's clock, jumps to its deadline once the `expire` file
-    exists), so the leg drives guardian-side expiry, its tree cleanup and
-    the timed_out receipt exactly as a flat deadline did, without racing
-    subject startup. nested-cancel raises Cancelled in the caller; close()
-    then requests cleanup over the control channel (the caller-side drain).
+    exists, and the guardian records that it applied the shift in the
+    `shifted` file), so the leg drives guardian-side expiry, its tree
+    cleanup and the timed_out receipt exactly as a flat deadline did,
+    without racing subject startup. nested-cancel raises Cancelled in the
+    caller; close() then requests cleanup over the control channel (the
+    caller-side drain).
 
     PASS requires a proof that the stimulus PRECEDED cleanup, not just that
     both happened: (1) at the poll that parsed both markers, BEFORE the
@@ -3278,13 +3298,18 @@ def _watchdog_tree_case(mode, order="event-first", backstop=_TREE_STARTUP_BACKST
     deadline (an expiry seen only at or after it may be the backstop's),
     nested-cancel needs timed_out False (it left supervision on the
     cleanup request, not on its own expiry); (3) the subject's recorded
-    status is SIGKILL (cleanup killed a still-running subject); (4) both
-    nested PIDs are gone. The backstop is a liveness bound only: when it,
-    not the stimulus, ended supervision, or when the stimulus was observed
-    only after cleanup, there is no tree-cleanup verdict, and the cause
-    names what was observed. A cause that is deterministic (the observer
-    never ran, a malformed marker, cleanup with neither trigger) is a
-    definite failure, never reported as a scheduling stall.
+    status is SIGKILL (cleanup killed a still-running subject, not one that
+    exited by itself); (4) both nested PIDs are gone. The backstop is a
+    liveness bound only: when it, not the stimulus, ended supervision, or
+    when the stimulus was observed only after cleanup, there is no
+    tree-cleanup verdict, and the cause names what was observed. A cause
+    that is deterministic is a definite failure whose message says it is a
+    code regression, never reported as host scheduling: the observer never
+    ran, or polled long after both markers were published without parsing
+    them; a malformed marker; cleanup with neither trigger; a guardian
+    blocked before READY; and a guardian that ran its expiry after a
+    stimulus mounted before the caller's deadline without ever applying the
+    clock shift.
 
     Vector parameters (the nested-orders leg; the real legs use the
     defaults): order "cleanup-first" lets the backstop arrive on both sides
@@ -3294,10 +3319,25 @@ def _watchdog_tree_case(mode, order="event-first", backstop=_TREE_STARTUP_BACKST
     backstop arrive and the guardian's cleanup finish BEFORE the stimulus
     is mounted (the stimulus-lost-the-race schedule); order "no-stimulus"
     records the observation, mounts no stimulus and lets the backstop
-    arrive instead (the stimulus-removed schedule); publish=False runs a
-    subject that never publishes; observe_waits=False leaves the wait
-    observer uninstalled (a harness defect)."""
+    arrive instead (the stimulus-removed schedule); order
+    "self-exit-after-snapshot" records the observation, then lets the
+    nested processes exit BY THEMSELVES and the guardian collect them
+    before the cancel (the subject-ended-first schedule); order
+    "killed-after-snapshot" records the observation, kills the subject tree
+    from outside the guardian, mounts no stimulus, and lets the caller's
+    deadline pass between the guardian's collection and the caller's
+    overdue check (the left-without-expiry schedule); publish=False runs a
+    subject that never publishes, publish="malformed" one that publishes a
+    non-PID marker; observe_waits=False leaves the wait observer
+    uninstalled and observe_parse=False installs one that never parses the
+    markers (harness defects); clock_shift=False disables the guardian's
+    clock shift (a code regression); startup_stall "blocked" or "runnable"
+    holds the guardian before READY, asleep or busy. `facts`, when given,
+    records what the exercise observed, so each vector can tell a schedule
+    that was established from one this host never produced."""
+    import select
     import signal
+    import socket
     import subprocess
     import tempfile
     import time
@@ -3308,11 +3348,15 @@ def _watchdog_tree_case(mode, order="event-first", backstop=_TREE_STARTUP_BACKST
     class Cancelled(RuntimeError):
         """The nested-cancel stimulus; no other error may stand in for it."""
 
+    if facts is None:
+        facts = {}
     real_wait, real_process, real_clock = emit._fixture_wait, emit._FixtureProcess, time.monotonic
+    real_subreaper = emit._fixture_subreaper
     leg = os.getpid()
     with tempfile.TemporaryDirectory(prefix="opf-tree-") as directory:
         markers = [Path(directory, name) for name in ("subject", "descendant")]
-        expire = Path(directory, "expire")
+        expire, shifted = Path(directory, "expire"), Path(directory, "shifted")
+        release, stalled = Path(directory, "release"), Path(directory, "stalled")
         # Deliberate fork/session escape is a tree-cleanup stimulus, not a verdict.
         subject = ("import os, time; from pathlib import Path; "
                    "pid = os.fork(); "
@@ -3342,9 +3386,21 @@ def _watchdog_tree_case(mode, order="event-first", backstop=_TREE_STARTUP_BACKST
                 and text.count("write_text(") == 1
                 and text.count("Path(directory, name)") == 1):
             raise AssertionError("marker write lines changed: " + text)
-        if not publish:
+        if publish == "malformed":
+            # Vector: a marker that exists but never holds a PID.
+            subject = ("from pathlib import Path; Path(" + repr(directory) + ", 'subject')"
+                       ".write_text('not-a-pid', encoding='ascii'); import time; time.sleep(3600)")
+        elif not publish:
             subject = "import time; time.sleep(3600)"  # vector: never publishes a marker
+        if order == "self-exit-after-snapshot":
+            # Vector: both nested processes exit by themselves once `release` exists.
+            parked = "time.sleep(3600)"
+            if subject.count(parked) != 1:
+                raise AssertionError("self-exit vector: subject park changed: " + subject)
+            subject = subject.replace(parked, "[time.sleep(0.005) for _ in iter(lambda: "
+                                      "os.path.exists(" + repr(str(release)) + "), True)]")
         launched, observed, snapshot, collected, shift = [], [], [], [], []
+        stimulus, startup = [], []
         polls = [0, 0.0]  # observer calls, and the wall time of the last one
 
         def parse():
@@ -3353,10 +3409,48 @@ def _watchdog_tree_case(mode, order="event-first", backstop=_TREE_STARTUP_BACKST
             except (FileNotFoundError, ValueError):
                 return []
 
+        def startup_state(child):
+            # Sampled when the leg's guardian missed READY, BEFORE close()
+            # kills it: a READY byte already waiting means the caller was
+            # late; a guardian asleep (state S) with none written is blocked
+            # in a startup that makes no blocking call before READY.
+            if child.pid is None or not child.timed_out:
+                return "unlaunched", ("the guardian launch itself had not completed (no code "
+                                      "regression established)")
+            readable = select.poll()
+            readable.register(child.control, select.POLLIN)
+            if readable.poll(0):
+                try:
+                    pending = child.control.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT)
+                except OSError:
+                    pending = None
+                if pending == b"R":
+                    return "late-caller", ("it HAD signalled READY, but the caller did not read "
+                                           "it in time: host scheduling")
+            try:
+                state = Path("/proc", str(child.pid), "stat").read_text(
+                    encoding="ascii").rpartition(")")[2].split()[0]
+            except (OSError, IndexError):
+                return "unreadable", "its state was unreadable (no code regression established)"
+            if state == "R":
+                return state, ("it was runnable (state R), not blocked: host scheduling, or a "
+                               "busy startup loop, which this sample cannot tell apart")
+            return state, ("it was in state {}, not blocked in its startup (no code regression "
+                           "established)".format(state))
+
         def capture(deadline, **kwargs):
             # Record the leg's own launch; construction is otherwise real.
             child = real_process(deadline, **kwargs)
             launched.append(child)
+            real_start = child._start
+
+            def sampled_start():
+                try:
+                    return real_start()
+                except TimeoutError:
+                    startup.append(startup_state(child))
+                    raise
+            child._start = sampled_start
             return child
 
         def clock():
@@ -3365,13 +3459,27 @@ def _watchdog_tree_case(mode, order="event-first", backstop=_TREE_STARTUP_BACKST
             # and runs on from there, so the guardian's expiry branch fires
             # at its next poll and its cleanup keeps the full grace (the
             # cleanup deadline is computed from this same shifted clock).
-            # The caller's clock is never shifted.
+            # The guardian records the shift in `shifted` BEFORE returning a
+            # shifted value. The caller's clock is never shifted.
             now = real_clock()
-            if os.getpid() == leg or not launched:
+            if os.getpid() == leg or not launched or not clock_shift:
                 return now
             if not shift and os.path.exists(expire):
+                shifted.touch()
                 shift.append(max(0.0, launched[-1].deadline - now))
             return now + (shift[0] if shift else 0.0)
+
+        def stalled_subreaper():
+            # Vector only (startup_stall): the guardian, before READY, holds
+            # asleep or busy past the backstop; close() then kills it.
+            if os.getpid() != leg:
+                stalled.touch()
+                until = real_clock() + backstop + _WATCHDOG_LAUNCH_MARGIN
+                if startup_stall == "blocked":
+                    select.poll().poll(int((until - real_clock()) * 1000))
+                while real_clock() < until:
+                    pass
+            return real_subreaper()
 
         def guardian_running(pid):
             try:
@@ -3389,6 +3497,30 @@ def _watchdog_tree_case(mode, order="event-first", backstop=_TREE_STARTUP_BACKST
                     return False
             return True
 
+        def gone(pids):
+            return not any(Path("/proc", str(pid)).exists() for pid in pids)
+
+        def children(parent):
+            found = []
+            for name in os.listdir("/proc"):
+                if name.isdigit():
+                    try:
+                        fields = Path("/proc", name, "stat").read_text(
+                            encoding="ascii").rpartition(")")[2].split()
+                    except OSError:
+                        continue
+                    if fields[1:2] == [str(parent)]:
+                        found.append(int(name))
+            return found
+
+        def hold(done):
+            # Vector only: wait, bounded by the backstop, for the forced
+            # event; whether it happened is recorded, never assumed.
+            until = real_clock() + backstop
+            while not done() and real_clock() < until:
+                time.sleep(0.005)
+            return done()
+
         def backstop_now():
             # Vector only: the backstop arrives on BOTH sides at once, as a
             # real expiry does (the caller's deadline is this same moment).
@@ -3399,23 +3531,32 @@ def _watchdog_tree_case(mode, order="event-first", backstop=_TREE_STARTUP_BACKST
             polls[0] += 1
             polls[1] = time.time()
             if not observed:
-                pids = parse()
+                pids = parse() if observe_parse else []
                 if pids and order == "cleanup-first":
                     backstop_now()
-                    hold = real_clock() + backstop
-                    while guardian_running(pid) and real_clock() < hold:
-                        time.sleep(0.005)
+                    facts["held"] = hold(lambda: not guardian_running(pid))
                 if pids:
                     observed.extend(pids)
                     # The ordering proof's first half, taken BEFORE the stimulus.
                     snapshot.append((real_clock(), guardian_running(pid), tree_running(pids)))
+                    facts["snapshot"] = snapshot[0][1] and snapshot[0][2]
                     if order == "backstop-after-snapshot":
                         backstop_now()
-                        hold = real_clock() + backstop
-                        while guardian_running(pid) and real_clock() < hold:
-                            time.sleep(0.005)
+                        facts["held"] = hold(lambda: not guardian_running(pid))
+                    elif order == "self-exit-after-snapshot":
+                        release.touch()
+                        facts["held"] = hold(lambda: not guardian_running(pid) and gone(pids))
+                    elif order == "killed-after-snapshot":
+                        for victim in children(pid) + pids:
+                            try:
+                                os.kill(victim, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
+                        facts["held"] = hold(lambda: not guardian_running(pid) and gone(pids))
                     if order == "no-stimulus":
                         backstop_now()
+                    elif order == "killed-after-snapshot":
+                        pass  # no stimulus: the subject tree was killed from outside
                     elif mode == "nested-cancel":
                         raise Cancelled("cancel with nested subject running")
                     else:
@@ -3423,10 +3564,17 @@ def _watchdog_tree_case(mode, order="event-first", backstop=_TREE_STARTUP_BACKST
                         # leaves only the backstop to end supervision, and
                         # the leg then reports CANNOT-EVALUATE, never a pass
                         # (the nested-orders no-stimulus vector pins that).
+                        # Its time is taken AFTER the file exists.
                         expire.touch()
+                        stimulus.append(real_clock())
             waited, raw = real_wait(pid, flags)
             if waited:
                 collected.append(real_clock())
+                if order == "killed-after-snapshot":
+                    # The caller's deadline passes between this collection
+                    # and its overdue check (the window a timed_out=False
+                    # receipt would otherwise pass through).
+                    launched[-1].deadline = real_clock()
             return waited, raw
 
         # Marker-race control: a marker that exists but is still empty (created,
@@ -3447,6 +3595,8 @@ def _watchdog_tree_case(mode, order="event-first", backstop=_TREE_STARTUP_BACKST
         with patch.object(time, "monotonic", clock), \
                 patch.object(emit, "_FixtureProcess", capture), \
                 (patch.object(emit, "_fixture_wait", observe) if observe_waits
+                 else nullcontext()), \
+                (patch.object(emit, "_fixture_subreaper", stalled_subreaper) if startup_stall
                  else nullcontext()):
             try:
                 emit.run_status_owned(
@@ -3454,17 +3604,36 @@ def _watchdog_tree_case(mode, order="event-first", backstop=_TREE_STARTUP_BACKST
                     process_fixture=True, timeout=backstop)
             except (Cancelled, subprocess.TimeoutExpired) as exc:
                 outcome = exc
+        facts["ready"] = bool(launched) and launched[-1].armed is True
+        facts["polls"] = polls[0]
+        facts["stalled"] = stalled.exists()
+        facts["startup"] = startup[0][0] if startup else None
+        facts["stimulus-early"] = bool(stimulus and stimulus[0] < launched[-1].deadline)
+        # What was published, recorded apart from the verdict's own checks.
+        facts["markers"] = [path.read_text(encoding="ascii") if path.exists() else None
+                            for path in markers]
+        facts["published-before-last-poll"] = bool(
+            len(parse()) == 2
+            and max(path.stat().st_mtime for path in markers) + 1.0 < polls[1])
         if outcome is None:
             raise AssertionError("fixture was accepted: " + mode)
         if not observed:
             # No stimulus was ever mounted. Name what was observed.
             if isinstance(outcome.__cause__, TimeoutError):
+                state, seen = startup[0] if startup else ("unsampled", "it was not sampled")
+                if state == "S":
+                    raise AssertionError(
+                        "the leg's fixture guardian was alive and BLOCKED (state S) at the {} s "
+                        "startup backstop without having signalled READY; its startup makes no "
+                        "blocking call before READY, so this is a code regression (a guardian "
+                        "startup hang), not host scheduling: {}".format(backstop, mode))
                 return ("cannot-evaluate", "the leg's fixture guardian never signalled READY "
-                        "within the {} s startup backstop ({}), so the nested subject never "
-                        "started".format(backstop, outcome.__cause__))
+                        "within the {} s startup backstop ({}; at the backstop {}), so the "
+                        "nested subject never started".format(backstop, outcome.__cause__, seen))
             if not polls[0]:
                 raise AssertionError("the wait observer never ran although the guardian "
-                                     "started: a harness defect, not a scheduling stall: " + mode)
+                                     "started: a code regression (harness defect), not host "
+                                     "scheduling: " + mode)
             seen = []
             for path in markers:
                 try:
@@ -3476,7 +3645,8 @@ def _watchdog_tree_case(mode, order="event-first", backstop=_TREE_STARTUP_BACKST
                     int(raw_text)
                 except ValueError:
                     raise AssertionError("marker writer defect: the {} marker holds {!r} after "
-                                         "the backstop".format(path.name, raw_text[:64])) from None
+                                         "the backstop: a code regression, not host "
+                                         "scheduling".format(path.name, raw_text[:64])) from None
                 seen.append("{} marker published at +{:.2f} s".format(
                     path.name, path.stat().st_mtime - started))
             if len(parse()) == 2:
@@ -3484,8 +3654,8 @@ def _watchdog_tree_case(mode, order="event-first", backstop=_TREE_STARTUP_BACKST
                 if newest + 1.0 < polls[1]:
                     raise AssertionError(
                         "the observer polled {:.2f} s after both markers were published and "
-                        "never parsed them: a harness defect, not a scheduling stall: {}".format(
-                            polls[1] - newest, mode))
+                        "never parsed them: a code regression (harness defect), not host "
+                        "scheduling: {}".format(polls[1] - newest, mode))
             return ("cannot-evaluate", "within the {} s startup backstop the observer polled {} "
                     "times (the last at +{:.2f} s) and saw: {}; no stimulus was mounted".format(
                         backstop, polls[0], max(0.0, polls[1] - started), ", ".join(seen)))
@@ -3518,6 +3688,20 @@ def _watchdog_tree_case(mode, order="event-first", backstop=_TREE_STARTUP_BACKST
                 raise AssertionError("the guardian left supervision without its own expiry "
                                      "(receipt timed_out=False): " + mode)
             if not collected or collected[0] >= child.deadline:
+                # The guardian ran its expiry (timed_out=True). Had it taken
+                # any clock sample AFTER the stimulus file existed, it would
+                # have recorded the shift; a sample BEFORE it could not have
+                # reached a deadline later than the stimulus. So a stimulus
+                # mounted before the deadline with no shift record is a code
+                # regression, whatever the host's scheduling.
+                if stimulus and stimulus[0] < child.deadline and not shifted.exists():
+                    raise AssertionError(
+                        "the stimulus was mounted at +{:.2f} s, before the caller's backstop "
+                        "deadline (+{:.2f} s), and the guardian then ran its own expiry "
+                        "(receipt timed_out=True), yet its clock never applied the stimulus "
+                        "shift: a code regression (the guardian clock shift is absent), not "
+                        "host scheduling: {}".format(
+                            stimulus[0] - launch_at, child.deadline - launch_at, mode))
                 return ("cannot-evaluate", "both markers were parsed at {} (the stimulus is "
                         "mounted at that poll) but the guardian was {} the caller's backstop deadline (+{:.2f} s), so its expiry may be the "
                         "backstop's, not the stimulus's".format(
@@ -3536,30 +3720,43 @@ def _watchdog_tree_case(mode, order="event-first", backstop=_TREE_STARTUP_BACKST
 def _watchdog_tree_vectors():
     """The nested-orders leg: deterministic schedules the tree legs must
     NEVER pass, each run through the real completion case and the runner's
-    own verdict mapping. Returns False (after printing the
-    _WATCHDOG_CANNOT_EVALUATE marker) when a vector's schedule could not be
-    established on this host; raises AssertionError when a schedule was
-    accepted or refused for the wrong reason."""
+    own verdict mapping. Each vector names a predicate over the facts the
+    exercise recorded that says whether its forced schedule was ESTABLISHED
+    on this host. Raises AssertionError when a schedule was accepted or
+    refused for the wrong reason, and when a schedule that WAS established
+    drew another cause (a code regression, never read as host scheduling).
+    Returns False (after printing the _WATCHDOG_CANNOT_EVALUATE marker)
+    only when a vector's schedule was not established on this host."""
     import io
     from contextlib import redirect_stdout
     unestablished = []
 
-    def run(mode, tree):
+    def run(mode, tree, facts):
         buffer = io.StringIO()
         with redirect_stdout(buffer):
-            rc = _watchdog_completion_case(mode, tree=tree)
+            rc = _watchdog_completion_case(mode, tree=dict(tree, facts=facts))
         return _watchdog_completion_verdict(rc, buffer.getvalue()), buffer.getvalue()
 
-    def expect_unevaluated(label, phrase, mode, **tree):
-        verdict, out = run(mode, tree)
+    def unexplained(label, established, facts, got):
+        if established(facts):
+            raise AssertionError("tree vector %s: its schedule was established (recorded %r), "
+                                 "yet the leg reported %s: a code regression, not host "
+                                 "scheduling" % (label, facts, got))
+        unestablished.append("%s: schedule not established on this host (recorded %r; the "
+                             "leg reported %s)" % (label, facts, got))
+
+    def expect_unevaluated(label, phrase, established, mode, **tree):
+        facts = {}
+        verdict, out = run(mode, tree, facts)
         if verdict != "cannot-evaluate":
             raise AssertionError("tree vector %s: %s, not CANNOT-EVALUATE: %r" % (label, verdict, out))
         if phrase not in out:
-            unestablished.append(label + ": " + out.strip())
+            unexplained(label, established, facts, repr(out.strip()))
 
-    def expect_failure(label, phrase, mode, **tree):
+    def expect_failure(label, phrase, established, mode, **tree):
+        facts = {}
         try:
-            verdict, out = run(mode, tree)
+            verdict, out = run(mode, tree, facts)
         except AssertionError as exc:
             if phrase not in str(exc):
                 raise AssertionError("tree vector %s refused for another reason: %s"
@@ -3567,31 +3764,77 @@ def _watchdog_tree_vectors():
             return
         if verdict != "cannot-evaluate":
             raise AssertionError("tree vector %s: %s, not refused: %r" % (label, verdict, out))
-        unestablished.append(label + ": " + out.strip())
+        unexplained(label, established, facts, repr(out.strip()))
+
+    def held(facts):
+        return facts.get("held") is True
+
+    def live(facts):
+        return facts.get("snapshot") is True
+
+    def live_then_held(facts):
+        return live(facts) and held(facts)
 
     # Both scheduling orders: event-first is the real nested-timeout and
     # nested-cancel legs; cleanup-first (the guardian's backstop and its
-    # cleanup finish before the observation) must never pass.
-    expect_unevaluated("cleanup-first/timeout", "stimulus observed only after cleanup",
+    # cleanup finish before the observation) must never pass. Once that
+    # schedule is established its cause is deterministic, so a removed
+    # snapshot guard is a definite failure here, not a stall.
+    expect_unevaluated("cleanup-first/timeout", "stimulus observed only after cleanup", held,
                        "nested-timeout", order="cleanup-first")
-    expect_unevaluated("cleanup-first/cancel", "stimulus observed only after cleanup",
+    expect_unevaluated("cleanup-first/cancel", "stimulus observed only after cleanup", held,
                        "nested-cancel", order="cleanup-first")
     # A clean observation whose stimulus loses the race to the backstop.
     expect_unevaluated("backstop-after-snapshot/timeout", "may be the backstop's",
-                       "nested-timeout", order="backstop-after-snapshot")
+                       live_then_held, "nested-timeout", order="backstop-after-snapshot")
     expect_unevaluated("backstop-after-snapshot/cancel", "expired before the cancel's",
-                       "nested-cancel", order="backstop-after-snapshot")
+                       live_then_held, "nested-cancel", order="backstop-after-snapshot")
     # The stimulus removed: the backstop alone ends supervision.
-    expect_unevaluated("no-stimulus/timeout", "may be the backstop's", "nested-timeout",
+    expect_unevaluated("no-stimulus/timeout", "may be the backstop's", live, "nested-timeout",
                        order="no-stimulus")
-    expect_failure("no-stimulus/cancel", "timeout stood in for the cancel stimulus",
+    expect_failure("no-stimulus/cancel", "timeout stood in for the cancel stimulus", live,
                    "nested-cancel", order="no-stimulus")
-    # The leg's backstop return (no marker ever published), and a harness
-    # defect that must be a definite failure, not a scheduling stall.
-    expect_unevaluated("backstop/no-markers", "subject marker absent", "nested-timeout",
-                       backstop=_TREE_VECTOR_BACKSTOP, publish=False)
-    expect_failure("inert-observer", "the wait observer never ran", "nested-timeout",
-                   backstop=_TREE_VECTOR_BACKSTOP, observe_waits=False)
+    # Pass condition (3): a subject that exits BY ITSELF between the
+    # snapshot and the cancel's cleanup was not killed by cleanup; only the
+    # SIGKILL status check refuses it.
+    expect_failure("self-exit/cancel", "tree cleanup did not kill a running subject",
+                   live_then_held, "nested-cancel", order="self-exit-after-snapshot")
+    # Pass condition (2), nested-timeout: a guardian that left supervision
+    # without its own expiry (its subject tree killed from outside) while
+    # the caller's deadline passed between collection and its overdue
+    # check; only the timed_out check refuses it.
+    expect_failure("killed/timeout", "left supervision without its own expiry",
+                   live_then_held, "nested-timeout", order="killed-after-snapshot")
+    # A guardian clock that never applies the shift expires only at the
+    # real deadline, after a stimulus mounted well before it.
+    expect_failure("shift-absent/timeout", "the guardian clock shift is absent",
+                   lambda facts: live(facts) and facts.get("stimulus-early") is True,
+                   "nested-timeout", backstop=_TREE_VECTOR_BACKSTOP, clock_shift=False)
+    # The leg's backstop return (no marker ever published), and the
+    # deterministic causes that must be definite failures, not stalls.
+    expect_unevaluated("backstop/no-markers", "subject marker absent",
+                       lambda facts: facts.get("ready") is True and facts.get("polls", 0) > 0,
+                       "nested-timeout", backstop=_TREE_VECTOR_BACKSTOP, publish=False)
+    expect_failure("inert-observer", "the wait observer never ran",
+                   lambda facts: facts.get("ready") is True,
+                   "nested-timeout", backstop=_TREE_VECTOR_BACKSTOP, observe_waits=False)
+    expect_failure("malformed-marker", "marker writer defect",
+                   lambda facts: facts.get("ready") is True
+                   and (facts.get("markers") or [None])[0] == "not-a-pid",
+                   "nested-timeout", backstop=_TREE_VECTOR_BACKSTOP, publish="malformed")
+    expect_failure("blind-observer", "never parsed them",
+                   lambda facts: facts.get("ready") is True
+                   and facts.get("published-before-last-poll") is True,
+                   "nested-timeout", backstop=_TREE_VECTOR_BACKSTOP, observe_parse=False)
+    # A guardian that never signals READY: asleep before READY is a code
+    # regression (a definite failure); runnable but unscheduled is the
+    # host's scheduling and stays CANNOT-EVALUATE.
+    expect_failure("startup-blocked", "BLOCKED (state S)",
+                   lambda facts: facts.get("startup") == "S",
+                   "nested-timeout", backstop=_TREE_VECTOR_BACKSTOP, startup_stall="blocked")
+    expect_unevaluated("startup-runnable", "never signalled READY",
+                       lambda facts: facts.get("startup") == "R",
+                       "nested-timeout", backstop=_TREE_VECTOR_BACKSTOP, startup_stall="runnable")
     if unestablished:
         print(_WATCHDOG_CANNOT_EVALUATE + " (tree vectors: schedule not established: "
               + "; ".join(unestablished) + ")")
@@ -13273,18 +13516,24 @@ def _watchdog_run_legs(cases, launch):
     return EXIT_FINDING if failed else EXIT_OK
 
 
-def _watchdog_declared_seconds():
+def _watchdog_declared_seconds(plan=None):
     """The opf self-test's DECLARED sequential worst case, in seconds, that
-    tools/selftest_git_fixture_env.py sizes its per-member bound above: the
-    sum of every watchdog regression leg's own process bound (its budget
-    plus the launch margin; the runner launches the legs one at a time),
-    plus the declared budget of the watchdog isolation self-test, which
-    also runs once at top level. The other registered opf self-tests declare
-    no end-to-end budget; the consumer's margin is the allowance for them."""
-    plan = _watchdog_regression_self_test(plan_only=True)
+    tools/selftest_git_fixture_env.py sizes its per-member bound above: for
+    every watchdog regression leg, its own process bound (its budget plus
+    the launch margin; the runner launches the legs one at a time) plus its
+    close-out after that bound (_watchdog_leg_closeout_seconds), plus the
+    declared budget of the watchdog isolation self-test, which also runs
+    once at top level. The other registered opf self-tests declare no
+    end-to-end budget; the consumer's margin is the allowance for them.
+    `plan` defaults to the runner's own tables; the consumer passes a
+    synthetic plan as its red-on-revert vector for each term."""
+    if plan is None:
+        plan = _watchdog_regression_self_test(plan_only=True)
     if not isinstance(plan, dict):
         raise RuntimeError("watchdog regression tables unavailable (runner returned %r)" % (plan,))
-    return sum(plan["bounds"].values()) + plan["budgets"]["blocked-isolation"]
+    bounds = plan["bounds"]
+    return (sum(bounds.values()) + len(bounds) * _watchdog_leg_closeout_seconds()
+            + plan["budgets"]["blocked-isolation"])
 
 
 def _watchdog_regression_self_test(plan_only=False):
@@ -13482,11 +13731,11 @@ def _watchdog_regression_self_test(plan_only=False):
         # derived, never a flat constant under the sanctioned wait.
         ("nested-timeout", _deadline_case_budget(_TREE_STARTUP_BACKSTOP)),
         ("nested-cancel", _deadline_case_budget(_TREE_STARTUP_BACKSTOP)),
-        # nested-orders runs eight tree exercises, one fixture launch each:
-        # six at the startup backstop and the two real-expiry vectors at
+        # nested-orders runs fifteen tree exercises, one fixture launch each:
+        # eight at the startup backstop and the seven real-expiry vectors at
         # their short backstop, each charged its allowance.
-        ("nested-orders", 6 * _deadline_case_budget(_TREE_STARTUP_BACKSTOP)
-         + 2 * _deadline_case_budget(_TREE_VECTOR_BACKSTOP)),
+        ("nested-orders", 8 * _deadline_case_budget(_TREE_STARTUP_BACKSTOP)
+         + 7 * _deadline_case_budget(_TREE_VECTOR_BACKSTOP)),
         ("no-signal-echild", 15), ("guardian-error", 48), ("empty-children", 48),
         ("bounded-diagnostics", 66), ("cleanup-budget", 21), ("deadline-flips", 77),
         ("subject-setup", 22), ("overdue-success", 161.0 + 0.01), ("launch-ownership", 60),
