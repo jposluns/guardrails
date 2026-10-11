@@ -483,7 +483,14 @@ per-platform residual coverage carry the same list):
 
 Offline, stdlib only (json, tomllib, os, re, stat, sys), no subprocess, no network. Launched isolated
 (python3 -I) so a file planted beside it cannot shadow a stdlib import. Exit statuses: 0 (with a deny
-decision or silent allow) and 2 (blocking error) only.
+decision or silent allow) and 2 (blocking error) only, the floor guard's below included. These statuses hold
+even when a standard stream
+cannot be written or flushed: every stderr diagnostic is best-effort (write, then flush, each failure
+swallowed, so the EXIT CODE carries the decision), a deny decision whose stdout write or flush fails exits
+2 instead of 0 (a lost deny blocks, never allows), and the hook leaves through os._exit after flushing
+both streams best-effort, so the interpreter-exit flush of a std stream cannot replace a blocking exit 2
+with the interpreter's own non-blocking status (a full device or a broken pipe once ended these paths with
+status 120, and a closed descriptor 2 with status 1, each of which waves the tool call through).
 
 PYTHON FLOOR: this hook requires Python 3.14 or newer, the pack floor that .aiqt/core/python-floor.toml
 states and tools/check_python_floor.py enforces; this file is a guarded-surfaces entry there. The guard at
@@ -491,21 +498,27 @@ the top of this file is the gate's canonical CLI form with refusal exit 2, not i
 form and not the aiqt_hooks.py hook form: this hook serves PreToolUse only, where exit 1 is a non-blocking
 error that lets the tool call proceed, while exit 2 blocks it and feeds standard error back to Claude. So
 an interpreter older than Python 3.14 that can start the hook reads no input, writes one line beginning
-`error: pretooluse_deny.py requires Python 3.14 or newer` to standard error and exits 2: the tool call is
-blocked (cannot evaluate), never waved through. An older interpreter that cannot start the hook (one that
-cannot compile this file, or a launch that fails before the guard runs) never reaches the guard and fails
-with its own error first; that exit status is not set by this hook, and an exit other than 2 lets the
-call proceed, so register the hook with an interpreter at or above the floor (the registration above
-names python3; point it at a 3.14 or newer interpreter where python3 is older).
+`error: pretooluse_deny.py requires Python 3.14 or newer` to standard error (a best-effort write: the
+exit does not depend on it) and exits 2: the tool call is
+blocked (cannot evaluate), under the output condition above. An older interpreter that cannot start the
+hook (one that cannot compile this file, or a launch that fails before the guard runs) never reaches the
+guard and fails with its own error first; that exit status is not set by this hook, and an exit other than
+2 lets the call proceed, so register the hook with an interpreter at or above the floor (the registration
+above names python3; point it at a 3.14 or newer interpreter where python3 is older).
 """
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: pretooluse_deny.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: pretooluse_deny.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 import errno
 import json
@@ -1025,11 +1038,47 @@ class Unreadable(Exception):
     """An envelope-level payload this hook cannot read at all (mapped to exit 2, a blocking error)."""
 
 
+def _stderr_note(line):
+    """Best-effort stderr diagnostic: write the line and flush, swallowing every failure (a closed
+    descriptor 2 leaves sys.stderr None; a full device or a broken pipe raises OSError), so the EXIT
+    CODE, never this line, carries the decision. Before this helper, a failing stderr write on a
+    fail-closed path ended the run with the interpreter's own status (1 or 120); on PreToolUse any
+    status other than 2 is non-blocking, so the call this hook meant to block went ahead."""
+    try:
+        sys.stderr.write(line)
+        sys.stderr.flush()
+    except BaseException:
+        pass
+
+
+def _exit_now(code):
+    """The one exit door: flush both std streams best-effort, then leave through os._exit, which skips
+    the interpreter-exit flush of the std streams (a stream that buffered a failed write raises again in
+    that flush and the interpreter exits 120, a status the platform treats as non-blocking, which would
+    turn a blocking exit 2 into an allow). Everything this hook writes is flushed at its write site, so
+    os._exit discards nothing."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except BaseException:
+            pass
+    os._exit(code)
+
+
 def _emit_deny(reason):
+    """Write the structured deny decision to stdout and flush it. A decision that cannot be both
+    written and flushed never provably reached the platform, and exit 0 without it reads as a silent
+    allow, so that failure returns the blocking exit 2 instead (a lost deny blocks, never allows)."""
     decision = dict(hookSpecificOutput=dict(hookEventName="PreToolUse",
                                             permissionDecision="deny",
                                             permissionDecisionReason="opf-pretooluse-deny: " + reason))
-    sys.stdout.write(json.dumps(decision) + "\n")
+    try:
+        sys.stdout.write(json.dumps(decision) + "\n")
+        sys.stdout.flush()
+    except BaseException as exc:
+        _stderr_note("opf-pretooluse-deny: the deny decision could not be written to standard output "
+                     "(%r). Failing closed: the tool call is blocked.\n" % (exc,))
+        return 2
     return 0
 
 
@@ -2821,13 +2870,13 @@ def main():
     try:
         payload = _read_payload()
     except Unreadable as exc:
-        sys.stderr.write("opf-pretooluse-deny: cannot evaluate: %s. Failing closed: the tool call is "
-                         "blocked (spec 14.1 denial posture).\n" % (exc,))
+        _stderr_note("opf-pretooluse-deny: cannot evaluate: %s. Failing closed: the tool call is "
+                     "blocked (spec 14.1 denial posture).\n" % (exc,))
         return 2
     tool_name = payload.get("tool_name")
     if not isinstance(tool_name, str) or not tool_name:
-        sys.stderr.write("opf-pretooluse-deny: cannot evaluate: the payload carries no non-empty "
-                         "tool_name. Failing closed: the tool call is blocked.\n")
+        _stderr_note("opf-pretooluse-deny: cannot evaluate: the payload carries no non-empty "
+                     "tool_name. Failing closed: the tool call is blocked.\n")
         return 2
     cwd = payload.get("cwd")
     tool_input = payload.get("tool_input")
@@ -2844,8 +2893,9 @@ def main():
 
 if __name__ == "__main__":
     try:
-        sys.exit(main())
-    except Exception as exc:  # noqa: BLE001  fail-closed backstop: never a silent allow on a crash
-        sys.stderr.write("opf-pretooluse-deny: cannot evaluate: unexpected error (%r). Failing "
-                         "closed: the tool call is blocked.\n" % (exc,))
-        sys.exit(2)
+        _code = main()
+    except BaseException as exc:  # noqa: BLE001  fail-closed backstop: never a silent allow on a crash
+        _stderr_note("opf-pretooluse-deny: cannot evaluate: unexpected error (%r). Failing "
+                     "closed: the tool call is blocked.\n" % (exc,))
+        _code = 2
+    _exit_now(_code)

@@ -36,11 +36,16 @@ Exit convention (matches the repo's gates): 0 clean; 1 drift (--check) or a refu
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: gen_crosswalk.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: gen_crosswalk.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 import hashlib
 import itertools
@@ -55,10 +60,15 @@ from _gen_common import repo_root, reconcile  # noqa: E402
 try:
     import tomllib
 except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships tomllib
-    sys.stderr.write(
-        "error: gen_crosswalk.py cannot import tomllib, part of the Python standard library; "
-        "this installation is incomplete. Nothing was run (cannot evaluate).\n")
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: gen_crosswalk.py cannot import tomllib, part of the Python standard library; "
+            "this installation is incomplete. Nothing was run (cannot evaluate).\n")
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 SCHEMA_REL = ".aiqt/core/migration/crosswalk-schema.toml"
 
@@ -644,10 +654,12 @@ def _fdopen_vectors(base):
     exactly one vector red: PREFIX (the pre-fix `with os.fdopen(fd)`) leaks under EARLY, and EXCEPT (an
     os.close in an except around the fdopen call, which then owns the descriptor) closes it twice under LATE.
     Returns (failures, runs)."""
+    import errno
     import importlib.util
     import inspect
+    import _close_selftest
     base.mkdir()
-    real_open, real_fdopen = os.open, os.fdopen
+    real_open, real_fdopen, real_fstat = os.open, os.fdopen, os.fstat
     sent = MemoryError("injected fdopen failure")
 
     def early(fd, *args, **kwargs):
@@ -657,7 +669,7 @@ def _fdopen_vectors(base):
         real_fdopen(fd, *args, **kwargs).close()
         raise sent
 
-    def run(call, fault):
+    def run(call, fault, seam=None):
         opened = []
 
         def spy(*args, **kwargs):
@@ -679,11 +691,27 @@ def _fdopen_vectors(base):
             for fd in opened:
                 try:
                     os.fstat(fd)
-                except OSError:
-                    continue
+                except OSError as exc:
+                    if exc.errno == errno.EBADF:          # only EBADF reads as closed; any other error raises
+                        continue
+                    raise _close_selftest._StCensusError(
+                        "descriptor census cannot evaluate descriptor {}: {!r}".format(fd, exc))
                 problems.append("OPEN")
                 os.close(fd)                              # a failing vector leaks; release it here
-            if any(name.endswith(".tmp") for name in os.listdir(dfd)):
+            # F-JOURNAL-HELD-FD-LISTING: dfd was opened BEFORE the vector wrote through it, and a
+            # listing read through a held descriptor can miss every entry created since its open (on
+            # btrfs the kernel snapshots a readdir upper bound at open time), so a leftover temporary
+            # would escape this sweep; list through a FRESH "." descriptor opened beneath dfd (the
+            # same directory identity, no path re-resolution), closed on every path. Under the
+            # stale-listing seam (the HELDFD-SEAM leg) the open is recorded, so the seam can tell this
+            # fresh descriptor from dfd and its dups.
+            listing_open = real_open if seam is None else seam.recording(real_open)
+            lfd = listing_open(".", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dfd)
+            try:
+                leftovers = os.listdir(lfd)
+            finally:
+                os.close(lfd)
+            if any(name.endswith(".tmp") for name in leftovers):
                 problems.append("TEMP")
         finally:
             os.close(dfd)
@@ -741,6 +769,85 @@ def _fdopen_vectors(base):
                 if problems != expected:
                     failures.append("fdopen flip {} {} under {}: expected {}, got {}".format(
                         label, mode, fault_label, expected or "green", problems or "green"))
+    # CENSUS: a recorded descriptor left open whose census fstat fails EIO must raise naming it (read as
+    # closed, the leak would pass). An independent fstat must still see it open, else the vector proves nothing.
+    kept = []
+
+    def leave_open(dfd):
+        kept.append(os.open(os.devnull, os.O_RDONLY))
+        raise sent
+
+    def unreadable(fd, *args, **kwargs):
+        if fd in kept:
+            raise OSError(errno.EIO, "injected census read failure")
+        return real_fstat(fd, *args, **kwargs)
+    os.fstat = unreadable
+    try:
+        run(leave_open, early)
+        got = "returned (the unreadable descriptor read as closed)"
+    except _close_selftest._StCensusError as exc:
+        got = "named" if kept and "descriptor {}:".format(kept[0]) in str(exc) else repr(exc)
+    finally:
+        os.fstat = real_fstat
+    runs += 1
+    for fd in kept:
+        try:
+            real_fstat(fd)
+        except OSError:
+            got = "the injected descriptor {} was not open".format(fd)
+        else:
+            os.close(fd)
+    if got != "named":
+        failures.append("fdopen vector CENSUS: expected the EIO descriptor named, got {}".format(got))
+    # F-JOURNAL-HELD-FD-LISTING: the TEMP sweep must report a leftover temporary created AFTER the
+    # fixture descriptor was opened (the vector writes it through dfd and leaves it behind); a listing
+    # read through the held descriptor itself can miss every entry created since its open, so the
+    # sweep reads through a fresh descriptor. FILESYSTEM-DEPENDENT integration evidence: this native leg
+    # fails against that regression only where a held descriptor's listing is stale (btrfs, not tmpfs);
+    # the seam leg after it fails against it on any filesystem.
+
+    def leaves_tmp(dfd):
+        fd = os.open("late-leftover.tmp", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=dfd)
+        os.close(fd)
+        raise sent
+
+    problems = run(leaves_tmp, early)
+    runs += 1
+    if problems != ["TEMP"]:
+        failures.append("fdopen vector HELDFD TEMP sweep: a leftover temporary created after the "
+                        "fixture descriptor was opened must be reported (expected ['TEMP'], got "
+                        "{})".format(problems))
+    try:
+        os.unlink(str(base / "late-leftover.tmp"))
+    except FileNotFoundError:
+        pass
+    # HELDFD-SEAM: the same leftover under the stale-listing seam (_close_selftest._StStaleListing), with dfd
+    # held before the vector writes through it: the seam serves the stale view through dfd and any dup of
+    # it, and the current view only through a "." descriptor opened relative to it, so on ANY filesystem
+    # the sweep must list through a fresh descriptor and report TEMP. Then the seam's own vectors.
+    seam = _close_selftest._StStaleListing()
+
+    def leaves_tmp_held(dfd):
+        seam.hold(dfd)
+        fd = os.open("late-seam-leftover.tmp", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=dfd)
+        os.close(fd)
+        raise sent
+
+    with seam:
+        problems = run(leaves_tmp_held, early, seam)
+    runs += 1
+    if problems != ["TEMP"] or not seam.views or "stale" in seam.views:
+        failures.append("fdopen vector HELDFD-SEAM TEMP sweep: under the stale-listing seam a leftover "
+                        "temporary created after the fixture descriptor was opened must be reported through "
+                        "a fresh listing descriptor (expected ['TEMP'], got {}; listing views "
+                        "{})".format(problems, seam.views))
+    try:
+        os.unlink(str(base / "late-seam-leftover.tmp"))
+    except FileNotFoundError:
+        pass
+    seam_failures, seam_checks = _close_selftest._st_stale_listing_check(str(base))
+    failures.extend("fdopen vector " + failure for failure in seam_failures)
+    runs += 1 if seam_checks else 0                 # the seam's own vectors count as one run
     return failures, runs
 
 
@@ -1062,12 +1169,17 @@ def self_test():
 
         # #378: this tool's _close_fd_yielding copy and its representative site, each green and red under
         # its flip.
-        close_failures, close_runs = _close_vectors(tmp / "close")
-        failures.extend(close_failures)
-        # F-CROSSWALK-FDOPEN-RESIDUAL: a raising os.fdopen leaves neither writer's descriptor open or closed
-        # twice, each green and red under its flip.
-        fdopen_failures, fdopen_runs = _fdopen_vectors(tmp / "fdopen")
-        failures.extend(fdopen_failures)
+        import _close_selftest
+        try:
+            close_failures, close_runs = _close_vectors(tmp / "close")
+            failures.extend(close_failures)
+            # F-CROSSWALK-FDOPEN-RESIDUAL: a raising os.fdopen leaves neither writer's descriptor open or
+            # closed twice, each green and red under its flip.
+            fdopen_failures, fdopen_runs = _fdopen_vectors(tmp / "fdopen")
+            failures.extend(fdopen_failures)
+        except _close_selftest._StCensusError as exc:  # the descriptor census cannot read one: cannot-evaluate
+            print("SELF-TEST ERROR: {}".format(exc), file=sys.stderr)
+            return 2
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

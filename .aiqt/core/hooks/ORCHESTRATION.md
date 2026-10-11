@@ -8,10 +8,154 @@ so a new yield path is covered by adding a binding, never by re-implementing jud
 
 ## The registry
 
-The suite is INERT unless a registry is present: `.aiqt/orchestration.local.json` (machine-local,
-never committed; whole-file precedence) or `.aiqt/orchestration.json` (committed, adopter-authored),
-resolved at the repository root of the session cwd. Relative paths resolve against that root. All
-keys except `version` are optional; an undeclared surface simply removes the probes that need it.
+A registry is `.aiqt/orchestration.local.json` (machine-local, never committed; whole-file
+precedence) or `.aiqt/orchestration.json` (committed, adopter-authored). Relative paths in it resolve
+against the repository root of the session cwd. All keys except `version` are optional; an undeclared
+surface simply removes the probes that need it.
+
+Where a registry is looked up (two scopes):
+
+- Every component except the truncation guard (the stop guard, the scheduled-yield and
+  TeammateIdle bindings, the unattended-ask blocker, the resume audit and barrier, the dispatch
+  ledger, the prompt stamp, and the untracked wait-loop guard) looks only at the git-resolved
+  toplevel of the session cwd. With no git toplevel, or where the registry loader reads the registry
+  there as absent, each of them is inert. A toplevel the loader cannot examine (a regular file, a
+  directory this process cannot search, or one holding a regular file named `.aiqt`) reads as bad,
+  not absent.
+- The truncation guard looks at the UNION of two places: every directory on the cwd's physical
+  ancestor chain (a no-follow, descriptor-anchored walk that needs no git) and, where git resolves
+  a toplevel for the cwd, that toplevel (which `core.worktree` can place off the ancestor chain).
+  Before either lookup, in every session, it denies a `tool_name` that is missing, not a non-empty
+  string, or carries a control character, and for a Bash call a `cwd` that is missing, not a
+  non-empty string, contains a NUL, is not an existing path, is not a directory, or is a directory
+  it cannot walk. A malformed `tool_input` is checked only after the lookup, so with no registry in
+  scope (default mode) such a call is allowed.
+- On the walk the NEAREST directory whose registry probe is not a clean not-present decides, and
+  the walk stops there. A clean not-present is no `.aiqt` entry at all, or a real `.aiqt` directory
+  holding neither registry name; so the walk passes a `.aiqt` directory without a registry name
+  (the usual layout of an adopted repository) and continues upward. A stray `.aiqt` file (or any
+  other entry it cannot evaluate) in a subdirectory shadows a confirmed registry above it, so
+  registry-required mode denies a Bash call from below that subdirectory. The git toplevel is
+  consulted only when every directory on the chain probes as a clean not-present.
+  Inside `.aiqt` the first present registry name decides (`orchestration.local.json`, then
+  `orchestration.json`): an `orchestration.local.json` that is a symlink or a directory is not
+  confirmed even beside a regular `orchestration.json`.
+
+What an absent registry means (two modes; they change only the truncation guard's scope decision and what
+the doctor and the resume audit report and arm from it):
+
+- DEFAULT (`AIQT_ORCH_REQUIRE_REGISTRY` unset or an explicit off value: `""`, `0`, `false`, `no`,
+  `off`, ASCII case-insensitive, matched exactly with nothing stripped): with no registry in its
+  scope the truncation guard is inert and allows every Bash call that passes those pre-scope
+  checks. A `.aiqt` entry it cannot evaluate (a regular file or a symlink named `.aiqt`, or a
+  `.aiqt` directory the guard's process lacks search (execute) permission on, such as mode `0600`
+  or `0000` for a process those modes bind; a `.aiqt` of mode `0100` evaluates normally for its owner
+  where `O_PATH` exists (Linux), because the `O_PATH` open needs no read permission, and for a process
+  the mode bits do not bind (root, or one holding `CAP_DAC_READ_SEARCH` or `CAP_DAC_OVERRIDE`), but it
+  cannot be evaluated by any other process that is not its owner (mode `0100` grants search to the
+  owner only), nor by its owner where `O_PATH` is unavailable and the `O_RDONLY` fallback open also
+  needs read permission; or a registry name that is not a regular file or cannot be examined) counts as present, so the
+  guard stays active there. The git toplevel is consulted only when the whole chain probes as a
+  clean not-present: one that exists but cannot be opened as a directory (it is a regular file, or
+  the process may not reach it) keeps the guard active the same way, while one that does not exist
+  (for example `core.worktree` naming a removed directory) holds no registry and reads as absent.
+- REGISTRY-REQUIRED (`AIQT_ORCH_REQUIRE_REGISTRY` set to any other value, including a padded or
+  garbled one): with no registry in its scope the truncation guard DENIES every Bash call that
+  passes the pre-scope checks, and an entry it cannot evaluate also DENIES (a discovery fault is
+  not a registry), as does a git toplevel that exists but cannot be opened as a directory (with
+  its own reason). A git toplevel that does not exist reads as absent, so it DENIES as an absent
+  registry does. A registry reachable only through the git toplevel reads as absent when git fails. A
+  symlink at the first present registry name DENIES in this mode, although the registry loader the
+  other components use follows it and accepts it; a symlinked `orchestration.json` beside a regular
+  `orchestration.local.json` is never examined. Discovery checks presence and file type only: a
+  regular registry file that is unreadable, invalid JSON, or empty satisfies this mode (the other
+  components then read it as bad). The variable is otherwise read only where the guard's scope decision for a
+  Bash call from the repository root is reported: by every `tools/orch_doctor.py` run, whose scope
+  report differs by mode (printed with no registry at the root, a finding with one when the guard
+  denies), and by the resume audit (the SessionStart hook and `tools/orch_doctor.py --resume-audit`,
+  which write the same resume barrier). Where the registry loader reads the repository root's registry
+  as absent, the resume audit stays silent and the doctor exits 2, in both modes, so every other component
+  stays inert on an absent registry in both modes. With a registry present, the audit also arms the
+  barrier (and SessionStart warns) when the truncation guard would deny a Bash call from the
+  repository root: in BOTH modes when git resolves the root but the walk cannot be carried out there
+  (for example a root directory this process can enter but not read), and in this mode also when that
+  root's registry scope is absent or cannot be confirmed (for example a symlinked `orchestration.json`).
+  The audit finds its root only through git, and returns silently in both modes before it reads the
+  registry wherever it finds none: a session cwd that is missing, empty or not a string (no git call is
+  made), or a session cwd for which git resolves no root, for any reason (an unreadable or broken git
+  config, a dangling gitfile, a dubious-ownership refusal, no git binary, a timeout, or a session cwd
+  this process cannot enter), or where git exits 0 but prints output that cannot be decoded (a root
+  path that is not valid UTF-8, for example), is empty, or is not absolute. The truncation guard denies
+  a Bash call whose cwd is missing, empty or not a string in every mode, before its scope check. For a
+  Bash call from a non-empty string cwd where git resolves nothing, whether the guard's scope check denies it depends only on its own ancestor walk of
+  that cwd and the mode, because its git leg resolves nothing either; its other checks still read the
+  call itself (in scope, a foreground bare `&` is denied): with a regular registry on the walk the scope
+  check does not deny a plain command in either mode, while a walk it cannot carry out denies in both.
+  Git can still resolve a root this process cannot enter (through `core.worktree`, from a session cwd
+  inside the repository's git directory). Where that root exists but this process cannot search it, or
+  it is not a directory, the registry loader's `lstat` faults, the loader reports the registry bad, and
+  the audit warns and arms the barrier in both modes (as it does for a regular file named `.aiqt` at
+  any root); where that root does not exist, the loader reports the registry absent and the audit stays
+  silent in both modes. Arming is best-effort, as is clearing, and both are atomic: each writer creates
+  a temporary file beside the barrier file, flushes and fsyncs it, then renames it onto the barrier
+  file with `os.replace`. Where the SessionStart audit cannot write the barrier (its state directory
+  cannot be created, the temporary file cannot be created or written, or the rename fails, for example
+  `XDG_STATE_HOME` naming a regular file, or a full disk), it removes the temporary file it created and
+  ignores the error so that SessionStart is never wedged. The previous barrier file, armed or clear, or
+  its absence, is then left byte-identical, so the PreToolUse barrier does not surface this run's
+  findings; the session still sees the SessionStart warning naming them (where opening the forced-exit
+  log fails other than as not found, because the state directory cannot be searched or is not a
+  directory, as with that regular file, the warning also names the forced-exit log as unreadable).
+  That warning then also says the barrier was not persisted (this audit did not arm it) and asks for a
+  manual record, instead of saying that a re-run clears the barrier, and names the remedy: remove a
+  directory at the barrier path (neither audit can replace one), otherwise make the state directory
+  creatable and writable. A clean audit that cannot clear the barrier adds no warning: a barrier it
+  leaves armed still reads as armed, noted once per arming where its warned flag can be written, otherwise
+  on each mutation outside the record surfaces (one already warned about stays silent), and
+  a directory in its place reads as armed and is noted on each mutation outside the record surfaces. The
+  PreToolUse barrier reads the barrier file only where the registry loader reads the registry ok, so
+  for a registry it reads bad an armed barrier surfaces nothing there until the registry reads ok. It
+  reads an absent barrier file (a dangling symlink included) as clear, and a symlink to a regular file
+  as that file. It reads the barrier with a non-blocking open (a FIFO with no writer does not wait for
+  one), an `fstat` that refuses anything not a regular file before any read (so a FIFO or a device such
+  as `/dev/zero` is never read), and a read of at most 65537 bytes (the 65536-byte bound plus one byte
+  that detects a longer file); a close error is read as a bad barrier, never passed to the dispatcher.
+  Every writer stores at most 65536 bytes: a finding list too long for the bound is stored as its first
+  findings (each cut to 4000 characters) plus one line counting the rest, so a written barrier always
+  reads back armed and well-formed and its warned flag can be recorded. A barrier is well-formed only when it is
+  a JSON object whose keys are exactly a boolean `active` and a list of string `findings` (both
+  required; a missing `findings` is malformed, never read as an empty list), plus an optional boolean
+  `warned` and an optional string `ts`. One that exists but is not a regular file (a FIFO, a device, a
+  directory, or a symlink to any of these; a UNIX socket fails its open with `ENXIO` and reads as
+  `OSError`), is larger than the bound, cannot be read, closed or parsed for any reason (including a
+  `RecursionError` from deeply nested JSON), or is not well-formed,
+  reads as armed: each mutation outside the allowlist then surfaces a note naming the file as
+  unreadable or malformed with the reason (not once per arming, since there is no readable `warned`
+  flag to record), during the bake that note blocks nothing, and a mutation on the allowlist is allowed
+  after the same read. The reader does not bound everything: path lookup on a hung mount can stall the
+  open (and the `lstat` and `realpath` calls) for any file type, a regular file on a stalled filesystem
+  can stall the read, and opening a device node does whatever its driver does; the 10-second hook
+  timeout bounds each such stall. A directory is named only where the `lstat` of the path and the
+  `fstat` of what was opened agree on device and inode. It clears when
+  `tools/orch_doctor.py --resume-audit` or the next SessionStart audit replaces the file (the rename
+  replaces a FIFO, a device node or a symlink at the path and leaves a symlink's target intact), or
+  when the user corrects or removes it (the state directory is on the allowlist); where the state
+  directory cannot be searched the replace fails too, and the note persists until its permissions are
+  restored. Neither audit can replace a directory at the barrier path itself (the rename fails with
+  `IsADirectoryError`), so for a directory the note says to remove the directory, after which a clean
+  audit clears the barrier; a symlink to a directory gets the generic note, since the rename replaces
+  the link. A writer removes the temporary file it created when any later step fails
+  (writing, closing or renaming it) and never removes a temporary name it did not create; a process
+  killed between creating and renaming it leaves that temporary file beside the barrier file.
+  `tools/orch_doctor.py --resume-audit` does not ignore a write error: its run ends with the error, and
+  the previous barrier file is left unchanged. The barrier does not record the
+  mode, so the two writers agree only when they run with the same value: a doctor run without the
+  variable can clear a barrier a registry-required SessionStart armed for a scope deny. Clearing it does
+  not allow any Bash call: the barrier only warns, and the guard still denies on its own scope check.
+
+The write-scope guard is not part of this suite but locates its declaration through this registry,
+and it is not inert on an absent registry: it then reads the declaration from the default state
+directory below, and a declaration there arms slice confinement.
 
 ```json
 {
@@ -43,9 +187,46 @@ keys except `version` are optional; an undeclared surface simply removes the pro
 (repo-key is a digest of the root path). The machine-written state there is `dispatch-ledger.jsonl`,
 `guard-events.jsonl`, `turn-state.json`, `resume-barrier.json`, `pending-asks.jsonl`,
 `backlog-checkpoint.json`, `attestations-validated.json`, and, when their events occur,
-`escape-spoof.json` (renamed with a `.surfaced` suffix once the resume audit has raised it) and the
-append-only `forced-exit.jsonl` (every non-closed-disposition forced exit appended as its own row,
-each surfaced exactly once, tracked by a companion `forced-exit-surfaced.json`). The mode record is a SHARED text file, read by ONE sound parser (never an incremental regex-plus-substring
+`escape-spoof.json` (renamed with a `.surfaced` suffix once the resume audit has raised it; each rename
+replaces the earlier `.surfaced` file, a failed rename leaves it to be raised again, and a later sentinel
+recorded before that audit overwrites it, so the lasting record of each ignored sentinel is its
+`guard-events.jsonl` row of kind `escape-spoof`, where that append succeeded; a failed append is warned
+about in the output of the hook that ignored the sentinel (its banner, or the block reason of a denied
+Stop or TeammateIdle, which has no banner; a denied scheduling call carries it in its deny reason and its
+banner), which asks for a manual record, and leaves no row) and the append-only `forced-exit.jsonl`
+(every non-closed-disposition forced exit appended as its
+own row, each normally raised once, at least once if recording that it was raised fails, tracked by a
+companion `forced-exit-surfaced.json`). The whole-file JSON records (`turn-state.json`,
+`backlog-checkpoint.json`, its `checkpoint-init.marker`, `attestations-validated.json` and
+`forced-exit-surfaced.json`) are each saved by one writer: it opens the state directory once as a
+directory descriptor (with `O_PATH` where the platform has it, so the open needs no permission on that
+directory itself, only search permission on its ancestors, while the later stat, create, rename and cleanup
+need search permission on it, the last three write permission too, and a write-and-search-only state
+directory saves; where `O_PATH` is absent the fallback open also needs read permission on that directory)
+and binds every later step (the read of the target's permission bits, the
+create, the rename and the cleanup removal) to it, so a symlink swapped in for that directory after the open
+can neither make the writer publish foreign content under the target's name nor hide the writer's own
+temporary file (the directory path itself is resolved once, at that open, a directory moved after the open
+still receives the save under its new name, and the writing uid is not a boundary); it creates a temporary
+file of its own beside the target (an exclusive create under a random name that never follows a symlink, so
+a file or symlink already at a temporary-like name is never opened, written or removed), gives it the
+existing target's permission bits (0600 for a new target), writes and fsyncs it, and renames it onto the
+target. A reader
+therefore sees the previous file or the new one, never a part of either, and a failed save leaves the
+previous file (or its absence) in place. A failed save is named with its error in the hook's output, except
+for the forced-exit surfaced set, whose failed advance raises those rows again at the next resume audit; a
+temporary file whose removal after a failure also fails is left beside the target and named there too, by
+the state directory path as given, which after a swap may no longer lead to it, and one left by a process
+killed mid-save is removed by nothing. Concurrent saves never share a temporary file,
+so one save cannot corrupt or remove another's, but the last rename wins: two hooks that read, modify and
+save the same file at once can lose one update (the read-modify-write is not serialized), and each reports
+its own save as succeeded. The save needs a writable and searchable state directory (and, where `O_PATH`
+is absent, a readable one), so a writable `turn-state.json` in a
+state directory the hook cannot write is not saved: a Stop or TeammateIdle deny there now fails open with
+findings (the earlier in-place overwrite let it stand), and a scheduling deny says its counter was not
+written. A symlink at the target is replaced, not written through, and the new file is owned by the writing
+uid. The uid the hooks run as can replace any of these files itself, so this is crash and collision safety,
+not a boundary against that uid. The mode record is a SHARED text file, read by ONE sound parser (never an incremental regex-plus-substring
 scan), and is recognized in EITHER of two shapes: a plain `Operating-mode: <text>` declaration line, or a JSON
 object with exactly a top-level string `mode` key (`{"mode": "attended"}` / `{"mode": "unattended"}`). A
 leading byte-order mark is tolerated in both shapes (stripped once before any check). The `Operating-mode:`
@@ -57,22 +238,40 @@ and `not-attended` do not match. A JSON marker must be exactly `{"mode": "<atten
 strict-exact with a duplicate-key-rejecting hook and no extra keys) or it fails closed. A recognized mode
 whose value begins with the `unattended` token arms the ask blocker. The reader fails CLOSED to the
 guards-armed (`unattended`) posture, never silently disarming, when a marker IS present but cannot yield a
-recognized value: a present-but-unreadable or non-UTF-8 file, a present `Operating-mode:` declaration whose
+recognized value: every outcome of reading the mode path other than not found or a decoded text (a mode path
+holding a NUL character, or one that is not strict UTF-8 (a lone surrogate, which is also how a
+surrogate-escaped non-UTF-8 name arrives), refused fail-closed before any open even where the OS could open
+it; a file that cannot be opened or read, a socket included, whose non-blocking open itself fails (`ENXIO`
+on Linux); one that is not a regular file, such as a FIFO, a device like `/dev/zero` or a directory, refused
+by an fstat after the non-blocking open and before any read, so a FIFO with no writer does not wait; one
+larger than 1048576 bytes, of which the reader reads at most one byte more; or one whose bytes are not valid UTF-8), each of which the ask guard's
+deny names, a present `Operating-mode:` declaration whose
 value is empty or does not begin with attended/unattended, a JSON-shaped marker (content beginning with `{`,
-`[`, or `"`) that is malformed or partial (an unterminated string, trailing garbage, or duplicate keys
-included), a present JSON value that parses but is not an object with exactly a single string `mode` key (a
+`[`, or `"`) that is malformed or partial (an unterminated string, trailing garbage, duplicate keys, or
+nesting too deep to parse included), a present JSON value that parses but is not an object with exactly a single string `mode` key (a
 scalar such as a number, boolean, or null, an array, an object with extra keys, or an object without a string
 `mode`), or a marker whose value falls outside the `attended`/`unattended` family. It preserves the fail-open
-(undeclared) answer only when NO marker is present: an undeclared mode path, a genuinely absent file, an empty
+(undeclared) answer only when NO marker is present: an undeclared mode path, a genuinely absent file (one
+whose open reports not found; a missing file under a parent path that is a regular file reports not a
+directory and fails closed, as any other unreadable file does), an empty
 or whitespace-only file, or content that carries no `Operating-mode:` declaration line, does not parse as
 JSON, and whose first non-whitespace character is not `{`, `[`, or `"` (ordinary prose: a sentence merely
 mentioning attended or unattended, or one beginning with a number or word such as `42 items done` or `true
-trailing`, is such prose and does not arm). The escape sentinel (default
+trailing`, is such prose and does not arm). Every other input fails closed, so every input reaches one of
+the two answers; only a stall bounded by the hook timeout delays it (a path lookup on a hung mount, a read
+from a stalled filesystem, or what a device driver's open does). The scope check of the stop, idle and
+yield guards, the dispatch ledger and the prompt stamp reads the mode record through the same reader, and
+every fail-closed result counts there as a declared mode, so scope is live: a read failure (a file not valid
+UTF-8 or a path not strict UTF-8 included) and a read text whose declaration or JSON marker is malformed or
+unrecognized alike. The escape sentinel (default
 `<state_dir>/ESCAPE-ALLOW-YIELD`) is operator-owned by enforced acceptance, not convention: it is
 honoured only as a regular file (never a symlink), owned by a uid other than the assistant's
 effective uid, and not group- or other-writable. A present sentinel failing any condition is ignored
-(the decision proceeds exactly as with no sentinel), logged to guard-events, and surfaced once by
-the next resume audit. Where operator and assistant share one uid, no file either can create passes,
+(the decision proceeds exactly as with no sentinel), logged to guard-events and `escape-spoof.json` (a
+failed write is warned about in the hook's banner, or in the block reason of a denied Stop or
+TeammateIdle, and the warning asks for a manual record), and normally raised
+once by the next resume audit (see the state-directory list above for when it is raised again or not
+at all). Where operator and assistant share one uid, no file either can create passes,
 so the clean-ALLOW escape channel is unavailable there: recovery is a differently-owned sentinel
 (for example root-owned), registry or mode maintenance by the operator, or the bounded, marked exit;
 split-uid deployment is the recommended posture.
@@ -83,7 +282,8 @@ common case is the sole orchestrator's own durable store, which is by design a S
 to the code repo. A guarded Write/Edit/MultiEdit whose target resolves, by EXACT repo-root match
 (the target's own resolved git toplevel EQUALS a declared store root, never a prefix or substring),
 into a declared store is ALLOWED and AUDITED (a `guard-events.jsonl` row, kind `wrtscp`, decision
-`allow`) instead of denied as an out-of-repo aiming error. It is honoured only when well-formed:
+`allow`; where that append fails, the write is still allowed with a note saying the row could not be
+written) instead of denied as an out-of-repo aiming error. It is honoured only when well-formed:
 each entry must be a non-empty absolute string resolving to a real git toplevel that IS the declared
 root itself; a malformed, unresolvable, non-repo, or non-root entry is fail-closed (dropped, so the
 cross-repo write still denies), and a bad entry can only ever remove a would-be allow, never open a
@@ -211,7 +411,8 @@ one space. The value is the rest of that line. The brief must be UTF-8 with no N
 boundary other than a physical newline.
 
 - `Review-target:` is required, once. It must be `revision`, `working-tree` or `not-a-review`. A
-  `working-tree` or `not-a-review` target is allowed with a note and a `guard-events.jsonl` row.
+  `working-tree` or `not-a-review` target is allowed with a note and a `guard-events.jsonl` row; where
+  that row cannot be written, the note says so (the allow stands).
 - `Reviewed-revision:` is required, once, for a `revision` target. It must be the full lowercase
   commit id, at the length of the repository's object format. A short id, a branch name or `HEAD`
   is refused.
@@ -357,6 +558,6 @@ Fabricated free-text blocker evidence remains mechanically unclosable only where
 
 The stop guard's blocker substantiation is itself largely ACTOR-AUTHORABLE: the backlog `state`/`granted` fields, a matching pending-decision row, the dispatch ledger, a `not-before` value, and (where no attestation register is declared) free-text external evidence are all surfaces the assistant can write. The guard raises the bar (it rejects an unknown blocker kind and requires a substantiating record in the declared authoritative source) but cannot categorically enforce that a block is granted by an authority other than the assistant; the categorical closure is operator-owned, assistant-non-writable records at the OS layer (SYSTEM-HARDENING.md entry 2). Because of this the stop path FAILS CLOSED-CONTINUE, not open: an unconfirmable blocker, an unreadable proof source, or a non-enumerable backlog DENIES the stop (ignorance refuses the wind-down) rather than yielding with findings, the only release for a genuine block is the operator-owned escape sentinel, and the guard never converts an unconfirmable state into a clean close; the loop bound past which repeated denials become a single deliberate, recorded forced exit remains the bounded, marked exit.
 
-The escape sentinel opens the clean-ALLOW channel only as an operator-created artefact: a regular file with a single hard link, reached without following any symlinked path component, resolved under the state-dir anchor (an absolute or '..' path outside it is rejected), owned by a uid other than this guard's, and not group- or other-writable; any other present file is ignored, recorded, and surfaced once at the next resume. Uid inequality proves not-self, never operator identity; component resolution is a best-effort lstat walk under the anchor, so a narrow window between the walk and the descriptor-bound stat remains.
+The escape sentinel opens the clean-ALLOW channel only as an operator-created artefact: a regular file with a single hard link, reached without following any symlinked path component, resolved under the state-dir anchor (an absolute or '..' path outside it is rejected), owned by a uid other than this guard's, and not group- or other-writable; any other present file is ignored, recorded (a failed record write is warned about in the hook's banner, or in the block reason of a denied Stop or TeammateIdle), and normally raised once at the next resume. Uid inequality proves not-self, never operator identity; component resolution is a best-effort lstat walk under the anchor, so a narrow window between the walk and the descriptor-bound stat remains.
 
-The registry file is the confinement's trust root (a guardrail-config-integrity surface, review-gated where committed). The anti-shrinkage checkpoint's first window has no union to compare; an init marker distinguishes that genuine first window from a checkpoint deleted after a prior window (held as a possible reset), and the bound logs what it drops, never silently. The checkpoint also records each open id's eligibility (granted-and-open vs proposed/ungranted), so a demotion of a previously-actionable id to proposed or ungranted with no closed receipt is held (cannot-evaluate) rather than silently routed to the harmless proposed bucket; that eligibility memory lives in the same actor-writable state dir, raising the bar without being categorical. Deleting the marker and the checkpoint together, like deleting the turn state to restart the loop bound, is the same actor-writable-state residual. The loop bound remains a deliberate, exhaustible, marked exit, with each denial and each forced exit individually recorded in guard-events and an append-only forced-exit log that the next resume surfaces exactly once. Host clock control defeats every freshness check here (out of threat model). The roster of yield primitives is fixed at generation and re-reconciled when the toolchain changes.
+The registry file is the confinement's trust root (a guardrail-config-integrity surface, review-gated where committed). The anti-shrinkage checkpoint's first window has no union to compare; an init marker distinguishes that genuine first window from a checkpoint deleted after a prior window (held as a possible reset), and the bound logs what it drops to guard-events, where a failed append is warned about in the hook's output, so a drop is never silent. A checkpoint or init marker that cannot be written is named in the hook's output (the deny reason and banner of a scheduling call, the block reason of a denied Stop or TeammateIdle, or the banner or note of an allow) whether or not its guard-events row is written; an unwritten checkpoint does not record that window's items, so one that then vanishes or is demoted before a later checkpoint write succeeds is not held as such unless an earlier checkpoint records it, and an unwritten init marker holds that window as cannot-evaluate. The checkpoint also records each open id's eligibility (granted-and-open vs proposed/ungranted), so a demotion of a previously-actionable id to proposed or ungranted with no closed receipt is held (cannot-evaluate) rather than silently routed to the harmless proposed bucket; that eligibility memory lives in the same actor-writable state dir, raising the bar without being categorical. Deleting the marker and the checkpoint together, like deleting the turn state to restart the loop bound, is the same actor-writable-state residual. The loop bound remains a deliberate, exhaustible, marked exit. Each denial and each forced exit appends its own guard-events row, and each forced exit also a row in an append-only forced-exit log, whose rows the next resume normally raises once (at least once if recording that they were raised fails). Neither record is guaranteed: a failed append leaves no row, and the hook then adds a short recording-failure warning to its output (the block reason of a denied Stop or TeammateIdle, which has no banner; the deny reason and the banner of a denied scheduling call; the banner of a forced exit) while the decision stands, so the loss is reported, not silent. The guard-events row of an ALLOW released by the operator escape is the only record that the override was used, so a failed append there adds the same kind of warning (in the banner of a Stop or TeammateIdle, in the note of a scheduling call) while the ALLOW stands. The row of a clean ALLOW with no escape is the over-fire metric only and is best effort: a failed append there is not reported. Host clock control defeats every freshness check here (out of threat model). The roster of yield primitives is fixed at generation and re-reconciled when the toolchain changes.

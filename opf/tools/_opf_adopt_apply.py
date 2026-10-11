@@ -13,7 +13,9 @@ transaction per (run, phase), reconcile-first; and a dispatch table keyed by the
 ADOPT_OPS vocabulary. Slice 5 makes the three finish ops executable: plant-governance (create-only
 planting of a pack member that passed the b.5 trust gate, verify_pack_member), render-views (create-only view
 publication of the render engine's planned bytes, composed into the journaled transaction) and record-adoption (the immutable receipt core and its genesis outcome event in the
-run's own evidence bundle, adoption_record). Every other op returns a refusing not-yet-executable verdict:
+run's own evidence bundle, adoption_record). The apply-time preservation pass (compose_preservation)
+composes the spec 14.2 preservation of the approved plan's sources into a transaction; it is a composition
+pass, not a dispatch entry. Every other op returns a refusing not-yet-executable verdict:
 the file ops, init-store composition, approval capture, hook activation, the completion checks,
 retirement, the stage driver, and the MUTATING CLI subcommands (approve, apply, complete, reconcile)
 remain later slices; the read-only `opf adopt` subcommands plan and status
@@ -105,11 +107,16 @@ Exit convention (the repo's gates and the sibling OPF units): 0 clean, 1 a findi
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: _opf_adopt_apply.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: _opf_adopt_apply.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 import datetime
 import hashlib
@@ -518,21 +525,50 @@ def _pinned_remove(rel, data, mode):
                 **{"source-poststate": dict(kind="file", mode=mode, sha256=_sha256(data))})
 
 
+class _Composition:
+    """ONE transaction's whole composition state in one object: the ordered op list, the staged bytes,
+    the directory bookkeeping and the seal. ApplyOps reaches all four only through its one `_state`
+    reference, so publishing a fork's state is a single attribute store (ApplyOps._adopt)."""
+
+    __slots__ = ("ops", "staged", "dirs", "sealed")
+
+    def __init__(self, ops, staged, dirs, sealed):
+        self.ops = ops
+        self.staged = staged
+        self.dirs = dirs
+        self.sealed = sealed
+
+
 class ApplyOps:
     """ONE adoption transaction's ordered op list and staged bytes, composed only through these methods
     against the live tree beneath `root_fd`: create-only publication, preserve-first archival, and a
     final inventory derived from the list itself. check_apply_ops re-proves every invariant over the
-    finished list, so a hand-built list is held to the same rules."""
+    finished list, so a hand-built list is held to the same rules. The composition state (ops, staged,
+    _dirs, sealed) is held in ONE _Composition behind the `_state` reference; the four names are
+    read-only views of it, so nothing rebinds one of them apart from the other three."""
 
     def __init__(self, root_fd, run_id, phase=None):
         self.root_fd = root_fd
         self.run_id = run_id
         self.phase = phase
         self.inventory = inventory_rel(run_id, phase)
-        self.ops = []
-        self.staged = {}
-        self._dirs = set()
-        self.sealed = False
+        self._state = _Composition([], {}, set(), False)
+
+    @property
+    def ops(self):
+        return self._state.ops
+
+    @property
+    def staged(self):
+        return self._state.staged
+
+    @property
+    def _dirs(self):
+        return self._state.dirs
+
+    @property
+    def sealed(self):
+        return self._state.sealed
 
     def _mkdirs(self, rel):
         parts = rel.split("/")[:-1]
@@ -589,11 +625,143 @@ class ApplyOps:
         data, mode = self.preserve(source_path, plan_digest)
         self.ops.append(_pinned_remove(source_path, data, mode))
 
+    def _fork(self):
+        """An isolated copy of this transaction's composition state (ops, staged bytes, directory
+        bookkeeping, seal) over the SAME live tree, so a multi-op pass composes into it and publishes
+        through _adopt only once the whole pass succeeds; a refusal part-way leaves this one untouched.
+        The op list, staged map and directory set are copied one level (the composing methods only
+        append to them, and staged values are immutable bytes); the seal is carried over, so a sealed
+        transaction's fork refuses every create exactly as the transaction itself does."""
+        work = ApplyOps(self.root_fd, self.run_id, self.phase)
+        state = self._state
+        work._state = _Composition(list(state.ops), dict(state.staged), set(state.dirs), state.sealed)
+        return work
+
+    def _adopt(self, work):
+        """Publish a fork's finished composition state as this transaction's own by ONE attribute store,
+        `self._state = work._state`: ops, staged bytes, directory bookkeeping and seal travel together
+        in the fork's _Composition, so this method has no instruction boundary at which the caller holds
+        part of the fork's state. An exception or interruption raised at any instruction up to that
+        store leaves the full entry state; one raised after it leaves the full new state (pinned by an
+        opcode-level fault at every instruction of this method and of compose_preservation, an
+        AdoptApplyError and a KeyboardInterrupt alike). The store itself runs no Python code (no
+        __setattr__ and no `_state` descriptor), so nothing can raise part-way through it; that is
+        inferred from the interpreter, not observed. The boundary that remains: a fault after the store
+        and before the caller receives the return value raises with the full new state already
+        published, so an exception alone does not tell the caller which of the two states it holds. The
+        fork shares the published _Composition afterwards and is discarded by its one caller."""
+        self._state = work._state
+
     def seal(self):
         """Create this transaction's inventory, derived from its own op list, as its final op."""
         data = emit_inventory(self.run_id, derive_rows(self.run_id, self.ops, self.staged))
         self.create(self.inventory, data)
-        self.sealed = True
+        self._state.sealed = True
+
+
+def _classify_source(run_id, label, row):
+    """Read and classify ONE plan source row for the preservation pass: (path, digest, action), the action
+    one of "preserved", "archived-removed" or "none". Anything it cannot read or classify raises a
+    cannot-evaluate AdoptApplyError, never a skip; a preservation other than this run's archive path for a
+    source the pass archives refuses the plan."""
+    def cannot(why):
+        return AdoptApplyError("cannot evaluate {}: {}; the preservation pass composes nothing "
+                               "(fail-closed)".format(label, why))
+    if not isinstance(row, dict):
+        raise cannot("it is not a table")
+    missing, unknown = schema._closed_keyset(row, schema.PLAN_SOURCE_REQUIRED, schema.PLAN_SOURCE_OPTIONAL)
+    if missing or unknown:
+        raise cannot("it is missing {} or carries unknown {} (schemas are closed)".format(
+            missing, [str(k) for k in unknown]))
+    path, digest, disp, occupying = row["path"], row["digest"], row["disposition"], row["occupying"]
+    if not schema._is_contained_filepath(path):
+        raise cannot("its path is not a contained relative file path")
+    if not schema._is_digest(digest):
+        raise cannot("its digest is not a sha256:<64 hex> digest")
+    if not isinstance(disp, str) or disp not in schema.DISPOSITIONS:
+        raise cannot("its disposition {!r} is outside DISPOSITIONS".format(disp))
+    if not schema._is_bool(occupying):
+        raise cannot("its occupying flag is not a boolean")
+    if disp == "keep":
+        if occupying:
+            raise cannot("it is kept but occupies a managed destination (spec 14.2 refuses it)")
+        if "preservation" in row:
+            raise cannot("it is kept in place but records a preservation destination")
+        return path, digest, "none"
+    if not schema._is_contained_filepath(row.get("preservation")):
+        raise cannot("it records no contained preservation destination")
+    if disp == "move" and not occupying:
+        return path, digest, "none"
+    home = archive_rel(run_id, path)
+    if row["preservation"] != home:
+        raise AdoptApplyError("{} preservation {!r} is not this run's adoption archive path {!r}, so the "
+                              "plan is refused and the preservation pass composes nothing (spec 14.2, "
+                              "fail-closed)".format(label, row["preservation"], home))
+    return path, digest, ("archived-removed" if occupying else "preserved")
+
+
+def compose_preservation(ops, plan):
+    """The apply-time preservation pass (spec 14.1, 14.2), driven by the approved plan's `sources` rows and
+    composed into ONE adoption transaction's ApplyOps. ALL OR NOTHING: first every row is classified from
+    the plan alone, with no live read, so a plan or row the pass cannot read or classify (a non-table plan
+    or row, a plan naming another run, sources that are not a list, a closed-keyset violation, a malformed
+    path or digest, a disposition outside DISPOSITIONS, a non-boolean occupying flag, a duplicate path, a
+    kept source that occupies a destination or records a preservation, a missing preservation) refuses the
+    whole pass as cannot-evaluate, never a silent skip. Then, in plan order, every live read and every op is
+    composed into an ISOLATED copy of the caller's ops, staged bytes and directory bookkeeping
+    (ApplyOps._fork): an OCCUPYING source is archived and then removed with a pinned remove, in that order
+    and in this transaction (ApplyOps.archive_occupying); a NON-OCCUPYING retire or migrate source is
+    preserved (its byte-identical archive copy created) and left frozen in place (ApplyOps.preserve), its
+    removal waiting for the green completion check; a kept source and a non-occupying move source take no
+    op here (a non-occupying move is preserved at its move destination by move-file, not by this pass).
+    Every source the pass archives must record exactly archive_rel(run_id, path) as its preservation, or
+    the plan is refused. A drifted, absent or unreadable source, or an occupied archive destination,
+    refuses through ApplyOps.preserve. Only after the whole pass succeeds, and its accounting is built, is
+    the isolated state published to the caller's ApplyOps, by one attribute store (ApplyOps._adopt); on ANY
+    refusal, at classification or at composition, the caller's ops, staged bytes, directory bookkeeping
+    and seal stay exactly as they were on entry, and an exception or interruption at any instruction of
+    this function or of ApplyOps._adopt leaves either that full entry state or the full new state, never
+    part of it (a fault after the store raises with the new state already published; see ApplyOps._adopt;
+    a fault inside a composing method lands on the fork, never on the caller). A sealed caller's fork
+    stays sealed, so a pass that would compose any op over it refuses with the seal reason. Returns the
+    (path, action) accounting of every row in plan order, the action one of "preserved",
+    "archived-removed" or "none"; raises AdoptApplyError on every refusal. DISCLOSED-RESIDUAL: the pass
+    holds only the rows it reads. It does not re-run validate_plan or check the approval binding
+    (apply_plan's later slice), and it takes the `occupying` flag as the planner recorded it, never
+    re-deriving the plan's managed destinations."""
+    if not isinstance(ops, ApplyOps):
+        raise AdoptApplyError("the preservation pass composes only into an adoption transaction's ApplyOps; "
+                              "nothing composed (fail-closed)")
+    if not isinstance(plan, dict):
+        raise AdoptApplyError("cannot evaluate the preservation pass: the plan is not a table; nothing "
+                              "composed (fail-closed)")
+    if plan.get("run_id") != ops.run_id:
+        raise AdoptApplyError("cannot evaluate the preservation pass: the plan names run {!r}, not this "
+                              "transaction's run {!r}; nothing composed (fail-closed)".format(
+                                  plan.get("run_id"), ops.run_id))
+    rows = plan.get("sources")
+    if not isinstance(rows, list):
+        raise AdoptApplyError("cannot evaluate the preservation pass: the plan's sources is not a list; "
+                              "nothing composed (fail-closed)")
+    classified = []
+    seen = set()
+    for i, row in enumerate(rows):
+        label = "plan sources[{}]".format(i)
+        path, digest, action = _classify_source(ops.run_id, label, row)
+        if path in seen:
+            raise AdoptApplyError("cannot evaluate {}: its path {!r} is a duplicate of an earlier row; the "
+                                  "preservation pass composes nothing (fail-closed)".format(label, path))
+        seen.add(path)
+        classified.append((path, digest, action))
+    work = ops._fork()
+    for path, digest, action in classified:
+        if action == "archived-removed":
+            work.archive_occupying(path, digest)
+        elif action == "preserved":
+            work.preserve(path, digest)
+    accounting = [(path, action) for path, _digest, action in classified]
+    ops._adopt(work)
+    return accounting
 
 
 def check_apply_ops(run_id, phase, ops, staged):
@@ -1444,9 +1612,10 @@ def apply_plan(plan_doc):
 def self_test():
     """Fail-closed invariants over synthetic vectors and throwaway temporary fixtures, judged on returned
     statuses, byte comparisons and journal states; each check asserting a refusal of the executable shell
-    or of apply input also matches one reason keyword so the refusal is attributed to the rule under test
-    (validator and dispatch gradings are asserted on their returned status, with a named finding matched
-    where that finding is itself the contract). No git, no network, no subprocess; every write lands
+    or of apply input also matches one reason keyword so the refusal is attributed to the rule under test,
+    and each preservation-pass refusal check matches its own rule's reason text (validator and dispatch
+    gradings are asserted on their returned status, with a named finding matched where that finding is
+    itself the contract). No git, no network, no subprocess; every write lands
     under its own TemporaryDirectory."""
     try:
         _journal.require_containment()
@@ -3081,6 +3250,358 @@ def _self_test_checks():
             except OSError:
                 pass
         os.close(jr_fd)
+
+    # 9b: the apply-time preservation pass (compose_preservation), driven by the plan's sources (spec
+    # 14.2): a non-occupying migrate or retire source is archived byte-equal and left frozen in place; an
+    # occupying source is archived and then removed by a pinned remove, in that order, and a kill-point
+    # after the removal reconciles back to the byte-identical source; keep and a non-occupying move
+    # compose no op; a drifted source, a preservation other than archive_rel(run_id, path), and every row
+    # the pass cannot read or classify refuse with nothing composed, each matched on its own rule's reason;
+    # a later unreadable, drifted or absent source leaves the caller's ApplyOps exactly as it was on entry
+    # (all or nothing); retire-file stays not yet executable.
+    pres_files = dict([("legacy/OLD.md", b"old notes\n"), (".working/TODO.md", b"hand-kept todo\n"),
+                       ("legacy/KEEP.md", b"kept\n"), ("legacy/MOVE.md", b"moved\n"),
+                       ("legacy/RETIRE.md", b"retired notes\n")])
+
+    def pres_row(path, disposition, occupying, payload=None, **extra):
+        row = dict(path=path, digest=plan_digest(pres_files[path] if payload is None else payload),
+                   disposition=disposition, occupying=occupying)
+        if disposition != "keep":
+            row["preservation"] = archive_rel(rid, path)
+        row.update(extra)
+        return row
+
+    def pres_plan(*rows):
+        p = schema.canonical_plan()
+        p["sources"] = [dict(r) if isinstance(r, dict) else r for r in rows]
+        return p
+
+    def pres_fixture(temp):
+        root = Path(temp).resolve()
+        for rel, payload in pres_files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_bytes(payload)
+        return root
+
+    def pres_compose(plan, seen):
+        def compose(ops):
+            seen.append(compose_preservation(ops, plan))
+            seen.append([dict(op) for op in ops.ops])
+        return compose
+
+    def bare_compose(root, plan):
+        """(accounting, refusal, ops, staged) of the pass over a bare ApplyOps on `root`, no transaction."""
+        root_fd = _open_product_root(root)
+        try:
+            bare = ApplyOps(root_fd, rid)
+            try:
+                acct, why = compose_preservation(bare, plan), None
+            except AdoptApplyError as exc:
+                acct, why = None, str(exc)
+            except Exception as exc:  # noqa: BLE001  a raw escape fails this vector, never the harness
+                acct, why = None, "raw {}: {}".format(type(exc).__name__, exc)
+            return acct, why, list(bare.ops), dict(bare.staged)
+        finally:
+            store._close_fd_exc_safe(root_fd)
+
+    def ops_state(ops):
+        """A copy of one ApplyOps's composition state (each op table copied one level): ops, staged bytes,
+        directory bookkeeping, seal."""
+        return [dict(op) for op in ops.ops], dict(ops.staged), set(ops._dirs), ops.sealed
+
+    def entry_compose(root, plan, sealed_entry=False, run_pass=attempt):
+        """(accounting, refusal, entry state, final state) of the pass, run through `run_pass`, over an
+        ApplyOps that already holds one composed bundle create (with its mkdirs) before the pass runs,
+        and that is also sealed by its inventory first when `sealed_entry`."""
+        root_fd = _open_product_root(root)
+        try:
+            held = ApplyOps(root_fd, rid)
+            held.create(evidence_home_rel(rid) + "/before-the-pass.txt", b"composed before the pass\n")
+            if sealed_entry:
+                held.seal()
+            entry = ops_state(held)
+            acct, why = run_pass(compose_preservation, held, plan)
+            return acct, why, entry, ops_state(held)
+        finally:
+            store._close_fd_exc_safe(root_fd)
+
+    migrate = pres_row("legacy/OLD.md", "migrate", False)
+    occupying = pres_row(".working/TODO.md", "retire", True)
+    keep = pres_row("legacy/KEEP.md", "keep", False)
+    move = pres_row("legacy/MOVE.md", "move", False, preservation=store.moved_dest("legacy/MOVE.md"))
+    retire = pres_row("legacy/RETIRE.md", "retire", False)
+    shape = []
+    schema._validate_plan_sources([migrate, occupying, keep, move, retire], rid, 1, shape)
+    check("preservation-vector-rows-plan-valid", shape == [])
+    todo, todo_copy = ".working/TODO.md", archive_rel(rid, ".working/TODO.md")
+    old_copy, retire_copy = archive_rel(rid, "legacy/OLD.md"), archive_rel(rid, "legacy/RETIRE.md")
+    nothing = dict()
+
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root = pres_fixture(temp)
+        seen = []
+        txn, _why = attempt(run_adopt_transaction, root, rid, pres_compose(pres_plan(migrate), seen))
+        after = snapshot(root)
+        composed = seen[1] if len(seen) == 2 else []
+        check("preservation-migrate-non-occupying-archive-byte-equal",
+              txn == rid and after.get(archive_rel(rid, "legacy/OLD.md")) == pres_files["legacy/OLD.md"]
+              and seen[:1] == [[("legacy/OLD.md", "preserved")]])
+        check("preservation-migrate-non-occupying-source-unchanged",
+              all(after.get(rel) == payload for rel, payload in pres_files.items())
+              and [(op["op"], op["path"]) for op in composed if op["op"] != "mkdir"]
+              == [("create", archive_rel(rid, "legacy/OLD.md"))])
+        check("preservation-migrate-bundle-verifies", verify_bundle(root, rid).status == VALID)
+
+    # a NON-OCCUPYING retire source takes the same preservation as a non-occupying migrate: its archive copy
+    # byte-equal, the live source unchanged, the archive create the only non-mkdir op, and the bundle valid
+    # with the copy claimed by its inventory (a pass that skipped preservation for retire turns these red).
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root = pres_fixture(temp)
+        seen = []
+        txn, _why = attempt(run_adopt_transaction, root, rid, pres_compose(pres_plan(retire), seen))
+        after = snapshot(root)
+        composed = seen[1] if len(seen) == 2 else []
+        try:
+            claimed = [row["path"] for row in tomllib.loads(
+                after.get(inventory_rel(rid), b"").decode("utf-8")).get("file", [])]
+        except (UnicodeDecodeError, tomllib.TOMLDecodeError, TypeError, KeyError):
+            claimed = None
+        check("preservation-retire-non-occupying-archive-byte-equal",
+              txn == rid and after.get(retire_copy) == pres_files["legacy/RETIRE.md"]
+              and seen[:1] == [[("legacy/RETIRE.md", "preserved")]])
+        check("preservation-retire-non-occupying-source-unchanged",
+              all(after.get(rel) == payload for rel, payload in pres_files.items()))
+        check("preservation-retire-non-occupying-archive-create-only",
+              [(op["op"], op["path"]) for op in composed if op["op"] != "mkdir"] == [("create", retire_copy)])
+        check("preservation-retire-bundle-verifies-claiming-the-copy",
+              verify_bundle(root, rid).status == VALID and claimed == [retire_copy])
+
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root = pres_fixture(temp)
+        before = snapshot(root)
+        for label, row in (("non-occupying", pres_row("legacy/OLD.md", "migrate", False, b"as planned\n")),
+                           ("occupying", pres_row(todo, "retire", True, b"as planned\n"))):
+            why = refusal(run_adopt_transaction, root, rid, pres_compose(pres_plan(row), []))
+            check("preservation-drifted-" + label + "-source-refused",
+                  why is not None and "drifted" in why and snapshot(root) == before and lock_free(root))
+
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root = pres_fixture(temp)
+        before = snapshot(root)
+        why = refusal(run_adopt_transaction, root, rid, pres_compose(pres_plan(
+            migrate, dict(pres_row("legacy/OLD.md", "migrate", False), path="legacy/GONE.md",
+                          preservation=archive_rel(rid, "legacy/GONE.md"))), []))
+        check("preservation-absent-source-refused",
+              why is not None and "absent" in why and snapshot(root) == before and lock_free(root))
+
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root = pres_fixture(temp)
+        seen = []
+        txn, _why = attempt(run_adopt_transaction, root, rid, pres_compose(pres_plan(occupying), seen))
+        after = snapshot(root)
+        composed = seen[1] if len(seen) == 2 else []
+        pin = composed[-1].get("source-poststate") if composed else None
+        check("preservation-occupying-create-then-pinned-remove",
+              [(op["op"], op["path"]) for op in composed if op["op"] != "mkdir"]
+              == [("create", todo_copy), ("remove", todo)]
+              and isinstance(pin, dict) and pin.get("sha256") == _sha256(pres_files[todo])
+              and seen[:1] == [[(todo, "archived-removed")]])
+        check("preservation-occupying-archived-then-removed",
+              txn == rid and after.get(todo_copy) == pres_files[todo] and todo not in after
+              and verify_bundle(root, rid).status == VALID)
+
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root = pres_fixture(temp)
+        before = snapshot(root)
+        removed = interrupt_when(lambda: (root / todo_copy).exists() and not (root / todo).exists())
+        with mock.patch.object(_journal, "_kill_point", removed):
+            try:
+                run_adopt_transaction(root, rid, pres_compose(pres_plan(occupying), []))
+                interrupted = False
+            except (_Interrupt, AdoptApplyError) as exc:
+                interrupted = isinstance(exc, _Interrupt)
+        check("preservation-kill-after-remove-leaves-open",
+              interrupted and txn_state(root, rid) == "open" and not (root / todo).exists())
+        check("preservation-kill-reconcile-restores-source-byte-identical",
+              (rid, "rolled-back") in reconcile_without_store(root) and snapshot(root) == before
+              and snapshot(root).get(todo) == pres_files[todo] and lock_free(root))
+
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root = pres_fixture(temp)
+        before = snapshot(root)
+        for label, rows, expect in (("keep", (keep,), [("legacy/KEEP.md", "none")]),
+                                    ("move", (move,), [("legacy/MOVE.md", "none")])):
+            acct, _why, composed, staged = bare_compose(root, pres_plan(*rows))
+            check("preservation-" + label + "-composes-no-op",
+                  acct == expect and composed == [] and staged == nothing and snapshot(root) == before)
+        acct, _why, composed, _staged = bare_compose(root, pres_plan(migrate, occupying, keep, move))
+        check("preservation-mixed-plan-accounts-every-source",
+              acct == [("legacy/OLD.md", "preserved"), (todo, "archived-removed"),
+                       ("legacy/KEEP.md", "none"), ("legacy/MOVE.md", "none")]
+              and [(op["op"], op["path"]) for op in composed if op["op"] != "mkdir"]
+              == [("create", archive_rel(rid, "legacy/OLD.md")), ("create", todo_copy), ("remove", todo)])
+        for label, row in (("foreign", pres_row("legacy/OLD.md", "migrate", False,
+                                                  preservation="legacy/elsewhere.md")),
+                           ("other-run", pres_row("legacy/OLD.md", "retire", False,
+                                                    preservation=archive_rel(other_run, "legacy/OLD.md"))),
+                           ("occupying-move-destination",
+                            pres_row(todo, "move", True, preservation=store.moved_dest(todo)))):
+            first = migrate if row["path"] == todo else occupying
+            acct, why, composed, staged = bare_compose(root, pres_plan(first, row))
+            check("preservation-mismatched-path-" + label + "-refused",
+                  acct is None and "adoption archive path" in (why or "") and composed == []
+                  and staged == nothing and snapshot(root) == before)
+        unknown = dict(keep, note="x")
+        no_flag = dict(migrate)
+        no_flag.pop("occupying")
+        no_pres = dict(migrate)
+        no_pres.pop("preservation")
+        # Each vector is matched on the reason of ITS OWN rule, never the shared "cannot evaluate" phrase,
+        # so a vector another rule also refuses still turns red when its own rule is removed. The
+        # disposition and occupying-flag rows are otherwise-admissible migrate rows of a live source, so
+        # without their rule they would be ACCEPTED, not refused elsewhere; an integer row must meet the
+        # module's own refusal, never a raw TypeError.
+        admissible = pres_row("legacy/KEEP.md", "migrate", False)
+        plan_why = "cannot evaluate the preservation pass: "
+        row_why = "cannot evaluate plan sources[1]: "
+        for label, plan, needle in (
+                ("plan-not-table", [], plan_why + "the plan is not a table"),
+                ("other-run-plan", dict(pres_plan(migrate), run_id=other_run),
+                 plan_why + "the plan names run {!r}".format(other_run)),
+                ("sources-not-list", dict(pres_plan(), sources=nothing),
+                 plan_why + "the plan's sources is not a list"),
+                ("row-not-table", pres_plan(migrate, "legacy/KEEP.md"), row_why + "it is not a table"),
+                ("row-integer", pres_plan(migrate, 7), row_why + "it is not a table"),
+                ("row-missing-occupying", pres_plan(occupying, no_flag),
+                 row_why + "it is missing ['occupying'] or carries unknown []"),
+                ("row-unknown-key", pres_plan(migrate, unknown),
+                 row_why + "it is missing [] or carries unknown ['note']"),
+                ("row-bad-path", pres_plan(migrate, dict(keep, path="legacy/../x.md")),
+                 row_why + "its path is not a contained relative file path"),
+                ("row-bad-digest", pres_plan(migrate, dict(keep, digest="sha256:" + "Z" * 64)),
+                 row_why + "its digest is not a sha256:<64 hex> digest"),
+                ("row-unknown-disposition", pres_plan(migrate, dict(admissible, disposition="delete")),
+                 row_why + "its disposition 'delete' is outside DISPOSITIONS"),
+                ("row-occupying-not-bool", pres_plan(migrate, dict(admissible, occupying="no")),
+                 row_why + "its occupying flag is not a boolean"),
+                ("row-occupying-falsy-int", pres_plan(migrate, dict(admissible, occupying=0)),
+                 row_why + "its occupying flag is not a boolean"),
+                ("row-duplicate-path", pres_plan(migrate, migrate),
+                 row_why + "its path 'legacy/OLD.md' is a duplicate of an earlier row"),
+                ("row-keep-occupying", pres_plan(migrate, dict(keep, occupying=True)),
+                 row_why + "it is kept but occupies a managed destination"),
+                ("row-keep-with-preservation",
+                 pres_plan(migrate, dict(keep, preservation=archive_rel(rid, "legacy/KEEP.md"))),
+                 row_why + "it is kept in place but records a preservation destination"),
+                ("row-missing-preservation", pres_plan(occupying, no_pres),
+                 row_why + "it records no contained preservation destination")):
+            acct, why, composed, staged = bare_compose(root, plan)
+            check("preservation-" + label + "-refused-by-its-own-rule",
+                  acct is None and needle in (why or "") and composed == [] and staged == nothing)
+        try:
+            outside = refusal(compose_preservation, None, pres_plan(migrate))
+        except Exception as exc:  # noqa: BLE001  a raw escape fails this vector, never the harness
+            outside = "raw {}: {}".format(type(exc).__name__, exc)
+        check("preservation-outside-transaction-refused",
+              "composes only into an adoption transaction's ApplyOps" in (outside or ""))
+        check("preservation-fixture-untouched", snapshot(root) == before)
+
+    # All or nothing: an earlier occupying row composes (archive create, pinned remove) into the pass's
+    # isolated state, then a LATER source refuses at its live read; the caller's ApplyOps, which already
+    # held a composed create before the pass, keeps exactly its entry ops, staged bytes, directory
+    # bookkeeping and seal. A success over the same held state publishes the entry ops followed by the
+    # pass's own, one op per path. Publication is ONE reference switch: a fault injected at every
+    # instruction of the pass and of ApplyOps._adopt leaves the full entry state or the full new state,
+    # never part of it; and a sealed caller's pass refuses with the seal reason, its state unchanged.
+    import errno
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root = pres_fixture(temp)
+        before = snapshot(root)
+        real_read = _journal._read_contained
+
+        def eacces_old(root_fd, relpath, *args, **kwargs):
+            if relpath == "legacy/OLD.md":
+                raise PermissionError(errno.EACCES, "Permission denied", relpath)
+            return real_read(root_fd, relpath, *args, **kwargs)
+
+        with mock.patch.object(_journal, "_read_contained", eacces_old):
+            acct, why, entry, final = entry_compose(root, pres_plan(occupying, migrate))
+        check("preservation-later-unreadable-source-leaves-entry-state",
+              acct is None and "cannot read 'legacy/OLD.md'" in (why or "") and final == entry
+              and len(entry[0]) > 1 and snapshot(root) == before)
+        acct, why, entry, final = entry_compose(
+            root, pres_plan(occupying, pres_row("legacy/OLD.md", "migrate", False, b"as planned\n")))
+        check("preservation-later-drifted-source-leaves-entry-state",
+              acct is None and "source 'legacy/OLD.md' is drifted" in (why or "") and final == entry
+              and snapshot(root) == before)
+        gone = dict(migrate, path="legacy/GONE.md", preservation=archive_rel(rid, "legacy/GONE.md"))
+        acct, why, entry, final = entry_compose(root, pres_plan(occupying, gone))
+        check("preservation-later-absent-source-leaves-entry-state",
+              acct is None and "'legacy/GONE.md' is absent" in (why or "") and final == entry
+              and snapshot(root) == before)
+        acct, why, entry, final = entry_compose(root, pres_plan(occupying, migrate))
+        paths = [op["path"] for op in final[0]]
+        check("preservation-success-publishes-after-entry-state",
+              acct == [(todo, "archived-removed"), ("legacy/OLD.md", "preserved")] and why is None
+              and final[0][:len(entry[0])] == entry[0]
+              and [(op["op"], op["path"]) for op in final[0][len(entry[0]):] if op["op"] != "mkdir"]
+              == [("create", todo_copy), ("remove", todo), ("create", old_copy)]
+              and len(paths) == len(set(paths)) and set(final[1]) == set(entry[1]) | {todo_copy, old_copy}
+              and final[2] >= entry[2] and snapshot(root) == before)
+        published = final
+        publication_codes = (compose_preservation.__code__, ApplyOps._adopt.__code__)
+
+        def faulting_pass(fault, at, sites):
+            """A run_pass that traces compose_preservation and ApplyOps._adopt opcode by opcode, recording
+            each instruction site, and raises `fault` at the instruction numbered `at` (none when -1)."""
+            def run(fn, *args):
+                def trace(frame, event, arg):
+                    if frame.f_code not in publication_codes:
+                        return None
+                    frame.f_trace_opcodes = True
+                    if event == "opcode":
+                        sites.append((frame.f_code, frame.f_lasti))
+                        if len(sites) - 1 == at:
+                            raise fault("injected publication fault")
+                    return trace
+                prior_trace = sys.gettrace()
+                sys.settrace(trace)
+                try:
+                    return fn(*args), None
+                except (AdoptApplyError, KeyboardInterrupt) as exc:
+                    return None, "{}: {}".format(type(exc).__name__, exc)
+                finally:
+                    sys.settrace(prior_trace)
+            return run
+
+        sites = []
+        acct, why, entry, final = entry_compose(root, pres_plan(occupying, migrate),
+                                                run_pass=faulting_pass(AdoptApplyError, -1, sites))
+        traced = list(sites)
+        check("preservation-publication-trace-reaches-the-switch",
+              why is None and final == published
+              and any(code is ApplyOps._adopt.__code__ for code, _lasti in traced))
+        for fault in (AdoptApplyError, KeyboardInterrupt):
+            outcomes = []
+            for at in range(len(traced)):
+                sites = []
+                acct, why, entry, final = entry_compose(root, pres_plan(occupying, migrate),
+                                                        run_pass=faulting_pass(fault, at, sites))
+                fired = why == "{}: injected publication fault".format(fault.__name__) and acct is None
+                outcomes.append("entry" if fired and final == entry
+                                else "new" if fired and final == published else "partial")
+            check("preservation-publication-fault-at-every-instruction-all-or-nothing-"
+                  + fault.__name__, len(outcomes) == len(traced) and "partial" not in outcomes
+                  and "entry" in outcomes and "new" in outcomes and snapshot(root) == before)
+        acct, why, entry, final = entry_compose(root, pres_plan(occupying, migrate), sealed_entry=True)
+        check("preservation-sealed-entry-refused-with-entry-state",
+              acct is None and entry[3] is True
+              and "the transaction is sealed by its inventory; nothing may follow it" in (why or "")
+              and final == entry and snapshot(root) == before)
+    rf = dispatch(schema.canonical_op("retire-file"))
+    check("preservation-retire-file-stays-not-yet-executable",
+          OP_HANDLERS["retire-file"] is _not_yet_executable and rf.status == CANNOT
+          and any("not yet executable" in f for f in rf.findings))
 
     # 10: apply takes only a plan/v2 (spec 14.1): a v1-marked plan is never apply input. The v1 schema no
     # longer ships (the plan-v2 schema replaced it, U8), and apply refuses on the format marker before it
