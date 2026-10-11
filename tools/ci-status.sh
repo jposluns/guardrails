@@ -25,10 +25,10 @@
 #   tools/ci-status.sh <sha> --wait    # poll until terminal, bounded and fail-loud
 #
 # Exit codes: 0 success, 1 failed / timed out / not-yet-terminal on a one-shot check,
-# 2 no run found or API error. Report-once (no --wait) never returns 0 for a non-terminal run.
+# 2 no run found, API error, or the repository cannot be determined (see THE REPOSITORY IS THE
+# CHECKOUT'S OWN below). Report-once (no --wait) never returns 0 for a non-terminal run.
 set -uo pipefail
 
-REPO="${CI_STATUS_REPO:-jposluns/guardrails}"
 # Resolve whatever rev was given (short SHA, branch, tag, HEAD~1) to a FULL 40-character
 # SHA. The `head_sha=` filter matches only on the full SHA, so a short one silently returns
 # zero runs and this script then reports "no workflow run registered" for a commit whose run
@@ -54,6 +54,63 @@ fi
 if ! COMMIT_TIME="$(git log -1 --no-show-signature --format=%ct "$SHA" --)" ||
     ! [[ "$COMMIT_TIME" =~ ^[0-9]+$ ]]; then
   printf 'ERROR: cannot read the committer date of %s.\n' "$SHA" >&2
+  exit 2
+fi
+
+# THE REPOSITORY IS THE CHECKOUT'S OWN. The runs read are those of the repository this checkout's origin
+# remote names, never a built-in name: a copied, forked, or adopter checkout that read a fixed repository
+# would report another repository's CI runs as its own. The origin URL is read with
+# `git remote get-url --all origin` (so url.<base>.insteadOf rewriting applies, as it does to a fetch) and
+# must match one of these forms exactly, with no other host, port, user name, credentials, path segment,
+# or trailing slash:
+#   https://github.com/OWNER/REPO    ssh://git@github.com/OWNER/REPO    git@github.com:OWNER/REPO
+# each optionally ending in .git. OWNER is 1 to 39 ASCII letters, digits, and hyphens, starting and ending
+# with a letter or digit; REPO is 1 to 100 ASCII letters, digits, '.', '_', and '-', other than '.' and
+# '..'. An origin that is absent, has more than one URL, or does not match is cannot-evaluate (exit 2,
+# before any API call), never a fallback; the message names which, and does not echo the URL, which may
+# carry credentials. CI_STATUS_REPO, when set and nonempty, only confirms: it must equal the derived
+# OWNER/REPO exactly (case included), or the script refuses with exit 2. There is deliberately no way to
+# read another repository's runs from this checkout.
+# The character classes are spelled out, never ranges, so the match does not depend on the locale.
+GITHUB_NAME_ALNUM='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
+GITHUB_OWNER_RE="^[${GITHUB_NAME_ALNUM}]([${GITHUB_NAME_ALNUM}-]{0,37}[${GITHUB_NAME_ALNUM}])?\$"
+GITHUB_REPO_RE="^[${GITHUB_NAME_ALNUM}._-]{1,100}\$"
+# Print OWNER/REPO for an accepted origin URL; return 1, printing nothing, for any other string.
+github_repo_from_url() {
+  local url="$1" path owner name
+  case "$url" in
+    https://github.com/*) path="${url#https://github.com/}" ;;
+    ssh://git@github.com/*) path="${url#ssh://git@github.com/}" ;;
+    git@github.com:*) path="${url#git@github.com:}" ;;
+    *) return 1 ;;
+  esac
+  path="${path%.git}"
+  [[ "$path" == */* ]] || return 1
+  owner="${path%%/*}"
+  name="${path#*/}"
+  [[ "$owner" =~ $GITHUB_OWNER_RE ]] || return 1
+  [[ "$name" =~ $GITHUB_REPO_RE ]] || return 1
+  [ "$name" != "." ] && [ "$name" != ".." ] || return 1
+  printf '%s/%s\n' "$owner" "$name"
+}
+ORIGIN_URLS="$(git remote get-url --all origin)"
+origin_rc=$?
+if [ "$origin_rc" -eq 2 ] || { [ "$origin_rc" -eq 0 ] && [ -z "$ORIGIN_URLS" ]; }; then
+  printf 'ERROR: cannot evaluate: this checkout has no origin remote, so the repository whose CI runs to read is unknown (no default repository is assumed).\n' >&2
+  exit 2
+elif [ "$origin_rc" -ne 0 ]; then
+  printf 'ERROR: cannot evaluate: git could not read the origin remote URL (git remote get-url exited %s).\n' "$origin_rc" >&2
+  exit 2
+elif [[ "$ORIGIN_URLS" == *$'\n'* ]]; then
+  printf 'ERROR: cannot evaluate: the origin remote has more than one URL, so the repository whose CI runs to read is ambiguous.\n' >&2
+  exit 2
+fi
+if ! REPO="$(github_repo_from_url "$ORIGIN_URLS")"; then
+  printf 'ERROR: cannot evaluate: the origin remote URL is not one of https://github.com/OWNER/REPO, ssh://git@github.com/OWNER/REPO or git@github.com:OWNER/REPO (each optionally ending in .git), so the repository whose CI runs to read is unknown.\n' >&2
+  exit 2
+fi
+if [ -n "${CI_STATUS_REPO:-}" ] && [ "$CI_STATUS_REPO" != "$REPO" ]; then
+  printf "ERROR: CI_STATUS_REPO is %s, but this checkout's origin remote names %s; refusing to read another repository's CI runs.\n" "$CI_STATUS_REPO" "$REPO" >&2
   exit 2
 fi
 NOW="$(date +%s)"

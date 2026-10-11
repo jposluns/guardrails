@@ -778,6 +778,12 @@ expected-check-ids = [
   "ci/scan-created-at-calendar-valid",
   "ci/filtered-only-failure-reported",
   "ci/jq-step-direct-cases",
+  "ci/repo-derived-https",
+  "ci/repo-derived-ssh",
+  "ci/repo-override-mismatch-refused",
+  "ci/repo-absent-remote-refused",
+  "ci/repo-malformed-url-refused",
+  "ci/repo-ambiguous-remote-refused",
   "ci/finalise-harness-error-keeps-failures",
 ]
 [[suite]]
