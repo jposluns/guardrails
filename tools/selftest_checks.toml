@@ -784,6 +784,11 @@ expected-check-ids = [
   "ci/repo-absent-remote-refused",
   "ci/repo-malformed-url-refused",
   "ci/repo-ambiguous-remote-refused",
+  "ci/repo-origin-line-break-refused",
+  "ci/repo-origin-unreadable-refused",
+  "ci/repo-origin-empty-refused",
+  "ci/repo-name-length-bounds",
+  "ci/repo-override-mismatch-not-echoed",
   "ci/finalise-harness-error-keeps-failures",
 ]
 [[suite]]

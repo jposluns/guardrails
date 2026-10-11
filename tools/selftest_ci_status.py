@@ -7,9 +7,11 @@ head_sha-filtered query and the unfiltered run listing, and a separate check ext
 from ci-status.sh and exercises it directly against crafted JSON. Verdicts use the child's return code
 and complete captured output, never a success token. The fixture repository's origin remote names the
 repository the script must read; the gh fixture records every argv it receives and answers only for the
-repository a case serves, so a case can pin which repository was queried, or that gh was never run. No
-case reaches the real GitHub API: gh resolves to the fixture first on a controlled PATH, and the child
-environment is built from nothing, so it carries no GH_TOKEN, GITHUB_TOKEN, or gh configuration.
+repository a case serves, so a case can pin which repository was queried, or that gh was never run. A
+case that needs origin output real git cannot be configured to give puts a fixture git first on PATH,
+which answers only that query and runs the real git for every other command. No case reaches the real
+GitHub API: gh resolves to the fixture first on a controlled PATH, and the child environment is built
+from nothing, so it carries no GH_TOKEN, GITHUB_TOKEN, or gh configuration.
 
   selftest_ci_status.py                              exit 0 on self-test pass, 1 on assertion failure
   selftest_ci_status.py --execution-report ABS_PATH  also write the executed check IDs as JSON,
@@ -225,6 +227,21 @@ except (IndexError, OSError, ValueError) as exc:
     sys.exit(1)
 """
 
+FAKE_GIT = r"""import os
+import subprocess
+import sys
+
+# On PATH only for a case that passes git_remote to invoke(). It answers exactly
+# `git remote get-url --all origin` with the bytes and exit status the case sets, which real git cannot be
+# configured to produce; every other git command runs the real git with the same arguments, standard
+# streams, and exit status.
+args = sys.argv[1:]
+if args == ["remote", "get-url", "--all", "origin"]:
+    sys.stdout.write(os.environ["MOCK_GIT_REMOTE_STDOUT"])
+    sys.exit(int(os.environ["MOCK_GIT_REMOTE_RC"]))
+sys.exit(subprocess.run([os.environ["MOCK_GIT_REAL"]] + args).returncode)
+"""
+
 
 def check(name, got, want):
     if name in _EXECUTED_SET:
@@ -346,9 +363,11 @@ class Fixture:
     def __init__(self, base):
         self.repo = base / "repo"
         self.bin = base / "bin"
+        self.git_bin = base / "git-bin"
         self.home = base / "home"
         self.repo.mkdir()
         self.bin.mkdir()
+        self.git_bin.mkdir()
         self.home.mkdir()
         self.base_env = {
             "PATH": SYSTEM_PATH,
@@ -385,8 +404,9 @@ class Fixture:
         self.scan_pages = []
         self.argv_log = base / "gh-argv.txt"
         self.gh_argv = []
-        for name, body in (("gh", FAKE_GH), ("date", FAKE_DATE), ("sleep", FAKE_SLEEP)):
-            executable = self.bin / name
+        for directory, name, body in ((self.bin, "gh", FAKE_GH), (self.bin, "date", FAKE_DATE),
+                                      (self.bin, "sleep", FAKE_SLEEP), (self.git_bin, "git", FAKE_GIT)):
+            executable = directory / name
             executable.write_text("#!{}\n{}".format(sys.executable, body), encoding="utf-8")
             executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
 
@@ -411,8 +431,9 @@ class Fixture:
             any(arg.startswith(prefix) for arg in argv) for argv in self.gh_argv)
 
     def invoke(self, polls, wait=False, timeout="900", clock=NOW, override=FIXTURE_REPO,
-               served=FIXTURE_REPO):
-        # override is CI_STATUS_REPO (None leaves it unset); served is the only repository gh answers for.
+               served=FIXTURE_REPO, git_remote=None):
+        # override is CI_STATUS_REPO (None leaves it unset); served is the only repository gh answers for;
+        # git_remote, when given, is the (stdout, exit status) the fixture git gives for the origin's URLs.
         self.response.write_text(json.dumps({"polls": polls}), encoding="utf-8")
         self.counter.write_text("0\n", encoding="utf-8")
         self.scan_log.write_text("", encoding="utf-8")
@@ -426,6 +447,11 @@ class Fixture:
         env["MOCK_GH_SCAN_LOG"] = str(self.scan_log)
         env["MOCK_GH_ARGV_LOG"] = str(self.argv_log)
         env["MOCK_GH_REPO"] = served
+        if git_remote is not None:
+            env["PATH"] = str(self.git_bin) + os.pathsep + env["PATH"]
+            env["MOCK_GIT_REAL"] = GIT
+            env["MOCK_GIT_REMOTE_STDOUT"] = git_remote[0]
+            env["MOCK_GIT_REMOTE_RC"] = str(git_remote[1])
         if override is not None:
             env["CI_STATUS_REPO"] = override
         env["CI_STATUS_TIMEOUT"] = timeout
@@ -1051,7 +1077,9 @@ def _run_checks():
         fixture.set_remote("upstream")
         check("ci/repo-absent-remote-refused", absent, [(2, [], True)] * 3)
 
-        # Each URL below is one rule of the strict parse away from an accepted form.
+        # Each URL below breaks a rule of the strict parse (host, scheme, user name or credentials, port, path
+        # shape, or a name's characters), most of them while otherwise matching an accepted form, and must be
+        # refused. The name length rules are pinned by ci/repo-name-length-bounds below.
         malformed = []
         for url in ("https://github.com/adopter-org",
                     "https://github.com/adopter-org/adopter-repo/extra",
@@ -1084,6 +1112,66 @@ def _run_checks():
             rc, output, _calls = fixture.invoke(green, override=None, served=served)
             ambiguous.append((rc, fixture.gh_argv, "has more than one URL" in output))
         check("ci/repo-ambiguous-remote-refused", ambiguous, [(2, [], True)] * 2)
+
+        # FIX-515-R2: git ends each URL it prints with a line feed, and command substitution strips every
+        # trailing one, so a URL that itself ends in a line feed, or a valid URL followed by a newline-only
+        # URL, read as one valid URL. Read byte for byte, both are refused before gh runs, although gh would
+        # answer for the repository they name.
+        line_break = []
+        for urls in (("https://github.com/adopter-org/adopter-repo.git\n",),
+                     ("https://github.com/adopter-org/adopter-repo.git", "\n")):
+            fixture.set_remote("origin", *urls)
+            rc, output, _calls = fixture.invoke(green, override=None, served=adopter)
+            line_break.append((rc, fixture.gh_argv, "has more than one URL" in output))
+        check("ci/repo-origin-line-break-refused", line_break, [(2, [], True)] * 2)
+
+        # A failing git remote get-url (an exit other than 0 or 2) is cannot-evaluate, whatever it printed:
+        # real git exits 128 on a url key with no value, and the fixture git prints a valid URL, then exits 1.
+        unreadable = []
+        config = fixture.repo / ".git" / "config"
+        saved_config = config.read_text(encoding="utf-8")
+        fixture.set_remote("origin")
+        config.write_text(config.read_text(encoding="utf-8") + '[remote "origin"]\n\turl\n', encoding="utf-8")
+        rc, output, _calls = fixture.invoke(green, override=None, served=adopter)
+        config.write_text(saved_config, encoding="utf-8")
+        unreadable.append((rc, fixture.gh_argv, "git could not read the origin remote URL" in output))
+        printed = "https://github.com/adopter-org/adopter-repo.git\n"
+        rc, output, _calls = fixture.invoke(green, override=None, served=adopter, git_remote=(printed, 1))
+        unreadable.append((rc, fixture.gh_argv, "git remote get-url exited 1)" in output))
+        check("ci/repo-origin-unreadable-refused", unreadable, [(2, [], True)] * 2)
+
+        # An origin read that succeeds with no URL (no output, or one empty line, which real git does not
+        # produce) is the no-origin refusal, never a parse of the empty string.
+        empty = []
+        for stdout in ("", "\n"):
+            rc, output, _calls = fixture.invoke(green, override=None, git_remote=(stdout, 0))
+            empty.append((rc, fixture.gh_argv,
+                          "has no origin remote, or its origin remote has no URL" in output))
+        check("ci/repo-origin-empty-refused", empty, [(2, [], True)] * 2)
+
+        # The name length bounds: the longest owner (39) and repository name (100) are read, and one character
+        # more is refused before gh runs, although gh would answer for it.
+        bounds = []
+        for owner, name in (("a" * 39, "adopter-repo"), ("adopter-org", "r" * 100),
+                            ("a" * 40, "adopter-repo"), ("adopter-org", "r" * 101)):
+            fixture.set_remote("origin", "https://github.com/{}/{}.git".format(owner, name))
+            rc, output, _calls = fixture.invoke(green, override=None, served=owner + "/" + name)
+            bounds.append((rc, fixture.reads_only(owner + "/" + name), fixture.gh_argv == [],
+                           "origin remote URL is not one of" in output))
+        check("ci/repo-name-length-bounds", bounds,
+              [(0, True, False, False)] * 2 + [(2, False, True, True)] * 2)
+
+        # The CI_STATUS_REPO refusal names only the derived repository and never echoes the override, which is
+        # unvalidated: neither a credential-bearing value nor one whose line break would forge a diagnostic
+        # line appears in the output, although gh would answer for the derived repository.
+        fixture.set_remote("origin", "https://github.com/adopter-org/adopter-repo.git")
+        not_echoed = []
+        for override in ("https://user:secret@github.com/" + adopter,
+                         adopter + "\nFORGED: diagnostic line", "upstream-org/upstream-repo"):
+            rc, output, _calls = fixture.invoke(green, override=override, served=adopter)
+            not_echoed.append((rc, fixture.gh_argv, "does not equal adopter-org/adopter-repo," in output,
+                               override in output, "secret" in output, "FORGED" in output))
+        check("ci/repo-override-mismatch-not-echoed", not_echoed, [(2, [], True, False, False, False)] * 3)
         fixture.set_remote("origin", FIXTURE_ORIGIN)
 
     # Round 7: main() must print every collected failure and map the exit code by the module docstring's
