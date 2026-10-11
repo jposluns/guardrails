@@ -37,19 +37,19 @@ reviewed edit here. Seven legs:
       root, by: no file, an unreadable file (mode 0; one that exits 2 if read, so a privileged user who
       can still read it gets the exit-2 case, printed as such), a directory, a syntax error, a module that
       raises, and a module that exits 2. Each of these launches must exit exactly 1 (never 2, which
-      blocks a PreToolUse call, and never 0, which would hide the failure), print nothing on stdout, and
-      say why on stderr. A module that exits 0 when run as __main__ with sys.argv equal to [its path]
-      must give exit 0, both as rendered and with an extra argument appended after the path, so the
-      launcher is shown to run the file the way a direct launch would and to take the file from its own
-      fixed position.
+      blocks a PreToolUse call, and never 0, which would hide the failure), write zero bytes to stdout
+      (whitespace included), and say why on stderr. A module that exits 0 when run as __main__ with
+      sys.argv equal to [its path] must give exit 0, both as rendered and with an extra argument
+      appended after the path, so the launcher is shown to run the file the way a direct launch would
+      and to take the file from its own fixed position.
   (f) FLOOR GUARD, through the rendered launcher. Every hooks.json entry that names a script (its command
       python3, run as sys.executable) is run on the plugin copy with sys.version_info set below the
       Python floor of .aiqt/core/python-floor.toml (one minor version under it) by a line prepended to
       its -c launcher program, so the script's own interpreter guard runs as it would on an older
       python3. The guard ends the process with os._exit, which the launcher cannot intercept, so this
       leg is the one that sees the guard's exit code: it must be exactly 1 (never 2, which blocks a
-      PreToolUse call), with nothing on stdout and the guard's `error: <file> requires Python` line on
-      stderr.
+      PreToolUse call), with zero bytes on stdout (whitespace included) and the guard's
+      `error: <file> requires Python` line on stderr.
   (d) DUPLICATES. A file name present both in .preview/ and in the manifest's script set is a finding:
       a reader could install both copies and run the check twice.
   (p) REPOSITORY PARITY. Code the pack copies share with .preview/stamp-truth-stop.py, and the `_cfg`
@@ -562,8 +562,9 @@ def leg_launch(root, rows, findings):
                 if rc != expect:
                     findings.append("%s: the launcher exited %s, expected %s (a failure exits exactly 1: "
                                     "never 2, which blocks, nor 0, which hides it)" % (label, rc, expect))
-                if out.strip():
-                    findings.append("%s: the launcher printed on stdout: %s" % (label, _bounded(out)))
+                if out:
+                    findings.append("%s: the launcher printed on stdout (%d byte(s)): %r"
+                                    % (label, len(out), out[:DIAG_LIMIT]))
                 if expect and not err.strip():
                     findings.append("%s: the failure is not reported on stderr" % label)
         print("  (l) %s: %s launch cases run on %s entr%s" % (script, len(LAUNCH_CASES), len(found),
@@ -611,9 +612,9 @@ def leg_floor(root, rows, findings):
                 findings.append("%s: under Python %d.%d the guard exited %s, expected 1 (its os._exit "
                                 "passes the launcher, and exit 2 blocks a PreToolUse call)"
                                 % (where, below[0], below[1], rc))
-            if out.strip():
-                findings.append("%s: under Python %d.%d the guard printed on stdout: %s"
-                                % (where, below[0], below[1], _bounded(out)))
+            if out:
+                findings.append("%s: under Python %d.%d the guard printed on stdout (%d byte(s)): %r"
+                                % (where, below[0], below[1], len(out), out[:DIAG_LIMIT]))
             marker = ("error: %s requires Python" % script).encode("utf-8")
             if marker not in err:
                 findings.append("%s: under Python %d.%d stderr lacks the guard's line %r: %s"
@@ -916,7 +917,8 @@ def main(argv):
 # and an `elapsed` segment where a fixture forbids it; a failing self-test; in hooks.json, a substituted
 # command, timeout, matcher, or an extra key in an entry (leg (w)'s whole-entry comparison), the launcher
 # reverted to a direct `python3 <file>` launch (leg (l): a missing script exits 2),
-# a launcher that never runs the file, one that reports a failure on stdout, not stderr, one that takes
+# a launcher that never runs the file, one that reports a failure on stdout, not stderr, one that writes
+# only whitespace on stdout (leg (l)'s zero-byte rule), one that takes
 # the last argument as the script (leg (l)'s appended argument), one that swallows a failure as exit 0
 # (leg (l)'s exact 1), and one that exits 2 on an unreadable file (leg (l)'s unreadable case, skipped
 # with a printed note where this user can read a mode 0 file); an extra entry beside the right one that
@@ -925,7 +927,8 @@ def main(argv):
 # extra exit-2 entry once per other spelling of the script path (./, //, .., a symlinked plugin root, a
 # symlink under another name, a relative path), each caught by legs (w) and (l) through NAMING;
 # a basename present in .preview/ too; a manifest
-# script with no fixture set (cannot-evaluate); and for leg (p): a one-character change to a shared
+# script with no fixture set (cannot-evaluate); for leg (f), a plugin guard that exits 2 and one that
+# writes only whitespace on stdout before its exit 1; and for leg (p): a one-character change to a shared
 # constant, a changed shared function on either side, a changed regex, a drifted _cfg, _is_worker
 # reintroduced into a pack copy, a missing pair file (exit 2), and the secfcl child-process pair
 # (merge train 2 QA rounds 1 and 2; each a cannot-evaluate, and each passed before the parity child
@@ -985,6 +988,8 @@ _ARGV_LAST = ("import sys\nsys.argv = ['-c', sys.argv[-1]]\n", "")
 # A launcher that runs the file but swallows every failure as exit 0.
 _SWALLOW_LAUNCHER = ("import sys\nimport runpy\ntry:\n    p = sys.argv[1]\n    sys.argv = [p]\n"
                      "    runpy.run_path(p, run_name='__main__')\nexcept BaseException:\n    pass\n")
+# The real launcher, prefixed with a whitespace-only write to stdout (zero bytes are required).
+_WHITESPACE_STDOUT = "import os\nos.write(1, b\" \\n\")\n"
 # The real launcher, prefixed with an exit 2 for an unreadable regular file.
 _UNREADABLE_2 = "import os, sys\nif os.path.isfile(sys.argv[1]) and not os.access(sys.argv[1], os.R_OK):\n    sys.exit(2)\n"
 _RENDER_FAULTS = (
@@ -1008,6 +1013,8 @@ _RENDER_FAULTS = (
      lambda h: h.update(args=h["args"][:4] + [_SWALLOW_LAUNCHER] + h["args"][-1:])),
     ("launcher-unreadable-2", RECORD, "l", ("unreadable: the launcher exited 2, expected 1",),
      lambda h: h.update(args=h["args"][:4] + [_UNREADABLE_2 + h["args"][4]] + h["args"][-1:])),
+    ("launcher-whitespace-stdout", CLOCK, "l", ("missing: the launcher printed on stdout",),
+     lambda h: h.update(args=h["args"][:4] + [_WHITESPACE_STDOUT + h["args"][4]] + h["args"][-1:])),
 )
 
 # Faults in the group holding the entry: (name, script, leg, needles, function(group) that edits it).
@@ -1161,6 +1168,15 @@ def self_test_main():
                    "        pass\n    os._exit(1)\n", "        pass\n    os._exit(2)\n")
             findings, unver = run_gate(root, legs=("f",), only=(script,))
             expect("floor guard exit 2 (%s)" % script, ("the guard exited 2, expected 1",), findings, unver)
+        # Leg (f) requires zero stdout bytes: a guard that writes only whitespace there before its exit 1
+        # is caught, where a whitespace-stripping test would pass it.
+        for script in (CLOCK, RECORD):
+            root = fresh("f-stdout-" + script)
+            _patch(root / PLUGIN_REL / "hooks" / "scripts" / script, "        pass\n    os._exit(1)\n",
+                   "        pass\n    os.write(1, b\" \\n\")\n    os._exit(1)\n")
+            findings, unver = run_gate(root, legs=("f",), only=(script,))
+            expect("floor guard whitespace stdout (%s)" % script, ("the guard printed on stdout",), findings,
+                   unver)
 
         mode0 = _mode0_unreadable(tmp)
         for name, script, leg, needles, edit in _RENDER_FAULTS:
@@ -1494,9 +1510,11 @@ def self_test_main():
         return 1
     print("SELF-TEST PASS: a clean copy passes legs (w), (k), (l), (f), (d) and (p); a deny key, a block "
           "key, an honoured worker variable, an over-length line with a line break, a script returning 2 or "
-          "calling os._exit(2), a plugin copy whose interpreter floor guard exits 2, a silent clock script, a wrong clock shape, an elapsed segment where "
+          "calling os._exit(2), a plugin copy whose interpreter floor guard exits 2 or writes only "
+          "whitespace on stdout, a silent clock script, a wrong clock shape, an elapsed segment where "
           "forbidden, a failing self-test, a substituted command, a direct python3 <file> launch, a "
-          "launcher that skips the file, reports on stdout, takes the last argument, swallows a failure "
+          "launcher that skips the file, reports on stdout, writes only whitespace on stdout, takes the "
+          "last argument, swallows a failure "
           "or exits 2 on an unreadable file, a changed timeout, matcher or extra key, an extra exit-2 entry "
           "(legs (w) and (l)) in each of seven spellings of the script path, an extra direct entry, a "
           "duplicated entry, a dual-present basename, a changed shared "

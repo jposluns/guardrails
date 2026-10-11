@@ -13,7 +13,8 @@ Legs, in order:
                  with a `script` key, both its core source and its plugin copy (HOOK_SCRIPT_DIRS) must
                  be listed, and every listed entry must be one of those, so a script hook the list
                  omits, or a stale entry, is a finding (exit 1). A missing, unreadable or unparseable
-                 manifest, or a `script` value that is not a plain .py file name, is cannot-evaluate.
+                 manifest, one with no [[hook]] row, or a `script` value that is not a plain .py file
+                 name, is cannot-evaluate.
                  It reads the manifest's script keys only; tools/gen_hooks.py validates the rest.
   pins           every `python-version:` interpreter pin in .github/workflows/*.yml, in PIN_FILES (the
                  shipped adopter CI template and its inline copy) and in every local action file (each
@@ -648,9 +649,10 @@ def launched_findings(root):
         data = tomllib.loads(_read_text(root / HOOKS_MANIFEST_REL))
     except tomllib.TOMLDecodeError as exc:
         raise CannotEvaluate("{}: does not parse: {}".format(HOOKS_MANIFEST_REL, exc))
-    rows = data.get("hook", [])
-    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
-        raise CannotEvaluate("{}: hook must be an array of tables".format(HOOKS_MANIFEST_REL))
+    # No hook rows at all is no manifest to reconcile against: every entry would read as stale.
+    rows = data.get("hook")
+    if not isinstance(rows, list) or not rows or not all(isinstance(row, dict) for row in rows):
+        raise CannotEvaluate("{}: hook must be a nonempty array of tables".format(HOOKS_MANIFEST_REL))
     scripts = set()
     for row in rows:
         if "script" not in row:
@@ -2278,8 +2280,9 @@ def _self_test_cases(base):
         got.append((listed_ok[0], code, _has(lines, "warn-only plugin hook script(s) " + rel)))
     check("source/launched-surface-unlisted-cannot-evaluate", got, [(0, 2, True)] * len(LAUNCHED_SURFACES))
     # The launched leg (its unlisted-script finding is revert/launched-leg): a LAUNCHED_SURFACES entry no
-    # manifest script row renders is a stale-entry finding; a missing manifest, or a script value that is
-    # not a plain file name, is cannot-evaluate.
+    # manifest script row renders is a stale-entry finding; a missing manifest, one that does not parse,
+    # one with no hook key or an empty hook array (never four stale-entry findings), or a script value
+    # that is not a plain file name, is cannot-evaluate.
     code, lines = evaluate(_fixture(base, files={HOOKS_MANIFEST_REL: _hooks_manifest(("clock-inject.py",))}))
     check("launched/stale-entry-finding", (code, [line for line in lines if "stale entry" in line]), (1, [
         "FAIL: LAUNCHED_SURFACES lists {}, which no {} script row renders (a stale entry)".format(
@@ -2291,6 +2294,15 @@ def _self_test_cases(base):
     code, lines = evaluate(_fixture(base, files={HOOKS_MANIFEST_REL: _hooks_manifest(
         ("clock-inject.py", "future-stamp-write.py", "../escape.py"))}))
     check("launched/path-script-cannot-evaluate", (code, _has(lines, "not a plain .py file name")), (2, True))
+    code, lines = evaluate(_fixture(base, files={HOOKS_MANIFEST_REL: "[[hook]\n"}))
+    check("launched/unparseable-manifest-cannot-evaluate", (code, _has(lines, "does not parse")), (2, True))
+    code, lines = evaluate(_fixture(base, files={HOOKS_MANIFEST_REL: "format-version = 1\n"}))
+    check("launched/no-hook-key-cannot-evaluate",
+          (code, _has(lines, "hook must be a nonempty array of tables"),
+           [line for line in lines if "stale entry" in line]), (2, True, []))
+    code, lines = evaluate(_fixture(base, files={HOOKS_MANIFEST_REL: "hook = []\n"}))
+    check("launched/empty-hook-array-cannot-evaluate",
+          (code, _has(lines, "hook must be a nonempty array of tables")), (2, True))
     for check_id, source, text in (
             ("guard/nonblocking-exit-2-finding", nonblocking, _entry(good)),
             ("guard/unlisted-exit-1-finding", listed, good_nonblocking)):

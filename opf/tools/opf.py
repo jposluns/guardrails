@@ -5545,26 +5545,53 @@ def _watchdog_bound_faults(bounds, budgets):
     return faults
 
 
-# The completion legs priced from a stated derivation (the comment above the
-# re-priced budgets in _watchdog_regression_self_test), and the one margin
-# each budget may carry above its derivation.
-_WATCHDOG_DERIVED_LEGS = ("cleanup-reaped", "no-signal-echild", "nested-timeout",
-                          "nested-cancel", "subject-orphan", "escalation-subject",
-                          "close-cancel", "census-exception", "drain-adopted",
-                          "reaped-subject-retry")
+# The completion legs NOT priced from a stated derivation, each with its
+# reason. Every completion leg the regression runner launches or budgets must
+# have exactly one of a checked derivation block (in the runner's comment) or
+# an entry here; the derived set is read from those blocks, never listed.
+_WATCHDOG_FLAT_BUDGET = (
+    "a flat declared budget train 2 did not re-derive from its permitted paths: the runtime "
+    "ledger charges every registered wait the leg makes against it on every run, so an "
+    "under-price can only fail the leg (a loud FAIL or a kill at its bound), never pass it")
+_WATCHDOG_UNDERIVED_LEGS = dict(
+    [(leg, _WATCHDOG_FLAT_BUDGET) for leg in (
+        "audit-ignore", "reaper", "nonce", "fixture-id", "status", "early-exit",
+        "cleanup-cancel", "premature-exit", "guardian-error", "empty-children",
+        "bounded-diagnostics", "cleanup-budget", "deadline-flips", "subject-setup",
+        "launch-ownership", "launch-cancel", "fd-hygiene-total", "nested-keep", "fd-census",
+        "subject-gc", "guardian-preload", "subject-receipt", "subject-ack", "pdeathsig",
+        "escalate-reaped", "poll-collected", "escalate-degraded", "poll-masked",
+        "unpinned-kill", "census-verify", "receipt-high-fd")]
+    + [("overdue-success",
+        "priced term by term under per-thread accounting in the runner's budget comment "
+        "(4 x deadline 30 + join 30 + fixture allowance 11 = 161.0) with its stated 0.01 s "
+        "float-summation margin, not the 1 s derivation margin")])
 _WATCHDOG_DERIVATION_MARGIN = 1
+# Each case function the regression runner launches, and the label prefix its
+# modes carry: a call to one of these from inside another case runs that mode
+# in the caller's process, charged to the caller's ledger.
+_WATCHDOG_CASE_PREFIXES = (("_watchdog_deadline_case", ""), ("_watchdog_safety_case", ""),
+                           ("_watchdog_overlap_case", "overlap-"),
+                           ("_watchdog_completion_case", "completion-"),
+                           ("_watchdog_ledger_case", "ledger-"))
 
 
-def _watchdog_derivation_faults(source, budgets):
-    """The derivation rule for the re-priced completion legs: in `source` (the
-    runner's own text), each derivation comment line `#   <leg>[, <leg>]: ...`
-    opens a block that must end in exactly one marker [derived: T + ... = N s]
-    whose terms sum to N, every _WATCHDOG_DERIVED_LEGS leg must have exactly one
-    block, and each leg's declared budget must equal N plus
-    _WATCHDOG_DERIVATION_MARGIN: a budget below its derivation, or above it by
-    more than the stated margin, is a fault. Returns the faults."""
+def _watchdog_derivation_faults(source, budgets, launched=(), exempt=None):
+    """The derivation rule for the completion legs: in `source` (the runner's
+    own text), each derivation comment line `#   <leg>[, <leg>]: ...` opens a
+    block that must end in exactly one marker [derived: T + ... = N s] whose
+    terms are numbers summing to N, and each derived leg's declared budget must
+    equal N plus _WATCHDOG_DERIVATION_MARGIN: a budget below its derivation, or
+    above it by more than the stated margin, is a fault. The checked set is
+    READ, never listed: every completion leg (a `completion-` label in
+    `budgets` or in `launched`) must have exactly one of a derivation block or
+    an `exempt` entry (default _WATCHDOG_UNDERIVED_LEGS) carrying a nonempty
+    reason, so a leg dropped from both, carried by both, or named by either
+    without being budgeted is a fault, and with `launched` given a budget for a
+    leg the runner never launches is one too. Returns the faults."""
     import math
     import re
+    exempt = _WATCHDOG_UNDERIVED_LEGS if exempt is None else exempt
     head = re.compile(r"\s*#   ([a-z][a-z-]*(?:, [a-z][a-z-]*)*): ")
     marker = re.compile(r"\[derived: ([0-9.]+(?: \+ [0-9.]+)*) = ([0-9.]+) s\]")
     blocks, current = [], None
@@ -5583,27 +5610,141 @@ def _watchdog_derivation_faults(source, budgets):
         found = marker.findall(" ".join(lines))
         for leg in legs:
             seen.setdefault(leg, []).append(found)
-    for leg in _WATCHDOG_DERIVED_LEGS:
-        entries = seen.get(leg, [])
+    launched = set(launched)
+    completion = set(label[len("completion-"):] for label in set(budgets) | launched
+                     if label.startswith("completion-"))
+    for leg in sorted(completion | set(seen) | set(exempt)):
+        label = "completion-" + leg
+        if leg not in completion:
+            faults.append("%s: %s names a leg the runner neither launches nor budgets" % (
+                label, "a derivation block" if leg in seen else "the exemption table"))
+            continue
+        if launched and label not in launched:
+            faults.append("%s: a declared budget for a leg the runner never launches" % label)
+        if leg in seen and leg in exempt:
+            faults.append("%s: both derived and exempted; it must be exactly one" % label)
+            continue
+        if leg not in seen:
+            reason = exempt.get(leg)
+            if not isinstance(reason, str) or not reason.strip():
+                faults.append("%s: neither a derivation block nor an exemption with a reason; "
+                              "a completion budget is derived or exempted by name" % label)
+            continue
+        entries = seen[leg]
         if len(entries) != 1 or len(entries[0]) != 1:
-            faults.append("completion-%s: %d derivation block(s) carrying %s marker(s), "
+            faults.append("%s: %d derivation block(s) carrying %s marker(s), "
                           "want exactly one block with one [derived: ...] marker" % (
-                              leg, len(entries), [len(found) for found in entries]))
+                              label, len(entries), [len(found) for found in entries]))
             continue
         terms, total = entries[0][0]
-        derived = float(total)
-        if not math.isclose(math.fsum(float(term) for term in terms.split(" + ")), derived,
-                            abs_tol=1e-9):
-            faults.append("completion-%s: derivation terms %s do not sum to %s" % (
-                leg, terms, total))
+        try:
+            values = [float(term) for term in terms.split(" + ")]
+            derived = float(total)
+        except ValueError:
+            faults.append("%s: derivation [derived: %s = %s s] holds a term that is not a "
+                          "number" % (label, terms, total))
             continue
-        budget = budgets.get("completion-" + leg)
+        if not math.isclose(math.fsum(values), derived, abs_tol=1e-9):
+            faults.append("%s: derivation terms %s do not sum to %s" % (label, terms, total))
+            continue
+        budget = budgets.get(label)
         if not _watchdog_finite_seconds(budget):
-            faults.append("completion-%s: no usable declared budget for its derivation" % leg)
+            faults.append("%s: no usable declared budget for its derivation" % label)
         elif not math.isclose(budget, derived + _WATCHDOG_DERIVATION_MARGIN, abs_tol=1e-9):
-            faults.append("completion-%s: declared budget %ss is not its derivation %ss plus "
-                          "the stated %ss margin" % (leg, budget, total,
+            faults.append("%s: declared budget %ss is not its derivation %ss plus "
+                          "the stated %ss margin" % (label, budget, total,
                                                      _WATCHDOG_DERIVATION_MARGIN))
+    return faults
+
+
+def _watchdog_dispatch_faults(budgets, sources=None):
+    """Every case branch that runs another case's mode in its own process (the
+    safety leg lost-cleanup runs the completion mode no-signal-echild) is priced
+    from what it dispatches, read from the case functions' source (`sources`,
+    name to text; default the live _WATCHDOG_CASE_PREFIXES functions): a branch
+    whose whole body is `return <case>(<mode>)` must carry exactly that mode's
+    budget, and any other dispatching branch at least the sum of its dispatched
+    modes' budgets (a floor only: its own waits, and a dispatched mode run under
+    a patched bound, may need more). A dispatch the scan cannot attribute to a
+    single run of one `mode == ...` or `mode in (...)` branch (a non-constant
+    mode, a call outside any mode test, or one inside a loop, comprehension,
+    nested function or lambda, which may run any number of times) is a fault.
+    Returns the faults."""
+    import ast
+    import inspect
+    import math
+    prefixes = dict(_WATCHDOG_CASE_PREFIXES)
+    if sources is None:
+        sources = dict((name, inspect.getsource(globals()[name])) for name in prefixes)
+
+    def tested(test):
+        if (not isinstance(test, ast.Compare) or not isinstance(test.left, ast.Name)
+                or test.left.id != "mode" or len(test.ops) != 1):
+            return None
+        right = test.comparators[0]
+        if isinstance(test.ops[0], ast.Eq):
+            items = [right]
+        elif isinstance(test.ops[0], ast.In) and isinstance(right, (ast.Tuple, ast.List, ast.Set)):
+            items = right.elts
+        else:
+            return None
+        if all(isinstance(item, ast.Constant) and isinstance(item.value, str) for item in items):
+            return tuple(item.value for item in items)
+        return None
+
+    def callee(node):
+        func = node.func
+        name = (func.id if isinstance(func, ast.Name)
+                else func.attr if isinstance(func, ast.Attribute) else None)
+        return name if name in prefixes else None
+
+    repeated = (ast.For, ast.AsyncFor, ast.While, ast.ListComp, ast.SetComp, ast.DictComp,
+                ast.GeneratorExp, ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+    faults, priced = [], {}
+    for case, text in sorted(sources.items()):
+        roots = [child for node in ast.parse(text).body for child in
+                 (node.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                  else [node])]
+        stack, pure = [(child, None, False) for child in roots], set()
+        while stack:
+            node, modes, looped = stack.pop()
+            branch = tested(node.test) if isinstance(node, ast.If) else None
+            if branch is not None:
+                body = node.body
+                if (len(body) == 1 and isinstance(body[0], ast.Return)
+                        and isinstance(body[0].value, ast.Call) and callee(body[0].value)):
+                    pure.add(id(body[0].value))
+                stack.extend((child, branch, looped) for child in body)
+                stack.extend((child, modes, looped) for child in node.orelse)
+                continue
+            looped = looped or isinstance(node, repeated)
+            if isinstance(node, ast.Call) and callee(node):
+                arg = node.args[0] if node.args else None
+                where = "%s line %d" % (case, node.lineno)
+                if (modes is None or looped or not isinstance(arg, ast.Constant)
+                        or not isinstance(arg.value, str)):
+                    faults.append("%s: a call to %s the scan cannot price as one run of one "
+                                  "mode branch" % (where, callee(node)))
+                else:
+                    for mode in modes:
+                        priced.setdefault(prefixes[case] + mode, []).append(
+                            (prefixes[callee(node)] + arg.value, id(node) in pure))
+            stack.extend((child, modes, looped) for child in ast.iter_child_nodes(node))
+    for label, dispatched in sorted(priced.items()):
+        budget = budgets.get(label)
+        names = [name for name, _pure in dispatched]
+        targets = [budgets.get(name) for name in names]
+        if not _watchdog_finite_seconds(budget) or not all(
+                _watchdog_finite_seconds(seconds) for seconds in targets):
+            faults.append("%s: no usable budget for it or for what it dispatches (%s)" % (
+                label, ", ".join(names)))
+        elif len(dispatched) == 1 and dispatched[0][1]:
+            if not math.isclose(budget, targets[0], abs_tol=1e-9):
+                faults.append("%s: runs exactly %s, budgeted %ss, but carries %ss" % (
+                    label, names[0], targets[0], budget))
+        elif budget < math.fsum(targets) - 1e-9:
+            faults.append("%s: dispatches %s, whose budgets sum to %ss, but carries %ss" % (
+                label, ", ".join(names), math.fsum(targets), budget))
     return faults
 
 
@@ -19265,7 +19406,7 @@ def _watchdog_regression_self_test():
     budgets = dict((mode, deadline_budget) for mode in deadline_modes)
     budgets.update(("overlap-" + mode, 102.0 + 0.01) for mode in overlap_modes)
     budgets.update((mode, deadline_budget) for mode in safety_modes)
-    budgets.update((("lost-cleanup", 16), ("fork-error", 36), ("poll-error", 36)))
+    budgets.update((("fork-error", 36), ("poll-error", 36)))
     # A launcher case runs its nested runner twice with every launch patched
     # to one exit-37 _run_fixture_process(timeout=5), each charged its allowance.
     budgets.update((label + "-" + disposition,
@@ -19308,17 +19449,23 @@ def _watchdog_regression_self_test():
     # child is never counted (the charge is pid-gated: a child charges no
     # ledger); a wait a HELPER makes in the leg process (a census loop, a
     # helper's own _bounded_wait) is counted exactly like the leg's own,
-    # and a helper loop is left out only where the derivation names why no
-    # passing path reaches it. The margin of 1 s is float
+    # and a helper loop is left out only where the derivation names why it
+    # charges nothing on any passing path: no passing path reaches it, or
+    # every passing path that reaches it leaves before its first sleep (as
+    # _fixture_group_pinned does below). The margin of 1 s is float
     # summation plus the at most one tick (0.005 s, or 0.05 s for the
     # nested legs' file gate) each fixed-tick or deadline-guarded loop can
     # sleep past its bound, under 0.5 s on every leg here; it is no timing
     # allowance. Each derivation ends in a marker [derived: T + ... = N s]
     # that _watchdog_derivation_faults checks before any leg runs: the
-    # marker's terms must sum to N, each of these ten legs must carry
-    # exactly one marker, and the declared budget must be N plus this 1 s
-    # margin, so a budget below its derivation (or above it by more than
-    # the stated margin) fails the runner.
+    # marker's terms must be numbers summing to N, each derived leg must
+    # carry exactly one marker, and the declared budget must be N plus this
+    # 1 s margin, so a budget below its derivation (or above it by more
+    # than the stated margin) fails the runner. Which legs are derived is
+    # read from these blocks, never listed: every other completion leg
+    # carries a reasoned entry in _WATCHDOG_UNDERIVED_LEGS instead, and a
+    # leg in neither (its block or entry dropped) or in both fails the
+    # runner too.
     #   cleanup-reaped: start() 5 + one _bounded_wait 15 + close() launch
     #     wait 10 (the guardian is marked collected, so no reap loop) = 30.
     #     [derived: 5 + 15 + 10 = 30 s]
@@ -19395,6 +19542,11 @@ def _watchdog_regression_self_test():
     #     [derived: 60 + 3 + 45 + 5 + 5 = 118 s]
     budgets.update((("completion-drain-adopted", 71.5 + 1),
                     ("completion-reaped-subject-retry", 118 + 1)))
+    # The safety leg lost-cleanup runs the completion mode no-signal-echild
+    # and nothing else (an alias in _watchdog_safety_case), so it carries
+    # that mode's derived budget; _watchdog_dispatch_faults holds every
+    # case that dispatches another mode to the price of what it runs.
+    budgets["lost-cleanup"] = budgets["completion-no-signal-echild"]
     # The isolation matrix: 31 timer cases, each one 180 s fixture call.
     budgets["blocked-isolation"] = 31 * _deadline_case_budget(180)
     # The ledger concurrency vectors: the declared budget IS the vector
@@ -19955,27 +20107,94 @@ def _watchdog_regression_self_test():
         if (not _watchdog_bound_faults(dict(probe=bad), dict(probe=10))
                 or not _watchdog_bound_faults(dict(probe=10 ** 6), dict(probe=bad))):
             flip_missed.append("non-finite floor input %r" % (bad,))
-    # The re-priced legs' budgets against their stated derivations, and
-    # three flips the check must refuse: a derivation raised above its
-    # declared budget, a budget raised past derivation plus margin, and a
-    # leg whose marker is removed.
+    # Every completion budget against its stated derivation or its reasoned
+    # exemption, and every dispatching case against what it runs, with the
+    # flips each check must refuse, each by its own fault: for census-exception
+    # a derivation raised above its declared budget, a budget raised past
+    # derivation plus margin, its marker removed and a marker term that is
+    # not a number; for cleanup-reaped its budget moved, its marker removed
+    # and its whole derivation block removed; an exempt leg dropped from the
+    # exemption table, a derived leg exempted as well, an exemption naming
+    # no leg, one with no reason, and a completion leg dropped from the
+    # launched set; the alias lost-cleanup priced one second below the mode
+    # it runs, deadline-flips one second below the modes it runs, and the
+    # alias dispatch moved into a loop.
     runner_source = inspect.getsource(_watchdog_regression_self_test)
-    # Assembled, never one literal, so the marker occurs once: in the comment.
+    launched = set(live)
+    # Assembled, never one literal, so each marker occurs once: in the comment.
     derived_marker = "[derived: 1020 + 210 + 5 = %d s]" % 1235
-    for flip, flip_source, flip_budgets in (
+    reaped_marker = "[derived: 5 + 15 + 10 = %d s]" % 30
+    runner_lines = runner_source.splitlines(True)
+    reaped_head = [index for index, line in enumerate(runner_lines)
+                   if line.lstrip().startswith("#   cleanup-reaped: ")]
+    reaped_end = [index for index, line in enumerate(runner_lines) if reaped_marker in line]
+    reaped_cut = ("".join(runner_lines[:reaped_head[0]] + runner_lines[reaped_end[0] + 1:])
+                  if len(reaped_head) == len(reaped_end) == 1 and reaped_head[0] < reaped_end[0]
+                  else runner_source)
+    exempt = _WATCHDOG_UNDERIVED_LEGS
+    for flip, flip_source, flip_budgets, flip_exempt, flip_launched, needle in (
             ("derivation above budget", runner_source.replace(
-                derived_marker, "[derived: 1020 + 210 + 6 = 1236 s]"), budgets),
+                derived_marker, "[derived: 1020 + 210 + 6 = 1236 s]"), budgets, exempt, launched,
+             "completion-census-exception: declared budget"),
             ("budget past derivation plus margin", runner_source,
-             dict(budgets, **{"completion-census-exception": 1235 + 2})),
-            ("marker removed", runner_source.replace(derived_marker, ""), budgets)):
-        if (runner_source.count(derived_marker) != 1
-                or not _watchdog_derivation_faults(flip_source, flip_budgets)):
+             dict(budgets, **{"completion-census-exception": 1235 + 2}), exempt, launched,
+             "completion-census-exception: declared budget"),
+            ("marker removed", runner_source.replace(derived_marker, ""), budgets, exempt,
+             launched, "completion-census-exception: 1 derivation block(s) carrying [0]"),
+            ("marker term not a number", runner_source.replace(
+                derived_marker, "[derived: 1020 + 210 + 5..0 = 1235 s]"), budgets, exempt,
+             launched, "holds a term that is not a number"),
+            ("second leg budget moved", runner_source,
+             dict(budgets, **{"completion-cleanup-reaped": 999}), exempt, launched,
+             "completion-cleanup-reaped: declared budget"),
+            ("second leg marker removed", runner_source.replace(reaped_marker, ""), budgets,
+             exempt, launched, "completion-cleanup-reaped: 1 derivation block(s) carrying [0]"),
+            ("derivation block removed", reaped_cut, budgets, exempt, launched,
+             "completion-cleanup-reaped: neither a derivation block nor an exemption"),
+            ("exempt leg dropped from the exemption table", runner_source, budgets,
+             dict((leg, why) for leg, why in exempt.items() if leg != "audit-ignore"), launched,
+             "completion-audit-ignore: neither a derivation block nor an exemption"),
+            ("derived leg exempted too", runner_source, budgets,
+             dict(exempt, **{"cleanup-reaped": _WATCHDOG_FLAT_BUDGET}), launched,
+             "completion-cleanup-reaped: both derived and exempted"),
+            ("exemption naming no leg", runner_source, budgets,
+             dict(exempt, **{"no-such-leg": _WATCHDOG_FLAT_BUDGET}), launched,
+             "completion-no-such-leg: the exemption table names a leg"),
+            ("exemption with no reason", runner_source, budgets,
+             dict(exempt, **{"audit-ignore": " "}), launched,
+             "completion-audit-ignore: neither a derivation block nor an exemption"),
+            ("completion leg dropped from the launched set", runner_source, budgets, exempt,
+             launched - {"completion-audit-ignore"},
+             "completion-audit-ignore: a declared budget for a leg the runner never launches")):
+        if needle not in "\n".join(_watchdog_derivation_faults(
+                flip_source, flip_budgets, flip_launched, flip_exempt)):
             flip_missed.append("derivation flip not refused: " + flip)
+    if runner_source.count(derived_marker) != 1 or runner_source.count(reaped_marker) != 1:
+        flip_missed.append("derivation flip markers not found once in the runner")
+    alias = "        return _watchdog_completion_case(\"no-signal-echild\")\n"
+    looped_alias = ("        for _ in (1, 2):\n"
+                    "            _watchdog_completion_case(\"no-signal-echild\")\n")
+    case_sources = dict((name, inspect.getsource(globals()[name]))
+                        for name, _prefix in _WATCHDOG_CASE_PREFIXES)
+    flips_run = budgets["pipe-stall"] * 2 + budgets["transient-census"]
+    for flip, flip_budgets, flip_sources, needle in (
+            ("alias priced below its mode", dict(
+                budgets, **{"lost-cleanup": budgets["completion-no-signal-echild"] - 1}), None,
+             "lost-cleanup: runs exactly completion-no-signal-echild"),
+            ("dispatching leg priced below its modes", dict(
+                budgets, **{"completion-deadline-flips": flips_run - 1}), None,
+             "completion-deadline-flips: dispatches"),
+            ("alias dispatch in a loop", budgets, dict(case_sources, _watchdog_safety_case=(
+                case_sources["_watchdog_safety_case"].replace(alias, looped_alias))),
+             "the scan cannot price")):
+        if needle not in "\n".join(_watchdog_dispatch_faults(flip_budgets, flip_sources)):
+            flip_missed.append("dispatch flip not refused: " + flip)
     floor = _watchdog_bound_faults(live, budgets)
-    derivation = _watchdog_derivation_faults(runner_source, budgets)
+    derivation = (_watchdog_derivation_faults(runner_source, budgets, launched)
+                  + _watchdog_dispatch_faults(budgets))
     if floor or derivation or flip_missed:
         print("opf watchdog regressions: FAIL (process bound below a leg's own budget: %s; "
-              "budget not its stated derivation plus margin: %s; "
+              "budget not reconciled to its derivation, exemption or dispatched mode: %s; "
               "floor vectors not refused: %s)" % (
                   "; ".join(floor) or "none", "; ".join(derivation) or "none",
                   ", ".join(flip_missed) or "none"))
