@@ -72,6 +72,8 @@ run_gate "portability" python3 -I -B tools/check_portability.py
 run_gate "derived-command-parameters-selftest" python3 -I -B tools/check_derived_command_parameters.py --self-test
 run_gate "derived-command-parameters" python3 -I -B tools/check_derived_command_parameters.py
 run_gate "dashes"    python3 -I -B tools/check_no_dashes.py
+run_gate "dashes-selftest" python3 -I -B tools/check_no_dashes.py --self-test
+run_gate "dashes-default-parity" python3 -I -B tools/check_no_dashes.py --default-parity
 run_gate "links"     python3 -I -B tools/check_links.py
 run_gate "site-selftest" python3 -I -B tools/check_site.py --self-test
 run_gate "site"      python3 -I -B tools/check_site.py
@@ -109,10 +111,13 @@ run_gate "opf-adopt-selftest" python3 -I -B opf/tools/_opf_adopt.py --self-test
 run_gate "opf-adopt-apply-selftest" python3 -I -B opf/tools/_opf_adopt_apply.py --self-test
 run_gate "opf-adopt-state-selftest" python3 -I -B opf/tools/_opf_adopt_state.py --self-test
 run_gate "opf-adopt-hook-selftest" python3 -I -B opf/tools/_opf_adopt_hook.py --self-test
+run_gate "opf-adopt-complete-selftest" python3 -I -B opf/tools/_opf_adopt_complete.py --self-test
 run_gate "opf-pack-manifest-selftest" python3 -I -B opf/tools/_opf_pack_manifest.py --self-test
 run_gate "opf-adopt-observe-selftest" python3 -I -B opf/tools/_opf_adopt_observe.py --self-test
 run_gate "opf-prompt-pack-selftest" python3 -I -B opf/tools/check_opf_prompt_pack.py --self-test
 run_gate "opf-prompt-pack" python3 -I -B opf/tools/check_opf_prompt_pack.py
+run_gate "opf-enforce-platforms-selftest" python3 -I -B tools/check_opf_enforce_platforms.py --self-test
+run_gate "opf-enforce-platforms" python3 -I -B tools/check_opf_enforce_platforms.py
 run_gate "opf-oplock-selftest" python3 -I -B opf/tools/_opf_oplock.py --self-test
 run_gate "opf-init-substrate-selftest" python3 -I -B opf/tools/_opf_init_substrate.py --self-test
 run_gate "opf-init-builders-selftest" python3 -I -B opf/tools/_opf_init.py --self-test
@@ -155,6 +160,8 @@ run_gate "artifact-checksums-selftest" python3 -I -B tools/check_artifact_checks
 run_gate "artifact-checksums"          python3 -I -B tools/check_artifact_checksums.py
 run_gate "rules-drift"     python3 -I -B tools/gen_rules.py --check
 run_gate "agents-drift"    python3 -I -B tools/gen_agents.py --check
+run_gate "first-pin-demo-selftest" python3 -I -B tools/gen_first_pin_demo.py --self-test
+run_gate "first-pin-demo-drift"    python3 -I -B tools/gen_first_pin_demo.py --check
 run_gate "mappings-page-drift" python3 -I -B tools/gen_mappings.py --check
 run_gate "reference-roster-selftest" python3 -I -B tools/gen_reference_facts.py --self-test
 run_gate "reference-roster-drift" python3 -I -B tools/gen_reference_facts.py --check
@@ -181,6 +188,8 @@ run_gate "hooks-selftest" python3 -I -B tools/gen_hooks.py --self-test
 run_gate "secret-patterns-drift" python3 -I -B tools/gen_secret_patterns.py --check
 run_gate "hooks-drift"    python3 -I -B tools/gen_hooks.py --check
 run_gate "hooks-behaviour-selftest" python3 -I -B tools/selftest_aiqt_hooks.py
+run_gate "char-policy-selftest" python3 -I -B tools/gen_char_policy.py --self-test
+run_gate "char-policy-drift" python3 -I -B tools/gen_char_policy.py --check
 run_gate "hooks-preview-selftest" python3 -I -B tools/check_hooks_preview.py --self-test
 run_gate "hooks-preview" python3 -I -B tools/check_hooks_preview.py
 run_gate "selftest-execution-selftest" python3 -I -B tools/check_selftest_execution.py --self-test

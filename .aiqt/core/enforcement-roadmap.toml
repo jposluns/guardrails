@@ -4,7 +4,10 @@
 # pending. enforced: the enforceability ledger links at least one shipped control to the rule;
 #   `mechanisms` RESTATES that linkage (namespaced gate:/hook: refs, unique and sorted) so this file is
 #   reviewable standalone, and tools/gen_enforcement_register.py CROSS-VALIDATES it against the ledger, so
-#   the two can never fork. partial: the same linkage invariant as enforced, and the linked mechanisms are
+#   the two can never fork. A rule whose only linked controls are preview-channel hooks (the [[hook]] rows of
+#   .aiqt/core/hooks/preview.toml: standalone .preview/ files installed by hand, not in the plugin) is still
+#   enforced or partial here, by that linkage, and the register shows it as "Preview only". partial: the
+#   same linkage invariant as enforced, and the linked mechanisms are
 #   known to cover only part of the rule (their residues name what each does not catch, not every
 #   uncovered clause of every linked rule). none: enforcement is
 #   not built yet. pending: not built yet, and `description` states the intended build. This file records
@@ -116,8 +119,8 @@ mechanisms = ["hook:diff-source", "hook:diff-wall-stop"]
 
 [[rule]]
 corpus-id = "cnstpr"
-status = "none"
-mechanisms = []
+status = "enforced"
+mechanisms = ["hook:constraint-reread"]
 
 [[rule]]
 corpus-id = "cntdef"
@@ -197,7 +200,7 @@ mechanisms = ["gate:ci-parity", "hook:gate-weakening-guard"]
 [[rule]]
 corpus-id = "gensrc"
 status = "enforced"
-mechanisms = ["gate:adapters-drift", "gate:agents-drift", "gate:changelog-drift", "gate:claude-drift", "gate:crosswalk-schema-drift", "gate:cursor-drift", "gate:disclosure-drift", "gate:enforceability-drift", "gate:enforcement-register-drift", "gate:gensrc-failclose", "gate:gensrc-registry-drift", "gate:hooks-drift", "gate:install-drift", "gate:manifest-gen-drift", "gate:mappings-page-drift", "gate:notice-drift", "gate:reference-roster-drift", "gate:renderers-drift", "gate:roadmap-drift", "gate:rules-drift", "gate:secret-patterns-drift", "gate:skill-drift", "gate:worker-pack-drift", "hook:gensrc-edit-guard"]
+mechanisms = ["gate:adapters-drift", "gate:agents-drift", "gate:changelog-drift", "gate:char-policy-drift", "gate:claude-drift", "gate:crosswalk-schema-drift", "gate:cursor-drift", "gate:disclosure-drift", "gate:enforceability-drift", "gate:enforcement-register-drift", "gate:first-pin-demo-drift", "gate:gensrc-failclose", "gate:gensrc-registry-drift", "gate:hooks-drift", "gate:install-drift", "gate:manifest-gen-drift", "gate:mappings-page-drift", "gate:notice-drift", "gate:reference-roster-drift", "gate:renderers-drift", "gate:roadmap-drift", "gate:rules-drift", "gate:secret-patterns-drift", "gate:skill-drift", "gate:worker-pack-drift", "hook:gensrc-edit-guard"]
 
 [[rule]]
 corpus-id = "goalfd"
@@ -316,8 +319,8 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "rerunf"
-status = "none"
-mechanisms = []
+status = "enforced"
+mechanisms = ["hook:rerun-pass-check"]
 
 [[rule]]
 corpus-id = "rmvpth"
@@ -656,8 +659,8 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "vfxcmt"
-status = "none"
-mechanisms = []
+status = "partial"
+mechanisms = ["hook:review-dispatch-pin"]
 
 [[rule]]
 corpus-id = "vrfdiv"

@@ -23,11 +23,63 @@ gate command is cannot-evaluate, not masked. Every other argument remains
 order-preserving and identity-relevant. Duplicates collapse because comparison is
 set-based.
 
+REQUIRED STATUS (multi-job shape). The CI member set is the union over every job,
+so a gate moved from one job to another is still one member, and a gate dropped
+from every job is still a local-only finding.
+Job set: the rule reads the job set the way YAML does or refuses. Under jobs:, a
+job id is read only from a plain key at indent 2 that GitHub accepts as a job id
+(JOB_HEADER_RE) and that no YAML version reads as a boolean or null, and every
+job's properties start at indent 4. A quoted, spaced, flow, complex or list key at
+indent 2, a line at indent 1 or 3, a job body that starts deeper than indent 4, a
+repeated top-level or job-level key, and a repeated job id are each cannot-evaluate
+(exit 2), never skipped. Any top-level line ends the jobs: mapping.
+Result masking: on any job, in a workflow of any size, each of continue-on-error,
+uses, defaults and container (RESULT_MASKING_JOB_KEYS) is a required-status finding
+(exit 1) whatever its value. The set is derived from GitHub's documented job-level
+syntax (jobs.<job_id>.*). continue-on-error is documented as letting the run pass
+when the job fails. uses hands the job's result to a reusable workflow this rule
+does not read. defaults (run.shell) and container replace the program or image every
+run: step executes in, so a gate command need not run at all. The other job keys
+cannot turn a failing gate into a success result: if:, needs:, timeout-minutes,
+concurrency and environment can only skip, cancel or fail a job, which Quality gates
+reads as not success; a strategy matrix job's result is failure when any leg fails
+(GitHub behaviour, not observed here); name, runs-on, permissions, outputs, env, services,
+with and secrets do not decide a result (with and secrets apply only under uses).
+The step-level keys that could (continue-on-error, if:, shell:, timeout-minutes)
+are outside the recognized step keys and stay cannot-evaluate, as does a gate
+command chained with || true.
+Aggregator: a workflow with more than one job must route every job into the one
+status branch protection requires. Exactly one job is named "Quality gates"
+(REQUIRED_STATUS_NAME); its job-level if: is always() (GitHub reads a skipped
+required job as passing, so without always() a failed or cancelled needed job would
+skip it and the status would read green); its needs: lists every other job exactly
+once and nothing else; and the job, from the line after its id, matches
+REQUIRED_STATUS_JOB line for line, ignoring blank and whole-line comment lines and
+reading the needs: key with its nested lines as one slot. The pin is the logic
+check: the pinned step exits 0 only when every needed result is the word success,
+and the self-test runs the pinned run: body under bash with all-success, failure,
+cancelled, skipped, unknown, empty and unset results, and once with its exit 1
+deleted, so a pin that could pass a failure fails the self-test. An exact pin was
+chosen over a semantic reading because this gate does not model bash: any edit to
+that job, harmless or not, is a finding until the pin and the workflow change
+together under review. Each departure is a required-status finding (exit 1). A
+needs: entry outside the recognized spellings (a block list of plain job ids, a
+one-line flow list, or one plain scalar) is cannot-evaluate. A one-job workflow is
+its own status and carries no aggregator rule, only the result-masking rule.
+Not checked: the branch-protection setting itself (that Quality gates is the
+required check, and that no other job reports that name through an expression in
+its name:); GitHub's evaluation of needs.*.result, if: always(), cancellation and
+matrix results, which is documented behaviour this gate does not observe; and the
+runner image, runs-on labels, services and environment values (a job or step env:
+can set a variable such as BASH_ENV that changes what an accepted gate command
+does). Inside a run: block the exact line exit 1 is accepted, because it can only
+end a step red; every other exit spelling stays unclassified.
+
 Exit convention:
   0  extraction succeeded, every difference has an active exception, no exception is
      stale or reversed, and both mandatory self-members are present
-  1  an evaluated parity finding, stale or reversed exception, or missing mandatory
-     self-member
+  1  an evaluated parity finding, stale or reversed exception, missing mandatory
+     self-member, or required-status finding
   2  cannot-evaluate, including an unreadable input, malformed control input, empty
      extraction, unsupported shell or YAML shape, unresolved command value, hidden
      action, circular runner invocation, or shadow-scan discrepancy
@@ -210,11 +262,16 @@ it does not require a combination of failures or the gitleaks NOT RUN branch.
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: check_ci_parity.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: check_ci_parity.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 import argparse
 import re
@@ -253,6 +310,70 @@ MASKED_REF_EXPRESSIONS = frozenset({
 
 # One repository-local, non-shipped gate; no general .github executable allowance.
 REPO_GATE = ".github/check_newtab_contract.py"
+
+# The one status branch protection requires. In a workflow with more than one job,
+# exactly one job carries this name, a job-level if: of always(), and a needs: list
+# naming every other job exactly once (module docstring, REQUIRED STATUS).
+REQUIRED_STATUS_NAME = "Quality gates"
+JOB_ID_RE = re.compile(r"[A-Za-z0-9_-]+")
+
+# A line at the job-key indent under jobs: is read as a job only when it is a plain
+# key GitHub accepts as a job id (a letter or _ first, then letters, digits, _ or -)
+# that no YAML version reads as a boolean or null. Every other line there (a quoted,
+# spaced, flow, complex or list key) is cannot-evaluate, because YAML can read a job
+# from it that this rule would not enumerate.
+JOB_HEADER_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_-]*):")
+YAML_NON_STRING_KEYS = frozenset((
+    "null", "true", "false", "yes", "no", "on", "off", "y", "n"))
+
+# Job-level keys from GitHub's workflow syntax (jobs.<job_id>.*) that can let a job
+# whose gate failed conclude success, so that needs.<job>.result, which the Quality
+# gates step reads, need not carry the failure. Present on any job, each is a
+# required-status finding whatever its value (module docstring, REQUIRED STATUS).
+RESULT_MASKING_JOB_KEYS = dict((
+    ("continue-on-error",
+     "GitHub documents it as letting the run pass when the job fails, so "
+     "the failure need not reach needs.<job>.result"),
+    ("uses",
+     "a reusable-workflow call concludes from jobs in a file this rule "
+     "does not read, and any of them may carry continue-on-error"),
+    ("defaults",
+     "defaults.run.shell can replace the program every run: step executes, "
+     "so a gate command need not run or fail its step"),
+    ("container",
+     "the container image supplies the shell every run: step executes in, "
+     "so a gate command need not run or fail its step"),
+))
+
+# The Quality gates job, pinned line for line after its job-id line. Blank and
+# whole-line comment lines are ignored, and the needs: key with its nested lines is
+# compared as the one slot line below, because needs: is checked against the job set
+# instead. Any other departure (a deleted exit 1, a changed success filter, an added
+# key, step or continue-on-error) is a required-status finding. The self-test runs
+# the pinned run: body under bash for every needed-result spelling it must refuse.
+REQUIRED_STATUS_NEEDS_SLOT = "    needs: <every other job>"
+REQUIRED_STATUS_JOB = (
+    "    name: Quality gates",
+    "    if: always()",
+    REQUIRED_STATUS_NEEDS_SLOT,
+    "    runs-on: ubuntu-latest",
+    "    steps:",
+    "      - name: Every quality job succeeded",
+    "        env:",
+    "          RESULTS: ${{ join(needs.*.result, ' ') }}",
+    "        run: |",
+    "          set -euo pipefail",
+    '          echo "Needed job results: ${RESULTS}"',
+    '          rest="${RESULTS:-none}"',
+    '          rest="${rest//success/}"',
+    '          rest="${rest// /}"',
+    '          if [ -n "$rest" ]; then',
+    '            echo "Quality gates: FAILED, every needed job must conclude '
+    'success"',
+    "            exit 1",
+    "          fi",
+    '          echo "Quality gates: PASS, every needed job concluded success"',
+)
 
 ALLOWLIST = (
     {
@@ -397,7 +518,8 @@ YAML_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*:\s*.*$")
 
 Result = namedtuple("Result", "ok value code message")
 Diagnostic = namedtuple("Diagnostic", "source line code message")
-Extraction = namedtuple("Extraction", "members origins diagnostics")
+Extraction = namedtuple(
+    "Extraction", "members origins diagnostics findings", defaults=((),))
 Finding = namedtuple("Finding", "kind identity message")
 ActiveException = namedtuple(
     "ActiveException", "side identity reason backlog")
@@ -1625,6 +1747,9 @@ def _classify_ci_command(
         benign = True
     elif block and stripped in ("else", "fi"):
         benign = True
+    elif block and stripped == "exit 1":
+        # Only a failing exit: it can end a step red, never green.
+        benign = True
     elif (block
             and tokens[:2] == ["git", "rev-parse"]
             and _safe_simple(tokens)):
@@ -1660,6 +1785,180 @@ def _classify_uses(value, source, line_number, diagnostics):
         ))
 
 
+def _unquote(value):
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+        return value[1:-1]
+    return value
+
+
+def _needs_ids(job, fields, source, diagnostics):
+    """Return the job ids a job's needs: names, in order, or None when absent."""
+    entry = fields.get("needs")
+    if entry is None:
+        return None
+    line_number, value = entry
+    items = fields.get("needs-items", [])
+    raw = []
+    if value:
+        if items:
+            diagnostics.append(_diagnostic(
+                source,
+                items[0][0],
+                "needs-shape",
+                "job {!r} needs: has both a value and list items".format(job),
+            ))
+        if value.startswith("[") and value.endswith("]"):
+            raw = [(line_number, part) for part in value[1:-1].split(",")]
+        else:
+            raw = [(line_number, value)]
+    else:
+        for item_number, item in items:
+            if not item.startswith("- "):
+                diagnostics.append(_diagnostic(
+                    source,
+                    item_number,
+                    "needs-shape",
+                    "job {!r} needs: line {!r} is not a list item".format(
+                        job, item),
+                ))
+                continue
+            raw.append((item_number, item[2:]))
+    ids = []
+    for item_number, part in raw:
+        name = _unquote(part.strip())
+        if not JOB_ID_RE.fullmatch(name):
+            diagnostics.append(_diagnostic(
+                source,
+                item_number,
+                "needs-shape",
+                "job {!r} needs: entry {!r} is not a plain job id".format(
+                    job, part.strip()),
+            ))
+            continue
+        ids.append(name)
+    return ids
+
+
+def _result_masking_findings(job_ids, job_fields):
+    """Return a finding for every RESULT_MASKING_JOB_KEYS key on any job."""
+    findings = []
+    for job in job_ids:
+        for line_number, key in job_fields[job].get("masking", ()):
+            findings.append(Finding(
+                "required-status",
+                job,
+                "job {!r} carries {}: at line {}; {}, so a failed gate can "
+                "leave the required status green".format(
+                    job, key, line_number, RESULT_MASKING_JOB_KEYS[key]),
+            ))
+    return findings
+
+
+def _aggregator_shape_findings(aggregator, lines, start):
+    """Compare the job whose id is on lines[start] with REQUIRED_STATUS_JOB.
+
+    Blank and whole-line comment lines are skipped, and a needs: key at the job
+    property indent, with every more-indented line under it, reads as
+    REQUIRED_STATUS_NEEDS_SLOT. Any other line is compared exactly."""
+    body = []
+    in_needs = False
+    for index in range(start + 1, len(lines)):
+        raw = lines[index]
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(raw) - len(raw.lstrip(" "))
+        if indent <= 2:
+            break
+        if in_needs and indent > 4:
+            continue
+        in_needs = indent == 4 and stripped.startswith("needs:")
+        body.append(
+            (index + 1, REQUIRED_STATUS_NEEDS_SLOT if in_needs else raw))
+    for position in range(max(len(body), len(REQUIRED_STATUS_JOB))):
+        got = body[position] if position < len(body) else None
+        want = (REQUIRED_STATUS_JOB[position]
+                if position < len(REQUIRED_STATUS_JOB) else None)
+        if got is None or got[1] != want:
+            return [Finding(
+                "required-status",
+                aggregator,
+                "job {!r} departs from the pinned Quality gates job "
+                "(REQUIRED_STATUS_JOB) at {}: got {!r}, expected {!r}; only "
+                "the pinned step is known to fail unless every needed "
+                "result is success".format(
+                    aggregator,
+                    "the end of the job" if got is None
+                    else "line {}".format(got[0]),
+                    None if got is None else got[1].strip(),
+                    None if want is None else want.strip()),
+            )]
+    return []
+
+
+def _required_status_findings(
+        job_ids, job_fields, lines, source, diagnostics):
+    """Flag a result-masking key on any job; in a multi-job workflow, also
+    require one job named REQUIRED_STATUS_NAME, shaped exactly as
+    REQUIRED_STATUS_JOB, whose needs: lists every other job exactly once
+    (module docstring, REQUIRED STATUS)."""
+    findings = _result_masking_findings(job_ids, job_fields)
+    if len(job_ids) < 2:
+        return findings
+    named = [
+        job for job in job_ids
+        if _unquote(job_fields[job].get("name", (0, ""))[1])
+        == REQUIRED_STATUS_NAME
+    ]
+    if len(named) != 1:
+        findings.append(Finding(
+            "required-status",
+            REQUIRED_STATUS_NAME,
+            "a workflow with more than one job needs exactly one job named "
+            "{!r}, the one required status; found {}".format(
+                REQUIRED_STATUS_NAME, len(named)),
+        ))
+        return findings
+    aggregator = named[0]
+    if job_fields[aggregator].get("if", (0, ""))[1] != "always()":
+        findings.append(Finding(
+            "required-status",
+            aggregator,
+            "job {!r} must carry if: always(); otherwise a failed or "
+            "cancelled needed job skips it, and GitHub reads a skipped "
+            "required job as passing".format(aggregator),
+        ))
+    findings.extend(_aggregator_shape_findings(
+        aggregator, lines, job_fields[aggregator]["start"]))
+    needs = _needs_ids(aggregator, job_fields[aggregator], source, diagnostics)
+    needs = [] if needs is None else needs
+    others = [job for job in job_ids if job != aggregator]
+    for job in others:
+        if job not in needs:
+            findings.append(Finding(
+                "required-status",
+                job,
+                "job {!r} is not in the needs: of {!r}, so its failure "
+                "cannot turn the required status red".format(job, aggregator),
+            ))
+    for job in sorted(set(needs)):
+        if job not in others:
+            findings.append(Finding(
+                "required-status",
+                job,
+                "the needs: of {!r} names {!r}, which is not another job in "
+                "this workflow".format(aggregator, job),
+            ))
+        if needs.count(job) > 1:
+            findings.append(Finding(
+                "required-status",
+                job,
+                "the needs: of {!r} lists {!r} more than once".format(
+                    aggregator, job),
+            ))
+    return findings
+
+
 def extract_ci(text):
     """Extract normalized members from the supported quality.yml subset."""
     source = CI_SOURCE
@@ -1684,6 +1983,12 @@ def extract_ci(text):
     current_mapping = None
     current_job = None
     saw_jobs = False
+    job_ids = []
+    job_fields = {}
+    last_job_key = None
+    top_keys = set()
+    refused_job = False
+    job_body_started = False
     index = 0
 
     while index < len(lines):
@@ -1717,16 +2022,29 @@ def extract_ci(text):
                 feature_error,
             ))
 
-        if stripped == "jobs:" and indent == 0:
-            in_jobs = True
-            saw_jobs = True
-            in_steps = False
-            index += 1
-            continue
-
         if indent == 0:
+            # Any top-level line closes the jobs: mapping, as it does in YAML.
+            in_jobs = False
+            in_steps = False
+            current_mapping = None
+            current_job = None
+            refused_job = False
             top_key = stripped.split(":", 1)[0] if ":" in stripped else stripped
-            if top_key not in TOP_LEVEL_KEYS:
+            if top_key in top_keys:
+                # YAML keeps one value for a repeated key; this rule would
+                # read both, so the repeat is refused rather than merged.
+                diagnostics.append(_diagnostic(
+                    source,
+                    line_number,
+                    "duplicate-key",
+                    "top-level key {!r} is declared more than once".format(
+                        top_key),
+                ))
+            top_keys.add(top_key)
+            if stripped == "jobs:":
+                in_jobs = True
+                saw_jobs = True
+            elif top_key not in TOP_LEVEL_KEYS:
                 diagnostics.append(_diagnostic(
                     source,
                     line_number,
@@ -1741,13 +2059,57 @@ def extract_ci(text):
             in_steps = False
             current_mapping = None
 
-        if (in_jobs
-                and indent == 2
-                and re.fullmatch(
-                    r"[A-Za-z0-9_-]+:", stripped)):
+        if in_jobs and refused_job and indent > 2:
+            # The body of a refused job line: already cannot-evaluate.
+            index += 1
+            continue
+
+        if in_jobs and indent in (1, 3):
+            diagnostics.append(_diagnostic(
+                source,
+                line_number,
+                "job-key-indent",
+                "line {!r} under jobs: is at indent {}; job ids are read "
+                "only at indent 2 and job properties only at indent "
+                "4".format(stripped, indent),
+            ))
+            index += 1
+            continue
+
+        if in_jobs and indent == 2:
             in_steps = False
             current_mapping = None
+            last_job_key = None
+            job_body_started = False
+            header = JOB_HEADER_RE.fullmatch(stripped)
+            if (header is None
+                    or header.group(1).lower() in YAML_NON_STRING_KEYS):
+                diagnostics.append(_diagnostic(
+                    source,
+                    line_number,
+                    "job-key-shape",
+                    "line {!r} at the job-id indent under jobs: is not a "
+                    "plain job id key; YAML can read a job from it that this "
+                    "rule would not enumerate, so it is refused, not "
+                    "skipped".format(stripped),
+                ))
+                current_job = None
+                refused_job = True
+                index += 1
+                continue
+            refused_job = False
             current_job = stripped
+            if stripped[:-1] in job_fields:
+                diagnostics.append(_diagnostic(
+                    source,
+                    line_number,
+                    "duplicate-job",
+                    "job id {!r} is declared more than once".format(
+                        stripped[:-1]),
+                ))
+            else:
+                job_ids.append(stripped[:-1])
+                job_fields[stripped[:-1]] = dict(start=index, keys=set())
             index += 1
             continue
 
@@ -1762,9 +2124,42 @@ def extract_ci(text):
             index += 1
             continue
 
+        if (in_jobs
+                and current_job is not None
+                and indent > 4
+                and not job_body_started):
+            diagnostics.append(_diagnostic(
+                source,
+                line_number,
+                "job-body-indent",
+                "the first line of job {!r} is at indent {}; job properties "
+                "are read only at indent 4".format(current_job[:-1], indent),
+            ))
+            refused_job = True
+            index += 1
+            continue
+
+        if in_jobs and indent == 4:
+            job_body_started = True
+            job_key = stripped.split(":", 1)[0] if ":" in stripped else stripped
+            seen = job_fields[current_job[:-1]]["keys"]
+            if job_key in seen:
+                diagnostics.append(_diagnostic(
+                    source,
+                    line_number,
+                    "duplicate-key",
+                    "job {!r} declares {!r} more than once".format(
+                        current_job[:-1], job_key),
+                ))
+            seen.add(job_key)
+            if job_key in RESULT_MASKING_JOB_KEYS:
+                job_fields[current_job[:-1]].setdefault(
+                    "masking", []).append((line_number, job_key))
+
         if in_jobs and indent == 4 and stripped == "steps:":
             in_steps = True
             current_mapping = None
+            last_job_key = None
             index += 1
             continue
 
@@ -1778,10 +2173,20 @@ def extract_ci(text):
                     "job-level line {!r} is outside the recognized job "
                     "properties".format(stripped),
                 ))
+            last_job_key = job_key
+            if job_key in ("name", "if", "needs"):
+                job_fields[current_job[:-1]][job_key] = (
+                    line_number,
+                    stripped.split(":", 1)[1].strip()
+                    if ":" in stripped else "",
+                )
             index += 1
             continue
 
         if not in_steps:
+            if last_job_key == "needs" and indent == 6:
+                job_fields[current_job[:-1]].setdefault(
+                    "needs-items", []).append((line_number, stripped))
             if re.match(r"(?:-\s+)?run:", stripped):
                 diagnostics.append(_diagnostic(
                     source,
@@ -1962,11 +2367,14 @@ def extract_ci(text):
             "workflow has no top-level jobs: mapping",
         ))
 
+    findings = _required_status_findings(
+        job_ids, job_fields, lines, source, diagnostics)
     diagnostics.extend(_shadow_check(text, source, origins))
     return Extraction(
         frozenset(members),
         origins,
         _dedupe_diagnostics(diagnostics),
+        tuple(findings),
     )
 
 
@@ -2188,6 +2596,8 @@ def reconcile(local_extraction, ci_extraction, allowlist=ALLOWLIST):
                 identity,
                 "mandatory member is absent from CI",
             ))
+
+    findings.extend(ci_extraction.findings)
 
     findings = tuple(sorted(
         findings,
@@ -4436,7 +4846,6 @@ def self_test():
             ("_scrub_scoped_first", "read_text"): 1,
             ("_system_pin_checks", "read_text"): 1,
             ("_system_pin_probe", "splitlines"): 1,
-            ("_write_report", "open-text"): 1,
             ("prepare", "read_text"): 1,
             ("run", "splitlines"): 1,
         },
@@ -4453,6 +4862,383 @@ def self_test():
                     relative,
                     sorted(got_sites.items()),
                     sorted(allowed.items())))
+
+    # 30 REQUIRED STATUS (multi-job shape): the member set is the union over
+    # every job, and a workflow with more than one job routes every job into
+    # one always() job named Quality gates. Each red fixture passes without
+    # the required-status rule (the member sets reconcile), so it fails
+    # without the change.
+    def multi_job_ci(aggregator, first=("python3 tools/a.py",),
+                     second=("python3 tools/b.py",), run_tail=()):
+        lines = ["name: Test", "jobs:"]
+        for job, commands in (("one", common + first), ("two", second)):
+            lines.extend((
+                "  " + job + ":",
+                "    name: Job " + job,
+                "    runs-on: ubuntu-latest",
+                "    steps:",
+                "      - uses: actions/checkout@v4",
+            ))
+            for number, command in enumerate(commands, 1):
+                lines.extend((
+                    "      - name: Gate {}".format(number),
+                    "        run: " + command,
+                ))
+        lines.extend(aggregator)
+        lines.extend(REQUIRED_STATUS_JOB[
+            REQUIRED_STATUS_JOB.index(REQUIRED_STATUS_NEEDS_SLOT) + 1:])
+        lines.extend(run_tail)
+        return "\n".join(lines) + "\n"
+
+    aggregator_head = ("  quality:", "    name: Quality gates")
+    always = ("    if: always()",)
+    needs_both = ("    needs:", "      - one", "      - two")
+    multi_local = local_fixture(
+        common + ("python3 tools/a.py", "python3 tools/b.py"))
+    good_multi = multi_job_ci(aggregator_head + always + needs_both)
+    case("30a every job routed into an always() Quality gates job passes",
+         evaluate(multi_local, good_multi, ()), 0)
+    moved = evaluate(
+        multi_local,
+        multi_job_ci(aggregator_head + always + needs_both,
+                     first=("python3 tools/a.py", "python3 tools/b.py")),
+        ())
+    case("30b a member present in two jobs is counted once", moved, 0)
+    if "tools/b.py" not in moved.ci_members or len(moved.ci_members) != 6:
+        failures.append(
+            "30b moved member was not counted exactly once: {!r}".format(
+                sorted(moved.ci_members)))
+    case("30c a member dropped from every job is a local-only finding",
+         evaluate(multi_local,
+                  multi_job_ci(aggregator_head + always + needs_both,
+                               second=("python3 tools/a.py --self-test",)),
+                  ()),
+         1, kinds=("local-only", "ci-only"))
+    case("30d a job missing from needs: is a required-status finding",
+         evaluate(multi_local,
+                  multi_job_ci(aggregator_head + always
+                               + ("    needs:", "      - one")), ()),
+         1, kinds=("required-status",))
+    case("30e a Quality gates job without if: always() is a finding",
+         evaluate(multi_local,
+                  multi_job_ci(aggregator_head + needs_both), ()),
+         1, kinds=("required-status",))
+    case("30f if: !cancelled() is not always() and is a finding",
+         evaluate(multi_local,
+                  multi_job_ci(aggregator_head
+                               + ("    if: ${{ !cancelled() }}",)
+                               + needs_both), ()),
+         1, kinds=("required-status",))
+    case("30g no job named Quality gates is a finding",
+         evaluate(multi_local,
+                  multi_job_ci(("  quality:", "    name: Aggregate")
+                               + always + needs_both), ()),
+         1, kinds=("required-status",))
+    case("30h a needs: entry naming no other job is a finding",
+         evaluate(multi_local,
+                  multi_job_ci(aggregator_head + always + needs_both
+                               + ("      - quality",)), ()),
+         1, kinds=("required-status",))
+    case("30i a duplicate needs: entry is a finding",
+         evaluate(multi_local,
+                  multi_job_ci(aggregator_head + always + needs_both
+                               + ("      - two",)), ()),
+         1, kinds=("required-status",))
+    case("30j a one-line flow needs: list is recognized",
+         evaluate(multi_local,
+                  multi_job_ci(aggregator_head + always
+                               + ("    needs: [one, two]",)), ()),
+         0)
+    case("30k a needs: entry that is not a plain job id is cannot-evaluate",
+         evaluate(multi_local,
+                  multi_job_ci(aggregator_head + always + needs_both
+                               + ("      - ${{ matrix.job }}",)), ()),
+         2)
+    case("30l exit 0 in a run block stays unclassified",
+         evaluate(multi_local,
+                  multi_job_ci(aggregator_head + always + needs_both,
+                               run_tail=("          exit 0",)), ()),
+         2)
+    case("30m a one-job workflow carries no required-status rule",
+         evaluate(local_fixture(common), ci_fixture(common), ()), 0)
+
+    def diagnostic_case(name, report, want):
+        case(name, report, 2)
+        got = {diagnostic.code for diagnostic in report.diagnostics}
+        if want not in got:
+            failures.append("{}: diagnostics {}, expected {!r}".format(
+                name, sorted(got), want))
+
+    def finding_case(name, report, want_code, needle):
+        case(name, report, want_code, kinds=("required-status",))
+        if not any(needle in finding.message
+                   for finding in report.findings
+                   if finding.kind == "required-status"):
+            failures.append(
+                "{}: no required-status finding mentions {!r}".format(
+                    name, needle))
+
+    def mutated(text, old, new):
+        if text.count(old) != 1:
+            failures.append(
+                "fixture edit {!r} does not match once".format(old))
+        return text.replace(old, new)
+
+    two_block = (
+        "  two:\n"
+        "    name: Job two\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - uses: actions/checkout@v4\n"
+        "      - name: Gate 1\n"
+        "        run: python3 tools/b.py\n"
+    )
+    one_need = multi_job_ci(
+        aggregator_head + always + ("    needs:", "      - one"))
+
+    # 31 JOB ENUMERATION: the rule reads the job set the way YAML does or
+    # refuses. Before the change the quoted and spaced keys with job two left
+    # out of needs: (31a to 31c), the indent-1 line (31i) and the repeated
+    # steps: key (31l) passed with exit 0; the boolean, digit-led and flow keys
+    # were read as other jobs or not at all, and the shifted bodies were
+    # refused under unrelated diagnostics. Each vector names the diagnostic it
+    # expects, so removing any one of these rules fails its own vector. 31m
+    # was a false finding: a key under a later top-level on: read as a job.
+    for label, header in (
+            ("31a a double-quoted job key", '  "two":'),
+            ("31b a single-quoted job key", "  'two':"),
+            ("31c a spaced job key", "  two :"),
+            ("31d a job key YAML reads as a boolean", "  on:"),
+            ("31e a job key GitHub refuses as an id", "  2two:")):
+        diagnostic_case(
+            label + " is cannot-evaluate, never skipped",
+            evaluate(multi_local,
+                     mutated(one_need, "\n  two:\n",
+                             "\n" + header + "\n"),
+                     ()),
+            "job-key-shape")
+    diagnostic_case(
+        "31f a one-line flow job is cannot-evaluate",
+        evaluate(multi_local,
+                 mutated(one_need, two_block,
+                         "  two: {name: Job two, runs-on: ubuntu-latest}\n"),
+                 ()),
+        "job-key-shape")
+    finding_case(
+        "31g control: a plain job key with a comment is read as a job",
+        evaluate(multi_local,
+                 mutated(one_need, "\n  two:\n", "\n  two:  # gates\n"),
+                 ()),
+        1, "'two' is not in the needs:")
+    two_lines = two_block.split("\n")
+    diagnostic_case(
+        "31h a job body at indent 3 is cannot-evaluate",
+        evaluate(multi_local,
+                 mutated(one_need, two_block, "\n".join(
+                     [two_lines[0]] + [line[1:] for line in two_lines[1:]])),
+                 ()),
+        "job-key-indent")
+    diagnostic_case(
+        "31i a line at indent 1 under jobs: is cannot-evaluate",
+        evaluate(multi_local,
+                 mutated(good_multi, "jobs:\n", "jobs:\n extra: x\n"),
+                 ()),
+        "job-key-indent")
+    diagnostic_case(
+        "31j a job body that starts deeper than indent 4 is cannot-evaluate",
+        evaluate(multi_local,
+                 mutated(one_need, two_block, "\n".join(
+                     [two_lines[0]]
+                     + ["  " + line if line else line
+                        for line in two_lines[1:]])),
+                 ()),
+        "job-body-indent")
+    diagnostic_case(
+        "31k a repeated jobs: key is cannot-evaluate",
+        evaluate(multi_local,
+                 good_multi + "jobs:\n" + two_block.replace("two", "three"),
+                 ()),
+        "duplicate-key")
+    diagnostic_case(
+        "31l a repeated job-level steps: key is cannot-evaluate",
+        evaluate(multi_local,
+                 mutated(good_multi, two_block, two_block
+                         + "    steps:\n"
+                         + "      - uses: actions/checkout@v4\n"),
+                 ()),
+        "duplicate-key")
+    case("31m a key under a later top-level on: is not read as a job",
+         evaluate(multi_local, good_multi + "on:\n  push:\n", ()), 0)
+
+    # 32 RESULT-MASKING KEYS: continue-on-error, uses, defaults and container
+    # on any job are each a required-status finding whatever their value,
+    # one-job workflows included. Each red fixture passed before the change.
+    # The step-level siblings (continue-on-error, if:, shell:, and a gate
+    # chained with || true) were already cannot-evaluate through the step-key
+    # allowlist and the shell grammar; 32j to 32m pin that.
+    for label, line, needle in (
+            ("32a continue-on-error: true", "    continue-on-error: true",
+             "continue-on-error"),
+            ("32b continue-on-error: false", "    continue-on-error: false",
+             "continue-on-error"),
+            ("32c an expression continue-on-error",
+             "    continue-on-error: ${{ matrix.experimental }}",
+             "continue-on-error"),
+            ("32d a one-line defaults: run shell",
+             "    defaults: {run: {shell: bash {0}}}", "defaults"),
+            ("32e a container:", "    container: node:20", "container")):
+        finding_case(
+            label + " on a work job is a finding",
+            evaluate(multi_local,
+                     mutated(good_multi, "    name: Job two\n",
+                             "    name: Job two\n" + line + "\n"),
+                     ()),
+            1, needle)
+    finding_case(
+        "32f continue-on-error on the Quality gates job is a finding",
+        evaluate(multi_local,
+                 multi_job_ci(aggregator_head + always
+                              + ("    continue-on-error: true",)
+                              + needs_both), ()),
+        1, "continue-on-error")
+    finding_case(
+        "32g a reusable-workflow uses: job is a finding",
+        evaluate(local_fixture(common + ("python3 tools/a.py",)),
+                 mutated(good_multi, two_block,
+                         "  two:\n"
+                         "    uses: ./.github/workflows/gates.yml\n"),
+                 ()),
+        1, "uses")
+    finding_case(
+        "32h continue-on-error in a one-job workflow is a finding",
+        evaluate(local_fixture(common),
+                 mutated(ci_fixture(common), "    runs-on: ubuntu-latest\n",
+                         "    continue-on-error: true\n"
+                         "    runs-on: ubuntu-latest\n"),
+                 ()),
+        1, "continue-on-error")
+    case("32i control: timeout-minutes and strategy on a work job pass",
+         evaluate(multi_local,
+                  mutated(good_multi, "    name: Job two\n",
+                          "    name: Job two\n"
+                          "    timeout-minutes: 30\n"
+                          "    strategy:\n"
+                          "      fail-fast: false\n"
+                          "      matrix:\n"
+                          "        os: [ubuntu-latest]\n"),
+                  ()),
+         0)
+    for label, line in (
+            ("32j step-level continue-on-error",
+             "        continue-on-error: true"),
+            ("32k a step-level if:", "        if: false"),
+            ("32l a step-level shell:", "        shell: bash {0}")):
+        diagnostic_case(
+            label + " is cannot-evaluate",
+            evaluate(multi_local,
+                     mutated(good_multi, "        run: python3 tools/b.py\n",
+                             "        run: python3 tools/b.py\n"
+                             + line + "\n"),
+                     ()),
+            "step-key")
+    case("32m a gate chained with || true is cannot-evaluate",
+         evaluate(multi_local,
+                  mutated(good_multi, "run: python3 tools/b.py\n",
+                          "run: python3 tools/b.py || true\n"),
+                  ()),
+         2)
+
+    # 33 QUALITY GATES LOGIC: the job is pinned line for line
+    # (REQUIRED_STATUS_JOB), so a change that could let it exit 0 while a
+    # needed result is not success is a finding. Each red fixture passed
+    # before the change.
+    for label, old, new in (
+            ("33a a deleted exit 1", "            exit 1\n", ""),
+            ("33b a success filter that strips every result",
+             'rest="${rest//success/}"', 'rest="${rest//[a-z]/}"'),
+            ("33c an empty result read as success",
+             'rest="${RESULTS:-none}"', 'rest="${RESULTS:-success}"'),
+            ("33d an inverted test", 'if [ -n "$rest" ]',
+             'if [ -z "$rest" ]'),
+            ("33e if: ${{ always() }}", "    if: always()\n",
+             "    if: ${{ always() }}\n"),
+            ("33f an added step",
+             "concluded success\"\n",
+             "concluded success\"\n"
+             "      - uses: actions/checkout@v4\n")):
+        finding_case(
+            label + " in Quality gates is a finding",
+            evaluate(multi_local, mutated(good_multi, old, new), ()),
+            1, "REQUIRED_STATUS_JOB")
+    diagnostic_case(
+        "33g a step-level continue-on-error in Quality gates is "
+        "cannot-evaluate",
+        evaluate(multi_local,
+                 mutated(good_multi,
+                         "      - name: Every quality job succeeded\n",
+                         "      - name: Every quality job succeeded\n"
+                         "        continue-on-error: true\n"),
+                 ()),
+        "step-key")
+    case("33h control: comments and blank lines in Quality gates pass",
+         evaluate(multi_local,
+                  mutated(good_multi, "    name: Quality gates\n",
+                          "    name: Quality gates\n\n    # the status\n"),
+                  ()),
+         0)
+
+    # 33i The pinned run: body itself, run under bash as GitHub runs a step
+    # with no shell: (bash -e), exits 0 only when every needed result is
+    # success. A body without its exit 1 passes a failure, so this vector
+    # fails if the pin loses the line.
+    import os
+    import shutil
+    import subprocess
+    body_at = REQUIRED_STATUS_JOB.index("        run: |") + 1
+    pinned_body = tuple(line[10:] for line in REQUIRED_STATUS_JOB[body_at:])
+    if any(not line.startswith(" " * 10)
+           for line in REQUIRED_STATUS_JOB[body_at:]):
+        failures.append("33i the pinned run: body is not indented 10")
+    bash = shutil.which("bash", path=os.defpath)
+
+    def aggregate(body, results):
+        env = dict(PATH=os.defpath, LC_ALL="C")
+        if results is not None:
+            env["RESULTS"] = results
+        return subprocess.run(
+            ["bash", "--noprofile", "--norc", "-e", "-c",
+             "\n".join(body) + "\n"],
+            env=env, stdin=subprocess.DEVNULL, capture_output=True,
+            text=True, timeout=60).returncode
+
+    if bash is None:
+        failures.append("33i bash not found on " + os.defpath)
+    else:
+        for results, want in (
+                (" ".join(("success",) * 10), 0),
+                ("success", 0),
+                ("failure", 1),
+                ("cancelled", 1),
+                ("skipped", 1),
+                ("success failure", 1),
+                ("success cancelled success", 1),
+                ("success skipped", 1),
+                ("neutral", 1),
+                ("", 1),
+                (None, 1)):
+            count += 1
+            got = aggregate(pinned_body, results)
+            if got != want:
+                failures.append(
+                    "33i pinned body with RESULTS={!r}: exit {}, "
+                    "expected {}".format(results, got, want))
+        count += 1
+        if aggregate(tuple(line for line in pinned_body
+                           if line.strip() != "exit 1"),
+                     "success failure") != 0:
+            failures.append(
+                "33i the deleted-exit-1 body did not pass a failure, so the "
+                "scenarios above do not discriminate")
 
     if failures:
         print("SELF-TEST FAIL:")

@@ -158,6 +158,20 @@ attacker-shaped; and code outside the scanned roots (the vendored opf/tools/_ven
 scopes only widen the candidate set (they fall through to the outer scope), so their own
 bindings never hide a sink.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    import os
+    try:
+        sys.stderr.write(
+            "error: check_dangerous_api.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
 import argparse
 import ast
 import builtins
@@ -165,7 +179,6 @@ import io
 import os
 import shutil
 import stat
-import sys
 import tempfile
 import tokenize
 from pathlib import Path
@@ -441,6 +454,30 @@ ALLOWLIST = (
     ("opf/tools/check_opf_doctor.py", "_self_test_isolated._doctor_suite", "shell", 3, _SAVED),
     ("opf/tools/check_opf_drift.py", "_self_test_isolated._drift_suite", "shell", 4, _SAVED),
     ("opf/tools/check_opf_init_p0.py", "runner_red_checks", "shell", 3, _SAVED),
+    ("tools/_selftest_exit_report.py", "_bootstrap_main", "code", 1,
+     "execution-report bootstrap: runs the runner script named in its own argv as __main__ under its"
+     " audit hook, the same trust as running that script directly with python3; no other input"),
+    ("tools/check_opf_enforce_platforms.py", "load_hook", "code", 1,
+     "check harness: loads the repository's own Claude Code deny hook as a private module, never"
+     " entered in sys.modules and its main() never called, the equivalent of an import; no external"
+     " input"),
+    ("tools/check_selftest_execution.py", "self_test", "code", 1,
+     "self-test probe: exec_module of the repository's own tools/_selftest_exit_report.py beside this"
+     " file, the equivalent of an import; no external input"),
+    ("tools/migrate.py", "self_test", "code", 1,
+     "self-test probe: reloads this file itself under a finder that hides tomllib, to pin the"
+     " nested missing-dependency refusal; no external input"),
+    ("tools/pin.py", "self_test", "code", 1,
+     "self-test probe: reloads this file itself under a finder that hides tomllib, to pin the"
+     " nested missing-dependency refusal; no external input"),
+    ("tools/selftest_orch_hooks.py", "_rdp_cases", "shell", 2, _SAVED),
+    ("opf/tools/check_opf_doctor.py", "_claude_hook_self_test", "code", 1,
+     "self-test probe: loads the repository's own opf/enforcement/claude/pretooluse_deny.py as a"
+     " fresh module to drive its classifier directly; no external input"),
+    ("opf/tools/check_opf_init.py", "_suite_isolated.load_mutant", "code", 1,
+     _MUTANT + " (each route mutant, written to the self-test's temporary directory first)"),
+    ("opf/tools/check_opf_init.py", "_suite_isolated.load_plain", "code", 1,
+     _MUTANT + " (each boot mutant, written to the self-test's temporary directory first)"),
 )
 
 

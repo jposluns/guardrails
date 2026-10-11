@@ -78,11 +78,16 @@ the sys.path insert idiom the repo's tools share.
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: opf.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: opf.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 import json
 import os
@@ -107,7 +112,14 @@ def _bootstrap():
     top for exactly this reason -- an eager top-level import failed before main()'s contract could apply.
     Idempotent: a re-import of an already-loaded module is a cheap no-op, so main() may call it on every
     invocation. Returns EXIT_OK on success, or EXIT_MALFORMED with a located diagnostic naming the helper
-    that could not be brought in."""
+    that could not be brought in; the variable parts of that diagnostic (the helper name or the read
+    error's text) are rendered through _init_inert, the one init escaper, so no raw, shell-live value is
+    printed on the way to any verb. A bootstrap failure OTHER than ImportError or OSError (for example a
+    SyntaxError in an installed helper) is not mapped here and surfaces as Python's own traceback: it
+    runs before init dispatch and outside _cmd_init's rendering boundary, a window _cmd_init and
+    OPF-QUICKSTART state. Both mapped arms render their variable parts AT this print (the init suite
+    drives a hostile ImportError, a nameless hostile ImportError and a hostile OSError through them
+    and requires each printed line inert, QA round 13 C)."""
     global _opf_store, _opf_schema, _opf_release, _opf_changelog, _opf_check
     global _opf_emit, _opf_views, _opf_fuzz, _opf_observe, _opf_absorb
     global _opf_worklog, _opf_write_guard, _opf_record, _opf_adopt_apply, _opf_adopt_plan
@@ -130,11 +142,14 @@ def _bootstrap():
         import _opf_adopt_plan   # OPF-ADOPT K9a: read-only investigation + plan freeze (the adopt planner)
         import _opf_adopt_state  # homes-1 adoption control area and bounded adoption state (C-CONTAINMENT)
     except ImportError as exc:
-        print("opf: cannot bootstrap: {} (cannot evaluate)".format(exc.name or exc), file=sys.stderr)
+        print("opf: cannot bootstrap: {} (cannot evaluate)".format(
+            _init_inert(exc.name or str(exc))), file=sys.stderr)
         return EXIT_MALFORMED
     except OSError as exc:
-        print("opf: cannot bootstrap: a helper module could not be read ({!r}) (cannot evaluate)".format(
-            exc), file=sys.stderr)
+        print("opf: cannot bootstrap: a helper module could not be read "
+              "({}: {}) (cannot evaluate)".format(
+                  _init_inert(type(exc).__name__), _init_inert(str(exc))),
+              file=sys.stderr)
         return EXIT_MALFORMED
     return EXIT_OK
 
@@ -1135,6 +1150,1763 @@ def _watchdog_isolation_self_test():
 # deadline-flips mutant forces a timeout ABOVE this bound and must stay
 # red, and the per-case subprocess budget still bounds a hang.
 _DEADLINE_EXECUTION_BOUND = 5.0
+# The deadline fixture's requested run_bounded timeout, and the allowance it
+# grants after the guardian's declared drain deadline for receipt delivery and
+# parent scheduling (its cleanup check). Named so the regression runner's
+# floor pins them and the leg ledger charges each fixture call by them.
+_DEADLINE_CASE_TIMEOUT = 0.25
+_DEADLINE_RECEIPT_ALLOWANCE = 1.0
+# Interpreter start, `import opf` and _bootstrap for one fixture process: the
+# launch margin the regression runner adds on top of a leg's own budget.
+_WATCHDOG_LAUNCH_MARGIN = 30
+# The per-launch timeout of _watchdog_completion_case's launch() helper.
+_COMPLETION_LAUNCH_TIMEOUT = 10
+
+
+def _deadline_case_budget(timeout_s=_DEADLINE_CASE_TIMEOUT):
+    """The longest run one _watchdog_deadline_case may take after its own start
+    without failing: execution up to the larger of the requested timeout and the
+    tolerated execution bound, then the guardian's full cleanup grace, then the
+    receipt allowance its cleanup check grants. A run_bounded override (the
+    deadline-flips late mutant) passes its own timeout."""
+    import _opf_emit
+    return (max(timeout_s, _DEADLINE_EXECUTION_BOUND) + _opf_emit._FIXTURE_CLEANUP_GRACE
+            + _DEADLINE_RECEIPT_ALLOWANCE)
+
+
+def _watchdog_finite_seconds(value):
+    """A usable bound or budget: a finite, positive int or float (never a bool)."""
+    import math
+    # type(value), never isinstance: a value whose __class__ property claims
+    # float passes isinstance and then raises in math.isfinite (claude
+    # round-9 MINOR); its exact type gates it out instead.
+    kind = type(value)
+    return (kind is not bool and issubclass(kind, (int, float))
+            and math.isfinite(value) and value > 0)
+
+
+def _watchdog_bound_faults(bounds, budgets):
+    """The kill-timeout rule for the regression runner: every leg's independent
+    process bound must cover the leg's own budget plus the launch margin, so a
+    leg whose CHARGED waits stay inside its declared budget is never killed and
+    reported as a hang. Waits the ledger does not charge (the residual list
+    above _WATCHDOG_POLL_TICK) sit outside that guarantee. Returns the
+    faults: a leg without a declared budget, a non-numeric, non-finite or
+    non-positive bound or budget (a NaN compares False with everything, so it
+    is refused explicitly), or a bound below budget + margin."""
+    faults = []
+    for label, bound in bounds.items():
+        budget = budgets.get(label)
+        if label not in budgets:
+            faults.append(label + ": no declared budget")
+        elif not _watchdog_finite_seconds(budget):
+            faults.append("%s: budget %r is not a finite positive number" % (label, budget))
+        elif not _watchdog_finite_seconds(bound):
+            faults.append("%s: bound %r is not a finite positive number" % (label, bound))
+        elif bound < budget + _WATCHDOG_LAUNCH_MARGIN:
+            faults.append("%s: bound %ss below its budget %ss plus the %ss launch margin" % (
+                label, bound, budget, _WATCHDOG_LAUNCH_MARGIN))
+    return faults
+
+
+# Runtime accounting of a watchdog leg's bounded waits. Static source analysis
+# cannot soundly bound these legs (data-dependent `while` loops, helpers
+# resolved at run time, callees outside the leg's own source), so the budget
+# is DECLARED per leg and every bounded wait the leg makes in its own process
+# through a REGISTERED primitive charges its full timeout (never its elapsed
+# time) to that budget while it runs, on whichever thread makes it: each
+# fixture-process call (run_bounded, _run_fixture_process, which
+# run_status_owned and the completion launch() use) at the deadline case's
+# per-call allowance for its timeout, each Thread.join, Event.wait,
+# Condition.wait, Queue.get, select.select and sleep timeout, and each polling
+# deadline the leg opens through _watchdog_deadline. A sub-tick sleep is
+# exempt ONLY while the sleeping thread is inside an unexpired deadline it
+# opened through _watchdog_deadline (a polling step that deadline already
+# charged); anywhere else it charges its full value. Waits a thread makes
+# while it is itself inside a REGISTERED call (the fixture machinery under a
+# run_bounded or _run_fixture_process call, Condition.wait under Event.wait
+# or Queue.get) belong to that outer call and are not charged twice; waits
+# OTHER threads make during that call are charged normally. Both the sub-tick
+# exemption and that suppression are keyed by the Thread object's IDENTITY
+# (a map from id(thread) to the pair (thread, container), the object
+# retained so its id cannot be reused, every lookup checking `entry[0] is
+# thread`), never by the object's own equality or hash (a Thread subclass
+# with a custom __eq__ and __hash__ would otherwise share one entry between
+# distinct threads) and never by threading.get_ident(), whose OS-level ident
+# is recycled once a thread exits and would hand a dead thread's exemption
+# to an unrelated successor. The ledger holds NO LOCK anywhere on the
+# charge, deadline, wrapper or report paths: nothing a same-thread
+# signal handler, a finalizer or a forked child can block on. Every
+# entry path (the shared wrapper, _watchdog_deadline, _watchdog_charge)
+# binds the ledger ONCE and appends a BEGIN token (a unique object) to
+# the ledger's append-only `begun` list BEFORE any user code runs
+# (before the value's own conversion and before any formatting that
+# could call a user __repr__), and on completion, success or exception,
+# appends exactly one LAND record (the token plus its charged seconds,
+# its uncountable label, or a void marker) to the append-only `landed`
+# list (the BEGIN append is the first step inside the try whose finally
+# appends the LAND, so an exception a same-thread signal handler raises
+# right after the BEGIN still lands it; an exception raised
+# asynchronously INSIDE that finally, before its append runs, is the
+# one way a token stays unlanded, and the report then refuses to
+# evaluate, never passes): list.append is atomic under the GIL, and nothing on these paths
+# read-modify-writes shared state (the per-thread suppression depth is
+# an append-only list of +1/-1 steps summed at read time). The leg's
+# report runs a CLOSING PROTOCOL: the ledger leaves the stack first (no
+# new charge can bind it), the report marks it closed, then waits,
+# bounded by _WATCHDOG_CLOSE_BOUND and polling with the pristine sleep
+# captured at install, until every BEGIN token has a LAND record, and
+# only then sums the landed records. A charge that began during the leg
+# is therefore either in the verdict or, if it cannot land within the
+# bound, turns the leg into a distinct CANNOT-EVALUATE (accounting
+# incomplete, naming the unlanded tokens), never a pass and never a
+# reported budget violation. A charge that finds its bound ledger
+# already closed when its BEGIN lands appends a void LAND there (so the
+# report never waits on it) and re-binds whichever ledger is innermost
+# THEN (its real wait has not started, so that is where the wait runs).
+# The per-thread maps (suppression depth, deadline ticks) are written
+# only by the thread that owns the key, and each ticks entry is an
+# append-only list whose max is taken at read time, so a nested longer
+# deadline opened by a same-thread signal handler is never overwritten
+# by the interrupted store. Suppression is interruption-safe: each
+# registered call stores an OPEN step (a unique token, in its thread's
+# map of open steps) as the first step inside the try whose finally pops
+# it, so an exception a raising signal handler throws right after the
+# OPEN still closes it; a charge suppressed under open steps lands a
+# record naming them, and the report treats a suppressed record whose
+# step never closed (an exception raised inside that finally before its
+# pop) like an unlanded token: it waits, bounded, and then refuses to
+# evaluate, never a silent pass over a suppression that outlived its
+# call. A same-thread signal handler, finalizer or nested registered call
+# landing mid-charge only ever APPENDS or stores, never waits, so it can
+# never self-deadlock. A forked child never waits on an inherited ledger
+# and never changes the parent's: every ledger step checks the ledger's
+# creating pid first, the charge re-checks it before handing its ledger
+# to a caller (a child forked inside the charge, say by a signal
+# handler, gets (None, None)), and the callers gate their tick and
+# suppression writes on it too; a child forked by a signal handler
+# between one of those checks and the write that follows it writes only
+# to its own copy-on-write memory, never to the parent's ledger.
+# Charges go to the
+# INNERMOST live ledger in this process: while a nested _watchdog_leg_entry
+# runs, EVERY thread's registered wait, including an outer leg's concurrent
+# background wait, charges the nested leg's ledger and is absent from the
+# outer leg's own accounting (the launcher legs' budgets carry margin for
+# exactly that gap). A leg whose
+# charged waits exceed its declared budget, or that makes a wait whose
+# timeout is not a finite number (including a fixture call whose timeout the
+# ledger cannot introspect), FAILS as a test failure; the runner's kill bound
+# stays budget + launch margin. The guarantee is exactly what the ledger
+# proves: the kill bound exceeds the leg's CHARGED waits plus the launch
+# margin. Waits the ledger does NOT charge sit outside that guarantee: a
+# wait with no timeout (a blocking waitpid on a child the leg has killed, an
+# untimed Event.wait handshake), threading.Lock.acquire(timeout=...),
+# queue.SimpleQueue.get, select.poll (used by _opf_emit's close/collect
+# paths), os.read, and socket operations. A sub-tick polling loop against a
+# RAW time.monotonic() deadline inside _opf_emit charges each tick it makes
+# outside a charged deadline and outside a charged call, so it charges about
+# its elapsed time, never its full bound. The conversion behind
+# _watchdog_deadline covers 52 polling-deadline sites; nine further
+# _FixtureProcess lifetimes became _WATCHDOG_FIXTURE_HOLD.
+_WATCHDOG_POLL_TICK = 0.1
+# How long a completion leg holds a sleep-until-killed fixture open: ten of
+# its 30 s polling deadlines. A fixture's deadline is not itself a wait; the
+# fixture's own waits (bounded by what remains of it) charge themselves.
+# Charging each held fixture's start() at what remains of this hold raises
+# those legs' declared budgets and therefore their kill bounds (up to tens
+# of minutes for a leg holding several fixtures): a real hang there is still
+# detected, but only at that slower bound -- a chosen trade of detection
+# latency for launch coverage, not a promptness proof.
+_WATCHDOG_FIXTURE_HOLD = 300
+# How long a leg's report waits for charges still in flight (their BEGIN
+# token appended before any user code ran, their conversion unfinished)
+# to land before it refuses to evaluate: a charge that cannot land
+# within this bound leaves the accounting incomplete, and the leg's
+# result is a distinct CANNOT-EVALUATE (EXIT_MALFORMED), never a pass
+# and never a reported budget violation (the bound proves only that the
+# accounting could not finish, not that any budget was exceeded).
+# Normal charges land in microseconds and the closing loop exits on its
+# first check. Stated limit: a heavily loaded host that stalls a live
+# conversion past this bound yields that CANNOT-EVALUATE for otherwise
+# within-budget work (fail-closed, loud, and distinct from both a pass
+# and a budget violation).
+_WATCHDOG_CLOSE_BOUND = 5
+_WATCHDOG_LEDGERS = []
+_WATCHDOG_ORIGINALS = []
+# The pristine time.sleep, captured at install time BEFORE the wrapper
+# replaces it: the closing wait of a NESTED leg polls with it, so that poll
+# can never charge the outer leg's ledger.
+_WATCHDOG_REAL_SLEEP = None
+
+
+def _watchdog_live_ledger():
+    """The innermost ledger THIS process created, or None: one bounded read
+    that tolerates a concurrent leg end between the emptiness check and the
+    index (never IndexError), and never hands a forked child the inherited
+    ledger."""
+    try:
+        ledger = _WATCHDOG_LEDGERS[-1]
+    except IndexError:
+        return None
+    return ledger if ledger["pid"] == os.getpid() else None
+
+
+def _watchdog_thread_entry(table, thread, factory):
+    """The per-thread container `table` holds for `thread`, keyed by the
+    Thread object's IDENTITY: `table` maps id(thread) to the pair (thread,
+    container), never the Thread object itself, whose user __eq__ and
+    __hash__ (a Thread subclass may define both) would decide membership
+    and let distinct threads share one exemption or suppression (codex
+    round-9 MAJOR 2). The pair retains the Thread object, so its id cannot
+    be reused while the entry exists, and every lookup checks
+    `entry[0] is thread`. No user code runs: the key is an int. With a
+    factory, a missing entry is created in ONE atomic dict step
+    (setdefault), so a same-thread signal handler's nested store lands in
+    the SAME container; without one, a missing entry is None. A
+    mismatched entry (never expected) yields a fresh unregistered
+    container, or None: nothing exempts or suppresses through it, so the
+    wait is charged (fail closed)."""
+    key = id(thread)
+    if factory is None:
+        entry = table.get(key)
+    else:
+        entry = table.setdefault(key, (thread, factory()))
+    if entry is None or entry[0] is not thread:
+        return None if factory is None else factory()
+    return entry[1]
+
+
+def _watchdog_charge(seconds, what, suppressible=True, transform=None):
+    """Charge one bounded wait to the running leg's ledger (a no-op outside a
+    leg or in a forked child of the leg), with NO lock anywhere: the only
+    shared-state writes are appends to the ledger's append-only `begun` and
+    `landed` lists, atomic under the GIL, so a same-thread signal handler,
+    finalizer or nested registered call landing mid-charge can never block,
+    and a forked child never waits on an inherited ledger. The ledger is
+    bound ONCE and a BEGIN token appended BEFORE any user code runs (all
+    the user code a charge runs comes afterwards: the value's conversion,
+    where float() runs an int or float subclass's __float__; the type gate
+    reads type(seconds), never a user __class__, and the thread-keyed maps
+    are keyed by id(thread) (_watchdog_thread_entry), so no user Thread
+    subclass's __eq__ or __hash__ runs in the suppression read here or in
+    the sub-tick exemption's ticks lookup; `what` must already be a plain
+    safe string, never one built by formatting a user object; a signal
+    handler may still run any code between any two steps); the leg's
+    report refuses
+    to evaluate until the token has a LAND record. The BEGIN append is the
+    first step inside the try whose finally appends the LAND record, so
+    exactly one LAND record is appended on every completion path, success
+    or exception, including an exception a same-thread signal handler
+    raises right after the BEGIN, and the retry branch lands through the
+    same finally. Stated limit: an exception raised asynchronously INSIDE
+    that finally, before its append runs, still leaves the token unlanded;
+    the report then refuses to evaluate (CANNOT-EVALUATE naming the
+    token), never a pass. A charge whose bound ledger
+    is already closed when its BEGIN lands appends a void LAND there and
+    re-binds whichever ledger is innermost THEN (its real wait has not
+    started, so it belongs there, or to no leg); a charge that finds
+    itself in a forked child (a conversion resumed there, or a signal
+    handler that forked inside the charge) lands nothing and returns
+    (None, None), never the inherited ledger. Suppression covers the
+    REGISTERED calls (charged or untimed) the current thread is inside:
+    each stores an OPEN step in this thread's map of open steps, keyed by
+    the Thread object's identity (_watchdog_thread_entry: never its
+    __eq__ or __hash__, never a recyclable OS ident), and pops it on exit.
+    A suppressible charge made while this thread has open steps belongs
+    to the outer call and lands a SUPPRESSED record naming those steps:
+    it counts as nothing, and the report refuses to evaluate while any
+    step it names stays open past the closing bound (a step whose pop an
+    exception interrupted never closes), while OTHER threads' waits are
+    charged even during this one's call. An unsuppressible record
+    (suppressible=False: a fixture timeout the ledger cannot introspect)
+    lands uncountable inside any suppression. Only a value whose EXACT
+    type (type(seconds), never a user __class__) is a non-bool int or
+    float, subclasses included (so a user __float__ still runs, after the
+    BEGIN), is convertible; outside a suppression (where every
+    suppressible charge lands suppressed) a bool, str, bytes or other
+    value, including one whose __class__ property claims float, lands
+    uncountable, exactly as _watchdog_finite_seconds refuses it, on the
+    fixture path too: `transform` never runs on such a value, so the
+    fixture allowance cannot turn it into a 0.0 wait. A convertible value
+    whose conversion fails (an int too large for a float) or yields a
+    non-finite number still reaches the transform. `transform` is a
+    TRUSTED post-conversion hook (the wrapper's fixture allowance and
+    sub-tick exemption), written in this module, never user code, though
+    the sub-tick exemption's ticks lookup hashes the current Thread
+    object as above. Returns the normalized (and
+    transformed) float AND the one ledger bound at the BEGIN, as the
+    pair (normalized, ledger), or (None, None) off the charged
+    paths; the caller carries that ledger through every later step
+    (the deadline tick, the wrapper suppression depth), so the
+    stack is never re-read after a charge and neither an exemption
+    nor a suppression can migrate to a ledger that was not charged
+    (codex round-8 MAJOR 2)."""
+    import threading
+    while True:
+        # Bind ONCE, before any user code: the conversion below may suspend
+        # this thread across the leg's end, and the stack is never re-read
+        # after it. The bounded read tolerates a concurrent leg end between
+        # the emptiness check and the index.
+        try:
+            ledger = _WATCHDOG_LEDGERS[-1]
+        except IndexError:
+            return None, None
+        if ledger["pid"] != os.getpid():
+            return None, None
+        token = [what]
+        record = None
+        try:
+            # BEGIN: one atomic append of a unique token, before the closed
+            # check, and the FIRST step inside this try, so an exception a
+            # same-thread signal handler raises right after it still lands
+            # the token through the finally below. The report marks the
+            # ledger closed and THEN reads `begun`; this side appends and
+            # THEN reads `closed`, so under the GIL every charge either sees
+            # the close here or its token is seen (and waited for) by the
+            # report.
+            ledger["begun"].append(token)
+            if ledger["closed"]:
+                # Closed between the bind and the BEGIN: that leg's report
+                # is out (or waiting only on tokens it has seen), so the
+                # finally lands void THERE (the report never waits on a
+                # landed token) and the loop re-binds. Each retry binds a
+                # strictly outer ledger (a closed ledger has already left
+                # the stack), so the loop terminates.
+                continue
+            # Normalize AFTER the BEGIN, holding nothing: the value's
+            # conversion runs user code (float() runs a subclass
+            # __float__), which may block, fork, raise or make registered
+            # calls. The gate reads type(seconds), never a user __class__
+            # (claude round-9 MINOR: a value whose __class__ property
+            # claims float passes isinstance, then float() refuses it).
+            # Only a non-bool int or float type is convertible; anything
+            # else is uncountable, exactly as _watchdog_finite_seconds
+            # refuses it, and never reaches the transform (whose fixture
+            # allowance would turn its NaN into a 0.0 wait).
+            kind = type(seconds)
+            convertible = kind is not bool and issubclass(kind, (int, float))
+            normalized = float("nan")
+            if convertible:
+                try:
+                    normalized = float(seconds)
+                except (TypeError, ValueError, OverflowError):
+                    normalized = float("nan")
+            if ledger["pid"] != os.getpid():
+                # A forked child resuming the conversion: lands nothing (the
+                # landing below is pid-gated too) and returns normally.
+                return None, None
+            if transform is not None and convertible:
+                normalized = transform(normalized, ledger)
+            # Identity-keyed (no user __eq__ or __hash__ runs): the OPEN
+            # steps of the registered calls this thread is inside.
+            opens = _watchdog_thread_entry(
+                ledger["depth"], threading.current_thread(), None)
+            opened = tuple(opens.values()) if opens else ()
+            if not suppressible:
+                record = ("uncountable", what)
+            elif opened:
+                # Belongs to this thread's outer registered call. The
+                # record names the open steps: the report accepts it as
+                # nothing only once each of them has closed (codex round-9
+                # MAJOR 1: a step whose close an exception interrupted
+                # never closes, and the leg is then CANNOT-EVALUATE, never
+                # a silent pass).
+                record = ("suppressed", what, opens, opened)
+            elif not _watchdog_finite_seconds(normalized) and normalized != 0:
+                record = ("uncountable", "%s(%r)" % (what, normalized))
+            else:
+                record = ("wait", "%s(%r)" % (what, normalized), normalized)
+            if ledger["pid"] != os.getpid():
+                # A child forked INSIDE this charge after the check above (a
+                # signal handler may fork anywhere): it gets no ledger, so
+                # no caller writes a tick or a suppression step to the
+                # inherited one (claude round-9 MINOR); the landing below
+                # is pid-gated too.
+                return None, None
+            return normalized, ledger
+        finally:
+            # Exactly one LAND per BEGIN on every path, success, retry or
+            # exception (a user conversion may raise anything, and a
+            # signal handler may raise right after the BEGIN); void on the
+            # retry and exceptional paths, and never in a forked child.
+            if ledger["pid"] == os.getpid():
+                ledger["landed"].append((token, record))
+
+
+def _watchdog_deadline(seconds):
+    """A polling deadline `seconds` from now, charged to the running leg. While
+    it is unexpired, the opening thread's (lifetime identity: this Thread
+    object's, never a recycled ident's) sub-tick sleeps are polling steps the
+    deadline's own charge already covers. The charge appends its BEGIN before
+    the value's conversion AND before any formatting of it (%r of a user
+    object is user code). The per-thread ticks entry is an append-only LIST
+    read through max(), never a read-modify-write store: a nested longer
+    deadline a same-thread signal handler opens mid-store survives the
+    interrupted outer store."""
+    import threading
+    import time
+    # The ONE ledger the charge bound at its BEGIN is carried into
+    # the tick store below, never a re-read of the stack: the
+    # conversion may suspend this thread across the leg end, and a
+    # re-read here would hand the tick, and with it the sub-tick
+    # exemption, to an outer ledger that was never charged (codex
+    # round-8 MAJOR 2).
+    normalized, ledger = _watchdog_charge(seconds, "deadline")
+    if (ledger is not None and normalized is not None
+            and _watchdog_finite_seconds(normalized)
+            and ledger["pid"] == os.getpid()):
+        # Monotone-safe without a lock: only the opening thread appends to
+        # its own entry's list (keyed by id(thread), created in one atomic
+        # setdefault, so a same-thread signal handler's nested append
+        # lands in the SAME list), and readers take the max of every
+        # deadline this thread ever opened, so an interleaved nested
+        # longer deadline is never overwritten by the interrupted store.
+        # Pid-gated: a forked child never writes the inherited ledger.
+        ticks = _watchdog_thread_entry(
+            ledger["ticks"], threading.current_thread(), list)
+        ticks.append(time.monotonic() + normalized)
+    return time.monotonic() + seconds
+
+
+def _watchdog_install_charges():
+    """Route the leg process's bounded-wait primitives through _watchdog_charge."""
+    import functools
+    import inspect
+    import queue
+    import select
+    import threading
+    import time
+    import _opf_emit
+
+    # Captured before the sleep wrapper installs below: the closing wait of
+    # a nested leg polls with the pristine sleep, never charging the outer
+    # leg's ledger.
+    global _WATCHDOG_REAL_SLEEP
+    _WATCHDOG_REAL_SLEEP = time.sleep
+
+    # The allowance inputs are pinned HERE, at install time, before the leg
+    # body runs: a leg that patches the module constants the allowance derives
+    # from cannot lower its own charges (the deadline-flips leg patches
+    # _DEADLINE_EXECUTION_BOUND; its charges stay at the pristine allowance).
+    grace = _opf_emit._FIXTURE_CLEANUP_GRACE
+    execution_bound = _DEADLINE_EXECUTION_BOUND
+    receipt = _DEADLINE_RECEIPT_ALLOWANCE
+
+    def fixture_allowance(seconds):
+        return max(seconds, execution_bound) + grace + receipt
+
+    # A timeout the ledger cannot determine. Distinct from None (an
+    # intentionally untimed primitive, never charged): an unknown FIXTURE
+    # default is uncountable and fails the leg.
+    unknown = object()
+
+    def subtick_exempt(normalized, ledger):
+        # TRUSTED post-conversion hook of the charge, never user code. The
+        # ledger was bound by the charge itself (pid-keyed: a forked child
+        # never reaches any transform). Max at read time: the largest
+        # deadline this thread ever opened governs, so a nested longer
+        # deadline survives the interrupted outer store.
+        if 0 <= normalized < _WATCHDOG_POLL_TICK:
+            # Identity-keyed: another thread that merely compares equal
+            # (a user __eq__) never lends this one its exemption.
+            ticks = _watchdog_thread_entry(
+                ledger["ticks"], threading.current_thread(), None)
+            if ticks and time.monotonic() < max(ticks):
+                return 0.0  # a polling step its charged deadline covers
+        return normalized
+
+    def fixture_charged(normalized, ledger):
+        # refused before fork (a non-finite or non-positive timeout)
+        return (fixture_allowance(normalized)
+                if _watchdog_finite_seconds(normalized) else 0.0)
+
+    def charged(owner, name, timeout_of, fixture=False):
+        real = getattr(owner, name)
+        transform = fixture_charged if fixture else (
+            subtick_exempt if name == "sleep" else None)
+
+        @functools.wraps(real)
+        def wrapper(*args, **kwargs):
+            timeout = timeout_of(args, kwargs)
+            if timeout is unknown:
+                # Unsuppressible: a fixture call whose timeout cannot be
+                # introspected never runs uncounted, at ANY suppression depth
+                # (a nested unknown-default call still fails the leg).
+                _, ledger = _watchdog_charge(
+                    float("nan"), "%s(<unknown timeout>)" % name,
+                    suppressible=False)
+            elif timeout is not None:
+                # The RAW value goes in: the charge appends its BEGIN token
+                # before the value's own conversion or any formatting of it
+                # runs (registration precedes user code on every entry
+                # path), and the trusted transform (fixture allowance,
+                # sub-tick exemption) runs after the conversion.
+                _, ledger = _watchdog_charge(timeout, name, transform=transform)
+            else:
+                # No charge was made (an intentionally untimed
+                # primitive): with no charged ledger to carry, the
+                # depth bookkeeping alone binds the live one.
+                ledger = _watchdog_live_ledger()
+            # Per-thread suppression, keyed by the Thread object's
+            # identity (_watchdog_thread_entry: never its __eq__ or
+            # __hash__, never a recyclable ident): while THIS thread is
+            # inside the real call, its nested waits (fixture machinery,
+            # Condition.wait under Event.wait or Queue.get) belong to the
+            # charge above. Other threads' waits keep charging. Every
+            # registered call, charged or untimed, stores one OPEN step (a
+            # unique token, keyed by its id) in this thread's map and pops
+            # it on exit: single atomic dict steps, never a
+            # read-modify-write a same-thread signal handler could tear.
+            # The step goes on the ONE ledger the charge above bound at
+            # its BEGIN (codex round-8 MAJOR 2: a timeout conversion
+            # suspended across a nested leg end must not suppress waits
+            # on an outer, uncharged ledger); None in a forked child
+            # (plain calls there), and both the OPEN and the pop are
+            # pid-gated, so a child forked during the real call writes
+            # nothing to the inherited ledger on this path.
+            me = threading.current_thread()
+            token = [name]
+            opens = None
+            try:
+                # OPEN is the FIRST step inside this try (codex round-9
+                # MAJOR 1): an exception a raising signal handler throws
+                # right after it still reaches the pop below, so no
+                # suppression outlives its call. A pop of an OPEN that
+                # never happened is a no-op.
+                if ledger is not None and ledger["pid"] == os.getpid():
+                    opens = _watchdog_thread_entry(ledger["depth"], me, dict)
+                    opens[id(token)] = token
+                return real(*args, **kwargs)
+            finally:
+                # An exception raised inside this finally before the pop
+                # runs leaves the step OPEN: every charge it then
+                # suppresses names it, and the report refuses to evaluate
+                # while it stays open, never a silent pass.
+                if opens is not None and ledger["pid"] == os.getpid():
+                    opens.pop(id(token), None)
+        _WATCHDOG_ORIGINALS.append((owner, name, real))
+        setattr(owner, name, wrapper)
+
+    def argument(index, key, default=None):
+        return lambda args, kwargs: kwargs.get(key, args[index] if len(args) > index else default)
+
+    def default(function, name):
+        # `unknown`, never None, when the signature cannot be introspected or
+        # the parameter has no default: an uncountable fixture timeout fails
+        # the leg instead of silently disabling its accounting.
+        try:
+            value = inspect.signature(function).parameters[name].default
+        except (TypeError, ValueError, KeyError):
+            return unknown
+        return unknown if value is inspect.Parameter.empty else value
+
+    run_default = default(_opf_emit.run_bounded, "timeout_s")
+    fixture_default = default(_opf_emit._run_fixture_process, "timeout")
+    charged(_opf_emit, "run_bounded", argument(1, "timeout_s", run_default), fixture=True)
+    charged(_opf_emit, "_run_fixture_process",
+            lambda args, kwargs: kwargs.get("timeout", fixture_default), fixture=True)
+    charged(threading.Thread, "join", argument(1, "timeout"))
+    charged(threading.Event, "wait", argument(1, "timeout"))
+    charged(threading.Condition, "wait", argument(1, "timeout"))
+    charged(queue.Queue, "get", argument(2, "timeout"))
+    charged(select, "select", argument(3, "timeout"))
+    charged(time, "sleep", argument(0, "secs"))
+
+
+def _watchdog_leg_entry(budget, case, *args):
+    """Run one watchdog leg against its declared budget: its charged bounded waits
+    must stay within the budget, or the leg fails (never a silent pass). The
+    closing protocol, lock-free: the ledger leaves the stack first (no new
+    charge can bind it), the report marks it closed, then waits, bounded by
+    _WATCHDOG_CLOSE_BOUND and polling with the pristine sleep captured at
+    install, until every BEGIN token in the append-only `begun` list has a
+    LAND record, and only then sums the landed records. A passing verdict is
+    therefore never issued while a charge of this leg is unlanded, and a
+    charge that cannot land within the bound makes the leg a distinct
+    CANNOT-EVALUATE (EXIT_MALFORMED: the accounting is incomplete, naming
+    the unlanded tokens), never a pass and never a reported budget
+    violation. Stated limit: a heavily loaded host that stalls a live
+    conversion past the bound yields that CANNOT-EVALUATE for otherwise
+    within-budget work. The report holds no lock and a forked child never
+    runs it (the ledger is pid-keyed)."""
+    if not _watchdog_finite_seconds(budget):
+        print("opf watchdog leg: FAIL (declared budget %r is not a finite positive number)"
+              % (budget,))
+        return EXIT_FINDING
+    import math
+    import time
+    ledger = dict(pid=os.getpid(), depth={}, ticks={}, begun=[], landed=[],
+                  closed=False)
+    if not _WATCHDOG_LEDGERS:
+        _watchdog_install_charges()
+    _WATCHDOG_LEDGERS.append(ledger)
+    try:
+        rc = case(*args)
+    finally:
+        # Removal is by IDENTITY, never list.remove, which compares
+        # dicts by VALUE: a nested leg whose ledger has no charges
+        # is equal to a quiescent outer one, and remove would delete
+        # the OUTER ledger, leave this closed one on the stack, and
+        # raise ValueError at the outer leg exit (codex round-8
+        # MAJOR 1). The search runs from the top: this ledger is
+        # innermost on the orderly path.
+        for index in range(len(_WATCHDOG_LEDGERS) - 1, -1, -1):
+            if _WATCHDOG_LEDGERS[index] is ledger:
+                del _WATCHDOG_LEDGERS[index]
+                break
+        if not _WATCHDOG_LEDGERS:
+            while _WATCHDOG_ORIGINALS:
+                owner, name, real = _WATCHDOG_ORIGINALS.pop()
+                setattr(owner, name, real)
+    if os.getpid() != ledger["pid"]:
+        return rc
+    # The closing protocol, without any lock: the ledger has left the stack
+    # (no new charge can bind it), closing is marked FIRST, and only then
+    # is `begun` read, so under the GIL every charge either sees `closed`
+    # at its BEGIN (and lands void here, charging whichever ledger is
+    # innermost then) or its token is seen below and waited for. The wait
+    # polls with the PRISTINE sleep captured at install time: a nested
+    # leg's report must never charge the outer leg's ledger.
+    ledger["closed"] = True
+    sleep = _WATCHDOG_REAL_SLEEP if _WATCHDOG_REAL_SLEEP is not None else time.sleep
+    bound = time.monotonic() + _WATCHDOG_CLOSE_BOUND
+    while True:
+        landed_tokens = set()
+        records = list(ledger["landed"])
+        for landed_token, _record in records:
+            landed_tokens.add(id(landed_token))
+        unlanded = [token[0] for token in list(ledger["begun"])
+                    if id(token) not in landed_tokens]
+        # A SUPPRESSED record counts as nothing only once every OPEN step
+        # it was suppressed under has closed (codex round-9 MAJOR 1): a
+        # step still open is a registered call still running, or one whose
+        # close an exception interrupted, and the two cannot be told apart,
+        # so the report waits for it under the same bound.
+        unlanded.extend(
+            "%s (suppressed under unclosed %s)" % (
+                record[1], ", ".join(step[0] for step in record[3]))
+            for _token, record in records
+            if record is not None and record[0] == "suppressed"
+            and any(record[2].get(id(step)) is step for step in record[3]))
+        if not unlanded:
+            break
+        if time.monotonic() >= bound:
+            # Accounting incomplete: a charge begun during the leg has not
+            # landed, or a charge was suppressed under a registered call
+            # whose suppression has not closed, from ANY cause (a
+            # conversion or a registered call suspended, blocked or stalled
+            # by a loaded host, or an exception raised inside a landing or
+            # suppression-closing step left it open for good), so NO
+            # verdict can be issued over it: not a pass, and not a budget
+            # violation either (nothing was measured over budget).
+            # Distinct CANNOT-EVALUATE, stating the bound. This exit means
+            # only that the accounting could not finish. Whenever such a
+            # charge finally lands, it lands in this closed ledger, inert.
+            print("opf watchdog leg: CANNOT EVALUATE (accounting incomplete: "
+                  "%d charge(s) begun during the leg had not landed, or had "
+                  "been suppressed under a registered call whose "
+                  "suppression had not closed, within the %ss closing "
+                  "bound: %s; a token or suppression stays open while its "
+                  "charge or call is unfinished (a suspended or stalled "
+                  "conversion or call, which a heavily loaded host can "
+                  "cause) or after an exception interrupted its landing or "
+                  "closing step, in either case without any demonstrated "
+                  "budget violation)" % (
+                      len(unlanded), _WATCHDOG_CLOSE_BOUND, ", ".join(unlanded)))
+            return EXIT_MALFORMED
+        sleep(0.005)
+    # The total is summed once HERE, after every BEGIN has landed, from the
+    # landed records (math.fsum: one correctly rounded sum, no
+    # order-dependent drift). Void records (retreated or exceptional
+    # charges) and suppressed records (each step they name now closed)
+    # carry no seconds and are not summed.
+    waits = [record[1:] for _token, record in ledger["landed"]
+             if record is not None and record[0] == "wait"]
+    uncountable = [record[1] for _token, record in ledger["landed"]
+                   if record is not None and record[0] == "uncountable"]
+    charged = math.fsum(seconds for _label, seconds in waits)
+    print("opf watchdog leg: charged %ss of a %ss declared budget in %d waits" % (
+        round(charged, 3), budget, len(waits)))
+    if uncountable:
+        print("opf watchdog leg: FAIL (waits with no finite timeout: %s)"
+              % ", ".join(uncountable))
+        return EXIT_FINDING
+    if charged > budget:
+        print("opf watchdog leg: FAIL (charged waits %ss exceed the declared budget %ss: %s)" % (
+            round(charged, 3), budget,
+            ", ".join("%s=%s" % wait for wait in waits)))
+        return EXIT_FINDING
+    return rc
+
+
+def _watchdog_ledger_case(mode, budget):
+    """Private subprocess: one concurrency vector of the runtime ledger, in its
+    own independently bounded fixture process (claude round-6 MEDIUM-2, codex
+    round-7 MEDIUM 6): a regression that hangs a vector is killed at that
+    vector's own process bound and reported as that vector's failure, never a
+    hung suite and never a false pass. Returns the vector leg's own verdict
+    int for the launching fixture to compare (3 marks a fixture that never
+    exercised its path); the two bool-return control modes
+    deliberately return a bool the launching fixture must REJECT
+    (codex round-8 MEDIUM). The held-landing vectors suspend one thread INSIDE
+    the landing step (the leg's `landed` list swapped for one whose append
+    blocks on that thread's first landing, before the record is appended),
+    so they catch a reintroduced ledger lock held ACROSS the landing
+    append, as the round-7 per-leg gate was: a design that locks
+    registration that way never reaches their fork or signal step and dies
+    at this fixture's bound. A lock scoped to the `begun` append alone is
+    never held at that suspension point, so those vectors pass it, and
+    landing-reentrant-charge (a trace hook at the landing line's line
+    event, which fires BEFORE that line runs) sees only a lock taken on an
+    EARLIER line, so it passes a one-line `with lock:` append and a lock
+    around the BEGIN append alone. append-reentrant-charge is the
+    layout-independent lock vector: the leg's `begun` and `landed` lists
+    are swapped for lists whose append completes the real append and THEN
+    makes a same-thread charge, where a non-reentrant lock held across
+    EITHER append, however it is laid out, self-deadlocks."""
+    import inspect
+    import signal
+    import threading
+    import time
+    import warnings
+    import _opf_emit
+
+    def outcome(got, want):
+        return EXIT_OK if got == want else 3  # a dead path is never EXIT_OK
+
+    def charge_atomic():
+        # Deterministic both-charges-land probe: thread A's charge is
+        # suspended MID-CONVERSION, inside its value's own float conversion
+        # (user code that runs after its BEGIN token is appended),
+        # while thread B charges 3 and only then releases A.
+        # Every handshake is an UNTIMED unregistered Lock, never a timed
+        # escape a stall could outrun: B can always finish, because A's
+        # suspension point holds nothing (no ledger step waits), and the
+        # leg's own closing wait holds the report open until A's
+        # registered charge lands. Records appended whole total 2 + 3 = 5
+        # over the 4.5 budget however the host stalls; an accumulation
+        # that re-read a shared running total around user conversion code
+        # would store A's stale sum and lose B's charge. The hand-over is
+        # one-shot so the probe value stays inert anywhere a regression
+        # converts it again.
+        a_inside = threading.Lock()
+        a_inside.acquire()
+        b_done = threading.Lock()
+        b_done.acquire()
+        handed = []
+
+        class Suspended(float):
+            def _hand_over(self):
+                if not handed:
+                    handed.append(True)
+                    a_inside.release()
+                    b_done.acquire()  # untimed: B always finishes
+
+            def __float__(self):
+                self._hand_over()
+                return float.__float__(self)
+
+            def __radd__(self, other):
+                self._hand_over()
+                return float(other) + float.__float__(self)
+
+        def charger():
+            a_inside.acquire()
+            _watchdog_charge(3.0, "b")
+            b_done.release()
+
+        def leg():
+            worker = threading.Thread(target=charger)
+            worker.start()
+            _watchdog_charge(Suspended(2.0), "a")
+            worker.join()  # untimed: never charged
+            return EXIT_OK
+        return _watchdog_leg_entry(budget, leg)
+
+    def reentrant_charge():
+        # Self-deadlock probe: the charged value's conversion itself makes
+        # registered calls on the SAME thread, directly and from a
+        # finalizer, exactly where a signal handler or callback could land
+        # mid-charge. No ledger step waits, so the nested wrapper can
+        # never block on anything its own thread holds; the worker must
+        # finish and its charges must land (2 + two sleep(0) = 2.0,
+        # exactly the 2 budget, a declared-timeout verdict). Every
+        # handshake is UNTIMED, so no wall clock ever decides this
+        # verdict: the worker's charge is stalled at entry behind a plain
+        # lock a helper thread releases, and the main thread joins with NO
+        # timeout, reading `done` only after that join. A regression that
+        # reintroduces a self-deadlock hangs THIS fixture process alone,
+        # which its own independent bound kills and reports as this
+        # vector's failure.
+        class Sleeper(float):
+            def _nested_calls(self):
+                class Final:
+                    def __del__(self):
+                        time.sleep(0)  # a finalizer's registered call
+
+                probe = Final()
+                del probe  # CPython refcount: __del__ runs here, mid-charge
+                time.sleep(0)  # a direct registered call, same thread
+
+            def __float__(self):
+                self._nested_calls()
+                return float.__float__(self)
+
+            def __radd__(self, other):
+                self._nested_calls()
+                return float(other) + float.__float__(self)
+
+        def leg():
+            done = []
+            stalled = threading.Lock()
+            stalled.acquire()
+            joining = threading.Event()
+
+            def body():
+                stalled.acquire()  # untimed: an arbitrary stall at charge entry
+                _watchdog_charge(Sleeper(2.0), "reentrant")
+                done.append(True)
+
+            def releaser():
+                joining.wait()  # untimed: never charged
+                stalled.release()
+
+            worker = threading.Thread(target=body)
+            helper = threading.Thread(target=releaser)
+            worker.start()
+            helper.start()
+            joining.set()
+            worker.join()  # untimed: never charged, and no stall flips `done`
+            helper.join()  # untimed: never charged
+            return outcome(bool(done), True)
+        return _watchdog_leg_entry(budget, leg)
+
+    def fork_mid_charge():
+        # Fork-safety probe: the process forks while another thread is
+        # suspended MID-CHARGE (inside its value's conversion), then the
+        # CHILD makes a registered sub-tick sleep and must finish: every
+        # ledger step checks the ledger's creating pid first, and no
+        # ledger step holds anything a fork could leave held. The reap is
+        # an untimed unregistered waitpid, so the verdict never depends on
+        # the wall clock; a regression that blocks the child hangs this
+        # fixture alone, killed and reported at its own bound, and the
+        # child's own alarm bounds it independently. Charges: the held
+        # value's 1.0 alone (a forked child's charges never reach this
+        # ledger), exactly the 1 s budget.
+        b_inside = threading.Lock()
+        b_inside.acquire()
+        b_release = threading.Lock()
+        b_release.acquire()
+        handed = []
+
+        class Held(float):
+            def _hand_over(self):
+                if not handed:
+                    handed.append(True)
+                    b_inside.release()
+                    b_release.acquire()  # untimed: released after the fork
+
+            def __float__(self):
+                self._hand_over()
+                return float.__float__(self)
+
+            def __radd__(self, other):
+                self._hand_over()
+                return float(other) + float.__float__(self)
+
+        def charger():
+            _watchdog_charge(Held(1.0), "held")
+
+        def leg():
+            worker = threading.Thread(target=charger)
+            worker.start()
+            b_inside.acquire()  # the charger is now suspended mid-charge
+            # Forking with a live worker thread is the scenario under test,
+            # so the interpreter's advisory warning for exactly that is
+            # silenced for this one call.
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                pid = os.fork()
+            if pid == 0:
+                # The child: one registered sub-tick sleep, then a plain
+                # exit. Blocking or raising here is a nonzero status the
+                # parent's outcome check turns red.
+                try:
+                    signal.signal(signal.SIGALRM, signal.SIG_DFL)
+                    signal.alarm(10)
+                    time.sleep(0.05)
+                    os._exit(0)
+                except BaseException:
+                    os._exit(70)
+            b_release.release()
+            worker.join()  # untimed: never charged
+            _, status = os.waitpid(pid, 0)  # untimed reap: never charged
+            return outcome((os.WIFEXITED(status), os.WEXITSTATUS(status)),
+                           (True, 0))
+        return _watchdog_leg_entry(budget, leg)
+
+    def held_landing(in_step, release_step):
+        # A holder thread whose own charge (0.5) suspends INSIDE the
+        # ledger's landing step, and the install that arms it: install(),
+        # called first in the leg, swaps this leg's `landed` list for one
+        # whose append, on the holder's first landing, stops BEFORE the
+        # record is appended, so the holder sits inside the landing
+        # bookkeeping, holding whatever a reintroduced lock spanning that
+        # append would hold (a lock around the BEGIN append alone is not
+        # held here). The thread-keyed maps are keyed by id(thread), so a
+        # Thread subclass's __hash__ no longer runs inside a charge and can
+        # no longer serve as this suspension point (codex round-9 MAJOR 2).
+        held = []
+        holder = threading.Thread(
+            target=lambda: _watchdog_charge(0.5, "held-landing"))
+
+        class HeldList(list):
+            def append(self, item):
+                if not held and threading.current_thread() is holder:
+                    held.append(True)
+                    in_step.set()
+                    release_step.acquire()  # untimed: released by the probe
+                list.append(self, item)
+
+        def install():
+            ledger = _WATCHDOG_LEDGERS[-1]  # this leg's own ledger
+            ledger["landed"] = HeldList(ledger["landed"])
+        return holder, install
+
+    def fork_held_landing():
+        # codex round-7 MAJOR 2, and the lock-reintroduction probe (claude
+        # round-6 MEDIUM-1, codex round-7 MEDIUM 5): the process forks
+        # while one thread sits suspended INSIDE the landing bookkeeping
+        # and the MAIN thread's own charge is mid-conversion; the child
+        # RESUMES that conversion, finds a foreign-pid ledger, lands
+        # nothing and exits 0 promptly, inside its own 10 s alarm. Red
+        # against a mutant restoring the round-7 per-leg gate: a design
+        # that locks registration deadlocks before the fork (this
+        # fixture's bound kills it), and a lock held across the landing
+        # append is held by the suspended holder, so the parent's own
+        # landing blocks and this fixture's bound kills it. A lock around
+        # the BEGIN append alone is not held at this suspension point and
+        # passes here; append-reentrant-charge is the vector that catches
+        # every lock layout. Charges:
+        # outer 1.0 + held-landing 0.5 = 1.5, exactly the budget.
+        in_step = threading.Event()
+        release_step = threading.Lock()
+        release_step.acquire()
+        holder, install = held_landing(in_step, release_step)
+        parent = os.getpid()
+        forked = []
+
+        class Forker(float):
+            def __float__(self):
+                if not forked:
+                    forked.append(True)
+                    holder.start()
+                    in_step.wait()  # untimed: the holder is inside landing
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore", DeprecationWarning)
+                        pid = os.fork()
+                    if pid == 0:
+                        # The CHILD, resuming this conversion: bound its
+                        # continuation independently of the parent.
+                        signal.signal(signal.SIGALRM, signal.SIG_DFL)
+                        signal.alarm(10)
+                    else:
+                        forked.append(pid)
+                return float.__float__(self)
+
+            def __radd__(self, other):
+                return float(other) + float.__float__(self)
+
+        def leg():
+            install()
+            _watchdog_charge(Forker(1.0), "outer")
+            if os.getpid() != parent:
+                # The child resumed the conversion and the charge above
+                # landed nothing (foreign pid): one registered sub-tick
+                # sleep as a plain call, then a prompt exit. Blocking or
+                # raising here is a nonzero status the parent's outcome
+                # check turns red.
+                try:
+                    time.sleep(0.05)
+                    os._exit(0)
+                except BaseException:
+                    os._exit(70)
+            release_step.release()
+            holder.join()  # untimed: never charged
+            _, status = os.waitpid(forked[1], 0)  # untimed reap: never charged
+            return outcome((os.WIFEXITED(status), os.WEXITSTATUS(status)),
+                           (True, 0))
+        return _watchdog_leg_entry(budget, leg)
+
+    def signal_held_landing():
+        # codex round-7 MAJOR 3, and the same lock-reintroduction probe: a
+        # SIGUSR1 handler charges on the MAIN thread while a helper thread
+        # sits suspended inside the landing bookkeeping and the main
+        # thread's own charge is mid-conversion. Appends never wait, so
+        # the handler's charge completes and every record lands: outer 1.0
+        # + held-landing 0.5 + handler 2.0 = 3.5, exactly the budget.
+        # Proven red against a mutant restoring the round-7 per-leg gate:
+        # the handler then blocks on the gate the suspended helper holds,
+        # the helper waits for a release only the blocked main thread
+        # could issue, and this fixture's own bound kills the deadlock and
+        # reports it as this vector's failure. The flag read is a
+        # same-thread spin, never a wait: CPython runs the handler between
+        # bytecodes of the raising thread.
+        in_step = threading.Event()
+        release_step = threading.Lock()
+        release_step.acquire()
+        holder, install = held_landing(in_step, release_step)
+        handled = []
+        fired = []
+
+        def handler(signum, frame):
+            _watchdog_charge(2.0, "handler")
+            handled.append(True)
+
+        class Trigger(float):
+            def __float__(self):
+                if not fired:
+                    fired.append(True)
+                    holder.start()
+                    in_step.wait()  # untimed: the holder is inside landing
+                    signal.raise_signal(signal.SIGUSR1)
+                    while not handled:
+                        pass  # same-thread spin: the handler charges first
+                    release_step.release()
+                return float.__float__(self)
+
+            def __radd__(self, other):
+                return float(other) + float.__float__(self)
+
+        def leg():
+            install()
+            _watchdog_charge(Trigger(1.0), "outer")
+            holder.join()  # untimed: never charged
+            return outcome((bool(handled), bool(fired)), (True, True))
+
+        saved = signal.signal(signal.SIGUSR1, handler)
+        try:
+            return _watchdog_leg_entry(budget, leg)
+        finally:
+            signal.signal(signal.SIGUSR1, saved)
+
+    def charge_lines(text):
+        # The source lines of _watchdog_charge holding `text`: the trace
+        # vectors below act at exactly those lines, and a vector whose
+        # line is missing never fires and fails as a dead path.
+        lines, first = inspect.getsourcelines(_watchdog_charge)
+        return set(first + index for index, line in enumerate(lines)
+                   if text in line)
+
+    def traced_charge(local):
+        # One _watchdog_charge on THIS thread with `local` as its line
+        # tracer. Trace functions run with tracing suspended, so a
+        # charge the tracer makes is itself untraced; the prior tracer
+        # is restored.
+        code = _watchdog_charge.__code__
+
+        def tracer(frame, event, arg):
+            return local if frame.f_code is code else None
+        saved = sys.gettrace()
+        sys.settrace(tracer)
+        try:
+            return _watchdog_charge(1.0, "outer")
+        finally:
+            sys.settrace(saved)
+
+    def landing_reentrant_charge():
+        # claude round-8 MEDIUM: a same-thread charge made from INSIDE
+        # the landing append, exactly where a signal handler or finalizer
+        # can land, must complete. A trace hook at the landing line runs
+        # the nested charge at that line's line event, which fires BEFORE
+        # the line runs, so only a non-reentrant lock taken on an EARLIER
+        # line (a multi-line `with lock:` block around the landing
+        # append) is HELD there, and the nested charge then
+        # self-deadlocks (this fixture's bound kills it and reports this
+        # vector's failure). A one-line `with lock: ...append(...)`, or a
+        # lock around the BEGIN append alone, is not held at that line
+        # event and passes here (claude round-9 MEDIUM);
+        # append-reentrant-charge catches every such layout. Lock-free,
+        # both charges land: outer 1.0 + nested 2.0 = 3.0, exactly the
+        # budget, from declared timeouts alone.
+        landing = charge_lines('ledger["landed"].append((token, record))')
+        fired = []
+
+        def local(frame, event, arg):
+            if event == "line" and frame.f_lineno in landing and not fired:
+                fired.append(True)
+                _watchdog_charge(2.0, "nested-landing")
+            return local
+
+        def leg():
+            traced_charge(local)
+            return outcome(bool(fired), True)
+        return _watchdog_leg_entry(budget, leg)
+
+    def begin_interrupted():
+        # claude round-8 MINOR: an exception raised on the charging
+        # thread right AFTER its BEGIN append (a trace hook at the next
+        # line stands in for a raising signal handler) must still land
+        # the token, because the BEGIN is the first step inside the try
+        # whose finally lands it. The interrupted charge lands void, so
+        # the leg is evaluated (0 charged, within the 1 budget); a BEGIN
+        # outside that try leaves the token unlanded, and the closing
+        # protocol then reports CANNOT-EVALUATE instead.
+        begin = charge_lines('ledger["begun"].append(token)')
+        state = dict(begun=False, raised=False)
+
+        class Interrupted(Exception):
+            pass
+
+        def local(frame, event, arg):
+            if event == "line" and not state["raised"]:
+                if state["begun"]:
+                    state["raised"] = True
+                    raise Interrupted()
+                if frame.f_lineno in begin:
+                    state["begun"] = True
+            return local
+
+        def leg():
+            try:
+                traced_charge(local)
+            except Interrupted:
+                pass
+            return outcome(state["raised"], True)
+        return _watchdog_leg_entry(budget, leg)
+
+    def late_conversion(charge):
+        # codex round-7 MAJOR 1: registration precedes the value's own
+        # conversion on EVERY entry path (the shared wrapper and
+        # _watchdog_deadline), so a float subclass whose conversion blocks
+        # past the leg body's return is still counted by the closing
+        # wait: the charge lands over the budget, never a pass with zero
+        # waits. Deterministic: the release is keyed to OBSERVED ledger
+        # state (this leg's ledger leaving the stack), never a timer,
+        # every handshake is untimed, and the monitor SPINS instead of
+        # sleeping because a registered sleep here would itself charge the
+        # leg.
+        release = threading.Lock()
+        release.acquire()
+        in_conversion = threading.Event()
+        handed = []
+        ledger_box = []
+
+        class Slow(float):
+            def _hand_over(self):
+                if not handed:
+                    handed.append(True)
+                    in_conversion.set()
+                    release.acquire()  # untimed: released once the leg has ended
+
+            def __float__(self):
+                self._hand_over()
+                return float.__float__(self)
+
+            def __radd__(self, other):
+                self._hand_over()
+                return float(other) + float.__float__(self)
+
+        def charger():
+            charge(Slow)
+
+        def releaser():
+            in_conversion.wait()  # untimed: the charge is mid-conversion
+            while any(entry is ledger_box[0] for entry in _WATCHDOG_LEDGERS):
+                pass  # spin: the leg body has not yet returned
+            release.release()
+
+        worker = threading.Thread(target=charger)
+        monitor = threading.Thread(target=releaser)
+
+        def leg():
+            ledger_box.append(_WATCHDOG_LEDGERS[-1])  # this leg's own ledger
+            worker.start()
+            monitor.start()
+            # Untimed (never charged): returns only once the charge is
+            # registered and suspended inside its conversion.
+            in_conversion.wait()
+            return EXIT_OK
+
+        result = _watchdog_leg_entry(budget, leg)
+        worker.join()  # untimed: never charged
+        monitor.join()  # untimed: never charged
+        return result if handed else 3
+
+    def unlanded_charge():
+        # Fail-open probe (the blocked-conversion escape): a charge appends
+        # its BEGIN token, then its conversion blocks on an untimed lock
+        # that is NOT released until after the report. The report must
+        # refuse to evaluate: at the closing bound the token is unlanded,
+        # the accounting is incomplete, and the leg is the distinct
+        # CANNOT-EVALUATE (EXIT_MALFORMED: never a pass, and never
+        # reported as a budget violation, because nothing was measured
+        # over budget), with the charging thread never raising (its ledger
+        # was bound before any user code and the stack is never re-read
+        # after). The closing bound is shrunk for this vector's DURATION
+        # only: the expected verdict holds for ANY bound and any stall, so
+        # no wall clock decides it.
+        release = threading.Lock()
+        release.acquire()
+        in_conversion = threading.Event()
+        handed = []
+        errors = []
+
+        class NeverLands(float):
+            def _hand_over(self):
+                if not handed:
+                    handed.append(True)
+                    in_conversion.set()
+                    release.acquire()  # untimed: released only after the report
+
+            def __float__(self):
+                self._hand_over()
+                return float.__float__(self)
+
+            def __radd__(self, other):
+                self._hand_over()
+                return float(other) + float.__float__(self)
+
+        def charger():
+            try:
+                _watchdog_charge(NeverLands(2.0), "unlanded")
+            except BaseException as exc:  # the probed crash, never expected
+                errors.append(repr(exc))
+
+        worker = threading.Thread(target=charger)
+
+        def leg():
+            worker.start()
+            # Untimed (never charged): returns only once the charge is
+            # registered and suspended inside its conversion.
+            in_conversion.wait()
+            return EXIT_OK
+
+        module = sys.modules[_watchdog_leg_entry.__module__]
+        saved = module._WATCHDOG_CLOSE_BOUND
+        module._WATCHDOG_CLOSE_BOUND = 0.2
+        try:
+            result = _watchdog_leg_entry(budget, leg)
+        finally:
+            module._WATCHDOG_CLOSE_BOUND = saved
+            release.release()
+        worker.join()  # untimed; the late landing stays inert in the closed ledger
+        return result if (handed and not errors) else 3
+
+    def nested_deadline_monotone():
+        # Monotone-tick probe: a nested LONGER _watchdog_deadline(100) fires
+        # from inside the outer _watchdog_deadline(1)'s own clock read,
+        # exactly where a same-thread signal handler (SIGUSR1) can land,
+        # and must survive: ticks is an append-only per-thread list whose
+        # max governs, so the interrupted outer store can never overwrite
+        # the nested 1100 tick with its stale 1001. The clock is CONTROLLED
+        # for both windows (reads return 1000, then 1002), so the verdict
+        # follows from the construction alone, whatever the host does:
+        # charges are exactly 1 + 100 = 101 (the sub-tick sleep at 1002 is
+        # exempt under the surviving 1100 tick), inside the 101 budget; a
+        # last-store-wins regression also charges the 0.05 sleep (its
+        # surviving tick is the stale 1001) and overruns.
+        from unittest import mock
+
+        def leg():
+            state = dict(now=1000.0, fired=False)
+
+            def interrupting_clock():
+                if not state["fired"]:
+                    state["fired"] = True
+                    _watchdog_deadline(100)  # the nested, longer deadline
+                return state["now"]
+
+            with mock.patch("time.monotonic", interrupting_clock):
+                _watchdog_deadline(1)
+            state["now"] = 1002.0
+            with mock.patch("time.monotonic", lambda: state["now"]):
+                time.sleep(0.05)
+            return outcome(state["fired"], True)
+        return _watchdog_leg_entry(budget, leg)
+
+    def cross_thread_subtick():
+        # One LIVE thread opens a deadline while the main thread sleeps
+        # sub-tick: another thread's deadline never exempts this one, so
+        # the sleep charges (5 + 0.05 = 5.05 over the 5.01 budget)
+        # whatever the wall clock does.
+        def leg():
+            opened, release = threading.Event(), threading.Event()
+
+            def opener():
+                _watchdog_deadline(5)
+                opened.set()
+                release.wait()  # untimed: never charged
+
+            worker = threading.Thread(target=opener)
+            worker.start()
+            opened.wait()  # untimed: never charged
+            time.sleep(0.05)
+            release.set()
+            worker.join()  # untimed: never charged
+            return EXIT_OK
+        return _watchdog_leg_entry(budget, leg)
+
+    def recycled_thread_sleep():
+        # A thread opens a 600 s deadline and EXITS; successors are then
+        # started and joined one at a time until the OS hands one the dead
+        # opener's recycled ident (checked EXPLICITLY, never assumed from
+        # scheduling), and only that successor sleeps sub-tick. Keyed by
+        # thread lifetime the sleep always charges (600 + 0.05 over the
+        # 600.01 budget, a declared-timeout verdict no stall can flip);
+        # keyed by the recycled ident it would inherit the dead opener's
+        # exemption, which no plausible stall can expire either (600 s of
+        # headroom), and escape. If no ident recycles within 64 attempts,
+        # the last-resort sleeper still charges, keeping THIS vector's
+        # verdict deterministic; only the discrimination against ident
+        # keying needs a recycled ident, which glibc hands the next
+        # sequentially created thread in practice.
+        def leg():
+            opener_ident = []
+
+            def open_deadline():
+                opener_ident.append(threading.get_ident())
+                _watchdog_deadline(600)
+
+            opener = threading.Thread(target=open_deadline)
+            opener.start()
+            opener.join()  # untimed: never charged
+            matched = []
+
+            def successor():
+                if threading.get_ident() == opener_ident[0]:
+                    matched.append(True)
+                    time.sleep(0.05)
+
+            for _ in range(64):
+                candidate = threading.Thread(target=successor)
+                candidate.start()
+                candidate.join()  # untimed: never charged
+                if matched:
+                    break
+            if not matched:
+                fallback = threading.Thread(target=lambda: time.sleep(0.05))
+                fallback.start()
+                fallback.join()  # untimed: never charged
+            return EXIT_OK
+        return _watchdog_leg_entry(budget, leg)
+
+    def stubbed_cross_thread():
+        # One thread holds a charged fixture call while the MAIN thread
+        # waits: the main thread's wait must still be charged (per-thread
+        # depth). Stub-based: this fixture process owns its own install,
+        # so the wrapper is created over the stub. The over/within pair
+        # differs only in the budget the launcher passes through.
+        def bounded_stub(body, timeout_s=30):
+            return body()
+
+        inside, release = threading.Event(), threading.Event()
+        results = []
+
+        def body():
+            inside.set()
+            release.wait()  # untimed handshake: never charged
+            return "done"
+
+        worker = threading.Thread(
+            target=lambda: results.append(_opf_emit.run_bounded(body, timeout_s=0.5)))
+
+        def leg():
+            worker.start()
+            inside.wait()  # untimed: the sleep below overlaps the fixture call
+            time.sleep(0.15)  # charged to the main thread despite the worker's call
+            release.set()
+            worker.join()  # untimed: never charged
+            return outcome(results, ["done"])
+
+        real = _opf_emit.run_bounded
+        _opf_emit.run_bounded = bounded_stub
+        try:
+            return _watchdog_leg_entry(budget, leg)
+        finally:
+            _opf_emit.run_bounded = real
+
+    def empty_nested_leg():
+        # codex round-8 MAJOR 1: a nested leg whose ledger carries NO
+        # charges is VALUE-equal to a quiescent outer one, so an
+        # equality-based stack removal deletes the OUTER ledger, leaves
+        # the closed inner one on the stack, and raises ValueError at
+        # the outer leg exit. Removal by identity keeps the outer
+        # ledger on the stack and raises nothing; the retained check
+        # reads the stack by identity before the outer leg ends.
+        outer_box = []
+
+        def leg():
+            outer_box.append(_WATCHDOG_LEDGERS[-1])  # this outer leg ledger
+            inner_rc = _watchdog_leg_entry(1, lambda: EXIT_OK)
+            retained = any(entry is outer_box[0]
+                           for entry in _WATCHDOG_LEDGERS)
+            return outcome((inner_rc, retained), (EXIT_OK, True))
+        return _watchdog_leg_entry(budget, leg)
+
+    def nested_migration(mode):
+        # codex round-8 MAJOR 2: a numeric conversion begun INSIDE a
+        # nested leg suspends until that ledger has left the stack,
+        # then resumes. The charge itself lands on the inner ledger
+        # (bound at its BEGIN); the bookkeeping that FOLLOWS the
+        # charge must stay on that SAME ledger. Migrated to the outer,
+        # uncharged ledger, a deadline tick exempts the worker
+        # sub-tick sleep (deadline-exemption-migration) and the
+        # wrapper suppression depth suppresses the body sleep
+        # (wrapper-suppression-migration), so the outer leg passes its
+        # 0.01 budget with 0 charged; carried correctly, the 0.05
+        # sleep charges the outer ledger and overruns it, from
+        # declared timeouts alone. The initial zero charge makes the
+        # outer ledger VALUE-distinct from the inner one, so this
+        # vector stays red on a migration even where stack removal by
+        # identity is sound. Every handshake is untimed, and the
+        # release is keyed to OBSERVED ledger state (the inner ledger
+        # leaving the stack), never a timer.
+        deadline = mode == "deadline-exemption-migration"
+        release = threading.Lock()
+        release.acquire()
+        in_conversion = threading.Event()
+        handed = []
+        inner_box = []
+        results = []
+
+        class Slow(float):
+            def _hand_over(self):
+                if not handed:
+                    handed.append(True)
+                    in_conversion.set()
+                    release.acquire()  # untimed: released once the inner leg has ended
+
+            def __float__(self):
+                self._hand_over()
+                return float.__float__(self)
+
+            def __radd__(self, other):
+                self._hand_over()
+                return float(other) + float.__float__(self)
+
+        def body():
+            time.sleep(0.05)  # must charge the OUTER ledger, never be suppressed
+            return "done"
+
+        def worker_run():
+            if deadline:
+                _watchdog_deadline(Slow(100.0))
+                time.sleep(0.05)  # must charge the OUTER ledger, never be exempt
+            else:
+                results.append(_opf_emit.run_bounded(body, timeout_s=Slow(0.5)))
+
+        def releaser():
+            in_conversion.wait()  # untimed: the charge is mid-conversion
+            while any(entry is inner_box[0] for entry in _WATCHDOG_LEDGERS):
+                pass  # spin: the inner leg body has not yet returned
+            release.release()
+
+        worker = threading.Thread(target=worker_run)
+        monitor = threading.Thread(target=releaser)
+        # Term-exact inner budgets: the deadline charge is exactly
+        # 100.0, and the wrapper charge is exactly the pinned fixture
+        # allowance for its 0.5 timeout.
+        inner_budget = 100.0 if deadline else _deadline_case_budget(0.5)
+
+        def inner_leg():
+            inner_box.append(_WATCHDOG_LEDGERS[-1])  # this inner leg ledger
+            worker.start()
+            monitor.start()
+            # Untimed (never charged): returns only once the charge is
+            # registered and suspended inside its conversion.
+            in_conversion.wait()
+            return EXIT_OK
+
+        def leg():
+            _watchdog_charge(0.0, "distinguish")
+            inner_rc = _watchdog_leg_entry(inner_budget, inner_leg)
+            worker.join()  # untimed: never charged
+            monitor.join()  # untimed: never charged
+            return outcome((inner_rc, results),
+                           (EXIT_OK, [] if deadline else ["done"]))
+
+        if deadline:
+            return _watchdog_leg_entry(budget, leg)
+
+        def bounded_stub(body_thunk, timeout_s=30):
+            return body_thunk()
+
+        real = _opf_emit.run_bounded
+        _opf_emit.run_bounded = bounded_stub
+        try:
+            return _watchdog_leg_entry(budget, leg)
+        finally:
+            _opf_emit.run_bounded = real
+
+    def append_reentrant_charge():
+        # claude round-9 MEDIUM, the layout-independent lock vector: the
+        # leg swaps its ledger's `begun` and `landed` lists for lists whose
+        # append, once each, completes the real append and THEN makes a
+        # same-thread charge, exactly where a signal handler charging
+        # right after the append lands. A reintroduced non-reentrant lock
+        # held across EITHER append, however it is laid out (a multi-line
+        # `with lock:` around the landing append, a one-line
+        # `with lock: ledger["begun"].append(token)`, a lock around the
+        # BEGIN append alone), is held there, so the nested charge's own
+        # BEGIN or LAND self-deadlocks, and this fixture's bound kills it
+        # and reports this vector's failure. Lock-free, every charge
+        # lands: outer 1.0 + after-begin 2.0 (made after the outer BEGIN)
+        # + after-land 4.0 (made after the first LAND, after-begin's own)
+        # = 7.0, exactly the budget, from declared timeouts alone.
+        fired = []
+
+        class Reentering(list):
+            def __init__(self, items, seconds, label):
+                super().__init__(items)
+                self.armed = (seconds, label)
+
+            def append(self, item):
+                list.append(self, item)
+                if self.armed is not None:
+                    seconds, label = self.armed
+                    self.armed = None
+                    fired.append(label)
+                    _watchdog_charge(seconds, label)
+
+        def leg():
+            ledger = _WATCHDOG_LEDGERS[-1]  # this leg's own ledger
+            ledger["begun"] = Reentering(ledger["begun"], 2.0, "after-begin")
+            ledger["landed"] = Reentering(ledger["landed"], 4.0, "after-land")
+            _watchdog_charge(1.0, "outer")
+            return outcome(sorted(fired), ["after-begin", "after-land"])
+        return _watchdog_leg_entry(budget, leg)
+
+    def suppression_interrupted(entry):
+        # codex round-9 MAJOR 1: a REAL raising SIGUSR1 handler interrupts
+        # a registered call's suppression bookkeeping on the main thread.
+        # The leg seeds its own thread's open-step map with a dict whose
+        # store (entry) or pop (cleanup), once, raises the signal: right
+        # AFTER the OPEN store, or right BEFORE the closing pop.
+        # signal.raise_signal runs the Python handler before it returns,
+        # so the handler's exception surfaces exactly there. Entry
+        # (suppression-entry-interrupted): the OPEN is inside the try
+        # whose finally pops it, so the step closes, and the later
+        # time.sleep(0.05) charges 0.05 over the 0.01 budget (with the
+        # OPEN outside the try, the step stays open and that sleep is
+        # suppressed). Cleanup (suppression-close-interrupted): the pop
+        # never runs, the step stays open, the later sleep lands
+        # suppressed under it, and the report refuses to evaluate
+        # (EXIT_MALFORMED), never the silent 0-charged pass that a
+        # suppression outliving its call used to give. The closing bound
+        # is shrunk for this vector's DURATION only; the expected
+        # verdicts hold for any bound.
+        state = dict(armed=True, raised=False)
+
+        class Interrupted(Exception):
+            pass
+
+        def handler(signum, frame):
+            state["raised"] = True
+            raise Interrupted()
+
+        class Interrupting(dict):
+            def __setitem__(self, key, value):
+                dict.__setitem__(self, key, value)
+                if entry and state["armed"]:
+                    state["armed"] = False
+                    signal.raise_signal(signal.SIGUSR1)
+
+            def pop(self, *args):
+                if not entry and state["armed"]:
+                    state["armed"] = False
+                    signal.raise_signal(signal.SIGUSR1)
+                return dict.pop(self, *args)
+
+        def leg():
+            me = threading.current_thread()
+            _WATCHDOG_LEDGERS[-1]["depth"][id(me)] = (me, Interrupting())
+            try:
+                time.sleep(0)
+            except Interrupted:
+                pass
+            time.sleep(0.05)  # never suppressed by a step whose call is over
+            return outcome(state["raised"], True)
+
+        module = sys.modules[_watchdog_leg_entry.__module__]
+        saved_bound = module._WATCHDOG_CLOSE_BOUND
+        saved = signal.signal(signal.SIGUSR1, handler)
+        module._WATCHDOG_CLOSE_BOUND = 0.2
+        try:
+            return _watchdog_leg_entry(budget, leg)
+        finally:
+            module._WATCHDOG_CLOSE_BOUND = saved_bound
+            signal.signal(signal.SIGUSR1, saved)
+
+    def fork_in_charge():
+        # claude round-9 MINOR: a fork INSIDE the charge, after its
+        # conversion's pid check (a forking transform stands in for a
+        # signal handler that forks there): the child's charge must
+        # return (None, None), never the parent's ledger, so no caller
+        # in the child writes a tick or a suppression step to it. The
+        # child reports through its exit status (0 only on (None, None));
+        # the reap is an untimed unregistered waitpid, and the child's
+        # own alarm bounds it. Charges: the parent's 1.0 alone, exactly
+        # the 1 s budget.
+        parent = os.getpid()
+        children = []
+
+        def forking(normalized, ledger):
+            if not children:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", DeprecationWarning)
+                    pid = os.fork()
+                if pid == 0:
+                    signal.signal(signal.SIGALRM, signal.SIG_DFL)
+                    signal.alarm(10)
+                children.append(pid)
+            return normalized
+
+        def leg():
+            got = _watchdog_charge(1.0, "forked", transform=forking)
+            if os.getpid() != parent:
+                os._exit(0 if got == (None, None) else 3)
+            _, status = os.waitpid(children[0], 0)  # untimed reap: never charged
+            return outcome((os.WIFEXITED(status), os.WEXITSTATUS(status)),
+                           (True, 0))
+        return _watchdog_leg_entry(budget, leg)
+
+    class EqualThread(threading.Thread):
+        # codex round-9 MAJOR 2: every instance compares equal to every
+        # other and hashes alike, so a thread map keyed by the Thread
+        # object (its equality and hash) hands one thread's entry to
+        # another.
+        def __eq__(self, other):
+            return isinstance(other, EqualThread)
+
+        def __hash__(self):
+            return 457
+
+    def equal_threads(mode):
+        # Two distinct but EQUAL threads, run one after the other (never
+        # both in threading's limbo map at once). Subtick: the first opens
+        # _watchdog_deadline(100); the second's sub-tick sleep charges
+        # (100.05 over the 100.01 budget); the control has the opener
+        # itself sleep, exempt (100.0, within). Suppression: the first
+        # sits inside a stubbed run_bounded (its fixture allowance); the
+        # second's sleep charges (0.05 over the 0.01 margin); the
+        # control sleeps inside the holder's own call, suppressed
+        # (within). Every handshake is an untimed unregistered Lock, and
+        # the verdicts follow from declared timeouts (the 100 s deadline
+        # cannot expire under any plausible stall).
+        same = mode in ("equal-thread-same-subtick",
+                        "equal-thread-same-suppression")
+        if mode in ("equal-thread-subtick", "equal-thread-same-subtick"):
+            def opener():
+                _watchdog_deadline(100)
+                if same:
+                    time.sleep(0.05)
+
+            def subtick_leg():
+                first = EqualThread(target=opener)
+                first.start()
+                first.join()  # untimed: never charged
+                if not same:
+                    second = EqualThread(target=lambda: time.sleep(0.05))
+                    second.start()
+                    second.join()  # untimed: never charged
+                return EXIT_OK
+            return _watchdog_leg_entry(budget, subtick_leg)
+        inside = threading.Lock()
+        inside.acquire()
+        release = threading.Lock()
+        release.acquire()
+        results = []
+
+        def body():
+            if same:
+                time.sleep(0.05)  # nested in the holder's own call
+            inside.release()
+            release.acquire()  # untimed: released by the leg
+            return "done"
+
+        def holder():
+            results.append(_opf_emit.run_bounded(body, timeout_s=0.5))
+
+        def leg():
+            first = EqualThread(target=holder)
+            first.start()
+            inside.acquire()  # untimed: the holder is inside its call
+            if not same:
+                second = EqualThread(target=lambda: time.sleep(0.05))
+                second.start()
+                second.join()  # untimed: never charged
+            release.release()
+            first.join()  # untimed: never charged
+            return outcome(results, ["done"])
+
+        def bounded_stub(body_thunk, timeout_s=30):
+            return body_thunk()
+
+        real = _opf_emit.run_bounded
+        _opf_emit.run_bounded = bounded_stub
+        try:
+            return _watchdog_leg_entry(budget, leg)
+        finally:
+            _opf_emit.run_bounded = real
+
+    if mode == "charge-atomic":
+        return charge_atomic()
+    if mode == "reentrant-charge":
+        return reentrant_charge()
+    if mode == "fork-mid-charge":
+        return fork_mid_charge()
+    if mode == "fork-held-landing":
+        return fork_held_landing()
+    if mode == "signal-held-landing":
+        return signal_held_landing()
+    if mode == "wrapper-late-conversion":
+        return late_conversion(lambda slow: time.sleep(slow(0.001)))
+    if mode == "deadline-late-conversion":
+        return late_conversion(lambda slow: _watchdog_deadline(slow(2.0)))
+    if mode == "late-landing-charge":
+        # Closing-protocol probe (the late-append escape): the direct-call
+        # variant of the late conversion, counted by the closing wait at
+        # 2.0 over the 1 budget, never passed on the records landed so far.
+        return late_conversion(lambda slow: _watchdog_charge(slow(2.0), "late"))
+    if mode == "unlanded-charge":
+        return unlanded_charge()
+    if mode == "landing-reentrant-charge":
+        return landing_reentrant_charge()
+    if mode == "append-reentrant-charge":
+        return append_reentrant_charge()
+    if mode in ("suppression-entry-interrupted",
+                "suppression-close-interrupted"):
+        return suppression_interrupted(mode == "suppression-entry-interrupted")
+    if mode == "fork-in-charge":
+        return fork_in_charge()
+    if mode in ("equal-thread-subtick", "equal-thread-same-subtick",
+                "equal-thread-suppression", "equal-thread-same-suppression"):
+        return equal_threads(mode)
+    if mode == "begin-interrupted":
+        return begin_interrupted()
+    if mode == "nested-deadline-monotone":
+        return nested_deadline_monotone()
+    if mode == "cross-thread-subtick":
+        return cross_thread_subtick()
+    if mode == "recycled-thread-sleep":
+        return recycled_thread_sleep()
+    if mode in ("cross-thread-over", "cross-thread-within"):
+        return stubbed_cross_thread()
+    if mode == "empty-nested-leg":
+        return empty_nested_leg()
+    if mode in ("deadline-exemption-migration",
+                "wrapper-suppression-migration"):
+        return nested_migration(mode)
+    if mode == "bool-false-control":
+        # codex round-8 MEDIUM: boolean verdicts, which compare equal
+        # to 0 and 1 under a plain ==, must be REJECTED by the
+        # launching fixture comparison (type(rc) is int before
+        # equality). The budget is declared but no leg runs.
+        return False
+    if mode == "bool-true-control":
+        return True
+    raise ValueError("unknown runtime ledger vector %r" % (mode,))
 
 
 def _watchdog_deadline_case(mode):
@@ -1229,7 +3001,7 @@ def _watchdog_deadline_case(mode):
                 patch.object(_opf_emit, "_fixture_children", census):
             # The thunk writes started_w and the guardian-side drain/cancel hooks
             # write the events file: both must be DECLARED under the fd allowlist.
-            result = _opf_emit.run_bounded(thunk, timeout_s=0.25,
+            result = _opf_emit.run_bounded(thunk, timeout_s=_DEADLINE_CASE_TIMEOUT,
                                            keep_fds=(started_w, events.fileno()))
         finished = time.monotonic()
         elapsed = finished - start
@@ -1240,13 +3012,14 @@ def _watchdog_deadline_case(mode):
         cancelled = min(cancellations) if cancellations else None
         # Execution latency ends at the observed signal, never at cleanup end.
         execution_ok = (cancelled is not None and
-                        0.25 <= cancelled - start < _DEADLINE_EXECUTION_BOUND)
-        # Cleanup is checked against its own declared deadline. One second is
-        # allowed separately for receipt delivery and parent scheduling.
+                        _DEADLINE_CASE_TIMEOUT <= cancelled - start < _DEADLINE_EXECUTION_BOUND)
+        # Cleanup is checked against its own declared deadline. One second
+        # (_DEADLINE_RECEIPT_ALLOWANCE) is allowed separately for receipt
+        # delivery and parent scheduling.
         cleanup_limit = max([row[2] for row in drains] or
                             [(cancelled or start) + _opf_emit._FIXTURE_CLEANUP_GRACE])
         cleanup_ok = (all(row[1] <= row[2] for row in drains)
-                      and finished <= cleanup_limit + 1)
+                      and finished <= cleanup_limit + _DEADLINE_RECEIPT_ALLOWANCE)
         if mode == "transient-census":
             # The old combined 1.5 s assertion rejects this passing cleanup.
             assert elapsed > 1.5 and drains, (elapsed, rows)
@@ -1594,7 +3367,8 @@ def _watchdog_completion_case(mode):
 
     def launch(code="return 0", **kwargs):
         return emit.run_status_owned([*command[:4], code],
-                                     fixture_id="completion/" + mode, timeout=10, **kwargs)
+                                     fixture_id="completion/" + mode,
+                                     timeout=_COMPLETION_LAUNCH_TIMEOUT, **kwargs)
 
     def refuses(error, call):
         try:
@@ -2053,7 +3827,7 @@ def _watchdog_completion_case(mode):
                 return stat.rsplit(b")", 1)[1].split()[0].decode("ascii")
 
             def await_state(target, wanted, note):
-                bound = time.monotonic() + 30
+                bound = _watchdog_deadline(30)
                 while state(target) not in wanted:
                     assert time.monotonic() < bound, note
                     time.sleep(0.005)
@@ -2080,7 +3854,7 @@ def _watchdog_completion_case(mode):
                     patch.object(emit, "_fixture_ack_subject", stop_guardian):
                 worker.start()
                 try:
-                    bound = time.monotonic() + 30
+                    bound = _watchdog_deadline(30)
                     while not guardian_file.exists():
                         assert time.monotonic() < bound, "guardian never reached its stop point"
                         time.sleep(0.005)
@@ -2196,7 +3970,9 @@ def _watchdog_completion_case(mode):
         # cancelled construction aborts the launch and re-raises the cancellation.
         real_start = threading.Thread.start
 
-        open_fds = _fixture_fd_census
+        # Identities, not bare numbers: a same-number replacement reads as a
+        # change; EBADF only reads as closed, any other read error raises.
+        open_fds = _st_census_fds
         _fixture_fd_census_pins()
 
         def no_children():
@@ -2233,6 +4009,45 @@ def _watchdog_completion_case(mode):
         # keeps a libffi mapping descriptor open for the process's life) so the
         # descriptor parity below measures ONLY what a cancelled launch leaks.
         emit._fixture_preload()
+        import errno
+        held_fd = os.open(os.devnull, os.O_RDONLY)
+        try:
+            assert _st_census_eio_raises(open_fds, held_fd), \
+                "the descriptor census read an EIO descriptor as closed"
+            assert _st_census_eio_raises(open_fds, held_fd, "readlink"), \
+                "the descriptor census read a descriptor whose link fails EIO as closed"
+            # Every other read error fails closed too (each seam's one tolerated
+            # errno included for the other seam); ENOENT on the link read alone
+            # (the number has no entry) reads as no kind.
+            for seam, codes in (("fstat", (errno.EACCES, errno.EPERM, errno.ENOENT)),
+                                ("readlink", (errno.EACCES, errno.EPERM, errno.EBADF))):
+                for code in codes:
+                    assert _st_census_eio_raises(open_fds, held_fd, seam, code), \
+                        "the descriptor census read a {} {} failure as closed".format(
+                            seam, errno.errorcode[code])
+
+            def link_enoent(path):
+                raise OSError(errno.ENOENT, "injected census read failure")
+            assert _st_census_anon_kind(held_fd, link_enoent) is None, \
+                "the descriptor census did not read an ENOENT link as no kind"
+        finally:
+            os.close(held_fd)
+        # A descriptor reopened at the same number to another file reads as
+        # a leak; the flip, a number-only census, reads it as unchanged.
+        assert _st_census_reuse_detected(open_fds), \
+            "the descriptor census read a same-number replacement as unchanged"
+        assert not _st_census_reuse_detected(lambda: set(entry[0] for entry in open_fds())), \
+            "flip: a number-only census caught the same-number replacement"
+        # An eventfd put at an epoll descriptor's number reads as a change by
+        # its anonymous-inode kind; the flip, a census of the stat fields
+        # alone, reads it as unchanged wherever the two share an inode.
+        detected, shared = _st_census_anon_reuse_detected(open_fds)
+        assert detected, "the descriptor census read an epoll-to-eventfd replacement as unchanged"
+        assert not shared or not _st_census_anon_reuse_detected(
+            lambda: set(entry[:4] for entry in open_fds()))[0], \
+            "flip: a stat-only census caught the epoll-to-eventfd replacement"
+        assert _st_census_anon_close_leak_free(open_fds), \
+            "the epoll-to-eventfd probe leaked a descriptor when its epoll close raised"
         before = open_fds()
         with patch.object(threading.Thread, "start", interrupted_start):
             held = cancelled_run()
@@ -2370,11 +4185,11 @@ def _watchdog_completion_case(mode):
             identity = (os.fstat(spare).st_dev, os.fstat(spare).st_ino)
 
             def probe():
-                try:
-                    stat = os.fstat(spare)
-                except OSError:
+                if not _st_census_open(spare):   # EBADF only reads as swept; any other read error raises
                     return "SWEPT"
+                stat = os.fstat(spare)
                 return "LEAKED" if (stat.st_dev, stat.st_ino) == identity else "SWEPT"
+            assert _st_census_eio_raises(probe, spare), "the probe read an EIO descriptor as swept"
 
             real_listdir = os.listdir
 
@@ -2498,18 +4313,18 @@ def _watchdog_completion_case(mode):
                 return stat.rsplit(b")", 1)[1].split()[0].decode("ascii")
 
             def await_state(target, wanted, note):
-                bound = time.monotonic() + 30
+                bound = _watchdog_deadline(30)
                 while state(target) not in wanted:
                     assert time.monotonic() < bound, note
                     time.sleep(0.005)
 
             def launch_wedged(hook):
                 guardian_file.unlink(missing_ok=True)
-                child = emit._FixtureProcess(time.monotonic() + 3600,
+                child = emit._FixtureProcess(time.monotonic() + _WATCHDOG_FIXTURE_HOLD,
                                              subject=lambda: time.sleep(3600))
                 with patch.object(emit, "_fixture_send_subject", hook):
                     child.start()
-                bound = time.monotonic() + 30
+                bound = _watchdog_deadline(30)
                 while not guardian_file.exists():
                     assert time.monotonic() < bound, "the guardian never reached its stop point"
                     time.sleep(0.005)
@@ -2593,7 +4408,7 @@ def _watchdog_completion_case(mode):
                 return stat.rsplit(b")", 1)[1].split()[0].decode("ascii")
 
             def await_state(target, wanted, note):
-                bound = time.monotonic() + 30
+                bound = _watchdog_deadline(30)
                 while state(target) not in wanted:
                     assert time.monotonic() < bound, note
                     time.sleep(0.005)
@@ -2601,11 +4416,11 @@ def _watchdog_completion_case(mode):
             def launch_wedged():
                 guardian_file.unlink(missing_ok=True)
                 marker.unlink(missing_ok=True)
-                child = emit._FixtureProcess(time.monotonic() + 3600,
+                child = emit._FixtureProcess(time.monotonic() + _WATCHDOG_FIXTURE_HOLD,
                                              subject=subject_body)
                 with patch.object(emit, "_fixture_ack_subject", wedge_ack):
                     child.start()
-                bound = time.monotonic() + 30
+                bound = _watchdog_deadline(30)
                 while not guardian_file.exists():
                     assert time.monotonic() < bound, "the guardian never stopped"
                     time.sleep(0.005)
@@ -2639,7 +4454,7 @@ def _watchdog_completion_case(mode):
             with patch.object(emit, "_fixture_pdeathsig", lambda: None), \
                     patch.object(emit, "_fixture_await_ack", lambda fd: None):
                 child, subject = launch_wedged()
-                bound = time.monotonic() + 30
+                bound = _watchdog_deadline(30)
                 while not marker.exists():
                     assert time.monotonic() < bound, "the flip subject never ran"
                     time.sleep(0.005)
@@ -2676,7 +4491,7 @@ def _watchdog_completion_case(mode):
                 scratch = Path(directory, "waiting.tmp")
                 scratch.write_text(str(os.getpid()), encoding="ascii")
                 scratch.rename(waiting)  # atomic: never a partial PID
-                bound = clock.monotonic() + 120
+                bound = _watchdog_deadline(120)
                 while not release.exists():
                     if clock.monotonic() >= bound:
                         os._exit(96)  # the gate never opened: fail loudly
@@ -2697,7 +4512,7 @@ def _watchdog_completion_case(mode):
                 return stat.rsplit(b")", 1)[1].split()[0].decode("ascii")
 
             def await_state(target, wanted, note):
-                bound = time.monotonic() + 30
+                bound = _watchdog_deadline(30)
                 while state(target) not in wanted:
                     assert time.monotonic() < bound, note
                     time.sleep(0.005)
@@ -2707,11 +4522,11 @@ def _watchdog_completion_case(mode):
                 waiting.unlink(missing_ok=True)
                 release.unlink(missing_ok=True)
                 marker.unlink(missing_ok=True)
-                child = emit._FixtureProcess(time.monotonic() + 3600,
+                child = emit._FixtureProcess(time.monotonic() + _WATCHDOG_FIXTURE_HOLD,
                                              subject=subject_body)
                 with patch.object(emit, "_fixture_pdeathsig", lambda: hold(arm)):
                     child.start()
-                bound = time.monotonic() + 30
+                bound = _watchdog_deadline(30)
                 while not waiting.exists():
                     assert time.monotonic() < bound, "the subject never reached its gate"
                     time.sleep(0.005)
@@ -2764,7 +4579,7 @@ def _watchdog_completion_case(mode):
                 os.kill(child.pid, signal.SIGKILL)
                 await_state(child.pid, ("Z",), "the killed guardian did not exit")
                 release.write_text("go", encoding="ascii")
-                bound = time.monotonic() + 30
+                bound = _watchdog_deadline(30)
                 while not marker.exists():
                     assert time.monotonic() < bound, "the flip orphan never ran"
                     time.sleep(0.005)
@@ -2820,7 +4635,7 @@ def _watchdog_completion_case(mode):
             return pids
 
         def await_child(owner, note):
-            bound = time.monotonic() + 30
+            bound = _watchdog_deadline(30)
             while True:
                 assert time.monotonic() < bound, note
                 listed = children_of(owner)
@@ -2842,14 +4657,15 @@ def _watchdog_completion_case(mode):
                         lambda subject, fd, **license: None))
                     stack.enter_context(patch.object(
                         emit, "_fixture_pdeathsig", lambda: None))
-                child = emit._FixtureProcess(time.monotonic() + 3600, subject=subject_tree)
+                child = emit._FixtureProcess(time.monotonic() + _WATCHDOG_FIXTURE_HOLD,
+                                             subject=subject_tree)
                 pid = child.start()
                 subject = await_child(pid, "the guardian subject never appeared")
                 descendant = await_child(subject, "the subject descendant never appeared")
                 # A stopped guardian models a cleanup that cannot make progress: it
                 # can never exit, so an unbounded close() would block until resumed.
                 os.kill(pid, signal.SIGSTOP)
-                bound = time.monotonic() + 30
+                bound = _watchdog_deadline(30)
                 while state(pid) != "T":
                     assert time.monotonic() < bound, "the guardian did not stop"
                     time.sleep(0.005)
@@ -2937,7 +4753,7 @@ def _watchdog_completion_case(mode):
         # (the outer guardian, under the regression runner) and lingers as a
         # zombie until that ancestor's drain: Z is dead, not surviving.
         dead = (None, "Z")
-        bound = time.monotonic() + 30
+        bound = _watchdog_deadline(30)
         while state(subject) not in dead or state(descendant) not in dead:
             assert time.monotonic() < bound, (state(subject), state(descendant))
             time.sleep(0.005)
@@ -2947,7 +4763,7 @@ def _watchdog_completion_case(mode):
         assert state(subject) not in dead, "flip: the subject died without its kill step"
         assert "could not confirm subject exit" in failures[0], failures
         os.killpg(subject, signal.SIGKILL)  # clean up the deliberately-leaked tree
-        bound = time.monotonic() + 30
+        bound = _watchdog_deadline(30)
         while state(subject) not in dead or state(descendant) not in dead:
             assert time.monotonic() < bound, "the flip cleanup did not complete"
             time.sleep(0.005)
@@ -2997,7 +4813,7 @@ def _watchdog_completion_case(mode):
                 return stat.rsplit(b")", 1)[1].split()[0].decode("ascii")
 
             def await_state(target, wanted, note):
-                bound = time.monotonic() + 30
+                bound = _watchdog_deadline(30)
                 while state(target) not in wanted:
                     assert time.monotonic() < bound, note
                     time.sleep(0.005)
@@ -3005,11 +4821,11 @@ def _watchdog_completion_case(mode):
             def exercise(flip):
                 wedged.unlink(missing_ok=True)
                 grandchild_file.unlink(missing_ok=True)
-                child = emit._FixtureProcess(time.monotonic() + 3600,
+                child = emit._FixtureProcess(time.monotonic() + _WATCHDOG_FIXTURE_HOLD,
                                              subject=subject_body)
                 with patch.object(emit, "_fixture_drain", reap_then_wedge):
                     child.start()
-                bound = time.monotonic() + 30
+                bound = _watchdog_deadline(30)
                 while not (wedged.exists() and grandchild_file.exists()):
                     assert time.monotonic() < bound, "the drain wedge was not reached"
                     time.sleep(0.005)
@@ -3074,7 +4890,7 @@ def _watchdog_completion_case(mode):
                 return stat.rsplit(b")", 1)[1].split()[0].decode("ascii")
 
             def await_state(target, wanted, note):
-                bound = time.monotonic() + 30
+                bound = _watchdog_deadline(30)
                 while state(target) not in wanted:
                     assert time.monotonic() < bound, note
                     time.sleep(0.005)
@@ -3084,10 +4900,10 @@ def _watchdog_completion_case(mode):
                 # guardian and collect it through poll(), never through close().
                 descendant_file.unlink(missing_ok=True)
                 with patch.object(emit, "_fixture_pdeathsig", lambda: None):
-                    child = emit._FixtureProcess(time.monotonic() + 3600,
+                    child = emit._FixtureProcess(time.monotonic() + _WATCHDOG_FIXTURE_HOLD,
                                                  subject=subject_body)
                     child.start()
-                bound = time.monotonic() + 30
+                bound = _watchdog_deadline(30)
                 while not descendant_file.exists():
                     assert time.monotonic() < bound, "the subject tree never appeared"
                     time.sleep(0.005)
@@ -3096,7 +4912,7 @@ def _watchdog_completion_case(mode):
                                    "children").read_text(encoding="ascii").split()[0])
                 os.kill(child.pid, signal.SIGKILL)
                 polled = []
-                bound = time.monotonic() + 30
+                bound = _watchdog_deadline(30)
                 while True:
                     try:
                         status = child.poll()
@@ -3221,7 +5037,9 @@ def _watchdog_completion_case(mode):
         real_abandon = emit._FixtureProcess._abandon_unfinished_launch
         real_finish = emit._FixtureProcess._finish_close
 
-        open_fds = _fixture_fd_census
+        # Identities, not bare numbers: a same-number replacement reads as a
+        # change; EBADF only reads as closed, any other read error raises.
+        open_fds = _st_census_fds
         _fixture_fd_census_pins()
 
         def no_children():
@@ -3239,13 +5057,13 @@ def _watchdog_completion_case(mode):
             return stat.rsplit(b")", 1)[1].split()[0].decode("ascii")
 
         def await_state(target, wanted, note):
-            bound = time.monotonic() + 30
+            bound = _watchdog_deadline(30)
             while state(target) not in wanted:
                 assert time.monotonic() < bound, note
                 time.sleep(0.005)
 
         def await_subject(child):
-            bound = time.monotonic() + 30
+            bound = _watchdog_deadline(30)
             while True:
                 listed = Path("/proc", str(child.pid), "task", str(child.pid),
                               "children").read_text(encoding="ascii").split()
@@ -3286,7 +5104,7 @@ def _watchdog_completion_case(mode):
                     child.close()
                 except emit.ChildStatusUnavailable as exc:
                     refusals.append(str(exc))
-                bound = time.monotonic() + 10
+                bound = _watchdog_deadline(10)
                 while time.monotonic() < bound:
                     pass
                 raise AssertionError("the pending interrupt was never delivered")
@@ -3315,6 +5133,45 @@ def _watchdog_completion_case(mode):
 
         emit._fixture_preload()
         assert no_children(), "children live before the close-cancel probe"
+        import errno
+        held_fd = os.open(os.devnull, os.O_RDONLY)
+        try:
+            assert _st_census_eio_raises(open_fds, held_fd), \
+                "the descriptor census read an EIO descriptor as closed"
+            assert _st_census_eio_raises(open_fds, held_fd, "readlink"), \
+                "the descriptor census read a descriptor whose link fails EIO as closed"
+            # Every other read error fails closed too (each seam's one tolerated
+            # errno included for the other seam); ENOENT on the link read alone
+            # (the number has no entry) reads as no kind.
+            for seam, codes in (("fstat", (errno.EACCES, errno.EPERM, errno.ENOENT)),
+                                ("readlink", (errno.EACCES, errno.EPERM, errno.EBADF))):
+                for code in codes:
+                    assert _st_census_eio_raises(open_fds, held_fd, seam, code), \
+                        "the descriptor census read a {} {} failure as closed".format(
+                            seam, errno.errorcode[code])
+
+            def link_enoent(path):
+                raise OSError(errno.ENOENT, "injected census read failure")
+            assert _st_census_anon_kind(held_fd, link_enoent) is None, \
+                "the descriptor census did not read an ENOENT link as no kind"
+        finally:
+            os.close(held_fd)
+        # A descriptor reopened at the same number to another file reads as
+        # a leak; the flip, a number-only census, reads it as unchanged.
+        assert _st_census_reuse_detected(open_fds), \
+            "the descriptor census read a same-number replacement as unchanged"
+        assert not _st_census_reuse_detected(lambda: set(entry[0] for entry in open_fds())), \
+            "flip: a number-only census caught the same-number replacement"
+        # An eventfd put at an epoll descriptor's number reads as a change by
+        # its anonymous-inode kind; the flip, a census of the stat fields
+        # alone, reads it as unchanged wherever the two share an inode.
+        detected, shared = _st_census_anon_reuse_detected(open_fds)
+        assert detected, "the descriptor census read an epoll-to-eventfd replacement as unchanged"
+        assert not shared or not _st_census_anon_reuse_detected(
+            lambda: set(entry[:4] for entry in open_fds()))[0], \
+            "flip: a stat-only census caught the epoll-to-eventfd replacement"
+        assert _st_census_anon_close_leak_free(open_fds), \
+            "the epoll-to-eventfd probe leaked a descriptor when its epoll close raised"
         before = open_fds()
 
         # Leg 1: fork unrecorded (wedged), SIGINT pending from inside the
@@ -3389,7 +5246,7 @@ def _watchdog_completion_case(mode):
         # Leg 4: SIGINT pending from inside the collection's bounded reap wait
         # -> the reap loop keeps running, collection and validation complete,
         # the interrupt lands after.
-        child = emit._FixtureProcess(time.monotonic() + 3600,
+        child = emit._FixtureProcess(time.monotonic() + _WATCHDOG_FIXTURE_HOLD,
                                      subject=lambda: time.sleep(3600))
         child.start()
         gpid = child.pid
@@ -3458,7 +5315,7 @@ def _watchdog_completion_case(mode):
                 if not fired:
                     fired.append(True)
                     os.kill(os.getpid(), signal.SIGINT)  # process-directed
-                    spin = time.monotonic() + 2.0
+                    spin = _watchdog_deadline(2.0)
                     while time.monotonic() < spin:
                         pass
                     survived.append(True)
@@ -3606,7 +5463,7 @@ def _watchdog_completion_case(mode):
                 return stat.rsplit(b")", 1)[1].split()[0].decode("ascii")
 
             def await_state(target, wanted, note):
-                bound = time.monotonic() + 30
+                bound = _watchdog_deadline(30)
                 while state(target) not in wanted:
                     assert time.monotonic() < bound, note
                     time.sleep(0.005)
@@ -3627,10 +5484,10 @@ def _watchdog_completion_case(mode):
                                                      lambda pid: None))
                     stack.enter_context(patch.object(emit, "_fixture_ack_subject",
                                                      wedge_ack))
-                    child = emit._FixtureProcess(time.monotonic() + 3600,
+                    child = emit._FixtureProcess(time.monotonic() + _WATCHDOG_FIXTURE_HOLD,
                                                  subject=lambda: time.sleep(3600))
                     child.start()
-                bound = time.monotonic() + 30
+                bound = _watchdog_deadline(30)
                 while not wedged.exists():
                     assert time.monotonic() < bound, \
                         "the guardian never reached its stop point"
@@ -3698,7 +5555,7 @@ def _watchdog_completion_case(mode):
                 return stat.rsplit(b")", 1)[1].split()[0].decode("ascii")
 
             def await_state(target, wanted, note):
-                bound = time.monotonic() + 30
+                bound = _watchdog_deadline(30)
                 while state(target) not in wanted:
                     assert time.monotonic() < bound, note
                     time.sleep(0.005)
@@ -3713,10 +5570,10 @@ def _watchdog_completion_case(mode):
                         patch.object(emit, "_fixture_pdeathsig", lambda: None))
                     for target, name, value in patches:
                         stack.enter_context(patch.object(target, name, value))
-                    child = emit._FixtureProcess(time.monotonic() + 3600,
+                    child = emit._FixtureProcess(time.monotonic() + _WATCHDOG_FIXTURE_HOLD,
                                                  subject=subject_body)
                     child.start()
-                bound = time.monotonic() + 30
+                bound = _watchdog_deadline(30)
                 while not descendant_file.exists():
                     assert time.monotonic() < bound, "the subject tree never appeared"
                     time.sleep(0.005)
@@ -3728,7 +5585,7 @@ def _watchdog_completion_case(mode):
 
             def poll_failure(child):
                 refusals = []
-                bound = time.monotonic() + 30
+                bound = _watchdog_deadline(30)
                 while not refusals:
                     assert time.monotonic() < bound, "poll never collected"
                     try:
@@ -3763,7 +5620,7 @@ def _watchdog_completion_case(mode):
 
             refusals, delivered = [], []
             with patch.object(emit._FixtureProcess, "_read_report", read_hook):
-                bound = time.monotonic() + 30
+                bound = _watchdog_deadline(30)
                 try:
                     while not refusals:
                         assert time.monotonic() < bound, "poll never collected"
@@ -3771,7 +5628,7 @@ def _watchdog_completion_case(mode):
                             assert child.poll() is None
                         except emit.ChildStatusUnavailable as exc:
                             refusals.append(str(exc))
-                            spin = time.monotonic() + 10
+                            spin = _watchdog_deadline(10)
                             while time.monotonic() < spin:
                                 pass
                             raise AssertionError(
@@ -3818,7 +5675,7 @@ def _watchdog_completion_case(mode):
             def poll_cancelled(child):
                 with patch.object(emit._FixtureProcess, "_read_report",
                                   side_effect=Cancelled()):
-                    bound = time.monotonic() + 30
+                    bound = _watchdog_deadline(30)
                     while True:
                         assert time.monotonic() < bound, "poll never collected"
                         try:
@@ -4026,7 +5883,7 @@ def _watchdog_completion_case(mode):
             return stat.rsplit(b")", 1)[1].split()[0].decode("ascii")
 
         def await_state(target, wanted, note):
-            bound = time.monotonic() + 30
+            bound = _watchdog_deadline(30)
             while state(target) not in wanted:
                 assert time.monotonic() < bound, note
                 time.sleep(0.005)
@@ -4060,7 +5917,7 @@ def _watchdog_completion_case(mode):
                 scratch.rename(descendant_file)  # atomic: never a partial PID
                 time.sleep(3600)
                 os._exit(0)
-            bound = time.monotonic() + 30
+            bound = _watchdog_deadline(30)
             while not descendant_file.exists():
                 assert time.monotonic() < bound, "the leg-1 tree never appeared"
                 time.sleep(0.005)
@@ -4130,7 +5987,7 @@ def _watchdog_completion_case(mode):
                 scratch.write_text(str(pid), encoding="ascii")
                 scratch.rename(descendant_file)  # atomic: never a partial PID
                 os._exit(0)                    # dies UNREAPED: a zombie leader
-            bound = time.monotonic() + 30
+            bound = _watchdog_deadline(30)
             while not descendant_file.exists():
                 assert time.monotonic() < bound, "the zombie-leg tree never appeared"
                 time.sleep(0.005)
@@ -4163,7 +6020,7 @@ def _watchdog_completion_case(mode):
             os.setsid()
             time.sleep(3600)
             os._exit(0)
-        bound = time.monotonic() + 30
+        bound = _watchdog_deadline(30)
         while True:
             try:
                 if os.getpgid(decoy) == decoy:
@@ -4220,7 +6077,7 @@ def _watchdog_completion_case(mode):
                     scratch = Path(directory, "leader.tmp")
                     scratch.write_text(str(leader), encoding="ascii")
                     scratch.rename(leader_file)
-                    bound = time.monotonic() + 30
+                    bound = _watchdog_deadline(30)
                     while not opened.exists():  # the caller holds the pidfd now
                         if time.monotonic() >= bound:
                             os._exit(125)
@@ -4236,7 +6093,7 @@ def _watchdog_completion_case(mode):
                     os._exit(125)
 
             def await_file(path, note):
-                bound = time.monotonic() + 30
+                bound = _watchdog_deadline(30)
                 while not path.exists():
                     assert time.monotonic() < bound, note
                     time.sleep(0.005)
@@ -4368,7 +6225,7 @@ def _watchdog_completion_case(mode):
                     os._exit(125)
 
             def await_file(path, note):
-                bound = time.monotonic() + 30
+                bound = _watchdog_deadline(30)
                 while not path.exists():
                     assert time.monotonic() < bound, note
                     time.sleep(0.005)
@@ -4423,7 +6280,7 @@ def _watchdog_completion_case(mode):
             os.setsid()
             time.sleep(3600)
             os._exit(0)
-        bound = time.monotonic() + 30
+        bound = _watchdog_deadline(30)
         while True:
             try:
                 if os.getpgid(sentinel) == sentinel:
@@ -4487,13 +6344,13 @@ def _watchdog_completion_case(mode):
             return stat.rsplit(b")", 1)[1].split()[0].decode("ascii")
 
         def await_state(target, wanted, note):
-            bound = time.monotonic() + 30
+            bound = _watchdog_deadline(30)
             while state(target) not in wanted:
                 assert time.monotonic() < bound, note
                 time.sleep(0.005)
 
         def await_file(path, note):
-            bound = time.monotonic() + 30
+            bound = _watchdog_deadline(30)
             while not path.exists():
                 assert time.monotonic() < bound, note
                 time.sleep(0.005)
@@ -4520,7 +6377,7 @@ def _watchdog_completion_case(mode):
                         grandchild = os.fork()
                         if grandchild == 0:
                             if forker:
-                                bound = time.monotonic() + 30
+                                bound = _watchdog_deadline(30)
                                 while not cue.exists():
                                     if time.monotonic() >= bound:
                                         os._exit(125)
@@ -4667,7 +6524,7 @@ def _watchdog_completion_case(mode):
                     scratch = Path(directory, "cue.tmp")
                     scratch.write_text("go", encoding="ascii")
                     scratch.rename(cue)
-                    bound = time.monotonic() + 30
+                    bound = _watchdog_deadline(30)
                     while not forked_file.exists():
                         assert time.monotonic() < bound, (
                             "the raced fork never appeared")
@@ -4703,7 +6560,7 @@ def _watchdog_completion_case(mode):
             os.setsid()
             time.sleep(3600)
             os._exit(0)
-        bound = time.monotonic() + 30
+        bound = _watchdog_deadline(30)
         while True:
             try:
                 if os.getpgid(survivor) == survivor:
@@ -4765,19 +6622,19 @@ def _watchdog_completion_case(mode):
             return stat.rsplit(b")", 1)[1].split()[0].decode("ascii")
 
         def await_state(target, wanted, note):
-            bound = time.monotonic() + 30
+            bound = _watchdog_deadline(30)
             while state(target) not in wanted:
                 assert time.monotonic() < bound, note
                 time.sleep(0.005)
 
         def await_file(path, note):
-            bound = time.monotonic() + 30
+            bound = _watchdog_deadline(30)
             while not path.exists():
                 assert time.monotonic() < bound, note
                 time.sleep(0.005)
 
         def await_pgid(target, note):
-            bound = time.monotonic() + 30
+            bound = _watchdog_deadline(30)
             while os.getpgid(target) != target:
                 assert time.monotonic() < bound, note
                 time.sleep(0.005)
@@ -4860,7 +6717,7 @@ def _watchdog_completion_case(mode):
                     and fake._subject_skipped is None), (
                 "the interrupted accounting was not recorded",
                 fake._subject_kill, fake._subject_skipped)
-            bound = time.monotonic() + 30
+            bound = _watchdog_deadline(30)
             while True:
                 waited, raw = os.waitpid(guardian, os.WNOHANG)
                 if waited == guardian:
@@ -5005,7 +6862,7 @@ def _watchdog_completion_case(mode):
                     "the recorded subject kill never ran (round 24: the "
                     "freeze fault skipped the held-pidfd SIGKILL)")
         os.waitpid(subject, 0)
-        bound = time.monotonic() + 30
+        bound = _watchdog_deadline(30)
         while True:
             waited, raw = os.waitpid(guardian, os.WNOHANG)
             if waited == guardian:
@@ -5049,7 +6906,7 @@ def _watchdog_completion_case(mode):
         assert fake._subject_kill is None and fake._subject_skipped is None, (
             "a cleanup that never ran was recorded",
             fake._subject_kill, fake._subject_skipped)
-        bound = time.monotonic() + 30
+        bound = _watchdog_deadline(30)
         while True:
             waited, raw = os.waitpid(guardian, os.WNOHANG)
             if waited == guardian:
@@ -5206,7 +7063,7 @@ def _watchdog_completion_case(mode):
             fake._subject_kill, fake._subject_skipped)
         # The direct held-pidfd backstop ran unpatched for SIGKILL: collect
         # the killed guardian.
-        bound = time.monotonic() + 30
+        bound = _watchdog_deadline(30)
         while True:
             waited, raw = os.waitpid(guardian, os.WNOHANG)
             if waited == guardian:
@@ -11175,8 +13032,17 @@ def _watchdog_overlap_case(mode):
 
 def _watchdog_regression_self_test():
     """R10: startup/collection/exit bounds and the registered runner under hostile inherited state."""
+    import ast
+    import contextlib
+    import inspect
+    import io
+    import queue
+    import select
     import signal
     import subprocess
+    import threading
+    import time
+    import _opf_emit
     from _opf_emit import run_status_owned
     if signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
         print("opf watchdog regressions: FAIL (unowned SIGCHLD disposition)")
@@ -11194,6 +13060,83 @@ def _watchdog_regression_self_test():
                     "liveness-permission")
     launcher_labels = ("isolation", "regression", "shared")
     launcher_dispositions = ("ignored", "handler")
+    # The runtime ledger's concurrency vectors (claude round-6 MEDIUM-2,
+    # codex round-7 MEDIUM 6): each runs in its own independently bounded
+    # fixture process, so a regression that hangs one is killed at that
+    # vector's bound and reported as THAT vector's failure, never a hung
+    # suite. Each row is (mode, the vector leg's own declared budget,
+    # which the fixture passes through to _watchdog_ledger_case, expected
+    # verdict). The budgets are term-exact at the vectors' definitions;
+    # unlanded-charge expects the distinct CANNOT-EVALUATE
+    # (EXIT_MALFORMED), never a pass and never a budget violation.
+    ledger_expected = (
+        ("charge-atomic", 4.5, EXIT_FINDING),
+        ("reentrant-charge", 2, EXIT_OK),
+        ("fork-mid-charge", 1, EXIT_OK),
+        ("fork-held-landing", 1.5, EXIT_OK),
+        ("signal-held-landing", 3.5, EXIT_OK),
+        ("wrapper-late-conversion", 0.0001, EXIT_FINDING),
+        ("deadline-late-conversion", 0.0001, EXIT_FINDING),
+        ("late-landing-charge", 1, EXIT_FINDING),
+        ("unlanded-charge", 10, EXIT_MALFORMED),
+        # claude round-8 MEDIUM: a same-thread charge made at the
+        # landing line's line event completes (a lock taken on an EARLIER
+        # line self-deadlocks here; a one-line lock or a BEGIN-only lock
+        # does not, which append-reentrant-charge covers); claude
+        # round-8 MINOR: an exception right after the BEGIN append still
+        # lands the token, so the leg is evaluated, never
+        # CANNOT-EVALUATE.
+        ("landing-reentrant-charge", 3, EXIT_OK),
+        ("begin-interrupted", 1, EXIT_OK),
+        # claude round-9 MEDIUM: a same-thread charge made right after
+        # EITHER append completes, so a non-reentrant lock held across
+        # the BEGIN or the LAND append, in any layout, self-deadlocks.
+        ("append-reentrant-charge", 7, EXIT_OK),
+        # codex round-9 MAJOR 1: a raising signal handler right after the
+        # suppression OPEN still closes it (the later sleep charges and
+        # overruns); one right before the close leaves the step open, and
+        # the leg is CANNOT-EVALUATE, never a silent pass.
+        ("suppression-entry-interrupted", 0.01, EXIT_FINDING),
+        ("suppression-close-interrupted", 0.01, EXIT_MALFORMED),
+        # claude round-9 MINOR: a child forked inside the charge gets
+        # (None, None), never the inherited ledger.
+        ("fork-in-charge", 1, EXIT_OK),
+        # codex round-9 MAJOR 2: distinct threads that compare EQUAL
+        # never share a deadline exemption or a suppression (the thread
+        # maps are identity-keyed); the same-thread controls keep both.
+        ("equal-thread-subtick", 100.01, EXIT_FINDING),
+        ("equal-thread-same-subtick", 100.01, EXIT_OK),
+        ("equal-thread-suppression", _deadline_case_budget(0.5) + 0.01, EXIT_FINDING),
+        ("equal-thread-same-suppression", _deadline_case_budget(0.5) + 0.01, EXIT_OK),
+        ("nested-deadline-monotone", 101, EXIT_OK),
+        ("cross-thread-subtick", 5.01, EXIT_FINDING),
+        ("recycled-thread-sleep", 600.01, EXIT_FINDING),
+        ("cross-thread-over", _deadline_case_budget(0.5) + 0.1, EXIT_FINDING),
+        ("cross-thread-within", _deadline_case_budget(0.5) + 0.15, EXIT_OK),
+        # codex round-8 MAJOR 1: a nested leg with NO charges must
+        # leave the OUTER ledger on the stack when it ends, raising
+        # nothing (stack removal by identity, never dict equality,
+        # under which two quiescent ledgers compare equal).
+        ("empty-nested-leg", 1, EXIT_OK),
+        # codex round-8 MAJOR 2: a conversion suspended across a
+        # nested leg end keeps its deadline tick and its suppression
+        # depth on the ledger it charged; the outer, uncharged leg
+        # (budget 0.01) then fails on the worker sleep (0.05, from
+        # declared timeouts alone) instead of inheriting an
+        # exemption or a suppression.
+        ("deadline-exemption-migration", 0.01, EXIT_FINDING),
+        ("wrapper-suppression-migration", 0.01, EXIT_FINDING),
+    )
+    # Boolean-return controls (codex round-8 MEDIUM): each returns
+    # a bool verdict (False for expected 0, True for expected 1)
+    # that the launching fixture comparison must REJECT: the
+    # control fixture exits 0 only on that rejection, so a
+    # comparison loosened to a plain == (under which False == 0
+    # and True == 1) turns a control red.
+    ledger_controls = (
+        ("bool-false-control", 1, EXIT_OK),
+        ("bool-true-control", 1, EXIT_FINDING),
+    )
     completion_modes = ("audit-ignore", "reaper", "nonce", "fixture-id", "status",
                         "early-exit", "cleanup-reaped", "cleanup-cancel", "premature-exit",
                         "nested-timeout", "nested-cancel", "no-signal-echild",
@@ -11220,35 +13163,644 @@ def _watchdog_regression_self_test():
         "regression": (len(deadline_modes) + len(overlap_modes)
                        + len(safety_modes)
                        + len(launcher_labels) * len(launcher_dispositions)
-                       + len(completion_modes) + 1),  # + blocked-isolation
+                       + len(completion_modes) + 1  # + blocked-isolation
+                       + len(ledger_expected)   # one fixture per ledger
+                       + len(ledger_controls)),  # vector and control
         "shared": 1,             # a single patched run_status_owned launch
     }
-    launcher_bounds = {label: 2 * launches * 5 + 30
-                       for label, launches in nested_launches.items()}
-    cases = [(mode, prefix + "return opf._watchdog_deadline_case(" + repr(mode) + ")", 10)
-             for mode in deadline_modes]
-    cases.extend(("overlap-" + mode,
-                  prefix + "return opf._watchdog_overlap_case(" + repr(mode) + ")", 60)
-                 for mode in overlap_modes)
-    cases.extend((mode, prefix + "return opf._watchdog_safety_case(" + repr(mode) + ")", 15)
-                 for mode in safety_modes)
-    cases.extend((label + "-" + disposition,
-                  prefix + "return opf._watchdog_launcher_case("
-                  + repr(label) + ", " + repr(disposition) + ")",
-                  launcher_bounds[label])
-                 for label in launcher_labels
-                 for disposition in launcher_dispositions)
-    cases.extend(("completion-" + mode,
-                  prefix + "return opf._watchdog_completion_case(" + repr(mode) + ")", 40)
-                 for mode in completion_modes)
+    # Every other family follows the same rule (the kill-timeout rule): a leg's
+    # process bound is its own budget plus the launch margin, never a flat
+    # constant below what the leg is sanctioned to wait for. The old flat 10 s
+    # deadline bound sat below one deadline case's own budget (execution
+    # bound + cleanup grace + receipt allowance = 11 s), so a leg slow but
+    # inside that budget could be killed and reported as a hang (an arithmetic
+    # consequence of those two numbers; no run reproduced such a kill).
+    deadline_budget = _deadline_case_budget()
+    # Every leg's budget is DECLARED here and checked on every run: the leg
+    # runs under _watchdog_leg_entry, which charges each bounded wait it makes
+    # at its full timeout and fails the leg when the charges exceed this
+    # budget. Each raised budget is written at its definition as MEASURED BASE
+    # + MARGIN, never a blended number. The overlap legs and overdue-success
+    # rose under PER-THREAD accounting (one thread's fixture call no longer
+    # hides the other threads' charged waits): their bases are the exact sums
+    # of their charged allowances and timeouts, term by term (overlap: the
+    # fixture allowance 11 for caller A's run_bounded, at timeout 5 or 1,
+    # neither ABOVE the 5 s execution bound (timeout 5 equals the bound,
+    # timeout 1 sits under it; max(timeout, bound) + grace + receipt = 11
+    # for both), plus the allowance 21 for caller
+    # B's run_bounded(15), two Event.wait(10), one select(10), two
+    # Thread.join(10) of caller A and one Thread.join(20) of caller B:
+    # 11 + 21 + 10 + 10 + 10 + 10 + 10 + 20 = 102.0; overdue-success
+    # 4 x deadline(30) + join(30) + fixture allowance 11 =
+    # 161.0, reproduced to the millisecond across three 2026-10-06 ledger
+    # runs), and their margin is 0.01, headroom against float summation of
+    # those charges, not a timing allowance. close-cancel alone had dropped,
+    # its one-hour fixture deadline replaced by the fixture hold. Raising a
+    # budget delays only the leg's independent KILL bound (budget + launch
+    # margin, a detection-latency trade); at report time the accounting
+    # tightens or loosens exactly with the leg's unused margin: a regression
+    # whose extra charged wait exceeds that unused margin fails the leg, and
+    # one inside it passes, which is why each margin above is stated at the
+    # smallest value its own headroom needs rather than padded.
+    budgets = dict((mode, deadline_budget) for mode in deadline_modes)
+    budgets.update(("overlap-" + mode, 102.0 + 0.01) for mode in overlap_modes)
+    budgets.update((mode, deadline_budget) for mode in safety_modes)
+    budgets.update((("lost-cleanup", 16), ("fork-error", 36), ("poll-error", 36)))
+    # A launcher case runs its nested runner twice with every launch patched
+    # to one exit-37 _run_fixture_process(timeout=5), each charged its allowance.
+    budgets.update((label + "-" + disposition,
+                    2 * nested_launches[label] * _deadline_case_budget(5))
+                   for label in launcher_labels for disposition in launcher_dispositions)
+    budgets.update(("completion-" + mode, seconds) for mode, seconds in (
+        ("audit-ignore", 16), ("reaper", 42), ("nonce", 32), ("fixture-id", 32),
+        ("status", 32), ("early-exit", 48), ("cleanup-reaped", 15), ("cleanup-cancel", 16),
+        ("premature-exit", 80), ("nested-timeout", 11), ("nested-cancel", 11),
+        ("no-signal-echild", 15), ("guardian-error", 48), ("empty-children", 48),
+        ("bounded-diagnostics", 66), ("cleanup-budget", 21), ("deadline-flips", 77),
+        ("subject-setup", 22), ("overdue-success", 161.0 + 0.01), ("launch-ownership", 60),
+        ("launch-cancel", 33), ("fd-hygiene-total", 92), ("nested-keep", 108),
+        ("fd-census", 48), ("subject-gc", 32), ("guardian-preload", 20),
+        ("subject-receipt", 784), ("subject-ack", 814), ("subject-orphan", 1658),
+        # escalation-subject: 884 is the UPPER bound on the leg's declared
+        # timeouts, not an exact base (two of its charges are fixture holds
+        # charged at what REMAINS of their 300 s hold when start() runs, so
+        # the timeout-derived sum is at most 884; one itemized run measured
+        # 883.996). Margin 6 covers the leg's load-dependent cleanup ticks,
+        # which are MEASURED, not structural: the three 2026-10-06 ledger
+        # runs measured 887.78 to 887.95 total, i.e. 3.78 to 3.95 s of
+        # ticks above the timeout-derived sum and under the 6 s margin
+        # (inferred from those totals and wait counts; the per-exercise
+        # split was not instrumented).
+        ("pdeathsig", 32), ("escalation-subject", 884 + 6), ("escalate-reaped", 784),
+        ("poll-collected", 1266), ("close-cancel", 1014), ("escalate-degraded", 784),
+        ("poll-masked", 2954), ("unpinned-kill", 600), ("census-verify", 630),
+        ("census-exception", 780), ("receipt-high-fd", 10)))
+    # The isolation matrix: 31 timer cases, each one 180 s fixture call.
+    budgets["blocked-isolation"] = 31 * _deadline_case_budget(180)
+    # The ledger concurrency vectors: the declared budget IS the vector
+    # leg's own (the fixture passes it through), so the kill-bound rule
+    # (budget + launch margin) prices each vector exactly.
+    budgets.update(("ledger-" + mode, seconds)
+                   for mode, seconds, _want in ledger_expected + ledger_controls)
+    entries = [(mode, "_watchdog_deadline_case", (mode,)) for mode in deadline_modes]
+    entries.extend(("overlap-" + mode, "_watchdog_overlap_case", (mode,))
+                   for mode in overlap_modes)
+    entries.extend((mode, "_watchdog_safety_case", (mode,)) for mode in safety_modes)
+    entries.extend((label + "-" + disposition, "_watchdog_launcher_case", (label, disposition))
+                   for label in launcher_labels for disposition in launcher_dispositions)
+    entries.extend(("completion-" + mode, "_watchdog_completion_case", (mode,))
+                   for mode in completion_modes)
+
+    def bound(label):
+        # Validated before any arithmetic: a missing, None, NaN or otherwise
+        # unusable budget reaches the floor's refusal below, never a TypeError.
+        budget = budgets.get(label)
+        return budget + _WATCHDOG_LAUNCH_MARGIN if _watchdog_finite_seconds(budget) else None
+
+    def entry(label, case, args):
+        return (prefix + "return opf._watchdog_leg_entry(" + repr(budgets.get(label))
+                + ", opf." + case + "".join(", " + repr(arg) for arg in args) + ")")
+
+    cases = [(label, entry(label, case, args), bound(label)) for label, case, args in entries]
     # Resolve the real registration, without recursively invoking this regression runner.
     # Both inherited disposition and mask are hostile; the outer runner's state is untouched.
     cases.append(("blocked-isolation", prefix
                   + "import signal; signal.signal(signal.SIGALRM, signal.SIG_IGN); "
                   + "signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM}); "
                   + "rc = opf._bootstrap(); "
-                  + "return rc if rc else dict(opf._self_tests())['opf-watchdog-isolation']()",
-                  31 * 180 + 30))                       # the isolation matrix's full budget plus launch margin
+                  + "return rc if rc else opf._watchdog_leg_entry("
+                  + repr(budgets.get("blocked-isolation"))
+                  + ", dict(opf._self_tests())['opf-watchdog-isolation'])",
+                  bound("blocked-isolation")))
+    # One fixture per ledger concurrency vector: the expected verdict is
+    # compared INSIDE the fixture (0 on a match, 3 otherwise), so a hang,
+    # crash or wrong verdict is a nonzero fixture status, and a hung
+    # vector is killed at its own independent bound and reported as that
+    # vector's failure, never a hung suite.
+    def ledger_fixture(mode, seconds, want, control=False):
+        # ONE comparison fragment serves the real vectors and the
+        # boolean-return controls (codex round-8 MEDIUM): only an
+        # EXACT int verdict passes (type(rc) is int, never a bool,
+        # whose False == 0 and True == 1). A control returns a bool
+        # and its fixture exits 0 only when this same fragment
+        # REJECTS it, so loosening the fragment to a plain ==
+        # turns a control red.
+        exact = "(type(rc) is int and rc == " + repr(want) + ")"
+        return (prefix + "rc = opf._watchdog_ledger_case(" + repr(mode)
+                + ", " + repr(seconds) + "); return "
+                + (("3 if " + exact + " else 0") if control
+                   else ("0 if " + exact + " else 3")))
+
+    cases.extend(("ledger-" + mode, ledger_fixture(mode, seconds, want),
+                  bound("ledger-" + mode))
+                 for mode, seconds, want in ledger_expected)
+    cases.extend(("ledger-" + mode,
+                  ledger_fixture(mode, seconds, want, control=True),
+                  bound("ledger-" + mode))
+                 for mode, seconds, want in ledger_controls)
+    # The rule holds for every leg, and it is discriminating: the pre-fix flat
+    # bounds (deadline 10 s, safety 15 s, completion 40 s) must be refused,
+    # naming the deadline and safety legs and the completion modes they under-cover.
+    live = dict((label, timeout) for label, _code, timeout in cases)
+    flat = dict(live)
+    flat.update((mode, 10) for mode in deadline_modes)
+    flat.update((mode, 15) for mode in safety_modes)
+    flat.update(("completion-" + mode, 40) for mode in completion_modes)
+    refused = " ".join(_watchdog_bound_faults(flat, budgets))
+    flip_missed = [label for label in deadline_modes + safety_modes
+                   + ("completion-premature-exit", "completion-deadline-flips",
+                      "completion-nested-keep")
+                   if label + ": bound" not in refused]
+    # The per-call allowance, the launch margin and the leg roster are inputs
+    # the floor itself trusts, so each is pinned: the allowance is execution
+    # up to max(timeout, execution bound) + cleanup grace + receipt allowance;
+    # the margin covers interpreter start, import and bootstrap; a bound one
+    # step under budget + margin is refused; and every mode a case function
+    # branches on is a launched leg.
+    for timeout_s in (_DEADLINE_CASE_TIMEOUT, _DEADLINE_EXECUTION_BOUND + 1, 30):
+        if _deadline_case_budget(timeout_s) < (max(timeout_s, _DEADLINE_EXECUTION_BOUND)
+                                               + _opf_emit._FIXTURE_CLEANUP_GRACE
+                                               + _DEADLINE_RECEIPT_ALLOWANCE):
+            flip_missed.append("per-call allowance at timeout %s" % timeout_s)
+    if _WATCHDOG_LAUNCH_MARGIN < 30:
+        flip_missed.append("launch margin %r below 30 s" % (_WATCHDOG_LAUNCH_MARGIN,))
+    if not _watchdog_bound_faults(dict(probe=10 + _WATCHDOG_LAUNCH_MARGIN - 0.5), dict(probe=10)):
+        flip_missed.append("bound below budget + margin")
+    for prefix_label, case in (("", _watchdog_deadline_case), ("", _watchdog_safety_case),
+                               ("overlap-", _watchdog_overlap_case),
+                               ("completion-", _watchdog_completion_case),
+                               ("ledger-", _watchdog_ledger_case)):
+        branched = set()
+        for node in ast.walk(ast.parse(inspect.getsource(case))):
+            if (isinstance(node, ast.Compare) and isinstance(node.left, ast.Name)
+                    and node.left.id == "mode"):
+                for item in node.comparators:
+                    for const in ast.walk(item):
+                        if isinstance(const, ast.Constant) and isinstance(const.value, str):
+                            branched.add(prefix_label + const.value)
+        flip_missed.extend("unlaunched mode %s" % label for label in sorted(branched - set(live)))
+    # A leg with no declared budget, or an unusable one, is refused by the floor
+    # on the runner's own tables (never a TypeError while bounds are built).
+    for label, budget in ((next(iter(budgets)), None), ("completion-reaper", float("nan"))):
+        probe_budgets = dict(budgets)
+        if budget is None:
+            del probe_budgets[label]
+        else:
+            probe_budgets[label] = budget
+        probe_bounds = dict(live)
+        probe_bounds[label] = (probe_budgets[label] + _WATCHDOG_LAUNCH_MARGIN
+                               if _watchdog_finite_seconds(probe_budgets.get(label))
+                               else live[label])
+        faults = " ".join(_watchdog_bound_faults(probe_bounds, probe_budgets))
+        if (label + (": no declared budget" if budget is None else ": budget")) not in faults:
+            flip_missed.append("unusable budget %r for %s" % (budget, label))
+    # The runtime ledger: a leg whose charged waits exceed its declared budget,
+    # whose wait has no finite timeout, or whose budget is unusable fails; a
+    # leg inside its budget keeps its own result; a wait a thread makes inside
+    # its own registered call is not charged twice, while another thread's
+    # concurrent wait IS charged (and an UNSET Event.wait's nested
+    # Condition.wait is the suppression's own within-budget vector); a
+    # sub-tick sleep is exempt only on the thread lifetime that opened a
+    # still-unexpired charged deadline (an expired deadline, another live
+    # thread's deadline, and a dead thread's recycled ident each charge);
+    # and an unknown fixture timeout fails the leg even from inside
+    # another charged wait. The ledger holds NO lock: every entry path
+    # appends a BEGIN token before any user code (the value's conversion
+    # or any formatting of it) and exactly one LAND record on completion,
+    # and the report waits, bounded, for every BEGIN to land before it
+    # sums, so a charge begun during a leg is in the verdict, or the leg
+    # is the distinct CANNOT-EVALUATE, never a pass. The CONCURRENCY
+    # vectors exercising that design run as per-vector fixtures
+    # (ledger_expected above), each in its own process with an independent
+    # kill bound, so a regression that hangs one is killed and reported as
+    # THAT vector's failure, never a hung suite and never a false pass:
+    # two concurrent charges BOTH land (charge-atomic suspends one charge
+    # mid-conversion, through untimed handshakes, while the other
+    # charges); a charge whose value's own conversion makes registered
+    # calls on the SAME thread, directly and from a finalizer, completes
+    # (reentrant-charge: no ledger step waits, so the nested wrapper can
+    # never block on anything its own thread holds); a wrapper or deadline
+    # timeout whose conversion outlives the leg body is REGISTERED before
+    # that conversion and counted by the closing wait
+    # (wrapper-late-conversion, deadline-late-conversion,
+    # late-landing-charge), never passed over with zero waits; one that
+    # cannot land within the closing bound turns the leg into the distinct
+    # CANNOT-EVALUATE, with the charging thread never raising
+    # (unlanded-charge); an exception raised right after a BEGIN append
+    # still lands its token, so the leg is evaluated, never
+    # CANNOT-EVALUATE (begin-interrupted); a same-thread charge made
+    # at the landing line's line event completes, where a lock taken on
+    # an earlier line self-deadlocks (landing-reentrant-charge: the line
+    # event fires before the line runs, so a one-line `with lock:`
+    # append or a lock around the BEGIN append alone passes it); a
+    # same-thread charge made right after EITHER the BEGIN or the LAND
+    # append completes, where a non-reentrant lock held across either
+    # append, in any layout, self-deadlocks (append-reentrant-charge,
+    # the layout-independent lock vector); a raising signal handler
+    # right after a registered call's suppression OPEN still closes it,
+    # and one right before its close leaves it open and the leg
+    # CANNOT-EVALUATE, never a silent pass
+    # (suppression-entry-interrupted, suppression-close-interrupted);
+    # a child forked inside a charge gets (None, None), never the
+    # inherited ledger (fork-in-charge); distinct threads that compare
+    # equal share neither a deadline exemption nor a suppression, while
+    # each keeps its own (equal-thread-subtick, equal-thread-suppression
+    # and their same-thread controls); a child forked while another
+    # thread is mid-charge exits 0 promptly (fork-mid-charge), as does a
+    # child that RESUMES a conversion while a second thread sits
+    # suspended inside the landing step itself, where a reintroduced
+    # lock held across the landing append would be held across the fork
+    # (fork-held-landing, red on the round-7 locked design by
+    # construction: the suspension is the leg's swapped `landed` list
+    # blocking that thread's first append; a lock around the BEGIN
+    # append alone is not held there and is append-reentrant-charge's
+    # to catch); a SIGUSR1 handler charging on the main thread while
+    # that same held-landing suspension is live completes without a
+    # hang (signal-held-landing, red on the round-7 locked design); a
+    # bool or str fixture timeout is uncountable, never a 0.0 wait
+    # (run-bounded-bool-timeout, run-bounded-str-timeout); and a nested longer deadline opened from
+    # inside the outer deadline's own clock read survives, because ticks
+    # is an append-only list with max taken at read time
+    # (nested-deadline-monotone); a nested leg with NO charges
+    # leaves the OUTER ledger on the stack when it ends, with
+    # nothing raised, because stack removal is by IDENTITY, never
+    # dict equality, under which two quiescent ledgers compare
+    # equal (empty-nested-leg); and a timeout conversion suspended
+    # across a nested leg end keeps its deadline tick and its
+    # suppression depth on the ledger it charged, so the outer,
+    # uncharged leg fails on the worker sleep instead of
+    # inheriting an exemption or a suppression
+    # (deadline-exemption-migration,
+    # wrapper-suppression-migration). Every
+    # registered primitive has an over-budget and a within-budget vector,
+    # with over-budget vectors in BOTH positional and keyword form where the
+    # primitive accepts both (time.sleep and select.select are
+    # positional-only in CPython; _run_fixture_process is keyword-only), so
+    # deleting one registration, misreading its argument index, reading only
+    # positional timeouts, or inflating the poll tick turns at least one
+    # vector red. No vector's EXPECTED verdict depends on wall-clock
+    # timing, and no vector's handshake carries a timed escape a stall
+    # could outrun: each over-budget verdict follows from declared
+    # timeouts alone, the deadline-exemption vectors control
+    # time.monotonic for the windows they need instead of racing a stall
+    # against slack, and NO timed join or timed wait decides any outcome
+    # (unlanded-charge's shrunken closing bound caps that vector's
+    # DURATION only, its expected cannot-evaluate holding for any bound
+    # and any stall). Stated limit: on a heavily loaded host a live
+    # conversion can outlast the closing bound, turning an otherwise
+    # within-budget leg into the loud CANNOT-EVALUATE; that verdict is
+    # fail-closed, distinct from a budget violation, and disclosed at
+    # _WATCHDOG_CLOSE_BOUND.
+    # Every vector leg returns an explicit int verdict, the comparison
+    # (vector_red for the in-process vectors below, the fixture's own
+    # comparison for the per-vector fixtures) requires an exact int (the
+    # boolean-return controls above hold that fragment exact), and
+    # each fixture outcome is asserted separately: a fixture that never
+    # exercised its path fails the vector even where the budget verdict
+    # alone would mask it.
+    def probe(*charges):
+        def leg():
+            for seconds in charges:
+                _watchdog_charge(seconds, "probe")
+            return EXIT_OK
+        return leg
+
+    fixture_outcomes = []
+
+    def outcome(got, want):
+        fixture_outcomes.append((got, want))
+        return EXIT_OK if got == want else 3  # a dead path is never EXIT_OK
+
+    def bounded(timeout_s, body, want, keyword=True):
+        if keyword:
+            return lambda: outcome(_opf_emit.run_bounded(body, timeout_s=timeout_s), want)
+        return lambda: outcome(_opf_emit.run_bounded(body, timeout_s), want)
+
+    def opened_deadline(seconds):
+        def leg():
+            _watchdog_deadline(seconds)
+            return EXIT_OK
+        return leg
+
+    def slept(deadline_s, *sleeps):
+        def leg():
+            if deadline_s is not None:
+                _watchdog_deadline(deadline_s)
+            for seconds in sleeps:
+                time.sleep(seconds)
+            return EXIT_OK
+        return leg
+
+    def joined(seconds, keyword):
+        def leg():
+            worker = threading.Thread(target=lambda: None)
+            worker.start()
+            if keyword:
+                worker.join(timeout=seconds)
+            else:
+                worker.join(seconds)
+            return EXIT_OK
+        return leg
+
+    def selected(seconds):
+        def leg():
+            read_fd, write_fd = os.pipe()
+            try:
+                os.write(write_fd, b"x")
+                ready, _, _ = select.select([read_fd], [], [], seconds)
+                return outcome(bool(ready), True)
+            finally:
+                os.close(read_fd)
+                os.close(write_fd)
+        return leg
+
+    def waited_event(seconds, keyword, preset=True):
+        def leg():
+            event = threading.Event()
+            if preset:
+                event.set()  # charged at its full timeout, returning at once
+            # Unset, the wait really elapses and its nested Condition.wait is
+            # suppressed: only the Event charge itself may reach the ledger.
+            if keyword:
+                event.wait(timeout=seconds)
+            else:
+                event.wait(seconds)
+            return EXIT_OK
+        return leg
+
+    def waited_condition(seconds, keyword):
+        def leg():
+            condition = threading.Condition()
+            with condition:
+                if keyword:
+                    condition.wait(timeout=seconds)
+                else:
+                    condition.wait(seconds)
+            return EXIT_OK
+        return leg
+
+    def queue_got(seconds, filled, keyword):
+        def leg():
+            channel = queue.Queue()
+            if filled:
+                channel.put("x")
+            try:
+                got = channel.get(timeout=seconds) if keyword else channel.get(True, seconds)
+            except queue.Empty:
+                got = "empty"
+            return outcome(got, "x" if filled else "empty")
+        return leg
+
+    # Stub-based vectors replace a fixture entry point on the module, so they
+    # are sound only when THIS run owns the install (the wrapper is then
+    # created over the stub). Under a nested launcher run the wrappers are
+    # already installed and the module attribute is the launcher's patch:
+    # these vectors are exercised by the top-level regression run instead.
+    owns_install = not _WATCHDOG_LEDGERS
+
+    def stubbed(attribute, stub, budget, leg):
+        real = getattr(_opf_emit, attribute)
+        setattr(_opf_emit, attribute, stub)
+        try:
+            return _watchdog_leg_entry(budget, leg)
+        finally:
+            setattr(_opf_emit, attribute, real)
+
+    def fixture_stub(argv, *, timeout=120):
+        return "held"
+
+    def fixture_leg():
+        return outcome(_opf_emit._run_fixture_process(["probe"], timeout=1), "held")
+
+    def opaque_bounded(*args, **kwargs):
+        return "ran"
+    # inspect.signature raises on a non-Signature __signature__: the ledger
+    # cannot see this stub's timeout default, so a call that relies on the
+    # default is uncountable and must fail the leg.
+    opaque_bounded.__signature__ = "unintrospectable"
+
+    def opaque_leg():
+        return outcome(_opf_emit.run_bounded(lambda: "x"), "ran")
+
+    def opaque_fixture(argv, **kwargs):
+        return "held"
+    opaque_fixture.__signature__ = "unintrospectable"
+
+    def no_default_bounded(body, timeout_s):
+        return body()
+
+    def no_default_leg():
+        # The stub's timeout_s has no default, so the install-time extractor
+        # must yield `unknown` (never inspect.Parameter.empty): the omitted
+        # timeout is recorded uncountable even though the real call then
+        # raises for the missing required argument.
+        try:
+            _opf_emit.run_bounded(lambda: "x")
+        except TypeError:
+            return outcome("typeerror", "typeerror")
+        return outcome("call succeeded", "typeerror")
+
+    def nested_unknown(call, want):
+        # The unknown-timeout fixture call happens INSIDE a charged Queue.get
+        # (this thread's suppression depth is raised): the uncountable record
+        # must survive that suppression and fail the leg.
+        nested = []
+
+        class Carrier(queue.Queue):
+            def _get(self):
+                nested.append(call())
+                return super()._get()
+
+        def leg():
+            channel = Carrier()
+            channel.put("x")
+            got = channel.get(timeout=0.01)
+            return outcome((got, tuple(nested)), ("x", (want,)))
+        return leg
+
+    def bounded_stub(body, timeout_s=30):
+        return body()
+
+    def patched_allowance_leg():
+        # A leg that lowers the module constant the fixture allowance derives
+        # from must NOT lower its own charges: the allowance inputs are pinned
+        # at install time, before any leg body runs.
+        module = sys.modules[_watchdog_leg_entry.__module__]
+        saved = module._DEADLINE_EXECUTION_BOUND
+        module._DEADLINE_EXECUTION_BOUND = 0.1
+        try:
+            return outcome(_opf_emit.run_bounded(lambda: "x", timeout_s=0.25), "x")
+        finally:
+            module._DEADLINE_EXECUTION_BOUND = saved
+
+    class Masquerade:
+        @property
+        def __class__(self):
+            return float
+
+    def masquerade_leg():
+        return outcome(_opf_emit.run_bounded(lambda: "x", timeout_s=Masquerade()), "x")
+
+    def expired_deadline_leg():
+        # The exemption dies with its deadline. The first sleep outlasts the
+        # 0.02 s deadline by construction (sleep suspends at least 0.03 s), so
+        # the second sub-tick sleep must charge. The expected verdict is
+        # timing-free: whether or not the FIRST sleep still caught the
+        # unexpired deadline, the charges (at least 0.02 + 0.05) exceed the
+        # 0.03 budget.
+        _watchdog_deadline(0.02)
+        time.sleep(0.03)
+        time.sleep(0.05)
+        return EXIT_OK
+
+    def pinned_clock_subtick_leg():
+        # The sub-tick exemption itself is the property under test, so the
+        # clock it reads is PINNED: monotonic is captured BEFORE the deadline
+        # opens (so tick >= frozen + 5 > frozen, an inequality no stall can
+        # break), then frozen for the two sleeps. The deadline can therefore
+        # never expire mid-vector, however long the host stalls, and the
+        # verdict follows from the construction alone. The vector still
+        # kills a deadline that sets no tick: 5 + 0.05 + 0.05 > 5.
+        from unittest import mock
+        frozen = time.monotonic()
+        _watchdog_deadline(5)
+        with mock.patch("time.monotonic", lambda: frozen):
+            time.sleep(0.05)
+            time.sleep(0.05)
+        return EXIT_OK
+
+    tick = _WATCHDOG_POLL_TICK
+    installed = (list(_WATCHDOG_LEDGERS), list(_WATCHDOG_ORIGINALS))
+    pristine = (time.sleep, threading.Thread.join, threading.Event.wait,
+                threading.Condition.wait, queue.Queue.get, select.select,
+                _opf_emit.run_bounded, _opf_emit._run_fixture_process)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ledger_vectors = [
+            ("within-budget", _watchdog_leg_entry(10, probe(4, 6)), EXIT_OK),
+            ("over-budget", _watchdog_leg_entry(10, probe(4, 6.5)), EXIT_FINDING),
+            ("infinite-wait", _watchdog_leg_entry(10, probe(float("inf"))), EXIT_FINDING),
+            ("nan-wait", _watchdog_leg_entry(10, probe(float("nan"))), EXIT_FINDING),
+            ("no-budget", _watchdog_leg_entry(None, probe()), EXIT_FINDING),
+            ("nan-budget", _watchdog_leg_entry(float("nan"), probe()), EXIT_FINDING),
+            ("deadline-over", _watchdog_leg_entry(1, opened_deadline(2)), EXIT_FINDING),
+            ("subtick-sleep-no-deadline",
+             _watchdog_leg_entry(tick / 100, slept(None, tick / 20)), EXIT_FINDING),
+            ("subtick-sleep-inside-deadline",
+             _watchdog_leg_entry(5, pinned_clock_subtick_leg), EXIT_OK),
+            ("expired-deadline-subtick",
+             _watchdog_leg_entry(0.03, expired_deadline_leg), EXIT_FINDING),
+            ("above-tick-sleep-inside-deadline",
+             _watchdog_leg_entry(0.2, slept(0.2, 0.15)), EXIT_FINDING),
+            ("sleep-positional-over", _watchdog_leg_entry(0.1, slept(None, 0.15)), EXIT_FINDING),
+            ("sleep-positional-within", _watchdog_leg_entry(0.15, slept(None, 0.15)), EXIT_OK),
+            ("join-positional-over", _watchdog_leg_entry(1, joined(2, False)), EXIT_FINDING),
+            ("join-positional-within", _watchdog_leg_entry(2, joined(2, False)), EXIT_OK),
+            ("join-keyword-over", _watchdog_leg_entry(1, joined(2, True)), EXIT_FINDING),
+            ("join-keyword-within", _watchdog_leg_entry(2, joined(2, True)), EXIT_OK),
+            ("select-positional-over", _watchdog_leg_entry(1, selected(2)), EXIT_FINDING),
+            ("select-positional-within", _watchdog_leg_entry(2, selected(2)), EXIT_OK),
+            ("event-positional-over", _watchdog_leg_entry(1, waited_event(1.5, False)), EXIT_FINDING),
+            ("event-keyword-over", _watchdog_leg_entry(1, waited_event(1.5, True)), EXIT_FINDING),
+            ("event-keyword-within", _watchdog_leg_entry(1.5, waited_event(1.5, True)), EXIT_OK),
+            # Unset: the wait elapses and its nested Condition.wait must be
+            # suppressed, or the charge doubles to 0.02 and overruns.
+            ("event-unset-single-charge",
+             _watchdog_leg_entry(0.01, waited_event(0.01, False, preset=False)), EXIT_OK),
+            ("condition-positional-over",
+             _watchdog_leg_entry(0.1, waited_condition(0.15, False)), EXIT_FINDING),
+            ("condition-keyword-over",
+             _watchdog_leg_entry(0.1, waited_condition(0.15, True)), EXIT_FINDING),
+            ("condition-keyword-within",
+             _watchdog_leg_entry(0.15, waited_condition(0.15, True)), EXIT_OK),
+            ("queue-positional-over", _watchdog_leg_entry(1, queue_got(2, True, False)), EXIT_FINDING),
+            ("queue-keyword-over", _watchdog_leg_entry(1, queue_got(2, True, True)), EXIT_FINDING),
+            ("queue-keyword-within", _watchdog_leg_entry(2, queue_got(2, True, True)), EXIT_OK),
+            ("queue-single-charge", _watchdog_leg_entry(0.15, queue_got(0.15, False, True)), EXIT_OK),
+            ("run-bounded-over", _watchdog_leg_entry(
+                _deadline_case_budget(0.5) - 0.5, bounded(0.5, lambda: "ok", "ok")), EXIT_FINDING),
+            ("run-bounded-positional-over", _watchdog_leg_entry(
+                _deadline_case_budget(60) - 0.5,
+                bounded(60, lambda: "ok", "ok", keyword=False)), EXIT_FINDING),
+            ("run-bounded-timeout-within", _watchdog_leg_entry(
+                _deadline_case_budget(0.5),
+                bounded(0.5, lambda: time.sleep(4) or "ok", "TIMEOUT")), EXIT_OK),
+            # claude round-8 MINOR: a bool or str fixture timeout (refused
+            # by run_bounded before fork) is uncountable and fails the
+            # leg, never a 0.0 wait through the fixture allowance.
+            ("run-bounded-bool-timeout", _watchdog_leg_entry(
+                1, bounded(True, lambda: "ok", "SETUP-ERROR:BadTimeout")), EXIT_FINDING),
+            ("run-bounded-str-timeout", _watchdog_leg_entry(
+                1, bounded("5", lambda: "ok", "SETUP-ERROR:BadTimeout")), EXIT_FINDING),
+        ]
+        if owns_install:
+            hold = _deadline_case_budget(1)
+            ledger_vectors.extend([
+                ("fixture-process-over",
+                 stubbed("_run_fixture_process", fixture_stub, hold - 0.5, fixture_leg),
+                 EXIT_FINDING),
+                ("fixture-process-within",
+                 stubbed("_run_fixture_process", fixture_stub, hold, fixture_leg), EXIT_OK),
+                ("opaque-fixture-default",
+                 stubbed("run_bounded", opaque_bounded, 50, opaque_leg), EXIT_FINDING),
+                ("opaque-fixture-process-default",
+                 stubbed("_run_fixture_process", opaque_fixture, 50,
+                         lambda: outcome(_opf_emit._run_fixture_process(["probe"]),
+                                         "held")), EXIT_FINDING),
+                ("opaque-nested-bounded",
+                 stubbed("run_bounded", opaque_bounded, 50,
+                         nested_unknown(lambda: _opf_emit.run_bounded(lambda: "x"),
+                                        "ran")), EXIT_FINDING),
+                ("opaque-nested-fixture",
+                 stubbed("_run_fixture_process", opaque_fixture, 50,
+                         nested_unknown(lambda: _opf_emit._run_fixture_process(["probe"]),
+                                        "held")), EXIT_FINDING),
+                ("no-default-fixture",
+                 stubbed("run_bounded", no_default_bounded, 50, no_default_leg),
+                 EXIT_FINDING),
+                ("pinned-allowance",
+                 stubbed("run_bounded", bounded_stub, _deadline_case_budget(0.25) - 0.5,
+                         patched_allowance_leg), EXIT_FINDING),
+                # claude round-9 MINOR: a timeout whose __class__ property
+                # claims float passes isinstance, yet float() refuses it;
+                # gated on its exact type it is uncountable and fails the
+                # leg, never a 0.0 wait through the fixture allowance.
+                ("masquerading-fixture-timeout",
+                 stubbed("run_bounded", bounded_stub, 50, masquerade_leg),
+                 EXIT_FINDING),
+            ])
+    def vector_red(got, want):
+        # The verdict comparison: only an EXACT int (never a bool, whose True
+        # compares equal to EXIT_FINDING) equal to the expected verdict passes.
+        return type(got) is not int or got != want
+
+    flip_missed.extend("runtime ledger vector %s" % name
+                       for name, got, want in ledger_vectors
+                       if vector_red(got, want))
+    if (not vector_red(True, EXIT_FINDING) or not vector_red(EXIT_OK, EXIT_FINDING)
+            or vector_red(EXIT_OK, EXIT_OK)):
+        flip_missed.append("verdict comparison accepts a bool or a wrong verdict")
+    flip_missed.extend("runtime ledger fixture outcome %r != %r" % pair
+                       for pair in fixture_outcomes if pair[0] != pair[1])
+    if (list(_WATCHDOG_LEDGERS), list(_WATCHDOG_ORIGINALS)) != installed:
+        flip_missed.append("runtime ledger left installed")
+    if (time.sleep, threading.Thread.join, threading.Event.wait,
+            threading.Condition.wait, queue.Queue.get, select.select,
+            _opf_emit.run_bounded, _opf_emit._run_fixture_process) != pristine:
+        flip_missed.append("runtime ledger wrappers leaked")
+    if not 0 < _WATCHDOG_POLL_TICK <= 0.1:
+        flip_missed.append("poll tick %r above 0.1 s" % (_WATCHDOG_POLL_TICK,))
+    # The floor fails closed on a non-finite, non-positive or non-numeric
+    # bound or budget (a NaN compares False with every threshold).
+    for bad in (float("nan"), float("inf"), -1, 0, True, "60", None):
+        if (not _watchdog_bound_faults(dict(probe=bad), dict(probe=10))
+                or not _watchdog_bound_faults(dict(probe=10 ** 6), dict(probe=bad))):
+            flip_missed.append("non-finite floor input %r" % (bad,))
+    floor = _watchdog_bound_faults(live, budgets)
+    if floor or flip_missed:
+        print("opf watchdog regressions: FAIL (process bound below a leg's own budget: %s; "
+              "floor vectors not refused: %s)" % (
+                  "; ".join(floor) or "none", ", ".join(flip_missed) or "none"))
+        return EXIT_FINDING
     failed = False
     for label, code, timeout in cases:
         try:
@@ -11539,16 +14091,16 @@ def _init_inventory(root_fd):
     an observation, not a filesystem snapshot: concurrent changes after enumeration remain possible.
     """
     journal = _opf_store._journal
-    report = {"entries": [], "complete": False}
+    rows = []
+    report = {"entries": rows, "complete": False}
     name_bytes = 0
 
     def add(relpath, st):
         nonlocal name_bytes
         name_bytes += len(os.fsencode(relpath))
-        if (len(report["entries"]) >= _INIT_MAX_ENTRIES
-                or name_bytes > _INIT_MAX_NAME_BYTES):
+        if len(rows) >= _INIT_MAX_ENTRIES or name_bytes > _INIT_MAX_NAME_BYTES:
             raise RuntimeError("foreign inventory exceeds entry/path-byte bounds")
-        report["entries"].append({"path": relpath, "kind": _init_kind(st)})
+        rows.append({"path": relpath, "kind": _init_kind(st)})
 
     def walk(fd, prefix, depth):
         with os.scandir(fd) as entries:
@@ -11582,7 +14134,7 @@ def _init_inventory(root_fd):
         report["complete"] = True
     except Exception as exc:  # noqa: BLE001  an incomplete inventory never licenses a write
         report["error"] = ascii(exc)
-    report["entries"].sort(key=lambda row: row["path"])
+    rows.sort(key=lambda row: row["path"])
     return report
 
 
@@ -11697,6 +14249,1234 @@ def _init_unignored(git, repo, root, paths):
             "({}). Check out or fetch the blob and retry.".format(sorted(unavailable)))
 
 
+def _init_glob_escape(text):
+    """Escape git wildmatch metacharacters so a repo-relative prefix is matched LITERALLY inside
+    a :(glob) pathspec: a store root whose directory is literally named "[x]" or "*" must not
+    have its name read as a pattern (the ls-files/ls-tree candidates neutralize the same class
+    with --literal-pathspecs, which :(glob) itself does not honour; backslash escaping is the
+    wildmatch-documented neutralization)."""
+    return "".join("\\" + ch if ch in "*?[]\\" else ch for ch in text)
+
+
+# The BARE-COMMAND alphabet: ASCII letters, digits, and . / - _ ONLY. A printed command
+# hint (the restore checkout, the staging add, the render hint) interpolates its values
+# bare, with no quoting at all, so a command is printed ONLY when every value in it
+# consists solely of these characters (_init_bare): such a word a POSIX shell cannot
+# split, substitute, quote, redirect or continue, on any physical line (shlex.quote is
+# retired: it kept a newline-holding value syntactically quoted while the quoted value's
+# middle physical lines ran standalone when the output was pasted line by line, QA
+# round 6 MAJOR). The escape names in this region are spelled in words because the CLI
+# self-test's import structural check re-decodes this whole file under a planted
+# raw_unicode_escape declaration, to which a raw backslash-u sequence in any comment or
+# docstring is itself an escape: well-formed it would decode to another character,
+# truncated it fails the decode.
+_INIT_BARE_SAFE = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789./-_")
+
+
+def _init_exact_str(value):
+    """The EXACT built-in str that every value and exception text init renders
+    or formats into a line, and every line it writes, is converted to first, as
+    are the text a rendering proof compares and each argument token before the
+    argument loop compares or gates it (QA round 14, requirement A: str() may
+    return a str SUBCLASS, and a subclass overriding __eq__, __hash__, __iter__
+    or __format__ decided what the rendering proof compared, what the renderer
+    iterated and what str.format printed, while the characters it carried
+    reached the output raw; QA round 15, requirement C: the argument loop
+    compared and gated tokens it had not converted, so a token whose own __eq__
+    answered "--root" acted as --root). Init's other comparisons (of a
+    sibling module's result, such as a resolver status, and of its own
+    bookkeeping) read their operands as they come and are not claimed here. An
+    instance of str or of any str subclass is
+    copied out through the BASE str.__str__ slot, which returns an exact str of
+    the same characters and never calls the subclass's own __str__; any other
+    value goes through str() once, and whatever that returns, a str subclass
+    included, is copied out the same way. The result's type is exactly str, so
+    the comparison, hashing, iteration and formatting init then applies to it
+    are the built-in ones, never a subclass's."""
+    if type(value) is str:
+        return value
+    if not issubclass(type(value), str):
+        value = str(value)
+    return str.__str__(value)
+
+
+def _init_bare(value):
+    """True when every character of value is in the bare-command alphabet: only such a
+    value may be interpolated into a printed command hint, because a hint carries its
+    values with no quoting at all. This is a gate, not a renderer: a value that fails
+    it is never escaped into a command (an escaped command could still carry a live
+    shell substitution or split across physical lines, QA round 6 MAJOR); the command
+    is withheld instead and the value is printed on a detail line through
+    _init_inert. The value is read as its exact str (_init_exact_str), so a str
+    subclass cannot pass the gate by what its own iteration yields."""
+    return all(ch in _INIT_BARE_SAFE for ch in _init_exact_str(value))
+
+
+# The FIXED rendering alphabet (QA round 8 BLOCKER 1: the round-8 widening to
+# "readable" punctuation let "!" reach output raw, where interactive bash history
+# expansion replays a prior history line, and zsh glob qualifiers and fish command
+# substitution execute code; the round-7 alphabet is restored and is FIXED): ASCII
+# letters, digits and . / - _ ONLY. Every other character, the SPACE included, every
+# quote, "!", "$", the backquote, "(", ")", braces, "~", "#", "=", every separator,
+# redirection and glob character, every control or format character and every
+# non-ASCII character, is rendered as a backslash escape of its code point.
+# Readability of a rendered value is NOT a goal that may widen this set: characters
+# one shell merely groups or ignores are live syntax in another (csh-lineage history
+# expansion acts on "!" INSIDE double quotes), so the only safe set is the one no
+# known interactive shell acts on anywhere in a word. The init suite's runtime paste
+# test drives hostile values through every init exit path and runs every printed
+# line alone through a POSIX sh and an interactive bash with a primed history line,
+# in a non-empty directory, to hold exactly that.
+_INIT_INERT_SAFE = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789./-_")
+
+
+def _init_inert(value):
+    """THE one renderer for every value (path, argument, commit id, exception text, JSON
+    report string) interpolated into any line init prints (QA rounds 6, 7 and 8): the
+    safe alphabet is FIXED and narrow, ASCII letters, digits and . / - _ only, and
+    every character outside it, the space included, becomes a backslash-x, backslash-u
+    or backslash-U escape of its code point, so the rendered form holds nothing an
+    interactive shell acts on (QA round 8 BLOCKER 1: the widened round-8 set let "!"
+    through raw, and bash history expansion replays the user's history even inside
+    double quotes; readability is not a goal that may widen the set). ascii() and
+    repr() are NOT inert for this purpose: each leaves "$" and the backquote raw inside
+    the quoted Python literal it yields, where a POSIX shell keeps them live when the
+    printed line is pasted (QA rounds 5 and 6 MAJOR). A value proven bare by _init_bare
+    renders unchanged. A rendered value is for reconstruction by hand (each escape
+    names one code point); it is never for pasting into a shell. Any value is
+    first converted to its exact str (_init_exact_str; QA round 14, requirement
+    A), so the characters iterated and tested here are the value's own and a
+    str subclass's __str__, __iter__, __eq__ or __hash__ never decides them; the
+    result is a join of exact str pieces, itself an exact str."""
+
+    def escape(ch):
+        code = ord(ch)
+        if code < 0x100:
+            return "\\x{:02x}".format(code)
+        if code < 0x10000:
+            return "\\u{:04x}".format(code)
+        return "\\U{:08x}".format(code)
+
+    text = _init_exact_str(value)
+    return "".join(ch if ch in _INIT_INERT_SAFE else escape(ch) for ch in text)
+
+
+def _init_echo(line, err=False):
+    """THE one output route for opf init (QA round 7, requirement B; QA round 9: the
+    permitted-CALL allowlist is replaced by a permitted-REFERENCE allowlist): every
+    line _cmd_init or any opf.py function it reaches prints goes through this
+    emitter. The init suite's route gate (check_opf_init._init_route_violations)
+    computes the set of opf.py functions reachable from _cmd_init and, in every one
+    of them except this emitter, requires EVERY name and attribute-chain REFERENCE
+    (a callee, an argument, a callback keyword such as key= or default=, a default,
+    anything spelled at all) to resolve to a name the function itself binds, to a
+    reachable module-level definition, or to an entry in a reviewed roster SCOPED
+    to the one function the real source uses it in; an unresolvable (computed)
+    reference is a violation, as is any reference to print, builtins, stdout,
+    stderr, write, writelines, warnings or logging, any import of or assignment to
+    a name that shadows a rostered external base (builtins and the five pinned
+    module imports) at module level or inside a reachable function, any rebinding
+    of this emitter or of the renderers, str.__new__ spelled anywhere outside
+    _InitRestoreLine itself, any assert statement in any reachable function, any
+    departure of _cmd_init from the pinned last-resort boundary shape and any
+    raise or assert inside it, any raise in _init_main outside the one handled
+    try unless it constructs _InitPriorStoreRefusal with no raise ... from cause
+    (an escaping cause would print raw in a chained traceback; _cmd_init's
+    last-resort boundary catches whatever escapes while _init_main runs, so no
+    traceback is printed between init dispatch and that boundary's guarded
+    report -- an interrupt landing in the boundary's own few statements, or
+    after _cmd_init returns on the dispatcher's return path, can still surface
+    Python's own traceback, the windows _cmd_init and QUICKSTART state, and the
+    first of them can chain the caught exception's raw text into that
+    traceback -- and
+    the init suite pins that wrapper's exact bytes), and any
+    _InitRestoreLine or _InitPriorStoreRefusal construction whose template (the
+    remedy template included) is not a string literal or a name that the
+    constructing function's OWN scope binds only by plain assignments of string
+    literals, with no nested def, lambda or match capture binding (QA round 10
+    MAJOR 2: the round-9 rule counted a binding a match capture hid from it and
+    a nested-def binding that did not bind the outer read). A
+    spelled output route (subprocess.run, os.system, os.write, os.writev, open,
+    Path(...).write_text, sys.exit, SystemExit, input, traceback, pprint,
+    sys.displayhook, an alias to an out-of-graph helper, an import alias such as
+    from os import writev as ascii, or a spelled callback such as
+    sorted(..., key=os.system)) is therefore refused because the reference is not
+    allowed where it appears. RESIDUAL (D-STATIC-PIN-RESIDUAL, stated exactly): a
+    static reference check cannot see what an ALLOWED reference does at runtime
+    with hostile VALUES (an allowed method spelling invoked on a rebound object),
+    code in ANOTHER MODULE (the sibling _opf_* modules the init path calls into,
+    whose own output and introspection this gate never parses), or INTROSPECTION
+    reached through allowed spellings at runtime; no introspection spelling
+    (getattr, globals, vars, __import__) is itself in any roster, but a hostile
+    sibling module is out of this gate's scope. Construction-side spellings the
+    gate does not read (a rendered-type subclass or construction in ANOTHER
+    module, one minted through introspection or type() at runtime, or any other
+    spelling of a construction the reference scan cannot see) are the same
+    residual. What such code hands to init's OWN prints is COVERED AT THE
+    OUTPUT, not chased statically: every value and exception text init
+    renders or formats into a line, and every line this emitter writes, is
+    first converted to an exact built-in str (_init_exact_str; QA round 14,
+    requirement A: a str subclass returned by str() overrode __eq__, __iter__
+    or __format__ and printed raw past the round-13 checks; QA round 15,
+    requirement C pins this emitter's own conversion), a JSON event line
+    passes through unrendered only a value whose type is exactly int, float,
+    bool or None and renders every other value that is not a list, tuple or
+    dict as text (_init_inert_json; QA round 15, requirement A: a tuple from a
+    sibling module's stat result, or one a str subclass's reflected __radd__
+    made of the root-binding text, printed its strings raw), the rendering
+    constructors
+    format only registered templates (_INIT_TEMPLATES) and render anything else
+    as a value, and the refusal handler accepts a message or restore line only
+    with its constructor's rendering proof, re-rendering everything else at the
+    point of output (QA round 13, requirements A and E). NOT covered, and
+    stated: output such code writes by itself rather than through this
+    emitter, and in-process rebinding of init's own functions or forgery of
+    the private rendering proofs. The suite's runtime paste test over
+    every init exit path is the primary guard for what the printed lines themselves
+    can do."""
+    stream = sys.stderr if err else sys.stdout
+    stream.write(_init_exact_str(line) + "\n")
+
+
+def _init_inert_json(value):
+    """Prepare a report for json.dumps so that every string in it went through
+    _init_inert, KEYS included, and FAIL CLOSED on every other type (QA round 15,
+    requirement A: the round-14 walk returned unchanged any value that was not a
+    str, list or dict, so a tuple reaching a report, a sibling module's stat
+    st_size or a root binding that a str subclass's reflected __radd__ turned
+    into a tuple, was serialised by json.dumps as an array of its raw strings).
+    A value whose type is EXACTLY int, float, bool or None passes unchanged; a
+    list, tuple or dict is walked into a new built-in list or dict, every item
+    through this function and every KEY rendered as text through _init_inert
+    whatever its type (every key the init reports bind today is a fixed literal,
+    so rendering keys usually changes no output byte; the init suite drives one
+    hostile key through this arm to hold it); and EVERY other value, a str or
+    str subclass, an int or float subclass, bytes or any other object, is
+    rendered through _init_inert as a value, which reads a str by its exact
+    characters and converts anything else once through str().
+    json.dumps alone is NOT shell-inert: it escapes quotes and control characters but
+    leaves "$" and "`" raw inside the JSON double quotes, exactly the double-quote context
+    in which a POSIX shell keeps substitutions live, so a pasted event line whose root or
+    foreign-entry name carries $(...) could execute it (QA round 5). An escaped value
+    reads back as a Python string literal."""
+    kind = type(value)
+    if value is None or kind is bool or kind is int or kind is float:
+        return value
+    if isinstance(value, (list, tuple)):
+        return [_init_inert_json(item) for item in value]
+    if isinstance(value, dict):
+        return {_init_inert(key): _init_inert_json(item)
+                for key, item in value.items()}
+    return _init_inert(value)
+
+
+# The REGISTERED rendering templates (QA round 13, requirement A: render at the
+# output, so no construction path prints raw). Every template the real init
+# source passes to _InitRestoreLine or _InitPriorStoreRefusal is spelled once at
+# its construction site, where the route gate pins it as a string literal or a
+# literal-only-bound name, and once here, byte-identically. The rendering
+# constructors FORMAT a template only when it is a member of this set: any other
+# template value, whatever construction route supplied it (a local or
+# module-level subclass inheriting a constructor included; QA round 12 MAJOR: a
+# declared subclass of _InitPriorStoreRefusal escaped the gate's
+# constructor-name rule and its message, a hostile value in the template
+# position, printed raw), is treated as a VALUE and rendered through
+# _init_inert, never formatted. Formatting an untrusted template is refused for
+# a second reason too: a str.format replacement field can traverse attributes of
+# its arguments, so an unregistered template must never reach format at all. A
+# drift between a construction site and this set is loud twice over: the suite's
+# template-sync check reads every construction site from the AST and requires
+# membership here, and the fail-safe rendering changes output bytes the suite
+# compares in full.
+_INIT_TEMPLATES = frozenset([
+    "",
+    ("  git -C {} --no-replace-objects --literal-pathspecs checkout {} -- "
+     "{}"),
+    ("  git -C {} --no-replace-objects --literal-pathspecs checkout {} -- "
+     "{} {}"),
+    ("a prior store exists in this repository's git history: commit {} on "
+     "HEAD's first-parent line holds {} or a store manifest {} (spec 4.3, "
+     "4.5), and spec 8.2 forbids restarting its counters at zero (record "
+     "ids would be reissued). Remedy: {remedy}, or re-adopt the ancestry "
+     "with opf adopt. Plain opf init refuses whenever this scan of HEAD's "
+     "first-parent line finds a prior store, and a store that never reached "
+     "a tree on HEAD's first-parent line (for example one created and "
+     "deleted on a side branch, merged or not) is not detected (adoption "
+     "across such side lines is opf adopt's authority); the scan checks the "
+     "root's current path only (a store committed under another directory, "
+     "for example before a rename, is not detected)"),
+    "opf init:   additional commit: {}",
+    "opf init:   additional restore path: {}",
+    "opf init:   commit: {}",
+    "opf init:   missing store path: {}",
+    "opf init:   repository: {}",
+    "opf init:   restore path: {}",
+    ("opf init: additional restore command (shell-ready; it restores the "
+     "remaining store path from the newest first-parent tree that holds "
+     "it):"),
+    ("opf init: restore command (shell-ready; it restores only the store "
+     "paths its commit holds, and the additional command below restores the "
+     "other named store path as git checks it out from its own commit):"),
+    ("opf init: restore command (shell-ready; it restores the named store "
+     "paths as git checks them out from that commit):"),
+    ("opf init: restore command withheld: a value in it holds a character "
+     "outside the bare-command alphabet A-Za-z0-9 . / - _ and an escaped "
+     "command could still carry a live shell substitution or split across "
+     "physical lines, so no command is printed. Restore each path named "
+     "below from the commit named above it, in the repository named below, "
+     "by your own means, reading each rendered value literally: the safe "
+     "alphabet is ASCII letters, digits and . / - _ only, and every other "
+     "character, the space included, is written as a backslash escape of "
+     "its code point:"),
+    ("opf init: the restore is PARTIAL: the .working tree the command or "
+     "lines above restore lacks each store path below, so no command or "
+     "path printed above provides it (this scan treats a first-level "
+     ".working subdirectory as a machine store only when it directly holds "
+     "manifest.toml or counters.toml, in that tree or in this line's "
+     "first-parent history at or before the named commit; a store found "
+     "either way is expected to hold both files, and a subdirectory holding "
+     "only other files or only deeper directories is neither expected nor "
+     "named; a structural file counts at its rename destination instead of "
+     "its old path only when the recorded destination blob id equals the "
+     "source blob id (an exact byte-identical move; git's similarity score "
+     "of 100 alone does not prove that, since reordered lines also score "
+     "100), no older first-parent record touched the destination, and the "
+     "renaming commit's tree holds no structural file under the source "
+     "subdirectory, so a machine subdirectory renamed whole with git mv is "
+     "complete at its new path, while any other pairing git's rename "
+     "detection reports, for example a store deleted beside a similar store "
+     "created in the same commit, or a pairing whose bytes were rearranged, "
+     "reads as a deletion of its source, which stays expected, fail-safe); "
+     "supply each missing path by your own means, or re-adopt with opf "
+     "adopt:"),
+    ("restore the store paths the lines below name, from the {} named below "
+     "(no command is printed: a value in it would hold a character outside "
+     "the bare-command alphabet)"),
+    ("restore the store paths the restore command below names, from that "
+     "commit"),
+    ("restore the store paths the restore commands below name, from the "
+     "commits they name (this history deleted the store across more than "
+     "one commit, so one command cannot restore every store path)"),
+    "{}",
+])
+
+
+class _InitRestoreLine(str):
+    """One physical line of a prior-store refusal's restore and detail block: a str
+    whose CONSTRUCTOR renders (QA round 7, requirement B). The template is a string
+    literal, or a name the constructing function's own scope binds only by plain
+    assignments of string literals, with no nested def, lambda or match capture
+    binding (the route gate refuses any other construction; QA round 10 MAJOR 2:
+    the round-9 rule counted bindings it could not see or that did not bind the
+    read), is FORMATTED only when it is a member of the registered-template set
+    _INIT_TEMPLATES (QA round 13, requirement A: a subclass inheriting this
+    constructor carried a hostile value in the template position, which no
+    constructor-name rule reads; an unregistered template is now itself rendered
+    through _init_inert as a value and never formatted, with the rendered values
+    following after literal spaces), and EVERY value is rendered through _init_inert
+    before it is formatted in, with no exception and no pass-through of any kind (QA
+    round 9, requirement B: the round-8 constructor passed a value of the exact
+    _InitRestoreLine type through unrendered, and str.__new__ could mint such a value
+    around a raw string); a value already proven bare renders unchanged, so rendering
+    it again is the identity, and every bare-word restore command stays
+    byte-identical. A line this constructor produced carries a private slot marker
+    set only here, AFTER its values were rendered: the marker proves that the
+    VALUES formatted into the line went through this constructor's renderer (the
+    template's own shape is the route gate's charge, never the marker's), it is
+    what the refusal constructor and the refusal handler accept, and an instance
+    minted around this constructor (str.__new__) lacks the slot and is
+    re-rendered wherever it arrives."""
+
+    __slots__ = ("_opf_line_rendered",)
+
+    def __new__(cls, template, *values):
+        rendered = [_init_inert(value) for value in values]
+        if type(template) is str and template in _INIT_TEMPLATES:
+            line = str.__new__(cls, template.format(*rendered))
+        else:
+            # Fail-safe (QA round 13, requirement A): an unregistered template,
+            # whatever construction route supplied it, is itself a VALUE and is
+            # rendered, never formatted; the rendered values follow after
+            # literal spaces, so the line still carries what was passed, inert.
+            line = str.__new__(cls, " ".join(
+                [_init_inert(template)] + rendered))
+        line._opf_line_rendered = True
+        return line
+
+
+def _init_line_rendered(line):
+    """True only for a line the _InitRestoreLine constructor produced, proven by the
+    private slot that constructor sets after rendering every value: never a type
+    check (QA round 9, requirement B: a str.__new__-minted instance of the exact
+    type carried a raw value through the round-8 type-based pass-through). A minted
+    instance has no slot value, and anything else fails the type test, so the
+    caller re-renders both."""
+    if type(line) is not _InitRestoreLine:
+        return False
+    try:
+        return line._opf_line_rendered is True
+    except AttributeError:
+        return False
+
+
+def _init_refusal_message(exc):
+    """The caught prior-store refusal's message, PROVEN rendered, or re-rendered
+    HERE, at the point of output (QA round 13, requirement A; QA round 14,
+    requirement A). The live text is first converted to an EXACT built-in str
+    (_init_exact_str): str(exc) may return a str subclass, whose own __eq__
+    faked the round-13 comparison below and whose __format__ or __iter__
+    changed what the handler printed, raw, past an untouched constructor proof.
+    The real constructor binds the composed, fully rendered message to a
+    private attribute AFTER rendering it; this accepts the exact text only when
+    that attribute is itself an exact str and EQUALS it under the built-in str
+    equality, so a construction route that never ran the real constructor (a
+    subclass overriding __init__, a minted instance, any other exception type
+    smuggled to the handler) and a message swapped in after construction (a
+    reassigned exc.args) are both rendered through _init_inert here, never
+    printed raw. Equality, not mere presence, because the proof must cover the
+    exact characters printed. Either way the return value is an exact str, so
+    the handler formats those characters and nothing a subclass chooses.
+    Deliberate in-process forgery of the private attribute around raw text,
+    and in-process rebinding of these functions, are hostile code already
+    running in this interpreter, the stated D-STATIC-PIN-RESIDUAL."""
+    text = _init_exact_str(exc)
+    try:
+        proven = exc._opf_rendered_message
+    except AttributeError:
+        return _init_inert(text)
+    if type(proven) is str and proven == text:
+        return text
+    return _init_inert(text)
+
+
+class _InitPriorStoreRefusal(RuntimeError):
+    """A DEFINITE prior-store ancestry finding (spec 8.2), as opposed to a cannot-evaluate:
+    _cmd_init reports it under a REFUSED prefix in the finding's own words, then prints
+    restore_lines (a label line and a restore command alone on its line, twice when the store
+    was deleted across two commits, or withheld-command detail lines when the repository
+    path or a restored path is not bare (_init_bare), plus
+    missing-store-path detail lines naming each structural store file the restorable
+    .working tree lacks). The exit code is the
+    same 2 either way; only the reporting wording distinguishes the two verdicts.
+    The CONSTRUCTOR renders (QA rounds 7 and 9, requirement B): the message is
+    template.format over values EACH rendered through _init_inert, with no
+    pass-through of any kind (the template and the remedy template are string
+    literals or literal-only-bound names, pinned by the route gate, and each is
+    FORMATTED only when it is a member of the registered-template set
+    _INIT_TEMPLATES: an unregistered one, a subclass inheriting this constructor
+    included, is itself rendered as a value and never formatted, QA round 13,
+    requirement A); the composed message is then bound to the private rendering
+    proof the refusal handler checks at the point of output; the remedy
+    prose is formatted here from its own pinned template over its own rendered
+    values, gains the fixed PARTIAL clause when partial is true, and fills the
+    template's {remedy} field, so no composed prose is ever passed back through the
+    renderer as a value; and every restore_lines entry that does not carry the
+    _InitRestoreLine constructor's rendering proof (_init_line_rendered, a private
+    slot a minted instance of the exact type lacks; QA round 9, requirement B) is
+    re-rendered through that constructor, so a raw value bound into any channel is
+    escaped at construction, never printed raw."""
+
+    def __init__(self, template, values, restore_lines,
+                 remedy_template="", remedy_values=(), partial=False):
+        rendered_remedy = [_init_inert(value) for value in remedy_values]
+        if type(remedy_template) is str and remedy_template in _INIT_TEMPLATES:
+            remedy = remedy_template.format(*rendered_remedy)
+        else:
+            # Fail-safe (QA round 13, requirement A): an unregistered remedy
+            # template is itself a value and renders, never formats.
+            remedy = " ".join(
+                [_init_inert(remedy_template)] + rendered_remedy)
+        if partial:
+            remedy = remedy + (
+                ", and the restore is PARTIAL (the missing-store-path lines below "
+                "name structural store files the restored .working tree lacks)")
+        rendered = [_init_inert(value) for value in values]
+        if type(template) is str and template in _INIT_TEMPLATES:
+            message = template.format(*rendered, remedy=remedy)
+        else:
+            # The same fail-safe for the message template: the remedy, itself
+            # rendered or literal either way above, follows after a literal
+            # space so nothing passed in is dropped.
+            message = " ".join(
+                [_init_inert(template)] + rendered
+                + ([remedy] if remedy else []))
+        super().__init__(message)
+        # The rendering PROOF the refusal handler accepts at the point of
+        # output (QA round 13, requirement A): set only AFTER the message was
+        # composed from rendered parts, and checked there by VALUE equality
+        # with the live str(exc), so a message swapped in afterwards (a
+        # reassigned exc.args) no longer matches and is re-rendered.
+        self._opf_rendered_message = message
+        self.restore_lines = [
+            line if _init_line_rendered(line) else _InitRestoreLine("{}", line)
+            for line in restore_lines]
+
+
+def _init_history_rels(prefix):
+    """The repo-relative committed-pointer and .working paths for a root at repo-relative prefix.
+
+    git reports and matches repo-relative paths with "/" on EVERY platform, so the ancestry
+    pathspecs, the ls-tree name comparisons, and the <commit>:<path> form are built with POSIX
+    separators (as_posix), never str(Path), which yields backslashes on Windows and would
+    silently match nothing there. A separate function so check_opf_init can pin the separator
+    choice on POSIX hosts too, by passing a PureWindowsPath prefix."""
+    pointer_path = prefix / _opf_store.POINTER_REL
+    working_path = prefix / _opf_store.WORKING_DIRNAME
+    return (pointer_path.as_posix(), working_path.as_posix())
+
+
+def _init_no_prior_store(git, repo, root):
+    """Refuse initialization where the first-parent history of HEAD shows a prior store (spec 8.2).
+
+    counters.toml holds monotonic high-water values that MUST NOT be reset, and only a genuinely
+    first adoption may start its counters at zero (spec 8.2): a fresh init over a line whose
+    history held a store would restart every namespace at zero and let record ids be reissued.
+    The committed paths that identify a store are the committed pointer .opf.toml (spec 4.3) and
+    a store manifest one level below .working/ (.working/<subdir>/manifest.toml, spec 4.4/4.5).
+    Presence of the PATH suffices, deliberately without reading the blob: a legacy [devprocess]
+    manifest proves prior ancestry exactly as a current one does (spec 4.5 refuses it as
+    unsupported-older-store, never reads it as absent), and no blob content could downgrade the
+    refusal. A found ancestor REFUSES, naming the newest first-parent commit whose tree held a
+    store and the remedy (restore that commit's store, or `opf adopt`); it never passes silently.
+    Each restore command, carried in restore_lines and printed alone on a line after the REFUSED
+    line, names only the store paths its commit's tree holds (git checkout fails outright on a
+    pathspec the commit lacks) and runs under --no-replace-objects, the neutralization every
+    read of this scan already runs under, because checkout honours replacement refs: without the
+    flag a replacement ref could substitute other bytes for the named commit's (QA round 4), and
+    under --literal-pathspecs as the staging hint is. A history that deleted the store across
+    MORE than one commit leaves the named commit's tree holding only part of the store: the
+    store path it lacks is probed one step the same way (its newest first-parent change at or
+    before the named commit, else that change's first parent), and a found holder is printed
+    as a second, ADDITIONAL restore command. A deletion split INSIDE .working (QA round 5
+    MAJOR; QA round 6 MAJOR; QA round 7 for the store definition) is probed structurally
+    through working_gaps: a first-level subdirectory of the restored .working tree is a
+    machine store only when it directly holds manifest.toml or counters.toml, in that
+    tree or in a first-parent commit at or before the named commit; each store found
+    either way must hold BOTH structural files in the restored tree, and a subdirectory
+    holding only other files or only deeper directories is neither expected nor named
+    (QA round 7 MAJOR 2: an adopter-kept non-store file such as notes/plan.md must not
+    make the restore read as PARTIAL); every expected file the tree lacks makes the
+    remedy say the restore is PARTIAL and name that missing path on its own detail line,
+    in words that state only what the scan observed (the restored tree lacks the path),
+    never that the path once existed or was deleted (QA round 6 MEDIUM: the counters of
+    a manifest-only history never existed).
+    No remedy text ever claims to restore the whole store: each command is labelled with
+    exactly the store paths its commit's tree holds, as git checks them out (the adopter's
+    own attributes and filters apply to a checkout, so the written bytes need not equal
+    the committed blob's), and a file outside the two probed structural names that an
+    earlier commit deleted inside .working is not detected. Commands are printed ONLY when
+    the repository path and every restored path are BARE (_init_bare: every character in
+    the bare-command alphabet A-Za-z0-9 . / - _; commit ids are validated hex, which
+    always are): such a command holds no character a
+    POSIX shell could split, substitute, quote or continue, on any physical line
+    (shlex.quote is retired here: it kept a newline-holding root syntactically quoted
+    while the quoted value's middle physical lines ran standalone when the output was
+    pasted line by line, QA round 6 MAJOR). Otherwise NO command is printed at all: the
+    refusal instead names the repository, commit(s) and path(s) on detail lines rendered
+    through _init_inert, the one renderer every value in this function's output goes
+    through at construction (the _InitRestoreLine and _InitPriorStoreRefusal
+    constructors render; ascii() is never used for output: it leaves "$" and the
+    backquote raw inside the quoted literal it yields, QA round 5 MAJOR).
+
+    SCOPE: the scan follows HEAD's FIRST-PARENT line only, the same line the adoption reader
+    proves an ancestral counters seed on (_opf_init_operation.read_ancestral_counter_seed,
+    decision 6). A store that never reached a tree on HEAD's first-parent line (for example one
+    created and deleted on a side branch, merged or not) is NOT detected: it left no mainline
+    state whose counters this init could restart, and distinguishing first adoption from
+    re-adoption across such side lines is the section 14 adoption investigation's authority, not
+    init's. PATH SCOPE: the scan checks the root's current path only (a store committed under
+    another directory, for example before a rename, is not detected): every pathspec is built
+    from the root's present repo-relative prefix, and a pathspec history walk does not follow
+    renames. The refusal text, the successful init output and OPF-QUICKSTART.md state both
+    limits in the same words.
+
+    FAIL-CLOSED BOUNDARIES: an unborn HEAD (rev-parse --verify --quiet rc 1, the _observe_prior
+    convention) has no history and PROCEEDS; a SHALLOW repository's truncated history cannot
+    prove the absence of a prior store (the clipped commits may hold one, and the pathspec walk
+    stops silently at the shallow boundary) and is a cannot-evaluate REFUSAL; a git read that
+    fails, times out, overflows its output bound, or answers in an unexpected shape refuses the
+    same way, never passes. A legacy info/grafts file can rewrite parent links inside EVERY
+    rev-list walk and, unlike a replacement ref, is NOT neutralized by --no-replace-objects, so
+    a graft could cut the very parent link that reaches a prior store; ANY entry at the grafts
+    path (the refusal names what it found: a regular file and its size, a symbolic link and its
+    target, or another kind), and a grafts path whose lstat fails other than as not-found, is
+    therefore a cannot-evaluate REFUSAL too, the
+    stance the adoption reader already takes (_opf_init_observe.graft_snapshot: preserved,
+    never interpreted). Refusing is chosen over neutralizing (GIT_GRAFT_FILE pointed at an
+    empty file) deliberately: a grafted repository's ancestry has been locally rewritten, so
+    neither the grafted nor the raw parent line is one this check can vouch for; the shared
+    hardened runner takes no per-call environment; and the refusal does not depend on a
+    deprecated variable staying honoured (git deprecates grafts in favour of replace refs,
+    which this scan already neutralizes). Every read goes through _opf_observe._run_git
+    (absolute git binary, explicit -C binding to this repository, allowlist-scrubbed
+    environment with every ambient GIT_* variable dropped, --no-replace-objects, lazy fetch
+    suppressed) over raw commit/tree data; no working-tree or index view is consulted."""
+    pointer_rel, working_rel = _init_history_rels(root.relative_to(repo))
+
+    def read(args, ok=(0,)):
+        result = _opf_observe._run_git(git, repo, args)
+        if not result.completed or result.rc not in ok:
+            raise RuntimeError(
+                "git history preflight: `git {}` could not answer ({}); a prior-store ancestry "
+                "that cannot be read never passes".format(
+                    " ".join(args),
+                    result.err if not result.completed
+                    else "rc {}: {}".format(result.rc, result.err)))
+        return result
+
+    def oid(raw):
+        text = raw.decode("ascii", errors="replace")
+        if len(text) not in (40, 64) or any(c not in "0123456789abcdef" for c in text):
+            raise RuntimeError(
+                "git history preflight: unexpected object id {}; refusing".format(ascii(raw)))
+        return text
+
+    def tree_store_paths(commit):
+        """The store paths the commit's raw tree holds, empty when it holds no store identifier
+        (the pointer blob, or a store-manifest path): the pointer when it is a blob, and .working
+        when it is a tree beside that pointer or holds a store manifest. These are exactly the
+        paths the remedy restores. Raises on any read it cannot complete: a missing tree object
+        (a filtered partial clone, say) is a refusal, never absence. The two destination paths
+        are passed as --literal-pathspecs, the same neutralization _init_untracked uses, so a
+        metacharacter-named prefix stays a path; ls-tree of an entry that is simply absent still
+        answers rc 0 with no output, which IS a proven absence."""
+        probe = read(["--literal-pathspecs", "ls-tree", "-z", commit, "--",
+                      pointer_rel, working_rel])
+        has_pointer = has_working = False
+        for entry in probe.out.split(b"\0"):
+            if not entry:
+                continue
+            meta, tab, name = entry.partition(b"\t")
+            fields = meta.split(b" ")
+            if tab != b"\t" or len(fields) != 3:
+                raise RuntimeError("git history preflight: unparseable ls-tree entry {}; "
+                                   "refusing".format(ascii(entry)))
+            if name == os.fsencode(pointer_rel) and fields[1] == b"blob":
+                has_pointer = True
+            if name == os.fsencode(working_rel) and fields[1] == b"tree":
+                has_working = True
+        held = [pointer_rel] if has_pointer else []
+        if has_working and has_pointer:
+            held.append(working_rel)
+        elif has_working:
+            listing = read(["ls-tree", "-r", "-z", "--name-only",
+                            commit + ":" + working_rel])
+            manifest = os.fsencode(_opf_store.MANIFEST_NAME)
+            for name in listing.out.split(b"\0"):
+                parts = name.split(b"/")
+                if len(parts) == 2 and parts[0] and parts[1] == manifest:
+                    held.append(working_rel)
+                    break
+        return held
+
+    def working_gaps(commit):
+        """Structural store files a checkout of <commit>:.working would still LACK, as
+        repo-relative paths (QA rounds 5, 6 and 7): a .working tree counts as a held
+        store path while a counters.toml or manifest.toml inside it was already absent
+        from it, so a restore of that tree exits 0 with spec 8.2's high-water counters
+        still missing. A first-level subdirectory of that tree is a machine STORE only
+        when it directly holds manifest.toml or counters.toml (spec 4.4/4.5, spec 8.2),
+        observed in the tree itself or in any first-parent commit at or before <commit>
+        (one `log` walk over the same escaped glob pathspecs as the main scan, read
+        under the shared hardened runner and its output bound, whose overflow refuses
+        like every other unreadable answer), so a machine subdirectory deleted WHOLE in
+        an earlier commit is still disclosed. The walk reads --raw (with --no-abbrev)
+        with rename detection, newest first, and its records are parsed from git's NUL-delimited
+        token stream positionally, by record arity, so a byte a committed filename may
+        legally hold (QA round 9 codex MEDIUM: the 0x01 header sentinel) never splits
+        a record: a header is read only at a record boundary, where every path token
+        was already consumed. A structural file whose NEWEST first-parent change at or
+        before <commit> renamed it counts at its destination INSTEAD OF its old path
+        only when the record's destination blob id EQUALS its source blob id, as the
+        --raw record carries both (git's similarity score of 100 does NOT prove the
+        bytes unchanged: the score is computed over a multiset of line hashes, so
+        reordered lines still score 100 while the blobs differ, QA round 10 MINOR 3),
+        no older first-parent record touched the destination path, and the
+        renaming commit's own tree holds no structural file under the source
+        subdirectory (one ls-tree probe per rename record, read like every other
+        answer here); so a machine subdirectory renamed whole with git mv survives
+        complete at its new name and does not read as a PARTIAL restore (QA round 8
+        MINOR 4), while ANY other pairing git's similarity-based rename detection
+        reports, for example a store deleted while a similar store was created in the
+        same commit (QA round 9 MEDIUM 2: that store's loss went unreported), reads
+        as a deletion of its source, which stays expected, FAIL-SAFE: the doubtful
+        case is disclosed as missing, never silently absorbed. A rename whose
+        destination the pathspecs exclude is reported by git as a deletion of its
+        source and stays disclosed, and a copy record never releases its source
+        (the source was not changed by a copy). Each store found either way is expected
+        to hold BOTH structural files; each expected file the tree lacks is returned.
+        A subdirectory holding only other files, or only deeper directories, is neither
+        expected nor named (QA round 7 MAJOR 2: an adopter-kept .working/notes/plan.md
+        is not a store, and reporting its structural files as missing was a false
+        PARTIAL). The caller reports each returned path as a PARTIAL restore in words
+        that assert only this observed lack, never a prior existence or deletion (QA
+        round 6 MEDIUM: the counters of a manifest-only history never existed). Only
+        the two structural filenames are probed: a tree in which some OTHER file was
+        deleted by an earlier commit is not detected, which is one reason no printed
+        remedy ever claims to restore the whole store. Called only for a commit whose
+        tree holds .working. Entry names are fsdecoded (surrogateescape, never
+        raising); the returned paths are DESCRIPTIVE mentions only, always rendered
+        through _init_inert at construction of the lines that carry them. The
+        stream itself must end with the terminating NUL of its last token, and
+        every record's modes, status and object ids must be mutually consistent
+        with the shapes git's documented --raw format prints, the file types of
+        its two sides included (a T only between different file types; an M, R
+        or C only between regular files or two sides of one non-regular mode,
+        the non-regular R or C exact only; an executable-bit change keeps the
+        file type): the derivation is stated at the parse below (QA round 13 B;
+        QA round 14 B). A stream or record outside those shapes refuses like
+        every other unreadable answer, fail-closed, before any record can
+        release a rename source."""
+        listing = read(["ls-tree", "-r", "-z", "--name-only",
+                        commit + ":" + working_rel])
+        names = set(listing.out.split(b"\0")) - {b""}
+        required = (os.fsencode(_opf_store.MANIFEST_NAME),
+                    os.fsencode(_opf_check.COUNTERS_NAME))
+        stores = set()
+        for name in names:
+            parts = name.split(b"/")
+            if len(parts) == 2 and parts[0] and parts[1] in required:
+                stores.add(parts[0])
+        touched = read(["log", "--first-parent", "--format=%x01%H", "--raw",
+                        "--no-abbrev", "--find-renames", "-z", commit, "--"]
+                       + [":(glob)" + _init_glob_escape(working_rel) + "/*/"
+                          + _init_glob_escape(os.fsdecode(want)) for want in required])
+        prefix = os.fsencode(working_rel) + b"/"
+
+        def structural(entry):
+            # The (subdir, filename) parts of a structural store path under the
+            # .working prefix; a listed path outside that prefix refuses (no glob
+            # pathspec above can match one), and a prefixed path that is not exactly
+            # <subdir>/<structural-name> returns None.
+            if not entry.startswith(prefix):
+                raise RuntimeError(
+                    "git history preflight: unexpected --name-status entry {} outside "
+                    "the pathspec prefix; refusing".format(ascii(entry)))
+            rel = entry[len(prefix):]
+            parts = rel.split(b"/")
+            if len(parts) == 2 and parts[0] and parts[1] in required:
+                return parts
+            return None
+
+        # PARSE: git's -z output is one NUL-delimited token stream; a committed
+        # path may hold ANY byte but NUL and the separator slash, the 0x01 header
+        # sentinel included (QA round 9 codex MEDIUM: splitting the whole stream on
+        # 0x01 split such a path in half and refused a previously supported
+        # disclosure), so the stream is split on NUL alone and read POSITIONALLY: a
+        # header (the 0x01-led token the %x01%H format prints) is accepted only at
+        # a record boundary, where the arity of every prior record has already
+        # consumed its path tokens, and a path token is consumed by arity, never
+        # inspected as a header or meta token. Each --raw meta token is
+        # ":<old mode> <new mode> <old blob id> <new blob id> <status>", exactly
+        # five space-separated fields (both blob ids validated like every other
+        # object id here), and the record's path tokens follow by status arity.
+        # git prints one newline between a header's NUL and the commit's first
+        # record, so the token at a boundary may carry one leading newline (and
+        # carries ONLY the next header after it when a listed commit has no
+        # records). Any other or unparseable token shape refuses. The stream
+        # must END with the terminating NUL of its last token (QA round 13 B:
+        # -z terminates every token, headers included, so a non-empty stream
+        # without a final NUL is truncated or not git's, and reading its tail
+        # as a complete token could hand a cut record to the resolver).
+        if touched.out and not touched.out.endswith(b"\0"):
+            raise RuntimeError(
+                "git history preflight: --raw output lacks its terminating NUL "
+                "({}); refusing".format(ascii(touched.out[-32:])))
+        tokens = touched.out.split(b"\0")
+        if tokens and tokens[-1] == b"":
+            tokens.pop()
+        commits = []   # (commit id, records, touched paths), newest first
+        index = 0
+        while index < len(tokens):
+            boundary = tokens[index]
+            if boundary[:1] == b"\n":
+                boundary = boundary[1:]
+            if boundary[:1] == b"\x01":
+                commits.append((oid(boundary[1:]), [], set()))
+                index += 1
+                continue
+            if not commits:
+                raise RuntimeError(
+                    "git history preflight: --raw output does not begin "
+                    "with a commit header ({}); refusing".format(ascii(boundary)))
+            records = commits[-1][1]
+            paths = commits[-1][2]
+            meta = boundary
+            fields = meta.split(b" ")
+            if meta[:1] != b":" or len(fields) != 5:
+                raise RuntimeError(
+                    "git history preflight: unparseable --raw record {}; "
+                    "refusing".format(ascii(meta)))
+            status = fields[4]
+            # DERIVATION (git-diff(1), RAW OUTPUT FORMAT; QA round 13 B): git
+            # prints each record as ":<src mode> <dst mode> <src id> <dst id>
+            # <status>", each mode %06o. A mode is 000000 EXACTLY on the side a
+            # record has no file on -- the src of a creation (A), the dst of a
+            # deletion (D) -- and on that side alone; every side that has a
+            # file carries one of the tree-entry modes git documents and
+            # writes, 100644 or 100755 (regular file), 120000 (symbolic link)
+            # or 160000 (gitlink). A tree's 040000 is NOT accepted: this walk
+            # reads git log's recursive, blob-level record stream, which never
+            # prints a tree record. The object id is the all-zero id exactly
+            # where the mode is 000000 (a log over committed trees never
+            # prints the out-of-sync all-zero id a worktree diff can). A
+            # rename or copy status is its letter followed by git's
+            # three-digit similarity score (%c%03d, 000 to 100). Any record
+            # outside these shapes -- a mode outside the documented set (an
+            # ancient loose mode such as 100664 included: refusing one is a
+            # cannot-evaluate, fail-closed), a 000000 on a side the status
+            # says has a file, a zero id beside a non-zero mode or the
+            # reverse, a malformed score -- is not a shape this scan can vouch
+            # for and REFUSES (QA round 12 E and QA round 13 B: the round-11
+            # parser checked none of this, so junk modes, zero-mode rename
+            # sides carrying non-zero ids, and malformed scores all passed,
+            # and a malformed rename record could release a source).
+            raw_modes = (b"000000", b"100644", b"100755", b"120000", b"160000")
+            src_mode, dst_mode = fields[0][1:], fields[1]
+            for mode in (src_mode, dst_mode):
+                if mode not in raw_modes:
+                    raise RuntimeError(
+                        "git history preflight: --raw record with a mode "
+                        "outside git's documented set {}; refusing".format(
+                            ascii(meta)))
+            if status[:1] in (b"R", b"C"):
+                score = status[1:]
+                if (len(score) != 3 or any(c not in b"0123456789" for c in score)
+                        or score > b"100"):
+                    raise RuntimeError(
+                        "git history preflight: --raw rename/copy status with a "
+                        "malformed similarity score {}; refusing".format(
+                            ascii(status)))
+            if status[:1] == b"A":
+                absent = (True, False)
+            elif status[:1] == b"D":
+                absent = (False, True)
+            elif status[:1] in (b"M", b"T", b"R", b"C"):
+                absent = (False, False)
+            else:
+                raise RuntimeError(
+                    "git history preflight: unexpected --raw status {}; "
+                    "refusing".format(ascii(status)))
+            # The blob ids are validated like every other object id this scan
+            # reads, fail-closed, and each side's id and mode must agree with
+            # the status per the derivation above; a rename record releases
+            # its source below ONLY when the ids are EQUAL and not the
+            # all-zero id, because git's similarity score of 100 does not
+            # prove the bytes unchanged (QA round 10 MINOR 3: reordered lines
+            # score 100 while the blobs differ).
+            old_blob = oid(fields[2])
+            new_blob = oid(fields[3])
+            if ((src_mode == b"000000", dst_mode == b"000000") != absent
+                    or (src_mode == b"000000") != (set(old_blob) == {"0"})
+                    or (dst_mode == b"000000") != (set(new_blob) == {"0"})):
+                raise RuntimeError(
+                    "git history preflight: --raw record whose modes, status "
+                    "and object ids are not mutually consistent {}; "
+                    "refusing".format(ascii(meta)))
+            # FILE TYPES (QA round 14 B; git-diff(1) RAW OUTPUT FORMAT and
+            # git's diffcore, each relationship below pinned by the suite's
+            # real-git fixtures): a present side's file type is REGULAR
+            # (100644 or 100755, which differ in the executable bit alone),
+            # SYMBOLIC LINK (120000) or GITLINK (160000). git prints T exactly
+            # when the two sides' file types differ, and M only when they
+            # agree (an executable-bit change alone is M 100644 100755, never
+            # T). Its rename and copy detection scores similarity between
+            # REGULAR files only and pairs a symbolic link or gitlink only by
+            # an EXACT match of the same mode and the same object id (score
+            # 100), so an R or C record joins two regular files (git mv plus
+            # chmod prints R100 100644 100755) or two sides of one
+            # non-regular mode with equal ids and score 100, and a regular
+            # file moved into a symbolic link of identical bytes prints a D
+            # and an A, never an R. A record outside these relationships (an
+            # R, C or M between a regular file and a symbolic link or gitlink,
+            # or between a symbolic link and a gitlink; a T between sides of
+            # one file type; an inexact R or C between non-regular sides) is
+            # not a record git emits, so it REFUSES here, at the parse,
+            # before any record is resolved and before any rename source can
+            # be released (codex round-13 MEDIUM: an R100 from a regular
+            # file to a symbolic link or gitlink with equal ids released its
+            # source).
+            regular = (b"100644", b"100755")
+            same_type = ((src_mode in regular and dst_mode in regular)
+                         or src_mode == dst_mode)
+            if status[:1] == b"T":
+                type_ok = not same_type
+            elif status[:1] == b"M":
+                type_ok = same_type
+            elif status[:1] in (b"R", b"C"):
+                type_ok = same_type and (
+                    src_mode in regular
+                    or (old_blob == new_blob and status[1:] == b"100"))
+            else:
+                type_ok = True
+            if not type_ok:
+                raise RuntimeError(
+                    "git history preflight: --raw record whose status does not "
+                    "match the file types of its two sides {}; "
+                    "refusing".format(ascii(meta)))
+            same_blob = old_blob == new_blob and set(old_blob) != {"0"}
+            if status[:1] in (b"R", b"C"):
+                if index + 2 > len(tokens) - 1:
+                    raise RuntimeError(
+                        "git history preflight: truncated rename record {}; "
+                        "refusing".format(ascii(status)))
+                records.append((status, tokens[index + 1], tokens[index + 2],
+                                same_blob))
+                paths.add(tokens[index + 1])
+                paths.add(tokens[index + 2])
+                index += 3
+            elif status in (b"A", b"M", b"D", b"T"):
+                if index + 1 > len(tokens) - 1:
+                    raise RuntimeError(
+                        "git history preflight: truncated --raw record "
+                        "{}; refusing".format(ascii(status)))
+                records.append((status, None, tokens[index + 1], same_blob))
+                paths.add(tokens[index + 1])
+                index += 2
+            else:
+                raise RuntimeError(
+                    "git history preflight: unexpected --raw status {}; "
+                    "refusing".format(ascii(status)))
+
+        def source_left(commit_id, subdir):
+            # True when the renaming commit's OWN tree still holds a structural
+            # file under the rename's source subdirectory: the move was partial,
+            # so the source stays a store, fail-safe. Read like every other answer
+            # here; --literal-pathspecs keeps a metacharacter-named subdirectory a
+            # path.
+            probe2 = read(["--literal-pathspecs", "ls-tree", "-z", commit_id, "--",
+                           working_rel + "/" + os.fsdecode(subdir) + "/"
+                           + os.fsdecode(required[0]),
+                           working_rel + "/" + os.fsdecode(subdir) + "/"
+                           + os.fsdecode(required[1])])
+            return len(probe2.out.split(b"\0")) > 1
+
+        # RESOLVE, newest first: the first record seen for a path is that path's
+        # newest change at or before <commit> and decides it. A rename record
+        # releases its SOURCE, counting the file at its destination only (QA
+        # round 8 MINOR 4: git mv of a machine subdirectory must not read as
+        # PARTIAL), ONLY when the record is R100 AND its destination blob id
+        # EQUALS its source blob id (QA round 10 MINOR 3: the similarity score
+        # is computed over a multiset of line hashes, so reordered lines still
+        # score 100 while the bytes differ; blob identity, never the score, is
+        # what releases the source), its destination is
+        # itself a structural store path that NO OLDER first-parent record
+        # touched, and the renaming commit's tree holds no structural file under
+        # the source subdirectory (source_left); otherwise the source reads as
+        # DELETED and its subdirectory stays expected, FAIL-SAFE (QA round 9
+        # MEDIUM 2: git pairs by content similarity, so a store deleted beside a
+        # similar store created in the same commit read as a rename and the
+        # deleted store's loss went unreported). A rename whose destination falls
+        # outside the glob pathspecs is reported by git as a plain deletion of the
+        # source (pathspec filtering precedes rename pairing), so a store moved
+        # OUT of .working still reads as deleted and stays disclosed; a copy
+        # record counts its destination and never decides or releases its source
+        # (a copy does not change the source).
+        decided = set()
+        for position, commit_entry in enumerate(commits):
+            for status, old_path, new_path, same_blob in commit_entry[1]:
+                if old_path is not None:
+                    new_parts = structural(new_path)
+                    old_parts = structural(old_path)
+                    if new_parts is not None and new_path not in decided:
+                        decided.add(new_path)
+                        stores.add(new_parts[0])
+                    if status[:1] == b"C" or old_parts is None:
+                        continue
+                    if old_path in decided:
+                        continue
+                    decided.add(old_path)
+                    touched_older = any(
+                        new_path in older[2]
+                        for older in commits[position + 1:])
+                    if not (status == b"R100" and same_blob
+                            and new_parts is not None
+                            and not touched_older
+                            and not source_left(commit_entry[0], old_parts[0])):
+                        stores.add(old_parts[0])
+                else:
+                    parts = structural(new_path)
+                    if parts is not None and new_path not in decided:
+                        decided.add(new_path)
+                        stores.add(parts[0])
+        expected = {store + b"/" + want for store in stores for want in required}
+        missing = {working_rel + "/" + os.fsdecode(rel)
+                   for rel in expected - names}
+        return sorted(missing)
+
+    head = read(["rev-parse", "--verify", "--quiet", "HEAD"], ok=(0, 1))
+    if head.rc == 1:
+        return   # unborn HEAD: no commit exists, so no history can hold a prior store
+    shallow = read(["rev-parse", "--is-shallow-repository"]).out.strip()
+    if shallow == b"true":
+        raise RuntimeError(
+            "cannot evaluate prior-store ancestry: this repository is SHALLOW, so the "
+            "first-parent history of HEAD is truncated and a prior store, whose counters "
+            "spec 8.2 forbids restarting, cannot be ruled out; unshallow the clone "
+            "(git fetch --unshallow) and retry")
+    if shallow != b"false":
+        raise RuntimeError("git history preflight: unexpected --is-shallow-repository answer "
+                           "{}; refusing".format(ascii(shallow)))
+    grafts_raw = read(["rev-parse", "--git-path", "info/grafts"]).out
+    try:
+        grafts_text = grafts_raw.decode("utf-8", "strict")
+    except UnicodeError:
+        raise RuntimeError("git history preflight: undecodable info/grafts path {}; "
+                           "refusing".format(ascii(grafts_raw)))
+    if not grafts_text.endswith("\n") or "\n" in grafts_text[:-1] or "\0" in grafts_text:
+        raise RuntimeError("git history preflight: malformed info/grafts path {}; "
+                           "refusing".format(ascii(grafts_raw)))
+    grafts_path = grafts_text[:-1]
+    if not os.path.isabs(grafts_path):
+        grafts_path = os.path.join(str(repo), grafts_path)
+    try:
+        grafts_st = os.lstat(grafts_path)
+    except FileNotFoundError:
+        pass   # proven absent: the walk below reads ungrafted parent links
+    except OSError as exc:
+        raise RuntimeError(
+            "cannot evaluate prior-store ancestry: lstat of the legacy grafts path {} failed "
+            "({}), which this scan does not take as proof that no grafts file is present; "
+            "grafts that git can read at that path may rewrite parent links in every history "
+            "walk and hide a prior store whose counters spec 8.2 forbids restarting; "
+            "refusing".format(ascii(grafts_path), ascii(exc)))
+    else:
+        # Name exactly what was found; whether git can read it, and whether it rewrites any
+        # parent link, is not interpreted here (an empty file or a dangling link rewrites
+        # nothing today, yet a later write through it could), so every kind refuses alike.
+        kind = _init_kind(grafts_st)
+        if kind == "file":
+            found = "a regular file of {} byte(s)".format(grafts_st.st_size)
+        elif kind == "symlink":
+            found = "a symbolic link to {}".format(ascii(os.readlink(grafts_path)))
+        else:
+            found = "an entry of kind {}".format(kind)
+        raise RuntimeError(
+            "cannot evaluate prior-store ancestry: found {} at the legacy grafts path {}; "
+            "git consults that path in every history walk, where grafts it can read may "
+            "rewrite parent links (--no-replace-objects does not neutralize them), and this "
+            "scan never interprets grafts, so a prior store, whose counters spec 8.2 forbids "
+            "restarting, cannot be ruled out; convert or remove it (git replace "
+            "--convert-graft-file turns a grafts file into replace refs, which this scan "
+            "already ignores) and retry".format(found, ascii(grafts_path)))
+    specs = [":(literal)" + pointer_rel,
+             ":(glob)" + _init_glob_escape(working_rel) + "/*/"
+             + _init_glob_escape(_opf_store.MANIFEST_NAME)]
+    newest_raw = read(["rev-list", "--first-parent", "--max-count=1", "HEAD", "--"]
+                      + specs).out.strip()
+    if not newest_raw:
+        return   # no first-parent commit ever changed a store-identifying path: no prior store
+    newest = oid(newest_raw)
+    ancestor = newest
+    held = tree_store_paths(newest)
+    if not held:
+        # The newest first-parent change to a store path whose own tree holds no store
+        # identifier is a deletion, so its first parent's tree held one (a parentless root
+        # commit can only ADD, so it always holds what it changed).
+        ancestor = oid(read(["rev-parse", "--verify", "--quiet",
+                             newest + "^1"]).out.strip())
+        held = tree_store_paths(ancestor)
+        if not held:
+            raise RuntimeError(
+                "git history preflight: commit {} changed a store path yet neither its tree "
+                "nor its first parent's holds a store identifier; refusing rather than "
+                "guessing".format(newest))
+    # A SPLIT deletion can leave the newest holding tree PARTIAL (QA round 4 MEDIUM 1): with
+    # .working deleted in one commit and the pointer in a later one (or the reverse), the
+    # commit named above holds only one store path while an older first-parent tree still
+    # holds the other, so a command restoring only what the named commit holds would quietly
+    # leave the counters deleted while exiting 0. Each store path the named commit lacks is
+    # therefore probed with its own single-hit first-parent walk from that commit, under the
+    # same one-step parent convention as the main walk (a hit whose own tree lacks the marker
+    # is a deletion, so its first parent's tree is read; a parentless hit can only ADD, so its
+    # tree lacking a REAL marker means none existed). A holder found there becomes a second,
+    # ADDITIONAL restore command, and the first command's label says it restores only the
+    # store paths its own commit holds. A probe that finds no real holder (nothing at or
+    # before the named commit ever
+    # held the path, or only a non-store entry such as a committed directory at the pointer
+    # path changed it) omits only this additional disclosure, never the refusal.
+    extra_commit = None
+    extra_paths = []
+    for marker, spec in ((pointer_rel, specs[0]), (working_rel, specs[1])):
+        if marker in held:
+            continue
+        hit_raw = read(["rev-list", "--first-parent", "--max-count=1", ancestor, "--",
+                        spec]).out.strip()
+        if not hit_raw:
+            continue   # proven: no first-parent tree at or before the named commit held it
+        hit = oid(hit_raw)
+        holder = hit
+        if marker not in tree_store_paths(hit):
+            parent = read(["rev-parse", "--verify", "--quiet", hit + "^1"], ok=(0, 1))
+            if parent.rc == 1:
+                continue   # a parentless commit only ADDS; lacking the marker, it added none
+            holder = oid(parent.out.strip())
+            if marker not in tree_store_paths(holder):
+                continue   # a non-store change at the path, not a restorable store
+        extra_commit = holder
+        extra_paths.append(marker)
+    # A split deletion can also happen INSIDE .working (QA round 5 MAJOR): both markers
+    # survive into the named tree while a counters.toml or manifest.toml under .working was
+    # deleted in an earlier commit, so the commands below would exit 0 with spec 8.2's
+    # high-water counters still deleted. Whichever named commit's tree the remedy restores
+    # .working from is probed structurally (working_gaps), and each missing file makes the
+    # remedy say the restore is PARTIAL and name that path on its own detail line.
+    gaps = []
+    if working_rel in held:
+        gaps = working_gaps(ancestor)
+    elif working_rel in extra_paths:
+        gaps = working_gaps(extra_commit)
+    # Every value interpolated below is rendered through _init_inert by the
+    # _InitRestoreLine and _InitPriorStoreRefusal constructors, never ascii() (ascii()
+    # is not shell-inert: it leaves "$" and the backquote raw inside the quoted literal
+    # it yields, QA round 5 MAJOR); the renderer escapes every character a POSIX shell
+    # could act on, and the commit ids are already validated hex (oid), which renders
+    # unchanged. Restore commands are printed ONLY when the repository path and every
+    # restored path are BARE (_init_bare: every character in A-Za-z0-9 . / - _): every
+    # word of such a command is then a bare literal the shell cannot split, substitute,
+    # quote or continue, on any physical line, so the command needs no quoting at all
+    # (shlex.quote is retired: it kept a newline-holding value syntactically quoted
+    # while its middle physical lines ran standalone when the output was pasted line by
+    # line, QA round 6 MAJOR). The printed command carries exactly two of the scan's
+    # neutralizations: --literal-pathspecs keeps git from reading a path as a pattern,
+    # and --no-replace-objects keeps a replacement ref from substituting another
+    # commit's bytes for the named one's (QA round 4 MEDIUM: checkout honours
+    # replacement refs; the scan's own reads already run under that flag). The scan's
+    # OTHER neutralizations, listed exactly (QA round 5 MINOR), transfer to no printed
+    # command: the grafts refusal (any entry at the legacy grafts path refused above,
+    # before any command is built); the allowlist environment scrub with
+    # GIT_NO_LAZY_FETCH=1, -c core.fsmonitor=false and --no-pager, which guard only the
+    # scan's own child processes (the pasted command runs as the user's git in the
+    # user's environment, where a checkout may legitimately lazy-fetch the blobs it
+    # restores and the user's own pager and fsmonitor configuration applies); and
+    # -c core.commitGraph=false, which guards the scan's rev-list and rev-parse walks
+    # against a commit-graph's cached data, and is not needed in the printed command
+    # because a checkout named by a FULL commit id reads the commit object itself,
+    # never the graph's cached tree (QA round 5, verified against a tree-substituted
+    # commit-graph). For any OTHER value (a space, a quote, a control or format
+    # character, an undecodable byte: anything outside the bare-command alphabet) NO
+    # command is printed at all (QA round 4 MINOR 2; QA round 6 MAJOR): an escaped
+    # command could keep a substitution live under the shell's quote reading or split
+    # across physical lines, so the refusal instead names the repository, the commits
+    # and the paths on rendered detail lines.
+    def checkout_line(commit_id, paths):
+        # Every word here is PROVEN bare by the gate below, so each renders
+        # unchanged through the constructor; the separating spaces come from one
+        # string-literal template per path arity (the renderer's fixed alphabet
+        # escapes a space inside a VALUE, and no composed line is ever passed back
+        # through the renderer as a value, QA round 9, requirement B), and a
+        # smuggled non-bare word would render visibly rather than run.
+        if len(paths) == 1:
+            return _InitRestoreLine(
+                "  git -C {} --no-replace-objects --literal-pathspecs checkout "
+                "{} -- {}", str(repo), commit_id, paths[0])
+        if len(paths) == 2:
+            return _InitRestoreLine(
+                "  git -C {} --no-replace-objects --literal-pathspecs checkout "
+                "{} -- {} {}", str(repo), commit_id, paths[0], paths[1])
+        raise RuntimeError(
+            "git history preflight: unexpected restore path count {}; "
+            "refusing".format(len(paths)))
+
+    if all(_init_bare(value) for value in [str(repo)] + held + extra_paths):
+        if extra_commit:
+            remedy_template = (
+                "restore the store paths the restore commands below name, from the "
+                "commits they name (this history deleted the store across more than "
+                "one commit, so one command cannot restore every store path)")
+            restore_lines = [_InitRestoreLine(
+                "opf init: restore command (shell-ready; it restores only the store "
+                "paths its commit holds, and the additional command below restores the "
+                "other named store path as git checks it out from its own commit):")]
+        else:
+            remedy_template = (
+                "restore the store paths the restore command below names, from that "
+                "commit")
+            restore_lines = [_InitRestoreLine(
+                "opf init: restore command (shell-ready; it restores the named store "
+                "paths as git checks them out from that commit):")]
+        remedy_values = ()
+        restore_lines.append(checkout_line(ancestor, held))
+        if extra_commit:
+            restore_lines += [
+                _InitRestoreLine(
+                    "opf init: additional restore command (shell-ready; it restores "
+                    "the remaining store path from the newest first-parent tree that "
+                    "holds it):"),
+                checkout_line(extra_commit, extra_paths)]
+    else:
+        remedy_template = (
+            "restore the store paths the lines below name, from the {} named below "
+            "(no command is printed: a value in it would hold a character outside "
+            "the bare-command alphabet)")
+        remedy_values = ("commits" if extra_commit else "commit",)
+        restore_lines = (
+            [_InitRestoreLine(
+                "opf init: restore command withheld: a value in it holds a character "
+                "outside the bare-command alphabet A-Za-z0-9 . / - _ and an escaped "
+                "command could still carry a live shell substitution or split across "
+                "physical lines, so no command is printed. Restore each path named "
+                "below from the commit named above it, in the repository named below, "
+                "by your own means, reading each rendered value literally: the safe "
+                "alphabet is ASCII letters, digits and . / - _ only, and every other "
+                "character, the space included, is written as a backslash escape of "
+                "its code point:"),
+             _InitRestoreLine("opf init:   repository: {}", str(repo)),
+             _InitRestoreLine("opf init:   commit: {}", ancestor)]
+            + [_InitRestoreLine("opf init:   restore path: {}", path)
+               for path in held])
+        if extra_commit:
+            restore_lines += (
+                [_InitRestoreLine("opf init:   additional commit: {}", extra_commit)]
+                + [_InitRestoreLine("opf init:   additional restore path: {}", path)
+                   for path in extra_paths])
+    if gaps:
+        restore_lines += (
+            [_InitRestoreLine(
+                "opf init: the restore is PARTIAL: the .working tree the command or "
+                "lines above restore lacks each store path below, so no command or "
+                "path printed above provides it (this scan treats a first-level "
+                ".working subdirectory as a machine store only when it directly holds "
+                "manifest.toml or counters.toml, in that tree or in this line's "
+                "first-parent history at or before the named commit; a store found "
+                "either way is expected to hold both files, and a subdirectory "
+                "holding only other files or only deeper directories is neither "
+                "expected nor named; a structural file counts at its rename "
+                "destination instead of its old path only when the recorded "
+                "destination blob id equals the source blob id (an exact "
+                "byte-identical move; git's similarity score of 100 alone does "
+                "not prove that, since reordered lines also score 100), no older "
+                "first-parent record touched the destination, and the renaming "
+                "commit's tree holds no structural file under the source "
+                "subdirectory, so a machine subdirectory renamed whole with git "
+                "mv is complete at its new path, while any other pairing git's "
+                "rename detection reports, for example a store deleted beside a "
+                "similar store created in the same commit, or a pairing whose "
+                "bytes were rearranged, reads as a deletion of its source, which "
+                "stays expected, fail-safe); "
+                "supply each missing path by your own means, or re-adopt with opf "
+                "adopt:")]
+            + [_InitRestoreLine("opf init:   missing store path: {}", path)
+               for path in gaps])
+    raise _InitPriorStoreRefusal(
+        "a prior store exists in this repository's git history: commit {} on HEAD's "
+        "first-parent line holds {} or a store manifest {} (spec 4.3, 4.5), and spec "
+        "8.2 forbids restarting its counters at zero (record ids would be reissued). "
+        "Remedy: {remedy}, or re-adopt the ancestry with opf adopt. Plain opf init "
+        "refuses whenever this scan of HEAD's first-parent line finds a prior store, "
+        "and a store that never reached a tree on HEAD's first-parent line (for "
+        "example one created and deleted on a side branch, merged or not) is not "
+        "detected (adoption across such side lines is opf adopt's authority); the "
+        "scan checks the root's current path only (a store committed under another "
+        "directory, for example before a rename, is not detected)",
+        (ancestor, pointer_rel,
+         working_rel + "/<subdir>/" + _opf_store.MANIFEST_NAME),
+        restore_lines, remedy_template=remedy_template,
+        remedy_values=remedy_values, partial=len(gaps) > 0)
+
+
 def _init_same_root(root, root_fd):
     check_fd = _opf_store._open_dir_nofollow(root)
     try:
@@ -11762,34 +15542,71 @@ def _init_observed(root_fd, directories, payloads):
     return rows
 
 
-def _cmd_init(rest):
+def _init_main(rest):
     """Create validated store sources and a pointer, without git writes or rendering.
 
     Preflight is read-only. Publication is create-only and deliberately not transactional: a
     later failure reports observed planned paths and leaves them for review. Enumeration, root
     identity checks, and final rereads do not serialize concurrent writers or directory renames.
     No lock, lease, rollback, adoption policy, or whole-store success verdict is supplied here.
+    Every failure path prints rendered text through the two handlers below; the second catches
+    BaseException, so a non-Exception raised while the try body runs (an interrupt or SystemExit after
+    publication started) still reports the partial-publication disclosure before returning rendered (QA
+    round 12 C). The disclosure is itself guarded (QA round 13 D; QA round 14 D; QA round 15 B: the
+    guard is the handler's first statement, so the publication test runs inside it too), with its
+    windows stated exactly. Once publication has started, a SECOND interrupt raised anywhere from the
+    publication test through the cannot-evaluate line and the detail report (the root re-check, the
+    observation pass, the JSON event line) drops whatever of those had not yet printed, and a fixed
+    fallback line plus the fixed "publication may be partial" sentence still print. The handler's
+    ENTRY is outside the guard: CPython raises a line event for the except clause that binds the
+    caught exception and for the guard's own try line, and an interrupt injected on either through a
+    trace function escapes to _cmd_init's boundary, which prints only its rendered last-resort line,
+    so no partial-publication sentence prints (whether a real asynchronous signal can be delivered on
+    those two lines is not exercised). A further interrupt landing in the fallback (its publication
+    test or its print, a third) or in the fixed sentence (a third, or a second one landing there
+    directly) escapes to _cmd_init's boundary the same way: landing in the fallback, it leaves no
+    partial-publication sentence printed at all; landing in the fixed sentence, the lines already
+    printed before it (the cannot-evaluate line and detail, or the fallback line, which says the
+    report failed and asks for a review of the created paths) stay printed while the sentence itself
+    may not print. Before publication starts, a second interrupt landing in the cannot-evaluate line
+    or the "no publication attempted" line is caught by the same guard, which prints a fixed line
+    saying a second failure interrupted the report and no publication was attempted; nothing was
+    published there, so no disclosure is owed, and a further interrupt landing in that fixed line
+    escapes to the boundary the same way. Whatever escapes the handlers (an interrupt during the
+    argument loop above the try, for one) is caught by _cmd_init's last-resort rendering boundary (QA
+    round 10 MAJOR 1); the windows that boundary itself does not cover are stated there and in
+    QUICKSTART.
     """
     root = None
     i = 0
     while i < len(rest):
-        tok = rest[i]
+        # Each token is read as its exact str before it is compared or gated (QA
+        # round 15, requirement C: a str subclass whose own __eq__ answered
+        # "--root" acted as --root).
+        tok = _init_exact_str(rest[i])
         if tok == "--root":
             if i + 1 >= len(rest):
-                print("opf init: --root requires a directory argument", file=sys.stderr)
+                _init_echo("opf init: --root requires a directory argument", err=True)
                 return EXIT_MALFORMED
             if root is not None:
-                print("opf init: --root given more than once", file=sys.stderr)
+                _init_echo("opf init: --root given more than once", err=True)
                 return EXIT_MALFORMED
-            val = rest[i + 1]
+            val = _init_exact_str(rest[i + 1])
             if val == "" or val.startswith("-"):
-                print("opf init: --root requires a non-empty directory argument, not {!r}".format(val),
-                      file=sys.stderr)
+                # The rejected value is rendered inert, never {!r}: repr of a value
+                # holding a single quote and no double quote is a DOUBLE-quoted literal
+                # in which $(...) stays live when the printed line reaches a POSIX shell
+                # (QA round 6 MAJOR). An empty value renders as nothing; the sentence
+                # names that case.
+                _init_echo("opf init: --root requires a non-empty directory argument, "
+                           "not the inert-escaped value {} (an empty value shows as "
+                           "nothing here)".format(_init_inert(val)), err=True)
                 return EXIT_MALFORMED
             root = val
             i += 2
         else:
-            print("opf init: unrecognized argument {!r}".format(tok), file=sys.stderr)
+            _init_echo("opf init: unrecognized argument, inert-escaped: {}".format(
+                _init_inert(tok)), err=True)
             return EXIT_MALFORMED
     root = root if root is not None else "."
     root_fd = None
@@ -11798,7 +15615,6 @@ def _cmd_init(rest):
     publishing = False
     stage = "preflight"
     try:
-        import shlex
         import _opf_init
 
         journal = _opf_store._journal
@@ -11809,8 +15625,13 @@ def _cmd_init(rest):
 
         inventory = _init_inventory(root_fd)
         if inventory["entries"] or not inventory["complete"]:
-            print(json.dumps(dict(inventory, event="foreign-content", root=str(root)),
-                             sort_keys=True))
+            # Report strings are inert-escaped, keys included (QA round 5): a raw root or
+            # foreign-entry name inside a printed JSON string sits in exactly the
+            # double-quote context where a POSIX shell keeps $(...) and `...` live on paste.
+            _init_echo(json.dumps(_init_inert_json(dict(inventory,
+                                                        event="foreign-content",
+                                                        root=str(root))),
+                                  sort_keys=True))
         if not inventory["complete"]:
             raise RuntimeError("foreign .working inventory incomplete; refusing initialization")
 
@@ -11833,7 +15654,7 @@ def _cmd_init(rest):
             # CANNOT-EVALUATE result as permission to initialize a partial store.
             raise RuntimeError("store resolution refused: {}".format(res.detail))
 
-        stage = "building and validating source payloads"
+        stage = "building-and-validating-source-payloads"
         working = _opf_store.WORKING_DIRNAME
         machine = working + "/" + _opf_store.DEFAULT_MACHINE_SUBDIR
         documents = [
@@ -11854,7 +15675,7 @@ def _cmd_init(rest):
             payloads["CHANGELOG.md"] = b"# Changelog\n"
         directories = [working, machine]
 
-        stage = "checking the destination inventory"
+        stage = "checking-the-destination-inventory"
         for relpath in directories + list(payloads):
             journal._check_rel(relpath)
             if journal._lstat_contained(root_fd, relpath) is not None:
@@ -11868,11 +15689,13 @@ def _cmd_init(rest):
         # index_paths carries for _init_untracked's prior-state detection is a path init never creates
         # and adopters legitimately gitignore, so it must not make init refuse.
         _init_unignored(git, repo, root, set(directories) | set(payloads))
+        stage = "checking-git-history-for-a-prior-store"
+        _init_no_prior_store(git, repo, root)
         _init_same_root(root, root_fd)
 
         publishing = True
         for relpath in directories:
-            stage = "creating directory " + relpath
+            stage = "creating-directory-" + relpath
             pfd, name = journal._open_parent(root_fd, relpath)
             try:
                 os.mkdir(name, 0o755, dir_fd=pfd)
@@ -11880,11 +15703,11 @@ def _cmd_init(rest):
             finally:
                 _opf_store._close_fd_exc_safe(pfd)
         for relpath, data in payloads.items():
-            stage = "creating " + relpath
+            stage = "creating-" + relpath
             _init_same_root(root, root_fd)
             _init_create(root_fd, relpath, data)
 
-        stage = "observing published source paths"
+        stage = "observing-published-source-paths"
         observed = _init_observed(root_fd, directories, payloads)
         if any(row["state"] != (
                 "directory" if row["path"] in directories else "matches-payload")
@@ -11896,52 +15719,200 @@ def _cmd_init(rest):
         }
         if (not final_inventory["complete"]
                 or {row["path"] for row in final_inventory["entries"]} != expected_working):
-            print(json.dumps(dict(final_inventory, event="post-publish-inventory", root=str(root)),
-                             sort_keys=True))
+            _init_echo(json.dumps(_init_inert_json(dict(final_inventory,
+                                                        event="post-publish-inventory",
+                                                        root=str(root))),
+                                  sort_keys=True))
             raise RuntimeError("working inventory changed during publication")
         if journal._lstat_at(root_fd, _opf_store.LOCAL_POINTER_REL) is not None:
             raise RuntimeError("local pointer appeared during publication")
         _init_same_root(root, root_fd)
         _init_untracked(git, repo, root, index_paths)
 
-        print("opf init: store SOURCES created and {} pointer written.".format(
-            _opf_store.POINTER_REL))
-        print(json.dumps({"event": "created", "root": str(root), "paths": list(payloads)},
-                         sort_keys=True))
-        print("opf init: these created paths are NOT yet git-tracked (final index read).")
-        print("Review the created files, then stage the reviewed paths:")
-        print("  git -C {} --literal-pathspecs add -- {}".format(
-            shlex.quote(str(root)), " ".join(shlex.quote(path) for path in payloads)))
-        print("opf init: ignore eligibility, including the global and system core.excludesFile, was checked")
-        print("  before creation; a later ignore or config change can still affect staging (git add -f).")
-        print("Commit the reviewed init paths, then materialize the Markdown views:")
-        print("  opf render --write --root {}".format(shlex.quote(str(root))))
-        print("opf init: exit 0 means valid sources were created; tracking and rendering are pending.")
-        return EXIT_OK
-    except Exception as exc:  # noqa: BLE001  includes InitError and residual I/O/import errors
-        print("opf init: cannot evaluate at {} during {}: {}; exit 2".format(
-            ascii(str(root)), stage, ascii(exc)), file=sys.stderr)
-        if publishing and root_fd is not None:
-            try:
-                _init_same_root(root, root_fd)
-                binding = "same-root"
-            except Exception as binding_exc:
-                binding = "cannot-confirm-root: " + ascii(binding_exc)
-            print(json.dumps({
-                "event": "partial-publication",
-                "root": str(root),
-                "scope": "opened-root-descriptor",
-                "root_binding": binding,
-                "paths": _init_observed(root_fd, directories, payloads),
-            }, sort_keys=True), file=sys.stderr)
-            print("opf init: publication may be partial; review the observed state. No rollback performed.",
-                  file=sys.stderr)
+        _init_echo("opf init: store SOURCES created and {} pointer written.".format(
+            _init_inert(_opf_store.POINTER_REL)))
+        _init_echo(json.dumps(_init_inert_json(
+            {"event": "created", "root": str(root), "paths": list(payloads)}),
+            sort_keys=True))
+        _init_echo("opf init: these created paths are NOT yet git-tracked (final index read).")
+        # The staging and render hints are printed ONLY when the root and every created
+        # path are BARE (_init_bare): every word of each hint is then a
+        # bare literal no POSIX shell can split, substitute, quote or continue, on any
+        # physical line. shlex.quote is retired here (QA round 6 MAJOR): it kept a
+        # newline-holding root syntactically quoted while the quoted value's middle
+        # physical lines ran standalone when the output was pasted line by line. For any
+        # other root the hints are withheld and the root is named rendered on a detail
+        # line.
+        if all(_init_bare(value) for value in [str(root)] + list(payloads)):
+            _init_echo("Review the created files, then stage the reviewed paths:")
+            _init_echo("  git -C {} --literal-pathspecs add -- {}".format(
+                _init_inert(str(root)),
+                " ".join(_init_inert(path) for path in payloads)))
+            _init_echo("opf init: ignore eligibility, including the global and system core.excludesFile, was checked")
+            _init_echo("  before creation; a later ignore or config change can still affect staging (git add -f).")
+            _init_echo("Commit the reviewed init paths, then materialize the Markdown views:")
+            _init_echo("  opf render --write --root {}".format(_init_inert(str(root))))
         else:
-            print("opf init: preflight refused; no publication attempted.", file=sys.stderr)
+            _init_echo("opf init: staging and render command hints withheld: a value in "
+                       "them holds a character")
+            _init_echo("  outside the bare-command alphabet A-Za-z0-9 . / - _ and an "
+                       "escaped command could still carry")
+            _init_echo("  a live shell substitution or split across physical lines, so "
+                       "no command is printed.")
+            _init_echo("  Review the created files, stage and commit the created paths "
+                       "the event line above")
+            _init_echo("  names (git add), then materialize the Markdown views (opf "
+                       "render --write), in the")
+            _init_echo("  root named below, by your own means, reading the rendered "
+                       "root literally: the safe alphabet is")
+            _init_echo("  ASCII letters, digits and . / - _ only, and every other "
+                       "character, the space included, is")
+            _init_echo("  written as a backslash escape of its code point:")
+            _init_echo("opf init:   root: " + _init_inert(str(root)))
+            _init_echo("opf init: ignore eligibility, including the global and system core.excludesFile, was checked")
+            _init_echo("  before creation; a later ignore or config change can still affect staging (git add -f).")
+        _init_echo("opf init: prior-store history was checked on HEAD's first-parent line only: a store")
+        _init_echo("  that never reached a tree on HEAD's first-parent line (for example one created and")
+        _init_echo("  deleted on a side branch, merged or not) is not detected (see opf adopt), and")
+        _init_echo("  the scan checks the root's current path only (a store committed under another")
+        _init_echo("  directory, for example before a rename, is not detected).")
+        _init_echo("opf init: exit 0 means valid sources were created; tracking and rendering are pending.")
+        return EXIT_OK
+    except _InitPriorStoreRefusal as exc:
+        # A DEFINITE finding, not an evaluation failure: reported as REFUSED in its own
+        # words. It is raised only by the read-only ancestry preflight, so publication
+        # never started. The message is NOT trusted by type (QA round 13, requirement
+        # A: this handler catches subclasses too, and a subclass inheriting or
+        # overriding the constructor carried a raw value): _init_refusal_message
+        # accepts it at this point of output only with the constructor's rendering
+        # proof, by value equality with the live str(exc), and renders it through
+        # _init_inert otherwise (never ascii(), which leaves a raw dollar sign and
+        # backquote inside the quoted literal it yields, QA round 5 MAJOR). The
+        # restore lines are read defensively (a subclass that never ran the real
+        # constructor may carry none) and each is accepted only with the
+        # _InitRestoreLine constructor's rendering proof (_init_line_rendered, a
+        # private slot set after every value was rendered; never a type check, QA
+        # round 9, requirement B: str.__new__ minted an exact-type instance around a
+        # raw value); any other entry (a raw string or minted instance smuggled onto
+        # the caught exception after construction) is re-rendered through that
+        # constructor here, never printed raw. The suite's runtime paste test holds
+        # these properties at runtime.
+        _init_echo("opf init: REFUSED at {} during {}: {}; exit 2".format(
+            _init_inert(str(root)), _init_inert(stage),
+            _init_refusal_message(exc)), err=True)
+        try:
+            caught_lines = list(exc.restore_lines)
+        except Exception:
+            caught_lines = []
+        for line in caught_lines:
+            _init_echo(line if _init_line_rendered(line)
+                       else _InitRestoreLine("{}", line), err=True)
+        _init_echo("opf init: preflight refused; no publication attempted.", err=True)
+        return EXIT_MALFORMED
+    except BaseException as exc:  # noqa: BLE001  InitError and residual errors, plus a non-Exception (interrupt or SystemExit) after publication started, so the partial-publication disclosure below runs before this returns rendered (QA round 12 C)
+        # Every interpolation is rendered inert AT THE PRINT (QA round 5; QA round 6):
+        # the root, the stage token and the exception text through _init_inert, whose
+        # raising sites may quote path-derived values with ascii() (not shell-inert on its
+        # own); the exception TYPE is printed by name around the escaped text, the
+        # readable part ascii(exc) used to carry. The handler's FIRST statement
+        # enters the disclosure guard, so the publication test, the cannot-evaluate
+        # line and the detail report all run inside it (QA round 14 D: a second
+        # interrupt landing in the first print escaped past the guard; QA round 15
+        # B: one landing on the publication test, which the round-14 handler ran
+        # before entering the guard, escaped the same way and dropped the
+        # partial-publication sentence).
+        try:
+            if publishing and root_fd is not None:
+                _init_echo("opf init: cannot evaluate at {} during {}: {}({}); exit 2".format(
+                    _init_inert(str(root)), _init_inert(stage),
+                    _init_inert(type(exc).__name__), _init_inert(str(exc))), err=True)
+                try:
+                    _init_same_root(root, root_fd)
+                    binding = "same-root"
+                except Exception as binding_exc:
+                    # The exception text is an exact str BEFORE the concatenation
+                    # (QA round 15, requirement A: ascii() may return the str
+                    # subclass repr() returned, whose reflected __radd__ decided
+                    # the result); the report renders it once, at the output.
+                    binding = "cannot-confirm-root: " + _init_exact_str(ascii(binding_exc))
+                _init_echo(json.dumps(_init_inert_json({
+                    "event": "partial-publication",
+                    "root": str(root),
+                    "scope": "opened-root-descriptor",
+                    "root_binding": binding,
+                    "paths": _init_observed(root_fd, directories, payloads),
+                }), sort_keys=True), err=True)
+            else:
+                _init_echo("opf init: cannot evaluate at {} during {}: {}({}); exit 2".format(
+                    _init_inert(str(root)), _init_inert(stage),
+                    _init_inert(type(exc).__name__), _init_inert(str(exc))), err=True)
+                _init_echo("opf init: preflight refused; no publication attempted.", err=True)
+                return EXIT_MALFORMED
+        except BaseException:  # noqa: BLE001  a SECOND interrupt anywhere from the publication test through the detail report must not drop the fixed disclosure below (QA round 13 D; QA round 14 D; QA round 15 B)
+            if not (publishing and root_fd is not None):
+                _init_echo("opf init: a second failure interrupted this report; "
+                           "preflight refused; no publication attempted.", err=True)
+                return EXIT_MALFORMED
+            _init_echo("opf init: the cannot-evaluate line or the partial-publication "
+                       "detail could not be reported (a second failure while the "
+                       "report itself ran); review the created paths yourself.",
+                       err=True)
+        _init_echo("opf init: publication may be partial; review the observed state. No rollback performed.",
+                   err=True)
         return EXIT_MALFORMED
     finally:
         if root_fd is not None:
             _opf_store._journal._close_fd_quietly(root_fd)
+
+
+def _cmd_init(rest):
+    """Run _init_main under ONE last-resort rendering boundary (QA round 10 MAJOR 1).
+
+    The round-9 argument loop sat outside the rendering handlers, so an assert, a
+    raise ... from (whose cause a chained traceback prints), or an implicit
+    exception (a subscript's KeyError or IndexError) raised there printed a raw
+    argv value on descriptor 2 inside an escaping Python traceback. _init_main now
+    carries the whole command, its own two rendering handlers included; whatever
+    still escapes it, BaseException included, is caught here and reported through
+    the one emitter with the exception type name and text BOTH rendered through
+    _init_inert, and the report itself is guarded: if printing it fails, nothing
+    more is printed, because a failing print would otherwise raise out of this
+    handler with the original exception chained, and Python prints a chained
+    traceback with every message raw. PROVED BY THIS SHAPE (the route gate pins
+    the shape, the init suite pins these exact bytes): every exception _init_main
+    lets escape is caught here and reported rendered, so from init dispatch onward
+    opf init reports a rendered line and exits 2 rather than printing a Python
+    traceback (a KeyboardInterrupt, or a mutant's SystemExit, raised while
+    _init_main runs reports the same way and exits 2). Three windows this boundary
+    does NOT cover, stated so no wording claims more than the code provides: an
+    asynchronous interrupt that lands in this handler's own few statements (after
+    the guarded report, at the return) can still escape, and because it arrives
+    while the caught exception is still being handled, Python's traceback then
+    CHAINS that exception (its type and its raw, unrendered text, then "During
+    handling of the above exception, another exception occurred"; QA round 14
+    C), so this window can print an init value raw; any failure BEFORE
+    init dispatch is outside this boundary entirely (a bootstrap fault other than
+    the ImportError or OSError _bootstrap maps to a rendered cannot-evaluate, for
+    example a SyntaxError in an installed helper, or an interrupt before or during
+    dispatch, surfaces as Python's own traceback or signal); and an interrupt
+    AFTER this function returns, in the dispatcher's own return and sys.exit
+    statements, escapes as Python's traceback of those dispatcher lines (that
+    traceback shows the dispatcher's source lines and the interrupt type; by
+    then no exception is being handled, so it interpolates no init value: this
+    qualifier holds for this post-return window only). What a static scan
+    still cannot prove is stated in _init_echo's docstring (D-STATIC-PIN-RESIDUAL)."""
+    try:
+        return _init_main(rest)
+    except BaseException as exc:  # noqa: BLE001  the last-resort rendering boundary
+        try:
+            _init_echo(
+                "opf init: cannot evaluate: {}({}); exit 2 (reported by the "
+                "last-resort boundary, which prints nothing else)".format(
+                    _init_inert(type(exc).__name__), _init_inert(str(exc))),
+                err=True)
+        except BaseException:  # noqa: BLE001  a failing report must not re-raise
+            pass
+        return EXIT_MALFORMED
 
 
 # --- opf upgrade: the store-schema upgrade to the tooling spec_version (spec 9.2) ---------------------
@@ -13259,8 +17230,17 @@ def _cmd_adopt(rest):
           `run_nonce` from os.urandom, both injected into the planner (the deterministic run id composes
           them). Exit 0: VALID -- the frozen plan TOML on stdout (an inert, digest-bound PROPOSAL, never
           permission or readiness to apply; `approve` captures the one approval).
-          Exit 1: INVALID (a schema-violating decision, op or plan). Exit 2: cannot-evaluate (an
-          unreadable worksheet, a changed inventory, an unresolvable root, an unresolved disposition).
+          Exit 1: INVALID (an op row or the frozen plan breaks the plan schema: an op missing a required
+          field, enforcement rows that are not each platform once in order, a means its platform does not
+          allow or one lacking its required residual, an enforcement member no op installs, a release
+          anchor disagreeing with manifest_sha256, or a move destination the frozen plan refuses, such as
+          one in the store tree outside the Move archive or one another effect also claims). Exit 2:
+          cannot-evaluate (an unreadable worksheet, a changed inventory, an unresolvable root, an
+          unresolved disposition; a decision row _opf_adopt_plan._decisions refuses before the plan
+          freezes: its keys, disposition, actor or candidate path, a keep of an occupying candidate, or
+          a move destination with no observed absence; an op, product, skip policy, enforcement
+          platform, means or residual outside its vocabulary; or a planner binding rule such as a
+          missing init-store or render-views members that are not exactly the declared views).
       approve --inputs FILE --plan FILE --actor NAME [--root DIR] : the one approval (spec 14.1), writing
           NOTHING: re-prove the frozen plan PLAN printed from its own bytes, observe the live revision and
           re-derive the plan from the worksheet over the live tree (a moved revision, a changed observation
@@ -14885,6 +18865,11 @@ def _cli_self_test():
                         _wl_seen["wfd"] = fd
                     return fd
 
+                def _wl_leaked(fd):
+                    """The worksheet leak verdict: whether fd is still open. Only EBADF reads as closed; any
+                    other read error raises naming fd, never read as closed."""
+                    return _st_census_open(fd)
+
                 def _wl_close(fd):
                     _wl_real_close(fd)
                     if fd == _wl_seen.get("pfd") and "fired" not in _wl_seen:
@@ -14913,12 +18898,18 @@ def _cli_self_test():
                     if _wl_out != "valueerror":
                         failures.append("adopt --inputs with a failing parent close: expected the "
                                         "fail-closed ValueError, got {}".format(_wl_out))
-                    try:
-                        os.fstat(_wl_seen["wfd"])
+                    if _wl_leaked(_wl_seen["wfd"]):
                         failures.append("adopt --inputs leaked the worksheet fd (fd {} still open "
                                         "after the parent close failed)".format(_wl_seen["wfd"]))
-                    except OSError:
-                        pass
+                # The worksheet leak verdict fails closed: an EIO census read of a held descriptor raises
+                # naming it, never reads as closed.
+                _wl_held = _wl_real_open(os.devnull, os.O_RDONLY)
+                try:
+                    if not _st_census_eio_raises(lambda: _wl_leaked(_wl_held), _wl_held):
+                        failures.append("adopt --inputs worksheet leak check: an EIO census read of a held "
+                                        "descriptor read as closed")
+                finally:
+                    _wl_real_close(_wl_held)
 
                 # plan with the FRESH digest and one SCHEMA-VIOLATING op row (a known op missing its
                 # required inputs) -> 1: INVALID rides _opf_adopt.validate_op through the wired planner
@@ -15158,6 +19149,169 @@ def _cli_self_test():
         return EXIT_MALFORMED
 
 
+def _st_census_stat(fd, fstat=None):
+    """The stat result of descriptor `fd`, or None once it is closed, for a self-test descriptor census or
+    survivor scan. Only EBADF reads as closed; any other read error (EIO, EACCES, ENOMEM) is cannot-evaluate,
+    raised naming `fd`, never read as a closed descriptor: a leak check fails closed on input it cannot read.
+    `fstat` defaults to os.fstat as bound when called, so a case can inject the census read failure."""
+    import errno
+    try:
+        return (os.fstat if fstat is None else fstat)(fd)
+    except OSError as exc:
+        if exc.errno == errno.EBADF:
+            return None
+        raise RuntimeError("descriptor census cannot evaluate descriptor {}: {!r}".format(fd, exc))
+
+
+def _st_census_open(fd, fstat=None):
+    """Whether descriptor `fd` is open (see _st_census_stat: only EBADF reads as closed)."""
+    return _st_census_stat(fd, fstat) is not None
+
+
+def _st_census_anon_kind(fd, readlink=None):
+    """The anonymous-inode kind of descriptor `fd` ("anon_inode:[eventpoll]", "anon_inode:[eventfd]"), None
+    for any other file, from its /proc/self/fd link. Anonymous-inode descriptors of many kinds share one
+    (st_dev, st_ino), so the kind is what tells an epoll descriptor from an eventfd put at its number. ENOENT
+    (the number has no entry: closed since its stat read) returns None; any other read error raises naming
+    `fd`, never read as closed. `readlink` defaults to os.readlink as bound when called."""
+    import errno
+    try:
+        target = (os.readlink if readlink is None else readlink)("/proc/self/fd/{}".format(fd))
+    except OSError as exc:
+        if exc.errno == errno.ENOENT:
+            return None
+        raise RuntimeError("descriptor census cannot evaluate descriptor {}: {!r}".format(fd, exc))
+    return target if target.startswith("anon_inode:") else None
+
+
+def _st_census_fds():
+    """This process's open descriptors as identities (number, st_dev, st_ino, file type, anonymous-inode
+    kind), so a descriptor closed and reopened at the same number to a different file reads as a change,
+    never as unchanged, an anonymous-inode descriptor replaced by one of another kind (an epoll descriptor by
+    an eventfd, which share one st_dev and st_ino) included. Residual: two anonymous-inode descriptors of the
+    same kind share every field, so one replaced at its number by another of its own kind still reads as
+    unchanged. Only EBADF reads as closed (the listing's own descriptor); any other read error raises naming
+    the descriptor."""
+    live = set()
+    for name in os.listdir("/proc/self/fd"):
+        info = _st_census_stat(int(name))
+        if info is not None:
+            live.add((int(name), info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode),
+                      _st_census_anon_kind(int(name))))
+    return live
+
+
+def _st_census_reuse_detected(scan):
+    """Whether `scan()` reports a same-number replacement as a change: a held /dev/null descriptor is in the
+    baseline, then its number is reopened to /dev/zero (dup2), so the set of open numbers is unchanged but
+    the file behind one is not. A number-only census reads that as unchanged and would pass a leak."""
+    held = os.open(os.devnull, os.O_RDONLY)
+    try:
+        baseline = scan()
+        other = os.open("/dev/zero", os.O_RDONLY)
+        try:
+            os.dup2(other, held)
+        finally:
+            os.close(other)
+        return scan() != baseline
+    finally:
+        os.close(held)
+
+
+def _st_census_anon_reuse_detected(scan):
+    """(detected, shared) for an anonymous-inode replacement: a held epoll descriptor is in the baseline, then
+    an eventfd is put at its number (dup2). `detected` is whether `scan()` reads that as a change; `shared` is
+    whether the two have one (st_dev, st_ino, file type), where a census of those stat fields alone reads the
+    replacement as unchanged and only the anonymous-inode kind tells them apart. Every descriptor it opens is
+    closed once on every path: `held` is owned from the dup on, under the finally that also covers the epoll's
+    own close, so a raising close leaves nothing open."""
+    import select
+    poll = select.epoll()
+    held = None
+    try:
+        try:
+            held = os.dup(poll.fileno())
+        finally:
+            poll.close()
+        before = os.fstat(held)
+        baseline = scan()
+        other = os.eventfd(0)
+        try:
+            os.dup2(other, held)
+        finally:
+            os.close(other)
+        after = os.fstat(held)
+        shared = (before.st_dev, before.st_ino, stat.S_IFMT(before.st_mode)) == \
+            (after.st_dev, after.st_ino, stat.S_IFMT(after.st_mode))
+        return scan() != baseline, shared
+    finally:
+        if held is not None:
+            os.close(held)
+
+
+def _st_census_anon_close_leak_free(scan):
+    """Whether _st_census_anon_reuse_detected leaves no descriptor open when its epoll's close raises:
+    select.epoll is wrapped so close() closes the real epoll and then raises OSError(EIO); the call must raise
+    that error, and `scan()` must read as it did before the call."""
+    import errno
+    import select
+    real_epoll = select.epoll
+
+    class RaisingEpoll:
+        def __init__(self):
+            self.real = real_epoll()
+
+        def fileno(self):
+            return self.real.fileno()
+
+        def close(self):
+            self.real.close()
+            raise OSError(errno.EIO, "injected epoll close failure")
+
+    before = scan()
+    select.epoll = RaisingEpoll
+    try:
+        _st_census_anon_reuse_detected(scan)
+        raised = False
+    except OSError as exc:
+        raised = exc.errno == errno.EIO
+    finally:
+        select.epoll = real_epoll
+    return raised and scan() == before
+
+
+def _st_census_eio_raises(scan, fd, seam="fstat", code=None):
+    """Whether `scan()` fails closed when the census read of the held descriptor `fd` fails errno `code` (EIO
+    by default): it must raise RuntimeError naming fd (read as closed, a leak would pass). os.<seam> (fstat,
+    or readlink of fd's /proc/self/fd link) fails for fd only during the call. An independent fstat must
+    still see fd open afterwards, else the check proves nothing. The caller owns fd."""
+    import errno
+    code = errno.EIO if code is None else code
+    real_fstat, real_readlink = os.fstat, os.readlink
+    real_seam = real_readlink if seam == "readlink" else real_fstat
+
+    def failing(number, *args, **kwargs):
+        if number in (fd, "/proc/self/fd/{}".format(fd)):
+            raise OSError(code, "injected census read failure")
+        return real_seam(number, *args, **kwargs)
+    if seam == "readlink":
+        os.readlink = failing
+    else:
+        os.fstat = failing
+    try:
+        scan()
+        named = False
+    except RuntimeError as exc:
+        named = "descriptor {}:".format(fd) in str(exc)
+    finally:
+        os.fstat, os.readlink = real_fstat, real_readlink
+    try:
+        real_fstat(fd)
+    except OSError:
+        return False
+    return named
+
+
 def _retained_close_offpath_self_test():
     """F-RETAINED-CLOSE-OFFPATH (part B), under P1: swept over every descriptor-closing helper family OFF
     the adopt status/plan paths K9a hardened. Each family's fixture call runs clean to count the os.close
@@ -15183,7 +19337,7 @@ def _retained_close_offpath_self_test():
     import _opf_adopt_observe
     this = sys.modules[__name__]
     tools = os.path.dirname(os.path.abspath(__file__))
-    real_open, real_dup, real_pipe, real_close = os.open, os.dup, os.pipe, os.close
+    real_open, real_dup, real_pipe, real_close, real_fstat = os.open, os.dup, os.pipe, os.close, os.fstat
     failures = []
     ran = []
 
@@ -15240,13 +19394,8 @@ def _retained_close_offpath_self_test():
             finally:
                 os.supports_dir_fd.discard(_open)
                 os.open, os.dup, os.pipe, os.close = real_open, real_dup, real_pipe, real_close
-            left = []
-            for fd in sorted(set(state.opened)):
-                try:
-                    os.fstat(fd)
-                except OSError:
-                    continue
-                left.append(fd)
+            # Only EBADF reads as closed; any other census read error raises naming the descriptor.
+            left = [fd for fd in sorted(set(state.opened)) if _st_census_open(fd)]
             for fd in left:                   # a pre-fix run leaks; release so the suite itself stays clean
                 try:
                     real_close(fd)
@@ -15274,9 +19423,44 @@ def _retained_close_offpath_self_test():
         if not ok:
             failures.append(name)
 
+    def census_read_failure():
+        """The survivor census fails closed: a call leaves a recorded descriptor open and its census read
+        fails EIO; the sweep must raise naming it (read as closed, the leak would pass). An independent fstat
+        must still see the descriptor open, else the row proves nothing."""
+        kept, fails = [], []
+
+        def leave_open():
+            kept.append(os.open(os.devnull, os.O_RDONLY))
+
+        def fstat(fd, *args, **kwargs):
+            if fd in kept:
+                raise OSError(errno.EIO, "injected census read failure")
+            return real_fstat(fd, *args, **kwargs)
+        try:
+            with mock.patch.object(os, "fstat", fstat):
+                sweep(leave_open)
+        except RuntimeError as exc:
+            if not kept or "descriptor {}:".format(kept[0]) not in str(exc):
+                fails.append("the sweep raised without naming descriptor {} ({!r})".format(kept, exc))
+        else:
+            fails.append("the sweep returned: the unreadable descriptor read as closed")
+        for fd in kept:
+            try:
+                real_fstat(fd)
+            except OSError:
+                fails.append("the injected descriptor {} was not open".format(fd))
+            else:
+                real_close(fd)
+        ran.append("offpath-census-read-failure")
+        print("  {} offpath-census-read-failure: EIO on a recorded descriptor left open: {}".format(
+            "PASS" if not fails else "FAIL", "; ".join(fails) if fails else "the sweep raised naming it"))
+        if fails:
+            failures.append("offpath-census-read-failure")
+
     base = Path(tempfile.mkdtemp(prefix="opf-retained-close-offpath-")).resolve()
     held = []
     try:
+        census_read_failure()
         # A render-clean empty-state store (the check_opf_drift fixture idiom), its views populated through
         # the engine's own planner, plus a store-control .gitignore for the write-guard reader.
         root = base / "store"
@@ -15482,7 +19666,8 @@ def _retained_close_offpath_self_test():
                     os.unlink(str(fresh / name))
             with mock.patch.object(this, "_init_repo", lambda root: ("git", root)), \
                     mock.patch.object(this, "_init_untracked", lambda *args: None), \
-                    mock.patch.object(this, "_init_unignored", lambda *args: None):
+                    mock.patch.object(this, "_init_unignored", lambda *args: None), \
+                    mock.patch.object(this, "_init_no_prior_store", lambda *args: None):
                 return _cmd_init(["--root", str(fresh)])
 
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
@@ -15585,7 +19770,7 @@ def _close_exc_safe_vectors_self_test():
     ANY = object()
     state = types.SimpleNamespace(opened=[], target=None, injected=None, err=errno.EIO, reuse=False,
                                   number=None, closes=0, probes=0, unrelated=None, want=None,
-                                  break_reuse=False)
+                                  break_reuse=False, census=real_fstat)
 
     def propagating(fd):
         """A P1 propagating close (the MASK and CALLER-FRAME stand-in): one os.close, its error raised."""
@@ -15740,11 +19925,8 @@ def _close_exc_safe_vectors_self_test():
         for fd in sorted(set(state.opened)):
             if fd == state.number and holds_unrelated(fd):
                 continue                      # the unrelated file: graded by REUSE, never as a survivor
-            try:
-                real_fstat(fd)
-            except OSError:
-                continue
-            left.append(fd)
+            if _st_census_open(fd, state.census):   # only EBADF reads as closed; any other read error raises
+                left.append(fd)
         for fd in left:                       # a failing vector leaks; release so the suite stays clean
             with contextlib.suppress(OSError):
                 real_close(fd)
@@ -16331,6 +20513,37 @@ def _close_exc_safe_vectors_self_test():
                                  "_opf_store._immediate_subdirs finally", fails))
             print("  {} forced-reuse-setup-failure body {} [_opf_store._immediate_subdirs finally]: {}".format(
                 "PASS" if ok else "FAIL", errno.errorcode[err], "; ".join(fails) if fails else "green"))
+        # The survivor census fails closed: a call leaves a recorded descriptor open and its census read fails
+        # EIO; run() must raise naming it (read as closed, the leak would pass). An independent fstat must
+        # still see the descriptor open, else the row proves nothing.
+        kept, fails = [], []
+
+        def census(fd, *args, **kwargs):
+            if fd in kept:
+                raise OSError(errno.EIO, "injected census read failure")
+            return real_fstat(fd, *args, **kwargs)
+        state.census = census
+        try:
+            run(lambda: kept.append(os.open(os.devnull, os.O_RDONLY)))
+        except RuntimeError as exc:
+            if not kept or "descriptor {}:".format(kept[0]) not in str(exc):
+                fails.append("census: run() raised without naming descriptor {} ({!r})".format(kept, exc))
+        else:
+            fails.append("census: run() returned; the unreadable descriptor read as closed")
+        finally:
+            state.census = real_fstat
+        for fd in kept:
+            try:
+                real_fstat(fd)
+            except OSError:
+                fails.append("census: the injected descriptor {} was not open".format(fd))
+            else:
+                real_close(fd)
+        checks += 1
+        if fails:
+            failures.append(("census-read-failure", "EIO", fails))
+        print("  {} census-read-failure EIO on a recorded descriptor left open: {}".format(
+            "PASS" if not fails else "FAIL", "; ".join(fails) if fails else "run() raised naming it"))
     except Exception as exc:  # noqa: BLE001  a fixture that cannot be built is a harness error, never a pass
         print("opf close exc-safe vectors self-test: harness error ({!r})".format(exc), file=sys.stderr)
         return EXIT_MALFORMED

@@ -30,8 +30,8 @@
       "sources": [
         ".aiqt/core/rules/",
         ".aiqt/core/hooks/manifest.toml",
-        ".aiqt/core/gates/manifest.toml",
-        ".aiqt/core/hooks/preview.toml"
+        ".aiqt/core/hooks/preview.toml",
+        ".aiqt/core/gates/manifest.toml"
       ],
       "target": ".aiqt/enforceability.json"
     },
@@ -74,6 +74,15 @@
         "CLAUDE.md"
       ],
       "target": ".aiqt/release/announce-snippet.txt"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_first_pin_demo.py",
+      "sources": [
+        "AGENTS.md",
+        ".aiqt/core/rules/"
+      ],
+      "target": ".aiqt/release/first-pin-demonstration.toml"
     },
     {
       "kind": "file",
@@ -152,6 +161,14 @@
       "target": ".github/copilot-instructions.md"
     },
     {
+      "kind": "block",
+      "regenerate": "python3 tools/gen_char_policy.py",
+      "sources": [
+        "tools/check_no_dashes.py"
+      ],
+      "target": ".preview/char-policy-write.py"
+    },
+    {
       "kind": "file",
       "regenerate": "python3 tools/gen_agents.py",
       "sources": [
@@ -225,6 +242,15 @@
         "changelog.toml"
       ],
       "target": "VERSION"
+    },
+    {
+      "kind": "block",
+      "regenerate": "python3 tools/gen_secret_patterns.py",
+      "sources": [
+        "opf/enforcement/ci/github-actions.yml",
+        "opf/enforcement/ci/opf-ci.sh"
+      ],
+      "target": "opf/tools/_opf_adopt_complete.py"
     },
     {
       "kind": "file",

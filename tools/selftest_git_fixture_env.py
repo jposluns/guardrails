@@ -55,11 +55,16 @@ a failed report write, or an unreadable, malformed, or suite-missing expectation
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: selftest_git_fixture_env.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: selftest_git_fixture_env.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 import ast
 import hashlib
@@ -73,13 +78,19 @@ from pathlib import Path
 try:
     import tomllib
 except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships tomllib
-    sys.stderr.write(
-        "error: selftest_git_fixture_env.py cannot import tomllib, part of the Python standard library; "
-        "this installation is incomplete. Nothing was run (cannot evaluate).\n")
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: selftest_git_fixture_env.py cannot import tomllib, part of the Python standard library; "
+            "this installation is incomplete. Nothing was run (cannot evaluate).\n")
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _git_fixture_env  # noqa: E402
+import _selftest_exit_report  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "opf" / "tools"))
 import _optlevel  # noqa: E402  level-0 parses for the mutants, shared with opf/tools
 
@@ -1442,6 +1453,7 @@ OPF_LIFECYCLE_EXEMPTIONS = {
                                        "umask 022); its fixtures commit through plumbing only "
                                        "(_opf_adopt_apply._selftest_git_commit and the S16 add, "
                                        "write-tree, commit-tree, update-ref helper), never a hook."),
+    "opf/tools/_opf_adopt_complete.py": "Completion-check vectors over temporary post-apply filesystem fixtures.",
     "opf/tools/_opf_init.py": "Canonical model bytes, defaults and validator vectors.",
     "opf/tools/_opf_init_contract.py": "KEEP contract validation over synthetic models.",
     "opf/tools/_opf_pack_manifest.py": "Pack parsing and digest vectors over filesystem fixtures.",
@@ -2067,6 +2079,18 @@ _SCAN_ALLOWED_UNPINNED = (
     ("tools/check_release_delta.py", "_git", ("git",),
      "production gate read funnel (rev-parse/cat-file/ls-tree/show and `worktree list`"
      " reads); read-only by design, and production launches stay unchanged"),
+    ("tools/check_release_delta.py", "_git_raw", ("git",),
+     "production gate read funnel with replace refs and grafts disabled"
+     " (--no-replace-objects plus GIT_GRAFT_FILE pinned to os.devnull; diff-tree and"
+     " merge-base reads for the post-release revision binding, QA round-2); read-only by"
+     " design, and production launches stay unchanged"),
+    ("tools/check_release_delta.py", "_stage1_git", ("git",),
+     "stage-1 re-execution read funnel (QA round 5, D-397-REEXEC-FROM-COMMITTED): rev-parse and"
+     " cat-file --batch reads only, with --no-replace-objects and -c core.commitGraph=false -c"
+     " core.fsmonitor=false in option position plus an INLINE GIT_* scrub (GIT_NO_REPLACE_OBJECTS=1,"
+     " GIT_GRAFT_FILE pinned to os.devnull); the env is built inline rather than through"
+     " _substitution_free_env because stage 1 runs before that function is defined and may import"
+     " nothing from the checkout; read-only by design, never a maintenance-triggering subcommand"),
     ("tools/check_release_delta.py", "_index_materialized_tree", ("git",),
      "throwaway-index staging funnel: the loop variable carries exactly `init -q` and"
      " `add --force -A` over a raw-materialized temp tree under a scrubbed env; neither"
@@ -4495,21 +4519,11 @@ def _expected_check_ids():
     return None
 
 
-def _write_report(report_path):
-    if report_path is None:
-        return True
-    try:
-        with open(report_path, "w", encoding="utf-8") as handle:
-            json.dump({"format_version": 1, "suite": SUITE_ID, "check_ids": EXECUTED}, handle)
-            handle.write("\n")
-    except OSError as exc:
-        print("SELF-TEST HARNESS ERROR: cannot write execution report {}: {}".format(
-            report_path, exc), file=sys.stderr)
-        return False
-    return True
-
-
 def main(report_path=None):
+    if report_path is not None:
+        # The execution report is finalized at interpreter exit, after this run's cleanup
+        # (tools/_selftest_exit_report.py); nothing writes it in band.
+        _selftest_exit_report.arm(report_path, SUITE_ID, EXECUTED)
     if shutil.which("git") is None:
         print("SELF-TEST HARNESS ERROR: git is not available on PATH", file=sys.stderr)
         return 2
@@ -4835,8 +4849,6 @@ def main(report_path=None):
     finally:
         shutil.rmtree(raw, ignore_errors=True)
 
-    if not _write_report(report_path):
-        return 2
     expected = _expected_check_ids()
     if expected is None:
         return 2
@@ -4865,4 +4877,4 @@ def _parse_argv(argv):
 
 
 if __name__ == "__main__":
-    sys.exit(main(_parse_argv(sys.argv[1:])))
+    _selftest_exit_report.exit_with(main(_parse_argv(sys.argv[1:])))

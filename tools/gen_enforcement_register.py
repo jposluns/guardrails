@@ -30,8 +30,10 @@ mechanism's residual names what that mechanism does not catch, which need not li
 every rule it is linked to. A rule whose every linked mechanism is class c (partial by the class legend) must
 be "partial"; "enforced" there is refused as an overclaim (exit 2). So the views never show the word
 Enforced as a status: a linked rule displays as "Gate-linked (class a)" when at least one linked gate is
-class a, "Gate-linked (class c only)" when every linked gate is class c, and "Hook-linked" when only hooks
-cite it (the ledger's own gate-linked / hook-linked precedence), each followed by ", partial" when the
+class a, "Gate-linked (class c only)" when every linked gate is class c, "Hook-linked" when only hooks
+cite it (the ledger's own gate-linked / hook-linked precedence), and "Preview only" when every linked
+mechanism is a preview-channel hook (a standalone .preview/ file installed by hand, not in the plugin), each
+followed by ", partial" when the
 roadmap decision is "partial". "none" displays as "No control" and "pending" as "Pending"; both mean no
 shipped control cites the rule yet, and "pending" adds the intended-build description. The summary counts
 the same display labels, so it cannot disagree with the rows.
@@ -66,11 +68,16 @@ generated-output drift.
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: gen_enforcement_register.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: gen_enforcement_register.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 import html
 import re
@@ -146,7 +153,10 @@ EXPLAINER = (
     "enforced. Gate-linked means at least one shipped repository gate cites the rule: class a when at least "
     "one of those gates is total for what it examines, class c only when every linked gate covers "
     "just a recognizable subset of the surface. Hook-linked means at least one shipped runtime hook cites "
-    "the rule and no gate does. A status ending in partial records the same linkage and states that the "
+    "the rule and no gate does. Preview only means every linked control is a preview-channel hook: a "
+    "standalone file under .preview/ that an adopter installs by hand, not part of the plugin, so nothing "
+    "runs for it unless it is installed. A status ending in partial records the same linkage and states "
+    "that the "
     "linked mechanisms are known to cover only part of the rule; their residuals name what they do not "
     "cover. No control means no shipped control cites the rule yet; pending means the "
     "same, and its description states the intended build. Each mechanism's class and residual describe the "
@@ -256,6 +266,14 @@ def load_ledger(root):
     return json.loads(fresh)
 
 
+def _hook_channel(hook):
+    """The Channel field of a hook: a preview-channel row (a standalone .preview/ file an adopter installs by
+    hand) names its file and that it is not in the plugin, so it is never shown like a plugin hook."""
+    if hook.get("channel") == "preview":
+        return "preview, installed by hand from " + hook["file"] + "; not in the plugin"
+    return "plugin"
+
+
 def ledger_index(ledger):
     """From the ledger build: cid -> entry, and ref -> control-display-info (deduped; a control cited by
     several rules is identical everywhere). Each rule's namespaced linkage is sorted(gate refs) then
@@ -272,7 +290,7 @@ def ledger_index(ledger):
             refs.append(ref)
             controls[ref] = {"kind": "gate", "id": gate["id"], "class": gate["class"],
                              "default": gate["default"], "platform": gate["platform"],
-                             "entry": gate["script"], "residue": gate["residue"]}
+                             "entry": gate["script"], "channel": "repository gate", "residue": gate["residue"]}
         for hook in entry["hooks"]:
             ref = "hook:" + hook["id"]
             refs.append(ref)
@@ -280,7 +298,8 @@ def ledger_index(ledger):
             entry_point = "{} on {}".format(hook["event"], matcher) if matcher else hook["event"]
             controls[ref] = {"kind": "hook", "id": hook["id"], "class": hook["class"],
                              "default": hook["default"], "platform": hook["platform"],
-                             "entry": entry_point, "residue": hook["residue"]}
+                             "entry": entry_point, "channel": _hook_channel(hook),
+                             "preview": hook.get("channel") == "preview", "residue": hook["residue"]}
         linkage[cid] = sorted(refs)
     return by_cid, controls, linkage
 
@@ -415,21 +434,26 @@ def rule_title(path):
 # makes it gate-linked) and carries the gate class, so a rule linked only through class c gates reads as
 # such; a roadmap "partial" decision adds PARTIAL_SUFFIX to the linkage label, so a rule its linked
 # mechanisms are known to cover only in part says so outright. The summary counts these same labels, so it
-# can never disagree with the per-rule rows.
+# can never disagree with the per-rule rows. A rule with no linked gate whose every linked mechanism is a
+# preview-channel hook (a standalone .preview/ file installed by hand, not in the plugin) reads Preview only,
+# never Hook-linked.
 PARTIAL_SUFFIX = ", partial"
 LABEL_GATE_A = "Gate-linked (class a)"
 LABEL_GATE_C = "Gate-linked (class c only)"
 LABEL_HOOK = "Hook-linked"
+LABEL_PREVIEW = "Preview only"
 LABEL_PENDING = "Pending"
 LABEL_NONE = "No control"
 STATUS_LABELS = (LABEL_GATE_A, LABEL_GATE_A + PARTIAL_SUFFIX, LABEL_GATE_C, LABEL_GATE_C + PARTIAL_SUFFIX,
-                 LABEL_HOOK, LABEL_HOOK + PARTIAL_SUFFIX, LABEL_PENDING, LABEL_NONE)
+                 LABEL_HOOK, LABEL_HOOK + PARTIAL_SUFFIX, LABEL_PREVIEW, LABEL_PREVIEW + PARTIAL_SUFFIX,
+                 LABEL_PENDING, LABEL_NONE)
 
 
 def _status_label(row, controls):
     """The display label for one roadmap row. load_roadmap has already bound an enforced or partial row's
     mechanisms to the ledger linkage, and the gates manifest admits only classes a and c, so a gate-linked
     rule is either class a (at least one class a gate) or class c only. Any other gate class fails closed.
+    A row with no gate whose every mechanism is a preview-channel hook reads LABEL_PREVIEW, never LABEL_HOOK.
     A partial row carries its linkage label followed by PARTIAL_SUFFIX."""
     status = row["status"]
     if status == "pending":
@@ -439,6 +463,8 @@ def _status_label(row, controls):
     suffix = PARTIAL_SUFFIX if status == "partial" else ""
     classes = {controls[ref]["class"] for ref in row["mechanisms"] if controls[ref]["kind"] == "gate"}
     if not classes:
+        if row["mechanisms"] and all(_is_preview(controls[ref]) for ref in row["mechanisms"]):
+            return LABEL_PREVIEW + suffix
         return LABEL_HOOK + suffix
     if "a" in classes:
         return LABEL_GATE_A + suffix
@@ -454,6 +480,15 @@ def _label_counts(rows, roadmap, controls):
     return counts
 
 
+def _is_preview(ctrl):
+    return ctrl["kind"] == "hook" and ctrl["channel"] != "plugin"
+
+
+def _how_suffix(ctrl):
+    """The marker after a preview-channel mechanism in a How cell; empty for a plugin hook or a gate."""
+    return " (preview channel, installed by hand)" if _is_preview(ctrl) else ""
+
+
 def _classes_present(enforced_union, controls):
     return {controls[ref]["class"] for ref in enforced_union}
 
@@ -461,7 +496,7 @@ def _classes_present(enforced_union, controls):
 def _enforced_cell_md(mechanisms, controls):
     parts = []
     for ref in mechanisms:
-        parts.append("`{}`, class {}".format(ref, controls[ref]["class"]))
+        parts.append("`{}`{}, class {}".format(ref, _how_suffix(controls[ref]), controls[ref]["class"]))
     return "; ".join(parts)
 
 
@@ -477,6 +512,7 @@ _MECH_FIELDS = (
     ("Default", "default"),
     ("Entry point", "entry"),
     ("Class", "class"),
+    ("Channel", "channel"),
 )
 
 
@@ -546,9 +582,9 @@ def render_html(rows, roadmap, controls, enforced_union):
             cells = []
             for ref in row["mechanisms"]:
                 ctrl = controls[ref]
-                cells.append('<a href="#mechanism-{anchor}"><code>{ref}</code></a>, class {cls}'
+                cells.append('<a href="#mechanism-{anchor}"><code>{ref}</code></a>{sfx}, class {cls}'
                              .format(anchor=_a("{}-{}".format(ctrl["kind"], ctrl["id"])),
-                                     ref=_t(ref), cls=_t(ctrl["class"])))
+                                     ref=_t(ref), sfx=_t(_how_suffix(ctrl)), cls=_t(ctrl["class"])))
             how = "; ".join(cells)
         elif status == "pending":
             how = _t(row["description"])
@@ -907,6 +943,19 @@ default = "block"
 class = "b"
 residue = '''{residue}'''
 """.format(residue=_HOOK_RESIDUE)
+
+# A preview-channel hook (a standalone .preview/ file, not in the plugin) citing rulecc, which hook-one also
+# cites (the mixed case), and ruledd, which nothing else cites (the preview-only case).
+_PREVIEW = """[[hook]]
+id = "pv-one"
+file = ".preview/pv-one.py"
+rules = ["rulecc", "ruledd"]
+platform = "claude-code"
+event = "Stop"
+default = "block"
+class = "b"
+residue = "A self-test preview hook, installed by hand."
+"""
 
 _GATES = """[[gate]]
 id = "gate-alpha"
@@ -1451,6 +1500,41 @@ def self_test_main():
             add_preview(ztree, zbody)
             if run_quiet(ztree, check=False) != 0:
                 failures.append("{}: expected exit 0 (the refreshed ledger must be accepted)".format(zname))
+        # (aa) PREVIEW CHANNEL, both views: a rule linked only to a preview-channel hook is shown as Preview
+        # only, never as Hook-linked, and a rule linked to a plugin hook AND a preview hook (the mixed case)
+        # stays Hook-linked with the preview mechanism marked as installed by hand.
+        pv = _build(tmp / "preview")
+        (pv / ".preview").mkdir()
+        (pv / ".preview" / "pv-one.py").write_text("# self-test preview hook\n", encoding="utf-8")
+        (pv / ".aiqt" / "core" / "hooks" / "preview.toml").write_text(_PREVIEW, encoding="utf-8")
+        (pv / ".aiqt" / "enforceability.json").write_text(gen_enforceability.build_ledger(pv), encoding="utf-8")
+        replace_in(pv / ROADMAP, 'corpus-id = "rulecc"\nstatus = "enforced"\nmechanisms = ["hook:hook-one"]',
+                   'corpus-id = "rulecc"\nstatus = "enforced"\nmechanisms = ["hook:hook-one", "hook:pv-one"]')
+        replace_in(pv / ROADMAP, 'corpus-id = "ruledd"\nstatus = "none"\nmechanisms = []',
+                   'corpus-id = "ruledd"\nstatus = "enforced"\nmechanisms = ["hook:pv-one"]')
+        if run_quiet(pv, check=False) != 0 or run_quiet(pv, check=True) != 0:
+            failures.append("preview tree: generation and a drift-clean regeneration expected exit 0")
+        else:
+            sfx = " (preview channel, installed by hand)"
+            body = (pv / MD_REL).read_text(encoding="utf-8")
+            for token in ("| Gate-linked (class a) | 1 |", "| Gate-linked (class a), partial | 1 |",
+                          "| Hook-linked | 1 |", "| Preview only | 1 |", "| Preview only, partial | 0 |",
+                          "| Pending | 1 |", "| No control | 0 |",
+                          "| `ruledd` | Preview only | `hook:pv-one`" + sfx + ", class b |",
+                          "| `rulecc` | Hook-linked | `hook:hook-one`, class b; `hook:pv-one`" + sfx + ", class b |",
+                          "- Channel: `preview, installed by hand from .preview/pv-one.py; not in the plugin`"):
+                if token not in body:
+                    failures.append("preview tree: {!r} missing from ENFORCEMENT.md".format(token))
+            page = (pv / HTML_REL).read_text(encoding="utf-8")
+            pv_link = '<a href="#mechanism-hook-pv-one"><code>hook:pv-one</code></a>' + sfx + ", class b"
+            for token in ("Hook-linked: <strong>1</strong>; Hook-linked, partial: <strong>0</strong>; Preview only: "
+                          "<strong>1</strong>; Preview only, partial: <strong>0</strong>; Pending: <strong>1</strong>; "
+                          "No control: <strong>0</strong>.",
+                          "<td><code>ruledd</code></td><td>Preview only</td><td>" + pv_link + "</td>",
+                          "<td><code>rulecc</code></td><td>Hook-linked</td><td><a href=\"#mechanism-hook-hook-one\">"
+                          "<code>hook:hook-one</code></a>, class b; " + pv_link + "</td>"):
+                if token not in page:
+                    failures.append("preview tree: {!r} missing from the generated page".format(token))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1477,7 +1561,9 @@ def self_test_main():
           "parse, is too complex to parse, or carries an unknown, non-text or lone-CR non-UTF-8 coding cookie "
           "all fail closed (exit 2), while cookie-like text in a lone-CR docstring is accepted; "
           "neither view calls a linked control enforcement, and the page "
-          "lead scopes its linkage claim to the declared inputs")
+          "lead scopes its linkage claim to the declared inputs; and a rule linked only to a preview-channel "
+          "hook reads Preview only (not Hook-linked) while a rule linked to a plugin hook and a preview hook "
+          "reads Hook-linked with the preview mechanism marked, in both views")
     return 0
 
 
