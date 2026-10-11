@@ -95,7 +95,10 @@ Legs, in order:
                  argv (a PreToolUse handler, an unknown mode, no mode) refuses with the canonical
                  refusal and exit 2, fixed: exit 1 does not block a PreToolUse call, so a HOOK_SURFACES
                  entry listed in nonblocking-surfaces is cannot-evaluate at the source leg. The hook's
-                 own self-test holds the literal equal to its fail-open handlers. Both forms
+                 own self-test holds the literal equal to its fail-open handlers. A guarded
+                 LAUNCHED_SURFACES entry (the pack's warn-only plugin hook scripts, which the plugin's
+                 launcher runs but cannot intercept an os._exit of) that nonblocking-surfaces does not
+                 list is cannot-evaluate at the source leg, so its guard must exit 1. Both forms
                  wrap each diagnostic write and its explicit flush (the stderr refusal, and the
                  hook form's stdout warning) in try/except BaseException and exit through
                  os._exit, which skips the interpreter-exit flush of the std streams, so the
@@ -484,6 +487,17 @@ if tuple(sys.version_info[:2]) < ({major}, {minor}):
 '''
 HOOK_SURFACES = (".aiqt/core/hooks/scripts/aiqt_hooks.py",
                  "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py")
+# The pack's standalone plugin hook scripts, core sources and plugin copies: the plugin runs each through
+# tools/gen_hooks.py's SCRIPT_LAUNCHER, which reports a nonzero sys.exit as exit 1, but the guard ends the
+# process with os._exit, which no launcher can intercept, so the guard's own exit reaches the host
+# unchanged. Both scripts are warn-only and one runs on PreToolUse, where exit 2 blocks the call, so
+# load_source refuses a guarded entry here that nonblocking-surfaces does not list: the guard and
+# dynamic legs then require exit 1 of it. tools/check_hook_scripts.py leg (f) runs each script's guard
+# through the rendered launcher.
+LAUNCHED_SURFACES = (".aiqt/core/hooks/scripts/clock-inject.py",
+                     ".aiqt/core/hooks/scripts/future-stamp-write.py",
+                     "plugin/aiqt-guardrails-hooks/hooks/scripts/clock-inject.py",
+                     "plugin/aiqt-guardrails-hooks/hooks/scripts/future-stamp-write.py")
 MODES_NAME = "FLOOR_FAIL_OPEN_MODES"
 MODE_RE = re.compile(r"[a-z][a-z0-9_]*")
 DENY_PROBE_MODE = "floor_deny_probe"
@@ -596,6 +610,12 @@ def load_source(root):
         raise CannotEvaluate("{}: nonblocking-surfaces lists the hook surface(s) {}, whose hook form "
                              "refuses a PreToolUse, unknown or missing mode with exit 2, fixed (exit 1 "
                              "does not block a PreToolUse call)".format(SOURCE_REL, ", ".join(hooks)))
+    launched = sorted((set(LAUNCHED_SURFACES) & set(surfaces)) - set(nonblocking))
+    if launched:
+        raise CannotEvaluate("{}: guarded-surfaces lists the warn-only plugin hook script(s) {} outside "
+                             "nonblocking-surfaces: their guard exits through os._exit, which the plugin's "
+                             "launcher cannot intercept, so an exit 2 would block a PreToolUse call"
+                             .format(SOURCE_REL, ", ".join(launched)))
     for item in surfaces:
         if not SURFACE_RE.fullmatch(item) or any(part in (".", "..") for part in item.split("/")):
             raise CannotEvaluate("{}: guarded-surfaces entry {!r} is not a repo-relative .py path"
@@ -2195,6 +2215,17 @@ def _self_test_cases(base):
     good_nonblocking = _entry(guard_text("demo.py", floor, code=NONBLOCKING_EXIT))
     check("guard/nonblocking-exit-1-passes",
           evaluate(_fixture(base, source=nonblocking, files={"tools/demo.py": good_nonblocking}))[0], 0)
+    # A LAUNCHED_SURFACES entry (a warn-only plugin hook script) passes listed in nonblocking-surfaces
+    # with its exit-1 guard, and guarded but unlisted it is cannot-evaluate, naming the entry.
+    got = []
+    for rel in LAUNCHED_SURFACES:
+        name = rel.rsplit("/", 1)[1]
+        listed_ok = evaluate(_fixture(base, source=_source_text(surfaces=[rel], nonblocking=[rel]),
+                                      files={rel: _entry(guard_text(name, floor, code=NONBLOCKING_EXIT))}))
+        code, lines = evaluate(_fixture(base, source=_source_text(surfaces=[rel]),
+                                        files={rel: _entry(guard_text(name, floor))}))
+        got.append((listed_ok[0], code, _has(lines, "warn-only plugin hook script(s) " + rel)))
+    check("source/launched-surface-unlisted-cannot-evaluate", got, [(0, 2, True)] * len(LAUNCHED_SURFACES))
     for check_id, source, text in (
             ("guard/nonblocking-exit-2-finding", nonblocking, _entry(good)),
             ("guard/unlisted-exit-1-finding", listed, good_nonblocking)):

@@ -1,8 +1,8 @@
 # .aiqt/core/hooks/preview.toml: the preview-channel hooks manifest (the ledger source for .preview/ hooks).
 #
 # One [[hook]] per .preview/ hook linked into the enforceability ledger. Not every published preview hook
-# that cites a rule has an entry (the three clock hooks, which cite timestamp-from-clock, have none), and
-# nothing checks that this list is complete. A preview hook is a standalone
+# that cites a rule has an entry (the clock hook stamp-truth-stop, which cites timestamp-from-clock, has
+# none), and nothing checks that this list is complete. A preview hook is a standalone
 # file an adopter installs by hand (.preview/README.md); it is NOT rendered into the pack's plugin, so it has
 # no handler in .aiqt/core/hooks/scripts/aiqt_hooks.py and no row in manifest.toml beside this file.
 # tools/gen_enforceability.py reads this manifest, validates it fail-closed, and renders each entry into the

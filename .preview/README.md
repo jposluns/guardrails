@@ -5,7 +5,7 @@ Each hook is one self-contained Python file that you can download, check, test, 
 Code by hand. This page is written so that you can hand it to your AI coding assistant and ask it to
 install a hook for you: every step below is a command it can run, and every check tells it when to stop.
 
-Ten hooks are published here, each listed with its checksum and link in the integrity table below.
+Eight hooks are published here, each listed with its checksum and link in the integrity table below.
 A hook without a row in that table is not available here, and the install steps do not apply to it.
 
 One document linked from this page is not a hook: [the OPF implementation prompt](../opf/spec/OPF-IMPLEMENTATION-PROMPT.md)
@@ -15,9 +15,10 @@ not apply to it.
 
 ## What these hooks are
 
-The three clock hooks, `clock-inject.py`, `stamp-truth-stop.py`, and `future-stamp-write.py`, back the
-rule that a current timestamp is read from the clock, never recalled or guessed
-([the rule text](../.claude/rules/aiqt/10-ACCUR-timestamp-from-clock.md)). `constraint-reread.py` backs the
+The clock hook `stamp-truth-stop.py` backs the rule that a current timestamp is read from the clock, never
+recalled or guessed ([the rule text](../.claude/rules/aiqt/10-ACCUR-timestamp-from-clock.md)). Its two
+former companions, `clock-inject.py` and `future-stamp-write.py`, are now part of the pack's plugin; see
+[Moved to the pack](#moved-to-the-pack). `constraint-reread.py` backs the
 rule that a standing constraint persists across context loss
 ([the rule text](../.claude/rules/aiqt/10-TRUST-standing-constraints-persist.md)), and `rerun-pass-check.py`
 backs the rule that a rerun pass does not erase an earlier failure
@@ -28,31 +29,19 @@ pattern, and `char-policy-write.py` applies your repository's own character poli
 no rule in the pack and claims none. Each one is a discipline guard against accidental drift, not a
 security boundary, and each one fails open: if the hook hits an error or input it cannot evaluate, it gets
 out of the way rather than blocking your work. Two exceptions block instead: an interpreter older than
-Python 3.14, described with the launch line below, and, on the six `PreToolUse` hooks, a deny decision that
+Python 3.14, described with the launch line below, and, on the five `PreToolUse` hooks, a deny decision that
 cannot be written to standard output and flushed (a full device, a closed pipe), where the hook exits 2
 rather than let a decided deny dissolve into a silent allow (a lost deny blocks, never allows; a lost
 advisory note still allows with exit 0). Each file states
 what it does not catch in a section headed `RESIDUAL COVERAGE` in its opening docstring; that section is
 the authority, and the summary further down this page only points to it.
 
-- **`clock-inject.py`** reads the real clock after each tool call and adds one short line to the
-  assistant's context, in the form `CLOCK (read by hook, authoritative): <local time> | <UTC time>`,
-  followed by the session's elapsed time when a lease is configured. The freshest time value in context
-  is then a real reading, not one the model composed. It informs; it blocks nothing. Events:
-  `PostToolUse` (after a tool call that succeeded) and `PostToolUseFailure` (after one that started and
-  failed); register both to cover both outcomes.
 - **`stamp-truth-stop.py`** checks each finished turn. When the assistant's prose carries a timestamp with
   an explicit zone that lies ahead of the clock, or an elapsed-time footer that disagrees with the
   configured lease, it blocks the stop and says why, so the assistant corrects the value before handing
   back. Text in code spans, fenced code blocks, and `>` quote lines is not checked, and a time that a
   scheduling word (such as `until`, `due`, or `next run at`) directly precedes is treated as a scheduled
-  time, not a reading. Event: `Stop`.
-- **`future-stamp-write.py`** denies a write that would record a future-dated timestamp into a folder you
-  have declared as holding working records. An observed-time entry (a heartbeat, a recorded-at value) has
-  to come from the clock, so one dated in the future was composed. A scheduled value (a deadline, a next
-  run) is legitimately in the future and is allowed. It checks file writes and edits, and shell commands
-  that write into those folders, including those made by a helper session started inside your session.
-  Event: `PreToolUse`, matcher `Write|Edit|MultiEdit|Bash`.
+  time, not a reading. It is not part of the pack's plugin. Event: `Stop`.
 - **`ungated-record.py`** denies a shell command that can write a completion claim after a test gate
   fails. For example, `pytest; echo PASS >> report` writes PASS even on failure; use
   `pytest && echo PASS >> report` so the record depends on success. It follows recognized test runners
@@ -182,13 +171,11 @@ files are served from this repository's main branch; for a raw download, use
 | File | SHA-256 | Link |
 |---|---|---|
 | `char-policy-write.py` | `84a08059513f27c76e944d54c08e8ddae520f9e040ebe19296d139d49646b0f8` | [char-policy-write.py](char-policy-write.py) |
-| `clock-inject.py` | `262749a3409d0fe8821cc115db28e05f35311cc0329008ff51f67090fd3d2e54` | [clock-inject.py](clock-inject.py) |
 | `constraint-reread.py` | `47fef771f94095c5915030bf014369f77f874ed217430d4fcb8ff00a583b17a9` | [constraint-reread.py](constraint-reread.py) |
-| `future-stamp-write.py` | `1cf8608693f472df1c7bee03b5ab5bf5de3e79a19b00c782a7015e77d167c348` | [future-stamp-write.py](future-stamp-write.py) |
 | `pattern-self-match.py` | `9687140625e12fe271c20a876f01642f5cdd374197ad12850f24078cd0eb9660` | [pattern-self-match.py](pattern-self-match.py) |
 | `record-remove-check.py` | `9ad3454daf7ea104a62ef022957f06e2584cdaff8d2d595dbcf2a0a8cfc9c366` | [record-remove-check.py](record-remove-check.py) |
 | `rerun-pass-check.py` | `d4c07f5d45b7d56b30635cb849282375a4ef664820cb26d9f97b5a0e99339431` | [rerun-pass-check.py](rerun-pass-check.py) |
-| `stamp-truth-stop.py` | `81abec162f22302fafb00a0d05ec10af4483f1cc0ab9070c4eb4f4d092cea4fb` | [stamp-truth-stop.py](stamp-truth-stop.py) |
+| `stamp-truth-stop.py` | `9e897b838068bf7e9958037da73a0f98ee4c99f689ab14fbc8d1c1b52660b991` | [stamp-truth-stop.py](stamp-truth-stop.py) |
 | `unbounded-wait.py` | `9d2a8f9c26693cc87d058284427d40554e5ff0c3f2eca3df46f4369669a43859` | [unbounded-wait.py](unbounded-wait.py) |
 | `ungated-record.py` | `35c65369b1609683e09b784681a23fab80a05e047c5f36abe5311f100b4f9394` | [ungated-record.py](ungated-record.py) |
 
@@ -207,6 +194,58 @@ gets the current version, and the checksum on this page changes in the same chan
 install, download the file from its link (for a raw download, the main-branch URL above), check its
 SHA-256 against this page, and run its self-test. The quality gate checks on every change that the table,
 SHA256SUMS, and the files agree.
+
+## Moved to the pack
+
+`clock-inject.py` and `future-stamp-write.py` are no longer published here. They now ship in the pack's
+Claude Code plugin, `aiqt-guardrails-hooks` version 0.5.0, whose sources are in
+[`.aiqt/core/hooks/scripts/`](../.aiqt/core/hooks/scripts/). If you installed either from this page,
+remove that copy and its `settings.json` entries before you install the plugin, so the hook does not run
+twice. The last checksums this page published for them, for identifying an old copy:
+
+| Former preview file | Last published SHA-256 |
+|---|---|
+| `clock-inject.py` | `262749a3409d0fe8821cc115db28e05f35311cc0329008ff51f67090fd3d2e54` |
+| `future-stamp-write.py` | `1cf8608693f472df1c7bee03b5ab5bf5de3e79a19b00c782a7015e77d167c348` |
+
+What changed in the pack copies:
+
+- `future-stamp-write.py` no longer denies. A write that would record a future-dated timestamp into a
+  declared store gets one warning line (a `systemMessage` of at most 100 characters), and the call goes
+  ahead. Whether the assistant itself sees that line is not established.
+- Neither script has a worker skip. A session that sets `AIQT_HOOKS_WORKER`, `ORCH_WORKER`, or
+  `ORCH_VERIFY_OWNER` now receives the clock line and the warnings.
+- Neither script reads the older `ORCH_` spellings. Rename `ORCH_LEASE_FILE` to `AIQT_LEASE_FILE` and
+  `ORCH_STORE_ROOT` to `AIQT_STORE_ROOT`. The worker variables have no replacement. A host setting that
+  turns off a plugin's hooks is not named here, because it has not been verified.
+- The plugin registers `clock-inject.py` on `PostToolUse` only, with matcher `.*`, so a failed tool call
+  gets no clock line.
+- The plugin does not run `python3 -I -S -B <file>` directly. It runs a short fixed launcher,
+  `python3 -I -S -B -c <launcher> <file>`, which runs the file and exits 1 with the reason on stderr if
+  the file is missing, cannot be read or parsed, raises an error, or exits with any code other than 0
+  through `sys.exit` or by returning. Run directly, Python exits 2 on a missing file, and exit 2 on
+  `PreToolUse` blocks the call. Exit 1 is a non-blocking hook error (from the host hook documentation,
+  not a live probe). On a `python3` that accepts `-I` but is older than the floor the hooks require,
+  each pack script either cannot be compiled (an interpreter that predates f-strings, which both scripts
+  use), which the launcher reports as exit 1, or stops at its own interpreter guard, which writes its
+  one-line error (the form shown in [Installing a hook](#installing-a-hook), step 4) to standard error
+  and ends the process with exit 1 itself; either way the call goes ahead with no warning and no clock
+  line. Five cases fall outside the launcher. A `python3` older than 3.4 rejects `-I` and
+  exits 2. A `python3` that cannot be found or started gets whatever outcome the host gives it (not
+  verified). A script that ends the process with `os._exit(2)` exits 2; the shipped scripts call
+  `os._exit` only with 0, and with 1 in the interpreter guard. A standard stream that is a directory makes Python exit 1 at startup, before
+  the hook can fail open, because the plugin does not use the `[ -d ... ]` launch guard this page uses. A
+  run past its timeout (30 seconds for `future-stamp-write.py`, 10 for `clock-inject.py`) is ended by
+  the host, which its documentation describes as non-blocking (not verified here). The launcher also
+  relies on the host passing `args` without a shell (the repository's reading of the host
+  documentation, not re-checked for the launcher).
+
+A copy kept from this page keeps the older behaviour: the preview `future-stamp-write.py` denies, and both
+preview copies keep the worker skip and the `ORCH_` fallback. `stamp-truth-stop.py` stays here, still
+blocks a stop it flags, keeps its worker skip and `ORCH_` fallback, and is not part of the pack. If you set
+only `ORCH_LEASE_FILE`, the pack's `clock-inject.py` shows no elapsed time, while this page's
+`stamp-truth-stop.py` still reads that lease and checks elapsed-time footers against it; set
+`AIQT_LEASE_FILE` to keep the two in step.
 
 ## Installing a hook
 
@@ -252,7 +291,7 @@ fails and report it; do not work around a failed check.
    array; do not add a second key with the same event name. Register each hook once: if a later version
    of the pack's plugin provides the same hook, remove this entry so it does not run twice.
 
-   Use this launch line for each of the ten hooks:
+   Use this launch line for each of the eight hooks:
 
    ```sh
    /bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B "/ABSOLUTE/PATH/TO/<file>"'
@@ -266,7 +305,7 @@ fails and report it; do not work around a failed check.
      use this guard in place of their docstrings' `REGISTRATION` line, which tests only stdin. This guard
      has a stricter launch
      condition: it also skips directory stdout or stderr. When none of the streams is a directory, it
-     runs the same `python3 -I -S -B` command with stdin unchanged. The three clock hooks,
+     runs the same `python3 -I -S -B` command with stdin unchanged. `stamp-truth-stop.py`,
      `constraint-reread.py`, `rerun-pass-check.py`, and `char-policy-write.py` do not define a
      `REGISTRATION` constant; use this same guard for them.
    - Use the absolute path to the downloaded file. It sits inside double quotes, so a path with spaces
@@ -279,20 +318,19 @@ fails and report it; do not work around a failed check.
      flush are best-effort: the exit status does not depend on them (each hook exits without the
      interpreter's own exit-time stream flush, so a stream whose flush fails cannot replace the
      exit), and the refusal holds even when standard error is unavailable or failing.
-     Claude Code reads the exit by event: for `clock-inject.py` (`PostToolUse`, `PostToolUseFailure`) the
-     exit is 2 and the tool has already run, so the line only reaches the assistant and nothing is
-     blocked; for the six `PreToolUse` hooks the exit is 2 and every matching tool call the launch guard
-     does not skip is denied; for `stamp-truth-stop.py` (`Stop`), `constraint-reread.py` (`SessionStart`,
-     `PreCompact`, `UserPromptSubmit`, and `Stop`), and `rerun-pass-check.py` (`PostToolUse`,
-     `PostToolUseFailure`, `UserPromptSubmit`, and `Stop`) the exit is 1, a non-blocking error, so no
-     reminder or note is added and every stop goes ahead unchecked (exit 2 would block the stop, and the
-     hook's own block cap would never run, since the hook stops before its loop guard runs). These exits,
+     Claude Code reads the exit by event: for the five `PreToolUse` hooks the exit is 2 and every
+     matching tool call the launch guard does not skip is denied; for `stamp-truth-stop.py` (`Stop`),
+     `constraint-reread.py` (`SessionStart`, `PreCompact`, `UserPromptSubmit`, and `Stop`), and
+     `rerun-pass-check.py` (`PostToolUse`, `PostToolUseFailure`, `UserPromptSubmit`, and `Stop`) the exit
+     is 1, a non-blocking error, so no reminder or note is added and every stop goes ahead unchecked (exit
+     2 would block the stop, and the hook's own block cap would never run, since the hook stops before its
+     loop guard runs). These exits,
      like a hook's other exits, hold while the hook's output (its diagnostic on standard error, and what
      it prints on standard output) can be written and flushed. A failing output stream can change the exit
      status and can lose output, a decision included; a separate fix in progress addresses this. An
      interpreter that cannot start the hook fails before its guard runs, with Python's own error instead
      of that line: an interpreter that predates the `-I` option rejects it and exits 2,
-     and one that accepts `-I` but predates f-strings cannot compile the three clock hooks and
+     and one that accepts `-I` but predates f-strings cannot compile `stamp-truth-stop.py` and
      `char-policy-write.py`, which use them, and exits 1. Exit 1 is a non-blocking error on these hooks'
      events, so a `PreToolUse` hook then allows every tool call unchecked; exit 2 on `Stop` blocks the
      stop, and the hook's own block cap never runs, and exit 2 on `UserPromptSubmit` blocks the prompt.
@@ -300,11 +338,9 @@ fails and report it; do not work around a failed check.
    - In JSON, each `"` inside the command is written `\"`, as in the entries below. The `timeout` value is
      the most seconds Claude Code lets one run of the hook take.
 
-   This combined example shows the ten hooks. Copy only entries for hooks you have downloaded,
-   checked, and tested. `clock-inject.py` needs both `PostToolUse` and `PostToolUseFailure`, with no
-   matcher (all tools); `stamp-truth-stop.py` uses `Stop`, with no matcher. On `PreToolUse`,
-   `future-stamp-write.py` matches file writes and shell commands, `char-policy-write.py` matches file writes
-   only, and the other four match `Bash`.
+   This combined example shows the eight hooks. Copy only entries for hooks you have downloaded,
+   checked, and tested. `stamp-truth-stop.py` uses `Stop`, with no matcher. On `PreToolUse`,
+   `char-policy-write.py` matches file writes only, and the other four match `Bash`.
    `constraint-reread.py` uses `SessionStart` (matcher `compact`), `PreCompact`, `UserPromptSubmit`, and
    `Stop`; `rerun-pass-check.py` uses `PostToolUse` and `PostToolUseFailure` (matcher
    `Bash|Write|Edit|MultiEdit|NotebookEdit`), `UserPromptSubmit`, and `Stop`.
@@ -313,11 +349,9 @@ fails and report it; do not work around a failed check.
    {
      "hooks": {
        "PostToolUse": [
-         { "hooks": [ { "type": "command", "timeout": 10, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/clock-inject.py\"'" } ] },
          { "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/rerun-pass-check.py\"'" } ] }
        ],
        "PostToolUseFailure": [
-         { "hooks": [ { "type": "command", "timeout": 10, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/clock-inject.py\"'" } ] },
          { "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/rerun-pass-check.py\"'" } ] }
        ],
        "SessionStart": [
@@ -336,7 +370,6 @@ fails and report it; do not work around a failed check.
          { "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/rerun-pass-check.py\"'" } ] }
        ],
        "PreToolUse": [
-         { "matcher": "Write|Edit|MultiEdit|Bash", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/future-stamp-write.py\"'" } ] },
          { "matcher": "Write|Edit|MultiEdit", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/char-policy-write.py\"'" } ] },
          { "matcher": "Bash", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/ungated-record.py\"'" } ] },
          { "matcher": "Bash", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/unbounded-wait.py\"'" } ] },
@@ -404,14 +437,12 @@ fails and report it; do not work around a failed check.
 5. Configure the hook with the environment variables in the next section, then start a new Claude Code
    session so the settings are read.
 
-6. Smoke-test the live hook. For `clock-inject.py`, run any command in the new session (for example
-   `true`) and confirm a `CLOCK (read by hook, authoritative):` line reaches the assistant's context. For
-   the other nine, a passing self-test in step 3 is the check; they stay silent until they see something
-   to flag.
+6. Smoke-test the live hook. For each of the eight, a passing self-test in step 3 is the check; they stay
+   silent until they see something to flag.
 
 ### A note on hooks that record authority
 
-Some hooks, though none of the ten above, need a line in a durable record to switch on or to grant an
+Some hooks, though none of the eight above, need a line in a durable record to switch on or to grant an
 exception, for example an entry saying that you, the maintainer, approved something. Expect your assistant
 to decline to write such a line itself, even when your permission settings would allow the write: a record
 of your own authority is not something it should author on your behalf, and permission allow rules have
@@ -421,17 +452,19 @@ you type directly (in Claude Code, a line starting with `!`).
 ## Configuration
 
 The hooks read their settings from environment variables. Each feature has its own off state, and nothing
-beyond these variables is assumed. Each `AIQT_` variable except `AIQT_CHAR_POLICY_ROOT` also accepts an
-older spelling with the prefix `ORCH_` (for example `ORCH_STORE_ROOT`), read only when the `AIQT_` one is
-unset, so "unset" below means both spellings are unset. The worker skip likewise also honours `ORCH_WORKER=1` and any value of
-`ORCH_VERIFY_OWNER`; if your environment sets either for another purpose, the hooks stay silent there.
+beyond these variables is assumed. In these preview hooks, each `AIQT_` variable except
+`AIQT_CHAR_POLICY_ROOT` also accepts an older spelling with the prefix `ORCH_` (for example
+`ORCH_STORE_ROOT`), read only when the `AIQT_` one is unset, so "unset" below means both spellings are
+unset. The worker skip likewise also honours `ORCH_WORKER=1` and any value of `ORCH_VERIFY_OWNER`; if your
+environment sets either for another purpose, the hooks stay silent there. The pack's `clock-inject.py` and
+`future-stamp-write.py` read neither the older spellings nor the worker variables; see
+[Moved to the pack](#moved-to-the-pack).
 
-- The current time needs no setting. `clock-inject.py` always reads it from the clock and injects it, and
-  `stamp-truth-stop.py` always compares zoned timestamps against it.
-- With no store configured (`AIQT_STORE_ROOT` unset), no write is inspected for a future date and no
-  record removal is inspected: `future-stamp-write.py` and `record-remove-check.py` do nothing.
-- With no lease configured (`AIQT_LEASE_FILE` unset), no elapsed time is reported or compared: the clock
-  line carries no elapsed segment, and the elapsed-footer check is off.
+- The current time needs no setting. `stamp-truth-stop.py` always compares zoned timestamps against it.
+- With no store configured (`AIQT_STORE_ROOT` unset), no record removal is inspected:
+  `record-remove-check.py` does nothing.
+- With no lease configured (`AIQT_LEASE_FILE` unset), no elapsed time is compared: the elapsed-footer
+  check is off.
 
 - **`ungated-record.py`** needs no store or lease setting. It skips helper-session calls and the worker
   processes described above. For a deliberate record that is not a completion claim, end the command
@@ -470,7 +503,7 @@ content of the command. Their reasons are optional; text inside quotes does not 
 | `AIQT_CHAR_POLICY_ROOT` | The absolute path to one repository root, for `char-policy-write.py`. The hook reads the policy file `.aiqt/char-policy.json` under it and checks only files inside it. |
 | `AIQT_CONSTRAINT_RECORD` | The absolute path to the project's durable record of standing constraints, for `constraint-reread.py`; unset, empty, or relative, that hook does nothing. It reads `Constraint: <text>` lines as the constraints to name, and `Constraints-reread: <UTC time>` lines (written by the assistant from `date -u +%Y-%m-%dT%H:%M:%SZ` after re-reading) as re-read entries. |
 | `AIQT_HOOK_STATE_DIR` | The absolute path to a folder for the per-session state of `constraint-reread.py` and `rerun-pass-check.py`. If unset, they use `$XDG_STATE_HOME/aiqt-guardrails`, else `$HOME/.local/state/aiqt-guardrails`. |
-| `AIQT_HOOKS_WORKER` | Set to `1` only in a separate worker process that another program launches to produce output for it to read back (a batch verifier, say), to keep the hooks that read it out of that output; `char-policy-write.py` does not read it and checks worker processes too. Do not set it for a helper session started inside your own session: `future-stamp-write.py` deliberately still checks the record writes such a helper makes, and `clock-inject.py` still gives it the clock. |
+| `AIQT_HOOKS_WORKER` | Set to `1` only in a separate worker process that another program launches to produce output for it to read back (a batch verifier, say), to keep the preview hooks that read it out of that output; `char-policy-write.py` does not read it and checks worker processes too. The pack's `clock-inject.py` and `future-stamp-write.py` do not read it. |
 | `G_REF_DIR` | Self-tests only: the folder containing reference hooks for the byte-identity checks in `ungated-record.py`, `unbounded-wait.py`, `record-remove-check.py`, and `pattern-self-match.py`. If unset or empty, they look beside the hook itself. Each missing reference makes its check report `SKIPPED`. |
 
 The lease file marks the session's start on a field line of its own:
@@ -492,17 +525,10 @@ printf 'Active-session: sess-%s\n' "$(date -u +%Y%m%dT%H%M%SZ)" > "$AIQT_LEASE_F
 Each hook is a best-effort guard, and each one states what it does not catch in the `RESIDUAL COVERAGE`
 section of its opening docstring. Read that section before relying on a hook; in outline:
 
-- **`clock-inject.py`** informs and enforces nothing: the assistant can still ignore or mis-copy the line.
-  It reproduces the host clock faithfully, so a wrong host clock gives wrong readings, and elapsed time is
-  only as right as the lease. It does not fire for a tool call rejected before it ran, or across a stretch
-  of prose with no tool call.
 - **`stamp-truth-stop.py`** checks only timestamps written with an explicit zone; an unzoned, 12-hour, or
   natural-language time is not checked. A fabricated time in a code span, a code block, a `>` quote line,
   or just after a scheduling word passes. A genuinely future time mentioned in plain prose without a
   scheduling word before it is blocked; the remedy is to add the word or put the time in a code span.
-- **`future-stamp-write.py`** checks only folders you declare, and only ISO-like timestamp literals. A
-  time in a quote or code span in a record, a time built from parts, or one just after a scheduling word
-  passes, and some table layouts give false positives or misses, which the file lists.
 - **`ungated-record.py`** checks recognized gates and literal completion claims in one straight-line
   shell command. It misses separate calls, scripts, nested shell strings, compound-command contents,
   background gates, unrecognized runners, claim words outside its fixed, case-sensitive uppercase list

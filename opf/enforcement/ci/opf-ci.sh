@@ -17,6 +17,11 @@
 #   OPF_PYTHON  the interpreter (default: python3); always launched isolated (-I -B)
 #   OPF_TOOL    the path to opf.py (default: ../../tools/opf.py beside this file, the pack layout)
 #
+# Its own directory is resolved with a status-checked dirname, so a missing dirname exits 2 rather than
+# resolving to the calling directory (and running whatever opf.py sits relative to it). It runs no git
+# itself, so it drops no GIT_ variable: opf.py runs its git reads under an allowlist environment that drops
+# every inherited GIT_ variable (GIT_TRACE* and GIT_TRACE2* included).
+#
 # Inert until adoption installs it; the CI receipt-identity comparison is a later release (U25).
 set -u
 if [ "$#" -gt 1 ]; then
@@ -24,9 +29,17 @@ if [ "$#" -gt 1 ]; then
     exit 2
 fi
 root=${1:-.}
+fail() {
+    echo "opf-ci: cannot evaluate: $1" >&2
+    exit 2
+}
+# The directory of this file, resolved in two checked steps: a dirname that fails (missing, say) stops
+# here, rather than leaving an empty name that `cd` would read as the calling directory.
+dir=$(dirname -- "$0") || fail "could not resolve the directory of $0 (dirname failed)"
+[ -n "$dir" ] || fail "could not resolve the directory of $0"
 # CDPATH is cleared for this one command: a CDPATH match makes `cd` PRINT the resolved directory, which
 # would corrupt `here` with a second output line (the portable idiom).
-here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || exit 2
+here=$(CDPATH= cd -- "$dir" && pwd) || fail "could not enter $dir"
 opf_python=${OPF_PYTHON:-python3}
 opf_tool=${OPF_TOOL:-$here/../../tools/opf.py}
 # Run one check step and normalize its status to the recipe vocabulary: the step's own 0/1/2 is

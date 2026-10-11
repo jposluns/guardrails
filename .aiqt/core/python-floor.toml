@@ -18,13 +18,20 @@
 #                     blocks the call (one that cannot start it fails first with Python's own exit; an
 #                     exit other than 2 lets the call proceed). The core hook and its plugin copy carry
 #                     the guard's hook form (HOOK_SURFACES in the gate): a fail-open event's mode warns
-#                     on exit 0 instead of refusing. Every guard's exit holds while the guarded file's
+#                     on exit 0 instead of refusing. The pack's clock-inject.py and future-stamp-write.py
+#                     (core sources and plugin copies) are warn-only plugin hooks: they carry the CLI form
+#                     with exit 1 and are listed in nonblocking-surfaces. The guard ends the process with
+#                     os._exit, which the plugin's launcher cannot intercept, so the host receives that
+#                     exit unchanged; an exit 2 would block a PreToolUse call (the gate's
+#                     LAUNCHED_SURFACES rule and tools/check_hook_scripts.py leg (f), which runs the guard
+#                     through the rendered launcher, hold this). Every guard's exit holds while the guarded file's
 #                     output (its diagnostic on stderr, and what it prints on stdout) can be written and
 #                     flushed. A failing output stream can change the exit status and can lose output,
 #                     a decision included; a separate fix in progress addresses this.
 # nonblocking-surfaces the guarded-surfaces entries whose guard exits 1 instead of 2, sorted, unique and each
 #                     also listed above: a hook whose event reads exit 2 as a block (a Stop hook's exit 2
-#                     blocks the stop, and the guard runs before the hook's own block cap). Never a
+#                     blocks the stop, and the guard runs before the hook's own block cap; a PreToolUse
+#                     hook's exit 2 blocks the call, and the pack's warn-only scripts must never block). Never a
 #                     HOOK_SURFACES entry (cannot-evaluate): the gate's hook template, not this list,
 #                     sets the hook form's refusal to raise SystemExit(2).
 # completeness-check  true since tools/check_entry_guard.py, the last shipped entrypoint, was guarded
@@ -37,10 +44,10 @@ format-version = 1
 python-floor = "3.14"
 guarded-surfaces = [
     ".aiqt/core/hooks/scripts/aiqt_hooks.py",
+    ".aiqt/core/hooks/scripts/clock-inject.py",
+    ".aiqt/core/hooks/scripts/future-stamp-write.py",
     ".preview/char-policy-write.py",
-    ".preview/clock-inject.py",
     ".preview/constraint-reread.py",
-    ".preview/future-stamp-write.py",
     ".preview/pattern-self-match.py",
     ".preview/record-remove-check.py",
     ".preview/rerun-pass-check.py",
@@ -48,6 +55,7 @@ guarded-surfaces = [
     ".preview/unbounded-wait.py",
     ".preview/ungated-record.py",
     "opf/enforcement/claude/pretooluse_deny.py",
+    "opf/tools/_child_contract.py",
     "opf/tools/_journal.py",
     "opf/tools/_opf_absorb.py",
     "opf/tools/_opf_adopt.py",
@@ -88,6 +96,8 @@ guarded-surfaces = [
     "opf/tools/selftest_commonmark_conformance.py",
     "opf/tools/selftest_commonmark_headings.py",
     "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py",
+    "plugin/aiqt-guardrails-hooks/hooks/scripts/clock-inject.py",
+    "plugin/aiqt-guardrails-hooks/hooks/scripts/future-stamp-write.py",
     "tools/_qa_adapter.py",
     "tools/aei_backlog_md.py",
     "tools/aiqt_corpus.py",
@@ -104,6 +114,7 @@ guarded-surfaces = [
     "tools/check_footer.py",
     "tools/check_gensrc_failclose.py",
     "tools/check_git_option_table.py",
+    "tools/check_hook_scripts.py",
     "tools/check_hooks_preview.py",
     "tools/check_install_page.py",
     "tools/check_instruction_budget.py",
@@ -180,9 +191,13 @@ guarded-surfaces = [
     "tools/selftest_orch_hooks.py",
 ]
 nonblocking-surfaces = [
+    ".aiqt/core/hooks/scripts/clock-inject.py",
+    ".aiqt/core/hooks/scripts/future-stamp-write.py",
     ".preview/constraint-reread.py",
     ".preview/rerun-pass-check.py",
     ".preview/stamp-truth-stop.py",
+    "plugin/aiqt-guardrails-hooks/hooks/scripts/clock-inject.py",
+    "plugin/aiqt-guardrails-hooks/hooks/scripts/future-stamp-write.py",
 ]
 completeness-check = true
 documentation-check = true
