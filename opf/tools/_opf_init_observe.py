@@ -331,6 +331,13 @@ class GitObjects:
         parent, name = os.path.split(path)
         # Walk from /, preserving evidence for every existing ancestor. A missing
         # ancestor proves absence only after its parent was opened without links.
+        # Every component here is TRAVERSED only (fstat for its identity, then a
+        # dir_fd-relative no-follow stat of the final name), never read, so each is
+        # opened with the shared walk's traverse mode (_opf_store._WALK_O_TRAVERSE:
+        # O_PATH, search permission only, where it exists; the old O_RDONLY where
+        # not). A search-only ancestor (mode 0711) is then classifiable instead of
+        # EACCES-refusing, and a symlinked component still refuses (ENOTDIR under
+        # O_PATH|O_DIRECTORY|O_NOFOLLOW; see _opf_store._WALK_O_TRAVERSE).
         fd = None
         identities = []
         try:
@@ -339,7 +346,7 @@ class GitObjects:
                 if not component:
                     continue
                 try:
-                    next_fd = os.open(component, os.O_RDONLY | os.O_DIRECTORY
+                    next_fd = os.open(component, _opf_store._WALK_O_TRAVERSE | os.O_DIRECTORY
                                       | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
                 except FileNotFoundError:
                     return (path, tuple(identities), "absent-ancestor", component)

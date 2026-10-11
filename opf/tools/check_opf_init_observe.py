@@ -318,6 +318,62 @@ def graft_close(module):
                 raise RuntimeError("graft-close-reuse: {}".format(problems))
 
 
+def graft_search_only(module):
+    """The grafts walk crosses a SEARCH-ONLY ancestor (mode 0111, the owner-bound spelling of the
+    root-owned 0711 scratch shape) and still classifies absence, because every component is opened in
+    the shared walk's traverse mode (_opf_store._WALK_O_TRAVERSE: O_PATH, search permission only,
+    where it exists), and a SYMLINKED intermediate still refuses (CANNOT-EVALUATE, never followed).
+    The reversal (components opened O_RDONLY again) is red by the recorded open flags wherever
+    os.O_PATH exists (uid 0 included) and also red behaviourally (EACCES) for a uid the mode bits
+    bind; on a platform without O_PATH the walk keeps the O_RDONLY fallback by design and this
+    reversal is not discriminable (disclosed; the production behaviour is unchanged there)."""
+    import os
+    import tempfile
+    import _opf_store
+    identity = "graft-search-only-ancestor"
+    with tempfile.TemporaryDirectory(prefix="opf-graft-searchonly-") as directory:
+        base = os.path.realpath(directory)
+        shield = os.path.join(base, "shield")
+        os.makedirs(os.path.join(shield, "info"))
+        target = os.path.join(shield, "info", "grafts")
+        source = types.SimpleNamespace(run=lambda args, budget: (target + "\n").encode("utf-8"),
+                                       product_root="/")
+        recorded = []
+        real_open = os.open
+
+        def recording_open(*args, **kwargs):
+            if kwargs.get("dir_fd") is not None:
+                recorded.append(args[1])
+            return real_open(*args, **kwargs)
+
+        bound = os.geteuid() != 0
+        if bound:
+            os.chmod(shield, 0o111)
+        try:
+            os.open = recording_open
+            try:
+                try:
+                    outcome = module.GitObjects.graft_snapshot(source, None)
+                except module.ObservationError:
+                    outcome = ("refused",)
+            finally:
+                os.open = real_open
+        finally:
+            if bound:
+                os.chmod(shield, 0o755)
+        check(len(outcome) == 3 and outcome[0] == target and outcome[2] == "absent", identity)
+        want = _opf_store._WALK_O_TRAVERSE
+        check(bool(recorded) and all(flags & want == want and flags & os.O_NOFOLLOW
+                                     for flags in recorded), identity)
+        # A symlinked intermediate still refuses through the traverse mode, never followed off-tree.
+        os.symlink("shield", os.path.join(base, "lnk"))
+        twisted = os.path.join(base, "lnk", "info", "grafts")
+        src2 = types.SimpleNamespace(run=lambda args, budget: (twisted + "\n").encode("utf-8"),
+                                     product_root="/")
+        refuses(module, lambda: module.GitObjects.graft_snapshot(src2, None),
+                module.CANNOT_EVALUATE, identity)
+
+
 # Each case owns a deliberate reversal and a reached assertion identity. No syntax
 # error, unexpected exception, timeout or failed fixture setup is accepted as RED.
 CASES = [
@@ -356,6 +412,11 @@ CASES = [
      "if evidence_commit not in chain:", "if False:"),
     ("seed-absent-evidence", absent_evidence,
      'source.run(["cat-file", "-e", evidence_commit], budget)', "pass"),
+    ("graft-search-only-ancestor", graft_search_only,
+     "next_fd = os.open(component, _opf_store._WALK_O_TRAVERSE | os.O_DIRECTORY\n"
+     "                                      | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)",
+     "next_fd = os.open(component, os.O_RDONLY | os.O_DIRECTORY\n"
+     "                                      | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)"),
     ("graft-close-reuse", graft_close,
      "prev, fd = fd, next_fd                    # ownership moves first: a failed close is\n"
      "                os.close(prev)                            # never closed again by the finally (P1, #378)",
