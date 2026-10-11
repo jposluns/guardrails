@@ -107,20 +107,25 @@ sibling repo, and a nested repo), with the declaration written into the redirect
 floor synthesized in-tree, removed in the finally.
 
 It also covers the destructive-operation guard (destructive_guard, sechau/secrst) through synthetic payloads
-only (no submitted command runs): rm/unlink, truncate and dd of= operands outside scratch and outside every
-repository, the home directory, the repository root, a linked worktree's .git file (and any .git component),
-ignored content, a nested repository, a submodule, an unresolvable operand, an xargs-fed path word and
-rm --no-preserve-root DENY, as do find -delete/-exec rm, mkfs/wipefs, shred, dropdb, a psql DROP,
-terraform/tofu destroy, kubectl delete, an unparseable command naming any in-scope destructive word (a
-here-string truncate/dd/kubectl among them), a quote-concatenated rm inside a substitution, an operand whose
-'..' follows a symlink (resolved the way the kernel resolves it), env -C/-S and sudo -D re-based or re-split
-wrapped commands, a conditional, backgrounded or wrapped cd followed by a relative operand, and busybox/toybox
-rm; a literal /tmp or TMPDIR path, a regenerable build DIRECTORY (an ordinary file so named is classified
-normally), tracked clean content (positive ls-files evidence required) and the leading
-GUARDRAIL_ALLOW_DESTRUCTIVE opt-out ALLOW (some with a note), a stopped wrapper walk (sudo docker rm) ALLOWS,
-and untracked content in a repository is SNAPSHOT-THEN-ALLOWED. A mutant sweep removes each named rule from
-_DESTRUCT_RULES and requires every vector that names it to change outcome; functional mutants cover the
-probe's tracked evidence and a fake clock that crosses the classification deadline mid-work.
+only (no submitted command runs). The guard is DENY UNLESS UNDERSTOOD, an allow-list of exactly modelled command
+shapes: rm/unlink, truncate and dd of= operands outside scratch and outside every repository, the home
+directory, the repository root, a linked worktree .git file (and any .git component), ignored content, a
+nested repository, a submodule, an unresolvable operand, an operand whose '..' follows a symlink or a missing
+component, and rm --no-preserve-root DENY, as do find -delete, mkfs/wipefs, shred, dropdb, a psql DROP,
+terraform/tofu destroy and kubectl delete; a destructive word behind an unmodelled runner (every
+_COMMAND_RUNNERS word without an exact spec, table-driven, xargs and find -exec among them), an unmodelled
+wrapper option or operand (env -C/-S, sudo -D, timeout 1e2), a known command in a running form (git -c, docker
+run), a computed command word, a line continuation, an ANSI-C escape, a heredoc operator, a pipeline or heredoc
+feeding an unmodelled command, a substitution, or an unparseable command DENIES; a cd that is conditional,
+backgrounded, wrapped, inside a compound body, through '..', to a missing directory or under CDPATH leaves
+the cwd unknown, so a later relative operand DENIES. A literal /tmp or TMPDIR path, a regenerable build
+DIRECTORY, tracked clean content (positive ls-files evidence required), a modelled wrapper or keyword in front
+of an allowed command, a known non-runner naming a destructive word as data (echo, git rm, sudo docker rm), the
+exact $(cat <<'EOF' ...) prose idiom and the leading GUARDRAIL_ALLOW_DESTRUCTIVE opt-out ALLOW (some with a
+note), and untracked content in a repository is SNAPSHOT-THEN-ALLOWED. Every round-2 QA reproduction is
+asserted denied. A mutant sweep removes each named rule from _DESTRUCT_RULES and requires every vector that
+names it to change outcome; functional mutants cover the probe tracked evidence and a fake clock that crosses
+the classification deadline mid-work.
 
   selftest_aiqt_hooks.py    exit 0 on SELF-TEST PASS, 1 on SELF-TEST FAIL, 2 on a harness/setup error
 """
@@ -1737,14 +1742,15 @@ def _test_destructive_guard(failures, tmp):
     an untracked FILE named src/dist, an ignored .env, an ignored directory under each regenerable name, and
     a symlink 'link' escaping to a plain directory outside every repo), a repo holding a nested repository
     and a committed gitlink, a clean repo whose tracked homedir stands in for HOME plus a LINKED worktree of
-    it (its .git is a file), and a dedicated scratch root used as TMPDIR. Repository vectors see only that scratch root (the fixture tree
-    may itself sit under /tmp or TMPDIR, which the guard treats as disposable); the scratch vectors use the
-    guard's real scratch roots. Every vector names the one rule it depends on, and the mutant sweep removes
-    that rule from _DESTRUCT_RULES and requires the vector's outcome to change, so no deny or allow vector
-    passes by accident."""
+    it (its .git is a file), a dedicated scratch root used as TMPDIR (holding the directory d/sub), and a
+    symlink 'cdlink' outside every repo pointing into it. Repository vectors see only that scratch root (the
+    fixture tree may itself sit under /tmp or TMPDIR, which the guard treats as disposable); the scratch
+    vectors use the guard's real scratch roots. CDPATH is cleared for the run. Every vector names the one rule
+    it depends on, and the mutant sweep removes that rule from _DESTRUCT_RULES and requires the vector's
+    outcome to change, so no deny or allow vector passes by accident."""
     handler = aiqt_hooks.destructive_guard
     base = tmp / "destructive"
-    saved_env = {key: os.environ.get(key) for key in ("HOME", "TMPDIR")}
+    saved_env = {key: os.environ.get(key) for key in ("HOME", "TMPDIR", "CDPATH")}
     saved_roots = aiqt_hooks._destruct_scratch_roots
     saved_rules = aiqt_hooks._DESTRUCT_RULES
     saved_record = aiqt_hooks._record_recovery
@@ -1788,10 +1794,15 @@ def _test_destructive_guard(failures, tmp):
         (repo / "src" / "dist").write_text("built-file\n", encoding="utf-8")
         # a LINKED worktree (its .git is a FILE pointing at clean's admin dir), for the git-admin rule
         _git(clean, "worktree", "add", "--detach", str(base / "linked"))
+        # a scratch directory (the target of the cd vectors) and a symlink OUTSIDE every repository and outside
+        # scratch that points into it, for the cd-through-'..' vector
+        (scratch / "d" / "sub").mkdir(parents=True)
+        os.symlink(str(scratch / "d" / "sub"), str(base / "cdlink"))
     except (OSError, subprocess.SubprocessError) as exc:
         failures.append("(dz-fixture) could not build the destructive-guard fixtures: {}".format(exc))
         return
     os.environ["TMPDIR"] = str(scratch)
+    os.environ.pop("CDPATH", None)
     scratch_real = os.path.realpath(str(scratch))
     home0 = saved_env["HOME"] or ""
     rp, absent = str(repo), "/srv/aiqt-selftest-absent"
@@ -1817,7 +1828,6 @@ def _test_destructive_guard(failures, tmp):
         ("deny-no-preserve-root", "no-preserve-root", "rm -rf --no-preserve-root {}/x".format(scratch), rp,
          "deny", real_roots),
         ("deny-find-delete", "find", "find . -name '*.pyc' -delete", rp, "deny", {}),
-        ("deny-find-exec-rm", "find", "find /srv -type f -exec rm -f {} +", rp, "deny", {}),
         ("deny-terraform", "terraform", "terraform destroy -auto-approve", rp, "deny", {}),
         ("deny-tofu-apply-destroy", "terraform", "tofu apply -destroy", rp, "deny", {}),
         ("deny-kubectl-namespace", "kubectl", "kubectl delete namespace prod", rp, "deny", {}),
@@ -1830,12 +1840,10 @@ def _test_destructive_guard(failures, tmp):
         ("deny-shred", "shred", "shred -u {}/secrets.txt".format(rp), rp, "deny", {}),
         ("deny-unparseable-rm", "raw", 'rm -rf "{}/appdata'.format(absent), rp, "deny", {}),
         ("deny-unparseable-find", "raw", "find . -delete 'x", rp, "deny", {}),
-        ("deny-sudo-wrapped", "wrappers", "sudo rm -rf {}/appdata".format(absent), rp, "deny", {}),
-        ("deny-control-flow", "wrappers", "if true; then rm -rf {}/appdata; fi".format(absent), rp, "deny", {}),
-        ("deny-xargs-fed", "xargs", "find . -name '*.log' | xargs rm -f", rp, "deny", {}),
         ("deny-cd-tracked", "cd", "cd /srv && rm -rf build", rp, "deny", {}),
         ("deny-backtick-subst", "subst", "echo `rm -rf {}/appdata`".format(absent), rp, "deny", {}),
         ("deny-quoted-subst", "subst", 'echo "$(rm -rf {}/appdata)"'.format(absent), rp, "deny", {}),
+        ("deny-subst-nonrecursive", "subst", 'echo "$(rm -f {}/x)"'.format(absent), rp, "deny", {}),
         ("deny-repo-root", "repo-root", "rm -rf {}".format(clean), rp, "deny", {}),
         ("deny-ignored-file", "ignored", "rm .env", rp, "deny", {}),
         ("deny-nested-repo", "embedded", "rm -rf holder", str(nest), "deny", {}),
@@ -1849,18 +1857,48 @@ def _test_destructive_guard(failures, tmp):
         ("allow-optout-note", "optout", "GUARDRAIL_ALLOW_DESTRUCTIVE=1 rm -rf {}/appdata".format(absent), rp,
          "allow-note", {}),
         ("allow-dd-null", "benign-sink", "dd if=/dev/zero of=/dev/null count=1", rp, "allow", {}),
-        # (A) '..' resolves the way the kernel does: the symlink BEFORE it first, so the lexical collapse
-        # (rp/src/pkg, an allow-note) is a forgery; the real target is outside every repository and DENIES.
+        # (A) an operand '..' resolves the way the kernel does: the symlink BEFORE it first, so the lexical
+        # collapse (rp/src/pkg, an allow-note) is a forgery; the real target is outside every repository. A
+        # '..' whose prefix does not resolve strictly cannot be proven kernel-equivalent and DENIES.
         ("deny-dotdot-symlink", "dotdot", "rm -rf link/../src/pkg", rp, "deny", {}),
-        # (B) wrapper options that change the wrapped command's cwd or re-split a word.
-        ("deny-env-chdir", "wrapper-opts", "env -C {} rm -rf data".format(absent), rp, "deny", {}),
+        ("deny-dotdot-missing", "dotdot", "rm -rf src/nonexist/../pkg", rp, "deny", {}),
+        # DENY UNLESS UNDERSTOOD: a modelled wrapper or keyword keeps the classification of what it runs (the
+        # mutant, with no wrapper model, reads every wrapper as an unmodelled runner and denies) ...
+        ("allow-wrapped-modelled", "wrappers", "sudo -u root nice -n 5 timeout -s KILL 30 rm -rf src/absent",
+         rp, "allow", {}),
+        ("allow-keyword-modelled", "wrappers", "if true; then rm -rf src/absent; fi", rp, "allow", {}),
+        # ... while an option or operand outside the wrapper model DENIES when a destructive word follows
+        # (the mutant skips the unmodelled word and classifies what follows).
         ("deny-env-split", "wrapper-opts", "env -S 'rm -rf {}/x'".format(absent), rp, "deny", {}),
         ("deny-env-split-long", "wrapper-opts", "env --split-string='rm -rf {}/x'".format(absent), rp,
          "deny", {}),
-        ("deny-sudo-chdir", "wrapper-opts", "sudo -D {} rm -rf data".format(absent), rp, "deny", {}),
-        # (H) the walk STOPS at the first non-wrapper word: docker's rm subcommand is not the shell's rm.
-        ("allow-wrapper-stop", "wrapper-opts", "sudo docker rm -f $CID", rp, "allow", {}),
-        ("deny-busybox", "wrappers", "busybox rm -rf {}/x".format(absent), rp, "deny", {}),
+        ("deny-timeout-float", "wrapper-opts", "timeout 1e2 rm -f src/absent", rp, "deny", {}),
+        # an unmodelled command runner (xargs, find -exec, every _COMMAND_RUNNERS word without a spec, appended
+        # below) DENIES when a destructive word follows it; the mutant allows it unexamined.
+        ("deny-xargs-fed", "runner", "find . -name '*.log' | xargs rm -f", rp, "deny", {}),
+        ("deny-find-exec-rm", "runner", "find /srv -type f -exec rm -f {} +", rp, "deny", {}),
+        # a KNOWN non-runner reads a destructive word as data; the mutant (nothing known) denies these ...
+        ("allow-wrapper-stop", "known", "sudo docker rm -f $CID", rp, "allow", {}),
+        ("allow-echo-text", "known", "echo rm -rf /", rp, "allow", {}),
+        ("allow-git-rm", "known", "git rm -r src", rp, "allow", {}),
+        # ... except in the forms where a known word runs another command.
+        ("deny-git-alias", "known-forms", "git -c 'alias.x=!rm -rf {}/x' x".format(absent), rp, "deny", {}),
+        ("deny-docker-run", "known-forms", "docker run --rm -v /:/host alpine rm -rf /host/srv", rp, "deny", {}),
+        ("deny-computed-word", "computed", "X=rm; $X -rf {}/x".format(absent), rp, "deny", {}),
+        ("deny-computed-glob", "computed", "/bin/r? -rf {}/x".format(absent), rp, "deny", {}),
+        # an environment assignment in front of a command can name a command it runs (GIT_EXTERNAL_DIFF, PAGER)
+        ("deny-assign-value", "assign", "GIT_EXTERNAL_DIFF='rm -rf {}/x' git diff".format(absent), rp, "deny",
+         {}),
+        # a definition that can shadow cat turns the $(cat <<EOF ...) prose idiom off
+        ("deny-prose-shadowed", "prose-shadow",
+         "cat() {{ bash; }}; git commit -m \"$(cat <<'EOF'\nrm -rf {}/x\nEOF\n)\"".format(absent), rp, "deny", {}),
+        # constructs this guard does not model: a line continuation, an ANSI-C escape, a heredoc operator.
+        ("deny-continuation", "construct", "rm -rf \\\n src/absent", rp, "deny", {}),
+        ("deny-ansi-c", "construct", "$'\\x72m' -rf src/absent", rp, "deny", {}),
+        ("deny-heredoc-op", "construct", "rm -rf src/absent <<'EOF'\nx\nEOF", rp, "deny", {}),
+        # destructive text FED to an unmodelled command through a pipeline or a heredoc.
+        ("deny-pipe-feed", "pipe-feed", "echo rm -rf {}/x | sh".format(absent), rp, "deny", {}),
+        ("deny-heredoc-feed", "heredoc-feed", "bash <<'EOF'\nrm -rf {}/x\nEOF".format(absent), rp, "deny", {}),
         # (C) a cd that may not run in the parent shell must not move the inferred cwd: conditional (&&/||),
         # backgrounded (&, a subshell), wrapped (command cd is modelled; time cd is not and fails closed).
         ("deny-cd-conditional", "cd-flow", "false && cd {}/d && true; rm -rf relic".format(scratch), rp,
@@ -1869,16 +1907,37 @@ def _test_destructive_guard(failures, tmp):
         ("deny-cd-background", "cd-flow", "cd {}/d && true & rm -rf relic".format(scratch), rp, "deny", {}),
         ("deny-cd-command", "cd-flow", "command cd {} && rm -rf data".format(absent), rp, "deny", {}),
         ("deny-cd-wrapped", "cd-flow", "time cd {}/d && rm -rf relic".format(scratch), rp, "deny", {}),
+        # a cd inside a compound body (skipped or repeated), a cd through '..' (logical and physical cd differ),
+        # a cd to a directory that does not exist (the shell stays put) and a relative cd under CDPATH.
+        ("deny-cd-if-body", "scope", "if false; then true; cd {}/d && true; fi; rm -rf relic".format(scratch),
+         rp, "deny", {}),
+        ("deny-cd-while-body", "scope",
+         "while false; do true; cd {}/d && true; done; rm -rf relic".format(scratch), rp, "deny", {}),
+        ("deny-cd-dotdot", "cd-dotdot", "cd {}/cdlink/.. && rm -rf relic".format(base), rp, "deny", {}),
+        ("deny-cd-absent", "cd-exists", "cd {}/absent-dir && true; rm -rf relic".format(scratch), rp, "deny", {}),
+        ("deny-cd-cdpath", "cd-cdpath", "export CDPATH=/srv; cd repo && rm -rf src/absent", str(base), "deny",
+         {}),
         # (E) a linked worktree's .git FILE is an administrative entry, never restorable content.
         ("deny-worktree-gitfile", "git-admin", "rm -rf .git", str(base / "linked"), "deny", {}),
-        # (D) the lexer rejects a here-string, and the WIDE raw fallback must cover every in-scope word.
+        # (D) the lexer rejects a here-string, and the raw fallback must cover every in-scope word.
         ("deny-herestring-truncate", "raw", "truncate -s 0 {}/d <<< x".format(absent), rp, "deny", {}),
         ("deny-herestring-dd", "raw", "dd if=/dev/zero of={}/d <<< x".format(absent), rp, "deny", {}),
         ("deny-herestring-kubectl", "raw", "kubectl delete namespace prod <<< x", rp, "deny", {}),
         # (D) a quote-concatenated spelling inside a substitution scans as the word the shell runs.
         ("deny-subst-concat", "subst", "echo \"$(r''m -rf {}/x)\"".format(absent), rp, "deny", {}),
+        # the text scans read the shell quoting context: a heredoc inside a substitution is data only in the
+        # exact $(cat <<'EOF' ...) idiom (the mutant strips every quoted heredoc body, hiding the input of bash) ...
+        ("deny-subst-heredoc-runner", "shell-context",
+         "echo \"$(bash <<'EOF'\nrm -rf {}/x\nEOF\n)\"".format(absent), rp, "deny", {}),
+        # ... and a line continuation inside an unquoted heredoc body still joins (the mutant reads r, m).
+        ("deny-unquoted-heredoc-join", "raw-join", "bash <<EOF\nr\\\nm -rf {}/x\nEOF".format(absent), rp,
+         "deny", {}),
     ] + [("allow-regenerable-" + name.strip("._"), "regenerable", "rm -rf " + name, rp, "allow", {})
-         for name in regen]
+         for name in regen] + [
+        # every command runner without an exact model DENIES 'RUNNER rm -rf data' where the bare command
+        # allows (data is absent inside the repository); the runner mutant allows each one unexamined
+        ("deny-runner-" + name, "runner", "{} rm -rf data".format(name), rp, "deny", {})
+        for name in sorted(aiqt_hooks._COMMAND_RUNNERS - set(aiqt_hooks._DESTRUCT_WRAPPER_SPECS))]
     try:
         for label, rule, command, cwd, want, opts in vectors:
             got = run(command, cwd, opts)
@@ -1919,22 +1978,90 @@ def _test_destructive_guard(failures, tmp):
                 ("dz-absent-in-repo", "rm -rf src/absent", rp, "allow"),
                 ("dz-dot-git", "rm -rf .git", rp, "deny"),
                 ("dz-unparseable-benign", 'ls "unbalanced', rp, "allow"),
-                ("dz-echo-text", "echo rm -rf /", rp, "allow"),
                 ("dz-git-rm", "git rm -r src", rp, "allow"),
                 ("dz-unquoted-subst", "echo $(rm -rf {}/appdata)".format(absent), rp, "deny"),
                 ("dz-subst-benign", 'git log -1 --format="$(echo %H)"', rp, "allow"),
                 ("dz-subst-heredoc-prose", "git commit -m \"$(cat <<'EOF'\nRefuse rm -rf outside scratch\nEOF\n)\"",
                  rp, "allow"),
+                ("dz-prose-idiom-piped", "git commit -m \"$(cat <<'EOF' | sh\nrm -rf {}/x\nEOF\n)\"".format(absent),
+                 rp, "deny"),
+                ("dz-prose-idiom-runner", "bash -c \"$(cat <<'EOF'\nrm -rf {}/x\nEOF\n)\"".format(absent),
+                 rp, "deny"),
                 ("dz-ls", "ls -la", rp, "allow"),
                 ("dz-kubectl-get", "kubectl get pods", rp, "allow"),
                 # (G) an ordinary untracked FILE named like a regenerable directory is classified normally
                 # (snapshot-then-allow), never name-allowed: the exception requires the DIRECTORY type.
                 # The pinned-code mutant (no type gate) returned a silent "allow" here.
                 ("dz-regenerable-file", "rm src/dist", rp, "allow-note"),
-                ("dz-psql-select", "psql -c 'SELECT 1'", rp, "allow")):
+                ("dz-psql-select", "psql -c 'SELECT 1'", rp, "allow"),
+                # deny-unless-understood forms that also deny through another rule (no single-rule mutant)
+                ("dz-sudo-wrapped", "sudo rm -rf {}/appdata".format(absent), rp, "deny"),
+                ("dz-control-flow", "if true; then rm -rf {}/appdata; fi".format(absent), rp, "deny"),
+                ("dz-busybox", "busybox rm -rf {}/x".format(absent), rp, "deny"),
+                ("dz-env-chdir", "env -C {} rm -rf data".format(absent), rp, "deny"),
+                ("dz-sudo-chdir", "sudo -D {} rm -rf data".format(absent), rp, "deny"),
+                ("dz-shell-c", "sh -c 'rm -rf data'", rp, "deny"),
+                ("dz-bash-c", "bash -c \"rm -rf data\"", rp, "deny"),
+                # the false-deny cost stays small: modelled shapes and known non-runners still allow
+                ("dz-cost-nice", "nice rm -rf src/absent", rp, "allow"),
+                ("dz-cost-timeout", "timeout 5 rm -rf src/absent", rp, "allow"),
+                ("dz-cost-env", "env FOO=1 rm -rf src/absent", rp, "allow"),
+                ("dz-cost-sudo-echo", "sudo echo rm -rf /", rp, "allow"),
+                ("dz-cost-grep", 'grep -rn "rm -rf" .', rp, "allow"),
+                ("dz-cost-gh", 'gh pr create --body "drop the rm -rf fallback"', rp, "allow"),
+                ("dz-cost-command-v", "command -v rm", rp, "allow"),
+                ("dz-cost-brace-group", "{ rm -rf src/absent; }", rp, "allow"),
+                ("dz-cost-case", "case x in x) rm -rf src/absent;; esac", rp, "allow"),
+                ("dz-function-body", "function f {{ rm -rf {}/x; }}; f".format(absent), rp, "deny"),
+                ("dz-computed-subst", "$(printf r%s m) -rf {}/x".format(absent), rp, "deny"),
+                ("dz-computed-quoted-subst", "\"$(printf r%s m)\" -rf {}/x".format(absent), rp, "deny"),
+                ("dz-computed-assigned", "X=$(printf r%s m); $X -rf {}/x".format(absent), rp, "deny"),
+                ("dz-prose-mentions-call", "git commit -m \"$(cat <<'EOF'\nFix f() handling of rm -rf\nEOF\n)\"",
+                 rp, "allow"),
+                # the round-2 QA reproductions (each allowed at the pinned revision), denied
+                ("dz-q2-xargs-i-rm", "xargs -i rm -rf {}", rp, "deny"),
+                ("dz-q2-xargs-i-unlink", "xargs -i unlink {}", rp, "deny"),
+                ("dz-q2-xargs-i-shred", "xargs -i shred {}", rp, "deny"),
+                ("dz-q2-xargs-i-truncate", "xargs -i truncate -s 0 {}", rp, "deny"),
+                ("dz-q2-xargs-i-dd", "xargs -i dd of={}", rp, "deny"),
+                ("dz-q2-xargs-l", "xargs -l rm -rf {}/data".format(absent), rp, "deny"),
+                ("dz-q2-xargs-e", "xargs -e rm -rf {}/data".format(absent), rp, "deny"),
+                ("dz-q2-xargs-slot", "xargs --process-slot-var SLOT rm -f {}/data".format(absent), rp, "deny"),
+                ("dz-q2-timeout-1e2", "timeout 1e2 rm -f {}/data".format(absent), rp, "deny"),
+                ("dz-q2-sudo-flock", "sudo flock {0}/lock rm -f {0}/data".format(absent), rp, "deny"),
+                ("dz-q2-continuation", "r\\\nm -rf {}/data <<< x".format(absent), rp, "deny"),
+                ("dz-q2-subst-continuation", "echo \"$(r\\\nm -rf {}/data)\"".format(absent), rp, "deny"),
+                ("dz-q2-heredoc-in-quotes", "echo \"<<'EOF' \"\nrm -rf {}/data <<< x".format(absent), rp, "deny"),
+                ("dz-q2-env-chdir-repeat", "env -C {} -C . rm -rf data".format(scratch), rp, "deny"),
+                ("dz-q2-env-split-quotes", "env -S \"r''m -rf {}/data\"".format(absent), rp, "deny"),
+                ("dz-q2-taskset", "taskset -c 0 rm -rf {}/x".format(absent), rp, "deny"),
+                ("dz-q2-flock", "flock /tmp/l rm -rf {}/x".format(absent), rp, "deny"),
+                ("dz-q2-flock-x", "flock -x /tmp/l rm -rf {}/x".format(absent), rp, "deny"),
+                ("dz-q2-flock-truncate", "flock /tmp/l truncate -s0 {}/x".format(absent), rp, "deny"),
+                ("dz-q2-pkexec", "pkexec rm -rf {}/x".format(absent), rp, "deny"),
+                ("dz-q2-runuser", "runuser -u root -- rm -rf {}/x".format(absent), rp, "deny"),
+                ("dz-q2-setpriv", "setpriv --reuid 1000 rm -rf {}/x".format(absent), rp, "deny"),
+                ("dz-q2-strace", "strace -f rm -rf {}/x".format(absent), rp, "deny"),
+                ("dz-q2-ltrace", "ltrace rm -rf {}/x".format(absent), rp, "deny"),
+                ("dz-q2-xvfb-run", "xvfb-run rm -rf {}/x".format(absent), rp, "deny"),
+                ("dz-q2-unbuffer", "unbuffer rm -rf {}/x".format(absent), rp, "deny"),
+                ("dz-q2-unshare", "unshare rm -rf {}/x".format(absent), rp, "deny"),
+                ("dz-q2-proot", "proot rm -rf {}/x".format(absent), rp, "deny")):
             got = run(command, cwd, {})
             if got != want:
                 failures.append("({}) {!r}: expected {}, got {}".format(label, command, want, got))
+        # the ONE runner table: every runner in it DENIES "RUNNER rm -rf data" from a cwd outside every
+        # repository, the exactly modelled wrappers included (timeout needs its DURATION, so there the bare
+        # form is an unmodelled operand), and the gate-discipline note tier reads the same table
+        for name in sorted(aiqt_hooks._COMMAND_RUNNERS):
+            got = run("{} rm -rf data".format(name), absent, {})
+            if got != "deny":
+                failures.append("(dz-runner-table-{}) {!r} from {}: expected deny, got {}".format(
+                    name, "{} rm -rf data".format(name), absent, got))
+        if (aiqt_hooks._GATE_NOTE_WRAPPERS is not aiqt_hooks._COMMAND_RUNNERS
+                or not set(aiqt_hooks._DESTRUCT_WRAPPER_SPECS) <= aiqt_hooks._COMMAND_RUNNERS):
+            failures.append("(dz-one-runner-table) _GATE_NOTE_WRAPPERS must be _COMMAND_RUNNERS, and every "
+                            "modelled wrapper must be a member of it")
         if len(_recovery_refs(repo)) <= len(before):
             failures.append("(dz-snapshot-made) the untracked-delete allow left no new refs/aiqt-recovery/ ref")
         roots = aiqt_hooks._destruct_scratch_roots()
@@ -10715,12 +10842,13 @@ def _main_isolated(monitor):
           "the frozen/floor denials are evaluated BEFORE the companion-store allow so a symlink into a "
           "declared store cannot bypass the freeze (findings 1 and 2), so a companion_stores widening cannot "
           "be self-declared through a guarded tool; the general Bash-write path stays the disclosed wrtscp "
-          "residual. sechau/secrst (destructive_guard) DENIES-and-educates a destructive operation with no "
-          "verified restore path (a path outside scratch and every repository, the home directory, a "
-          "repository root, a .git administrative entry, ignored or nested-repository or submodule content, "
-          "an unresolvable or xargs-fed operand, a symlink-escaping '..' operand, a re-split or re-rooted or "
-          "cwd-shifted wrapper form it cannot model, find -delete, a device, database or cloud destroyer, an "
-          "unparseable command naming any in-scope destructive word), "
+          "residual. sechau/secrst (destructive_guard) is DENY UNLESS UNDERSTOOD: it DENIES-and-educates a "
+          "destructive operation with no verified restore path (a path outside scratch and every repository, "
+          "the home directory, a repository root, a .git administrative entry, ignored or nested-repository or "
+          "submodule content, an unresolvable or symlink-escaping '..' operand, find -delete, a device, database "
+          "or cloud destroyer) and any destructive word in a shape it does not model exactly (an unmodelled "
+          "runner or wrapper option, a known command in a running form, a computed command word, a continuation, "
+          "heredoc or ANSI-C construct, a fed pipeline or heredoc, a substitution, an unparseable command), "
           "SNAPSHOT-THEN-ALLOWS untracked repository content, and ALLOWS tracked clean content (positive "
           "ls-files evidence, a note on a recursive delete), a literal scratch path, a regenerable build "
           "directory (the directory type required), and the leading opt-out "

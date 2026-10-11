@@ -6555,49 +6555,111 @@ def protected_line(data):
 # (_record_recovery), a literal scratch path or a regenerable build DIRECTORY is ALLOWED, and everything
 # else in the destructive class is DENIED and educated. NO-ASK posture: no path returns an ask.
 #
+# DENY UNLESS UNDERSTOOD. The guard is an ALLOW-LIST of the command shapes it models exactly, never a
+# catalogue of the shapes it rejects: a segment is classified only when every wrapper, option, operand,
+# construct and cwd effect in front of its effective command is one the tables below model. Any other shape
+# that carries an in-scope destructive word (_destruct_marker) DENIES with a reason naming the unmodelled
+# part, so a harmless command in an unmodelled shape is denied too (the accepted false-deny cost).
+#
 # _DESTRUCT_RULES names every rule the guard applies. Each deny or allow vector the self-test exercises
 # depends on exactly one named rule, and the self-test proves that by removing one name at a time from this
 # set (a mutant per rule) and requiring the vector's outcome to change. The production set always holds
 # every name; nothing reads it from the environment.
 _DESTRUCT_RULES = frozenset((
     "rm", "truncate", "dd", "benign-sink", "find", "format", "shred", "dropdb", "sql", "terraform",
-    "kubectl", "wrappers", "wrapper-opts", "xargs", "cd", "cd-flow", "subst", "unresolvable",
-    "no-preserve-root", "home", "scratch", "repo-root", "regenerable", "ignored", "embedded", "gitlink",
-    "git-admin", "dotdot", "snapshot", "clean", "optout", "raw"))
+    "kubectl", "wrappers", "wrapper-opts", "runner", "known", "known-forms", "computed", "construct",
+    "pipe-feed", "heredoc-feed", "cd", "cd-flow", "scope", "cd-dotdot", "cd-exists", "cd-cdpath", "subst",
+    "unresolvable", "no-preserve-root", "home", "scratch", "repo-root", "regenerable", "ignored", "embedded",
+    "gitlink", "git-admin", "dotdot", "snapshot", "clean", "optout", "raw", "shell-context", "raw-join",
+    "assign", "prose-shadow"))
 # The leading opt-out, matching GUARDRAIL_ALLOW_DISCARD's convention (bash last-wins, falsy values below).
 _DESTRUCT_OPTOUT_RE = re.compile(r"^GUARDRAIL_ALLOW_DESTRUCTIVE=(.*)$")
-# Words that stand in front of the real command (privilege, scheduling, multiplexer, and shell control-flow
-# words). Each wrapper's VALUE-CONSUMING options are modelled (the tables below); the options that re-base
-# the wrapped command's relative operands (env -C/--chdir, sudo -D/--chdir) move the inferred cwd, and the
-# options that re-split or re-root what follows (env -S/--split-string, sudo/doas -R/--chroot) DENY when
-# anything destructive follows. The walk STOPS at the first word that is none of a wrapper, an assignment,
-# an option, or an option value: that word is the effective command (sudo docker rm ... runs docker, not
-# rm), and the remaining words are raw-scanned so unclassifiable destructive text still DENIES.
-_DESTRUCT_WRAPPERS = frozenset((
-    "sudo", "doas", "command", "exec", "builtin", "env", "nice", "nohup", "time", "timeout", "stdbuf",
-    "ionice", "chrt", "setsid", "busybox", "toybox", "xargs", "!", "{", "if", "then", "elif", "else",
-    "do", "while", "until"))
-# Per-wrapper short option letters that CONSUME a value (the attached remainder of the cluster, else the
-# next word) and long option names that consume the NEXT word when given without '='. An option letter or
-# name absent here is read as a plain flag; a consuming option this table misses can hide the real command
-# behind its value, a disclosed residual (the raw stop-scan in _destruct_effective is the backstop for
-# destructive text behind such a value).
-_DESTRUCT_WRAPPER_ARG_OPTS = {
-    "sudo": "aCcDghpRrTtUu", "doas": "aCu", "env": "CSu", "nice": "n", "ionice": "cnp",
-    "chrt": "p", "stdbuf": "ioe", "timeout": "ks", "xargs": "adEeIiLlnPs", "exec": "a",
+# ONE table of the command words that run another command: privilege, scheduling, tracing, sandbox,
+# multiplexer, remote, shell and evaluation words. The gate-discipline note tier reads the same table as
+# _GATE_NOTE_WRAPPERS. This guard models EXACTLY the subset with an entry in _DESTRUCT_WRAPPER_SPECS; every
+# other runner here, like every command word in neither table nor _DESTRUCT_KNOWN, is UNMODELLED and DENIES
+# when a destructive word follows it.
+_COMMAND_RUNNERS = frozenset((
+    "sudo", "doas", "env", "nice", "nohup", "time", "timeout", "stdbuf", "ionice", "chrt", "setsid",
+    "command", "builtin", "exec", "busybox", "toybox", "xargs", "taskset", "flock", "pkexec", "runuser",
+    "setpriv", "strace", "ltrace", "xvfb-run", "unbuffer", "unshare", "proot", "chroot", "script", "watch",
+    "parallel", "su", "sg", "nsenter", "systemd-run", "firejail", "bwrap", "fakeroot", "valgrind", "numactl",
+    "ssh", "eval", "source", ".", "sh", "bash", "dash", "zsh", "ksh", "mksh", "ash", "fish", "csh", "tcsh"))
+# The wrappers this guard models EXACTLY, each as (short flag letters, short letters that take a value (the
+# attached remainder, else the next word), long flags, long options that take a value (=VALUE or the next
+# word), long options whose value may only be attached with =, the positional operand ahead of the wrapped
+# command: None, "duration" (the timeout DURATION, only in the plain decimal form _DESTRUCT_DURATION_RE
+# accepts) or "priority" (the optional decimal chrt priority)). Every option spelling outside an entry is
+# UNMODELLED, including a valid one: env -C/--chdir/-S/--split-string, sudo -D/-R/-i/-s, an abbreviated long
+# option, timeout 1e2. None of the modelled options moves the working directory. env and sudo also take
+# NAME=VALUE assignments ahead of the command.
+_DESTRUCT_WRAPPER_SPECS = {
+    "sudo": ("AbEHknPS", "gu", ("askpass", "background", "non-interactive", "preserve-groups",
+                                "reset-timestamp", "set-home", "stdin"), ("group", "user"), ("preserve-env",),
+             None),
+    "doas": ("n", "u", (), (), (), None),
+    "env": ("i", "u", ("ignore-environment",), ("unset",), (), None),
+    "nice": ("", "n", (), ("adjustment",), (), None),
+    "nohup": ("", "", (), (), (), None),
+    "timeout": ("v", "ks", ("foreground", "preserve-status", "verbose"), ("kill-after", "signal"), (),
+                "duration"),
+    "stdbuf": ("", "eio", (), ("error", "input", "output"), (), None),
+    "setsid": ("cfw", "", ("ctty", "fork", "wait"), (), (), None),
+    "ionice": ("t", "cn", ("ignore",), ("class", "classdata"), (), None),
+    "chrt": ("bdfioRrv", "", ("batch", "deadline", "fifo", "idle", "other", "reset-on-fork", "rr", "verbose"),
+             (), (), "priority"),
+    "command": ("pVv", "", (), (), (), None),
+    "builtin": ("", "", (), (), (), None),
+    "exec": ("cl", "a", (), (), (), None),
+    "time": ("p", "", (), (), (), None),
+    "busybox": ("", "", (), (), (), None),
+    "toybox": ("", "", (), (), (), None),
 }
-_DESTRUCT_WRAPPER_LONG_ARG_OPTS = {
-    "sudo": frozenset(("close-from", "command-timeout", "group", "host", "other-user", "prompt",
-                       "role", "type", "user")),
-    "env": frozenset(("unset",)),
-    "nice": frozenset(("adjustment",)),
-    "ionice": frozenset(("class", "classdata", "pid")),
-    "timeout": frozenset(("kill-after", "signal")),
-    "stdbuf": frozenset(("input", "output", "error")),
-    "xargs": frozenset(("arg-file", "delimiter", "max-args", "max-chars", "max-lines", "max-procs")),
-}
-# timeout's DURATION and chrt's PRIORITY are bare positional operands ahead of the wrapped command.
-_DESTRUCT_NUMERIC_RE = re.compile(r"^[0-9][0-9.smhd]*$")
+# Shell reserved words that stand in front of a command and take no options.
+_DESTRUCT_KEYWORDS = frozenset(("!", "{", "if", "then", "elif", "else", "do", "while", "until"))
+# Reserved and builtin words the lexer marks opaque only for their brace or bracket character; as a whole word
+# each is literal, never a command name computed at run time.
+_DESTRUCT_LITERAL_WORDS = frozenset(("{", "}", "[", "[[", "]]"))
+_DESTRUCT_DURATION_RE = re.compile(r"^[0-9]+(?:\.[0-9]+)?[smhd]?$")
+# Command words this guard KNOWS do not run another command from their arguments or their input: a
+# destructive word among their arguments is data (echo rm -rf /, grep -n truncate f, git rm x), never a
+# command. git, gh, docker and podman are known only in the forms _destruct_runner_form does not flag. Every
+# other command word (an interpreter, a build tool, a runner, an unknown program) is UNMODELLED.
+_DESTRUCT_KNOWN = frozenset((
+    "echo", "printf", "cat", "ls", "grep", "egrep", "fgrep", "head", "tail", "wc", "cut", "tr", "uniq",
+    "diff", "cmp", "comm", "paste", "join", "nl", "fold", "fmt", "rev", "tac", "column", "stat", "file", "du",
+    "df", "pwd", "true", "false", "test", "[", "cd", "pushd", "popd", "mkdir", "touch", "cp", "mv", "ln",
+    "chmod", "chown", "tee", "which", "type", "basename", "dirname", "realpath", "readlink", "date", "id",
+    "whoami", "uname", "hostname", "nproc", "seq", "mktemp", "sha256sum", "sha1sum", "md5sum", "base64",
+    "od", "xxd", "jq", "curl", "wget", "sleep", "wait", "kill", "exit", "return", "shift", "export", "unset",
+    "local", "declare", "typeset", "readonly", "read", "shopt", "set", "umask", "printenv", "ps", "pgrep",
+    "fi", "done", "esac", "}", "for", "select", "case", "git", "gh", "docker", "podman"))
+# git, gh, docker and podman forms that run another command: a git -c/--config-env/--exec-path setting (an
+# alias, pager or hook command), a git subcommand outside the modelled set (an alias, bisect run, rebase
+# --exec, submodule foreach, difftool, ...), a transport or pager command option, a gh alias or extension, and
+# a container run/exec/create/compose/build/debug.
+_DESTRUCT_GIT_SAFE = frozenset((
+    "add", "am", "apply", "archive", "blame", "branch", "bundle", "cat-file", "check-attr", "check-ignore",
+    "checkout", "cherry", "cherry-pick", "clean", "clone", "commit", "config", "count-objects", "describe",
+    "diff", "diff-files", "diff-index", "diff-tree", "fetch", "for-each-ref", "format-patch", "fsck", "gc",
+    "grep", "hash-object", "help", "init", "log", "ls-files", "ls-remote", "ls-tree", "merge", "merge-base",
+    "mv", "notes", "prune", "pull", "push", "range-diff", "read-tree", "reflog", "remote", "repack", "reset",
+    "restore", "rev-list", "rev-parse", "revert", "rm", "shortlog", "show", "show-branch", "show-ref",
+    "sparse-checkout", "stash", "status", "switch", "symbolic-ref", "tag", "update-index", "update-ref",
+    "var", "verify-commit", "verify-tag", "version", "worktree", "write-tree"))
+_DESTRUCT_GIT_GLOBAL_FLAGS = frozenset((
+    "--no-pager", "-p", "--paginate", "-P", "--bare", "--no-replace-objects", "--literal-pathspecs",
+    "--glob-pathspecs", "--noglob-pathspecs", "--icase-pathspecs", "--no-optional-locks"))
+_DESTRUCT_GIT_GLOBAL_VALUES = frozenset(("-C", "--git-dir", "--work-tree", "--namespace"))
+_DESTRUCT_GIT_RUN_OPTS = ("--upload-pack", "--receive-pack", "--exec", "--open-files-in-pager", "-O")
+_DESTRUCT_GH_SAFE = frozenset((
+    "api", "auth", "browse", "cache", "config", "gist", "help", "issue", "label", "org", "pr", "project",
+    "release", "repo", "ruleset", "run", "search", "secret", "status", "variable", "workflow"))
+_DESTRUCT_CONTAINER_RUNS = frozenset(("run", "exec", "create", "compose", "build", "buildx", "debug"))
+# Compound-command reserved words, for the scope model the cwd tracking reads.
+_DESTRUCT_OPENERS = frozenset(("if", "while", "until", "for", "select", "case", "{"))
+_DESTRUCT_CLOSERS = frozenset(("fi", "done", "esac", "}"))
+_DESTRUCT_INNER = frozenset(("then", "else", "elif", "do", "!", "time"))
 # Command words whose operands name files the command destroys or overwrites; each operand is classified.
 _DESTRUCT_PATH_WORDS = frozenset(("rm", "unlink", "truncate", "dd"))
 # Command words that always deny: their target is a device, a database, or remote state, none of which has a
@@ -6607,8 +6669,14 @@ _DESTRUCT_SQL_CLIENTS = frozenset(("psql", "mysql", "mariadb", "sqlite3"))
 _DESTRUCT_SQL_RE = re.compile(
     r"(?is)\bdrop\s+(?:table|database|schema|view|index|sequence|owned|role|user|extension|materialized)\b"
     r"|\btruncate\b")
+# The command words this guard classifies itself (never read as a generic runner).
+_DESTRUCT_CLASSIFIED = (_DESTRUCT_PATH_WORDS | _DESTRUCT_FORMAT_WORDS | _DESTRUCT_SQL_CLIENTS
+                        | frozenset(("find", "shred", "dropdb", "terraform", "tofu", "kubectl")))
+# The single-word destroyers a marker scan looks for among argv words.
+_DESTRUCT_KILL_WORDS = frozenset((
+    "rm", "rmdir", "unlink", "shred", "truncate", "dd", "dropdb", "mke2fs", "mkswap", "wipefs"))
 _DESTRUCT_FIND_EXEC = frozenset(("-exec", "-execdir", "-ok", "-okdir"))
-_DESTRUCT_FIND_KILLERS = frozenset(("rm", "unlink", "shred", "truncate"))
+_DESTRUCT_KUBECTL_RUNS = frozenset(("exec", "run", "debug", "attach", "plugin"))
 _DESTRUCT_DD_SINKS = frozenset(("/dev/null", "/dev/stdout", "/dev/stderr"))
 # Directories a build regenerates from the repository's sources; a recursive delete of one inside a
 # repository is allowed without a snapshot.
@@ -6618,37 +6686,49 @@ _DESTRUCT_REGENERABLE = frozenset(("node_modules", "__pycache__", ".pytest_cache
 _DESTRUCT_BUDGET = 6.0
 _RM_LONG_OPTS = ("recursive", "force", "interactive", "one-file-system", "no-preserve-root", "preserve-root",
                  "dir", "verbose", "help", "version")
-# The narrow raw scan: a raw recursive rm, a find -delete, or an always-deny command word. Used by the
-# substitution scan (its disclosed scope) and as the stop-scan backstop behind a wrapper walk.
-_RAW_DESTRUCT_RE = re.compile(
-    r"(?:^|[\s;&|()`'\"/\\])rm\s(?:[^\n;&|]*?\s)?(?:-[A-Za-z]*[rR]|--rec)"
-    r"|(?:^|[\s;&|()`'\"/\\])find\s[^\n;&|]*\s-delete\b"
-    r"|(?:^|[\s;&|()`'\"/\\])(?:mkfs[.\w]*|mke2fs|mkswap|wipefs|shred|dropdb)(?=$|[\s;&|()`'\"])")
-# The WIDE raw scan for a command the LEXER cannot parse (and for a wrapper option that re-splits or
-# re-roots what follows): the fallback cannot classify operands at all, so EVERY in-scope command word
-# DENIES there, not only a recursive rm: rm/unlink in any form, truncate, dd with an of= sink, kubectl
-# delete, terraform/tofu destroy, a SQL client beside DROP or TRUNCATE, plus the narrow scan's names.
-_RAW_DESTRUCT_WIDE_RE = re.compile(
-    r"(?:^|[\s;&|()`'\"/\\])(?:rm|unlink|truncate|shred|dropdb|mke2fs|mkswap|wipefs|mkfs[.\w]*)"
-    r"(?=$|[\s;&|()`'\"])"
-    r"|(?:^|[\s;&|()`'\"/\\])dd\s[^\n;&|]*\bof="
-    r"|(?:^|[\s;&|()`'\"/\\])find\s[^\n;&|]*\s-delete\b"
-    r"|(?:^|[\s;&|()`'\"/\\])kubectl\s[^\n;&|]*\bdelete(?=$|[\s;&|()`'\"])"
-    r"|(?:^|[\s;&|()`'\"/\\])(?:terraform|tofu)\s[^\n;&|]*-?destroy\b"
-    r"|(?:^|[\s;&|()`'\"/\\])(?:psql|mysql|mariadb|sqlite3)(?=[\s;&|()`'\"])[^\n;&|]*"
-    r"(?i:\bdrop\b|\btruncate\b)")
-# Quote and escape characters removed before a raw scan, so a quote-concatenated spelling (r''m, "r"m,
+# The text marker: an in-scope destructive word in TEXT this guard does not read as argv (an unparseable
+# command, a substitution, the arguments of an unmodelled command, a fed pipeline or heredoc). Every
+# alternative over-matches (any non-word neighbour; a multi-word form across the rest of the line) because a
+# hit here only ever denies.
+_DESTRUCT_TEXT_RE = re.compile(
+    r"(?<![\w.-])(?:rm|rmdir|unlink|shred|truncate|dropdb|mke2fs|mkswap|wipefs|mkfs(?:\.\w+)?)(?![\w.-])"
+    r"|(?<![\w.-])dd\s[^\n]*\bof="
+    r"|(?<![\w.-])find\s[^\n]*\s-delete\b"
+    r"|(?<![\w.-])kubectl\s[^\n]*\bdelete\b"
+    r"|(?<![\w.-])(?:terraform|tofu)\s[^\n]*-?destroy\b"
+    r"|(?<![\w.-])(?:psql|mysql|mariadb|sqlite3)\s[^\n]*(?i:\bdrop\b|\btruncate\b)"
+    r"|(?<![\w.-])git\s[^\n]*\b(?:clean|restore|reset\s[^\n]*--hard|checkout\s[^\n]*\s--(?=\s|$))"
+    r"|(?<![\w.-])(?:docker|podman)\s[^\n]*\b(?:rm|rmi|prune)\b")
+# The looser marker for a command word computed at run time ($X, ${X:-rm}, "$(...)"): the destructive word
+# anywhere in the command text, bounded only by non-alphanumerics.
+_DESTRUCT_LOOSE_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?:rm|rmdir|unlink|shred|truncate|dd|dropdb|mke2fs|mkswap|wipefs|mkfs)(?![A-Za-z0-9])")
+# A computed command word: a plain $NAME or ${NAME} is checked for a destructive word in the command text and
+# for a NAME assigned from a substitution; any other expansion, a substitution, or a glob that can match a
+# destructive command name (_DESTRUCT_GLOB_TARGETS) is never understood.
+_DESTRUCT_PLAIN_VAR_RE = re.compile(r"^\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})$")
+_DESTRUCT_SUBST_ASSIGN_RE = re.compile(r"(?<![A-Za-z0-9_$])[A-Za-z_][A-Za-z0-9_]*\+?=[\"']?(?:\$\(|`)")
+_DESTRUCT_GLOB_TARGETS = _DESTRUCT_KILL_WORDS | _DESTRUCT_CLASSIFIED | frozenset(("mkfs",))
+# A command that may SHADOW the cat of the $(cat <<EOF ...) prose idiom (a function or alias definition, hash,
+# enable, a PATH change) turns that idiom off, so its heredoc body is scanned like any other.
+_DESTRUCT_SHADOW_RE = re.compile(
+    r"(?:^|[\s;&|(){}])(?:function|alias|hash|enable)\s|(?:^|[\s;&|(){}])(?:export\s+)?PATH\+?="
+    r"|[A-Za-z_][A-Za-z0-9_.:-]*\s*\(\s*\)")
+# Quote and escape characters removed before a text scan, so a quote-concatenated spelling (r''m, "r"m,
 # r\m) scans as the word the shell actually runs. Removal only JOINS fragments, so it can over-match a
-# quoted mention (the safe direction) and never under-matches a real spelling.
+# quoted mention (the safe direction).
 _DESTRUCT_QUOTE_STRIP = dict.fromkeys(map(ord, "'\"\\"))
+_DESTRUCT_ANSI_ESCAPES = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": "\n", "r": "\r",
+                          "t": "\t", "v": "\v", "\\": "\\", "'": "'", '"': '"', "?": "?"}
 _DESTRUCT_ALTS = (
     "This guard cannot verify human authorization (rule sechau) or a verified restore path (rule secrst) "
     "for it. Safe next steps: hold, and ask the human operator in the conversation to run it or to authorize "
     "it explicitly; copy or commit the data first, or work on a literal path under /tmp or the session "
-    "TMPDIR; name every target as a literal path rather than a variable, glob, or command substitution. If "
-    "the human has explicitly authorized this exact operation and accepted the loss, re-issue it with a "
-    "leading GUARDRAIL_ALLOW_DESTRUCTIVE=1 assignment; that prefix is a convention the assistant can type, "
-    "so it records a claimed authorization and is not proof of one.")
+    "TMPDIR; name every target as a literal path rather than a variable, glob, or command substitution, and "
+    "run the command bare or behind a wrapper this guard models, not through another runner, an interpreter, "
+    "a pipeline or a heredoc. If the human has explicitly authorized this exact operation and accepted the "
+    "loss, re-issue it with a leading GUARDRAIL_ALLOW_DESTRUCTIVE=1 assignment; that prefix is a convention "
+    "the assistant can type, so it records a claimed authorization and is not proof of one.")
 
 
 def _destruct_word(token):
@@ -6656,29 +6736,258 @@ def _destruct_word(token):
     return token.rsplit("/", 1)[-1]
 
 
-def _destruct_is_target_word(word):
-    """True when word names a command this guard classifies (a path word, an always-deny word, a SQL
-    client, or a wrapper it peels)."""
-    return (word in _DESTRUCT_PATH_WORDS or word in _DESTRUCT_FORMAT_WORDS or word in _DESTRUCT_SQL_CLIENTS
-            or word.startswith("mkfs") or word in ("shred", "dropdb", "find", "terraform", "tofu", "kubectl")
-            or word in _DESTRUCT_WRAPPERS)
+def _destruct_ansi_c(text, i):
+    r"""(decoded, next_index) for the body of an ANSI-C $'...' word starting at index i (just past the
+    opening $'): the escapes bash decodes (\n, \xHH, \NNN octal, \uHHHH, \UHHHHHHHH, \cX and the
+    single-character forms) are decoded, so $'\x72m' reads as the rm bash runs. An unterminated body runs
+    to the end of the text."""
+    out = []
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if c == "'":
+            return "".join(out), i + 1
+        if c != "\\" or i + 1 >= n:
+            out.append(c)
+            i += 1
+            continue
+        e = text[i + 1]
+        i += 2
+        if e in _DESTRUCT_ANSI_ESCAPES:
+            out.append(_DESTRUCT_ANSI_ESCAPES[e])
+        elif e in "01234567":
+            j = i
+            while j < n and j < i + 2 and text[j] in "01234567":
+                j += 1
+            out.append(chr(int(e + text[i:j], 8) & 0xFF))
+            i = j
+        elif e in "xuU":
+            width = {"x": 2, "u": 4, "U": 8}[e]
+            j = i
+            while j < n and j < i + width and text[j] in "0123456789abcdefABCDEF":
+                j += 1
+            try:
+                out.append(chr(int(text[i:j], 16)) if j > i else "\\" + e)
+            except (ValueError, OverflowError):
+                out.append("\\" + e + text[i:j])
+            i = j
+        elif e == "c" and i < n:
+            out.append(chr(ord(text[i]) & 0x1F))
+            i += 1
+        else:
+            out.append("\\" + e)
+    return "".join(out), n
 
 
-def _destruct_raw_text(text):
-    r"""Raw text prepared for a fallback scan: the bodies of QUOTED heredocs removed first (literal prose),
-    then every quote and backslash removed, so a quote-concatenated spelling (r''m, "r"m, r\m) scans as the
-    word the shell actually runs. Removal only joins fragments: it can over-match a quoted mention (the
-    safe direction) and never hides a real spelling."""
-    return _strip_quoted_heredoc_bodies(text).translate(_DESTRUCT_QUOTE_STRIP)
+def _destruct_shell_text(text, prose):
+    r"""The text a destructive-word scan reads, tracked through the shell QUOTING CONTEXT: single and double
+    quotes, ANSI-C $'...' bodies (decoded), backslash escapes, $( ) and backtick substitutions, a comment
+    at a word start, heredoc operators. A backslash-newline outside single quotes is a line continuation and
+    is removed, as bash removes it. A heredoc operator is recognized only where the shell recognizes one
+    (unquoted, never inside a quoted string), and every heredoc body is KEPT (it is fed to a command), except
+    that, when prose is True, the body of the one exact prose idiom $(cat <<'EOF' ... EOF) is dropped: a
+    quoted-delimiter heredoc read by a bare cat that is the whole substitution, whose output is a word of
+    data such as a commit message. Nothing else is removed, so a form this reading does not recognize
+    over-matches (the safe direction)."""
+    out = []
+    stack = []
+    pending = []
+    i = 0
+    n = len(text)
+    while i < n:
+        c = text[i]
+        top = stack[-1] if stack else None
+        if top is not None and top["kind"] == "dq":
+            if c == "\\" and i + 1 < n:
+                if text[i + 1] != "\n":
+                    out.append(text[i:i + 2])
+                i += 2
+            elif c == "\"":
+                stack.pop()
+                out.append(c)
+                i += 1
+            elif c == "`":
+                stack.append({"kind": "bt"})
+                out.append(c)
+                i += 1
+            elif text.startswith("$(", i):
+                out.append("$(")
+                stack.append({"kind": "sub", "start": len(out), "parens": 0, "prose": None})
+                i += 2
+            else:
+                out.append(c)
+                i += 1
+            continue
+        if c == "\\":
+            if i + 1 < n and text[i + 1] != "\n":
+                out.append(text[i:i + 2])
+            i += 2
+            continue
+        last = next((chunk[-1] for chunk in reversed(out) if chunk), "")
+        if c == "#" and (last == "" or last in " \t\n;&|()<>"):
+            end = text.find("\n", i)
+            end = n if end < 0 else end
+            out.append(text[i:end])
+            i = end
+            continue
+        if c == "'":
+            end = text.find("'", i + 1)
+            end = n if end < 0 else end + 1
+            out.append(text[i:end])
+            i = end
+            continue
+        if text.startswith("$'", i):
+            body, i = _destruct_ansi_c(text, i + 2)
+            out.append(body)
+            continue
+        if c == "\"":
+            stack.append({"kind": "dq"})
+        elif c == "`":
+            if top is not None and top["kind"] == "bt":
+                stack.pop()
+            else:
+                stack.append({"kind": "bt"})
+        elif text.startswith("$(", i):
+            out.append("$(")
+            stack.append({"kind": "sub", "start": len(out), "parens": 0, "prose": None})
+            i += 2
+            continue
+        elif top is not None and top["kind"] == "sub" and c == "(":
+            top["parens"] += 1
+        elif top is not None and top["kind"] == "sub" and c == ")":
+            if top["parens"]:
+                top["parens"] -= 1
+            else:
+                stack.pop()
+                spans = top["prose"]
+                if (spans is not None and not "".join(out[spans[0] + 1:spans[1]]).strip()
+                        and not "".join(out[spans[1] + 1:]).strip()):
+                    out[spans[1]] = "\n"  # the exact $(cat <<'EOF' ... EOF) prose idiom: its body is data
+        elif text.startswith("<<<", i):
+            out.append("<<<")
+            i += 3
+            continue
+        elif text.startswith("<<", i):
+            parsed = _parse_heredoc_delim(text, i + 2, n)
+            if parsed is not None:
+                quoted, delim, strip_tabs, next_i = parsed
+                owner = None
+                if (prose and quoted and top is not None and top["kind"] == "sub"
+                        and "".join(out[top["start"]:]).strip() == "cat"):
+                    owner = top
+                out.append(text[i:next_i])
+                pending.append((delim, strip_tabs, owner, len(out) - 1))
+                i = next_i
+                continue
+        elif c == "\n" and pending:
+            out.append("\n")
+            i += 1
+            for delim, strip_tabs, owner, op_index in pending:
+                start = i
+                while i < n:
+                    nl = text.find("\n", i)
+                    line = text[i:(nl if nl != -1 else n)]
+                    i = n if nl == -1 else nl + 1
+                    if (line.lstrip("\t") if strip_tabs else line) == delim:
+                        break
+                out.append(text[start:i])
+                if owner is not None:
+                    owner["prose"] = (op_index, len(out) - 1)
+            del pending[:]
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _destruct_join_lines(text):
+    """text with every backslash-newline pair removed, reading backslashes as escapes left to right (an
+    escaped backslash before a newline is kept, and that newline stays a separator)."""
+    out = []
+    i = 0
+    n = len(text)
+    while i < n:
+        if text[i] == "\\" and i + 1 < n:
+            if text[i + 1] != "\n":
+                out.append(text[i:i + 2])
+            i += 2
+            continue
+        out.append(text[i])
+        i += 1
+    return "".join(out)
+
+
+def _destruct_text_variants(text, prose=False):
+    """The forms of text a destructive-word scan reads, each with quotes and escapes removed: the
+    shell-context reading (_destruct_shell_text), plus two line-continuation joins of it (a continuation
+    inside a heredoc body, or in any span that reading copies verbatim, still joins when the shell reads that
+    span). A hit in ANY form counts, so the union only over-matches."""
+    if "shell-context" in _DESTRUCT_RULES:
+        base = _destruct_shell_text(text, prose)
+    else:
+        base = _strip_quoted_heredoc_bodies(text) if prose else text
+    forms = [base]
+    if "raw-join" in _DESTRUCT_RULES:
+        forms += [base.replace("\\\n", ""), _destruct_join_lines(base)]
+    return [form.translate(_DESTRUCT_QUOTE_STRIP) for form in forms]
+
+
+def _destruct_text_marker(text, prose=False, loose=False):
+    """The first in-scope destructive word in text (a short excerpt), or None; loose selects the
+    computed-command-word form (_DESTRUCT_LOOSE_RE)."""
+    regex = _DESTRUCT_LOOSE_RE if loose else _DESTRUCT_TEXT_RE
+    for form in _destruct_text_variants(text, prose):
+        hit = regex.search(form)
+        if hit:
+            return " ".join(hit.group(0).split())[:60]
+    return None
+
+
+def _destruct_argv_marker(words):
+    """The first in-scope destructive command word among quote-decoded argv words, or None: a single-word
+    destroyer (rm, rmdir, unlink, shred, truncate, dd, dropdb, mkfs*, mke2fs, mkswap, wipefs) or a destroying
+    form (find -delete, kubectl delete, terraform/tofu destroy, a SQL client beside DROP or TRUNCATE, git
+    clean, restore, reset --hard or checkout with --, . or -f, docker or podman rm, rmi or prune)."""
+    for k, tok in enumerate(words):
+        word = _destruct_word(tok)
+        later = words[k + 1:]
+        if word in _DESTRUCT_KILL_WORDS or word.startswith("mkfs"):
+            return word
+        if ((word == "find" and "-delete" in later) or (word == "kubectl" and "delete" in later)
+                or (word in ("terraform", "tofu") and ("destroy" in later or "-destroy" in later))
+                or (word in _DESTRUCT_SQL_CLIENTS and any(_DESTRUCT_SQL_RE.search(arg) for arg in later))
+                or (word == "git" and ("clean" in later or "restore" in later
+                                       or ("reset" in later and "--hard" in later)
+                                       or ("checkout" in later
+                                           and any(arg in ("--", ".", "-f", "--force") for arg in later))))
+                or (word in ("docker", "podman") and any(arg in ("rm", "rmi", "prune") for arg in later))):
+            return " ".join([word] + later)[:60]
+    return None
+
+
+def _destruct_marker(words, extra=()):
+    """The in-scope destructive word named by argv words (read as argv, then as text, so a command string
+    such as sh -c 'rm -rf x' or a quote-concatenated r''m is seen) or by the extra text fragments;
+    None when there is none."""
+    words = list(words)
+    return _destruct_argv_marker(words) or _destruct_text_marker(" ".join(words + [w for w in extra if w]))
 
 
 def _destruct_abs(token):
-    """Collapse an ABSOLUTE operand the way the kernel resolves it: a '..' component applies only AFTER the
-    symlink before it is resolved (os.path.realpath walks components left to right), so 'repo/link/../x' is
-    judged at the real target the shell will touch, never at the lexically collapsed forgery. A dot-dot-free
-    path keeps the cheaper lexical collapse (the classifier realpaths it before judging anyway)."""
-    if "dotdot" in _DESTRUCT_RULES and ".." in token.split("/"):
-        return os.path.realpath(token)
+    """Collapse an ABSOLUTE operand the way the kernel resolves it, or None when that cannot be proven. A
+    '..' component applies only AFTER the symlink before it is resolved, so the path up to its last '..'
+    must resolve STRICTLY (os.path.realpath(strict=True): every component exists and is reachable from this
+    process); a prefix that does not (a missing, unreadable or looping component, which a wrapper running as
+    another user may resolve differently) returns None, and the operand DENIES. A dot-dot-free path keeps the
+    cheaper lexical collapse (the classifier realpaths it before judging anyway)."""
+    parts = token.split("/")
+    if "dotdot" in _DESTRUCT_RULES and ".." in parts:
+        last = max(k for k, part in enumerate(parts) if part == "..")
+        try:
+            real = os.path.realpath("/".join(parts[:last + 1]) or "/", strict=True)
+        except (OSError, ValueError):
+            return None
+        return "/" + os.path.normpath(os.path.join(real, "/".join(parts[last + 1:]))).lstrip("/")
     return "/" + os.path.normpath(token).lstrip("/")
 
 
@@ -6691,129 +7000,158 @@ def _destruct_left(deadline, cap):
     return max(0.05, min(cap, deadline - time.monotonic()))
 
 
-def _destruct_chdir(cwd, value, opaque):
-    """The wrapped command's working directory after a modelled env -C / sudo -D directory change: the
-    literal value (absolute, or joined to the current cwd), or None (UNKNOWN, so a later relative operand
-    DENIES) when the value is missing, opaque, or relative with no known cwd."""
-    if not value or opaque:
-        return None
-    if os.path.isabs(value):
-        return _destruct_abs(value)
-    if not cwd:
-        return None
-    return _destruct_abs(os.path.join(cwd, value))
+def _destruct_short_cluster(tok, flags, values):
+    """Words one short-option cluster consumes (1, or 2 when its value letter ends the cluster), or 0 when a
+    letter in it is not modelled."""
+    for pos in range(1, len(tok)):
+        if tok[pos] in values:
+            return 1 if pos + 1 < len(tok) else 2
+        if tok[pos] not in flags:
+            return 0
+    return 1
 
 
-def _destruct_wrapper_stop(word, tok, trailing):
-    """The deny detail for a wrapper option this guard cannot model through: env -S/--split-string re-splits
-    one word into a command line of its own, and sudo/doas -R/--chroot re-roots every path the wrapped
-    command touches. Returns a deny detail when the trailing words name anything destructive (either raw
-    scan over the quote-decoded words), else None: the walk stops and nothing in scope follows."""
-    if _RAW_DESTRUCT_WIDE_RE.search(trailing) or _RAW_DESTRUCT_RE.search(trailing):
-        return ("the {} option {!r} makes the following words run {} this guard cannot model, and they name "
-                "a destructive operation, so their real targets cannot be classified".format(
-                    word, tok[:40], "as a re-split command line" if word == "env" else "under a chroot"))
+def _destruct_peel_one(seg, i):
+    """Walk ONE modelled wrapper's options, assignments and positional operand to the wrapped command, exactly
+    as its _DESTRUCT_WRAPPER_SPECS entry models them. Returns (index_of_the_wrapped_command,
+    unmodelled_detail_or_None): an option or operand the entry does not model stops the walk there with a
+    detail (the caller denies when a destructive word follows); command -v/-V runs nothing."""
+    argv, opaque = seg.argv, seg.argv_opaque
+    word = _destruct_word(argv[i])
+    flags, values, longs, long_values, long_attached, positional = _DESTRUCT_WRAPPER_SPECS[word]
+    strict = "wrapper-opts" in _DESTRUCT_RULES
+    j = i + 1
+    options = True
+    while j < len(argv):
+        tok = argv[j]
+        if word in ("env", "sudo") and _ENV_ASSIGN_RE.match(tok):
+            options = False
+            j += 1
+            continue
+        if not options or not tok.startswith("-") or (tok == "-" and word != "env"):
+            break
+        if tok == "--":
+            options = False
+            j += 1
+            continue
+        step = 0
+        if tok == "-":
+            step = 1  # env's lone - is -i
+        elif tok.startswith("--"):
+            name, eq, _value = tok[2:].partition("=")
+            if (name in longs and not eq) or name in long_attached:
+                step = 1
+            elif name in long_values:
+                step = 1 if eq else 2
+        elif word == "nice" and tok[1:].isdigit():
+            step = 1  # the obsolete nice -N adjustment
+        else:
+            step = _destruct_short_cluster(tok, flags, values)
+            if step and word == "command" and ("v" in tok or "V" in tok):
+                return len(argv), None  # command -v/-V describes the names and runs nothing
+        if step:
+            j += step
+            continue
+        if strict:
+            return j, "the {} option {!r} is not one this guard models".format(word, tok[:40])
+        j += 1
+    if positional == "duration" and j < len(argv):
+        if not opaque[j] and _DESTRUCT_DURATION_RE.match(argv[j]):
+            j += 1
+        elif strict:
+            return j, "the timeout DURATION {!r} is not a form this guard models".format(argv[j][:40])
+        else:
+            j += 1
+    elif positional == "priority" and j < len(argv) and not opaque[j] and argv[j].isdigit():
+        j += 1
+    return j, None
+
+
+def _destruct_effective(seg):
+    """(index, unmodelled_detail): the index of the segment's effective command word after leading
+    assignments, shell keywords (_DESTRUCT_KEYWORDS), a function NAME prefix and the wrappers this guard models exactly
+    (_destruct_peel_one), or len(argv) when nothing runs; unmodelled_detail names a wrapper option or operand
+    outside the model (the walk stops at it, and the caller denies when a destructive word follows)."""
+    argv = seg.argv
+    i = _command_word_index(argv)
+    while i < len(argv) and "wrappers" in _DESTRUCT_RULES:
+        if argv[i] in _DESTRUCT_KEYWORDS:
+            i += 1
+            continue
+        if argv[i] == "function":
+            i += 2  # a function NAME definition: its body (behind the brace keyword) is classified
+            continue
+        if seg.argv_opaque[i] or _destruct_word(argv[i]) not in _DESTRUCT_WRAPPER_SPECS:
+            break
+        i, detail = _destruct_peel_one(seg, i)
+        if detail:
+            return i, detail
+    return i, None
+
+
+def _destruct_runner_form(word, args):
+    """The reason a KNOWN command word runs another command in this form, or None: git with a -c,
+    --config-env or --exec-path setting or another unmodelled global option, a git subcommand outside
+    _DESTRUCT_GIT_SAFE (an alias, bisect, rebase, submodule, difftool, ...) or a transport or pager command
+    option; a gh subcommand outside _DESTRUCT_GH_SAFE (an alias or extension); a docker or podman
+    run/exec/create/compose/build/debug."""
+    if word == "git":
+        k = 0
+        while k < len(args) and args[k].startswith("-"):
+            tok = args[k]
+            if tok in _DESTRUCT_GIT_GLOBAL_FLAGS:
+                k += 1
+            elif tok.split("=", 1)[0] in _DESTRUCT_GIT_GLOBAL_VALUES:
+                k += 1 if "=" in tok else 2
+            else:
+                return ("the git option {!r} is not one this guard models (a setting can define an alias, a "
+                        "pager or a hook command)".format(tok[:40]))
+        if k >= len(args):
+            return None
+        if args[k] not in _DESTRUCT_GIT_SAFE:
+            return "git {!r} is a subcommand this guard does not model (an alias or a command runner)".format(
+                args[k][:40])
+        for tok in args[k + 1:]:
+            if tok.startswith(_DESTRUCT_GIT_RUN_OPTS) or (args[k] == "clone" and tok.startswith("-u")):
+                return "the git {} option {!r} runs a command".format(args[k], tok[:40])
+        return None
+    if word == "gh":
+        sub = next((arg for arg in args if not arg.startswith("-")), None)
+        if sub is None or sub in _DESTRUCT_GH_SAFE:
+            return None
+        return "gh {!r} is a subcommand this guard does not model (an alias or an extension)".format(sub[:40])
+    if word in ("docker", "podman"):
+        hit = next((arg for arg in args if arg in _DESTRUCT_CONTAINER_RUNS), None)
+        if hit:
+            return "{} {} runs a command".format(word, hit)
     return None
 
 
-def _destruct_peel_one(seg, i, cwd):
-    """Walk ONE wrapper word's own assignments, options and option values to its operand (the wrapped
-    command). Returns (index_of_the_wrapped_command, cwd_for_it, deny_detail_or_None). A modelled
-    env -C/--chdir or sudo -D/--chdir re-bases the wrapped command's relative operands (an unresolvable
-    directory makes the cwd unknown); env -S/--split-string and sudo/doas -R/--chroot are unmodellable and
-    DENY when anything destructive follows (_destruct_wrapper_stop); an option value is consumed so it is
-    never mistaken for the wrapped command; timeout and chrt skip their bare numeric positional operands."""
-    argv = seg.argv
-    word = _destruct_word(argv[i])
-    shorts = _DESTRUCT_WRAPPER_ARG_OPTS.get(word, "")
-    longs = _DESTRUCT_WRAPPER_LONG_ARG_OPTS.get(word, frozenset())
-    j = i + 1
-    while j < len(argv):
-        tok = argv[j]
-        if tok == "--":
-            return j + 1, cwd, None
-        if _ENV_ASSIGN_RE.match(tok):
-            j += 1
+def _destruct_nesting(argv, nest):
+    """(nest, broken) after one segment's leading reserved words: if, while, until, for, select, case and
+    an opening brace open a compound scope; fi, done, esac and a closing brace close one (closing at depth 0
+    sets broken: a scope this model lost track of); then, else, elif, do, !, time and a function NAME prefix
+    keep reading."""
+    broken = False
+    k = 0
+    while k < len(argv):
+        w = argv[k]
+        if w in _DESTRUCT_OPENERS:
+            nest += 1
+            if w in ("for", "select", "case"):
+                break
+        elif w in _DESTRUCT_CLOSERS:
+            if nest:
+                nest -= 1
+            else:
+                broken = True
+        elif w == "function":
+            k += 2
             continue
-        if word in ("timeout", "chrt") and _DESTRUCT_NUMERIC_RE.match(tok):
-            j += 1
-            continue
-        if tok.startswith("--") and len(tok) > 2:
-            name, eq, inline = tok[2:].partition("=")
-            if (word == "env" and name == "split-string") or (word in ("sudo", "doas") and name == "chroot"):
-                trailing = " ".join([inline] + argv[j + 1:])
-                return len(argv), cwd, _destruct_wrapper_stop(word, tok, trailing)
-            if name == "chdir" and word in ("env", "sudo"):
-                if eq:
-                    cwd = _destruct_chdir(cwd, inline, seg.argv_opaque[j])
-                    j += 1
-                elif j + 1 < len(argv):
-                    cwd = _destruct_chdir(cwd, argv[j + 1], seg.argv_opaque[j + 1])
-                    j += 2
-                else:
-                    return len(argv), cwd, None
-                continue
-            if not eq and name in longs:
-                j += 2
-                continue
-            j += 1
-            continue
-        if tok.startswith("-") and len(tok) > 1:
-            consumed, letter, value, v_opaque = 1, "", None, False
-            for pos in range(1, len(tok)):
-                ch = tok[pos]
-                if ch in shorts:
-                    letter = ch
-                    if pos + 1 < len(tok):
-                        value, v_opaque = tok[pos + 1:], seg.argv_opaque[j]
-                    elif j + 1 < len(argv):
-                        value, v_opaque, consumed = argv[j + 1], seg.argv_opaque[j + 1], 2
-                    break
-                if not ch.isalnum():
-                    break
-            if (word == "env" and letter == "S") or (word in ("sudo", "doas") and letter == "R"):
-                trailing = " ".join([value or ""] + argv[j + consumed:])
-                return len(argv), cwd, _destruct_wrapper_stop(word, tok, trailing)
-            if (word == "env" and letter == "C") or (word == "sudo" and letter == "D"):
-                cwd = _destruct_chdir(cwd, value, v_opaque)
-            j += consumed
-            continue
-        return j, cwd, None
-    return len(argv), cwd, None
-
-
-def _destruct_effective(seg, cwd):
-    """(index, via_xargs, cwd, deny_detail): the index of the segment's effective command word after leading
-    assignments and any wrapper or control-flow word, or len(argv) when there is none; via_xargs is True
-    when xargs stood in front, so the command receives operands this guard cannot see; cwd is the working
-    directory the wrapped command's relative operands resolve against (re-based by a modelled env -C /
-    sudo -D, None when a directory change cannot be resolved); deny_detail is set when a wrapper form
-    cannot be classified while destructive text follows (fail closed). The walk STOPS at the first word
-    that is neither a wrapper, an assignment, an option, nor an option value: that word is the effective
-    command (sudo docker rm ... runs docker, not the shell's rm), and the remaining words are raw-scanned
-    so unclassifiable destructive text behind an unmodelled form still DENIES rather than pass unexamined."""
-    argv = seg.argv
-    i = _command_word_index(argv)
-    via_xargs = False
-    while i < len(argv) and "wrappers" in _DESTRUCT_RULES and _destruct_word(argv[i]) in _DESTRUCT_WRAPPERS:
-        if _destruct_word(argv[i]) == "xargs" and "xargs" in _DESTRUCT_RULES:
-            via_xargs = True
-        if "wrapper-opts" not in _DESTRUCT_RULES:
-            j = i + 1
-            while j < len(argv) and not _destruct_is_target_word(_destruct_word(argv[j])):
-                j += 1
-            i = j
-            continue
-        i, cwd, detail = _destruct_peel_one(seg, i, cwd)
-        if detail:
-            return i, via_xargs, cwd, detail
-        if i < len(argv) and not _destruct_is_target_word(_destruct_word(argv[i])):
-            if _RAW_DESTRUCT_RE.search(" ".join(argv[i:])):
-                return i, via_xargs, cwd, (
-                    "the wrapped command {!r} is not one this guard models, while the words after it name a "
-                    "destructive operation it cannot classify".format(argv[i][:80]))
+        elif w not in _DESTRUCT_INNER:
             break
-    return i, via_xargs, cwd, None
+        k += 1
+    return nest, broken
 
 
 def _rm_operands(args):
@@ -7011,35 +7349,132 @@ def _destruct_classify_path(path, recursive, deadline=None):
     return ("deny", "{} has no restore path this guard verified".format(path))
 
 
-def _destruct_segment(seg, cwd, deadline):
-    """The verdicts for one lexed segment: a list of ('allow'|'note'|'snap'|'deny', detail) pairs, empty
-    when the segment runs nothing in the destructive class. An operand reached after the monotonic deadline
-    denies unclassified."""
+def _destruct_computed(token, command):
+    """Why a command word computed at run time may be a destructive command, or None: its name is built by a
+    substitution or an expansion operator, or is a glob that can match a destructive command name, or the
+    command text names a destructive word anywhere (_DESTRUCT_LOOSE_RE), or a plain $NAME is assigned from a
+    substitution somewhere in the command."""
+    name = _destruct_word(token)
+    plain = _DESTRUCT_PLAIN_VAR_RE.match(name)
+    if not plain and ("$" in name or "`" in name):
+        return "its name is computed by a substitution or an expansion this guard does not model"
+    if any(ch in name for ch in "*?[") and any(fnmatch.fnmatchcase(word, name) for word in _DESTRUCT_GLOB_TARGETS):
+        return "its name is a glob that can match a destructive command"
+    hit = _destruct_text_marker(command, loose=True)
+    if hit:
+        return "the command text names {!r}".format(hit)
+    if plain and _DESTRUCT_SUBST_ASSIGN_RE.search(command):
+        return "the command assigns a variable from a substitution, whose value this guard cannot see"
+    return None
+
+
+def _destruct_unmodelled(what, marker):
+    """The verdict list for a shape this guard does not model that names a destructive word."""
+    return [("deny", "{}, and it names {!r}; this guard classifies only the command shapes it models "
+                     "exactly, so what this would destroy cannot be classified".format(what, marker))]
+
+
+def _destruct_feed_marker(ctx):
+    """The destructive word in the text a pipeline feeds to the current segment (the earlier stages of the
+    same pipeline as argv and as text; the whole command when an earlier stage reads a heredoc, whose body
+    the lexer does not keep), or None."""
+    upstream = ctx["upstream"]
+    for seg in upstream:
+        hit = _destruct_argv_marker(seg.argv)
+        if hit:
+            return hit
+    if any("<<" in seg.raw for seg in upstream):
+        return _destruct_text_marker(ctx["command"])
+    return _destruct_text_marker("\n".join(seg.raw for seg in upstream))
+
+
+def _destruct_segment(seg, cwd, deadline, ctx):
+    """The verdicts for one lexed segment: a list of ('allow'|'note'|'snap'|'deny', detail) pairs,
+    empty when the segment runs nothing in the destructive class. ctx carries the whole command text
+    (ctx["command"]) and the earlier stages of the pipeline feeding this segment (ctx["upstream"]). An
+    operand reached after the monotonic deadline denies unclassified."""
     argv = seg.argv
-    if ("subst" in _DESTRUCT_RULES and seg.opaque_shell and ("`" in seg.raw or "$(" in seg.raw)
-            and _RAW_DESTRUCT_RE.search(_destruct_raw_text(seg.raw))):
-        # a backtick or quoted $( ) substitution is one opaque word to the lexer, so its body is scanned raw
-        # with quotes and escapes removed (a quote-concatenated r''m scans as the rm the shell runs); quoted
-        # heredoc bodies, such as a commit message written through $(cat <<'EOF' ...), stay excluded as prose
-        return [("deny", "a command substitution in {!r} names a recursive rm, a find -delete, or a device, file "
-                         "system, or database destroyer, whose targets this guard cannot classify"
-                         .format(seg.raw.strip()[:160]))]
-    idx, via_xargs, cwd, wrapped = _destruct_effective(seg, cwd)
-    if wrapped:
-        return [("deny", wrapped)]
+    if "subst" in _DESTRUCT_RULES and seg.opaque_shell and ("`" in seg.raw or "$(" in seg.raw):
+        # a backtick or quoted $( ) substitution is one opaque word to the lexer, so the segment text is read
+        # through its quoting context with quotes and escapes removed; only the exact $(cat <<'EOF' ...)
+        # prose idiom (a commit message) is excluded as data
+        hit = _destruct_text_marker(seg.raw, prose=ctx["prose"])
+        if hit:
+            return [("deny", "a command substitution in {!r} names {!r}, a destructive command whose targets "
+                             "this guard cannot classify".format(seg.raw.strip()[:160], hit))]
+    if "construct" in _DESTRUCT_RULES:
+        if "\\\n" in seg.raw or "<<" in seg.raw:
+            hit = _destruct_argv_marker(argv)
+            if hit:
+                return _destruct_unmodelled("the segment uses a line continuation or a heredoc operator, which "
+                                            "this guard does not model", hit)
+        if "$'" in seg.raw and "\\" in seg.raw:
+            hit = _destruct_text_marker(seg.raw)
+            if hit:
+                return _destruct_unmodelled("the segment uses an ANSI-C quoted word with an escape, whose "
+                                            "decoded text this guard does not model", hit)
+    idx, unmodelled = _destruct_effective(seg)
+    if unmodelled:
+        tok = argv[idx] if idx < len(argv) else ""
+        hit = _destruct_marker(argv[idx:], (tok[2:], tok.partition("=")[2]))
+        return _destruct_unmodelled(unmodelled, hit) if hit else []
     if idx >= len(argv):
         return []
+    if "assign" in _DESTRUCT_RULES:
+        hit = next((found for found in (_destruct_text_marker(tok.split("=", 1)[1]) for tok in argv[:idx]
+                                        if _ENV_ASSIGN_RE.match(tok)) if found), None)
+        if hit:
+            return _destruct_unmodelled("an environment assignment in front of {!r} carries a value the command "
+                                        "may run (a pager, editor, diff, ssh or shell setting)".format(
+                                            argv[idx][:60]), hit)
     word = _destruct_word(argv[idx])
+    args = argv[idx + 1:]
+    if "computed" in _DESTRUCT_RULES and seg.argv_opaque[idx] and argv[idx] not in _DESTRUCT_LITERAL_WORDS:
+        why = _destruct_computed(argv[idx], ctx["command"])
+        if why:
+            return [("deny", "the command word {!r} is computed at run time and {}, so this guard cannot tell "
+                             "which command runs".format(argv[idx][:60], why))]
+        return []
+    if word in _DESTRUCT_CLASSIFIED or word.startswith("mkfs"):
+        return _destruct_classified(seg, idx, word, cwd, deadline)
+    if "known" in _DESTRUCT_RULES and word in _DESTRUCT_KNOWN:
+        form = _destruct_runner_form(word, args) if "known-forms" in _DESTRUCT_RULES else None
+        hit = _destruct_marker(args) if form else None
+        return _destruct_unmodelled(form, hit) if hit else []
+    if "runner" not in _DESTRUCT_RULES:
+        return []
+    what = ("{!r} is a command runner this guard does not model".format(word) if word in _COMMAND_RUNNERS
+            else "{!r} is a command this guard does not model (it may run another command)".format(word[:60]))
+    hit = _destruct_marker(args)
+    if hit:
+        return _destruct_unmodelled(what, hit)
+    if "pipe-feed" in _DESTRUCT_RULES and ctx["upstream"]:
+        hit = _destruct_feed_marker(ctx)
+        if hit:
+            return _destruct_unmodelled(what + " and reads a pipeline", hit)
+    if "heredoc-feed" in _DESTRUCT_RULES and "<<" in seg.raw:
+        hit = _destruct_text_marker(ctx["command"])
+        if hit:
+            return _destruct_unmodelled(what + " and reads a heredoc", hit)
+    return []
+
+
+def _destruct_classified(seg, idx, word, cwd, deadline):
+    """The verdicts for a command word this guard classifies itself (_DESTRUCT_CLASSIFIED): find -delete,
+    the format words, shred, dropdb, a SQL client beside DROP or TRUNCATE, terraform/tofu destroy and kubectl
+    delete DENY; find -exec and kubectl exec/run/debug/attach/plugin run another command and DENY when a
+    destructive word follows; rm, unlink, truncate and dd have every operand resolved and classified."""
+    argv = seg.argv
     args = argv[idx + 1:]
     opaque = seg.argv_opaque[idx + 1:]
     tilde = seg.argv_leading_tilde[idx + 1:]
     if word == "find" and "find" in _DESTRUCT_RULES:
-        for k, arg in enumerate(args):
-            if arg == "-delete" or (arg in _DESTRUCT_FIND_EXEC and k + 1 < len(args)
-                                    and _destruct_word(args[k + 1]) in _DESTRUCT_FIND_KILLERS):
-                return [("deny", "find {} deletes every file the expression matches, a set this guard cannot "
-                                 "enumerate".format(arg))]
-        return []
+        if "-delete" in args:
+            return [("deny", "find -delete deletes every file the expression matches, a set this guard cannot "
+                             "enumerate")]
+        k = next((k for k, arg in enumerate(args) if arg in _DESTRUCT_FIND_EXEC), None)
+        hit = _destruct_marker(args[k:]) if k is not None and "runner" in _DESTRUCT_RULES else None
+        return _destruct_unmodelled("find {} runs another command".format(args[k]), hit) if hit else []
     if (word.startswith("mkfs") or word in _DESTRUCT_FORMAT_WORDS) and "format" in _DESTRUCT_RULES:
         return [("deny", "{} formats or wipes a device or file system".format(word))]
     if word == "shred" and "shred" in _DESTRUCT_RULES:
@@ -7052,12 +7487,16 @@ def _destruct_segment(seg, cwd, deadline):
     if word in ("terraform", "tofu") and "terraform" in _DESTRUCT_RULES and (
             "destroy" in args or "-destroy" in args):
         return [("deny", "{} destroy removes managed infrastructure".format(word))]
-    if word == "kubectl" and "kubectl" in _DESTRUCT_RULES and "delete" in args:
-        return [("deny", "kubectl delete removes cluster resources")]
+    if word == "kubectl" and "kubectl" in _DESTRUCT_RULES:
+        if "delete" in args:
+            return [("deny", "kubectl delete removes cluster resources")]
+        run = next((arg for arg in args if arg in _DESTRUCT_KUBECTL_RUNS), None)
+        hit = _destruct_marker(args) if run and "runner" in _DESTRUCT_RULES else None
+        return _destruct_unmodelled("kubectl {} runs another command".format(run), hit) if hit else []
     if word in ("rm", "unlink") and "rm" in _DESTRUCT_RULES:
         recursive, no_preserve, operands = _rm_operands(args)
         if no_preserve and "no-preserve-root" in _DESTRUCT_RULES:
-            return [("deny", "rm --no-preserve-root disables rm's own guard against deleting /")]
+            return [("deny", "rm --no-preserve-root disables the rm guard against deleting /")]
     elif word == "truncate" and "truncate" in _DESTRUCT_RULES:
         recursive, operands = False, _truncate_operands(args)
     elif word == "dd" and "dd" in _DESTRUCT_RULES:
@@ -7068,8 +7507,6 @@ def _destruct_segment(seg, cwd, deadline):
         opaque = [flag or arg.startswith("~") for flag, arg in zip(opaque, args)]
     else:
         return []
-    if via_xargs:
-        return [("deny", "xargs feeds {} operands this guard cannot see".format(word))]
     verdicts = []
     for k in operands:
         if word == "dd" and "benign-sink" in _DESTRUCT_RULES and args[k] in _DESTRUCT_DD_SINKS:
@@ -7079,8 +7516,9 @@ def _destruct_segment(seg, cwd, deadline):
             verdicts.append(("deny", "the classification ran past its {}-second budget before the {} operand "
                                      "{!r}".format(_DESTRUCT_BUDGET, word, args[k])))
         elif path is None:
-            verdicts.append(("deny", "the {} operand {!r} is a variable, glob, substitution, or relative path "
-                                     "this guard cannot resolve to a literal target".format(word, args[k])))
+            verdicts.append(("deny", "the {} operand {!r} is a variable, glob, substitution, a relative path "
+                                     "with no known working directory, or a '..' path whose kernel "
+                                     "resolution this guard cannot prove".format(word, args[k])))
         else:
             verdict = _destruct_classify_path(path, recursive, deadline)
             if verdict[0] != "deny" and time.monotonic() > deadline:
@@ -7092,32 +7530,50 @@ def _destruct_segment(seg, cwd, deadline):
     return verdicts
 
 
-def _destruct_next_cwd(seg, cwd, depth, prev_sep):
+def _destruct_next_cwd(seg, cwd, prev_sep, depth, scoped, cdpath_risk):
     """The working directory after a segment. A literal 'cd DIR' moves it ONLY when every condition holds:
-    the segment is reached UNCONDITIONALLY in the parent shell (it follows '', ';' or '&', never '&&', '||'
-    or a pipe, whose cd may be skipped or run in a subshell), it is joined forward by '&&' outside any
-    subshell, the cd stands bare or behind only a 'command'/'builtin' prefix, and DIR is one literal,
-    non-option word. Any other directory change - a conditional cd, a pushd or popd, or a cd/pushd/popd
-    named ANYWHERE behind a wrapper this guard does not model through (time cd DIR, env cd DIR) - makes the
-    cwd UNKNOWN (None), so a later relative operand cannot resolve and DENIES (fail closed). The caller
-    separately voids a cwd moved inside a backgrounded list (its cd ran in a subshell)."""
+    the segment is reached UNCONDITIONALLY in the parent shell (it follows '', ';' or '&', never '&&',
+    '||' or a pipe), outside every subshell (depth 0) and every compound command or function body (scoped:
+    an if, while, until, for, select or case body, or a brace group, may skip or repeat its cd), it is joined
+    forward by '&&', the cd stands bare or behind only a command/builtin prefix, DIR is one literal non-option
+    word with no '..' component (logical and physical cd resolve '..' differently), a relative DIR is not
+    subject to CDPATH (unset in this environment and named nowhere in the command), and DIR is an existing
+    directory this process can search (a failed cd leaves the shell where it was). Any other directory change
+    - a pushd or popd, a cd/pushd/popd named ANYWHERE behind another word, a source, . or eval that may run
+    one - makes the cwd UNKNOWN (None), so a later relative operand cannot resolve and DENIES (fail closed).
+    The caller separately voids a cwd moved inside a backgrounded list (its cd ran in a subshell)."""
     argv = seg.argv
     idx = _command_word_index(argv)
     if "cd-flow" in _DESTRUCT_RULES:
         while idx < len(argv) and _destruct_word(argv[idx]) in ("command", "builtin"):
             idx += 1
     if idx >= len(argv) or _destruct_word(argv[idx]) not in ("cd", "pushd", "popd") or "cd" not in _DESTRUCT_RULES:
-        if ("cd" in _DESTRUCT_RULES and "cd-flow" in _DESTRUCT_RULES
-                and any(_destruct_word(tok) in ("cd", "pushd", "popd") for tok in argv[idx:])):
+        if "cd" in _DESTRUCT_RULES and "cd-flow" in _DESTRUCT_RULES and (
+                any(_destruct_word(tok) in ("cd", "pushd", "popd") for tok in argv[idx:])
+                or (idx < len(argv) and argv[idx] in ("source", ".", "eval"))):
             return None  # a directory change hides behind a word this guard does not model through
         return cwd
     rest = argv[idx + 1:]
-    if (_destruct_word(argv[idx]) == "cd" and seg.sep_after == "&&" and depth == 0 and len(rest) == 1
+    if not (_destruct_word(argv[idx]) == "cd" and seg.sep_after == "&&" and depth == 0 and len(rest) == 1
             and not seg.argv_opaque[idx + 1] and not rest[0].startswith("-")
-            and (cwd or os.path.isabs(rest[0]))
-            and ("cd-flow" not in _DESTRUCT_RULES or prev_sep in ("", ";", "&"))):
-        return _destruct_abs(os.path.join(cwd or "/", rest[0]))
-    return None
+            and (cwd or os.path.isabs(rest[0]))):
+        return None
+    if "cd-flow" in _DESTRUCT_RULES and prev_sep not in ("", ";", "&"):
+        return None
+    if "scope" in _DESTRUCT_RULES and not scoped:
+        return None
+    target = rest[0]
+    if "cd-dotdot" not in _DESTRUCT_RULES:
+        return _destruct_abs(os.path.join(cwd or "/", target))
+    if ".." in target.split("/"):
+        return None
+    if ("cd-cdpath" in _DESTRUCT_RULES and cdpath_risk and not os.path.isabs(target)
+            and not (target == "." or target.startswith("./"))):
+        return None
+    moved = "/" + os.path.normpath(os.path.join(cwd or "/", target)).lstrip("/")
+    if "cd-exists" in _DESTRUCT_RULES and not (os.path.isdir(moved) and os.access(moved, os.X_OK)):
+        return None
+    return moved
 
 
 def destructive_guard(data):
@@ -7126,73 +7582,64 @@ def destructive_guard(data):
     NO-ASK posture: the outcome is ALLOW, ALLOW-with-a-note, SNAPSHOT-THEN-ALLOW, or DENY-and-educate, never an
     ask.
 
-    Each lexed segment (the shared quote/redirect-aware lexer, _lex_command) is resolved past leading assignments,
-    wrapper words (sudo, env, nice, timeout, busybox, xargs, ...) and control-flow words to its effective command
-    word. Each wrapper's value-consuming options are modelled: env -C/--chdir and sudo -D/--chdir re-base the
-    wrapped command's relative operands (an unresolvable directory makes the cwd unknown, so they DENY), while
-    env -S/--split-string and sudo/doas -R/--chroot cannot be modelled through and DENY when anything destructive
-    follows. The walk stops at the first word that is none of a wrapper, an assignment, an option or its value:
-    that word is the effective command (sudo docker rm ... runs docker, not rm), and the remaining words are
-    raw-scanned so unclassifiable destructive text still DENIES. rm and unlink, truncate, and dd's of= target are
-    PATH words: each operand is resolved to a literal absolute path and classified. A relative operand resolves
-    against the payload cwd, moved only by a literal, UNCONDITIONALLY-REACHED 'cd DIR &&' in the parent shell
-    (bare or behind command/builtin); a conditional cd (after && or ||), a cd inside a pipeline, subshell or
-    backgrounded list, a pushd/popd, or a cd behind any other word makes the cwd UNKNOWN, so later relative
-    operands DENY. A '..' component is resolved the way the kernel resolves it (the symlink before it first,
-    os.path.realpath), so 'repo/link/../x' is judged at the real target the shell will touch. Each resolved
-    path is classified, in order: the home directory or an ancestor of it DENIES; a literal path strictly under
-    /tmp or the process TMPDIR ALLOWS; a path outside every git repository DENIES; the repository root (or an
-    ancestor of it) DENIES; a .git component under the toplevel (a linked worktree's .git file, the
-    administrative directory) DENIES; a regenerable build DIRECTORY (node_modules, __pycache__, .pytest_cache,
-    build, dist, target; the directory type is required, an ordinary file so named is classified normally)
-    ALLOWS; content holding an ignored file, a nested repository, or a submodule DENIES; uncommitted (untracked
-    or modified) content is SNAPSHOT-THEN-ALLOWED through the git_discard recovery layer (refs/aiqt-recovery/,
-    the same ledger), and DENIED when the snapshot cannot be made; tracked, clean content ALLOWS (a recursive
-    delete with a note naming the git restore command), where "tracked" requires POSITIVE evidence (ls-files
-    lists the path); an EXISTING path git lists nothing tracked under DENIES. An operand that is a variable,
-    glob, brace, command substitution, ~user form, or a relative path with no known cwd DENIES, as does every
-    operand of an xargs-fed path word, rm --no-preserve-root, and dd to a device other than /dev/null,
-    /dev/stdout or /dev/stderr. find -delete and find -exec rm, mkfs and wipefs, shred, dropdb, a
-    psql/mysql/mariadb/sqlite3 argument carrying DROP or TRUNCATE, terraform or tofu destroy, and kubectl delete
-    always DENY: a database, a device, or remote state has no restore path this guard can verify. An unparseable
-    command (a lexer ValueError, e.g. a here-string) is scanned raw with quotes and escapes stripped (quoted
-    heredoc bodies excluded) and DENIES when its text names ANY in-scope command word (rm or unlink in any form,
-    truncate, dd with of=, find -delete, kubectl delete, terraform/tofu destroy, a SQL client beside
-    DROP/TRUNCATE, or an always-deny word): the fallback cannot classify operands, so in-scope words there never
-    pass unexamined; otherwise an unparseable command ALLOWS. A segment carrying a backtick or quoted $( )
-    substitution (one opaque word to the lexer) gets the narrower quote-stripped scan (a recursive rm, find
-    -delete, or an always-deny word, so a quote-concatenated r''m is seen). An unquoted $( ) body is lexed as
-    its own segment and classified like any other.
+    DENY UNLESS UNDERSTOOD: an ALLOW-LIST of command shapes modelled exactly. Each lexed segment (the shared
+    quote/redirect-aware lexer, _lex_command) is resolved past leading assignments, the shell keywords !, {, if,
+    then, elif, else, do, while and until, and the wrappers modelled EXACTLY in _DESTRUCT_WRAPPER_SPECS (sudo, doas,
+    env, nice, nohup, time, timeout, stdbuf, ionice, chrt, setsid, command, builtin, exec, busybox, toybox, each
+    with a closed option table) to its effective command word. A segment that carries an in-scope destructive word
+    (rm, rmdir, unlink, shred, truncate, dd, mkfs*, mke2fs, mkswap, wipefs, dropdb, find -delete, kubectl delete,
+    terraform/tofu destroy, a SQL client beside DROP or TRUNCATE, git clean/restore/reset --hard/checkout --, docker
+    or podman rm/rmi/prune) DENIES, naming the unmodelled part, whenever its shape is not modelled: a wrapper option
+    or operand outside its table (env -C/-S, sudo -D/-R/-i, timeout 1e2, ...); a command runner in _COMMAND_RUNNERS
+    without a spec (xargs, taskset, flock, pkexec, runuser, setpriv, strace, ltrace, xvfb-run, unbuffer, unshare,
+    proot, chroot, eval, source, sh -c, ...) or ANY command word in neither table nor _DESTRUCT_KNOWN (the known
+    non-runners, such as echo, grep and cat, and git, gh, docker and podman in their non-running forms); a pipeline
+    or a heredoc feeding such a command; a command word computed at run time; a line continuation, a heredoc
+    operator or an ANSI-C escape in the segment; a backtick or quoted $( ) substitution (scanned through its
+    quoting context; only the $(cat <<'EOF' ...) prose idiom is excluded as data); an unparseable command (a
+    here-string, a process substitution, an unquoted heredoc) whose text, read through its quoting context with
+    line continuations joined, names one.
+
+    In a modelled shape, rm and unlink, truncate, and dd's of= target are PATH words: each operand is resolved to
+    a literal absolute path and classified. A relative operand resolves against the payload cwd, moved only by a
+    literal, UNCONDITIONALLY-REACHED 'cd DIR &&' in the parent shell (bare or behind command/builtin), outside
+    every subshell and compound body, with no '..' in DIR, no CDPATH in play, and DIR an existing searchable
+    directory; any other directory change makes the cwd UNKNOWN, so later relative operands DENY. A '..' in an
+    operand is resolved the way the kernel resolves it (the prefix through its last '..' must resolve strictly,
+    else the operand DENIES). Each resolved path is classified, in order: the home directory or an ancestor of it
+    DENIES; a literal path strictly under /tmp or the process TMPDIR ALLOWS; a path outside every git repository
+    DENIES; the repository root (or an ancestor of it) DENIES; a .git component under the toplevel DENIES; a
+    regenerable build DIRECTORY (node_modules, __pycache__, .pytest_cache, build, dist, target; the directory type
+    is required) ALLOWS; content holding an ignored file, a nested repository, or a submodule DENIES; uncommitted
+    content is SNAPSHOT-THEN-ALLOWED through the git_discard recovery layer (refs/aiqt-recovery/, the same ledger),
+    and DENIED when the snapshot cannot be made; tracked, clean content ALLOWS (a recursive delete with a note
+    naming the git restore command) on POSITIVE ls-files evidence; an EXISTING path git lists nothing tracked under
+    DENIES. A variable, glob, brace, command substitution, ~user or unresolvable operand, rm --no-preserve-root,
+    and dd to a device other than /dev/null, /dev/stdout or /dev/stderr DENY. find -delete, mkfs and wipefs, shred,
+    dropdb, a SQL DROP or TRUNCATE, terraform or tofu destroy, and kubectl delete always DENY.
+
+    FALSE DENIES (the accepted cost of the allow-list): a harmless command in an unmodelled shape is denied when it
+    names a destructive word (xargs grep rm, pytest -k truncate, a python heredoc mentioning rm, a relative rm after
+    a cd inside a case statement), as is every glob or variable operand and every path word outside a repository
+    and outside scratch.
 
     OPT-OUT: a truthy GUARDRAIL_ALLOW_DESTRUCTIVE leading the segment's own command (bash last-wins; '', 0, false,
     no, off are falsy) skips that segment with a note. It is a CONVENTION the assistant can type, so it records
     a claimed human authorization and accepted loss; it is not proof of either. It is not honoured on an
     unparseable command.
 
-    RESIDUAL (not seen): deletion through an interpreter (python -c, perl -e, node), a script file, a make target,
-    an sh -c, bash -c or eval string, a shell alias or function, xargs input fed to any other command, another
-    command runner or remote shell (parallel, watch, ssh), an API call (curl -X DELETE), an MCP tool, or a
-    Write-tool overwrite; a non-recursive rm inside a backtick or quoted $( ) substitution; mv or cp over an
-    existing file and a shell '>' redirect (bash_absolute_paths covers only a relative one); a SQL file given
-    with -f, a database client other than those named, and row-level DELETE or UPDATE; content git cannot see as
-    changed (assume-unchanged or skip-worktree marks) is read as tracked and clean when ls-files lists it; a
-    wrapper option the finite tables miss that consumes a value can make that value read as the effective
-    command, so a destructive command behind such a value is seen only by the raw stop-scan (destructive TEXT
-    there still denies). A verified restore path is provable only for git-recoverable content, so database,
-    device, and cloud destruction always deny. FALSE POSITIVES (accepted cost): every glob or variable operand
-    denies (rm *.o, rm -f "$tmp"), every path word outside a repository and outside scratch denies, an ignored
-    file inside a repository denies (rm .env), an xargs-fed rm denies, every kubectl delete denies, any cd that
-    is conditional, piped, subshelled or backgrounded (and any cd/pushd/popd token behind an unmodelled word,
-    even a non-command like 'echo cd') makes later relative operands deny, an unparseable command that merely
-    MENTIONS an in-scope word denies, and env -S / sudo -R deny whenever destructive text follows.
+    RESIDUAL (not seen): a destructive operation spelled without any in-scope word (python shutil.rmtree, a script
+    file, a make target, a value computed at run time and not spelled in the command), state from an earlier turn
+    (an alias, a function, a git alias, a CDPATH, a changed cwd the payload does not report), mv or cp over an
+    existing file and a shell redirect, docker or podman rm and other container state, an API call, and content
+    git cannot see as changed (assume-unchanged or skip-worktree marks).
 
     FAIL POSTURE: a missing tool_name or an unreadable command DENIES (fail closed); a non-Bash tool ALLOWS; a
     failed status probe DENIES; one deadline (_DESTRUCT_BUDGET) covers the whole classification: repository
     discovery, the status and ls-files probes and the recovery snapshot run with subprocess timeouts capped by
     the time remaining, an operand reached after the deadline DENIES, and a classification or snapshot result
-    COMPLETED after the deadline also DENIES (a late result is the platform's to decide, not this guard's); a
-    mis-wired event hard-blocks. Non-subprocess work (path resolution, existence checks) is not individually
-    bounded, the remaining overrun residual."""
+    COMPLETED after the deadline also DENIES; a mis-wired event hard-blocks. Non-subprocess work (path
+    resolution, existence checks) is not individually bounded, the remaining overrun residual."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: destructive_guard wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))
@@ -7211,15 +7658,14 @@ def destructive_guard(data):
     try:
         segments = _lex_command(command)
     except ValueError:
-        raw = _destruct_raw_text(command)
-        if "raw" in _DESTRUCT_RULES and (_RAW_DESTRUCT_WIDE_RE.search(raw) or _RAW_DESTRUCT_RE.search(raw)):
-            return _deny("AIQT rules sechau/secrst: the command could not be parsed by the shell lexer and its "
-                         "text names an in-scope destructive command (rm or unlink, truncate, dd with of=, a "
-                         "find -delete, kubectl delete, terraform destroy, a SQL DROP or TRUNCATE, or a "
-                         "device, file system, or database destroyer), so this guard cannot classify its "
-                         "targets; it is denied rather than run (fail closed). Re-issue it as a parseable "
-                         "command with literal targets. {}"
-                         .format(_DESTRUCT_ALTS),
+        hit = _destruct_text_marker(command) if "raw" in _DESTRUCT_RULES else None
+        if hit:
+            return _deny("AIQT rules sechau/secrst: the command could not be parsed by the shell lexer (a "
+                         "here-string, a process substitution, an unquoted heredoc or an unbalanced quote), and "
+                         "its text, read through its quoting context with line continuations joined, names {!r}, "
+                         "an in-scope destructive command; this guard classifies only the command shapes it "
+                         "models exactly, so it denies rather than run (fail closed). Re-issue it as a "
+                         "parseable command with literal targets. {}".format(hit, _DESTRUCT_ALTS),
                          "AIQT guardrail: denied an unparseable command naming a destructive operation "
                          "(rules sechau, secrst).")
         return _allow()
@@ -7228,10 +7674,20 @@ def destructive_guard(data):
     verdicts = []
     notes = []
     depth = 0
+    nest = 0
+    broken = False
     prev_sep = ""
+    upstream = []
     cwd_boundary = cwd
+    cdpath_risk = bool(os.environ.get("CDPATH")) or "CDPATH" in command or "cdable_vars" in command
+    # the $(cat <<EOF ...) prose idiom holds only while nothing in the command (outside such prose) can shadow cat
+    prose = not ("prose-shadow" in _DESTRUCT_RULES
+                 and _DESTRUCT_SHADOW_RE.search(_destruct_shell_text(command, True)))
     deadline = time.monotonic() + _DESTRUCT_BUDGET
     for seg in segments:
+        nest, lost = _destruct_nesting(seg.argv, nest)
+        broken = broken or lost
+        ctx = {"command": command, "upstream": upstream if prev_sep in ("|", "|&") else [], "prose": prose}
         idx = _command_word_index(seg.argv)
         last = None
         for tok in seg.argv[:idx]:
@@ -7239,23 +7695,30 @@ def destructive_guard(data):
             if m:
                 last = m.group(1)
         if ("optout" in _DESTRUCT_RULES and last is not None and last.lower() not in _DISCARD_FALSY
-                and _destruct_segment(seg, cwd, deadline)):
+                and _destruct_segment(seg, cwd, deadline, ctx)):
             notes.append("GUARDRAIL_ALLOW_DESTRUCTIVE is set on '{}', so this guard did not check it; the "
                          "prefix records a claimed human authorization and accepted loss (rules sechau, "
                          "secrst) and is not proof of either.".format(" ".join(seg.argv[idx:])[:200]))
         else:
-            verdicts.extend(_destruct_segment(seg, cwd, deadline))
-        cwd = _destruct_next_cwd(seg, cwd, depth, prev_sep)
+            verdicts.extend(_destruct_segment(seg, cwd, deadline, ctx))
+        cwd = _destruct_next_cwd(seg, cwd, prev_sep, depth, nest == 0 and not broken, cdpath_risk)
         if "cd-flow" in _DESTRUCT_RULES:
             if seg.sep_after == "&":
                 if cwd != cwd_boundary:
                     cwd = None  # a cwd moved inside a backgrounded list: its cd ran in a subshell, so the
-                    # parent shell's cwd is not what the move computed; fail closed to UNKNOWN
+                    # parent shell cwd is not what the move computed; fail closed to UNKNOWN
                 cwd_boundary = cwd
             elif seg.sep_after in ("", ";"):
-                cwd_boundary = cwd  # a list boundary: later '&' backgrounds only what follows it
+                cwd_boundary = cwd  # a list boundary: a later background operator covers only what follows it
+        upstream = ctx["upstream"] + [seg] if seg.sep_after in ("|", "|&") else []
         prev_sep = seg.sep_after
-        depth += {"(": 1, ")": -1}.get(seg.sep_after, 0)
+        if seg.sep_after == "(":
+            depth += 1
+        elif seg.sep_after == ")":
+            if depth:
+                depth -= 1
+            elif not nest:
+                broken = True  # an unbalanced close outside a case pattern: the scope model is lost
     denies = [detail for kind, detail in verdicts if kind == "deny"]
     if denies:
         return _deny("AIQT rules sechau/secrst (human-authorization, verified-restore-path): denied a "
@@ -8522,11 +8985,9 @@ def _verification_sink_message(hit):
 
 
 # The note tier's view of a checker or a sink the canonical deny cannot prove: wrappers beyond the four the
-# deny peels, a checker word right inside a command substitution, a sink anywhere after a later pipe.
-_GATE_NOTE_WRAPPERS = frozenset((
-    "env", "nice", "timeout", "time", "command", "builtin", "exec", "nohup", "stdbuf", "sudo", "doas",
-    "ionice", "chrt", "taskset", "xvfb-run", "unbuffer", "script", "watch", "busybox", "setsid", "flock",
-    "strace", "ltrace"))
+# deny peels, a checker word right inside a command substitution, a sink anywhere after a later pipe. The
+# wrapper set is the ONE command-runner table the destructive-operation guard also reads (_COMMAND_RUNNERS).
+_GATE_NOTE_WRAPPERS = _COMMAND_RUNNERS
 _GATE_SUBST_WORD_RE = re.compile(r"(?:\$\(|`)\s*([^\s()`|;&<>]+)")
 
 
