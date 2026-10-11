@@ -3578,7 +3578,7 @@ source-path = ".aiqt/core/rules/security-seci-preview-has-no-side-effects.md"
 start-line = 12
 end-line = 14
 canonical-text = "An operation the assistant presents as a preview, dry run, plan, diff, or read-only inspection makes no\nstate-changing or outbound side effect on the subject it describes: it does not write, delete, deploy,\nsend, purchase, grant, or otherwise act on that subject or a downstream system."
-source-digest = "b29c0bbcb332ca86cc28006c2379167b67ba0d02a7603a575777fb0767557968"
+source-digest = "36145b4018199d582a3688840e1608554529a781895e025baa18647360a120da"
 
 [[clause]]
 clause-id = "secprv.2"
@@ -3587,7 +3587,7 @@ source-path = ".aiqt/core/rules/security-seci-preview-has-no-side-effects.md"
 start-line = 14
 end-line = 16
 canonical-text = "An effectful action is a\nseparate operation that carries its own explicit confirmation, and approval of a preview is never carried\nforward as approval of the change it previews."
-source-digest = "b29c0bbcb332ca86cc28006c2379167b67ba0d02a7603a575777fb0767557968"
+source-digest = "36145b4018199d582a3688840e1608554529a781895e025baa18647360a120da"
 
 [[clause]]
 clause-id = "secprv.3"
@@ -3596,7 +3596,7 @@ source-path = ".aiqt/core/rules/security-seci-preview-has-no-side-effects.md"
 start-line = 14
 end-line = 16
 canonical-text = "An effectful action is a\nseparate operation that carries its own explicit confirmation, and approval of a preview is never carried\nforward as approval of the change it previews."
-source-digest = "b29c0bbcb332ca86cc28006c2379167b67ba0d02a7603a575777fb0767557968"
+source-digest = "36145b4018199d582a3688840e1608554529a781895e025baa18647360a120da"
 
 [[clause]]
 clause-id = "secprv.4"
@@ -3605,7 +3605,7 @@ source-path = ".aiqt/core/rules/security-seci-preview-has-no-side-effects.md"
 start-line = 14
 end-line = 16
 canonical-text = "An effectful action is a\nseparate operation that carries its own explicit confirmation, and approval of a preview is never carried\nforward as approval of the change it previews."
-source-digest = "b29c0bbcb332ca86cc28006c2379167b67ba0d02a7603a575777fb0767557968"
+source-digest = "36145b4018199d582a3688840e1608554529a781895e025baa18647360a120da"
 
 [[clause]]
 clause-id = "secprv.5"
@@ -3613,8 +3613,8 @@ corpus-id = "secprv"
 source-path = ".aiqt/core/rules/security-seci-preview-has-no-side-effects.md"
 start-line = 16
 end-line = 18
-canonical-text = "Only source code, published reference documentation, even\nthe supplier's, or a run isolated from the subject and downstream systems establishes preview status, for\nthe version, inputs, settings, and privilege meant for use."
-source-digest = "b29c0bbcb332ca86cc28006c2379167b67ba0d02a7603a575777fb0767557968"
+canonical-text = "Only source code, published reference documentation stating\nthe effects, even the supplier's, or a run isolated from the subject and downstream systems establishes\npreview status, for the version, inputs, settings, and privilege meant for use."
+source-digest = "36145b4018199d582a3688840e1608554529a781895e025baa18647360a120da"
 
 [[clause]]
 clause-id = "secprv.6"
@@ -3622,8 +3622,8 @@ corpus-id = "secprv"
 source-path = ".aiqt/core/rules/security-seci-preview-has-no-side-effects.md"
 start-line = 18
 end-line = 19
-canonical-text = "An isolated run covers only what it tested,\nnever an input or setting naming the subject or a downstream system."
-source-digest = "b29c0bbcb332ca86cc28006c2379167b67ba0d02a7603a575777fb0767557968"
+canonical-text = "An isolated run covers\nonly what it tested, not an input or setting naming either."
+source-digest = "36145b4018199d582a3688840e1608554529a781895e025baa18647360a120da"
 
 [[clause]]
 clause-id = "secprv.7"
@@ -3631,8 +3631,8 @@ corpus-id = "secprv"
 source-path = ".aiqt/core/rules/security-seci-preview-has-no-side-effects.md"
 start-line = 19
 end-line = 21
-canonical-text = "Runtime self-description, such as a\ntool description, annotation, help text, or mode or flag name, never counts: a check mode can write\nbefore, while, or after checking."
-source-digest = "b29c0bbcb332ca86cc28006c2379167b67ba0d02a7603a575777fb0767557968"
+canonical-text = "A bare or contradicted no-change claim\nestablishes nothing, nor does a tool description, annotation, help text, or mode or flag name:\ndocumentation can misdescribe the executable; a check mode can write at any point."
+source-digest = "36145b4018199d582a3688840e1608554529a781895e025baa18647360a120da"
 
 [[clause]]
 clause-id = "secprv.8"
@@ -3640,8 +3640,8 @@ corpus-id = "secprv"
 source-path = ".aiqt/core/rules/security-seci-preview-has-no-side-effects.md"
 start-line = 21
 end-line = 24
-canonical-text = "Without that status, an operation presented as a preview or relied on in\nplace of a confirmation a change would need is treated as effectful for confirmation and authorization,\nwith the uncertainty disclosed, and is not given elevated privilege as if it only reads; an ordinary read\nrun as such is not."
-source-digest = "b29c0bbcb332ca86cc28006c2379167b67ba0d02a7603a575777fb0767557968"
+canonical-text = "Lacking that status, an\noperation presented as a preview or as changing nothing, or used instead of a needed confirmation, counts\nas effectful for confirmation and authorization, with the uncertainty disclosed, and gets no elevated\nprivilege as a read; a read run for information and not so presented is outside this."
+source-digest = "36145b4018199d582a3688840e1608554529a781895e025baa18647360a120da"
 
 [[clause]]
 clause-id = "secprv.9"
@@ -3649,8 +3649,8 @@ corpus-id = "secprv"
 source-path = ".aiqt/core/rules/security-seci-preview-has-no-side-effects.md"
 start-line = 21
 end-line = 24
-canonical-text = "Without that status, an operation presented as a preview or relied on in\nplace of a confirmation a change would need is treated as effectful for confirmation and authorization,\nwith the uncertainty disclosed, and is not given elevated privilege as if it only reads; an ordinary read\nrun as such is not."
-source-digest = "b29c0bbcb332ca86cc28006c2379167b67ba0d02a7603a575777fb0767557968"
+canonical-text = "Lacking that status, an\noperation presented as a preview or as changing nothing, or used instead of a needed confirmation, counts\nas effectful for confirmation and authorization, with the uncertainty disclosed, and gets no elevated\nprivilege as a read; a read run for information and not so presented is outside this."
+source-digest = "36145b4018199d582a3688840e1608554529a781895e025baa18647360a120da"
 
 [[clause]]
 clause-id = "secprv.10"
@@ -3658,8 +3658,8 @@ corpus-id = "secprv"
 source-path = ".aiqt/core/rules/security-seci-preview-has-no-side-effects.md"
 start-line = 19
 end-line = 21
-canonical-text = "Runtime self-description, such as a\ntool description, annotation, help text, or mode or flag name, never counts: a check mode can write\nbefore, while, or after checking."
-source-digest = "b29c0bbcb332ca86cc28006c2379167b67ba0d02a7603a575777fb0767557968"
+canonical-text = "A bare or contradicted no-change claim\nestablishes nothing, nor does a tool description, annotation, help text, or mode or flag name:\ndocumentation can misdescribe the executable; a check mode can write at any point."
+source-digest = "36145b4018199d582a3688840e1608554529a781895e025baa18647360a120da"
 
 [[clause]]
 clause-id = "secprv.11"
@@ -3667,8 +3667,8 @@ corpus-id = "secprv"
 source-path = ".aiqt/core/rules/security-seci-preview-has-no-side-effects.md"
 start-line = 24
 end-line = 25
-canonical-text = "Incidental read-side activity a preview needs, such as a cache write or log, is not a\nprohibited side effect on the subject or a downstream system."
-source-digest = "b29c0bbcb332ca86cc28006c2379167b67ba0d02a7603a575777fb0767557968"
+canonical-text = "Only incidental\nread-side activity a preview needs, such as a lookup or access log, is allowed."
+source-digest = "36145b4018199d582a3688840e1608554529a781895e025baa18647360a120da"
 
 [[clause]]
 clause-id = "secpth.1"
