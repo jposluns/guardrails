@@ -17,7 +17,12 @@ WHAT IT DOES
     Event: PreToolUse, matcher Bash. Register the launch line REGISTRATION (below the imports), filled with python3
     and this file's absolute path. Output: nothing (allow), ONE line holding the standard PreToolUse deny object, or
     ONE line holding a note (a systemMessage with no permissionDecision, so the permission flow is unchanged). Exit
-    status: always 0; the decision travels in the JSON. This hook never asks.
+    status: 0, with the decision in the JSON, except the floor guard's exit 2 on an interpreter older than Python
+    3.14 that can start the hook; one that cannot start it exits with Python's own status first (THREAT MODEL).
+    These exits hold while the hook's output (its diagnostic on stderr, and what it prints on stdout) can be
+    written and flushed. A failing output stream can change the exit status and can lose output, a decision
+    included: the exit is the blocking exit 2 when a DENY line cannot be written to stdout and flushed (a lost
+    deny blocks, never allows; a lost note keeps exit 0). This hook never asks.
 
     LITERAL. A bare word, a '...' string, or a "..." string whose value is non-empty, does not start with `-`, and
     uses only the characters A-Z, a-z, 0-9 and _ . / : @ % = , -. Such a value holds no blank, newline, quote or
@@ -120,21 +125,23 @@ THREAT MODEL
     not taken as the whole payload: the hook reads on until the input ends, so a host that keeps stdin open after
     the payload gets the cannot-evaluate note on every Bash call. Each wait is for the time left
     at most, so that note comes about 2 seconds late, but the OS can return from a wait late, and nothing here
-    bounds how much later. The one exception is an interpreter older than Python 3.14 that can start the hook: the guard
-    at the top of this file reads no input, writes one line beginning
-    `error: pattern-self-match.py requires Python 3.14 or newer` to stderr and exits 2, which PreToolUse treats as
-    a deny, so every Bash call is denied until Python is upgraded or the hook's entry is removed. An older
-    interpreter that cannot start the hook never reaches the guard and fails with Python's own error first. For
-    this hook that is only one that predates the -I option, and it exits 2, which still denies every Bash call:
-    this file is meant to hold no f-string or other syntax newer than Python 3.4, so that any interpreter that
-    accepts -I reaches the guard. The self-test checks for f-strings, parses the file with the parser's 3.4
-    grammar setting, and scans the syntax tree and tokens for these newer forms that grammar setting accepts: a
-    starred item in a display or subscript ([*a], x[*a], return *a, b), {**a}, f(*a, b), f(**a, **b), a trailing
-    comma after a starred parameter or argument (lambda *a,: 0 too), a decorator that is not a dotted name or a
-    call of one (@a[0].b, @(a)), a parenthesized with (with (a as b, c as d):), and continue inside finally. A
-    newer form outside these checks would go unnoticed, and an older interpreter would then fail to compile the
-    file and exit 1, which PreToolUse treats as non-blocking. .preview/README.md (Installing a hook, step 4)
-    describes those cases.
+    bounds how much later. The one exception is an interpreter older than Python 3.14 that can start the hook: the
+    guard at the top of this file reads no input, writes one line beginning
+    `error: pattern-self-match.py requires Python 3.14 or newer` to stderr (a best-effort write: the exit
+    does not depend on it) and exits 2, which PreToolUse treats as a
+    deny, so every Bash call the launch line hands to Python is denied until Python is upgraded or the hook's entry
+    is removed, under the output condition WHAT IT DOES states. An older interpreter that cannot start the hook
+    never reaches the guard and fails with Python's own error first. For this hook that is only one that predates
+    the -I option, and it exits 2, which still denies every Bash call the launch line hands to Python: this file is
+    meant to hold no f-string or other syntax newer than Python 3.4, so that any interpreter that accepts -I reaches
+    the guard. The self-test checks for f-strings, parses the file with the parser's 3.4 grammar setting, and scans
+    the syntax tree and tokens for these newer forms that grammar setting accepts: a starred item in a display or
+    subscript ([*a], x[*a], return *a, b), {**a}, f(*a, b), f(**a, **b), a trailing comma after a starred parameter
+    or argument (lambda *a,: 0 too), a decorator that is not a dotted name or a call of one (@a[0].b, @(a)), a
+    parenthesized with (with (a as b, c as d):), and continue inside finally. A newer form outside these checks
+    would go unnoticed, and an older interpreter would then fail to compile the file and exit 1, which PreToolUse
+    treats as non-blocking. .preview/README.md (Installing a hook, step 4) describes those cases and its launch
+    line, which skips the hook, so the call goes ahead, when a standard stream is a directory.
     The hook writes nothing to stdout in exactly these cases: a verification worker process (a worker kill-switch
     variable; legacy spellings are also honoured), where it writes one line to stderr saying it skipped, whatever
     its argv other than a lone `--self-test`, and reads nothing; a JSON
@@ -198,11 +205,16 @@ Self-test: python3 -I -S -B pattern-self-match.py --self-test
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: pattern-self-match.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: pattern-self-match.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 import json
 import os
@@ -959,7 +971,9 @@ def _emit_line(text, *stream):
     """Write one line to `stream` (default stdout) and flush it. A line meant for stderr is written there or
     dropped (sys.stderr is None when descriptor 2 was closed at startup), never sent to stdout. On any output
     failure point that descriptor at /dev/null, so the interpreter's shutdown flush cannot fail either; if even
-    that rescue fails, end the process at once with status 0: the hook always exits 0."""
+    that rescue fails, end the process at once with status 0: every line this path carries is advisory (a
+    note, or the worker line on stderr), so losing one keeps exit 0 (the deny line goes through
+    _emit_deny_line, which fails closed when the deny cannot be written and flushed)."""
     s = stream[0] if stream else sys.stdout
     if s is None:
         return
@@ -977,9 +991,32 @@ def _emit_line(text, *stream):
             os._exit(0)
 
 
+def _emit_deny_line(text):
+    """Write the DENY line to stdout and flush it. A deny that cannot be both written and flushed never
+    provably reached the platform, and the silent exit 0 reads as an allow, so the failure is noted on
+    stderr (best-effort: write, then flush, each failure swallowed) and the process ends at once with the
+    blocking exit 2 through os._exit, which skips the interpreter's exit flush (a stream that buffered a
+    failed write raises again there, and the interpreter's own status, 120, is non-blocking). A lost deny
+    blocks, never allows; a lost NOTE still travels _emit_line's fail-open path and keeps exit 0."""
+    try:
+        sys.stdout.write(text + "\n")
+        sys.stdout.flush()
+    except BaseException:
+        try:
+            sys.stderr.write("pattern-self-match: the deny decision could not be written to stdout; failing "
+                             "closed with exit 2 (a lost deny blocks, never allows).\n")
+            sys.stderr.flush()
+        except BaseException:
+            pass
+        os._exit(2)
+
+
 def main(argv):
-    """The hook: always 0, output only a deny or note line (a payload it cannot read gets the cannot-evaluate
-    note). `--self-test` alone runs the self-test instead. Otherwise a verification worker process writes only
+    """The hook, reached only past the floor guard: 0, or, through _emit_deny_line, the blocking exit 2 when
+    a deny line cannot be written and
+    flushed (a lost deny blocks, never allows); output only a deny or note line (a payload it cannot read
+    gets the cannot-evaluate note).
+    `--self-test` alone runs the self-test instead. Otherwise a verification worker process writes only
     the worker line, to stderr, whatever its argv; any other argv gets the argv note (_NOTE_ARGV). Both return 0
     before stdin is read."""
     readable = isinstance(argv, (list, tuple)) and bool(argv) and all(isinstance(a, str) for a in argv)
@@ -1003,7 +1040,10 @@ def main(argv):
     except Exception:
         out = {"systemMessage": _NOTE_ERROR}
     if out is not None:
-        _emit_line(json.dumps(out))
+        if "hookSpecificOutput" in out:  # a deny decision: lost means blocked, never allowed
+            _emit_deny_line(json.dumps(out))
+        else:
+            _emit_line(json.dumps(out))
     return 0
 
 
@@ -1478,6 +1518,48 @@ def _self_test():
             # and through main in a child (run_hook), whatever arguments main passes its reader
             out = self.run_hook(payload_bytes("pkill -f qa-x/"))[1]
             self.assertEqual(json.loads(out)["hookSpecificOutput"]["permissionDecision"], "deny")
+
+        def test_09b_stream_failure_deny_exits_2(self):
+            """A deny whose stdout cannot be written or flushed exits 2 with the failure noted on stderr
+            (a lost deny blocks, never allows; before this hardening these runs exited 0 with the deny
+            lost, which allowed the call), while a lost NOTE keeps exit 0. One child per state: stdout on
+            /dev/full (the write or flush raises ENOSPC) and on the write end of a pipe whose read end is
+            already closed (EPIPE). Skipped where /dev/full is absent."""
+            if not os.path.exists("/dev/full"):
+                self.skipTest("/dev/full is absent on this host")
+
+            def run_streams(data, stdout_to):
+                handles = []
+                if stdout_to == "full":
+                    handle = open("/dev/full", "wb")
+                    handles.append(handle)
+                    stdout_target = handle
+                else:
+                    read_end, write_end = os.pipe()
+                    os.close(read_end)
+                    handles.append(write_end)
+                    stdout_target = write_end
+                try:
+                    p = subprocess.run([sys.executable, "-I", "-S", "-B", here], input=data,
+                                       stdout=stdout_target, stderr=subprocess.PIPE,
+                                       env=dict(LC_ALL="C"), timeout=60)
+                finally:
+                    for handle in handles:
+                        try:
+                            if isinstance(handle, int):
+                                os.close(handle)
+                            else:
+                                handle.close()
+                        except OSError:
+                            pass
+                return p.returncode, p.stderr
+
+            for stdout_to in ("full", "broken"):
+                rc, err = run_streams(payload_bytes("pkill -f qa-x/"), stdout_to)
+                self.assertEqual(rc, 2, (stdout_to, err))
+                self.assertIn(b"could not be written to stdout", err)
+                rc, err = run_streams(payload_bytes("pkill sleep"), stdout_to)  # a NOTE line, lost, exit 0
+                self.assertEqual((rc, err), (0, b""), stdout_to)
 
         def test_09_process_fail_open(self):
             # a payload the hook cannot read is allowed WITH the cannot-evaluate note, never silently; each one on

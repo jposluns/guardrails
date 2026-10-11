@@ -57,11 +57,16 @@ snapshot or an adversarial writer restoring stat values. Re-observe at apply.
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: _opf_adopt_plan.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: _opf_adopt_plan.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 import copy
 import datetime
@@ -1685,13 +1690,17 @@ def self_test():
             replacement_ino = (replacement / "toml/manifest.toml").stat().st_ino
             self.assertNotEqual(original_ino, replacement_ino)
             state = {"fired": False}
-            real_listdir = os.listdir
+            # F-JOURNAL-HELD-FD-LISTING: discovery lists .working through _journal._listdir_fresh
+            # (a fresh "." descriptor beneath the held one), not through os.listdir on the held
+            # descriptor, so the swap is injected at that seam: after the listing returns, before
+            # any listed manifest is read.
+            real_fresh = store._journal._listdir_fresh
             real_read = os.read
             read_inos = set()
 
-            def swap_listdir(target="."):
-                names = real_listdir(target)
-                if isinstance(target, int) and not state["fired"] and sorted(names) == ["toml"]:
+            def swap_fresh(held_fd, label):
+                names = real_fresh(held_fd, label)
+                if not state["fired"] and sorted(names) == ["toml"]:
                     # The .working listing during store resolution: swap the whole tree NOW, after
                     # the listing returned but before any listed manifest is read.
                     os.rename(self.root / ".working", self.root / ".working-swapped-out")
@@ -1706,7 +1715,7 @@ def self_test():
                     pass
                 return real_read(fd, size)
 
-            with mock.patch.object(os, "listdir", swap_listdir), \
+            with mock.patch.object(store._journal, "_listdir_fresh", swap_fresh), \
                     mock.patch.object(os, "read", spy_read):
                 result = investigate(self.root, sources=self.sources, targets=self.all_targets())
             self.assertTrue(state["fired"], "the .working swap injection did not fire")

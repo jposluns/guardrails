@@ -27,8 +27,11 @@ records, background polling loops, existing working-record files, and commands t
 pattern, and `char-policy-write.py` applies your repository's own character policy to file writes; it backs
 no rule in the pack and claims none. Each one is a discipline guard against accidental drift, not a
 security boundary, and each one fails open: if the hook hits an error or input it cannot evaluate, it gets
-out of the way rather than blocking your work. The one
-exception is an interpreter older than Python 3.14, described with the launch line below. Each file states
+out of the way rather than blocking your work. Two exceptions block instead: an interpreter older than
+Python 3.14, described with the launch line below, and, on the six `PreToolUse` hooks, a deny decision that
+cannot be written to standard output and flushed (a full device, a closed pipe), where the hook exits 2
+rather than let a decided deny dissolve into a silent allow (a lost deny blocks, never allows; a lost
+advisory note still allows with exit 0). Each file states
 what it does not catch in a section headed `RESIDUAL COVERAGE` in its opening docstring; that section is
 the authority, and the summary further down this page only points to it.
 
@@ -178,16 +181,16 @@ files are served from this repository's main branch; for a raw download, use
 
 | File | SHA-256 | Link |
 |---|---|---|
-| `char-policy-write.py` | `f4ba55614af02379066d27b5e78fa7249892ce0b73c8eef2490f8edad5069b8b` | [char-policy-write.py](char-policy-write.py) |
-| `clock-inject.py` | `ef761a106e8154f071fc37c71943303a5cf193ae26ca855eab5b41ddb7acd930` | [clock-inject.py](clock-inject.py) |
-| `constraint-reread.py` | `545db95126a701dc2c4bfff75a38345814a08b0b879b20d9477578290bd2dd93` | [constraint-reread.py](constraint-reread.py) |
-| `future-stamp-write.py` | `0b8590b8e21d3967446d55fa71fd7a334248e447202441b1426d272cbede969c` | [future-stamp-write.py](future-stamp-write.py) |
-| `pattern-self-match.py` | `bbb2e0b1996e072a15eac0c740949dceb7205a5643b0dd0460e604f9ac9cb737` | [pattern-self-match.py](pattern-self-match.py) |
-| `record-remove-check.py` | `c17a75839784e07387408b2018df2ad9dcdb14b913dff146d42a7dc15768a79d` | [record-remove-check.py](record-remove-check.py) |
-| `rerun-pass-check.py` | `be6c07021581b6bb64c9c7efea80165fe6731a3c7d8524a299570060a677a2d8` | [rerun-pass-check.py](rerun-pass-check.py) |
-| `stamp-truth-stop.py` | `6d050fb0945d6f668e1e2879aa3b3aea0570f4b0e54ccca2a27ef52474920996` | [stamp-truth-stop.py](stamp-truth-stop.py) |
-| `unbounded-wait.py` | `482e0a12281f18ed57c9e8bc600140179f28bb01dc165c4ab97a2fda3d05bafc` | [unbounded-wait.py](unbounded-wait.py) |
-| `ungated-record.py` | `04feef36fb75333390fbab1982005721c404c24f00b0f2720a38dd746595fed8` | [ungated-record.py](ungated-record.py) |
+| `char-policy-write.py` | `84a08059513f27c76e944d54c08e8ddae520f9e040ebe19296d139d49646b0f8` | [char-policy-write.py](char-policy-write.py) |
+| `clock-inject.py` | `262749a3409d0fe8821cc115db28e05f35311cc0329008ff51f67090fd3d2e54` | [clock-inject.py](clock-inject.py) |
+| `constraint-reread.py` | `47fef771f94095c5915030bf014369f77f874ed217430d4fcb8ff00a583b17a9` | [constraint-reread.py](constraint-reread.py) |
+| `future-stamp-write.py` | `1cf8608693f472df1c7bee03b5ab5bf5de3e79a19b00c782a7015e77d167c348` | [future-stamp-write.py](future-stamp-write.py) |
+| `pattern-self-match.py` | `9687140625e12fe271c20a876f01642f5cdd374197ad12850f24078cd0eb9660` | [pattern-self-match.py](pattern-self-match.py) |
+| `record-remove-check.py` | `9ad3454daf7ea104a62ef022957f06e2584cdaff8d2d595dbcf2a0a8cfc9c366` | [record-remove-check.py](record-remove-check.py) |
+| `rerun-pass-check.py` | `d4c07f5d45b7d56b30635cb849282375a4ef664820cb26d9f97b5a0e99339431` | [rerun-pass-check.py](rerun-pass-check.py) |
+| `stamp-truth-stop.py` | `81abec162f22302fafb00a0d05ec10af4483f1cc0ab9070c4eb4f4d092cea4fb` | [stamp-truth-stop.py](stamp-truth-stop.py) |
+| `unbounded-wait.py` | `9d2a8f9c26693cc87d058284427d40554e5ff0c3f2eca3df46f4369669a43859` | [unbounded-wait.py](unbounded-wait.py) |
+| `ungated-record.py` | `35c65369b1609683e09b784681a23fab80a05e047c5f36abe5311f100b4f9394` | [ungated-record.py](ungated-record.py) |
 
 What the checksum does and does not prove:
 
@@ -272,22 +275,28 @@ fails and report it; do not work around a failed check.
      Step 3 checks the installing shell's `python3`, which can differ from the one on Claude Code's
      `PATH`; each hook also checks its own interpreter when it starts. On an older interpreter that can
      start the hook, each hook reads no input, writes one line beginning
-     `error: <file> requires Python 3.14 or newer` to standard error, and exits.
-     Claude Code reads the exit by event: for `clock-inject.py` (`PostToolUse`,
-     `PostToolUseFailure`) the exit is 2 and the tool has already run, so the line only reaches the
-     assistant and nothing is blocked; for the six `PreToolUse` hooks the exit is 2 and every matching
-     tool call is denied; for `stamp-truth-stop.py` (`Stop`), `constraint-reread.py` (`SessionStart`,
+     `error: <file> requires Python 3.14 or newer` to standard error, and exits. The write and its
+     flush are best-effort: the exit status does not depend on them (each hook exits without the
+     interpreter's own exit-time stream flush, so a stream whose flush fails cannot replace the
+     exit), and the refusal holds even when standard error is unavailable or failing.
+     Claude Code reads the exit by event: for `clock-inject.py` (`PostToolUse`, `PostToolUseFailure`) the
+     exit is 2 and the tool has already run, so the line only reaches the assistant and nothing is
+     blocked; for the six `PreToolUse` hooks the exit is 2 and every matching tool call the launch guard
+     does not skip is denied; for `stamp-truth-stop.py` (`Stop`), `constraint-reread.py` (`SessionStart`,
      `PreCompact`, `UserPromptSubmit`, and `Stop`), and `rerun-pass-check.py` (`PostToolUse`,
-     `PostToolUseFailure`, `UserPromptSubmit`, and `Stop`) the exit is 1, a non-blocking error, so no reminder or note is
-     added and every stop goes ahead unchecked (exit 2 would block the stop, and the hook's own block cap
-     would never run, since the hook stops before its loop guard runs). An interpreter that cannot start
-     the hook fails before its guard runs, with Python's own error instead of that line: an interpreter
-     that predates the `-I` option rejects it and exits 2, and one that accepts `-I` but predates
-     f-strings cannot compile the three clock hooks, which use them, and exits 1. Exit 1 is a
-     non-blocking error on every event, so a `PreToolUse` hook then allows every tool call unchecked;
-     exit 2 on `Stop` blocks the stop, and the hook's own block cap never runs, and exit 2 on
-     `UserPromptSubmit` blocks the prompt. If you see any of these errors, upgrade Python or remove the
-     hook's entry.
+     `PostToolUseFailure`, `UserPromptSubmit`, and `Stop`) the exit is 1, a non-blocking error, so no
+     reminder or note is added and every stop goes ahead unchecked (exit 2 would block the stop, and the
+     hook's own block cap would never run, since the hook stops before its loop guard runs). These exits,
+     like a hook's other exits, hold while the hook's output (its diagnostic on standard error, and what
+     it prints on standard output) can be written and flushed. A failing output stream can change the exit
+     status and can lose output, a decision included; a separate fix in progress addresses this. An
+     interpreter that cannot start the hook fails before its guard runs, with Python's own error instead
+     of that line: an interpreter that predates the `-I` option rejects it and exits 2,
+     and one that accepts `-I` but predates f-strings cannot compile the three clock hooks and
+     `char-policy-write.py`, which use them, and exits 1. Exit 1 is a non-blocking error on these hooks'
+     events, so a `PreToolUse` hook then allows every tool call unchecked; exit 2 on `Stop` blocks the
+     stop, and the hook's own block cap never runs, and exit 2 on `UserPromptSubmit` blocks the prompt.
+     If you see any of these errors, upgrade Python or remove the hook's entry.
    - In JSON, each `"` inside the command is written `\"`, as in the entries below. The `timeout` value is
      the most seconds Claude Code lets one run of the hook take.
 
