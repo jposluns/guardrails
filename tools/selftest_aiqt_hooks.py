@@ -8785,12 +8785,13 @@ def _main_isolated(monitor):
                            "honours the entry in every tree"):
             if _gs_phrase not in _gs_residue:
                 failures.append("(gs-res-scope) the residue must state the authoring scope: {!r}".format(_gs_phrase))
-        # (gs-res-local) Beside the Bash residual, the residue discloses that a Write to a sibling settings file is not
-        # judged (gs-auth-b-local below) yet can change hook behaviour for later sessions, and that gen_hooks applies
-        # the same marker size bound as the guard (gs-auth-f below).
-        for _gs_phrase in ("A Write to a sibling settings file such as .claude/settings.local.json is not judged by "
-                           "this guard", "can change hook behaviour for later sessions",
-                           "the two apply the same size bound"):
+        # (gs-res-local) Beside the Bash residual, the residue discloses that a Write, Edit or MultiEdit to a sibling
+        # settings file is not judged (gs-auth-b-local below) yet can change hook behaviour for later sessions, that
+        # keeping that file personal is a convention, and that gen_hooks applies the same marker size bound as the
+        # guard (gs-auth-f below).
+        for _gs_phrase in ("A Write, Edit or MultiEdit to a sibling settings file such as .claude/settings.local.json "
+                           "is not judged by this guard", "can change hook behaviour for later sessions",
+                           "is a convention, not enforced", "the two apply the same size bound"):
             if _gs_phrase not in _gs_residue:
                 failures.append("(gs-res-local) the residue must state: {!r}".format(_gs_phrase))
 
@@ -8837,10 +8838,13 @@ def _main_isolated(monitor):
         # (gs-auth-b) The authoring tree still denies it, naming gen_hooks and its source.
         gexpect("(gs-auth-b) the authoring tree denies a Write to .claude/settings.json", "deny",
                 tool="Write", file_path=os.path.join(gau, _gs_settings), cwd=gau)
-        # (gs-auth-b-local) The disclosed residual: a sibling settings file is local and ungenerated, so no registry
-        # entry covers it and a Write to it in the authoring tree is not judged (allowed silently).
-        gexpect("(gs-auth-b-local) the authoring tree does not judge a Write to .claude/settings.local.json", "allow",
-                tool="Write", file_path=os.path.join(gau, ".claude", "settings.local.json"), cwd=gau)
+        # (gs-auth-b-local) The disclosed residual: no generator writes a sibling settings file, so no registry entry
+        # covers it and a Write, Edit or MultiEdit to it in the authoring tree is not judged (allowed silently).
+        for _gs_tool in ("Write", "Edit", "MultiEdit"):
+            gexpect("(gs-auth-b-local-{}) the authoring tree does not judge a {} to .claude/settings.local.json"
+                    .format(_gs_tool, _gs_tool), "allow", tool=_gs_tool,
+                    file_path=os.path.join(gau, ".claude", "settings.local.json"), cwd=gau,
+                    edits=[{"old_string": "a", "new_string": "b"}] if _gs_tool == "MultiEdit" else None)
         _gs_why = _gs_auth_reason(gau, _gs_settings)
         if ("python3 tools/gen_hooks.py" not in _gs_why or ".aiqt/core/hooks/manifest.toml" not in _gs_why
                 or "authoring marker" in _gs_why):

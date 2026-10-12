@@ -438,30 +438,32 @@ def check_authoring_only(root, tracked, classes, exclusions):
     repository-local .claude/settings.json it gates) is tracked in this repository and NEVER shipped. It is
     read from the tree under check by gen_gensrc.read_authoring_roster, the same file and parser that scope the
     gensrc registry, so the two never disagree on the roster of a tree that carries one (under --root as in this
-    repository), and a roster that cannot be read statically raises ValueError (exit 2). A tree with no
-    tools/gen_hooks.py has no roster as gen_gensrc reads it (it scopes nothing there); this check then holds the
-    roster of the gen_hooks beside this tool, so that case can only add a refusal, never drop one.
-    GateError unless: the roster is tracked together or not at all (a tracked settings file without its
-    marker would make gen_hooks read this tree as an adopter tree and silently stop reconciling it); every
-    tracked roster path is excluded by an EXACT [[exclusion]] literal, never a pattern and never a class
-    row (classify() refuses a class selector that reaches an excluded path, so an excluded roster path is
-    in no SOURCES, ARTIFACTS or .gitattributes line, and no release or pin install can carry it to an
-    adopter); and every tracked roster path is a regular file on disk. A tree tracking none of the roster
-    (a synthetic fixture) obliges nothing. classes is the classify() result, checked again here so a
-    roster path that reached it is named as a would-ship error."""
+    repository), and a roster that cannot be read statically raises ValueError (exit 2). The never-ship duties
+    below bind the UNION of that roster and the shipped one (AUTHORING_ONLY_REL of the gen_hooks beside this
+    tool), always, not only where the tree has none: a tree roster that omits a shipped path, or a tree with
+    no tools/gen_hooks.py (no roster as gen_gensrc reads it), still has that path refused a release class. The
+    tracked-together duty binds the tree roster alone (the shipped one where the tree has none), so a tree may
+    roster its own paths. GateError unless: the roster is tracked together or not at all (a tracked settings
+    file without its marker would make gen_hooks read this tree as an adopter tree and silently stop
+    reconciling it); every tracked path of either roster is excluded by an EXACT [[exclusion]] literal, never a
+    pattern and never a class row (classify() refuses a class selector that reaches an excluded path, so an
+    excluded roster path is in no SOURCES, ARTIFACTS or .gitattributes line, and no release or pin install can
+    carry it to an adopter); and every tracked path of either roster is a regular file on disk. A tree
+    tracking none of either roster (a synthetic fixture) obliges nothing. classes is the classify() result,
+    checked again here so a roster path that reached it is named as a would-ship error."""
     import gen_gensrc
-    roster = gen_gensrc.read_authoring_roster(root / "tools")
-    if not roster:
-        # No tools/gen_hooks.py in the tree, so gen_gensrc reads no roster and scopes nothing there; the never-ship
-        # rule still holds the roster of the gen_hooks beside this tool, so the fallback only adds refusals.
-        import gen_hooks
-        roster = tuple(gen_hooks.AUTHORING_ONLY_REL)
+    import gen_hooks
+    shipped = tuple(gen_hooks.AUTHORING_ONLY_REL)
+    roster = gen_gensrc.read_authoring_roster(root / "tools") or shipped
     present = [rel for rel in roster if rel in tracked]
     if present and len(present) != len(roster):
         raise GateError("the authoring-only roster {} must be tracked together; tracked: {}".format(
             ", ".join(roster), ", ".join(present)))
+    never_ship = roster + tuple(rel for rel in shipped if rel not in roster)
     exact = {sel.exact for sel, _ in exclusions if sel.exact is not None}
-    for rel in present:
+    for rel in never_ship:
+        if rel not in tracked and rel not in classes:
+            continue
         if rel not in exact:
             raise GateError("authoring-only path {} {}; it must never ship: exclude it by an exact "
                             "[[exclusion]] path literal".format(
@@ -805,8 +807,9 @@ def main():
 #   (m) the authoring-only roster excluded by exact literals passes (a gensrc target, yet never in SOURCES);
 #       a roster path given a class, a pattern exclusion over it, the settings without the marker, an exact
 #       exclusion of a gensrc target off the roster, and a tracked marker missing on disk each exit 2; a
-#       roster bound by the tree under check (its own tools/gen_hooks.py) is honoured, a tree with none still
-#       refuses the settings a release class, and the real one reads as exactly the two shipped roster paths;
+#       roster bound by the tree under check (its own tools/gen_hooks.py) is honoured, while a tree with none,
+#       and a tree roster omitting either shipped roster path, still refuses that path a release class (exit 2),
+#       and the real one reads as exactly the two shipped roster paths;
 #   F-FROZEN-PARTITION: a vocabulary class in neither FROZEN_CLASSES nor UNFROZEN_CLASSES, a class in both,
 #       and a class outside the vocabulary each fail closed.
 
@@ -1279,14 +1282,29 @@ def _self_test_main_isolated():
         fx = _roster_fixture(tmp / "roster-own", _LOCAL_OUT_CLASS + excl_own + _EXCL_MARKER, own)
         if fx is None or run_quiet(fx, check=False) != 0:
             failures.append("authoring-only roster: a roster bound by the tree under check expected exit 0")
-        # A tree with no tools/gen_hooks.py (the same generator under another name) still refuses the settings a
-        # release class: the shipped roster is the floor there, so the tree-local read never drops a refusal.
+        # The shipped roster binds beside the tree roster, not only where the tree has none. A tree with no
+        # tools/gen_hooks.py (the same generator under another name) still refuses the settings a release class.
         no_hooks = {"tools/gen_local.py" if k == "tools/gen_hooks.py" else k: v for k, v in _ROSTER_FILES.items()}
         fx = _roster_fixture(tmp / "roster-nohooks", _LOCAL_OUT_CLASS + class_row.format(".claude/settings.json")
                              + _EXCL_MARKER, no_hooks)
         if fx is None or run_quiet(fx, check=False) != 2:
             failures.append("authoring-only roster: the settings given a release class in a tree with no "
                             "tools/gen_hooks.py expected exit 2")
+        # A tree roster naming one shipped path, the other tracked and given a release class, the kept one excluded
+        # by an exact literal: each exits 2 (each exited 0, the omitted path in the manifest, when the shipped
+        # roster was held only for a tree with none).
+        for i, (kept, kept_excl, omitted) in enumerate((
+                ("AUTHORING_MARKER_REL", _EXCL_MARKER, ".claude/settings.json"),
+                ("PROJECT_SETTINGS_REL", _EXCL_SETTINGS, ".aiqt/authoring.toml"))):
+            subset = dict(_ROSTER_FILES)
+            subset["tools/gen_hooks.py"] = _GEN_LOCAL.replace(
+                "AUTHORING_ONLY_REL = (AUTHORING_MARKER_REL, PROJECT_SETTINGS_REL)",
+                "AUTHORING_ONLY_REL = ({},)".format(kept))
+            fx = _roster_fixture(tmp / "roster-omit{}".format(i),
+                                 _LOCAL_OUT_CLASS + class_row.format(omitted) + kept_excl, subset)
+            if subset["tools/gen_hooks.py"] == _GEN_LOCAL or fx is None or run_quiet(fx, check=False) != 2:
+                failures.append("authoring-only roster: a tree roster omitting {} given a release class expected "
+                                "exit 2".format(omitted))
         try:
             real_roster = gen_gensrc.read_authoring_roster(Path(__file__).resolve().parent)
         except (OSError, ValueError) as exc:
@@ -1320,7 +1338,8 @@ def _self_test_main_isolated():
           "is a loud exit 2 that writes no output (F-GENMANIFEST-UNKNOWN-OPT); the authoring-only roster "
           "excluded by exact literals passes and never reaches the manifest, while a roster path given a "
           "class, a pattern exclusion over it, the settings without the marker, an exact exclusion of a "
-          "gensrc target off the roster, and a tracked marker missing on disk each fail closed (exit 2); "
+          "gensrc target off the roster, a tracked marker missing on disk, and a shipped roster path given a "
+          "class under a tree roster that omits it or in a tree with none each fail closed (exit 2); "
           "and a vocabulary class "
           "recorded in neither FROZEN_CLASSES nor UNFROZEN_CLASSES, a class recorded in both, and a frozen "
           "class outside the vocabulary each fail the frozen floor closed (F-FROZEN-PARTITION)")

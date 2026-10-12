@@ -133,9 +133,21 @@ def _reject_rebinding(tree, name, allowed, where, assignment):
                 raise ValueError(binder.format("a global/nonlocal declaration"))
 
 
+def _parse_module(path):
+    """Parse the module at path as the interpreter compiles it: from its BYTES, so a PEP 263 coding cookie
+    decodes the source as an import would (a UTF-8 text read of a file declaring `# coding: utf-7` parses
+    other statements than the module runs). The bytes must also decode as UTF-8 and parse as that text, so a
+    file the text read refused (bytes that are not UTF-8, a leading BOM) stays refused. Raises OSError on a
+    read fault, UnicodeDecodeError (a ValueError) or SyntaxError; each caller maps them to exit 2."""
+    data = path.read_bytes()
+    ast.parse(data.decode("utf-8"), filename=str(path))
+    return ast.parse(data, filename=str(path))
+
+
 def _read_declaration(path, where):
     """Return the value of path's single module-level GENSRC_OUTPUTS literal, recovered by parsing the
-    file to an AST and evaluating ONLY that literal with ast.literal_eval. The module is never imported
+    file to an AST (its bytes, as the interpreter does: _parse_module, so a coding cookie is honoured) and
+    evaluating ONLY that literal with ast.literal_eval. The module is never imported
     or executed, so an import-time SystemExit, a dynamic __getattr__, or any other side effect cannot
     influence the result. Fail-closed: raises ValueError (naming `where`) when there is no single
     top-level literal Assign to GENSRC_OUTPUTS, when the right-hand side is non-literal, or when the
@@ -162,9 +174,8 @@ def _read_declaration(path, where):
     parameter (def f[GENSRC_OUTPUTS](), class C[GENSRC_OUTPUTS], type X[GENSRC_OUTPUTS] = ...)
     binds only in the type-parameter scope, is not inspected, and cannot affect the module-level
     declaration: an accepted nested-scope residual."""
-    source = path.read_text(encoding="utf-8")  # OSError -> caller's fail-closed try
     try:
-        tree = ast.parse(source, filename=str(path))
+        tree = _parse_module(path)  # OSError -> caller's fail-closed try
     except SyntaxError as exc:
         raise ValueError("{}: cannot parse for its GENSRC_OUTPUTS declaration ({})".format(where, exc))
     # The ONLY valid declaration is a single top-level plain Assign to GENSRC_OUTPUTS.
@@ -326,21 +337,26 @@ def read_authoring_roster(tools_dir):
     else: the _reject_rebinding walk _read_declaration uses refuses every other binding of those names
     anywhere in the module (tuple or star unpacking, augmented or annotated assignment, a for, with, import,
     def or class binding, a walrus, a del, a global or nonlocal declaration, an except-as, a match capture,
-    a parameter, and any binding nested in a block or a function), so the parsed value is the value the
-    module binds. Bounded like _read_declaration: the walk is conservative (an unrelated local reuse of one
-    of these names inside a function is refused too, failing safe), a dynamic rebinding (globals(),
-    setattr, exec) is out of scope, and a PEP-695 type parameter is not inspected."""
+    a parameter, and any binding nested in a block or a function). Each name the roster uses must also be
+    bound in a statement BEFORE the roster assignment (the module reads it at that line, so a later
+    assignment is not the value the roster takes) and must not be a dunder name (__doc__, __name__ and the
+    rest), which the interpreter binds itself (a module docstring binds __doc__). The file is parsed from its
+    bytes (_parse_module), so a PEP 263 coding cookie is honoured as an import honours it. Within those rules
+    the parsed value is the value the module binds. Bounded like _read_declaration: the walk is conservative
+    (an unrelated local reuse of one of these names inside a function is refused too, failing safe), a
+    dynamic rebinding (globals(), setattr, exec) is out of scope, and a PEP-695 type parameter is not
+    inspected."""
     path = Path(tools_dir) / ROSTER_GEN
     try:
-        source = path.read_text(encoding="utf-8")
+        tree = _parse_module(path)
     except FileNotFoundError:
         return ()
-    try:
-        tree = ast.parse(source, filename=str(path))
     except SyntaxError as exc:
         raise ValueError("{}: cannot parse for its {} roster ({})".format(ROSTER_GEN, ROSTER_NAME, exc))
     plain = {}
-    for node in tree.body:
+    position = {}
+    for index, node in enumerate(tree.body):
+        position[id(node)] = index
         if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
             plain.setdefault(node.targets[0].id, []).append(node)
 
@@ -353,15 +369,23 @@ def read_authoring_roster(tools_dir):
         if len(nodes) != 1:
             raise ValueError("{}: {} must be bound exactly once, by a plain module-level assignment "
                              "(fail-closed)".format(ROSTER_GEN, name))
-        return nodes[0].value
+        return nodes[0]
 
-    value = _bound_once(ROSTER_NAME)
+    roster_node = _bound_once(ROSTER_NAME)
+    value = roster_node.value
     if not isinstance(value, (ast.Tuple, ast.List)) or not value.elts:
         raise ValueError("{}: {} must be a non-empty tuple or list".format(ROSTER_GEN, ROSTER_NAME))
     roster = []
     for item in value.elts:
         if isinstance(item, ast.Name):
-            item = _bound_once(item.id)
+            if item.id.startswith("__") and item.id.endswith("__"):
+                raise ValueError("{}: {} must not use the dunder name {}, which the interpreter binds itself "
+                                 "(fail-closed)".format(ROSTER_GEN, ROSTER_NAME, item.id))
+            bound = _bound_once(item.id)
+            if position[id(bound)] >= position[id(roster_node)]:
+                raise ValueError("{}: {} must be bound before {} reads it (fail-closed)".format(
+                    ROSTER_GEN, item.id, ROSTER_NAME))
+            item = bound.value
         if not (isinstance(item, ast.Constant) and isinstance(item.value, str) and item.value):
             raise ValueError("{}: every {} item must be a str literal, or a name bound once to one "
                              "(fail-closed)".format(ROSTER_GEN, ROSTER_NAME))
@@ -482,7 +506,11 @@ def main():
 #   (q) every binding of the roster or of a name it uses other than its one plain top-level assignment (tuple
 #       or star unpacking, augmented or annotated assignment, top-level or nested, a for/with/import/def/class
 #       binding, a walrus, a del, a global declaration, a plain assignment nested in a block) fails closed
-#       (exit 2).
+#       (exit 2),
+#   (r) a source is read as the interpreter binds it: a roster name read through __doc__ or __name__, a name
+#       bound after the roster, a dunder name bound before it, and a `# coding: utf-7` cookie hiding a
+#       rebinding of a roster name or of GENSRC_OUTPUTS each fail closed (exit 2); a leading BOM and bytes that
+#       are not UTF-8 stay refused (exit 2), and a utf-8 cookie on a valid generator generates (exit 0).
 # A raised SystemExit anywhere in a run() call is caught by run_quiet and returned as a non-int sentinel
 # string, so the self-test can never itself exit early (green or otherwise) on a raise: an UNEXPECTED
 # raise mismatches its case's expected exit code and registers as a FAILURE, while case (n) asserts the
@@ -653,8 +681,8 @@ def _hooks_decl(*entries):
     return "GENSRC_OUTPUTS = (\n" + body + ")\n"
 
 
-_FAKE_HOOKS_ROSTER = _ROSTER_NAMES + _ROSTER + _hooks_decl((".claude/settings.json", "file", ""),
-                                                          ("OUT.md", "file", ""))
+_ROSTER_DECL = _hooks_decl((".claude/settings.json", "file", ""), ("OUT.md", "file", ""))
+_FAKE_HOOKS_ROSTER = _ROSTER_NAMES + _ROSTER + _ROSTER_DECL
 _NO_ROSTER_DECL = _hooks_decl(("OUT.md", "file", ""))
 # Each must fail closed (exit 2): an unscoped entry over a roster path would make gensrc_guard deny an
 # adopter's edits to its own copy, and a roster that cannot be read statically must never read as empty.
@@ -701,6 +729,41 @@ _ROSTER_REBINDS = {
     "a del": "del AUTHORING_MARKER_REL\n",
     "a global declaration": "def _f():\n    global AUTHORING_ONLY_REL\n",
     "a plain assignment nested in an if": "if True:\n    PROJECT_SETTINGS_REL = \".claude/other.json\"\n",
+}
+# Case (r): label -> (generator file name, its bytes or text, expected exit). The first three are the reproduced
+# divergences, each exit 0 under a UTF-8 text parse with no order or dunder rule: it read .claude/settings.json
+# where an import binds another value (the module docstring, the module name, or, under the utf-7 cookie, the
+# hidden second assignment the ASCII comment text "+AAo-" decodes to a newline before). A name bound after the
+# roster and a dunder name bound before it keep the order and dunder rules apart. The declaration reader shares
+# the bytes parse, so the same cookie cannot hide GENSRC_OUTPUTS = () behind the literal. A leading BOM and
+# latin-1 bytes under a latin-1 cookie were refused by the UTF-8 text read and stay refused; a utf-8 cookie on
+# the valid case (o) generator is no false reject.
+_MARKER_NAME = 'AUTHORING_MARKER_REL = ".aiqt/authoring.toml"\n'
+_UTF7 = "# coding: utf-7\n"
+_SOURCE_READS = {
+    "a module docstring read through __doc__, rebound after the roster (reproduced)": (
+        "gen_hooks.py", ('""".claude/other.json"""\n' + _MARKER_NAME
+                         + "AUTHORING_ONLY_REL = (AUTHORING_MARKER_REL, __doc__)\n"
+                         + '__doc__ = ".claude/settings.json"\n' + _ROSTER_DECL), 2),
+    "__name__ read by the roster, rebound after it (reproduced)": (
+        "gen_hooks.py", (_MARKER_NAME + "AUTHORING_ONLY_REL = (AUTHORING_MARKER_REL, __name__)\n"
+                         + '__name__ = ".claude/settings.json"\n' + _ROSTER_DECL), 2),
+    "a utf-7 coding cookie hiding a rebinding of a used name (reproduced)": (
+        "gen_hooks.py", (_UTF7 + _ROSTER_NAMES + 'x = 1  # +AAo-PROJECT_SETTINGS_REL = ".claude/other.json"\n'
+                         + _ROSTER + _ROSTER_DECL), 2),
+    "a used name bound after the roster": (
+        "gen_hooks.py", (_MARKER_NAME + _ROSTER + 'PROJECT_SETTINGS_REL = ".claude/settings.json"\n'
+                         + _ROSTER_DECL), 2),
+    "a dunder name bound before the roster": (
+        "gen_hooks.py", (_MARKER_NAME + '__doc__ = ".claude/settings.json"\n'
+                         + "AUTHORING_ONLY_REL = (AUTHORING_MARKER_REL, __doc__)\n" + _ROSTER_DECL), 2),
+    "a utf-7 coding cookie hiding GENSRC_OUTPUTS = () behind the literal": (
+        "gen_selftestcookie.py", _UTF7 + _DECOY + "x = 1  # +AAo-GENSRC_OUTPUTS = ()\n", 2),
+    "a leading BOM": ("gen_hooks.py", b"\xef\xbb\xbf" + _FAKE_HOOKS_ROSTER.encode("utf-8"), 2),
+    "latin-1 bytes under a latin-1 cookie": (
+        "gen_hooks.py", b"# coding: latin-1\n# \xe9\n" + _FAKE_HOOKS_ROSTER.encode("utf-8"), 2),
+    "a utf-8 coding cookie on the valid generator": (
+        "gen_hooks.py", "# -*- coding: utf-8 -*-\n" + _FAKE_HOOKS_ROSTER, 0),
 }
 
 
@@ -910,6 +973,20 @@ def self_test_main():
             _build_from(qdir, "gen_hooks.py", text)
             if run_quiet(qdir, check=False) != 2:
                 failures.append("authoring-only roster: {} expected exit 2 (single binding)".format(label))
+
+        # (r) A source is read as the interpreter binds it, and the byte forms the UTF-8 text read refused stay
+        #     refused; each generator is written as bytes, so a cookie or a BOM reaches the reader unchanged.
+        for idx, (label, (filename, data, want)) in enumerate(_SOURCE_READS.items()):
+            raw = data if isinstance(data, bytes) else data.encode("utf-8")
+            try:
+                ast.parse(raw)  # the interpreter compiles each vector, so only the reader can refuse it
+            except (SyntaxError, ValueError) as exc:
+                failures.append("source read: {} does not compile from its bytes ({})".format(label, exc))
+            sdir = tmp / "sourceread{}".format(idx)
+            _build_from(sdir, filename, "")
+            (sdir / "tools" / filename).write_bytes(raw)
+            if run_quiet(sdir, check=False) != want:
+                failures.append("source read: {} expected exit {}".format(label, want))
     finally:
         if unread_tools is not None:
             os.chmod(unread_tools, 0o755)  # restore even on an unexpected early exit
@@ -936,7 +1013,9 @@ def self_test_main():
           "all fail closed (exit 2); the gen_hooks AUTHORING_ONLY_REL roster scopes exactly its entry "
           "\"authoring\", and every roster fault (a roster path under a tree or as a block, an unbound, "
           "computed or doubly bound roster, a self-declared scope, and every other binding of the roster or a "
-          "name it uses) fails closed (exit 2)" + note)
+          "name it uses) fails closed (exit 2); a roster name read through __doc__ or __name__, bound after the "
+          "roster, or a dunder, a utf-7 cookie hiding a rebinding, a leading BOM and non-UTF-8 bytes fail closed "
+          "(exit 2), while a utf-8 cookie generates" + note)
     return 0
 
 

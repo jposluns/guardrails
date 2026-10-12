@@ -90,8 +90,9 @@ PROJECT_SCRIPT_PATH = '"$CLAUDE_PROJECT_DIR"/' + SCRIPT_REL
 # (exit 2), so damage to it here cannot silently drop the drift check. AUTHORING_ONLY_REL is the never-shipped
 # roster: gen_gensrc and gen_manifest both read it from this file statically (gen_gensrc.read_authoring_roster),
 # gen_gensrc scopes its registry entries "authoring", so gensrc_guard enforces them only where this marker is
-# exact, and gen_manifest keeps them out of the release. Keep it a tuple of literals, or of names each bound
-# exactly once, by one plain top-level assignment, to a str literal; any other binding fails closed.
+# exact, and gen_manifest keeps them out of the release (with this roster as imported beside it, whatever a
+# tree under check rosters). Keep it a tuple of literals, or of non-dunder names each bound exactly once, by
+# one plain top-level assignment above it, to a str literal; any other binding fails closed.
 AUTHORING_MARKER_REL = ".aiqt/authoring.toml"
 AUTHORING_MARKER = {"format-version": 1, "role": "pack-authoring-repository"}
 AUTHORING_MARKER_MAX_BYTES = 1_000_000

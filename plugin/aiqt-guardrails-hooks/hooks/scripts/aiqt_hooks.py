@@ -8655,10 +8655,11 @@ def gensrc_guard(data):
     fires only when the file_path resolves onto a kind=file or kind=tree registry entry. Coverage is
     exactly the registry, so an ABSENT registry is the inert ALLOW by design; kind=block entries are
     EXCLUDED (a path guard cannot see which lines an edit touches); Bash is EXCLUDED by design
-    (regeneration itself runs through Bash), so the matcher is Write|Edit|MultiEdit only. A Write to a sibling
-    settings file such as .claude/settings.local.json (local and ungenerated, so no registry entry) is not
-    judged either, yet it can change hook behaviour for later sessions; the settings precedence Claude Code
-    gives it is not verified by this pack. NO-ASK posture:
+    (regeneration itself runs through Bash), so the matcher is Write|Edit|MultiEdit only. A Write, Edit or
+    MultiEdit to a sibling settings file such as .claude/settings.local.json is not judged either (no generator
+    writes it, so no registry entry names it; that it holds only personal settings is a convention, not
+    enforced), yet it can change hook behaviour for later sessions; the settings precedence Claude Code gives
+    it is not verified by this pack. NO-ASK posture:
     a CONFIRMED registry match DENIES and names the source to edit and the regenerate command (a reachable
     correct action). A PRESENT-but-unreadable/malformed registry ALSO DENIES, fail-closed (round-2 finding
     8): a corrupted registry must not silently disable the generated-artefact protection, so a cannot-read of
