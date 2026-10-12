@@ -103,12 +103,22 @@ SUITE_ID = "git-fixture-env-selftest"
 # member runs as long as its own work takes (opf.py --self-test alone needs minutes unloaded), and a host
 # loaded to several times its CPU count stretches that past any fixed wall-clock bound. So the bound is
 # load-tolerant (tools/_load_bound.py): a child is stopped only when its process tree makes no CPU or
-# output progress for the stall bound (a hang), or spends the budget in load-adjusted seconds (a spin);
-# the budgets are the former wall-clock bounds, which these children finish within on an idle host.
-# A stop is reported as the bound firing, never as the child exit code.
+# output progress for the stall bound (a heuristic: silence is not proof of a hang), or spends the budget
+# in load-adjusted seconds (a spin); the budgets are the former wall-clock bounds, which these children
+# finish within on an idle host. A stop is the bound firing: its result is a BoundStop, which check()
+# files as cannot-evaluate (the suite exits 2), never as the child's failure.
+# Longest silent wait a member legitimately makes: a bounded hold of a worker thread or a child while
+# the member works on (at most 120 s, the Event hold in opf/tools/_opf_adopt_observe.py, released at once
+# in a passing run); a child a member waits on counts its CPU as the member's progress. 300 s exceeds it.
+# The corpus self-test makes no deliberate wait (no sleep, Event, select or child timeout in
+# tools/selftest_aiqt_corpus.py), so 120 s covers blocked disk I/O alone.
 MEMBER_BUDGET_S, MEMBER_STALL_S = 1200, 300
 CORPUS_BUDGET_S, CORPUS_STALL_S = 300, 120
+_LOAD_FACTOR = None  # None reads the host load; the bound vectors inject a factor to simulate a loaded host
 FAILURES = []
+# Checks whose result a load-tolerant bound stopped: not judged, so the suite is cannot-evaluate (exit 2).
+CANNOT_EVALUATE = []
+BOUND_STOPS = []
 EXECUTED = []
 _EXECUTED_SET = set()
 
@@ -141,8 +151,62 @@ def check(name, got, want):
         sys.exit(2)
     _EXECUTED_SET.add(name)
     EXECUTED.append(name)
-    if got != want:
+    verdict = _judge(got, want)
+    if verdict == "cannot-evaluate":
+        CANNOT_EVALUATE.append("{}: not judged, a load-tolerant bound stopped its child: got {!r}"
+                               .format(name, got))
+    elif verdict == "fail":
         FAILURES.append("{}: got {!r}, want {!r}".format(name, got, want))
+
+
+class BoundStop(str):
+    """The result of a child a load-tolerant bound stopped. A str, so it never equals a passing result;
+    check() files a result that differs from the wanted one only by BoundStops as cannot-evaluate."""
+
+
+def _bound_stop(what, exc):
+    stop = BoundStop("{} was stopped by its load-tolerant bound: {}".format(what, exc.reason))
+    BOUND_STOPS.append(stop)
+    return stop
+
+
+def _stop_or(argv, value):
+    """For a list of failing members: the BoundStop of a stopped member, else the member argv."""
+    return value[0] if value and isinstance(value[0], BoundStop) else argv
+
+
+def _without_stops(value):
+    if isinstance(value, list):
+        return [_without_stops(item) for item in value if not isinstance(item, BoundStop)]
+    if isinstance(value, tuple):
+        return tuple(_without_stops(item) for item in value)
+    return value
+
+
+def _carries_stop(value):
+    if isinstance(value, BoundStop):
+        return True
+    return isinstance(value, (list, tuple)) and any(_carries_stop(item) for item in value)
+
+
+def _judge(got, want):
+    """"pass", "fail", or "cannot-evaluate" when got differs from want only by BoundStops (a stopped
+    child's result, or stopped entries in a list of failing members); a real difference stays "fail"."""
+    if got == want:
+        return "pass"
+    if _carries_stop(got):
+        rest = _without_stops(got)
+        if isinstance(got, BoundStop) or rest == want or (
+                isinstance(rest, list) and all(item == want for item in rest)):
+            return "cannot-evaluate"
+    return "fail"
+
+
+def _verdict_code(failures, cannot_evaluate, bound_stops):
+    """1 for any failure, else 2 when a bound stopped a child (cannot-evaluate), else 0."""
+    if failures:
+        return 1
+    return 2 if cannot_evaluate or bound_stops else 0
 
 
 def _poison_environ():
@@ -1215,7 +1279,7 @@ def _config_injection_lane(base):
     _wrapper_bypass_control(base, env, marker, monitor_marker)
     _prepared_before_pool_control(env, marker, monitor_marker)
     combined = _config_results(roster, env, marker, monitor_marker)
-    check("config/registered-combined", [argv for argv, value in combined.items()
+    check("config/registered-combined", [_stop_or(argv, value) for argv, value in combined.items()
                                        if value != (0, b"", b"", b"")], [])
     for rc_id, hooks_id, member in (
             ("config/selftest_aiqt_corpus/rc", "config/selftest_aiqt_corpus/hooks",
@@ -1314,7 +1378,7 @@ def _config_injection_lane(base):
     malformed_results = _config_results(
         [argv for argv in roster if _command_identity(argv) not in CONFIG_EXCLUSIONS["malformed"]],
         env, marker, monitor_marker)
-    check("config/registered-malformed", [argv for argv, value in malformed_results.items()
+    check("config/registered-malformed", [_stop_or(argv, value) for argv, value in malformed_results.items()
                                         if value != (0, b"", b"", b"")], [])
     for malformed_id, member in (
             ("config/selftest_aiqt_corpus/malformed", "tools/selftest_aiqt_corpus.py"),
@@ -1368,7 +1432,7 @@ def _config_injection_lane(base):
     check("config/system-control", (probe.returncode, bool(monitor_marker.read_bytes())),
           (0, True))
     system_results = _config_results(roster, system_env, marker, monitor_marker, system=True)
-    check("config/registered-system", [argv for argv, value in system_results.items()
+    check("config/registered-system", [_stop_or(argv, value) for argv, value in system_results.items()
                                      if value != (0, b"", b"", b"")], [])
     return system_results
 
@@ -1377,11 +1441,14 @@ def _run_config_member(member, env):
     try:
         proc = _load_bound.run([sys.executable, "-I", "-B", str(ROOT / member[0]), *member[1:]],
                                budget_s=MEMBER_BUDGET_S, stall_s=MEMBER_STALL_S,
+                               clock=_load_bound.LoadClock(factor=_LOAD_FACTOR),
                                cwd=ROOT, env=env, text=True, errors="replace")
         if proc.returncode:
             print("CONFIG-INJECTION {}:\n{}".format(member, proc.stdout + proc.stderr),
                   file=sys.stderr)
         return proc.returncode
+    except _load_bound.Hung as exc:
+        return _bound_stop("member {}".format(" ".join(member)), exc)
     except (OSError, subprocess.SubprocessError) as exc:
         return str(exc)
 
@@ -1681,8 +1748,9 @@ def _opf_home_lifecycles(config_results):
     paths = {_command_identity(argv)[0] for argv in roster}
     missing = set(OPF_LIFECYCLE_EXEMPTIONS) - paths
     for argv in roster:
-        if config_results.get(argv) != (0, b"", b"", b""):
-            missing.add(_command_identity(argv)[0])
+        value = config_results.get(argv)
+        if value != (0, b"", b"", b""):
+            missing.add(_stop_or(_command_identity(argv)[0], value))
     problems = []
     try:
         trees = {Path(relative).stem: ast.parse(
@@ -1775,8 +1843,11 @@ def _run_corpus(poison_key, poison_value, cwd):
     try:
         proc = _load_bound.run([sys.executable, "-I", "-B", str(CORPUS_SELFTEST)],
                                budget_s=CORPUS_BUDGET_S, stall_s=CORPUS_STALL_S,
+                               clock=_load_bound.LoadClock(factor=_LOAD_FACTOR),
                                cwd=str(cwd), env=env, text=True)
         return proc.returncode
+    except _load_bound.Hung as exc:
+        return _bound_stop("corpus self-test ({} poison)".format(poison_key), exc)
     except (OSError, subprocess.SubprocessError) as exc:
         return "corpus launch failed: {}".format(exc)
 
@@ -1799,8 +1870,11 @@ def _run_corpus_imported(poison_key, poison_value, cwd):
     try:
         proc = _load_bound.run([sys.executable, "-I", "-B", "-c", code, str(ROOT / "tools")],
                                budget_s=CORPUS_BUDGET_S, stall_s=CORPUS_STALL_S,
+                               clock=_load_bound.LoadClock(factor=_LOAD_FACTOR),
                                cwd=str(cwd), env=env, text=True)
         return proc.returncode
+    except _load_bound.Hung as exc:
+        return _bound_stop("imported corpus self-test ({} poison)".format(poison_key), exc)
     except (OSError, subprocess.SubprocessError) as exc:
         return "imported corpus launch failed: {}".format(exc)
 
@@ -2116,9 +2190,11 @@ _SCAN_ALLOWED_UNPINNED = (
     # Cannot-evaluate launches (argv or head outside the resolver's bounds), each audited:
     ("tools/_load_bound.py", "run", ("unresolved",),
      "cannot-evaluate head: the shared load-tolerant runner launches its caller argv, which"
-     " this scan does not follow to the call site; run() itself refuses (ValueError) any argv"
-     " whose head is git, so no git launch passes through it (git stays on a pinned"
-     " subprocess call this scan enforces)"),
+     " this scan does not follow to the call site; run() itself refuses (ValueError), before"
+     " any launch, an argv whose program resolves (PATH from env, then symlinks) to git, or"
+     " is a shell or program launcher (env, nice, timeout and the rest of _LAUNCHERS) that"
+     " could run git, so no git launch passes through it (git stays on a pinned subprocess"
+     " call this scan enforces); its vectors include /usr/bin/env git and a symlink alias"),
     ("tools/check_git_option_table.py", "_git", ("unresolved",),
      "cannot-evaluate funnel: the argv tail is the caller's *args; every caller passes"
      " option-table introspection forms (init -q --template= of a scratch probe repo,"
@@ -4527,6 +4603,49 @@ def _expected_check_ids():
     return None
 
 
+def _bound_stop_lane(base):
+    """The load-tolerant child bound through this suite's own call sites. bound/slowed-run-passes: a
+    member printing progress for about 2 s passes a 1 s budget under an injected 16x load and is stopped
+    under none (the pass is owed to the load adjustment). bound/hang-is-cannot-evaluate: a silent member and
+    a silent corpus run are each stopped by the heuristic stall bound and filed as cannot-evaluate, never
+    as a failure; a real difference beside a stop stays a failure; the suite exits 1 for any failure, else
+    2 for a stop. The lane's own stops are expected, so they leave BOUND_STOPS as they found it."""
+    global MEMBER_BUDGET_S, MEMBER_STALL_S, CORPUS_BUDGET_S, CORPUS_STALL_S, CORPUS_SELFTEST, _LOAD_FACTOR
+    slowed = base / "bound-slowed.py"
+    slowed.write_text("import time\nfor _ in range(8):\n    print(1, flush=True)\n    time.sleep(0.25)\n",
+                      encoding="utf-8")
+    silent = base / "bound-silent.py"
+    silent.write_text("import time\ntime.sleep(3600)\n", encoding="utf-8")
+    saved = (MEMBER_BUDGET_S, MEMBER_STALL_S, CORPUS_BUDGET_S, CORPUS_STALL_S, CORPUS_SELFTEST, _LOAD_FACTOR)
+    kept = len(BOUND_STOPS)
+    env = _git_fixture_env.git_fixture_env()
+    try:
+        MEMBER_BUDGET_S, MEMBER_STALL_S = 1, 1.5
+        _LOAD_FACTOR = lambda: _load_bound.MAX_LOAD_FACTOR  # noqa: E731
+        slowed_loaded = _run_config_member((str(slowed),), env)
+        _LOAD_FACTOR = lambda: 1.0  # noqa: E731
+        slowed_idle = _run_config_member((str(slowed),), env)
+        # A 20 s budget: the 1.5 s stall bound must stop the silent child first (the stop text says which
+        # bound fired), and a regression to a plain timeout still ends this lane in 20 s, not an hour.
+        MEMBER_BUDGET_S, MEMBER_STALL_S = 20, 1.5
+        member_stop = _run_config_member((str(silent),), env)
+        CORPUS_BUDGET_S, CORPUS_STALL_S, CORPUS_SELFTEST = 20, 1.5, silent
+        corpus_stop = _run_corpus("GIT_DIR", "/decoy/.git", base)
+    finally:
+        MEMBER_BUDGET_S, MEMBER_STALL_S, CORPUS_BUDGET_S, CORPUS_STALL_S, CORPUS_SELFTEST, _LOAD_FACTOR = saved
+        del BOUND_STOPS[kept:]
+    check("bound/slowed-run-passes", (slowed_loaded, isinstance(slowed_idle, BoundStop)), (0, True))
+    check("bound/hang-is-cannot-evaluate",
+          (isinstance(member_stop, BoundStop),
+           isinstance(member_stop, str) and "heuristic stall bound" in member_stop,
+           isinstance(corpus_stop, BoundStop),
+           _judge(member_stop, 0), _judge([member_stop], []), _judge([member_stop, ("tools/x.py",)], []),
+           _judge(([corpus_stop], []), ([], [])),
+           (_verdict_code([], ["x"], []), _verdict_code([], [], ["x"]), _verdict_code(["f"], ["x"], ["x"]),
+            _verdict_code([], [], []))),
+          (True, True, True, "cannot-evaluate", "cannot-evaluate", "fail", "cannot-evaluate", (2, 2, 1, 0)))
+
+
 def main(report_path=None):
     if report_path is not None:
         # The execution report is finalized at interpreter exit, after this run's cleanup
@@ -4825,6 +4944,7 @@ def main(report_path=None):
         _manifest_setup_failures(base)
         _manifest_extra_setup_failures()
         _opf_home_lifecycles(config_results)
+        _bound_stop_lane(base)
 
         # ---------- layer 3: the end-to-end leak probe ----------
         decoy = _build_decoy(base)
@@ -4864,11 +4984,20 @@ def main(report_path=None):
         FAILURES.append("execution-set/missing: {}".format(check_id))
     for check_id in sorted(_EXECUTED_SET - expected):
         FAILURES.append("execution-set/extra: {}".format(check_id))
-    if FAILURES:
+    verdict = _verdict_code(FAILURES, CANNOT_EVALUATE, BOUND_STOPS)
+    if verdict == 1:
         print("SELF-TEST FAIL:")
         for failure in FAILURES:
             print("  - " + failure)
+        for line in CANNOT_EVALUATE:
+            print("  (also could not evaluate) " + line)
         return 1
+    if verdict == 2:
+        print("SELF-TEST CANNOT-EVALUATE: a load-tolerant bound stopped a child (a heuristic stall or the "
+              "load-adjusted budget, never a proven hang), so its checks were not judged:")
+        for line in CANNOT_EVALUATE or BOUND_STOPS:
+            print("  - " + line)
+        return 2
     print("SELF-TEST PASS: {} unique checks executed; execution set reconciled against "
           "tools/selftest_checks.toml".format(len(EXECUTED)))
     return 0

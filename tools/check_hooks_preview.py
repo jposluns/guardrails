@@ -22,8 +22,9 @@ an absent or unreadable one is exit 2), and every other entry must be a hook fil
       After that scrub the one variable AIQT_HOOKS_REQUIRE_SIBLINGS=1 is set: a hook skips its
       sibling-parity tests when a sibling file is absent unless that variable is "1", and here the
       siblings are present, so a parity test can never skip silently under this gate.
-      A nonzero exit is a finding. A run that outlives SELFTEST_TIMEOUT seconds delivered no verdict and
-      is a cannot-evaluate (exit 2), attributed to this gate's deadline, not reported as a hook failure.
+      A nonzero exit is a finding. A run stopped by this gate's load-tolerant bound (SELFTEST_TIMEOUT
+      load-adjusted seconds, or the heuristic SELFTEST_STALL_S stall bound) delivered no verdict and is a
+      cannot-evaluate (exit 2), attributed to the bound, never reported as a hook failure or a proven hang.
   (b) INTEGRITY. The README.md integrity table (the one table whose header row is exactly
       `| File | SHA-256 | Link |`; every line from its separator row to the first blank line
       or the end of the file must be a `| a | b | c |` row, since GitHub renders a row written without a
@@ -124,7 +125,12 @@ GFM_SPACE = " \t"
 SELFTEST_TIMEOUT = 600
 # The bound is load-tolerant (tools/_load_bound.py): SELFTEST_TIMEOUT counts load-adjusted seconds, which
 # stretch while the host runs more work than it has CPUs, and a self-test whose process tree makes no CPU
-# or output progress for SELFTEST_STALL_S wall seconds is stopped as hung. Either stop is unverifiable.
+# or output progress for SELFTEST_STALL_S wall seconds is stopped by a heuristic stall bound (silence is
+# not proof of a hang). Either stop is the bound firing: unverifiable, never a hook failure.
+# Longest silent wait a shipped hook self-test legitimately makes: a few seconds (a deliberately timed-out
+# sleeping child, a thread held on an Event that the test releases); a hook self-test's own hang guards
+# (HANG_TIMEOUT = 120 s, Event holds of 60 s) are reached only by a hang. 300 s exceeds them all, so the
+# hook's own guard reports first.
 SELFTEST_STALL_S = 300
 _load_factor = None  # None reads the host load; the self-test injects a factor to simulate a loaded host
 # Characters of an OS error kept in a diagnostic, so a failure is reported, never dumped.
@@ -326,9 +332,10 @@ def leg_selftest(pdir, hooks, findings, unverifiable):
                                       env=_selftest_env(), budget_s=SELFTEST_TIMEOUT, stall_s=SELFTEST_STALL_S,
                                       clock=_load_bound.LoadClock(factor=_load_factor))
             except subprocess.TimeoutExpired as exc:
-                unverifiable.append("{}/{}: --self-test did not finish within this gate's {}s deadline ({}); "
-                                    "no verdict was delivered".format(PREVIEW_DIR, name, SELFTEST_TIMEOUT,
-                                                                      getattr(exc, "reason", "timeout")))
+                unverifiable.append("{}/{}: --self-test was stopped by this gate's load-tolerant bound ({} "
+                                    "load-adjusted s, stall bound {} s: {}); no verdict was delivered"
+                                    .format(PREVIEW_DIR, name, SELFTEST_TIMEOUT, SELFTEST_STALL_S,
+                                            getattr(exc, "reason", "timeout")))
                 continue
             except (OSError, subprocess.SubprocessError) as exc:
                 unverifiable.append("{}/{}: --self-test could not be launched: {}".format(PREVIEW_DIR, name, exc))

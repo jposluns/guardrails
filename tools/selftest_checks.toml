@@ -980,6 +980,9 @@ expected-check-ids = [
   "leak/gitdir-poison-caller-unchanged",
   "leak/imported-gitdir-poison-fixture-green",
   "leak/imported-gitdir-poison-caller-unchanged",
+  # ---------- the load-tolerant child bound: a slowed run passes, a stop is cannot-evaluate ----------
+  "bound/slowed-run-passes",
+  "bound/hang-is-cannot-evaluate",
 ]
 
 [[suite]]

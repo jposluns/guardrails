@@ -159,9 +159,13 @@ REGEN_RE = re.compile(r"^tools/gen_([A-Za-z0-9_]+)\.py$")
 # Both bounds are in LOAD-ADJUSTED seconds (tools/_load_bound.py): they stretch while the host runs more
 # work than it has CPUs, so a loaded host slows the sweep without turning it into cannot-evaluate, and a
 # probe is also stopped early once its process tree makes no CPU or output progress for PROBE_STALL_S
-# wall seconds (a hang, not slowness). Either stop is cannot-evaluate (exit 2), never a verdict.
-PROBE_TIMEOUT = 120  # per subprocess --check; a hung generator is cannot-evaluate, not a hang
-PROBE_STALL_S = 60  # wall seconds without CPU or output progress that mark a probe as hung
+# wall seconds. That stall test is a heuristic bound (silence is not proof of a hang). Either stop is the
+# bound firing, cannot-evaluate (exit 2), never a verdict on the generator.
+PROBE_TIMEOUT = 120  # per subprocess --check; a generator stopped by it is cannot-evaluate
+# Longest silent wait a generator --check legitimately makes: none deliberate. It reads files and runs git
+# and interpreter children, whose CPU counts as its own progress, so only blocked disk I/O leaves it
+# silent; 60 s is far above that on a working host.
+PROBE_STALL_S = 60
 TOTAL_TIMEOUT = 1800  # backstop for the whole sweep; exceeding it is cannot-evaluate, never a hang
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)  # Linux/CI have it; degrade safely where the platform lacks it
 _load_factor = _load_bound.load_factor  # module-level indirection so the self-test can inject host load
@@ -838,8 +842,9 @@ def main() -> int:
 #       UTF-8 passes the sweep (exit 0): the gate probes a block target with invalid UTF-8 only and the
 #       generator rejects it, exercising the is_block probe path no other fixture covers.
 #   (n) load tolerance: under an injected host load a generator slower than a 1 s per-probe bound passes
-#       while printing progress, a silent hang is still stopped (exit 2), and the same slow generator
-#       on an idle host overruns the bound (exit 2); the shared _load_bound vectors also run here.
+#       while printing progress, a silent sleeper is still stopped by the stall bound (exit 2), and the
+#       same slow generator on an idle host overruns the bound (exit 2); the shared _load_bound vectors
+#       also run here.
 # Every fixture is synthetic; any invalid-UTF-8 corruption bytes are assembled from non-secret parts so
 # this file never trips the repo secret scan.
 
@@ -1453,28 +1458,43 @@ def _self_test_main_isolated():
         # (n) Load tolerance. With the per-probe bound cut to 1 s and the host load injected at the cap, a
         #     generator that takes about 2 s while printing progress passes every probe (a 1 s wall-clock
         #     bound would have made it cannot-evaluate); a generator that sleeps silently is still stopped
-        #     by the stall bound (exit 2); and on an idle host the same slow generator overruns the 1 s
-        #     budget (exit 2), so the pass is owed to the load adjustment. The shared vectors follow.
+        #     by the stall bound (exit 2; a spy on _run_check requires the stop to be the stall bound's,
+        #     not the 16 s budget's); and on an idle host the same slow generator overruns the 1 s budget
+        #     (exit 2), so the pass is owed to the load adjustment. The shared vectors follow.
         slow_main = ("def main():\n    import time\n    for _ in range(8):\n"
                      "        print(\"working\", flush=True)\n        time.sleep(0.25)\n")
         slow = _build_repo(tmp / "slow", {"goodfile": _GOODFILE.replace("def main():\n", slow_main)})
         hang = _build_repo(tmp / "hang", {"goodfile": _GOODFILE.replace(
             "def main():\n", "def main():\n    import time\n    if \"--check\" in sys.argv[1:]:\n"
             "        time.sleep(3600)\n")})  # hangs on --check only, so the fixture build still writes
+        stops = []
+
+        def _spy_run_check(script_path, cwd, timeout=PROBE_TIMEOUT, env_overrides=None):
+            try:
+                return saved_run_check(script_path, cwd, timeout, env_overrides)
+            except _load_bound.Hung as exc:
+                stops.append(exc.kind)
+                raise
+
         PROBE_TIMEOUT, PROBE_STALL_S = 1, 1
         try:
             _load_factor = lambda: _load_bound.MAX_LOAD_FACTOR  # noqa: E731
             _now = _load_bound.LoadClock(factor=lambda: _load_factor())
-            rc_slow, rc_hang = sweep_quiet(slow), sweep_quiet(hang)
+            rc_slow = sweep_quiet(slow)
+            _run_check = _spy_run_check
+            rc_hang = sweep_quiet(hang)
+            _run_check = saved_run_check
             _load_factor = lambda: 1.0  # noqa: E731
             _now = _load_bound.LoadClock(factor=lambda: _load_factor())
             rc_idle = sweep_quiet(slow)
         finally:
             _load_factor, PROBE_TIMEOUT, PROBE_STALL_S = saved_bounds
             _now = saved_now
-        if (rc_slow, rc_hang, rc_idle) != (0, 2, 2):
-            failures.append("load tolerance: expected (slow under load, silent hang, slow on an idle host) "
-                            "= (0, 2, 2), got {!r}".format((rc_slow, rc_hang, rc_idle)))
+            _run_check = saved_run_check
+        if (rc_slow, rc_hang, rc_idle, sorted(set(stops))) != (0, 2, 2, ["stall"]):
+            failures.append("load tolerance: expected (slow under load, silent hang, slow on an idle host, "
+                            "the bound that stopped the hang) = (0, 2, 2, ['stall']), got {!r}"
+                            .format((rc_slow, rc_hang, rc_idle, sorted(set(stops)))))
         failures.extend(_load_bound.vector_failures(sys.executable))
 
         # (l) A sandbox-setup mkdtemp failure (injected OSError) returns cannot-evaluate (exit 2), not an
@@ -1646,9 +1666,9 @@ def _self_test_main_isolated():
           "whose corrupted probe raises (itself exit 2); a generator changing a real-tree file's mode is "
           "detected (exit 2); a decode-only generator is caught (exit 1) specifically by a "
           "valid-but-different / same-length content probe; a total-runtime deadline overrun returns exit "
-          "2; a generator slower than the per-probe bound passes under host load while a silent hang and the "
-          "same slow generator on an idle host each return exit 2 (load-tolerant bounds, shared vectors "
-          "included); a sandbox-setup mkdtemp failure returns exit 2; a block-kind generator that fail-closes "
+          "2; a generator slower than the per-probe bound passes under host load while a silently sleeping "
+          "generator (stopped by the heuristic stall bound, not the budget) and the same slow generator on an "
+          "idle host each return exit 2 (load-tolerant bounds, shared vectors included); a sandbox-setup mkdtemp failure returns exit 2; a block-kind generator that fail-closes "
           "on invalid UTF-8 passes (exit 0), exercising the invalid-UTF-8-only block probe path; a "
           "git-reading generator passes (exit 0) because the D6 template materializes a real git "
           "repository so its baseline git ls-files succeeds; a repo-local core.fsmonitor hook is NEVER "
