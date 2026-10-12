@@ -1444,7 +1444,13 @@ expected-check-ids = [
   "mutant/every-mutant-caught",
   "mutant/every-vector-discriminates",
   "gate/caller-timer-survives",
+  "gate/timer-reset-refused",
   "gate/overrun-bounded-as-hung",
+  "gate/expiry-kills-and-reaps",
+  "gate/descendants-killed",
+  "gate/parent-death-kills-group",
+  "gate/fork-window-cleaned",
+  "gate/child-never-unwinds",
   "live/real-tree-passes",
   "live/direct-launch-passes",
 ]
