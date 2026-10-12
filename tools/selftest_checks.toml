@@ -1454,6 +1454,7 @@ expected-check-ids = [
   "gate/witness-kill-confirmed",
   "gate/witness-cleanup-spares-owner",
   "gate/witness-cleanup-binds-write-end",
+  "gate/witness-refusal-named",
   "gate/failure-never-retried-or-masked",
   "gate/expiry-kills-and-reaps",
   "gate/escaped-child-killed",
