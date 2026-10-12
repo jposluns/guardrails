@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Check token-level parity between the local and CI quality-gate rosters.
 
-The gate reads tools/run_all_checks.sh and .github/workflows/quality.yml as data. It
-does not execute either file. Both paths are absolute and derived from this file's
+The gate reads tools/run_all_checks.sh and the two CI workflows (CI_WORKFLOWS:
+.github/workflows/quality.yml and .github/workflows/msg-leaks.yml) as data. It
+executes none of them. Every path is absolute and derived from this file's
 resolved repository root. The --self-test alone also runs a scratch copy of the runner
 under bash, with stub python3 and gitleaks commands, to prove a failing gate is named
 (GATE FAILED: <name> (exit <n>)) and listed (FAILED GATES: ...) before RESULT: FAIL.
@@ -74,6 +75,29 @@ runner image, runs-on labels, services and environment values (a job or step env
 can set a variable such as BASH_ENV that changes what an accepted gate command
 does). Inside a run: block the exact line exit 1 is accepted, because it can only
 end a step red; every other exit spelling stays unclassified.
+TWO WORKFLOWS. The CI side is the union of the named workflows in CI_WORKFLOWS:
+quality.yml and msg-leaks.yml, which holds the message/metadata leak scan alone
+so that only its one job re-runs on a PR title/body edit. A gate may run in
+either file and is still one member. Each named workflow is required: a missing
+or unreadable one is cannot-evaluate (exit 2), never an empty side. The job-set,
+result-masking and aggregator rules above apply to each file on its own, so the
+one-job msg-leaks.yml is its own status; that branch protection requires it
+beside Quality gates is not checked here.
+TRIGGER. The message/metadata leak scan (MSG_LEAKS_SCAN) reads the PR title and
+body, so the workflow that runs it must list opened, synchronize, reopened and
+edited (MSG_LEAKS_PULL_REQUEST_TYPES) in its pull_request types, and a workflow
+that does not run it must not carry edited on pull_request or
+pull_request_target (EDIT_EVENTS), because edited re-runs every job of that
+workflow on a metadata-only change. Each departure is a trigger finding (exit
+1). The rule reads the top-level on: block: an event key at indent 2 with no
+value reads as GitHub's default types (opened, synchronize, reopened); types:
+at indent 4 is a one-line flow list, one plain scalar, or a block list at
+indent 6; and a one-line on: value naming events gives each its default types.
+Under an EDIT_EVENTS key any other shape (a flow mapping, a line at an
+unexpected indent, a repeated event or types: key, an item that is not a plain
+name) is cannot-evaluate (exit 2), as are a quoted event key and a line at
+indent 1 or 3 anywhere in on:. The push trigger and branches: filters are not
+checked.
 
 Exit convention:
   0  extraction succeeded, every difference has an active exception, no exception is
@@ -88,8 +112,9 @@ DISCLOSED RESIDUAL. This is token-level set parity only. It does not compare
 environment values, operating systems, tool versions, execution order, multiplicity,
 step placement across jobs, labels, or whether the shell harness propagates a child
 failure. Interpreter-flag differences are intentionally removed from identity and are
-owned by check_python_launcher_isolation.py. Scope is exactly the two named files, so
-gates in other workflows are not enumerated. Argument order is identity-relevant,
+owned by check_python_launcher_isolation.py. Scope is exactly the three named files
+(the runner and CI_WORKFLOWS), so gates in other workflows, such as the scheduled
+currency.yml, are not enumerated. Argument order is identity-relevant,
 making a harmless reorder fail loud. Coordinated removal of both of this gate's own
 invocations cannot be detected if nobody runs the remaining file manually. The
 extractors implement a disclosed shell and YAML subset; an unknown construct is
@@ -98,7 +123,7 @@ top-level or job-level workflow key, an exit outside the exact terminal summary
 blocks or the top-level directory-binding line before the first gate, unbalanced
 if/fi nesting in the runner, a duplicate else or an empty then or else branch,
 any character outside printable ASCII (0x20-0x7E) plus tab and newline in
-either input file, job content without a job mapping, a run_gate()
+any input file, job content without a job mapping, a run_gate()
 dispatcher body outside its recognized shape, a run_gate() function definition
 inside an if branch, a run_gate word (label or argument)
 outside the gate-line character allowlist, a masked runtime-value flag in the
@@ -149,8 +174,8 @@ outside the supported grammar could hide a tools/ string from comment stripping.
 The runner's failure-state rules are lexical and shape-based: the runner is
 validated as printable-ASCII lines against an exact line and word allowlist
 with branch-state checks; the rules see line shapes and branch positions, not
-reachability or runtime values. Before any line is trusted, BOTH input files
-are refused whole if any character falls outside printable ASCII (0x20-0x7E)
+reachability or runtime values. Before any line is trusted, EVERY input file
+is refused whole if any character falls outside printable ASCII (0x20-0x7E)
 plus tab and newline: Python's splitlines() also breaks a line at \v, \f,
 \x1c, \x1d, \x1e, \x85, U+2028 and U+2029, and its strip() also removes
 Unicode spaces such as U+00A0, while bash breaks lines only at \n and reads
@@ -285,6 +310,9 @@ LOCAL_PATH = ROOT / "tools" / "run_all_checks.sh"
 CI_PATH = ROOT / ".github" / "workflows" / "quality.yml"
 LOCAL_SOURCE = "tools/run_all_checks.sh"
 CI_SOURCE = ".github/workflows/quality.yml"
+MSG_LEAKS_CI_PATH = ROOT / ".github" / "workflows" / "msg-leaks.yml"
+MSG_LEAKS_CI_SOURCE = ".github/workflows/msg-leaks.yml"
+CI_WORKFLOWS = ((CI_SOURCE, CI_PATH), (MSG_LEAKS_CI_SOURCE, MSG_LEAKS_CI_PATH))
 
 # Runtime-derived values deliberately lose their concrete value while retaining the
 # flag in identity. A new runtime-valued flag is not masked automatically, so it
@@ -374,6 +402,11 @@ REQUIRED_STATUS_JOB = (
     "          fi",
     '          echo "Quality gates: PASS, every needed job concluded success"',
 )
+
+MSG_LEAKS_SCAN = "tools/check_msg_leaks.py"  # the live scan (module docstring, TRIGGER)
+EDIT_EVENTS = ("pull_request", "pull_request_target")
+DEFAULT_PULL_REQUEST_TYPES = ("opened", "synchronize", "reopened")
+MSG_LEAKS_PULL_REQUEST_TYPES = DEFAULT_PULL_REQUEST_TYPES + ("edited",)
 
 ALLOWLIST = (
     {
@@ -1959,9 +1992,122 @@ def _required_status_findings(
     return findings
 
 
-def extract_ci(text):
-    """Extract normalized members from the supported quality.yml subset."""
-    source = CI_SOURCE
+def _edit_event_types(lines, source, diagnostics):
+    """Return {event: types} for each EDIT_EVENTS trigger of the top-level on:.
+
+    The shapes read are those the module docstring lists (TRIGGER); any
+    other shape under an edit event appends a trigger-shape diagnostic."""
+    events = {}
+    typed = set()
+
+    def refuse(line_number, message):
+        diagnostics.append(_diagnostic(
+            source, line_number, "trigger-shape", message))
+
+    def names(line_number, value):
+        if value.startswith("[") and value.endswith("]"):
+            parts = [_unquote(part.strip()) for part in value[1:-1].split(",")]
+        else:
+            parts = [_unquote(value)]
+        if not all(JOB_ID_RE.fullmatch(part) for part in parts):
+            refuse(line_number, "{!r} is not a plain name or a one-line list "
+                   "of plain names".format(value))
+            return ()
+        return tuple(parts)
+
+    start = None
+    for index, raw in enumerate(lines):
+        code = _strip_comment(raw)
+        if code[:1] not in ("", " ") and code.split(":", 1)[0] == "on":
+            start = index
+            break
+    if start is None:
+        return events
+    value = _strip_comment(lines[start]).split(":", 1)[1].strip()
+    if value:
+        for event in names(start + 1, value):
+            if event in EDIT_EVENTS:
+                events[event] = DEFAULT_PULL_REQUEST_TYPES
+        return events
+    event = None
+    in_types = False
+    for index in range(start + 1, len(lines)):
+        code = _strip_comment(lines[index])
+        if not code.strip():
+            continue
+        indent = len(code) - len(code.lstrip(" "))
+        if indent == 0:
+            break
+        stripped = code.strip()
+        key, _, rest = stripped.partition(":")
+        rest = rest.strip()
+        if indent in (1, 3):
+            refuse(index + 1, "line {!r} under on: is at indent {}; events "
+                   "are read only at indent 2".format(stripped, indent))
+        elif indent == 2:
+            in_types = False
+            event = key if key in EDIT_EVENTS else None
+            if _unquote(key) != key:
+                refuse(index + 1, "quoted on: key {!r}".format(key))
+            elif event is not None:
+                if event in events:
+                    refuse(index + 1,
+                           "on: declares {} more than once".format(event))
+                elif rest:
+                    refuse(index + 1, "{}: value {!r} is outside the "
+                           "recognized trigger shapes".format(event, rest))
+                events[event] = DEFAULT_PULL_REQUEST_TYPES
+        elif event is None:
+            continue
+        elif indent == 4:
+            in_types = key == "types"
+            if in_types:
+                if event in typed:
+                    refuse(index + 1, "{} declares types: more than "
+                           "once".format(event))
+                typed.add(event)
+                events[event] = names(index + 1, rest) if rest else ()
+                in_types = not rest
+        elif indent == 6 and in_types and stripped.startswith("- "):
+            events[event] += names(index + 1, stripped[2:].strip())
+        elif not in_types and indent > 4:
+            continue
+        else:
+            refuse(index + 1, "line {!r} under {} is outside the recognized "
+                   "trigger shapes".format(stripped, event))
+    return events
+
+
+def _trigger_findings(lines, members, source, diagnostics):
+    """Require pull_request edited exactly where the message/metadata leak
+    scan runs (module docstring, TRIGGER)."""
+    events = _edit_event_types(lines, source, diagnostics)
+    if MSG_LEAKS_SCAN in members:
+        types = events.get("pull_request", ())
+        missing = [kind for kind in MSG_LEAKS_PULL_REQUEST_TYPES
+                   if kind not in types]
+        if not missing:
+            return []
+        return [Finding(
+            "trigger",
+            source,
+            "{} runs {} but its pull_request types lack {}, so the scan does "
+            "not re-run on every pull request change it must see (edited is "
+            "a PR title/body change)".format(
+                source, MSG_LEAKS_SCAN, ", ".join(missing)),
+        )]
+    return [Finding(
+        "trigger",
+        source,
+        "{} carries {} type edited but does not run {}, so a PR title/body "
+        "edit re-runs every job of this workflow; only the workflow that runs "
+        "that scan triggers on edited".format(source, event, MSG_LEAKS_SCAN),
+    ) for event in EDIT_EVENTS if "edited" in events.get(event, ())]
+
+
+def extract_ci(text, source=CI_SOURCE):
+    """Extract normalized members from one CI_WORKFLOWS file in the supported
+    workflow subset; source labels its diagnostics and findings."""
     diagnostics = []
     members = set()
     origins = {}
@@ -2369,6 +2515,7 @@ def extract_ci(text):
 
     findings = _required_status_findings(
         job_ids, job_fields, lines, source, diagnostics)
+    findings.extend(_trigger_findings(lines, members, source, diagnostics))
     diagnostics.extend(_shadow_check(text, source, origins))
     return Extraction(
         frozenset(members),
@@ -2623,10 +2770,35 @@ def reconcile(local_extraction, ci_extraction, allowlist=ALLOWLIST):
     )
 
 
-def evaluate(local_text, ci_text, allowlist=ALLOWLIST):
+def merge_ci(extractions):
+    """Union (source, extraction) pairs into the one CI side (module
+    docstring, TWO WORKFLOWS). Origins are keyed (source, line), because
+    line numbers repeat across files."""
+    members = set()
+    origins = {}
+    diagnostics = []
+    findings = []
+    for source, extraction in extractions:
+        members.update(extraction.members)
+        for line_number, scripts in extraction.origins.items():
+            origins[(source, line_number)] = set(scripts)
+        diagnostics.extend(extraction.diagnostics)
+        findings.extend(extraction.findings)
+    return Extraction(
+        frozenset(members),
+        origins,
+        _dedupe_diagnostics(diagnostics),
+        tuple(findings),
+    )
+
+
+def evaluate(local_text, ci_text, allowlist=ALLOWLIST, extra_ci=()):
+    """Reconcile the runner with the CI side: ci_text is quality.yml, and
+    extra_ci holds a (source, text) pair for each further workflow."""
     return reconcile(
         extract_local(local_text),
-        extract_ci(ci_text),
+        merge_ci([(CI_SOURCE, extract_ci(ci_text))] + [
+            (source, extract_ci(text, source)) for source, text in extra_ci]),
         allowlist,
     )
 
@@ -2635,10 +2807,12 @@ def run_paths(
         local_path,
         ci_path,
         allowlist=ALLOWLIST,
-        reader=None):
-    """Read both required absolute paths and return a structured Report.
+        reader=None,
+        extra_ci_paths=CI_WORKFLOWS[1:]):
+    """Read every required absolute path (the runner, quality.yml and each
+    (source, path) in extra_ci_paths) and return a structured Report.
 
-    Both files go through read_runner_text, the ONE byte-level reader: the
+    Every file goes through read_runner_text, the ONE byte-level reader: the
     raw bytes are screened before any decode, and the accepted bytes are
     decoded strictly as ASCII with no newline translation."""
     diagnostics = []
@@ -2647,7 +2821,7 @@ def run_paths(
     for source, path in (
         (LOCAL_SOURCE, local_path),
         (CI_SOURCE, ci_path),
-    ):
+    ) + tuple(extra_ci_paths):
         if not isinstance(path, Path) or not path.is_absolute():
             diagnostics.append(_diagnostic(
                 source,
@@ -2683,7 +2857,9 @@ def run_paths(
     validated_allowlist = tuple(
         entry._asdict() for entry in entries)
     return evaluate(
-        texts[0], texts[1], validated_allowlist)
+        texts[0], texts[1], validated_allowlist,
+        tuple((source, text) for (source, _path), text
+              in zip(extra_ci_paths, texts[2:])))
 
 
 def render(report):
@@ -5265,6 +5441,114 @@ def self_test():
                 "33i the deleted-exit-1 body did not pass a failure, so the "
                 "scenarios above do not discriminate")
 
+    msg_scan = "python3 -I -B " + MSG_LEAKS_SCAN
+    msg_selftest = msg_scan + " --self-test"
+    msg_waiver = ({
+        "side": "ci-only",
+        "identity": MSG_LEAKS_SCAN,
+        "reason": "the live scan needs the CI event",
+        "backlog": "T-34",
+    },)
+    local_msg = local_fixture(common + (msg_selftest,))
+
+    def with_on(text, on_block):
+        return text.replace("name: Test\n", "name: Test\non:\n" + on_block, 1)
+
+    def pr_types(types):
+        return ("  pull_request:\n    branches: [main]\n    types: " + types
+                + "\n  push:\n    branches: [main]\n")
+
+    defaults = pr_types("[opened, synchronize, reopened]")
+    edited = pr_types("[opened, synchronize, reopened, edited]")
+    quality_side = with_on(ci_fixture(common), defaults)
+    scan_text = ci_fixture((msg_selftest, msg_scan))
+    msg_side = ((MSG_LEAKS_CI_SOURCE, with_on(scan_text, edited)),)
+
+    def scan_case(name, quality, scan, want_code, kinds=(), local_only=None):
+        case(name, evaluate(local_msg, quality, msg_waiver, scan), want_code,
+             kinds, local_only)
+
+    case("34a two workflows: the scan alone in msg-leaks.yml, with edited",
+         evaluate(local_msg, quality_side, msg_waiver, msg_side), 0,
+         active={("ci-only", MSG_LEAKS_SCAN)})
+    scan_case("34b msg-leaks.yml dropped: the scan self-test is local-only",
+              quality_side, (), 1, ("local-only", "stale-allowlist"),
+              (MSG_LEAKS_SCAN + " --self-test",))
+    scan_case("34c edited back on quality.yml is a trigger finding",
+              with_on(ci_fixture(common), edited), msg_side, 1, ("trigger",))
+    scan_case("34d msg-leaks.yml without edited is a trigger finding",
+              quality_side, ((MSG_LEAKS_CI_SOURCE, with_on(scan_text, defaults)),),
+              1, ("trigger",))
+    scan_case("34e msg-leaks.yml with no pull_request trigger is a trigger "
+              "finding", quality_side, ((MSG_LEAKS_CI_SOURCE, scan_text),),
+              1, ("trigger",))
+    block_list = "  pull_request:\n    types:\n      - opened\n      - synchronize\n"
+    scan_case("34f a block-list edited item on quality.yml is a trigger finding",
+              with_on(ci_fixture(common),
+                      block_list + "      - reopened\n      - edited\n"),
+              msg_side, 1, ("trigger",))
+    scan_case("34g a block list without edited on quality.yml passes",
+              with_on(ci_fixture(common), block_list + "      - reopened\n"),
+              msg_side, 0)
+    scan_case("34h a block list with all four types on msg-leaks.yml passes",
+              quality_side,
+              ((MSG_LEAKS_CI_SOURCE, with_on(
+                  scan_text, block_list + "      - reopened\n      - edited\n")),),
+              0)
+    scan_case("34i edited on pull_request_target of quality.yml is a trigger "
+              "finding",
+              with_on(ci_fixture(common), "  pull_request_target:\n    types: [edited]\n"),
+              msg_side, 1, ("trigger",))
+    scan_case("34j a one-line on: list gives msg-leaks.yml default types only",
+              quality_side,
+              ((MSG_LEAKS_CI_SOURCE, scan_text.replace(
+                  "name: Test\n", "name: Test\non: [push, pull_request]\n", 1)),),
+              1, ("trigger",))
+    scan_case("34k a one-line on: list on quality.yml passes (no edited)",
+              ci_fixture(common).replace(
+                  "name: Test\n", "name: Test\non: [push, pull_request]\n", 1),
+              msg_side, 0)
+    scan_case("34l the scan and edited in one workflow pass (the rule follows "
+              "the scan, not a file name)",
+              with_on(ci_fixture(common + (msg_selftest, msg_scan)), edited),
+              (), 0)
+    for label, shape in (
+            ("a flow mapping", "  pull_request: {types: [edited]}\n"),
+            ("a quoted event key", "  \"pull_request\":\n    types: [edited]\n"),
+            ("an indent-3 line", "  pull_request:\n   types: [edited]\n"),
+            ("a repeated types: key",
+             "  pull_request:\n    types: [opened]\n    types: [edited]\n"),
+            ("a repeated event",
+             "  pull_request:\n  pull_request:\n    types: [edited]\n"),
+            ("a non-name list item",
+             "  pull_request:\n    types: [opened, {x: edited}]\n"),
+            ("an indent-5 item under types:",
+             "  pull_request:\n    types:\n     - edited\n")):
+        scan_case("34m a trigger shape outside the subset is cannot-evaluate: "
+                  + label, with_on(ci_fixture(common), shape), msg_side, 2)
+
+    def without_msg_workflow(path):
+        if path == MSG_LEAKS_CI_PATH:
+            raise FileNotFoundError(str(path))
+        return path.read_bytes()
+
+    missing_msg = run_paths(LOCAL_PATH, CI_PATH, ALLOWLIST, without_msg_workflow)
+    case("34n a missing msg-leaks.yml is cannot-evaluate, never an empty side",
+         missing_msg, 2)
+    count += 1
+    if not any(item.source == MSG_LEAKS_CI_SOURCE and item.code == "read-error"
+               for item in missing_msg.diagnostics):
+        failures.append("34n the missing workflow is not named: {!r}".format(
+            missing_msg.diagnostics))
+    labelled = evaluate(local_msg, quality_side, msg_waiver, (
+        (MSG_LEAKS_CI_SOURCE, with_on(scan_text, edited) + "bogus: 1\n"),))
+    count += 1
+    if not any(item.source == MSG_LEAKS_CI_SOURCE
+               and item.code == "unknown-top-key"
+               for item in labelled.diagnostics):
+        failures.append("34o a msg-leaks.yml diagnostic does not carry its own "
+                        "source: {!r}".format(labelled.diagnostics))
+
     if failures:
         print("SELF-TEST FAIL:")
         for failure in failures:
@@ -5298,7 +5582,7 @@ def main(argv=None):
     if args.self_test:
         return self_test()
 
-    report = run_paths(LOCAL_PATH, CI_PATH)
+    report = run_paths(LOCAL_PATH, CI_PATH, extra_ci_paths=CI_WORKFLOWS[1:])
     print(render(report))
     return report.code
 
