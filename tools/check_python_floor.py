@@ -53,12 +53,16 @@ Legs, in order:
                  quote or a flow indicator and does not close on its own line is cannot-evaluate. A
                  plain (unquoted) pin of a floor whose text ends in 0 is a finding, since YAML reads
                  a plain 3.20 as the number 3.2.
-                 In a file under .github/workflows, a pin that is a patch release of the floor
-                 (MAJOR.MINOR.PATCH, HOST_PATCH_RE) passes only when it equals the python-host-patch
-                 that HOST_SOURCE_REL names (the host-patch CI jobs, which tools/check_python_host_pin.py
-                 also holds to it); that source is read only for such a pin, and a missing, unreadable
-                 or malformed one is cannot-evaluate. A patch-release pin anywhere else (a PIN_FILES
-                 entry, a local action file) is a finding, as is any other release.
+                 Inside a HOST_JOBS job of HOST_WORKFLOW_REL (.github/workflows/quality.yml), and
+                 nowhere else, a pin that is a patch release of the floor (MAJOR.MINOR.PATCH, each
+                 component at most four digits, HOST_PATCH_RE) passes only when it equals the
+                 python-host-patch that HOST_SOURCE_REL names (the host-patch CI jobs, which
+                 tools/check_python_host_pin.py also holds to it); that source is read only for such a
+                 pin, and a missing, unreadable or malformed one is cannot-evaluate. The job is the
+                 nearest job id at indent 2 above the pin under the top-level jobs: key. Every other
+                 pin in any workflow, a PIN_FILES entry or a local action file must equal the floor
+                 exactly, so a patch-release pin in another job or file is a finding, as is any other
+                 release.
                  The key is found without regard to case, since the runner reads an input by its
                  upper-cased name: a strict pin whose key is in any other case is cannot-evaluate,
                  and so is any line, script text included, that names INPUT_PYTHON-VERSION
@@ -312,11 +316,17 @@ SOURCE_KEYS = {"format-version", "python-floor", "guarded-surfaces", "nonblockin
 WORKFLOWS_REL = ".github/workflows"
 PIN_FILES = ("opf/enforcement/ci/github-actions.yml", "opf/tools/check_opf_doctor.py")
 PIN_KEY = "python-version"
-# The host-patch CI jobs: in a file under WORKFLOWS_REL, a pin that is a patch release of the floor passes
-# only when it equals the python-host-patch this repository-local source names (_host_patch_pin).
+# The host-patch CI jobs: inside a HOST_JOBS job of HOST_WORKFLOW_REL, and nowhere else, a pin that is a patch
+# release of the floor passes only when it equals the python-host-patch this repository-local source names
+# (_host_patch_pin). These names are those of tools/check_python_host_pin.py, whose self-test holds them
+# equal (HOST_JOBS, WORKFLOW_REL, SOURCE_REL, PATCH_RE there).
+HOST_WORKFLOW_REL = WORKFLOWS_REL + "/quality.yml"
+HOST_JOBS = ("opf-host-patch", "git-fixture-env-host-patch")
 HOST_SOURCE_REL = ".aiqt/python-host.toml"
 HOST_SOURCE_KEYS = {"format-version", "python-host-patch"}
-HOST_PATCH_RE = re.compile(r"([1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
+HOST_PATCH_RE = re.compile(r"([1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})")
+# A job id under the top-level jobs: key, a plain key at indent 2, then nothing but an optional comment.
+HOST_JOB_RE = re.compile(r"  (?P<id>[A-Za-z_][A-Za-z0-9_-]*) *:(?:[ \t]+#.*|[ \t]*)")
 # The step environment variable the Actions toolkit reads the input from ("INPUT_" plus the upper-cased
 # name). A line naming it can set the input outside a pin.
 INPUT_ENV = "INPUT_" + PIN_KEY.upper()
@@ -658,13 +668,33 @@ def load_host_patch(root):
     return patch
 
 
-def _host_patch_pin(root, rel, value, want, host):
-    """Whether a pin that differs from the floor is the host patch: rel is a file under WORKFLOWS_REL, value
-    is a patch release of the floor, and it equals the python-host-patch HOST_SOURCE_REL names. The source
-    is read only here, once per run (cached in host), so it is cannot-evaluate only when such a pin needs
-    it."""
-    if not rel.startswith(WORKFLOWS_REL + "/") or not value.startswith(want + ".") \
-            or HOST_PATCH_RE.fullmatch(value) is None:
+def _workflow_job(lines):
+    """The id of the job the last of lines sits in: the nearest earlier job id at indent 2 (HOST_JOB_RE)
+    under a top-level jobs: line, or None when the line sits elsewhere or an indent-2 line above it is not a
+    plain job id."""
+    job = None
+    for text in reversed(lines[:-1]):
+        stripped = text.strip(" \t")
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = _indent(text)
+        if indent == 0:
+            return job if text.split("#", 1)[0].rstrip(" \t") == "jobs:" else None
+        if indent == 2 and job is None:
+            header = HOST_JOB_RE.fullmatch(text)
+            if header is None:
+                return None
+            job = header.group("id")
+    return None
+
+
+def _host_patch_pin(root, rel, lines, value, want, host):
+    """Whether a pin that differs from the floor is the host patch: rel is HOST_WORKFLOW_REL, the pin, the
+    last of lines, sits in a HOST_JOBS job, value is a patch release of the floor, and it equals the
+    python-host-patch HOST_SOURCE_REL names. The source is read only here, once per run (cached in host), so
+    it is cannot-evaluate only when such a pin needs it."""
+    if rel != HOST_WORKFLOW_REL or _workflow_job(lines) not in HOST_JOBS \
+            or not value.startswith(want + ".") or HOST_PATCH_RE.fullmatch(value) is None:
         return False
     if "patch" not in host:
         host["patch"] = load_host_patch(root)
@@ -729,7 +759,7 @@ def pin_findings(root, floor):
             plain = match.group("plain")
             value = next(group for group in match.group("plain", "single", "double")
                          if group is not None)
-            if value != want and not _host_patch_pin(root, rel, value, want, host):
+            if value != want and not _host_patch_pin(root, rel, lines, value, want, host):
                 findings.append("{}:{}: python-version {!r} differs from the floor {!r}".format(
                     rel, number, value, want))
             elif value == want and plain is not None and want.endswith("0"):
@@ -1837,18 +1867,18 @@ def _declared(floor_text="3.14"):
 
 
 def _fixture(base, source=None, workflow_pin="3.14", template_pin="3.14", files=None, pin_quote="'",
-             declarations=True):
-    """A clean tree; workflow_pin is the version on quality.yml line 6, or with pin_quote="" the whole
-    text after that line's indentation. Every declaration file states the floor unless declarations
-    is false; files are written after them."""
+             declarations=True, job="q"):
+    """A clean tree; workflow_pin is the version on quality.yml line 6, in the job named job, or with
+    pin_quote="" the whole text after that line's indentation. Every declaration file states the floor
+    unless declarations is false; files are written after them."""
     root = Path(tempfile.mkdtemp(prefix="tree-", dir=base))
     for rel, text in (_declared() if declarations else {}).items():
         _write(root, rel, text)
     _write(root, SOURCE_REL, _source_text() if source is None else source)
     pin = "python-version: {0}{1}{0}".format(pin_quote, workflow_pin) if pin_quote else workflow_pin
     _write(root, WORKFLOWS_REL + "/quality.yml",
-           "jobs:\n  q:\n    steps:\n      - uses: actions/setup-python@v5\n        with:\n"
-           "          {}\n".format(pin))
+           "jobs:\n  {}:\n    steps:\n      - uses: actions/setup-python@v5\n        with:\n"
+           "          {}\n".format(job, pin))
     _write(root, PIN_FILES[0], "      - uses: actions/setup-python@v5\n        with:\n"
            "          python-version: '{}'\n".format(template_pin))
     _write(root, PIN_FILES[1], "TEMPLATE = \"\"\"\n          python-version: '{}'\n\"\"\"\n".format(
@@ -1909,29 +1939,53 @@ def _old_guard_text(name, floor, modes=None, code=REFUSAL_EXIT):
     return "\n".join(out)
 
 
-def _key_depth_bounded(real):
+class _ParserMismatch(Exception):
+    """tomllib's private key parser does not fit the parse_key(src, pos) -> (pos, key) the injection
+    wraps."""
+
+
+def _key_depth_bounded(real, calls):
     """tomllib's key parser, made to raise RecursionError on a key of more than 1000 dotted parts, as a
-    release that bounds key depth does."""
-    def parse_key(src, pos):
-        pos, key = real(src, pos)
-        if len(key) > 1000:
+    release that bounds key depth does. calls records each call; a call or a result that does not fit
+    parse_key(src, pos) -> (pos, key) raises _ParserMismatch."""
+    def parse_key(*args, **kwargs):
+        calls.append(len(args))
+        try:
+            result = real(*args, **kwargs)
+        except TypeError as exc:
+            raise _ParserMismatch("calling it raised TypeError: {}".format(exc))
+        if not (isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], tuple)):
+            raise _ParserMismatch("it returned {} rather than (pos, key)".format(type(result).__name__))
+        if len(result[1]) > 1000:
             raise RecursionError("injected: a key of more than 1000 dotted parts")
-        return pos, key
+        return result
     return parse_key
 
 
 def _host_parse_refusal(root, bound):
     """(exit code, whether the report says HOST_SOURCE_REL does not parse) for evaluate over root, with
-    tomllib's key parser bounded when bound is true; "raised NAME" when the exception escapes."""
-    real = tomllib._parser.parse_key
+    tomllib's key parser bounded when bound is true; "raised NAME" when the exception escapes. The bound
+    patches a private tomllib function: on a release where it is missing, has another shape or is never
+    called, the result is a text naming that cause, so the case fails cleanly rather than crashing."""
+    parser = getattr(tomllib, "_parser", None)
+    real = getattr(parser, "parse_key", None)
+    if bound and not callable(real):
+        return ("tomllib._parser.parse_key is missing or not callable on this release, so the injected "
+                "key-depth case cannot run")
+    calls = []
     if bound:
-        tomllib._parser.parse_key = _key_depth_bounded(real)
+        parser.parse_key = _key_depth_bounded(real, calls)
     try:
         code, lines = evaluate(root)
     except (RecursionError, ValueError) as exc:
         return "raised " + type(exc).__name__
+    except _ParserMismatch as exc:
+        return "tomllib._parser.parse_key does not fit the injection on this release: {}".format(exc)
     finally:
-        tomllib._parser.parse_key = real
+        if bound:
+            parser.parse_key = real
+    if bound and not calls:
+        return "tomllib._parser.parse_key was never called, so the injected key-depth case did not run"
     return code, _has(lines, HOST_SOURCE_REL + ": does not parse")
 
 
@@ -2098,25 +2152,55 @@ def _self_test_cases(base):
         "      - run: echo done"), pin_quote=""))
     check("pins/block-scalar-pin-finding",
           (code, _has(lines, "quality.yml:8: python-version '3.12' differs")), (1, True))
-    # The host-patch jobs: a workflow pin that is a patch release of the floor passes only when it equals the
-    # python-host-patch HOST_SOURCE_REL names, and only in a file under WORKFLOWS_REL.
+    # The host-patch jobs: a pin that is a patch release of the floor passes only inside a HOST_JOBS job of
+    # HOST_WORKFLOW_REL, and only when it equals the python-host-patch HOST_SOURCE_REL names; every other pin
+    # in any workflow must equal the floor exactly.
     host = {HOST_SOURCE_REL: "format-version = 1\npython-host-patch = \"3.14.4\"\n"}
-    check("pins/host-patch-workflow-passes",
-          evaluate(_fixture(base, workflow_pin="3.14.4", files=host))[0], 0)
-    code, lines = evaluate(_fixture(base, workflow_pin="3.14.8", files=host))
+    opf = HOST_JOBS[0]
+    check("pins/host-patch-host-job-passes",
+          tuple(evaluate(_fixture(base, workflow_pin="3.14.4", files=host, job=job))[0] for job in HOST_JOBS),
+          (0,) * len(HOST_JOBS))
+    code, lines = evaluate(_fixture(base, workflow_pin="3.14.4", files=host))
+    check("pins/host-patch-other-job-finding",
+          (code, _has(lines, "quality.yml:6: python-version '3.14.4' differs")), (1, True))
+    code, lines = evaluate(_fixture(base, files={**host, WORKFLOWS_REL + "/other.yml": (
+        "jobs:\n  " + opf + ":\n    steps:\n      - uses: actions/setup-python@v5\n        with:\n"
+        "          python-version: '3.14.4'\n")}))
+    check("pins/host-patch-other-workflow-finding",
+          (code, _has(lines, "other.yml:6: python-version '3.14.4' differs")), (1, True))
+    code, lines = evaluate(_fixture(base, files={**host, HOST_WORKFLOW_REL: (
+        "on:\n  " + opf + ":\n    python-version: '3.14.4'\njobs:\n  q:\n    steps:\n"
+        "      - uses: actions/setup-python@v5\n        with:\n          python-version: '3.14'\n")}))
+    check("pins/host-patch-outside-jobs-finding",
+          (code, _has(lines, "quality.yml:3: python-version '3.14.4' differs")), (1, True))
+    # A reviewer reproduction: the real workflows with every '3.14' pin moved to the host patch. Only the
+    # host-patch jobs' pins pass; each pin that was '3.14' is a finding.
+    real = {WORKFLOWS_REL + "/" + name: _read_text(ROOT / WORKFLOWS_REL / name)
+            for name in sorted(os.listdir(ROOT / WORKFLOWS_REL)) if _yaml_name(name)}
+    floor_pin = "python-version: '3.14'"
+    expected = {"{}:{}".format(rel, number) for rel, text in real.items()
+                for number, line in enumerate(text.split("\n"), 1) if line.strip(" ") == floor_pin}
+    code, lines = evaluate(_fixture(base, files={**host, **{
+        rel: text.replace(floor_pin + "\n", "python-version: '3.14.4'\n") for rel, text in real.items()}}))
+    found = {line[len("FAIL: "):].split(": python-version", 1)[0] for line in lines
+             if line.startswith("FAIL: ") and "differs from the floor" in line}
+    check("pins/newest-legs-at-host-patch-finding", (code, found == expected, len(expected) > 0),
+          (1, True, True))
+    code, lines = evaluate(_fixture(base, workflow_pin="3.14.8", files=host, job=opf))
     check("pins/other-patch-workflow-finding",
           (code, _has(lines, "quality.yml:6: python-version '3.14.8' differs")), (1, True))
     code, lines = evaluate(_fixture(base, template_pin="3.14.4", files=host))
     check("pins/host-patch-template-finding",
           (code, _has(lines, PIN_FILES[0] + ":3: python-version '3.14.4' differs")), (1, True))
-    code, lines = evaluate(_fixture(base, workflow_pin="3.14.4"))
+    code, lines = evaluate(_fixture(base, workflow_pin="3.14.4", job=opf))
     check("pins/host-patch-source-missing-cannot-evaluate",
           (code, _has(lines, HOST_SOURCE_REL + ": cannot stat")), (2, True))
-    code, lines = evaluate(_fixture(base, workflow_pin="3.14.4", files={
-        HOST_SOURCE_REL: "format-version = 1\npython-host-patch = \"3.14\"\n"}))
-    check("pins/host-patch-source-malformed-cannot-evaluate",
-          (code, _has(lines, HOST_SOURCE_REL + ": want exactly")), (2, True))
-    code, lines = evaluate(_fixture(base, workflow_pin="3.13.4", files={
+    for check_id, patch in (("pins/host-patch-source-malformed-cannot-evaluate", "3.14"),
+                            ("pins/host-patch-source-long-component-cannot-evaluate", "3.14." + "1" * 5000)):
+        code, lines = evaluate(_fixture(base, workflow_pin="3.14.4", job=opf, files={
+            HOST_SOURCE_REL: "format-version = 1\npython-host-patch = \"{}\"\n".format(patch)}))
+        check(check_id, (code, _has(lines, HOST_SOURCE_REL + ": want exactly")), (2, True))
+    code, lines = evaluate(_fixture(base, workflow_pin="3.13.4", job=opf, files={
         HOST_SOURCE_REL: "format-version = 1\npython-host-patch = \"3.13.4\"\n"}))
     check("pins/off-floor-host-patch-finding",
           (code, _has(lines, "quality.yml:6: python-version '3.13.4' differs")), (1, True))
@@ -2132,7 +2216,7 @@ def _self_test_cases(base):
             ("pins/host-patch-source-long-dotted-key-cannot-evaluate", ".".join(["k"] * 1001) + " = 1\n",
              True),
             ("pins/host-patch-source-long-integer-cannot-evaluate", "x = " + "1" * 5000 + "\n", False)):
-        root = _fixture(base, workflow_pin="3.14.4",
+        root = _fixture(base, workflow_pin="3.14.4", job=opf,
                         files={HOST_SOURCE_REL: host[HOST_SOURCE_REL] + extra})
         check(check_id, _host_parse_refusal(root, bound), (2, True))
     # An explicit-key entry whose value is a quoted scalar over several lines is outside the grammar.

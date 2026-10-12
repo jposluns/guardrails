@@ -68,16 +68,24 @@ reads `actions/runs`, needing only Actions: Read), never `gh pr checks` (a fine-
 the Checks API) and never `commits/<sha>/status` (which always reads pending). The gate roster grows
 toward the full pack roster (portability, dogfood and adapter parity, version monotonicity).
 
-CI runs two Python legs. Every other job pins `3.14`, which the runner resolves to the newest 3.14 patch
-release; those jobs stay required. Two more required jobs, `opf-host-patch` and
+CI runs two Python legs. Two required jobs in `.github/workflows/quality.yml`, `opf-host-patch` and
 `git-fixture-env-host-patch`, run the OPF tooling self-test and the git-fixture-env behaviour self-test on
-the exact patch release the maintainer host runs, named in `.aiqt/python-host.toml`; they add CI time
-(the git-fixture-env suite runs twice per change), a cost accepted for this signal. A passing local suite
-then predicts a required CI leg, and a failure on the `3.14` legs alone points at a patch-release
-difference, not the change (a change once passed every local suite and failed only in CI on a newer patch
-release). `tools/check_python_host_pin.py` holds those pins equal to the file and reports a local
-interpreter on another patch release; when the host interpreter changes, update the file and both pins in
-one change.
+the exact patch release the maintainer host runs, named in `.aiqt/python-host.toml`, on
+`runs-on: ubuntu-24.04`. Every other job pins `3.14`, which resolves to a 3.14 release the runner provides
+(setup-python takes a cached 3.14 without checking for a newer patch release; `check-latest` is off), and
+every other job in `quality.yml` stays required. The host jobs add CI time, a cost accepted for this
+signal: the OPF tooling self-test and the git-fixture-env suite each run twice in every run, and an edit to
+a pull request's title or body starts a run. A passing local suite on the host patch then predicts a
+required CI leg; a failure on the `3.14` legs alone is diagnostic evidence of a patch-release difference,
+not proof that the change is innocent (a change once passed every local suite and failed only in CI on a
+newer patch release). The runner image is pinned beside the patch because the setup-python manifest builds
+3.14.4 only for ubuntu-22.04 and ubuntu-24.04: `ubuntu-latest` moving to ubuntu-26.04 would fail both host
+jobs, and moving them off ubuntu-24.04 (or its retirement) needs a host patch with a build for the new
+image. `tools/check_python_host_pin.py` holds each host job whole (that runner, one setup-python pin, the
+gate itself as the next step, the job's suite) and fails when the running interpreter is another release,
+so `tools/run_all_checks.sh` FAILS on any patch release other than the one the file names. When the host
+interpreter changes, update `python-host-patch` in `.aiqt/python-host.toml` and the `python-version` pin of
+both host jobs in `quality.yml` together, in one change.
 
 ## Git and writing conventions
 
