@@ -56,7 +56,12 @@ complete):
   R5 secrets split across lines, concatenated, encoded, or carried in a binary file (a suffix outside
      TEXT_SUFFIXES is never read; a suffixless file that is not valid UTF-8 is treated as binary and
      skipped): unchanged, gitleaks-or-nothing territory. A dotenv or TEXT_SUFFIXES file that is not valid
-     UTF-8 is NOT skipped: it is decoded losslessly and scanned (_read_scan_text).
+     UTF-8 is NOT skipped: it is decoded losslessly and scanned (_read_scan_text). A scan candidate that
+     starts with a UTF-16 byte-order mark and decodes as UTF-16 is scanned as UTF-16. Two or more stray
+     non-ASCII bytes that together form a valid UTF-8 letter decode as that letter, so beside a token they
+     break its word boundary and can hide it (the same word-boundary behaviour as in valid UTF-8 text);
+     UTF-16 without a byte-order mark and other non-UTF-8 encodings are not decoded as such, so a secret in
+     them can be missed.
   R6 the F-127 env-reference exclusion residual: unchanged, and it now ALSO governs the entropy path's
      unquoted branch.
   R7 a high-entropy value that is actually a filesystem path, URL fragment, or opaque identifier assigned
@@ -77,6 +82,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
         pass
     os._exit(2)
 
+import codecs
 import math
 import re
 from pathlib import Path
@@ -351,16 +357,25 @@ def _read_scan_text(path):
     valid UTF-8 is decoded LOSSLESSLY with errors="surrogateescape": every valid character keeps its
     meaning and each undecodable byte becomes its own lone surrogate, which is neither a word character
     nor a line break, so every ASCII pattern still matches beside it (a latin-1 view would turn 0xFE into
-    a letter that breaks a word boundary, and 0x85 into a line break). Only a SUFFIXLESS file that is not
-    valid UTF-8 is treated as binary and skipped, as the existing rule (_is_scan_candidate) defines."""
+    a letter that breaks a word boundary, and 0x85 into a line break). A candidate that is not valid UTF-8
+    but starts with a UTF-16 byte-order mark and decodes as UTF-16 is scanned as UTF-16 (a UTF-8 view puts
+    a placeholder between every two ASCII characters, which defeats every pattern). Otherwise only a
+    SUFFIXLESS file that is not valid UTF-8 is treated as binary and skipped, as the existing rule
+    (_is_scan_candidate) defines."""
     data = path.read_bytes()
     try:
         return data.decode("utf-8"), None
     except UnicodeDecodeError:
-        if not _is_declared_text(path):
-            return None, "SKIP (not utf-8, no suffix: treated as binary)"
-        return (data.decode("utf-8", errors="surrogateescape"),
-                "NOTE (not valid utf-8: scanned, each undecodable byte kept as a placeholder)")
+        pass
+    if data[:2] in (codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE):
+        try:
+            return data.decode("utf-16"), "NOTE (UTF-16 byte-order mark: decoded as UTF-16 and scanned)"
+        except UnicodeDecodeError:
+            pass  # not valid UTF-16 after all: judged as any other non-UTF-8 file below
+    if not _is_declared_text(path):
+        return None, "SKIP (not utf-8, no suffix: treated as binary)"
+    return (data.decode("utf-8", errors="surrogateescape"),
+            "NOTE (not valid utf-8: scanned, each undecodable byte kept as a placeholder)")
 
 
 def _is_scan_candidate(path):
@@ -368,10 +383,11 @@ def _is_scan_candidate(path):
     as `.env.local` or `.env.production`, which hold real credentials), has a suffix in TEXT_SUFFIXES, or
     has no suffix at all (an extensionless PEM key like id_rsa). Suffix matching is case-insensitive, so a
     `.PEM` or `.TXT` file scans too. A file whose suffix is NOT in TEXT_SUFFIXES is skipped up front; a
-    suffixless file that is NOT valid UTF-8 is binary: it is read and skipped later (a UTF-8-decodable
-    suffixless file is scanned). A dotenv or TEXT_SUFFIXES file is text by declaration and is scanned even
-    when it is not valid UTF-8 (_read_scan_text). TEXT_SUFFIXES is a curated allow-list, so a text format
-    not on it is skipped here and left to gitleaks; add it to TEXT_SUFFIXES to cover it."""
+    suffixless file that is NOT valid UTF-8 (and not UTF-16 with a byte-order mark) is binary: it is read
+    and skipped later (a UTF-8-decodable suffixless file is scanned). A dotenv or TEXT_SUFFIXES file is
+    text by declaration and is scanned even when it is not valid UTF-8 (_read_scan_text). TEXT_SUFFIXES is
+    a curated allow-list, so a text format not on it is skipped here and left to gitleaks; add it to
+    TEXT_SUFFIXES to cover it."""
     return _is_declared_text(path) or not path.suffix
 
 
@@ -639,10 +655,10 @@ def _self_test() -> int:
         globals()[_name] = _saved
 
     # Non-UTF-8 scan, driven through main() over a private temp root so a revert of the lossless decode is
-    # red. notes.md carries ONE invalid byte beside a planted token and beside a credential assignment;
-    # creds.txt puts the invalid byte directly ADJACENT to the token (a latin-1 view would turn it into a
-    # letter and break the token word boundary); blob is a TRUE binary (no suffix, NUL bytes, not UTF-8)
-    # carrying the same token, and stays skipped as before. Tokens are assembled from parts (SECP).
+    # red. notes.md carries one invalid byte beside a planted token and another beside a credential
+    # assignment; creds.txt puts the invalid byte directly ADJACENT to the token (a latin-1 view would turn
+    # it into a letter and break the token word boundary); blob is a TRUE binary (no suffix, NUL bytes, not
+    # UTF-8) carrying the same token, and stays skipped as before. Tokens are assembled from parts (SECP).
     import io
     import tempfile
     from contextlib import redirect_stdout
@@ -653,9 +669,27 @@ def _self_test() -> int:
                                          + ("password = " + real).encode("ascii") + b"\n")
         (troot / "creds.txt").write_bytes(b"\xfe" + _tok + b"\n")
         (troot / "blob").write_bytes(b"\x7fELF\x00\x00\xff\xfe " + _tok + b"\n")
+        # UTF-16 with a byte-order mark, little- and big-endian and suffixless: decoded as UTF-16 and
+        # scanned (a UTF-8 view puts a placeholder between every two characters and finds nothing).
+        _line16 = "password = " + real + "\n"
+        (troot / "win16le.txt").write_bytes(codecs.BOM_UTF16_LE + _line16.encode("utf-16-le"))
+        (troot / "win16be.md").write_bytes(codecs.BOM_UTF16_BE + (_tok.decode("ascii") + "\n").encode(
+            "utf-16-be"))
+        (troot / "winkey16").write_bytes(codecs.BOM_UTF16_LE + (_tok.decode("ascii") + "\n").encode(
+            "utf-16-le"))
         out = io.StringIO()
         with redirect_stdout(out):
             scan_rc = main(troot)
+        # The non-UTF-8 decode is LOSSLESS: re-encoding with surrogateescape gives back the exact bytes
+        # for distinct invalid bytes and truncated multi-byte sequences, so a lossy decode (errors="replace",
+        # a latin-1 view) is red even where it would keep the same findings.
+        lossless_cases = [b"a\x80b\xfe\xffc\xc0\n", b"\xe2\x82 tail\n\xf0\x9f\x98"]
+        for index, data in enumerate(lossless_cases):
+            path = troot / "lossless{}.md".format(index)
+            path.write_bytes(data)
+            text, _note = _read_scan_text(path)
+            if text is None or text.encode("utf-8", errors="surrogateescape") != data:
+                failures.append("non-UTF-8 decode of {!r} must be lossless (got {!r})".format(data, text))
     scan_out = out.getvalue()
     non_utf8_cases = [
         ("  notes.md:2: GitHub token", True),            # one invalid byte BESIDE a planted token: a finding
@@ -663,6 +697,10 @@ def _self_test() -> int:
         ("  creds.txt:1: GitHub token", True),           # the invalid byte directly adjacent: still a finding
         ("  blob:", False),                              # a true binary: never scanned, so no finding
         ("SKIP (not utf-8, no suffix: treated as binary): blob", True),  # and it is named as skipped
+        ("  win16le.txt:1: credential-named variable assigned a literal", True),  # UTF-16 LE with a BOM
+        ("  win16be.md:1: GitHub token", True),          # UTF-16 BE with a BOM
+        ("  winkey16:1: GitHub token", True),            # a suffixless UTF-16 file is text, not binary
+        ("NOTE (UTF-16 byte-order mark: decoded as UTF-16 and scanned): win16le.txt", True),
     ]
     if scan_rc != 1:
         failures.append("non-UTF-8 scan: main() over the fixture root must exit 1, got {}".format(scan_rc))
@@ -677,9 +715,10 @@ def _self_test() -> int:
             print("  " + f)
         return 1
     print("SELF-TEST PASS: {} ASSIGN + {} scan-candidate + {} PREFIXES + {} provider-label + {} "
-          "provider-neg + {} ENTROPY + {} entropy-unit + {} non-UTF-8 scan cases".format(
+          "provider-neg + {} ENTROPY + {} entropy-unit + {} non-UTF-8 scan + {} lossless-decode "
+          "cases".format(
               len(cases), len(names), len(prefix_cases), len(label_cases), len(label_neg),
-              len(entropy_cases), len(entropy_units), len(non_utf8_cases)))
+              len(entropy_cases), len(entropy_units), len(non_utf8_cases), len(lossless_cases)))
     return 0
 
 

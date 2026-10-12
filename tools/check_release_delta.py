@@ -2719,7 +2719,7 @@ def run(root):
 # --- self-test --------------------------------------------------------------------------------------
 # Pure classification cases (every 6.5 table row over in-memory inputs) always run and are deterministic.
 # The git-independent genesis and unreachable-predecessor cases build minimal record trees in a private
-# tempdir and are skipped with a printed note (never a false pass) where no writable tempdir exists.
+# tempdir; where no writable tempdir exists they cannot run, which is a NOT RUN failure (never a pass).
 
 def _run_quiet_root(root):
     with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
@@ -2890,6 +2890,7 @@ def _edit_clause_consistently(repo):
 
 
 _REAL_PACK_CASES = "the real full-pack two-release run() cases (findings 1/2, rounds 3-8)"
+_E2E_TMP_PREFIX = "aiqt-release-delta-selftest-"
 
 
 def _not_run(failures, case, cause):
@@ -2897,6 +2898,53 @@ def _not_run(failures, case, cause):
     fails the run), never a printed note beside a PASS: coverage that did not run is not coverage."""
     failures.append("NOT RUN: {}: {}; coverage that did not run FAILS the self-test, never a silent "
                     "PASS".format(case, cause))
+
+
+def _plant_notice_omission(mpath, failures):
+    """Drop the NOTICE [[sources]] row from the regenerated manifest at mpath (the round-8 finding 1
+    fixture). Corpus content decides whether that row exists, so this can fail in CI: a manifest without
+    exactly one NOTICE row ahead of its [[artifacts]] rows records a NOT RUN failure and returns False."""
+    mblocks = mpath.read_text(encoding="utf-8").split("\n[[sources]]")
+    kept = [mblocks[0]] + ["\n[[sources]]" + b for b in mblocks[1:] if 'path = "NOTICE"\n' not in b]
+    if len(kept) == len(mblocks) - 1 and "[[artifacts]]" in "".join(kept):
+        mpath.write_text("".join(kept), encoding="utf-8")
+        return True
+    _not_run(failures, "the under-claimed predecessor manifest case (round-8 finding 1)",
+             "the regenerated manifest does not carry exactly one NOTICE [[sources]] row ahead of "
+             "its [[artifacts]] rows, so the omission cannot be planted")
+    return False
+
+
+def _plant_noncanon_source_path(cp, failures):
+    """Rewrite the first source-path in the clauses.toml at cp to a NON-CANONICAL form that resolves to the
+    same file (dir/sub/../sub/file; the round-5 finding 1 fixture). Corpus content decides whether such a
+    path exists, so this can fail in CI: a clauses.toml with no source-path that has a parent directory
+    records a NOT RUN failure and returns False."""
+    import re
+    text = cp.read_text(encoding="utf-8")
+    m = re.search(r'source-path = "([^"]+)"', text)
+    parts = m.group(1).split("/") if m else []
+    if len(parts) < 2:
+        _not_run(failures, "the non-canonical HEAD clause source-path case (round-5 finding 1)",
+                 "the archived clauses.toml has no source-path with a parent directory to rewrite")
+        return False
+    noncanon = "/".join(parts[:-1] + ["..", parts[-2], parts[-1]])   # dir/sub/../sub/file (same file)
+    cp.write_text(text.replace('source-path = "{}"'.format(m.group(1)),
+                               'source-path = "{}"'.format(noncanon), 1), encoding="utf-8")
+    return True
+
+
+def _e2e_git_cases(tmp, failures):
+    """Run the two real git end-to-end case sets. Each returns False when it could not run; a False return
+    that recorded no cause is itself a NOT RUN failure (the two caller nets), so neither set can end early
+    without failing the self-test."""
+    n_real = len(failures)
+    if not _real_pack_e2e(tmp, failures) and len(failures) == n_real:
+        _not_run(failures, _REAL_PACK_CASES, "the case ended early without recording a cause")
+    n_post = len(failures)
+    if not _post_release_e2e(tmp, failures) and len(failures) == n_post:
+        _not_run(failures, "the POST-RELEASE head cases", "the case ended early without recording a "
+                 "cause")
 
 
 def _real_pack_not_run_vectors(tmp, failures):
@@ -2953,15 +3001,124 @@ def _real_pack_not_run_vectors(tmp, failures):
                             "failures={})".format(name, want, ran, got))
 
 
+def _not_run_net_vectors(tmp, failures):
+    """Red-on-revert vectors for the NOT RUN sites that an ordinary run never reaches (the real corpus,
+    git and host all behave), so reverting one of them would otherwise leave the self-test green: a failed
+    end-to-end temp-directory allocation (the nested self-test must exit nonzero, never a partial PASS),
+    the corpus-dependent NOTICE-row and source-path fixtures, the two caller nets in _e2e_git_cases (an
+    end-to-end function that returns False without recording a cause), and the POST-RELEASE cases that
+    lose their discriminating power on a git that ignores a planted replace ref, graft or filter mask, or
+    for a root user (os.geteuid patched to 0)."""
+    import tempfile
+    # The nested self-test (the self_test_main entry, which sets up its own git lifecycle) with ONLY the
+    # end-to-end temp allocation failing. It cannot recurse: without that temp directory it never reaches
+    # this function.
+    real_mkdtemp = tempfile.mkdtemp
+
+    def _no_e2e_tmp(*args, **kwargs):
+        if kwargs.get("prefix") == _E2E_TMP_PREFIX:
+            raise PermissionError("injected: no writable temp directory")
+        return real_mkdtemp(*args, **kwargs)
+
+    out = io.StringIO()
+    tempfile.mkdtemp = _no_e2e_tmp
+    try:
+        with redirect_stdout(out), redirect_stderr(io.StringIO()):
+            rc = self_test_main()
+    finally:
+        tempfile.mkdtemp = real_mkdtemp
+    if rc == 0 or "NOT RUN: every end-to-end case" not in out.getvalue():
+        failures.append("(NOT RUN temp) a failed end-to-end temp-directory allocation must record a NOT RUN "
+                        "failure and exit nonzero, never a partial PASS (got rc={}: {})".format(
+                            rc, out.getvalue().strip()[-300:]))
+
+    # The corpus-dependent fixtures, each with a control that plants and a corpus that cannot.
+    vdir = tmp / "not-run-vectors"
+    vdir.mkdir()
+    for plant, text, want in (
+            (_plant_notice_omission, 'format-version = 1\n\n[[sources]]\npath = "NOTICE"\n\n[[sources]]\n'
+             'path = "README.md"\n\n[[artifacts]]\npath = "a.md"\n', None),
+            (_plant_notice_omission, 'format-version = 1\n\n[[sources]]\npath = "README.md"\n\n'
+             '[[artifacts]]\npath = "a.md"\n', "the omission cannot be planted"),
+            (_plant_noncanon_source_path, '[[clause]]\nsource-path = "rules/stub.md"\n', None),
+            (_plant_noncanon_source_path, '[[clause]]\nsource-path = "stub.md"\n',
+             "no source-path with a parent directory")):
+        path = vdir / "fixture.toml"
+        path.write_text(text, encoding="utf-8")
+        got = []
+        planted = plant(path, got)
+        if want is None:
+            ok = planted is True and not got and path.read_text(encoding="utf-8") != text
+        else:
+            ok = planted is False and any(f.startswith("NOT RUN: ") and want in f for f in got)
+        if not ok:
+            failures.append("(NOT RUN corpus) {} over {!r}: expected {} (got {!r}, failures={})".format(
+                plant.__name__, text, "a planted fixture" if want is None else
+                "False and a NOT RUN failure naming {!r}".format(want), planted, got))
+
+    # The caller nets: an end-to-end function that returns False and records nothing.
+    saved = {name: globals()[name] for name in ("_real_pack_e2e", "_post_release_e2e")}
+    got = []
+    globals().update(_real_pack_e2e=lambda _tmp, _failures: False,
+                     _post_release_e2e=lambda _tmp, _failures: False)
+    try:
+        _e2e_git_cases(tmp, got)
+    finally:
+        globals().update(saved)
+    for case in (_REAL_PACK_CASES, "the POST-RELEASE head cases"):
+        if not any(f.startswith("NOT RUN: {}: the case ended early".format(case)) for f in got):
+            failures.append("(NOT RUN net) a False return from {} that recorded no cause must be a NOT RUN "
+                            "failure (got {})".format(case, got))
+
+    # The POST-RELEASE cases on a git that ignores the planted replace ref (GIT_NO_REPLACE_OBJECTS), the
+    # graft (an empty GIT_GRAFT_FILE) and the filter mask (a required smudge that fails, so the checkout
+    # leaves the status dirty), run as a simulated root user.
+    real_env, real_geteuid = _selftest_env, os.geteuid
+
+    def _misbehaving_git_env():
+        env = real_env()
+        env["GIT_NO_REPLACE_OBJECTS"] = "1"
+        env["GIT_GRAFT_FILE"] = os.devnull
+        count = int(env.get("GIT_CONFIG_COUNT", "0"))
+        for index, (key, value) in enumerate((("filter.mask.smudge", "false"),
+                                              ("filter.mask.required", "true"))):
+            env["GIT_CONFIG_KEY_{}".format(count + index)] = key
+            env["GIT_CONFIG_VALUE_{}".format(count + index)] = value
+        env["GIT_CONFIG_COUNT"] = str(count + 2)
+        return env
+
+    pdir = tmp / "not-run-post-release"
+    pdir.mkdir()
+    got = []
+    globals()["_selftest_env"] = _misbehaving_git_env
+    os.geteuid = lambda: 0
+    try:
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            _post_release_e2e(pdir, got, only=("(refs/replace, R3-1)", "(info/grafts)", "(codex R3-2)",
+                                               "(R9 unsearchable ancestor)"))
+    finally:
+        globals()["_selftest_env"] = real_env
+        os.geteuid = real_geteuid
+    for want in ("did not substitute the planted replace ref", "ignores info/grafts",
+                 "did not leave a clean status", "running as root"):
+        if not any(f.startswith("NOT RUN: ") and want in f for f in got):
+            failures.append("(NOT RUN post-release) a case that loses its discriminating power must record a "
+                            "NOT RUN failure naming {!r} (got {})".format(want, got))
+
+
 def _real_pack_e2e(tmp, failures):
     """Build REAL full-pack two-release git repos from `git archive HEAD` of THIS repo and drive the real
     run() through the delta path: a clean CONSISTENTLY-edited id-keyed PATCH (finding 2), malformed-loader
     variants (findings 1/3), a wrong-version disposition (round-3 finding 3), and a smudge-filter predecessor
     renderer-closure attack that the raw-blob materialization defeats (round-4 findings 1/4), and genesis
     full-pack manifest/profiles/invalid-UTF-8 mutations (round-5 findings 1/3/5). Returns True when the
-    primary cases ran and False when they could not; every path that ends a case early first records a
-    NOT RUN failure naming its cause (_not_run), never a printed note beside a PASS. Hermetic: private
-    temp git repos, neutralized identity."""
+    primary cases ran and False when they could not. A path that ends a case early records a failure
+    first, never a printed note beside a PASS: 14 named NOT RUN sites (_not_run: 12 in this body, and one
+    each in _plant_notice_omission and _plant_noncanon_source_path for the two corpus-dependent
+    fixtures), the existing NOT RUN failures for an unavailable or unextractable archive, and the existing
+    fixture-setup failures that _pin_fixture_version and _regen_fixture_manifest record; a failed
+    `git tag` raises (check=True). The caller (_e2e_git_cases) adds a NOT RUN failure for a False return
+    that recorded none. Hermetic: private temp git repos, neutralized identity."""
     import re
     env = _selftest_env()
     arch = _archive_head(repo_root())
@@ -3283,11 +3440,7 @@ def _real_pack_e2e(tmp, failures):
     # recorded in `failures` by the helper.
     if not _pin_fixture_version(repo3, failures):
         return True  # the primary cases already ran; the setup failure is recorded in failures
-    mpath = repo3 / MANIFEST_REL
-    mblocks = mpath.read_text(encoding="utf-8").split("\n[[sources]]")
-    kept = [mblocks[0]] + ["\n[[sources]]" + b for b in mblocks[1:] if 'path = "NOTICE"\n' not in b]
-    if len(kept) == len(mblocks) - 1 and "[[artifacts]]" in "".join(kept):
-        mpath.write_text("".join(kept), encoding="utf-8")
+    if _plant_notice_omission(repo3 / MANIFEST_REL, failures):
         ok3 = True
         for args in (["add", "-A"], ["commit", "-q", "-m", "release 1.0.0", "--no-verify"]):
             if subprocess.run(["git", "-C", str(repo3), *args], capture_output=True, env=env).returncode != 0:
@@ -3322,10 +3475,6 @@ def _real_pack_e2e(tmp, failures):
                 failures.append("real full-pack run(): a predecessor manifest that under-claims a covered "
                                 "pack path (NOTICE) must be caught by gen_manifest --check/check_manifest on "
                                 "the raw predecessor, exit 2 (round-8 finding 1)")
-    else:
-        _not_run(failures, "the under-claimed predecessor manifest case (round-8 finding 1)",
-                 "the regenerated manifest does not carry exactly one NOTICE [[sources]] row ahead of "
-                 "its [[artifacts]] rows, so the omission cannot be planted")
 
     # (this round's #1) The PREDECESSOR's OWN releases and id-history records are now strict-validated. Each
     # fixture below mutates ONE predecessor record and REGENERATES the predecessor manifest so the mutated
@@ -3711,21 +3860,10 @@ def _real_pack_e2e(tmp, failures):
     # strict_clause_inventory now rejects the non-canonical form, exit 2. The manifest is regenerated so the
     # sole thing under test is the path form (neutering the source-path check makes this fixture pass).
     g1 = _extract_genesis("genesis-clause-noncanon-path")
-    if g1 is not None:
-        cp = g1 / CLAUSES_REL
-        text = cp.read_text(encoding="utf-8")
-        m = re.search(r'source-path = "([^"]+)"', text)
-        parts = m.group(1).split("/") if m else []
-        if len(parts) >= 2:
-            noncanon = "/".join(parts[:-1] + ["..", parts[-2], parts[-1]])   # dir/sub/../sub/file (same file)
-            cp.write_text(text.replace('source-path = "{}"'.format(m.group(1)),
-                                       'source-path = "{}"'.format(noncanon), 1), encoding="utf-8")
-            if _genesis_regen(g1) and _run_quiet_root(g1) != 2:
-                failures.append("real genesis full-pack run(): a non-canonical HEAD clause source-path that "
-                                "resolves to the real file must fail closed exit 2 (round-5 finding 1)")
-        else:
-            _not_run(failures, "the non-canonical HEAD clause source-path case (round-5 finding 1)",
-                     "the archived clauses.toml has no source-path with a parent directory to rewrite")
+    if g1 is not None and _plant_noncanon_source_path(g1 / CLAUSES_REL, failures):
+        if _genesis_regen(g1) and _run_quiet_root(g1) != 2:
+            failures.append("real genesis full-pack run(): a non-canonical HEAD clause source-path that "
+                            "resolves to the real file must fail closed exit 2 (round-5 finding 1)")
 
     # (round-5 finding 3) a genesis default-correction row that is fully valid EXCEPT a captured-source whose
     # host carries a raw SPACE ('https://exa mple.com/...'): the pre-fix urlparse-only check accepted it (a
@@ -3812,7 +3950,12 @@ def _post_release_e2e(tmp, failures, only=None):
     CRLF tag line, the tag key before the version line).
 
     `only` (an iterable of label substrings) runs a subset, for out-of-tree mutant-discrimination
-    drivers and focused debugging. Returns True if it ran, False if skipped."""
+    drivers and focused debugging; the unselected cases then do not run, by request. Returns False when a
+    fixture a case needs could not be built (each such return records a failure first, and the caller
+    nets a False return that recorded none), True otherwise. A case that would lose its discriminating
+    power on this host records a NOT RUN failure instead of passing: a git that does not substitute the
+    planted replace ref, ignores info/grafts, or leaves the filter-masked status dirty, and a root user,
+    for whom directory search permission is not enforced."""
     env = _selftest_env()
     arch = _archive_head(repo_root())
     if arch is None:
@@ -4052,8 +4195,8 @@ def _post_release_e2e(tmp, failures, only=None):
                 failures.append("fixture setup ({}): git replace failed".format(labelR))
             else:
                 if b"2000-01-01" in _g(repo, "show", "HEAD:" + CHANGELOG_REL).stdout:
-                    print("SELF-TEST NOTE: this git did not substitute the planted replace ref; the "
-                          "blob-replacement case still asserts the funnel reads", file=sys.stderr)
+                    _not_run(failures, labelR, "this git did not substitute the planted replace ref, so "
+                             "the case cannot show that the --no-replace-objects pins defeat one")
                 # The funnel itself must return the RECORDED committed bytes while the replacement is
                 # active: this assertion fails ALONE when the _git pins are bypassed (claude F3), even
                 # where a redundant downstream guard would still exit 2.
@@ -4107,8 +4250,8 @@ def _post_release_e2e(tmp, failures, only=None):
             (repo / ".git" / "info" / "grafts").write_text(orphan_oid + " " + commit1 + "\n",
                                                            encoding="utf-8")
             if _g(repo, "merge-base", "--is-ancestor", commit1, "HEAD").returncode != 0:
-                print("SELF-TEST NOTE: this git ignores info/grafts; the graft case still asserts the "
-                      "funnel reads", file=sys.stderr)
+                _not_run(failures, labelGf, "this git ignores info/grafts, so the case cannot show "
+                         "that the GIT_GRAFT_FILE pin defeats a planted graft")
             # The funnel must refuse the grafted parent: fails ALONE when the GIT_GRAFT_FILE pin is
             # bypassed (claude F3).
             if _git_raw(repo, ["merge-base", "--is-ancestor", commit1, "HEAD"]).returncode == 0:
@@ -4167,8 +4310,8 @@ def _post_release_e2e(tmp, failures, only=None):
                     man_path.unlink()
                     _g(repo, "checkout", "--", MANIFEST_REL)
                     if _g(repo, "status", "--porcelain=v1").stdout.strip():
-                        print("SELF-TEST NOTE: the filter mask did not clean the status; the masked-"
-                              "manifest case still asserts the committed verdict", file=sys.stderr)
+                        _not_run(failures, labelF, "the filter mask did not leave a clean status, so "
+                                 "the working tree does not hide the corrupt committed manifest")
                     # The working tree now shows the VALID manifest and status is clean, yet the
                     # COMMITTED manifest is corrupt: only the materialized-committed-tree legs catch it.
                     _check(repo, labelF, 2, "head manifest")
@@ -5071,8 +5214,8 @@ def _post_release_e2e(tmp, failures, only=None):
             import tempfile as _tempfile9u
             base9u = _marker_free_base7()
             if os.geteuid() == 0:
-                print("SKIP {}: running as root, directory search permission is not enforced "
-                      "(the OSError branch is unreachable this way)".format(label9u))
+                _not_run(failures, label9u, "running as root, directory search permission is not "
+                         "enforced, so the fail-closed OSError branch cannot be reached this way")
             elif base9u is None:
                 failures.append(label9u + ": no marker-free temp path exists (fixture-env)")
             else:
@@ -6651,17 +6794,13 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
     import shutil
     import tempfile
     try:
-        tmp = Path(tempfile.mkdtemp(prefix="aiqt-release-delta-selftest-"))
-    except OSError:
+        tmp = Path(tempfile.mkdtemp(prefix=_E2E_TMP_PREFIX))
+    except OSError as exc:
         tmp = None
+        _not_run(failures, "every end-to-end case (genesis, unreachable-predecessor, real full-pack and "
+                 "POST-RELEASE)", "no writable temp directory ({})".format(exc))
 
-    if tmp is None:
-        print("SELF-TEST NOTE: no writable temp directory; the genesis and unreachable-predecessor "
-              "end-to-end cases were SKIPPED (the classification-leg coverage above still ran)",
-              file=sys.stderr)
-        e2e_ran = False
-    else:
-        e2e_ran = True
+    if tmp is not None:
 
         def _valid_manifest(genesis):
             # A STRUCTURALLY valid manifest carrying the EXACT mandatory top-level keyset (round-5 finding
@@ -6877,7 +7016,8 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
             # by the invented `subject`, left unconsumed, so a PATCH became an undispositioned MAJOR) and the
             # format-version case PASSES exit 0 (finding 1: the loader never validated format-version). Both
             # now behave (0 and 2). A case that cannot run (no git, no archive, a fixture that cannot be
-            # built, or corpus content it needs) is a NAMED NOT RUN failure, never a skip beside a PASS.
+            # built, or corpus content it needs) is a NAMED NOT RUN failure, never a skip beside a PASS;
+            # so is a case that loses its discriminating power on this host's git or as root.
             # ---- QA round-6 codex blocker 1 / claude 3: a git REFUSAL is never the checkout
             # path. Simulated dubious-ownership refusals (a real safe.directory refusal needs a
             # foreign-OWNED repository, which an unprivileged self-test cannot create and the
@@ -7089,17 +7229,9 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
 
             if _git_available():
                 _real_pack_not_run_vectors(tmp, failures)
-                n_real = len(failures)
-                real_ran = _real_pack_e2e(tmp, failures)
-                if not real_ran and len(failures) == n_real:
-                    _not_run(failures, _REAL_PACK_CASES, "the case ended early without recording a cause")
-                n_post = len(failures)
-                post_ran = _post_release_e2e(tmp, failures)
-                if not post_ran and len(failures) == n_post:
-                    _not_run(failures, "the POST-RELEASE head cases", "the case ended early without "
-                             "recording a cause")
+                _not_run_net_vectors(tmp, failures)
+                _e2e_git_cases(tmp, failures)
             else:
-                real_ran = post_ran = False
                 failures.append("NOT RUN: the real full-pack and POST-RELEASE run() cases: git is "
                                 "unavailable; coverage that did not run FAILS the self-test (QA round-4 "
                                 "codex R4-3 / claude m4)")
@@ -7117,90 +7249,83 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
             "the id-lifecycle born/retirement release-and-uniqueness rows and corpus-id diff (#3), the "
             "combined multi-leg consumption, the Step-2 disposition-schema acceptance and id-uniqueness "
             "(#5), the repin/self-test mode resolution (#9), and the PATCH/MINOR/MAJOR bump computation")
-    if e2e_ran:
-        full_pack = ("; and the REAL FULL-PACK two-release run() clean CONSISTENTLY-edited id-keyed PATCH "
-                     "(exit 0, finding 2), its format-version variants (exit 2, finding 1), a wrong-version "
-                     "disposition (exit 1, round-3 finding 3), a SMUDGE-FILTER predecessor closure attack "
-                     "defeated by raw materialization (exit 2, round-4 findings 1/4), and the GENESIS "
-                     "full-pack manifest bogus-artifact/missing-sources (exit 2, round-5 finding 1), a "
-                     "self-referential profiles symlink (exit 2, round-5 finding 5), an invalid-UTF-8 "
-                     "child capture (round-5 finding 3), the round-6 non-string block-id (finding 2), "
-                     "an unknown clauses.toml top-level key (finding 3), and a non-vocabulary class-change "
-                     "class (finding 6) each exit 2, and the round-7 predecessor anchoring/version-binding "
-                     "(a tree-oid commit_sha and a changelog/manifest version disagreement each exit 2, "
-                     "finding 2), a manifest ../escape path and a list-valued artifact kind (finding 1), and "
-                     "a renderers.toml integer target (finding 8) each exit 2 hold") \
-                    if real_ran else \
-                    "; the REAL FULL-PACK two-release run() cases did NOT run (a NOT RUN failure, never a skip)"
-        full_pack += ("; and the POST-RELEASE head (RELEASING steps 6a/6b, round-2 rewrite over COMMITTED "
-                      "revisions: the attestation row alone and plus the correctly placed changelog tag key "
-                      "exit 0; another committed path, a smudge-masked committed edit, a quoted-path edit, a "
-                      "mode-only change or a deletion on each post-release path, a non-descendant head "
-                      "(bare, and masked by an info/grafts parent rewrite), a stale manifest, an "
-                      "extra or altered prior row, a predecessor-manifest version mismatch, a changelog edit "
-                      "other than the tag key (bare, and masked by a refs/replace blob substitution, with "
-                      "the funneled _show read asserted directly), a corrupt or stale COMMITTED manifest "
-                      "masked by a blob replacement, a clean/smudge filter, or skip-worktree, "
-                      "a mis-placed tag key (EOF/older table, the TOML-only catch), "
-                      "and a head version below the newest row each fail; a staged-only edit and untracked "
-                      "files are a stderr ADVISORY over an exit-0 committed verdict, an assume-unchanged "
-                      "working-tree overwrite never reaches the verdict, and the three admitted byte-level "
-                      "variants (a releases.toml comment, a CRLF tag line, the tag key before the version "
-                      "line) exit 0 (QA round-3); the round-4 substitution and provenance cases (a "
-                      "GIT_DIR decoy, a forged object-directory overlay with the funneled _show read "
-                      "asserted directly, an overwritten loose object refused by the per-object "
-                      "re-hash, a committed profiles artifact with the checkout copy deleted, a gate "
-                      "import diverging from the committed HEAD copy, and the materialized committed "
-                      "tree running its OWN validator copies) each refuse exit 2, and a skipped "
-                      "archive/extract/build coverage set now FAILS the self-test; the QA round-5 "
-                      "launch cases over a dedicated fixture (stage-1 re-execution of the committed "
-                      "gate copy, with an untracked tools/tempfile.py shadow, a crafted __pycache__ "
-                      ".pyc, a repo-config core.fsmonitor hook, and a repo-config clean filter and "
-                      "post-index-change hook each left inert at exit 2, the "
-                      "checkout routing records reverted to the release still routed POST-RELEASE "
-                      "from committed objects, an inherited PYTHONPATH/sitecustomize ignored by "
-                      "every -I child, and the accepted state re-executing to exit 0) and the "
-                      "per-object re-hash refusing a forged commit, tree and tag (not only a blob), "
-                      "and the verified ancestry walk refusing a forged intermediate commit, "
-                      "each hold; the QA round-6 fail-closed launch (a corrupt HEAD, a bad config "
-                      "and a missing git each exit 2 from stage 1 with a checkout tripwire inert; "
-                      "a simulated dubious-ownership refusal fails closed in stage 1 and in "
-                      "routing; and round 7: a corrupt ancestor .git/HEAD and a dangling ancestor "
-                      ".git file each exit 2 with the tripwire inert while the no-.git-anywhere "
-                      "control still reaches the checkout gate; and round 8: a damaged ancestor "
-                      "reached through a symlinked launch path, a bare ancestor with a corrupt "
-                      "HEAD, and dangling, looping and unreadable ancestor .git entries each exit "
-                      "2 with the tripwire inert while an unborn ancestor HEAD still reaches the "
-                      "checkout gate; and round 9: a symlink followed by `..` and a symlinked "
-                      "gate file never hide the gate's physical repository, an unsearchable "
-                      "ancestor fails closed, and the refusal names the marker it found; and "
-                      "round 10: a pipe read through /dev/fd/N and a source run with no __file__ "
-                      "each exit 2 with no traceback, and a non-git copy run from inside another "
-                      "repository judges its own root, not the cwd; and round 11: an imported "
-                      "main() with no stage-1 hand-off exits 2 by name), the no-follow bounded drift "
-                      "advisory (a symlinked parent, a swapped-in FIFO, an over-cap UNCHECKED "
-                      "file; and round 7: a final-component symlink to an outside committed copy, "
-                      "an empty-blob FIFO, a refused dot-dot/dot component, per-path drift "
-                      "states judged by exact name, a child-bounded FIFO open; and rounds 9 "
-                      "and 10: exactly one DRIFT-STATES record, with no key repeated inside it, "
-                      "and the fsmonitor pins held on the genesis route and on "
-                      "git_tracked/_index_materialized_tree), the promisor lazy-fetch "
-                      "refusal (GIT_NO_LAZY_FETCH pinned, no transport, no sshCommand), and the "
-                      "stage-2 sitecustomize isolation hold; and the replayed "
-                      "pre-row gate "
-                      "(round-2 B1: an undispositioned later release exits 1 after its row lands, with its "
-                      "pre-row control; a malformed genesis tree exits 2) holds) hold") if post_ran else \
-                     "; the POST-RELEASE head cases did NOT run (a NOT RUN failure, never a skip)"
-        print("SELF-TEST PASS: {}; the end-to-end genesis-structural fail-closed (exit 2, #1), "
-              "genesis-flag-mismatch (exit 2), unreachable-predecessor (exit 2), and git-plumbing "
-              "predecessor-ownership (#11, no worktree materialized) cases hold; the REAL run() "
-              "malformed-input fixtures (releases/dispositions/order/MANIFEST format-version and unknown "
-              "top-level key, a duplicate manifest source, junk default-correction and classless "
-              "class-change, a duplicate predecessor clause row) each fail closed exit 2 (findings 1/3/4, "
-              "round-3 finding 1){}".format(core, full_pack))
-    else:
-        print("SELF-TEST PASS (PARTIAL): {}; the end-to-end cases were SKIPPED (no writable temp "
-              "directory), so those paths are UNVERIFIED this run".format(core))
+    full_pack = ("; and the REAL FULL-PACK two-release run() clean CONSISTENTLY-edited id-keyed PATCH "
+                 "(exit 0, finding 2), its format-version variants (exit 2, finding 1), a wrong-version "
+                 "disposition (exit 1, round-3 finding 3), a SMUDGE-FILTER predecessor closure attack "
+                 "defeated by raw materialization (exit 2, round-4 findings 1/4), and the GENESIS "
+                 "full-pack manifest bogus-artifact/missing-sources (exit 2, round-5 finding 1), a "
+                 "self-referential profiles symlink (exit 2, round-5 finding 5), an invalid-UTF-8 "
+                 "child capture (round-5 finding 3), the round-6 non-string block-id (finding 2), "
+                 "an unknown clauses.toml top-level key (finding 3), and a non-vocabulary class-change "
+                 "class (finding 6) each exit 2, and the round-7 predecessor anchoring/version-binding "
+                 "(a tree-oid commit_sha and a changelog/manifest version disagreement each exit 2, "
+                 "finding 2), a manifest ../escape path and a list-valued artifact kind (finding 1), and "
+                 "a renderers.toml integer target (finding 8) each exit 2 hold")
+    full_pack += ("; and the POST-RELEASE head (RELEASING steps 6a/6b, round-2 rewrite over COMMITTED "
+                  "revisions: the attestation row alone and plus the correctly placed changelog tag key "
+                  "exit 0; another committed path, a smudge-masked committed edit, a quoted-path edit, a "
+                  "mode-only change or a deletion on each post-release path, a non-descendant head "
+                  "(bare, and masked by an info/grafts parent rewrite), a stale manifest, an "
+                  "extra or altered prior row, a predecessor-manifest version mismatch, a changelog edit "
+                  "other than the tag key (bare, and masked by a refs/replace blob substitution, with "
+                  "the funneled _show read asserted directly), a corrupt or stale COMMITTED manifest "
+                  "masked by a blob replacement, a clean/smudge filter, or skip-worktree, "
+                  "a mis-placed tag key (EOF/older table, the TOML-only catch), "
+                  "and a head version below the newest row each fail; a staged-only edit and untracked "
+                  "files are a stderr ADVISORY over an exit-0 committed verdict, an assume-unchanged "
+                  "working-tree overwrite never reaches the verdict, and the three admitted byte-level "
+                  "variants (a releases.toml comment, a CRLF tag line, the tag key before the version "
+                  "line) exit 0 (QA round-3); the round-4 substitution and provenance cases (a "
+                  "GIT_DIR decoy, a forged object-directory overlay with the funneled _show read "
+                  "asserted directly, an overwritten loose object refused by the per-object "
+                  "re-hash, a committed profiles artifact with the checkout copy deleted, a gate "
+                  "import diverging from the committed HEAD copy, and the materialized committed "
+                  "tree running its OWN validator copies) each refuse exit 2, and a skipped "
+                  "archive/extract/build coverage set now FAILS the self-test; the QA round-5 "
+                  "launch cases over a dedicated fixture (stage-1 re-execution of the committed "
+                  "gate copy, with an untracked tools/tempfile.py shadow, a crafted __pycache__ "
+                  ".pyc, a repo-config core.fsmonitor hook, and a repo-config clean filter and "
+                  "post-index-change hook each left inert at exit 2, the "
+                  "checkout routing records reverted to the release still routed POST-RELEASE "
+                  "from committed objects, an inherited PYTHONPATH/sitecustomize ignored by "
+                  "every -I child, and the accepted state re-executing to exit 0) and the "
+                  "per-object re-hash refusing a forged commit, tree and tag (not only a blob), "
+                  "and the verified ancestry walk refusing a forged intermediate commit, "
+                  "each hold; the QA round-6 fail-closed launch (a corrupt HEAD, a bad config "
+                  "and a missing git each exit 2 from stage 1 with a checkout tripwire inert; "
+                  "a simulated dubious-ownership refusal fails closed in stage 1 and in "
+                  "routing; and round 7: a corrupt ancestor .git/HEAD and a dangling ancestor "
+                  ".git file each exit 2 with the tripwire inert while the no-.git-anywhere "
+                  "control still reaches the checkout gate; and round 8: a damaged ancestor "
+                  "reached through a symlinked launch path, a bare ancestor with a corrupt "
+                  "HEAD, and dangling, looping and unreadable ancestor .git entries each exit "
+                  "2 with the tripwire inert while an unborn ancestor HEAD still reaches the "
+                  "checkout gate; and round 9: a symlink followed by `..` and a symlinked "
+                  "gate file never hide the gate's physical repository, an unsearchable "
+                  "ancestor fails closed, and the refusal names the marker it found; and "
+                  "round 10: a pipe read through /dev/fd/N and a source run with no __file__ "
+                  "each exit 2 with no traceback, and a non-git copy run from inside another "
+                  "repository judges its own root, not the cwd; and round 11: an imported "
+                  "main() with no stage-1 hand-off exits 2 by name), the no-follow bounded drift "
+                  "advisory (a symlinked parent, a swapped-in FIFO, an over-cap UNCHECKED "
+                  "file; and round 7: a final-component symlink to an outside committed copy, "
+                  "an empty-blob FIFO, a refused dot-dot/dot component, per-path drift "
+                  "states judged by exact name, a child-bounded FIFO open; and rounds 9 "
+                  "and 10: exactly one DRIFT-STATES record, with no key repeated inside it, "
+                  "and the fsmonitor pins held on the genesis route and on "
+                  "git_tracked/_index_materialized_tree), the promisor lazy-fetch "
+                  "refusal (GIT_NO_LAZY_FETCH pinned, no transport, no sshCommand), and the "
+                  "stage-2 sitecustomize isolation hold; and the replayed "
+                  "pre-row gate "
+                  "(round-2 B1: an undispositioned later release exits 1 after its row lands, with its "
+                  "pre-row control; a malformed genesis tree exits 2) holds) hold")
+    print("SELF-TEST PASS: {}; the end-to-end genesis-structural fail-closed (exit 2, #1), "
+          "genesis-flag-mismatch (exit 2), unreachable-predecessor (exit 2), and git-plumbing "
+          "predecessor-ownership (#11, no worktree materialized) cases hold; the REAL run() "
+          "malformed-input fixtures (releases/dispositions/order/MANIFEST format-version and unknown "
+          "top-level key, a duplicate manifest source, junk default-correction and classless "
+          "class-change, a duplicate predecessor clause row) each fail closed exit 2 (findings 1/3/4, "
+          "round-3 finding 1){}".format(core, full_pack))
     return 0
 
 
