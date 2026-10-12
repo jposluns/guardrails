@@ -571,6 +571,25 @@ jobs:
       - name: Git-fixture-env behaviour self-test (execution-reconciled)
         run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-selftest
 
+  merge-train:
+    name: Merge-train self-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Merge-train self-test (red on revert)
+        run: python3 -I -B tools/merge_train.py --self-test --red-on-revert
+
+      - name: Merge-train behaviour self-test (execution-reconciled)
+        run: python3 -I -B tools/check_selftest_execution.py --suite merge-train-selftest
+
   registry:
     name: Records, manifest and parity
     runs-on: ubuntu-latest
@@ -761,6 +780,7 @@ jobs:
       - generated
       - selftest-execution
       - git-fixture-env
+      - merge-train
       - registry
       - byte-canon-matrix
     runs-on: ubuntu-latest

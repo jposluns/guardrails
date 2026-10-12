@@ -44,6 +44,10 @@ reason = "Repository-local NEWTAB coverage declaration; tracked, not shipped. Ad
 path = ".aiqt/char-policy.json"
 reason = "Repository-local character policy read by tools/check_no_dashes.py and the char-policy-write preview hook; tracked, not shipped. Adopters own their roots (an absent file applies the gate's built-in default), like .aiqt/newtab.toml; this tracked file belongs to concern 1, not the untracked concern-2 namespace."
 
+[[exclusion]]
+path = ".aiqt/merge-train.toml"
+reason = "Repository-local merge-train opt-in (D10); tracked, not shipped. It names this repository's maintainer identity and generator commands, and its presence on a base branch is what enables tools/merge_train.py, so shipping it would switch the tool on in every adopter under the wrong identity. Adopters commit their own, like .aiqt/newtab.toml."
+
 # --- concern-1: manifest-self and the managed block ----------------------------------------------------
 
 [[release-class]]
