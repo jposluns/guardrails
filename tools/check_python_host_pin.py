@@ -35,6 +35,10 @@ Legs, in order:
                                 with: of exactly CHECKOUT_INPUTS, no other key), and no other step uses a
                                 checkout action: a ref:, repository: or path: input, or a second checkout,
                                 can put another tree under the gate and the suite;
+                 step-env       no step of the job carries env:: a step env: changes what an otherwise
+                                accepted run: command does (a BASH_ENV value, or a write to GITHUB_PATH
+                                or GITHUB_ENV through it), so env: on any step, held or extra, is a
+                                finding, and the job-keys rule keeps refusing a job-level env:;
                  setup          exactly one step uses setup-python; it carries no key but name, uses and
                                 with:, its with: holds only python-version, and that is the one line in the
                                 job that names python-version (a job-level env: or another key never counts
@@ -45,7 +49,8 @@ Legs, in order:
                  suite-step     an executable step after the setup-python step runs the job's suite,
                                 HOST_SUITES (opf-host-patch: the OPF tooling self-test;
                                 git-fixture-env-host-patch: the git-fixture-env behaviour self-test).
-               So a top-level key outside TOP_KEYS, another runner or checkout, removing or moving a
+               So a top-level key outside TOP_KEYS, another runner or checkout, an env: on a
+               host-patch job or on any of its steps, removing or moving a
                host-patch job, its setup-python step, its Python host pin step or its suite step, changing a
                job id or the command a held step runs, and disabling a held step (if:, continue-on-error:) are
                each a finding. A display name (name:) is not held: it changes neither what a step runs nor how
@@ -70,6 +75,12 @@ Legs, in order:
                not run the pinned release.
 
   check_python_host_pin.py              run every leg over this repository
+  check_python_host_pin.py --jobs-only  run the source and jobs legs only and skip the interpreter leg:
+                                        the CI step of the registry job of quality.yml, which runs
+                                        OUTSIDE the host-patch jobs this gate judges, so an edit to
+                                        those jobs cannot silence every CI run of the jobs leg, and
+                                        which pins the floor '3.14', not the host patch, so the
+                                        interpreter leg cannot run there
   check_python_host_pin.py --self-test  fixture trees for every leg and every job rule, plus red-on-revert:
                                         for each finding leg, a copy of this gate loaded through importlib
                                         with that leg's call removed passes the fixture the intact gate
@@ -85,15 +96,27 @@ character, a top-level line that is not a plain key, a repeated top-level key, a
 place or read, a pin line outside the strict form, unavailable temporary storage).
 
 DISCLOSED RESIDUAL. The jobs leg reads only quality.yml: its top-level keys and, in the HOST_JOBS jobs, their
-keys, runner, checkout step, setup-python step, Python host pin step and suite step. Another step in a
-host-patch job runs as written, and what the suites test is theirs: a step that starts another interpreter,
-appends to GITHUB_PATH, changes the checked-out tree or uses a local or composite action is not judged here.
-tools/check_ci_parity.py is the second holder for those edits: in every job it refuses a uses: of an action
-other than actions/checkout and actions/setup-python and a run: command outside its parity grammar. An edit
-that makes every run step exit 0 without running its command (a top-level defaults: run: shell: true {0}) also
-silences, in CI, this gate's own step, every other gate step and the Quality gates job's step, so CI cannot
-report it; this gate and check_ci_parity refuse it where they run outside that workflow, in
-tools/run_all_checks.sh. The grammar of the whole workflow, the setup-python uses: shape and every other pin
+keys, runner, checkout step, the env: of every step, setup-python step, Python host pin step and suite step.
+Another step in a host-patch job runs as written once it carries no env:, and what the suites test is
+theirs: a step whose run: command starts another interpreter, appends to GITHUB_PATH or GITHUB_ENV, changes
+the checked-out tree or uses a local or composite action is not judged here. tools/check_ci_parity.py is the
+second holder for those edits: in every job it refuses a uses: of an action other than actions/checkout and
+actions/setup-python and a run: command outside its parity grammar. In CI the jobs leg runs inside the
+host-patch jobs (their Python host pin steps) and once outside them, as the --jobs-only step of the registry
+job, so an edit inside the host-patch jobs alone (a job-level env: or defaults: that silences every CI step
+of those jobs among them) cannot silence every CI run of this gate. What stays CI-blind after that is an
+edit that also silences the registry job's own steps. A top-level defaults: or env: silences, in CI, every
+run step of every job, the --jobs-only step included, so CI cannot report it; this gate (workflow-keys) and
+check_ci_parity refuse it where they run outside that workflow, in tools/run_all_checks.sh. A job-level
+env: (a BASH_ENV value) on the registry job silences, in CI, that job's steps, check_ci_parity's and the
+--jobs-only step included; it is inside check_ci_parity's disclosed environment-value residual, which that
+gate's docstring owns, and no gate refuses it in CI, so the surface that refuses it together with any
+host-patch-job edit is this gate's jobs leg run outside CI, in tools/run_all_checks.sh (a job-level
+defaults:, container:, continue-on-error: or uses: there is a check_ci_parity finding, reported in
+tools/run_all_checks.sh when CI is silenced). A host-job line carrying a form feed or a vertical tab passes
+this gate's line model while the python-floor grammar refuses it; neither is a YAML line break, so the two
+gates differ in which lines they accept, not in the line-break refusal. The grammar of the whole workflow,
+the setup-python uses: shape and every other pin
 belong to the python-floor gate (tools/check_python_floor.py), which accepts a pin of a patch release only
 inside the HOST_JOBS jobs of quality.yml and only when it equals this source, and holds every other
 python-version in any workflow to the floor exactly. GitHub's runtime is not modelled: when the runner image
@@ -167,8 +190,8 @@ SETUP_KEYS = {"name", "uses", "with"}
 RUN_KEYS = {"name", "run"}
 # The rules of the jobs leg; the self-test removes each from a copy of this gate to show its cases red on
 # revert.
-JOB_RULES = frozenset({"workflow-keys", "job-keys", "runner", "checkout", "setup", "pin", "gate-step",
-                       "suite-step"})
+JOB_RULES = frozenset({"workflow-keys", "job-keys", "runner", "checkout", "step-env", "setup", "pin",
+                       "gate-step", "suite-step"})
 # MAJOR.MINOR.PATCH, no leading zero, at most four digits in each component.
 PATCH_RE = re.compile(r"([1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})")
 PIN_KEY = "python-version"
@@ -367,6 +390,13 @@ def _host_job_findings(job, tree, want):
         if others:
             found.append("{} carries another checkout step (step {}), which can put another tree under the "
                          "gate and the suite".format(where, others[0] + 1))
+    if "step-env" in JOB_RULES:
+        for index, step in enumerate(steps):
+            if "env" in step:
+                found.append("{} sets env: on step {}: a step env: changes what an otherwise accepted "
+                             "run: command does (a BASH_ENV value, or a write to GITHUB_PATH or "
+                             "GITHUB_ENV through it); no step of a host-patch job carries env:".format(
+                                 where, index + 1))
     setups = [index for index, step in enumerate(steps)
               if isinstance(step.get("uses"), str) and "setup-python" in step["uses"].lower()]
     if "setup" in JOB_RULES:
@@ -482,22 +512,29 @@ def interpreter_findings(patch, version):
                 *version[:4], SOURCE_REL, _patch_text(patch), _patch_text(patch), SOURCE_REL, WORKFLOW_REL)]
 
 
-def evaluate(root, version):
-    """Run every leg over root, judging the interpreter version; return (exit code, report lines)."""
+def evaluate(root, version, jobs_only=False):
+    """Run every leg over root, judging the interpreter version; return (exit code, report lines).
+    jobs_only (--jobs-only) runs the source and jobs legs and skips the interpreter leg: the CI step
+    outside the host-patch jobs runs on the floor pin, not the host patch, so the interpreter leg
+    cannot run there."""
     try:
         patch = load_source(root)
         findings = []
         findings.extend(job_findings(root, patch))
-        findings.extend(interpreter_findings(patch, version))
+        if not jobs_only:
+            findings.extend(interpreter_findings(patch, version))
     except CannotEvaluate as exc:
         return 2, ["CANNOT EVALUATE: {}".format(exc)]
     if findings:
         return 1, ["FAIL: " + finding for finding in findings]
-    return 0, ["PASS: python host patch {} ({}): {} carries only the top-level keys {}, its host-patch jobs "
-               "{} each run on {}, check out as written, pin it in their one setup-python step, run this "
-               "gate right after it and run their suite, and this interpreter is Python {}".format(
-                   _patch_text(patch), SOURCE_REL, WORKFLOW_REL, ", ".join(TOP_KEYS), ", ".join(HOST_JOBS),
-                   RUNNER, _patch_text(version[:3]))]
+    report = ("PASS: python host patch {} ({}): {} carries only the top-level keys {}, its host-patch jobs "
+              "{} each run on {}, carry env: on no job key or step, check out as written, pin it in their "
+              "one setup-python step, run this gate right after it and run their suite".format(
+                  _patch_text(patch), SOURCE_REL, WORKFLOW_REL, ", ".join(TOP_KEYS), ", ".join(HOST_JOBS),
+                  RUNNER))
+    if jobs_only:
+        return 0, [report + " (--jobs-only: the interpreter leg did not run)"]
+    return 0, [report + ", and this interpreter is Python {}".format(_patch_text(version[:3]))]
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -689,7 +726,10 @@ def _malformed_refusal(refusal, damage, marker):
 
 def _job_cases():
     """Each jobs-leg finding case: (check id, edits, omitted jobs, a marker of its finding, and the one
-    JOB_RULES rule whose removal lets it pass, or None for a case more than one rule refuses)."""
+    JOB_RULES rule whose removal lets it pass, or None where no one rule decides it:
+    jobs/second-pin-line-finding and jobs/job-env-pin-finding are each refused by two overlapping rules,
+    and pins/host-job-missing-finding is refused by the unconditional missing-job check in job_findings,
+    which no JOB_RULES rule controls)."""
     suite = {job: _suite_step(job) for job in HOST_JOBS}
     gate_name = "      - name: Python host pin\n"
     suite_name = "      - name: Suite\n"
@@ -781,6 +821,24 @@ def _job_cases():
         ("jobs/job-defaults-finding",
          ((OPF, runs, "    defaults:\n      run:\n        shell: echo {0}\n" + runs),), (),
          "opf-host-patch carries defaults:", "job-keys"),
+        # Reviewer reproductions: an extra, otherwise unheld step whose env: makes BASH_ENV append to
+        # GITHUB_PATH before an otherwise accepted command runs, and the GITHUB_ENV variant.
+        ("jobs/step-env-github-path-finding",
+         ((OPF, GATE_STEP, GATE_STEP + "      - name: Extra check\n        run: " + GATE_RUN
+           + " --self-test\n        env:\n"
+           + "          BASH_ENV: $(printf /review-probe >> \"$GITHUB_PATH\")\n\n"),), (),
+         "opf-host-patch sets env: on step 4", "step-env"),
+        ("jobs/step-env-github-env-finding",
+         ((GFE, GATE_STEP, GATE_STEP + "      - name: Extra check\n        run: " + GATE_RUN
+           + " --self-test\n        env:\n"
+           + "          BASH_ENV: $(printf REVIEW_PROBE=1 >> \"$GITHUB_ENV\")\n\n"),), (),
+         GFE + " sets env: on step 4", "step-env"),
+        # A reviewer reproduction: a job-level env: (BASH_ENV) in BOTH host-patch jobs, which in CI
+        # silences every step of those jobs, this gate's own steps included; job-keys keeps refusing it.
+        ("jobs/job-env-bash-env-both-jobs-finding",
+         ((OPF, runs, "    env:\n      BASH_ENV: '$(: > \"$0\")'\n" + runs),
+          (GFE, runs, "    env:\n      BASH_ENV: '$(: > \"$0\")'\n" + runs)), (),
+         "carries env:", "job-keys"),
         ("jobs/checkout-ref-finding", ((OPF, fetch_tags, fetch_tags + "          ref: main\n"),), (),
          "opf-host-patch: its first step is not the checkout step as written", "checkout"),
         ("jobs/checkout-repository-finding",
@@ -983,6 +1041,21 @@ def _self_test_cases(base):
         code, lines = evaluate(_fixture(base), version)
         check(check_id, (code, _has(lines, "the running interpreter is " + shown)), (1, True))
 
+    # The --jobs-only leg (the CI step of the registry job, outside the host-patch jobs): it skips
+    # the interpreter leg, so it can run on the floor pin, and it still runs the jobs leg, so a
+    # job-level env: placed in both host-patch jobs (which in CI silences every step of those jobs,
+    # this gate's own steps included) is refused from outside them. Red on revert: a jobs_only that no
+    # longer skips the interpreter leg fails the first check, and one that no longer runs the jobs leg
+    # fails the second.
+    check("jobs/jobs-only-skips-interpreter-leg",
+          (evaluate(_fixture(base), (3, 14, 8, "final"), jobs_only=True)[0],
+           evaluate(_fixture(base), (3, 14, 8, "final"))[0]), (0, 1))
+    env_edit = "    env:\n      BASH_ENV: '$(: > \"$0\")'\n    runs-on: "
+    root = _fixture(base, workflow=_workflow(((OPF, "    runs-on: ", env_edit),
+                                              (GFE, "    runs-on: ", env_edit))))
+    code, lines = evaluate(root, HOST, jobs_only=True)
+    check("jobs/jobs-only-still-refuses-host-job-env", (code, _has(lines, "carries env:")), (1, True))
+
     try:
         real = load_source(ROOT) + ("final",)
     except CannotEvaluate as exc:
@@ -1050,14 +1123,14 @@ def self_test():
 
 
 def main(argv):
-    if not argv:
-        code, lines = evaluate(ROOT, tuple(sys.version_info[:4]))
+    if not argv or argv == ["--jobs-only"]:
+        code, lines = evaluate(ROOT, tuple(sys.version_info[:4]), jobs_only=bool(argv))
         for line in lines:
             print(line, file=sys.stderr if code == 2 else sys.stdout)
         return code
     if argv == ["--self-test"]:
         return self_test()
-    print("usage: check_python_host_pin.py [--self-test]", file=sys.stderr)
+    print("usage: check_python_host_pin.py [--jobs-only | --self-test]", file=sys.stderr)
     return 2
 
 

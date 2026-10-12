@@ -223,6 +223,9 @@ run_gate "python-floor" python3 -I -B tools/check_python_floor.py
 # host-job pins in .github/workflows/quality.yml together.
 run_gate "python-host-pin-selftest" python3 -I -B tools/check_python_host_pin.py --self-test
 run_gate "python-host-pin" python3 -I -B tools/check_python_host_pin.py
+# The jobs-leg-only member mirrors the registry job's CI step, which judges the host-patch jobs from
+# outside them (roster symmetry; ci-parity reconciles it).
+run_gate "python-host-pin-jobs" python3 -I -B tools/check_python_host_pin.py --jobs-only
 run_gate "renderers-selftest"    python3 -I -B tools/gen_renderers.py --self-test
 run_gate "renderers-drift"       python3 -I -B tools/gen_renderers.py --check
 run_gate "manifest-gen-selftest" python3 -I -B tools/gen_manifest.py --self-test
