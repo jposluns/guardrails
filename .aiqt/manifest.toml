@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "d584a2f9e3e6783cb053dd212494f0dfd638579d00eb1f3218dbba1f359beb60"
+tree-sha256 = "2e35a4fd5fcc5f694c33dfcff171e02822e226f16da0764d05cd1a6ed01165ce"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3011,8 +3011,8 @@ sha256 = "5bd27665a3c757397d62b076ea65759bbfd5406e74f04660b538ac7b4eef6470"
 
 [[sources]]
 path = "opf/tools/opf.py"
-bytes = 1679704
-sha256 = "fd8186b2bfa585f420f23ed31717cf2991ac58e06213b39f0f2eee55b96940e0"
+bytes = 1694430
+sha256 = "6d82f6be7bc96e22916aba14275a383dcef3c8f6a1df8484991b90b94b17284a"
 
 [[sources]]
 path = "opf/tools/run_all_checks.sh"
