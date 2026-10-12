@@ -5640,7 +5640,8 @@ _WATCHDOG_UNSCANNED_CASES = {
 # route as well. _watchdog_dispatch_faults refuses each anywhere in a
 # scanned case and counts a top-level statement that spells one as able to
 # reach a case; _watchdog_launched_functions refuses each in a fixture
-# launch source outside `import opf` and the attribute reads on that name.
+# launch source outside `import opf`, the attribute reads on that name and
+# `from opf import <name>`.
 _WATCHDOG_MODULE_NAMES = ("opf", "__main__")
 _WATCHDOG_MODULE_ROUTES = _WATCHDOG_MODULE_NAMES + (
     "modules", "importlib", "import_module", "__import__", "__spec__", "__loader__",
@@ -5653,11 +5654,23 @@ _WATCHDOG_MODULE_ROUTES = _WATCHDOG_MODULE_NAMES + (
     "pydoc", "resolve", "safeimport", "BaseConfigurator", "importer",
     "PyEval_GetGlobals", "PyEval_GetFrameGlobals")
 _WATCHDOG_MODULE_ROUTE_PREFIXES = ("PyImport_",)
+# The spellings a fixture launch source may not hold at all, besides the
+# module routes: code compiled from a string (exec, eval, compile) and the
+# namespaces and heap from which a function can be read without its name
+# being written (vars, globals, locals, gc, __dict__).
+# _watchdog_launched_functions refuses each anywhere in a launch source, and
+# the launch sources use none. Of these the dispatch scan refuses only
+# globals, as a module route: the completion case itself uses exec, eval,
+# compile, vars and gc, so the scan names them among its residuals instead.
+_WATCHDOG_LAUNCH_INTROSPECTION = ("exec", "eval", "compile", "vars", "globals", "locals", "gc",
+                                  "__dict__")
 # A dotted string whose last part is one of these suffixes names a file
-# ("opf.py") in a top-level data statement (a table of file names), so there
-# its module-name parts are not read as routes. In a def or class, a case
-# body included, they are: there patch("opf.py", create=True) targets this
-# module's attribute py and so holds this module.
+# ("opf.py") in a top-level table of file names, so where no def, async def,
+# class or lambda encloses it at any depth its module-name parts are not read
+# as routes. This is decided for each string by its own chain of enclosing
+# nodes: under a def, class or lambda, one nested in a top-level if, try,
+# with, for or while included, they are read, since there patch("opf.py",
+# create=True) targets this module's attribute py and so holds this module.
 _WATCHDOG_FILE_SUFFIXES = ("py", "pyc", "pyi", "pyw")
 # The functions through which a scanned case may read the module table, each
 # with its reason: a gate's own def is exempt from the module-route reach seed
@@ -5806,10 +5819,11 @@ def _watchdog_dispatch_faults(budgets, module=None, cases=None, scanned=None):
     or nonlocal, an except or match capture), and every string constant,
     whole and, when it is a dotted or colon-joined path (a patch or
     resolve_name target), part by part, its module-name parts included,
-    except in a top-level statement other than a def or class when the
-    string ends in a file suffix (_WATCHDOG_FILE_SUFFIXES: a table entry
-    "opf.py" names a file, while patch("opf.py", create=True) in a def
-    targets this module). It refuses:
+    except where the string ends in a file suffix (_WATCHDOG_FILE_SUFFIXES)
+    and no def, async def, class or lambda encloses it at any depth (a
+    top-level table entry "opf.py" names a file, while patch("opf.py",
+    create=True) in a def or lambda targets this module, one nested in a
+    top-level if, try, with, for or while included). It refuses:
     (1) a case call it cannot attribute (a non-constant mode, a call outside
     any mode test, or one inside a loop, comprehension, nested function or
     lambda, which may run any number of times);
@@ -5857,7 +5871,10 @@ def _watchdog_dispatch_faults(budgets, module=None, cases=None, scanned=None):
     reaches one). A case function or a gate not bound exactly once at the top
     level, by its def, is a fault, and so is a case or gate def that carries a
     decorator (the function a call runs need not be the def the scan reads,
-    and a decorator can map one mode to another) and a case def whose first
+    and a decorator can map one mode to another), an attribute of a case or
+    gate assigned or deleted anywhere in `module` (its __code__,
+    __defaults__, __kwdefaults__, __wrapped__ or any other, directly or
+    through an item of one, for the same reason), and a case def whose first
     positional parameter is not mode or has a default (the scan prices a call
     by its first argument, and a default or an earlier parameter lets the mode
     that runs differ from it). With `cases` (every module function a
@@ -5888,13 +5905,16 @@ def _watchdog_dispatch_faults(budgets, module=None, cases=None, scanned=None):
     through a callable or object from outside `module` (another module that
     holds this one or one of its functions, or a value a caller supplies);
     (e) through a rebinding made at run time by code outside the case bodies
-    (a global statement, setattr or patch.object in other code); (f) through
+    (a global statement, setattr, delattr or patch.object, in this module or
+    another; only an attribute or item store or delete written on a case or
+    gate name is refused); (f) through
     a module gate's body: a gate def is exempt from the route seed, so what
     it returns or holds is checked against its stated reason by review, not
     by this scan; or (g) through any route, binding form or
-    library helper the lists above do not name, or through a top-level data
-    statement holding a file-suffixed name of this module ("opf.py") that a
-    case hands to patch(..., create=True). Each of (a) to (g) is open to
+    library helper the lists above do not name, or through a file-suffixed
+    name of this module ("opf.py") written where no def, class or lambda
+    encloses it (a top-level data table) that a case hands to patch(...,
+    create=True). Each of (a) to (g) is open to
     code written to reach a case unseen: deliberate evasion of a static scan
     is the residual this guard leaves to review. Returns the faults."""
     import ast
@@ -5914,8 +5934,8 @@ def _watchdog_dispatch_faults(budgets, module=None, cases=None, scanned=None):
         # Every identifier a node spells, from all of its fields: no
         # identifier-bearing field is skipped. A string spells its value and,
         # as a dotted or colon-joined path, each part, its module-name parts
-        # excepted only when `filed` (a top-level statement other than a def
-        # or class) and the path ends in a file suffix ("opf.py").
+        # excepted only when `filed` (no def, async def, class or lambda
+        # encloses the node) and the path ends in a file suffix ("opf.py").
         if isinstance(node, ast.Constant):
             if not isinstance(node.value, str):
                 return set()
@@ -5981,17 +6001,31 @@ def _watchdog_dispatch_faults(budgets, module=None, cases=None, scanned=None):
     # binds() above: an assignment or import target, or a def, class, target,
     # capture or declaration inside a compound statement) and every name its
     # statement spells, with the route seed when it spells a module route and
-    # is not a gate's own def.
+    # is not a gate's own def. In the walk of each statement a node is
+    # `filed` while no def, class or lambda encloses it, and an attribute or
+    # item stored or deleted on a case or gate name is a fault.
     defs = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
-    spells, bindings = {}, {}
+    spells, bindings, altered = {}, {}, []
     for statement in tree.body:
         if isinstance(statement, defs):
             bound = [statement.name]
         else:
             bound = [name for node in ast.walk(statement) for name in binds(node)]
-        names, filed = set(), not isinstance(statement, defs)
-        for node in ast.walk(statement):
+        names, stack = set(), [(statement, True)]
+        while stack:
+            node, filed = stack.pop()
             names.update(spelled(node, filed))
+            if (isinstance(node, (ast.Attribute, ast.Subscript))
+                    and not isinstance(node.ctx, ast.Load)):
+                root = node.value
+                while isinstance(root, (ast.Attribute, ast.Subscript)):
+                    root = root.value
+                if isinstance(root, ast.Name) and (root.id in prefixes or root.id in gates):
+                    altered.append("%s: line %d assigns or deletes %s, so a call need not run "
+                                   "the def the scan reads; a case or gate is not altered "
+                                   "after its def" % (root.id, node.lineno, ast.unparse(node)))
+            filed = filed and not isinstance(node, defs + (ast.Lambda,))
+            stack.extend((child, filed) for child in ast.iter_child_nodes(node))
         if routed(names) and not (isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
                                   and statement.name in gates):
             names.add(route)
@@ -6007,7 +6041,7 @@ def _watchdog_dispatch_faults(budgets, module=None, cases=None, scanned=None):
                 grew = True
     repeated = (ast.For, ast.AsyncFor, ast.While, ast.ListComp, ast.SetComp, ast.DictComp,
                 ast.GeneratorExp, ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
-    faults, priced = [], {}
+    faults, priced = list(altered), {}
     for gate in sorted(gates):
         found = bindings.get(gate, [])
         if (len(found) != 1 or not isinstance(found[0], (ast.FunctionDef, ast.AsyncFunctionDef))
@@ -6124,27 +6158,49 @@ def _watchdog_launched_functions(sources, module_name="opf"):
     as _opf_emit._fixture_main runs it (the body of one function, each line
     indented), and every attribute read on the name `module_name` and every
     name imported from that module is collected, however the source spaces
-    or splits it. The one way a source may hold the module is `import
-    <module_name>` and reading attributes on that name. A source is a fault,
-    never a smaller set, since the runner cannot read what it reaches, when
-    it does not parse; star-imports from the module; imports the module as
-    another name or another module as `module_name`; uses the name other than
-    to read an attribute; binds the name by any other form (an assignment or
-    del, an ImportFrom alias such as `from json import opf`, a def, class,
+    or splits it. A source may hold the module in two ways only: `import
+    <module_name>` and reading attributes on that name, and `from
+    <module_name> import <name>` (absolute, under any alias but the
+    module's own name). The second is the first spelled another way, and so
+    safe to allow: it names the module literally, binds only the function
+    it imports, and collects that name for the same reconciliation an
+    attribute read gets. A source is a fault, never a smaller set, since the
+    runner cannot read what it reaches, when it does not parse; star-imports
+    from the module (a star names nothing to collect); imports the module as
+    another name or another module as `module_name`; assigns or deletes an
+    attribute of the module (an assignment, augmented or annotated
+    assignment or del of `opf.<name>`), since a later read of that name need
+    not run the function collected; assigns or deletes any other attribute
+    or item (`opf.<name>.__code__`, or an attribute of a name that `from
+    opf import` binds) or spells setattr, delattr, __setattr__ or
+    __delattr__, since through a name bound to a module function a store
+    changes what a later call runs (the launch sources make no such store);
+    uses the name other than to read an attribute; binds the name by any
+    other form (an assignment or del, an
+    ImportFrom alias such as `from json import opf`, a def, class,
     parameter, except name, match capture, star or mapping rest, a global or
-    nonlocal, a type parameter); or, outside those permitted import and
-    attribute reads, spells a listed module route (_WATCHDOG_MODULE_ROUTES or
-    a name beginning with one of _WATCHDOG_MODULE_ROUTE_PREFIXES: this
-    module's names "opf" and "__main__", sys.modules, __import__, importlib and
-    its import_module, and every other spelling that list holds) as an
+    nonlocal, a type parameter); outside those permitted import and
+    attribute reads, spells a listed module route (_WATCHDOG_MODULE_ROUTES
+    or a name beginning with one of _WATCHDOG_MODULE_ROUTE_PREFIXES: this
+    module's names "opf" and "__main__", sys.modules, __import__, importlib
+    and its import_module, and every other spelling that list holds) as an
     identifier, a whole string or a part of a dotted string, with no
-    file-suffix carve-out. Like the dispatch scan it reads written names
-    only, so what remains outside it is a module or function reached through
-    a name computed at run time (assembled, decoded or read from elsewhere)
-    and a route the list does not hold. Returns (names, faults)."""
+    file-suffix carve-out; or spells, anywhere, permitted reads included,
+    one of _WATCHDOG_LAUNCH_INTROSPECTION (exec, eval, compile, vars,
+    globals, locals, gc, __dict__) in any of those ways. Like the dispatch
+    scan it reads written names only and refuses known spellings, not every
+    way to reach a function. What remains outside it is a module or
+    function reached through a name computed at run time (assembled, decoded
+    or read from elsewhere), through a route or helper the lists do not
+    hold, by predicate selection over objects (an object picked by its type
+    or by an attribute it holds, not by a written name), and by key through
+    an exempt helper such as _self_tests (dict(opf._self_tests())[key] runs
+    whatever that table holds under the key). Returns (names, faults)."""
     import ast
     import re
     routes = set(_WATCHDOG_MODULE_ROUTES) | set([module_name])
+    introspection = set(_WATCHDOG_LAUNCH_INTROSPECTION)
+    setters = set(("setattr", "delattr", "__setattr__", "__delattr__"))
     dotted = re.compile(r"[A-Za-z_]\w*(?:[.:][A-Za-z_]\w*)+\Z")
     names, faults = set(), []
 
@@ -6190,14 +6246,21 @@ def _watchdog_launched_functions(sources, module_name="opf"):
             continue
         # The permitted spellings of the module: the name read for an
         # attribute, the attribute read (collected), `import <module_name>`
-        # and `from <module_name> import <name>` (each name collected).
+        # and `from <module_name> import <name>` (each name collected). An
+        # attribute of the module assigned or deleted is a fault.
         read, permitted = set(), set([id(tree.body[0])])
         for node in ast.walk(tree):
             if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
                     and node.value.id == module_name and isinstance(node.value.ctx, ast.Load)):
-                names.add(node.attr)
                 read.add(id(node.value))
-                permitted.add(id(node))
+                if isinstance(node.ctx, ast.Load):
+                    names.add(node.attr)
+                    permitted.add(id(node))
+                else:
+                    faults.append("launch source %s line %d: assigns or deletes the attribute "
+                                  "%s of %s, so a later read of it need not run the function "
+                                  "the runner reads" % (label, node.lineno - 1, node.attr,
+                                                        module_name))
             elif isinstance(node, ast.ImportFrom) and node.module == module_name and not node.level:
                 permitted.add(id(node))
                 for alias in node.names:
@@ -6217,6 +6280,22 @@ def _watchdog_launched_functions(sources, module_name="opf"):
                 permitted.update((id(node), id(node.names[0])))
         for node in ast.walk(tree):
             where = "launch source %s line %d" % (label, getattr(node, "lineno", 2) - 1)
+            reached = sorted(spelled(node) & introspection)
+            if reached:
+                faults.append("%s: spells %s, which runs code compiled from a string or reads "
+                              "a namespace or the heap, so the runner cannot read the module "
+                              "functions it reaches" % (where, ", ".join(reached)))
+            if (isinstance(node, (ast.Attribute, ast.Subscript))
+                    and not isinstance(node.ctx, ast.Load) and not (
+                        isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+                        and node.value.id == module_name)):
+                faults.append("%s: assigns or deletes %s, so a later call through it need not "
+                              "run the function the runner reads; a launch source stores no "
+                              "attribute or item" % (where, ast.unparse(node)))
+            if spelled(node) & setters:
+                faults.append("%s: spells %s, which assigns or deletes an attribute, so a later "
+                              "call need not run the function the runner reads" % (
+                                  where, ", ".join(sorted(spelled(node) & setters))))
             if isinstance(node, ast.Name) and node.id == module_name:
                 if id(node) not in read:
                     faults.append("%s: uses the name %s other than to read an attribute, so the "
@@ -20799,20 +20878,29 @@ def _watchdog_regression_self_test():
     # pydoc.safeimport, BaseConfigurator.importer, a BaseConfigurator's
     # resolve and a patch target "opf.py" made with create=True, whose file
     # suffix must not hide its module part (each a route found after the
-    # list was first written); a case function bound twice at the top level;
-    # a module gate bound twice; a case def and a module gate def each
-    # carrying a decorator; a case def taking mode after a parameter with a
-    # default, and one giving mode a default; a launched case function
-    # neither scanned nor exempted; the ledger case, which only the ledger
-    # vectors' launch sources name, dropped from the scanned set; and,
-    # through the runner's own verdict, launch sources naming a function with
-    # spaces around the dot and directly (the control), not parsing, handing
-    # the module object to a call, reaching the module through sys.modules
-    # (read in place and bound to a name), __import__,
-    # importlib.import_module and pydoc.locate, naming "opf" and "__main__"
-    # in a string under a computed module-table name, binding the name opf
-    # by an ImportFrom alias, a def, a class, an except name, a match capture
-    # and an assignment, and a completion leg's own launch source dropped.
+    # list was first written), and that patch target made in a module-level
+    # helper the branch calls, a def under a top-level if, a def under a
+    # top-level try and a lambda, which the carve-out must not reach; a case
+    # function bound twice at the top level; a module gate bound twice; a
+    # case def and a module gate def each carrying a decorator; a case's
+    # __code__ assigned at the top level, an item of a case's __kwdefaults__
+    # assigned, and a gate's __wrapped__ deleted in a def; a case def taking
+    # mode after another parameter, and one giving mode a default; a
+    # launched case function neither scanned nor exempted; the ledger case,
+    # which only the ledger vectors' launch sources name, dropped from the
+    # scanned set; and, through reconciled(), launch sources naming a
+    # function with spaces around the dot and directly (an existing-behaviour
+    # control), not parsing, handing the module object to a call, reaching
+    # the module through sys.modules (read in place and bound to a name),
+    # __import__, importlib.import_module and pydoc.locate, naming "opf" and
+    # "__main__" in a string under a computed module-table name, binding the
+    # name opf by an ImportFrom alias, a def, a class, an except name, a
+    # match capture and an assignment (an existing-behaviour control),
+    # assigning and deleting an attribute of opf, assigning an attribute and
+    # an item under a function read on opf and an attribute of a function
+    # imported from it, spelling setattr, delattr, __setattr__, __delattr__,
+    # exec, eval, compile, vars, globals, locals, gc and __dict__, and a
+    # completion leg's own launch source dropped.
     runner_source = inspect.getsource(_watchdog_regression_self_test)
     launched = set(live)
     # Assembled, never one literal, so each marker occurs once: in the comment.
@@ -20881,11 +20969,13 @@ def _watchdog_regression_self_test():
     launch_sources = [(label, code) for label, code, _timeout in cases]
 
     def reconciled(sources):
-        # The runner's whole budget verdict for `sources`: the derivation rule
-        # over the legs they launch, the launch inventory, and the dispatch
-        # scan reconciled against it. The verdict below and every launch
-        # flip take it from here, so dropping any of the three from the
-        # verdict turns a launch flip red.
+        # Three terms of the runner's budget verdict for `sources`, not the
+        # whole verdict (the bound floor below is outside it): the derivation
+        # rule over the legs they launch, the launch inventory, and the
+        # dispatch scan reconciled against it. The verdict below and every
+        # launch flip take these three from here, so dropping one inside
+        # reconciled() turns a flip red; a rewrite of the verdict line that
+        # stops taking them from here is not caught by a flip.
         names, faults = _watchdog_launched_functions(sources)
         legs = set(label for label, _code in sources)
         return names, (_watchdog_derivation_faults(runner_source, budgets, legs) + faults
@@ -20957,7 +21047,11 @@ def _watchdog_regression_self_test():
                          "        found = patch(\"opf.py\", create=True)\n"
                          "        found.start()\n"
                          "        return getattr(found.target, " + computed
-                         + ")(\"no-signal-echild\")\n"))
+                         + ")(\"no-signal-echild\")\n"),
+        hidden_patch=("        found = _watchdog_hidden_patch()\n"
+                      "        found.start()\n"
+                      "        return getattr(found.target, " + computed
+                      + ")(\"no-signal-echild\")\n"))
     helper_def = ("\n\ndef _watchdog_hidden_dispatch():\n"
                   "    return _watchdog_completion_case(\"no-signal-echild\")\n")
     module_helper_def = ("\n\ndef _watchdog_hidden_module():\n"
@@ -20968,6 +21062,19 @@ def _watchdog_regression_self_test():
     match_capture_def = ("\n\nmatch _watchdog_completion_case:\n"
                          "    case hidden_case:\n"
                          "        pass\n")
+    # The file-suffixed patch target made in a module-level helper the branch
+    # calls: a def under a top-level if or try, or a lambda, is not a data
+    # table, so the carve-out must not reach the string inside it.
+    patch_def = ("def _watchdog_hidden_patch():\n"
+                 "    from unittest.mock import patch\n"
+                 "    return patch(\"opf.py\", create=True)\n")
+    nested_patch = "".join("    " + line for line in patch_def.splitlines(True))
+    patch_helper_defs = dict(
+        under_if="\n\nif True:\n" + nested_patch,
+        under_try="\n\ntry:\n" + nested_patch + "except ImportError:\n    pass\n",
+        lambda_form=("\n\nfrom unittest.mock import patch as _watchdog_hidden_mock\n"
+                     "_watchdog_hidden_patch = lambda: _watchdog_hidden_mock(\n"
+                     "    \"opf.py\", create=True)\n"))
     # A decorator mapping audit-ignore to no-signal-echild: the scan would
     # price the call by the mode it names, not the mode that runs.
     case_def = "def _watchdog_completion_case(mode):\n"
@@ -21038,13 +21145,33 @@ def _watchdog_regression_self_test():
              launched_cases, "spells BaseConfigurator, a module route"),
             ("module named by a file-suffixed patch target", budgets, hidden("suffixed_target"),
              launched_cases, "spells opf, a module route"),
+            ("file-suffixed patch target in a helper def under a top-level if", budgets,
+             hidden("hidden_patch", patch_helper_defs["under_if"]), launched_cases,
+             "spells _watchdog_hidden_patch, which can reach a case function"),
+            ("file-suffixed patch target in a helper def under a top-level try", budgets,
+             hidden("hidden_patch", patch_helper_defs["under_try"]), launched_cases,
+             "spells _watchdog_hidden_patch, which can reach a case function"),
+            ("file-suffixed patch target in a top-level lambda helper", budgets,
+             hidden("hidden_patch", patch_helper_defs["lambda_form"]), launched_cases,
+             "spells _watchdog_hidden_patch, which can reach a case function"),
             ("case def carrying a decorator", budgets,
              module_source.replace(case_def, "@_watchdog_remap\n" + case_def) + remap_def,
              launched_cases, "_watchdog_completion_case: a case def carrying 1 decorator(s)"),
             ("module gate def carrying a decorator", budgets,
              module_source.replace(gate_def, "@staticmethod\n" + gate_def), launched_cases,
              "_watchdog_module_loaded: a module gate def carrying 1 decorator(s)"),
-            ("case def taking mode after a parameter with a default", budgets,
+            ("case __code__ assigned at the top level", budgets,
+             module_source + "\n_watchdog_completion_case.__code__ = "
+             "_watchdog_safety_case.__code__\n", launched_cases,
+             "assigns or deletes _watchdog_completion_case.__code__"),
+            ("item of a case __kwdefaults__ assigned", budgets,
+             module_source + "\n_watchdog_completion_case.__kwdefaults__[\"mode\"] = \"x\"\n",
+             launched_cases, "assigns or deletes _watchdog_completion_case.__kwdefaults__["),
+            ("gate __wrapped__ deleted in a def", budgets,
+             module_source + "\n\ndef _watchdog_hidden_unwrap():\n"
+             "    del _watchdog_module_loaded.__wrapped__\n", launched_cases,
+             "assigns or deletes _watchdog_module_loaded.__wrapped__"),
+            ("case def taking mode after another parameter", budgets,
              module_source.replace(case_def, case_def.replace(
                  "(mode)", "(label, mode=\"no-signal-echild\")")), launched_cases,
              "_watchdog_completion_case: mode is not the first positional parameter"),
@@ -21072,12 +21199,13 @@ def _watchdog_regression_self_test():
     if any(module_source.count(anchor) != 1
            for anchor in (alias, branch_head, case_def, gate_def)):
         flip_missed.append("dispatch flip anchors not found once in the module")
-    # Each launch flip goes through reconciled(), the runner's own verdict;
+    # Each launch flip goes through reconciled(), the verdict terms above;
     # the table name is computed where only the string rule must see "opf".
     unlisted = "._watchdog_unlisted_case()"
     table = "vars(sys)[\"modu\" + \"les\"]"
     for flip, code, needle in (
-            ("a function called directly (the control)", prefix + "return opf" + unlisted,
+            ("a function called directly (an existing-behaviour control)",
+             prefix + "return opf" + unlisted,
              "_watchdog_unlisted_case: a case function the runner launches"),
             ("a function named with spaces around the dot",
              prefix + "return opf . _watchdog_unlisted_case()",
@@ -21119,8 +21247,62 @@ def _watchdog_regression_self_test():
             ("the name opf bound by a match capture",
              prefix + "\nmatch 0:\n    case opf:\n        pass\nreturn 0",
              "binds the name opf (ast.MatchAs)"),
-            ("the name opf bound by an assignment", prefix + "opf = sys; return 0",
-             "uses the name opf other than to read an attribute")):
+            ("the name opf bound by an assignment (an existing-behaviour control)",
+             prefix + "opf = sys; return 0",
+             "uses the name opf other than to read an attribute"),
+            ("an attribute of opf assigned",
+             prefix + "opf._watchdog_completion_case = opf._watchdog_safety_case; return 0",
+             "assigns or deletes the attribute _watchdog_completion_case of opf"),
+            ("an attribute of opf deleted",
+             prefix + "del opf._watchdog_completion_case; return 0",
+             "assigns or deletes the attribute _watchdog_completion_case of opf"),
+            ("an attribute of a function read on opf assigned",
+             prefix + "opf._watchdog_completion_case.__code__ = opf._watchdog_safety_case.__code__; "
+             "return 0", "assigns or deletes opf._watchdog_completion_case.__code__, so"),
+            ("an item of a function attribute read on opf assigned",
+             prefix + "opf._watchdog_completion_case.__kwdefaults__[\"mode\"] = 0; return 0",
+             "assigns or deletes opf._watchdog_completion_case.__kwdefaults__["),
+            ("an attribute of a function imported from opf assigned",
+             prefix + "from opf import _watchdog_completion_case as found; "
+             "found.__code__ = found.__code__; return 0", "assigns or deletes found.__code__, so"),
+            ("setattr on a function imported from opf",
+             prefix + "from opf import _watchdog_completion_case as found; "
+             "setattr(found, \"__code__\", found.__code__); return 0",
+             "spells setattr, which assigns or deletes"),
+            ("delattr on a function imported from opf",
+             prefix + "from opf import _watchdog_completion_case as found; "
+             "delattr(found, \"__wrapped__\"); return 0", "spells delattr, which assigns or deletes"),
+            ("object.__setattr__ on a function imported from opf",
+             prefix + "from opf import _watchdog_completion_case as found; "
+             "object.__setattr__(found, \"__code__\", found.__code__); return 0",
+             "spells __setattr__, which assigns or deletes"),
+            ("object.__delattr__ on a function imported from opf",
+             prefix + "from opf import _watchdog_completion_case as found; "
+             "object.__delattr__(found, \"__wrapped__\"); return 0",
+             "spells __delattr__, which assigns or deletes"),
+            ("code compiled from a string by exec",
+             prefix + "found = exec; found(\"o\" + \"pf" + unlisted + "\"); return 0",
+             "spells exec, which runs code compiled"),
+            ("code compiled from a string by eval",
+             prefix + "found = eval; return found(\"o\" + \"pf" + unlisted + "\")",
+             "spells eval, which runs code compiled"),
+            ("code compiled from a string by compile",
+             prefix + "found = compile(\"0\", \"f\", \"single\"); return 0",
+             "spells compile, which runs code compiled"),
+            ("a namespace read through globals", prefix + "return globals()",
+             "spells globals, which runs code compiled"),
+            ("a namespace read through locals", prefix + "return locals()",
+             "spells locals, which runs code compiled"),
+            ("a function picked from the heap through gc",
+             prefix + "import gc; return [found for found in gc.get_objects() if getattr("
+             "found, \"__name__\", 0) == \"_watchdog_unlisted_case\"][0]()",
+             "spells gc, which runs code compiled"),
+            ("the module table read through vars",
+             prefix + "return " + table + "[\"o\" + \"pf\"]" + unlisted,
+             "spells vars, which runs code compiled"),
+            ("the module table read through __dict__",
+             prefix + "return sys.__dict__[\"modu\" + \"les\"][\"o\" + \"pf\"]" + unlisted,
+             "spells __dict__, which runs code compiled")):
         if needle not in "\n".join(reconciled(launch_sources + [(flip, code)])[1]):
             flip_missed.append("launch flip not refused: " + flip)
     if "completion-audit-ignore: a declared budget for a leg the runner never launches" not in (
