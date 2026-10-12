@@ -78,9 +78,12 @@ Rules (each self-test vector is caught by exactly its rule, and passes with that
                      #K/N it held (DISCLOSED RESIDUAL). A comprehension or generator expression is not a scope here:
                      what it holds belongs to the scope around it. An identity two scopes share would tell neither
                      apart, so it exits 2 (cannot evaluate) and is never merged. A definition's name, decorators,
-                     defaults, annotations, bases and keywords belong to the scope that runs the definition (an
-                     annotation too, though the interpreter evaluates it only when it is read), and only its
-                     parameters and body to its own scope. Scope identities and ordinals give
+                     defaults, annotations, bases, keywords and type parameters (their bounds, constraints and
+                     defaults) belong to the scope that runs the definition, and only its parameters and body to
+                     its own scope; a type alias is not a scope here, so its value belongs to the scope that runs
+                     the type statement. An annotation, a type parameter's bound, constraints and default, and a
+                     type alias's value belong there although the interpreter evaluates each only when it is
+                     read, in an annotation scope of its own. Scope identities and ordinals give
                      each node its own key (file, scope, ordinal and text); a key that more than one node held would
                      allow none of them, listed or not (a backstop against a regression in that numbering: no parsed
                      tree reaches it, and the self-test injects it). Each row is held live: it
@@ -166,11 +169,14 @@ or action line outside the accepted YAML subset (above).
                                        without it (one per watched name and import-system member, and one per
                                        importer, among them), every green vector exits 0, every cannot-evaluate
                                        vector exits 2, every site vector finds exactly the sites (scope and
-                                       reference) it names, every edit vector (rows the gate writes for one
-                                       source) gives exactly its findings on the edited source, every mutant in
-                                       MUTANTS (one check removed, with the backstop that would refuse first
-                                       where one is named) fails
-                                       the vector it names, removing any one watched name, member or importer
+                                       reference) it names, every edit vector (rows the gate under test writes
+                                       for one source, the fixture's own rows among them) passes that source
+                                       unchanged and gives exactly its findings, each in the edited file, on
+                                       the edited source, every mutant in MUTANTS (one check removed, with the
+                                       backstop that would refuse first where one is named, or a line or a
+                                       column put into the key) fails the vector it names (an edit vector only
+                                       when the unchanged source passes under that mutant and every finding
+                                       lies in the edited file), removing any one watched name, member or importer
                                        fails its vector, and the live tree passes
 
 Exit convention: 0 clean; 1 a finding; 2 usage or cannot-evaluate.
@@ -194,16 +200,20 @@ over-rejection: N changes, so every row under a sibling of that name goes stale 
 (an over-rejection wherever that shifts that scope's #K), and a new reference of that text ahead of it in its scope (the
 ordinals shift, and one is left unlisted) each make a row stale or a reference a finding until the row is rewritten (the
 re-review the binding asks for); but a move within its scope (onto another line, into or out of a branch, a loop or a
-try, between an annotation and a default of one definition, or into, out of or between comprehensions and generator
-expressions), an edit elsewhere in its scope (rebinding a name it is passed, say), a change of layout, comments or quote
+try, between an annotation and a default of one definition, from a type alias's value or a type parameter's bound
+into a statement beside it, or into, out of or between comprehensions and generator expressions), an edit elsewhere in
+its scope (rebinding a name it is passed, say), a change of layout, comments or quote
 style that ast.unparse does not keep, and an exchange among the references of one text in one scope (one removed and
 another of that text added there in one change, or two swapped) leave every row valid, so none of them is re-reviewed: a
 row reviews a node's text in its scope, not its place there. A comprehension or generator expression is not a scope
 here, though Python gives each a nested scope of its own (on the floor version a list, set or dict comprehension is
-inlined into the code of its function and a generator expression is not, and both keep their loop variables to
-themselves): what it holds is read in the def, class, lambda or module around it, so a move between two of them in one
-def is a move within that def, which is wider than a move within one of Python's scopes. An annotation, which the floor
-version evaluates only when it is read, is read in the scope that runs its definition, as a default is. A scope is
+inlined into the code of the function, class body or module around it and a generator expression is not, and both
+keep their loop variables to themselves): what it holds is read in the def, class, lambda or module around it, so a
+move between two of them in one def is a move within that def, which is wider than a move within one of Python's
+scopes. An annotation, a type parameter's bound, constraints and default, and a type alias's value, each of which the
+floor version evaluates only when it is read, in an annotation scope of its own, are read in the scope that runs the
+definition or the type statement, as a default is: a move between one of them and the code beside it is a move within
+that scope, which is again wider than a move within one of Python's scopes. A scope is
 known by its name, its ordinal among same-named siblings and their count, not by its place or its contents, so an edit
 that keeps the count of same-named siblings in a scope (siblings reordered or exchanged whole, or as many removed as
 added in one change) reads the sibling now at each #K/N as the one that was there: a reference that ends in the sibling
@@ -1250,8 +1260,13 @@ def watched_names(modules=IMPORT_SYSTEM_MODULES, inert=INERT_IMPORT_SYSTEM_MEMBE
 def _scoped_children(node, scope, inner=None):
     """(child, scope, descend) for each child of node. A def, class or lambda runs its body, and binds its
     parameters, in a scope of its own, inner (its identity, scope_identities); everything else it holds (decorators,
-    defaults, annotations, bases, keywords, type parameters) runs where the definition runs, in the enclosing scope.
-    A parameter is a leaf there: its annotation is pushed apart, in the enclosing scope."""
+    defaults, annotations, bases, keywords, type parameters with their bounds, constraints and defaults) is read in
+    the enclosing scope, where the definition runs. A parameter is a leaf there: its annotation is pushed apart, in
+    the enclosing scope. A type alias is no scope here, so its value is read in the scope that runs the type
+    statement. The floor version evaluates an annotation, a type parameter's bound, constraints and default, and a
+    type alias's value only when it is read, in an annotation scope of its own, yet each is read here in the scope
+    around it, so a move between one of them and the code beside it is a move within that scope (DISCLOSED
+    RESIDUAL)."""
     if not isinstance(node, SCOPE_NODES):
         return [(child, scope, True) for child in ast.iter_child_nodes(node)]
     out = []
@@ -2743,18 +2758,23 @@ _SITE_VECTORS = (
     ("a default's lambda numbered in the scope that runs the definition",
      "def f(a=lambda: __import__):\n    return lambda: __import__\ng = lambda: __import__\n",
      ("<lambda>#1/2 | #1: __import__", "f.<lambda> | #1: __import__", "<lambda>#2/2 | #1: __import__")),
-    # A comprehension or generator expression is not a scope here: what it holds is read in the scope around it.
+    # A comprehension or generator expression is not a scope here: what it holds is read in the scope around it. A
+    # regression pin, not red on revert: the gate read it this way before this boundary was disclosed, so it fails
+    # only against a later change to that reading.
     ("comprehension and generator expression read in the def around them",
      "def f(a):\n    return [__import__(n) for n in a], (__import__(n) for n in a)\n",
      ("f | #1: __import__(n)", "f | #2: __import__(n)")),
 )
 
 # (name, source before, source after, the lines of the findings the after source gives as tools/t.py, exactly, 0 for a
-# row's own): the rows are the ones the gate under test writes for the before source, so each vector reads one edit
-# the way that gate reads it, and a vector holds against this gate and fails against one whose scope identity merges
-# distinct lexical scopes (the identity before scope instances were told apart), or, where the edit adds or removes a
-# same-named sibling, against one whose identity leaves out the count of same-named siblings; the last two pass on
-# both and fail against a mutant (MUTANTS) that counts siblings of other names or puts a column into the key.
+# row's own): the rows are the ones the gate under test writes for the before source and for the fixture's own
+# tools/a.py, so each vector reads one edit the way that gate reads it. The before source must pass under those rows
+# (the control), and every finding on the after source must be a dynamic-import finding in tools/t.py, or the vector
+# fails without crediting a mutant (_UNCREDITED): a mutant that changes every key alike writes the rows with it, so it
+# is caught only where the edit itself reads differently. A vector holds against this gate and fails against one
+# whose scope identity merges distinct lexical scopes (the identity before scope instances were told apart), or, where
+# the edit adds or removes a same-named sibling, against one whose identity leaves out the count of same-named
+# siblings; the vectors after those say what else they fail against.
 _MOVE_VECTORS = (
     ("reference moved into a sibling lambda",
      "a = lambda x: __import__(x)\nb = lambda x: None\n", "a = lambda x: None\nb = lambda x: __import__(x)\n", (0, 2)),
@@ -2788,10 +2808,23 @@ _MOVE_VECTORS = (
     ("same-named sibling added after a listed scope, its row stale (an over-rejection)",
      "a = lambda x: __import__(x)\nb = lambda x: None\n",
      "a = lambda x: __import__(x)\nb = lambda x: None\nc = lambda x: None\n", (0, 1)),
+    # These hold against this gate and fail against a mutant (MUTANTS) that counts siblings of other names, or puts a
+    # column or a line into the key.
     ("def of another name added beside a listed scope", "def f(x):\n    return __import__(x)\n",
      "def g(x):\n    return None\ndef f(x):\n    return __import__(x)\n", ()),
     ("reference moved within its lambda", "a = lambda x: (x, __import__(x))\nb = lambda x: None\n",
      "a = lambda x: (__import__(x), x)\nb = lambda x: None\n", ()),
+    ("unrelated lines inserted above a listed site", "def f(x):\n    return __import__(x)\n",
+     "def u():\n    return 1\n\n\ndef f(x):\n    return __import__(x)\n", ()),
+    # Regression pins of a disclosed boundary, not red on revert (the gate read them this way before the boundary was
+    # disclosed): a type alias's value and a type parameter's bound, though the floor version evaluates each only
+    # when it is read, are read in the scope that runs the type statement or the definition, so a move from either
+    # into a statement beside it is a move within that scope. The second also fails against a mutant that reads what
+    # a definition holds in the definition's own scope.
+    ("type alias value moved into a statement beside it", "type T = __import__(x)\n",
+     "type T = int\nv = __import__(x)\n", ()),
+    ("type-parameter bound moved into a statement beside it", "def f[U: __import__(x)](y):\n    return y\n",
+     "def f[U: int](y):\n    return y\nv = __import__(x)\n", ()),
 )
 
 
@@ -2884,7 +2917,8 @@ _CANNOT_VECTORS = (
 def _vector_cases(tmp):
     """Build every vector's fixture tree once. Returns [(name, expected, rule, rel, base, kwargs, special)]:
     expected is 1 (a finding of rule at rel), 0 (clean), 2 (cannot evaluate), "sites" (base is then the
-    source) or "move" (rule is then the finding lines, rel the before source, base the tree holding the after)."""
+    source) or "move" (rule is then the finding lines, rel the before source, base the tree holding the after,
+    kwargs["control"] the tree holding the before)."""
     cases = []
     for index, (name, rule, at, extra, drop, kwargs, rehash) in enumerate(_RULE_VECTORS + _importer_vectors() +
                                                                           _name_vectors(*watched_names())):
@@ -2914,8 +2948,9 @@ def _vector_cases(tmp):
     for name, source, sites in _SITE_VECTORS:
         cases.append((name, "sites", sites, None, source, dict(), None))
     for index, (name, before, after, lines) in enumerate(_MOVE_VECTORS):
-        cases.append((name, "move", lines, before, _fixture(tmp / ("m%d" % index), (("tools/t.py", after),)), dict(),
-                      None))
+        control = _fixture(tmp / ("m%dc" % index), (("tools/t.py", before),))
+        cases.append((name, "move", lines, before, _fixture(tmp / ("m%d" % index), (("tools/t.py", after),)),
+                      dict(control=control), None))
     return cases
 
 
@@ -2966,23 +3001,41 @@ def _scan_rc(module, base, rules=None, special=None, **kwargs):
     return (1 if findings else 0), findings
 
 
+# The prefix of a problem that is not the vector's own failure (an edit vector's control failing, or a finding
+# outside the edited file): the self-test fails it against this gate and credits no mutant with it.
+_UNCREDITED = "not credited: "
+
+
+def _written_rows(module, rel, source):
+    """The DYNAMIC_IMPORT_SITES rows the gate under test (this gate or a mutant of it) writes for source at rel."""
+    rows = dict()
+    for key, scope, _names, _called, _line in module.dynamic_sites(ast.parse(source), *module.watched_names()):
+        rows.setdefault(scope, []).append(key)
+    return tuple((rel, scope, tuple(keys), "r") for scope, keys in rows.items())
+
+
 def _case_failure(module, case):
-    """None if the case holds against module (this gate or a mutant of it), else what went wrong."""
+    """None if the case holds against module (this gate or a mutant of it), else what went wrong (_UNCREDITED
+    first when that is not the vector's own failure)."""
     name, expected, rule, at, base, kwargs, special = case
     if expected == "sites":
         got = tuple("%s | %s" % (site[1], site[0]) for site in module.dynamic_sites(ast.parse(base),
                                                                                    *module.watched_names()))
         return None if got == rule else "expected sites %r, got %r" % (rule, got)
     if expected == "move":
-        rows = dict()
-        for key, scope, _names, _called, _line in module.dynamic_sites(ast.parse(at), *module.watched_names()):
-            rows.setdefault(scope, []).append(key)
-        rc, findings = _scan_rc(module, base, allowlist=_FIXTURE_SITES + tuple(
-            ("tools/t.py", scope, tuple(keys), "r") for scope, keys in rows.items()))
-        got = tuple(sorted(f[2] for f in findings if f[0] == "dynamic-import" and f[1] == "tools/t.py"))
-        if rc == 2 or got != rule or len(got) != len(findings):
-            return "expected findings at lines %r of tools/t.py, got rc %d %r" % (rule, rc, findings)
-        return None
+        try:
+            allowlist = _written_rows(module, "tools/a.py", _A_PY) + _written_rows(module, "tools/t.py", at)
+        except module.CannotEvaluate as exc:
+            return _UNCREDITED + "the gate under test cannot write rows for the unchanged sources: %s" % exc
+        rc, findings = _scan_rc(module, kwargs["control"], allowlist=allowlist)
+        if rc != 0:
+            return _UNCREDITED + "the rows written for the unchanged source fail it, rc %d %r" % (rc, findings)
+        rc, findings = _scan_rc(module, base, allowlist=allowlist)
+        if rc == 2 or any(f[:2] != ("dynamic-import", "tools/t.py") for f in findings):
+            return _UNCREDITED + ("the edited source gives rc %d, or a finding outside the edited file's "
+                                  "dynamic-import rows: %r" % (rc, findings))
+        got = tuple(sorted(f[2] for f in findings))
+        return None if got == rule else "expected findings at lines %r of tools/t.py, got %r" % (rule, findings)
     kwargs = dict(kwargs)
     special = kwargs.pop("special", special)
     expect = kwargs.pop("expect", None)
@@ -3009,7 +3062,8 @@ _SELF_TEST_MARKER = "\n# " + "-" * 64 + " self-test\n"
 # before the self-test: (mutant id, the exact source text, its replacement, the vector that must then fail). A tuple
 # of texts and a tuple of replacements remove a check together with the backstop that would refuse first, so the
 # check's own vector catches it, not the backstop. The self-test loads every mutant as a scratch module and requires
-# its named vector to fail.
+# its named vector to fail; an edit vector (_MOVE_VECTORS) credits it only when the rows the mutant writes pass the
+# unchanged source and every finding on the edited source is in the edited file (_UNCREDITED otherwise).
 MUTANTS = (
     # the walk and the inputs
     ("symlinked-dir-refused", "if os.path.islink(os.path.join(dirpath, d)):", "if False:", "symlinked directory"),
@@ -3086,8 +3140,10 @@ MUTANTS = (
     # Round-9: each lexical scope instance is its own scope (same-named siblings numbered in source order in the
     # scope that runs their definitions, a class marked), an identity two scopes share is refused, and a malformed
     # reference is refused as malformed; each removed in turn and caught by its vector.
+    # The numbering alone removed is refused as a shared identity on the unchanged source too, so no edit vector
+    # credits it; its site vector does.
     ("scope-instances-numbered", "            if counts[name] > 1:\n", "            if False:\n",
-     "reference moved into a sibling lambda"),
+     "sibling lambdas numbered in source order"),
     ("scope-instances-counted", "seen[name] = seen.get(name, 0) + 1", "seen[name] = 1",
      "identical references in sibling lambdas, each the first in its own"),
     ("scope-instances-source-order", "sorted(held.get(id(parent), ()), key=lambda n: (n.lineno, n.col_offset))",
@@ -3120,6 +3176,10 @@ MUTANTS = (
      "            elif isinstance(child, ast.AST):\n                out.append((child, scope, True))",
      "            elif isinstance(child, ast.AST):\n                out.append((child, inner, True))",
      "decorator evaluated outside its function"),
+    ("site-definition-outer-type-parameters",
+     "            elif isinstance(child, ast.AST):\n                out.append((child, scope, True))",
+     "            elif isinstance(child, ast.AST):\n                out.append((child, inner, True))",
+     "type-parameter bound moved into a statement beside it"),
     ("site-defaults-outer", "out.extend((d, scope, True) for d in", "out.extend((d, inner, True) for d in",
      "default argument evaluated outside its function"),
     ("site-annotations-outer", "out.append((arg.annotation, scope, True))",
@@ -3178,11 +3238,11 @@ MUTANTS = (
      "two identical calls on one line, each listed"),
     ("site-key-ordinal-per-scope", "        key = (scope, text)\n", "        key = text\n",
      "identical references in two scopes, each the first in its own"),
-    # Not a removal but the defect this identity replaces: a line number put back into the key fails the vector
-    # that adds unrelated lines above every listed site.
+    # Not a removal but the defect this identity replaces: a line number put back into the key fails the edit vector
+    # that adds unrelated lines above a listed site (the fixture's rows are written with it, so they cannot catch it).
     ("site-key-position-free", "sites.append((reference_key(ordinals[key], text),",
      "sites.append((reference_key(ordinals[key], \"%d: %s\" % (span[0], text)),",
-     "unrelated lines inserted above every listed site"),
+     "unrelated lines inserted above a listed site"),
     ("site-key-column-free", "sites.append((reference_key(ordinals[key], text),",
      "sites.append((reference_key(ordinals[key], \"%d: %s\" % (span[1], text)),", "reference moved within its lambda"),
     ("site-key-unique", "        if nodes[(rel, function, reference)] > 1:\n", "        if False:\n",
@@ -3535,6 +3595,8 @@ def self_test_main():
                 problem = "raised %s" % type(exc).__name__
             if problem is None:
                 failures.append("mutant %s: vector %r still holds with the check removed" % (mutant, vector))
+            elif problem.startswith(_UNCREDITED):
+                failures.append("mutant %s: vector %r %s" % (mutant, vector, problem))
             else:
                 print("MUTANT %s caught by %s (%s)" % (mutant, vector, problem.split(",")[0]))
         # Each watched name and member removed in turn from a scratch copy: its own vector must then fail.
@@ -3568,8 +3630,9 @@ def self_test_main():
     importers = len(_importer_vectors())
     print("SELF-TEST PASS: %d rule vectors red with their rule and green without it (%d of them one per watched "
           "name or import-system member, %d one per importer), %d green vectors exit 0, %d cannot-evaluate vectors "
-          "exit 2, %d dynamic-import site vectors hold, %d edit vectors (rows written for one source, findings exact "
-          "on the edited one) hold, %d mutants (one check removed each, with its backstop where named) caught by their "
+          "exit 2, %d dynamic-import site vectors hold, %d edit vectors (rows written for one source pass it "
+          "unchanged, findings exact and in the edited file only on the edited one) hold, %d mutants (one check "
+          "removed each, with its backstop where named, or a line or a column put into the key) caught by their "
           "vectors, %d watched names, %d members and %d importers each removed and caught, the live tree passes"
           % (len(_RULE_VECTORS) + len(names | members) + importers, len(names | members), importers,
              len(_GREEN_VECTORS), len(_CANNOT_VECTORS), len(_SITE_VECTORS), len(_MOVE_VECTORS), len(MUTANTS),
