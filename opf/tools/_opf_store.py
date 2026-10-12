@@ -1322,7 +1322,7 @@ def _sorted_key_names(keys):
 
 
 _DISPLAY_MAX_DEPTH = 32      # container levels a finding-message render descends before a depth marker
-_DISPLAY_MAX_NODES = 512     # values (containers and scalars) a render visits before it stops
+_DISPLAY_MAX_NODES = 512     # values (containers and scalars) a render copies before it stops
 _DISPLAY_MAX_CHARS = 1024    # characters of rendered content before a cut (on a whole escape) and a marker
 _DISPLAY_MARKER_MAX = 37     # longest marker appended after that cut: "...<str of N chars>", N at sys.maxsize
 _DISPLAY_NAME_MAX = 64       # characters of a type or timezone name a marker or a rendered datetime may carry
@@ -1330,7 +1330,10 @@ _DISPLAY_CONTAINERS = (dict, list, tuple, set, frozenset)       # exact types; a
 _DISPLAY_TIMES = (datetime.datetime, datetime.date, datetime.time)   # exact types, as tomllib builds them
 _DISPLAY_ATOM = re.compile(r"\\(?:x[0-9a-f]{2}|u[0-9a-f]{4}|U[0-9a-f]{8}|.)|.", re.DOTALL)
 _DISPLAY_ATOM_MAX = 10       # the longest _DISPLAY_ATOM: a backslash, U and eight hex digits
-_DISPLAY_END = object()      # the exhausted-iterator sentinel of _bounded_repr
+_DISPLAY_END = object()      # the exhausted-iterator sentinel of _display_snapshot
+_DISPLAY_STOP = ("stop",)    # the _display_snapshot entry where the copy reached _DISPLAY_MAX_NODES values
+_DISPLAY_INT_CEILING = 10 ** _DISPLAY_MAX_CHARS          # the least int whose repr() is too wide
+_DISPLAY_INT_FLOOR = -(10 ** (_DISPLAY_MAX_CHARS - 1))   # the greatest negative int whose repr() is too wide
 _TYPE_NAME = type.__dict__["__name__"]   # the getter of type itself, so a metaclass __name__ never runs
 
 
@@ -1360,65 +1363,29 @@ def _display_time_ok(value):
             and len(name) <= _DISPLAY_NAME_MAX)
 
 
-def _display_int_width(value):
-    """An upper bound on len(repr(value)) for an exact int, from its bit length alone, so an int is sized
-    BEFORE any conversion: a magnitude of b bits has at most floor(b * 0.30103) + 1 decimal digits (0.30103
-    exceeds log10(2)), plus one for a sign. The bound can exceed the true width by one, so an int within a
-    digit of a bound may be judged over it."""
-    return value.bit_length() * 30103 // 100000 + 1 + (value < 0)
-
-
-def _display_leaf_cost(value):
-    """The content size _display_within_bounds charges for a non-container value whose built-in repr() is
-    safe to call: the length of a str or bytes, the _display_int_width of an int, and 0 for None, a bool, a
-    float and a supported date or time (each of those repr()s is a fixed few dozen characters at most, or
-    carries a name bounded by _DISPLAY_NAME_MAX). None when the value does not render through plain repr():
-    an unsupported type, or a date or time _display_time_ok refuses."""
+def _display_scalar_ok(value):
+    """True when `value` is a supported non-container value, one whose built-in repr() runs no method a caller
+    can define: an exact str, bytes, int, float or bool, None, or an exact date, datetime or time that
+    _display_time_ok admits. Each is immutable and its type cannot be reassigned, so the answer, once given,
+    holds for as long as the value is referenced."""
     kind = type(value)
-    if kind is str or kind is bytes:
-        return len(value)
-    if kind is int:
-        return _display_int_width(value)
-    if value is None or kind is bool or kind is float:
-        return 0
-    if _display_kind(kind, _DISPLAY_TIMES) and _display_time_ok(value):
-        return 0
-    return None
+    return (kind is str or kind is bytes or kind is int or kind is float or kind is bool or value is None
+            or (_display_kind(kind, _DISPLAY_TIMES) and _display_time_ok(value)))
 
 
-def _display_within_bounds(value):
-    """True when the built-in repr() of `value` is safe to call and its work is bounded: every container is
-    one of the exact _DISPLAY_CONTAINERS types and nests at most _DISPLAY_MAX_DEPTH deep, the value holds at
-    most _DISPLAY_MAX_NODES values in all (containers and scalars, counted before any is pushed), every other
-    value is one _display_leaf_cost prices, and the priced content (str and bytes lengths, int widths) totals
-    at most _DISPLAY_MAX_CHARS. The walk is iterative, holds at most _DISPLAY_MAX_NODES pending values and
-    stops at the first exceeded bound, so it never recurses and its work is bounded whatever the depth or
-    width of the input; it reads only exact built-in types, so no method a caller can define runs."""
-    nodes = 0
-    chars = 0
-    stack = [(value, 0)]
-    while stack:
-        item, depth = stack.pop()
-        nodes += 1
-        kind = type(item)
-        if _display_kind(kind, _DISPLAY_CONTAINERS):
-            width = len(item) * 2 if kind is dict else len(item)
-            if depth >= _DISPLAY_MAX_DEPTH or nodes + len(stack) + width > _DISPLAY_MAX_NODES:
-                return False
-            if kind is dict:
-                for key, member in item.items():
-                    stack.append((key, depth + 1))
-                    stack.append((member, depth + 1))
-            else:
-                stack.extend((member, depth + 1) for member in item)
-        else:
-            cost = _display_leaf_cost(item)
-            if cost is None:
-                return False
-            chars += cost
-            if chars > _DISPLAY_MAX_CHARS:
-                return False
-    return True
+def _display_int(value):
+    """repr() of an exact int when that is at most _DISPLAY_MAX_CHARS characters, decided exactly before any
+    conversion: it is exactly when _DISPLAY_INT_FLOOR < value < _DISPLAY_INT_CEILING (a negative int spends one
+    character on its sign), and CPython compares two ints of different lengths by their lengths alone, so the
+    test does not grow with the size of the int. A wider int, or one whose repr() trips the
+    integer-string-conversion limit (which can be set as low as 640 digits), renders as the type-and-size
+    marker <oversized-int: N bits>, built from the bit length without converting the int."""
+    if _DISPLAY_INT_FLOOR < value < _DISPLAY_INT_CEILING:
+        try:
+            return repr(value)
+        except ValueError:
+            pass
+    return "<oversized-int: {} bits>".format(value.bit_length())
 
 
 def _display_take(out, room, text):
@@ -1441,36 +1408,26 @@ def _display_take(out, room, text):
 def _display_unsupported(value):
     """The fixed marker for a value whose exact type is not on the allow-list: <unrenderable NAME>, NAME being
     its type name read through the __name__ getter of type itself (_TYPE_NAME, so a metaclass __name__ never
-    runs), escaped and cut to _DISPLAY_NAME_MAX characters (a trailing ... marks a cut). Nothing else is
-    read: the __repr__, __str__ and __format__ of the value are never called."""
+    runs), escaped and cut to _DISPLAY_NAME_MAX characters (a trailing ... marks a cut). A type name can be a
+    str subclass of any length, so it is read only through the str slots themselves (str.__len__, and
+    str.__getitem__ for an exact-str copy of its first _DISPLAY_NAME_MAX characters): no method of that
+    subclass runs and the copy is bounded whatever the name length. Nothing else is read: the __repr__, __str__
+    and __format__ of the value are never called."""
     name = _TYPE_NAME.__get__(type(value))
-    if type(name) is not str:
-        name = str.__str__(name)       # a str-subclass name: str.__str__ returns its exact-str copy
-    text, count = _escape_bounded(name, _DISPLAY_NAME_MAX)
-    return "<unrenderable {}{}>".format(text, "" if count == len(name) else "...")
-
-
-def _display_int(value):
-    """repr() of an exact int whose _display_int_width is at most _DISPLAY_MAX_CHARS. A wider int, or one whose
-    repr() trips the integer-string-conversion limit (which can be set as low as 640 digits), renders as the
-    type-and-size marker <oversized-int: N bits>, built from the bit length without converting the int."""
-    if _display_int_width(value) <= _DISPLAY_MAX_CHARS:
-        try:
-            return repr(value)
-        except ValueError:
-            pass
-    return "<oversized-int: {} bits>".format(value.bit_length())
+    head = str.__getitem__(name, slice(0, _DISPLAY_NAME_MAX))
+    text, count = _escape_bounded(head, _DISPLAY_NAME_MAX)
+    return "<unrenderable {}{}>".format(text, "" if count == str.__len__(name) else "...")
 
 
 def _display_leaf(value):
     """The rendering of one non-container value, its work bounded by _DISPLAY_MAX_CHARS whatever the value
     size, because every supported scalar is sized BEFORE it is converted: a str is cut on the value to its
     first _DISPLAY_MAX_CHARS characters before repr() and, when cut, reports its length (...<str of N chars>);
-    a bytes longer than _DISPLAY_MAX_CHARS renders as <oversized-bytes: N bytes> and an int wider than
-    _DISPLAY_MAX_CHARS characters (_display_int) as <oversized-int: N bits>, neither building its repr();
-    None, a bool, a float and a supported date or time render through their built-in repr(); any other value
-    is unsupported (_display_unsupported). The text can exceed _DISPLAY_MAX_CHARS (a cut str repr() with its
-    escapes); the caller bounds it with _display_take."""
+    a bytes longer than _DISPLAY_MAX_CHARS renders as <oversized-bytes: N bytes> and an int whose repr() would
+    be wider than _DISPLAY_MAX_CHARS characters (an exact test, _display_int) as <oversized-int: N bits>,
+    neither building its repr(); None, a bool, a float and a supported date or time render through their
+    built-in repr(); any other value is unsupported (_display_unsupported). The text can exceed
+    _DISPLAY_MAX_CHARS (a cut str repr() with its escapes); the caller bounds it with _display_take."""
     kind = type(value)
     if kind is str:
         if len(value) > _DISPLAY_MAX_CHARS:
@@ -1482,80 +1439,98 @@ def _display_leaf(value):
         return repr(value)
     if kind is int:
         return _display_int(value)
-    if value is None or kind is bool or kind is float:
-        return repr(value)
-    if _display_kind(kind, _DISPLAY_TIMES) and _display_time_ok(value):
+    if _display_scalar_ok(value):
         return repr(value)
     return _display_unsupported(value)
 
 
-def _display_brackets(value):
-    """The (open, close) text repr() puts around a built-in container, so _bounded_repr spells every
-    container it renders exactly as repr() does."""
-    kind = type(value)
+def _display_brackets(kind, size):
+    """The (open, close) text repr() puts around a built-in container of the exact type `kind` holding `size`
+    members, so _display_render spells every container it renders exactly as repr() does."""
     if kind is dict:
         return "{", "}"
     if kind is list:
         return "[", "]"
     if kind is tuple:
-        return "(", ",)" if len(value) == 1 else ")"
-    if not value:
+        return "(", ",)" if size == 1 else ")"
+    if not size:
         return kind.__name__ + "(", ")"
     return ("{", "}") if kind is set else (kind.__name__ + "({", "})")
 
 
-def _bounded_repr(value):
-    """An iterative, bounded rendering of `value` for a finding message whose plain repr() is unsafe or too
-    long. It spells every supported value as repr() does; a container nested deeper than _DISPLAY_MAX_DEPTH
-    renders as a depth marker, every other value renders through _display_leaf, and rendering stops at
-    _DISPLAY_MAX_CHARS characters, cut on a whole escape (_display_take) and followed by ...<truncated>. It
-    also stops after _DISPLAY_MAX_NODES values, a backstop: every visited value emits at least one character,
-    so the character bound alone already caps the values visited at _DISPLAY_MAX_CHARS. It keeps its own work
-    stack, steps through each container with an iterator instead of copying its members, and never recurses,
-    so its work is bounded by those constants whatever the depth or width of the input (a 100,000-level nested
-    table or a million-element array included)."""
-    out = []
-    used = 0
+def _display_snapshot(value):
+    """One bounded private copy of `value`, taken before anything is rendered: _display_render reads only this
+    copy, so each member of a live container is read exactly once, and a member another thread replaces after
+    it was read is never rendered. An entry is ("leaf", v) for a supported scalar (_display_scalar_ok, so v
+    is immutable and stays supported); ("text", marker) for an unsupported value (its _display_unsupported
+    marker, built at once) or for a container _DISPLAY_MAX_DEPTH levels deep (a depth marker); ("box", kind,
+    members) for a container of an exact _DISPLAY_CONTAINERS type, members being a fresh list of the entries
+    of its members (a dict as key, value, key, value); and _DISPLAY_STOP where the copy reached
+    _DISPLAY_MAX_NODES values. The walk is depth first in rendering order, iterative, and steps through each
+    container with its built-in iterator, so it copies at most _DISPLAY_MAX_NODES values and holds at most
+    2 * _DISPLAY_MAX_DEPTH + 1 iterators whatever the size, depth or width of the input. It reads only exact
+    built-in types (never len() of a live container), so no method a caller can define runs."""
     nodes = 0
-    truncated = False
-    stack = [("value", value, 0)]   # ("value", v, depth), ("text", s), or ("members", frame)
-    while stack:
-        entry = stack.pop()
-        if entry[0] == "text":
-            piece = entry[1]
-        elif entry[0] == "members":
-            frame = entry[1]           # [member iterator, kind, depth, members shown, close text]
-            member = next(frame[0], _DISPLAY_END)
-            if member is _DISPLAY_END:
-                piece = frame[4]
-            else:
-                stack.append(entry)
-                if frame[1] is dict:
-                    stack.append(("value", member[1], frame[2] + 1))
-                    stack.append(("text", ": "))
-                    stack.append(("value", member[0], frame[2] + 1))
-                else:
-                    stack.append(("value", member, frame[2] + 1))
-                if frame[3]:
-                    stack.append(("text", ", "))
-                frame[3] += 1
-                continue
+    top = []
+    frames = [(iter((value,)), top, 0, False)]   # (member iterator, entries copied, member depth, dict pairs)
+    while frames:
+        members, copied, depth, pairs = frames[-1]
+        item = next(members, _DISPLAY_END)
+        if item is _DISPLAY_END:
+            frames.pop()
+        elif pairs:
+            frames.append((iter(item), copied, depth, False))   # a (key, value) pair from dict.items()
         else:
-            item, depth = entry[1], entry[2]
             nodes += 1
             if nodes > _DISPLAY_MAX_NODES:
-                truncated = True
+                copied.append(_DISPLAY_STOP)
                 break
             kind = type(item)
             if not _display_kind(kind, _DISPLAY_CONTAINERS):
-                piece = _display_leaf(item)
+                copied.append(("leaf", item) if _display_scalar_ok(item)
+                              else ("text", _display_unsupported(item)))
             elif depth >= _DISPLAY_MAX_DEPTH:
-                piece = "<{} nested deeper than {} levels>".format(kind.__name__, _DISPLAY_MAX_DEPTH)
+                copied.append(("text", "<{} nested deeper than {} levels>".format(kind.__name__,
+                                                                                  _DISPLAY_MAX_DEPTH)))
             else:
-                piece, close = _display_brackets(item)
-                members = iter(item.items() if kind is dict else item)
-                stack.append(("members", [members, kind, depth, 0, close]))
-        taken, whole = _display_take(out, _DISPLAY_MAX_CHARS - used, piece)
+                box = []
+                copied.append(("box", kind, box))
+                frames.append((iter(item.items() if kind is dict else item), box, depth + 1, kind is dict))
+    return top[0]
+
+
+def _display_render(snapshot, escape):
+    """Render a _display_snapshot as repr() spells it: a leaf through _display_leaf, a marker as itself, a box
+    with the brackets and separators repr() writes. Rendering stops at _DISPLAY_MAX_CHARS characters, cut on a
+    whole escape (_display_take) and followed by ...<truncated>; _DISPLAY_STOP stops it the same way. With
+    `escape`, each piece is escaped (_escape_line_unsafe) BEFORE the cut, so escaping can never take the
+    result over the bound; only the first room + _DISPLAY_ATOM_MAX characters of a piece are escaped, since
+    no more of it can fit. It keeps its own work stack and never recurses; it reads only the snapshot."""
+    out = []
+    used = 0
+    truncated = False
+    stack = [snapshot]
+    while stack:
+        entry = stack.pop()
+        if entry is _DISPLAY_STOP:
+            truncated = True
+            break
+        if entry[0] == "leaf":
+            piece = _display_leaf(entry[1])
+        elif entry[0] == "text":
+            piece = entry[1]
+        else:
+            kind, members = entry[1], entry[2]
+            piece, close = _display_brackets(kind, len(members))
+            stack.append(("text", close))
+            for i in range(len(members) - 1, -1, -1):
+                stack.append(members[i])
+                if i:
+                    stack.append(("text", ": " if kind is dict and i % 2 else ", "))
+        room = _DISPLAY_MAX_CHARS - used
+        if escape:
+            piece = _escape_line_unsafe(piece[:room + _DISPLAY_ATOM_MAX])
+        taken, whole = _display_take(out, room, piece)
         used += taken
         if not whole:
             truncated = True
@@ -1566,7 +1541,7 @@ def _bounded_repr(value):
 
 def _safe_display(value):
     """Render a value for a FINDING MESSAGE (or a controlled-refusal message), BOUNDED in work and output and
-    NEVER RAISING (the one residual is item 5 below). Three hazards reach a message from a parsed manifest,
+    NEVER RAISING (the one residual is item 6 below). Three hazards reach a message from a parsed manifest,
     counters, version, worklog or record file. First, tomllib parses a hexadecimal, octal, or binary integer
     literal (0x.../0o.../0b...) into an arbitrarily-large Python int with NO digit limit (the
     integer-string-conversion limit applies to base-10 only, and sys.set_int_max_str_digits(0) lifts it), so
@@ -1582,20 +1557,29 @@ def _safe_display(value):
          __repr__, __str__, __format__, __eq__ and __hash__ are never called, and no metaclass method runs.
       2. Every supported scalar is sized BEFORE it is converted (_display_leaf): a bytes or an int over the
          bound renders a type-and-size marker without building its repr(), and a str is cut on the value.
-      3. A value _display_within_bounds admits whose repr() is at most _DISPLAY_MAX_CHARS characters renders
-         as repr(value), byte for byte; that is the whole byte-identity guarantee. Any other value renders
-         through _bounded_repr, so a value past a bound differs from repr() even when short (a scalar nested
-         33 levels deep shows a depth marker; a cyclic list shows its expansion up to the bounds). A str
-         renders as repr() when that is at most _DISPLAY_MAX_CHARS characters, and otherwise as the longest
-         whole-escape prefix of at most _DISPLAY_MAX_CHARS characters of the repr() of its first
-         _DISPLAY_MAX_CHARS characters, followed by ...<str of N chars>.
-      4. The result is at most _DISPLAY_MAX_CHARS + _DISPLAY_MARKER_MAX characters: content is cut on a whole
+      3. No container is passed to repr() or str(). The renderer takes ONE bounded copy first
+         (_display_snapshot: exact types only, at most _DISPLAY_MAX_NODES values and _DISPLAY_MAX_DEPTH
+         container levels) and renders only that copy (_display_render), spelling each value as repr() does.
+         Each member of a live container is read exactly once, so a member another thread replaces after it
+         was read is never rendered, and no method a caller can define runs on the value.
+      4. A value whose members are all supported, whose containers nest at most _DISPLAY_MAX_DEPTH deep and
+         hold at most _DISPLAY_MAX_NODES values in all, and whose repr() is at most _DISPLAY_MAX_CHARS
+         characters renders as repr(value), byte for byte; that is the whole byte-identity guarantee. Any
+         other value differs from repr() even when short (a scalar nested 33 levels deep shows a depth
+         marker; a cyclic list shows its expansion up to the bounds). A str renders as repr() when that is
+         at most _DISPLAY_MAX_CHARS characters, and otherwise as the longest whole-escape prefix of at most
+         _DISPLAY_MAX_CHARS characters of the repr() of its first _DISPLAY_MAX_CHARS characters, followed by
+         ...<str of N chars>.
+      5. The result is at most _DISPLAY_MAX_CHARS + _DISPLAY_MARKER_MAX characters: content is cut on a whole
          escape at _DISPLAY_MAX_CHARS, and the marker after a cut is ...<truncated> (14 characters) or
          ...<str of N chars> (at most 37, N being a str length and so at most sys.maxsize). The work is
          bounded by the _DISPLAY_ constants whatever the size, depth or width of the input.
-      5. Residual: a MemoryError, a RuntimeError (another thread resizing a dict or set mid-render) or a
-         ValueError yields the fixed placeholder <unrenderable-value>; an asynchronous exception
-         (KeyboardInterrupt, or one a signal handler raises) is not caught and propagates.
+      6. Residual: a MemoryError, a RuntimeError (another thread resizing a dict or set while it is copied) or
+         a ValueError yields the fixed placeholder <unrenderable-value>; an asynchronous exception
+         (KeyboardInterrupt, or one a signal handler raises) is not caught and propagates. A container another
+         thread changes while it is copied, in a way its iterator does not refuse (a list, a replaced dict
+         value, a set changed at the same size), renders the members the copy read, each checked as it was
+         read. A finalizer the garbage collector runs during a render is outside the value and is not prevented.
     So the message is always produced and the caller still records its finding or refusal (fail-closed;
     guard-input-soundness). It is the shared message-rendering guard for the finding-message idiom across
     the three OPF pass-A validators (store, schema, release), the doctor and the record verb. Like
@@ -1610,14 +1594,7 @@ def _safe_display(value):
             out = []
             _display_take(out, _DISPLAY_MAX_CHARS, text)
             return "{}...<str of {} chars>".format("".join(out), len(value))
-        if _display_within_bounds(value):
-            try:
-                text = repr(value)
-            except (ValueError, MemoryError, RecursionError):
-                text = None       # an int under a lowered integer-string limit: _bounded_repr marks it
-            if text is not None and len(text) <= _DISPLAY_MAX_CHARS:
-                return text
-        return _bounded_repr(value)
+        return _display_render(_display_snapshot(value), False)
     except (MemoryError, RuntimeError, ValueError):
         return "<unrenderable-value>"
 
@@ -1665,22 +1642,22 @@ def _escape_bounded(s, room):
 def _safe_str(value):
     """The str()-style companion of _safe_display, for a finding-message position that renders a value with
     {} (no surrounding repr quotes) rather than {!r}: a version string interpolated into a `release #N
-    (<version>)` label, for instance. It shares the allow-list, the sizing before conversion and the residual
-    of _safe_display, and its result is likewise at most _DISPLAY_MAX_CHARS + _DISPLAY_MARKER_MAX characters.
-    A str renders with every NON-PRINTABLE character escaped to a backslash form (_escape_line_unsafe), so a
-    value carrying a control character cannot inject a second diagnostic line; the ESCAPED text is cut on a
-    whole escape at _DISPLAY_MAX_CHARS characters (_escape_bounded) and a cut appends ...<str of N chars>, so
-    a str whose escaped form is at most _DISPLAY_MAX_CHARS characters renders exactly as before, byte for
-    byte. A supported date or time renders as its built-in str(). A built-in container renders as
-    _safe_display does: its str() IS its repr(), and repr() escapes every character str.isprintable()
-    rejects, so the escape applied here changes nothing and the bound carries over. Every other value
-    renders as _display_leaf does (an exact int, float, bool or None has str() equal to repr(), and so does a
-    bytes), its escaped text cut on a whole escape at _DISPLAY_MAX_CHARS characters and followed by
-    ...<truncated> when cut: an oversized int is the oversized-int marker, an unsupported type
-    <unrenderable NAME>, and no __str__ or __repr__ a caller can define is called. Unlike _safe_display,
-    which renders through repr() and so already escapes controls, this str()-based renderer must escape them
-    itself (the store/release sibling the schema newline-hardening left exposed; codex round-6). It is for
-    MESSAGE rendering only, never the byte-stable coverage digest."""
+    (<version>)` label, for instance. It shares the allow-list, the sizing before conversion, the bounded copy
+    and the residual of _safe_display, and its result is likewise at most _DISPLAY_MAX_CHARS +
+    _DISPLAY_MARKER_MAX characters. A str renders with every NON-PRINTABLE character escaped to a backslash
+    form (_escape_line_unsafe), so a value carrying a control character cannot inject a second diagnostic
+    line; the ESCAPED text is cut on a whole escape at _DISPLAY_MAX_CHARS characters (_escape_bounded) and a
+    cut appends ...<str of N chars>, so a str whose escaped form is at most _DISPLAY_MAX_CHARS characters
+    renders exactly as before, byte for byte. A supported date or time renders as its built-in str(). Every
+    other value renders from its _display_snapshot as _safe_display renders it, with each piece escaped
+    BEFORE the cut at _DISPLAY_MAX_CHARS characters (_display_render), so escaping never takes the result over
+    the bound: a built-in container renders as _safe_display does (its str() IS its repr(), and repr()
+    escapes every character str.isprintable() rejects, so the escape changes nothing), an exact int, float,
+    bool, None or bytes as its repr() (which equals its str()), an oversized int as the oversized-int marker
+    and an unsupported type as <unrenderable NAME>, and no __str__ or __repr__ a caller can define is called.
+    Unlike _safe_display, which renders through repr() and so already escapes controls, this str()-based
+    renderer must escape them itself (the store/release sibling the schema newline-hardening left exposed;
+    codex round-6). It is for MESSAGE rendering only, never the byte-stable coverage digest."""
     try:
         kind = type(value)
         if kind is str:
@@ -1688,13 +1665,9 @@ def _safe_str(value):
             if count == len(value):
                 return text
             return "{}...<str of {} chars>".format(text, len(value))
-        if _display_kind(kind, _DISPLAY_CONTAINERS):
-            return _escape_line_unsafe(_safe_display(value))
         if _display_kind(kind, _DISPLAY_TIMES) and _display_time_ok(value):
             return _escape_line_unsafe(str(value))
-        out = []
-        _, whole = _display_take(out, _DISPLAY_MAX_CHARS, _escape_line_unsafe(_display_leaf(value)))
-        return "".join(out) if whole else "".join(out) + "...<truncated>"
+        return _display_render(_display_snapshot(value), True)
     except (MemoryError, RuntimeError, ValueError):
         return "<unrenderable-value>"
 
@@ -3829,9 +3802,11 @@ def self_test():
         check("deeprender-depth-at-bound-byte-identical", _safe_display(_dr_nest) == repr(_dr_nest))
         check("deeprender-depth-past-bound-marker", _safe_display([_dr_nest]) == "[" * _DISPLAY_MAX_DEPTH
               + "<list nested deeper than {} levels>".format(_DISPLAY_MAX_DEPTH) + "]" * _DISPLAY_MAX_DEPTH)
-        # Round 2 (each red on the round-1 renderer): the ESCAPED output is bounded exactly. Content is cut on a
-        # whole escape at _DISPLAY_MAX_CHARS characters, never splitting one, and the marker after the cut is
-        # at most _DISPLAY_MARKER_MAX characters (the longest, a str-length marker at sys.maxsize).
+        # Round 2: the ESCAPED output is bounded exactly. Content is cut on a whole escape at _DISPLAY_MAX_CHARS
+        # characters, never splitting one, and the marker after the cut is at most _DISPLAY_MARKER_MAX
+        # characters (the longest, a str-length marker at sys.maxsize). The marker-max check reads constants
+        # only: it guards the constant against a longer marker and is red on no renderer reversion. The
+        # escaped-str and whole-escape checks are red on the round-1 renderer.
         check("deeprender-marker-max-is-the-longest-marker",
               _DISPLAY_MARKER_MAX >= len("...<str of {} chars>".format(sys.maxsize)) >= len("...<truncated>"))
         _dr_nul, _dr_astral = chr(0) * 1024, chr(0x1000C) * 1024
@@ -3946,6 +3921,186 @@ def self_test():
             timeout_s=60) == "True|True|True")
         check("deeprender-store-control-roots-deep-homes-refused", run_bounded(_dr_path_helper(
             store_control_roots, "unknown homes generation: "), timeout_s=60) == "True|True|True")
+        # Round 3: a renderer reads each member of a live container exactly once, into one bounded private copy,
+        # and renders only that copy. A profile hook stands in for another thread: it replaces a member at the
+        # N-th profile event of one render, for every N an unmutated render reaches, so each interleaving at
+        # event granularity is tried deterministically. Wherever the replacement lands, the member read is the
+        # original or the replacement, checked as it was read, so the result is one of two exact strings (both
+        # must occur, so the hook is known to land) and the replacement __repr__ never runs. Red on the round-2
+        # renderer, which ran repr() on the live container after a separate preflight: on the dict case, 24
+        # interleavings of each renderer ran the replacement __repr__ (1,000 NULs, raw from _safe_display, and
+        # 4,007 characters escaped from _safe_str).
+        _dr_calls = []
+
+        class _DrRace:
+            def __repr__(self):
+                _dr_calls.append("repr")
+                return chr(0) * 1000
+            __str__ = __repr__
+
+        def _dr_race_sweep(render, make, mutate, allowed):
+            events = [0]
+
+            def count(frame, event, arg):
+                events[0] += 1
+            prior = sys.getprofile()
+            sys.setprofile(count)
+            try:
+                render(make())
+            finally:
+                sys.setprofile(prior)
+            shown_all, bad = set(), []
+            for target in range(1, events[0] + 1):
+                value, seen = make(), [0]
+
+                def hook(frame, event, arg):
+                    seen[0] += 1
+                    if seen[0] == target:
+                        mutate(value)
+                del _dr_calls[:]
+                sys.setprofile(hook)
+                try:
+                    shown = render(value)
+                except Exception as exc:  # noqa: BLE001  an escape is recorded, so the check fails
+                    shown = type(exc).__name__
+                finally:
+                    sys.setprofile(prior)
+                shown_all.add(shown)
+                if _dr_calls or shown not in allowed:
+                    bad.append(target)
+            return not bad and shown_all == set(allowed)
+        _dr_q = chr(39)
+        _dr_kq = "{" + _dr_q + "k" + _dr_q + ": "
+        _dr_cases = ((lambda: {"k": 1}, lambda v: v.__setitem__("k", _DrRace()),
+                      (_dr_kq + "1}", _dr_kq + "<unrenderable _DrRace>}")),
+                     (lambda: [1], lambda v: v.__setitem__(0, _DrRace()), ("[1]", "[<unrenderable _DrRace>]")))
+        check("deeprender-member-replaced-mid-render-never-rendered",
+              all(_dr_race_sweep(f, make, put, allowed) for f in (_safe_display, _safe_str)
+                  for make, put, allowed in _dr_cases))
+        # Round 3: a type name is escaped, so a newline in it cannot forge a line, and since it can be a str
+        # subclass of any length it is read only through the str slots: no method of the subclass runs and only
+        # _DISPLAY_NAME_MAX characters are copied. Red on the round-2 renderer, which copied a str-subclass name
+        # whole (about 1 MB traced for a 1,000,000-character name).
+
+        class _DrName(str):
+            def __len__(self):
+                raise RuntimeError("name len called")
+
+            def __getitem__(self, key):
+                raise RuntimeError("name getitem called")
+
+            def __iter__(self):
+                raise RuntimeError("name iter called")
+
+            def __str__(self):
+                raise RuntimeError("name str called")
+
+        def _dr_named(name):
+            kind = type("_DrNamed", (), {})
+            kind.__name__ = name
+            return kind()
+        _dr_forged = "a" + chr(10) + "FORGED"
+        check("deeprender-type-name-escaped",
+              [f(_dr_named(n)) for f in (_safe_display, _safe_str) for n in (_dr_forged, _DrName(_dr_forged))]
+              == ["<unrenderable a\\x0aFORGED>"] * 4)
+        _dr_named_long = _dr_named(_DrName("N" * 1000000))
+        _dr_trace = not tracemalloc.is_tracing()
+        if _dr_trace:
+            tracemalloc.start()
+        try:
+            tracemalloc.reset_peak()
+            _dr_base = tracemalloc.get_traced_memory()[0]
+            _dr_names = (_safe_display(_dr_named_long), _safe_str(_dr_named_long))
+            _dr_peak = tracemalloc.get_traced_memory()[1] - _dr_base
+        finally:
+            if _dr_trace:
+                tracemalloc.stop()
+        check("deeprender-type-name-copy-bounded",
+              _dr_names == ("<unrenderable " + "N" * _DISPLAY_NAME_MAX + "...>",) * 2 and _dr_peak < 65536)
+        # Round 3: the copy is bounded by count as well as by depth. A wide, shallow value of zero-cost leaves
+        # (491,300 values: 17 lists of 170 lists of 170 None) is copied only up to _DISPLAY_MAX_NODES values and
+        # renders the exact bounded prefix. The text is the same with or without the count bound (the character
+        # bound cuts first), so the copied-entry count is what goes red when the count bound is removed.
+
+        def _dr_entries(entry):
+            count, todo = 0, [entry]
+            while todo:
+                item = todo.pop()
+                if item is not _DISPLAY_STOP:
+                    count += 1
+                    if item[0] == "box":
+                        todo.extend(item[2])
+            return count
+        _dr_shallow = [[[None] * 170] * 170] * 17
+        check("deeprender-wide-shallow-copy-bounded",
+              _guard(lambda: _dr_entries(_display_snapshot(_dr_shallow))) == _DISPLAY_MAX_NODES
+              and _safe_display(_dr_shallow) == "[[[" + ", ".join(["None"] * 170) + "], ...<truncated>")
+        # Round 3: a cut never splits a u-form escape (the x and U forms are checked above), in a container, in a
+        # str rendered with repr() and in a str rendered escaped.
+        _dr_sep = chr(0x2028) * 300
+        check("deeprender-cut-on-whole-u-escape",
+              _safe_display([_dr_sep]) == "[" + chr(39) + "\\u2028" * 170 + "...<truncated>"
+              and _safe_display(_dr_sep) == chr(39) + "\\u2028" * 170 + "...<str of 300 chars>"
+              and _safe_str(_dr_sep) == "\\u2028" * 170 + "...<str of 300 chars>")
+        # Round 3: escaping keeps the output budget for a container as for a scalar: _safe_str escapes each
+        # piece BEFORE the cut, so the result stays within the bound however a piece escapes. No supported value
+        # renders a non-printable character, so a leaf rendering of 2,000 NULs is substituted to reach that path
+        # (round 2 escaped the whole rendered container after its cut, with no budget).
+        _dr_globals = globals()
+        _dr_leaf = _dr_globals["_display_leaf"]
+        _dr_globals["_display_leaf"] = lambda value: chr(0) * 2000
+        try:
+            _dr_escaped = (_safe_str([None]), _safe_str({"k": None}))
+        finally:
+            _dr_globals["_display_leaf"] = _dr_leaf
+        check("deeprender-container-escape-keeps-budget",
+              _dr_escaped == ("[" + "\\x00" * 255 + "...<truncated>", "{" + "\\x00" * 255 + "...<truncated>"))
+        # Round 3: the int width test is exact at the bound (round 2 estimated it from the bit length, so an int
+        # whose repr() is exactly 1,024 characters, 2 ** 3401 among them, could render the marker), and a
+        # negative int spends one character on its sign. The int-to-str limit is pinned to the default and
+        # restored, so the verdict comes from the code under test.
+        _dr_idlimit = sys.get_int_max_str_digits()
+        sys.set_int_max_str_digits(4300)
+        try:
+            _dr_fit = (2 ** 3401, 10 ** 1023, -(10 ** 1022), 10 ** 1024 - 1, -(10 ** 1023) + 1)
+            check("deeprender-int-width-exact-at-bound",
+                  all(len(repr(v)) == _DISPLAY_MAX_CHARS and _safe_display(v) == _safe_str(v) == repr(v)
+                      for v in _dr_fit)
+                  and [f(v) for f in (_safe_display, _safe_str) for v in (10 ** 1024, -(10 ** 1023))]
+                  == ["<oversized-int: 3402 bits>", "<oversized-int: 3399 bits>"] * 2)
+        finally:
+            sys.set_int_max_str_digits(_dr_idlimit)
+        # Round 3: a timezone renders through repr() only when it holds nothing a caller defines and its name is
+        # at most _DISPLAY_NAME_MAX characters. A 64-character name renders as repr(), byte for byte; a
+        # 65-character name, a timedelta-subclass offset and a str-subclass name each render the fixed marker
+        # from both renderers, and no subclass __repr__ runs.
+
+        class _DrDelta(datetime.timedelta):
+            def __repr__(self):
+                raise RuntimeError("offset repr called")
+
+        class _DrZoneName(str):
+            def __repr__(self):
+                raise RuntimeError("zone name repr called")
+        _dr_at = datetime.datetime(2026, 1, 2, 3, 4, 5)
+        _dr_zone64 = _dr_at.replace(tzinfo=datetime.timezone(_dr_hour, "N" * _DISPLAY_NAME_MAX))
+        _dr_zones = (_dr_at.replace(tzinfo=datetime.timezone(_dr_hour, "N" * (_DISPLAY_NAME_MAX + 1))),
+                     _dr_at.replace(tzinfo=datetime.timezone(_DrDelta(hours=5))),
+                     _dr_at.replace(tzinfo=datetime.timezone(_dr_hour, _DrZoneName("n"))))
+        check("deeprender-timezone-admission-exact",
+              _safe_display(_dr_zone64) == repr(_dr_zone64) and _safe_display([_dr_zone64]) == repr([_dr_zone64])
+              and [f(v) for f in (_safe_display, _safe_str) for v in _dr_zones] == ["<unrenderable datetime>"] * 6)
+        # Round 3: require_ordinary_target renders its refusal through _safe_display (a {!r} there renders a long
+        # target whole). The target is a contained path under the journal home, 2,000 characters long.
+        _dr_target = JOURNALS_REL + "/" + "a" * 2000
+        try:
+            require_ordinary_target(_dr_target)
+            _dr_refusal = "accepted"
+        except ValueError as exc:
+            _dr_refusal = str(exc)
+        _dr_expected = "ordinary operation target {}{}...<str of {} chars> overlaps the journal home".format(
+            chr(39), _dr_target[:_DISPLAY_MAX_CHARS - 1], len(_dr_target))
+        check("deeprender-ordinary-target-refusal-bounded", _dr_refusal == _dr_expected)
 
         # NEW-5: the store-read cap is enforced on the bytes ACTUALLY read, not only the pre-open lstat, so a
         # file reporting a small size at lstat but reading over the cap (a raced swap) is refused. The lstat is
