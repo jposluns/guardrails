@@ -50,12 +50,17 @@ unreadable, or does not parse). An unparsable script is never read as passing. T
 The self-test exits 0 when every check passes, 1 when any fails, and 2 (cannot evaluate) when none fails but a
 gate-runner vector was not exercised in any of its ATTEMPTS runs (host scheduling let the bound overtake each run,
 widened a timer read's bracket past TIMER_BRACKET, or made a run whose cleanup is proven overrun its elapsed
-bound); such a run is never read as a pass or as a failure. Host scheduling can still fail a clean run where a
-bound has no such reading: a stall of GATE_TIMEOUT (3 s) in the gate run of a fixture vector (under a mutant, such
-a stall reads that mutant as caught); one of HANG_SECONDS (60 s) between a witnessed run's deadline and its kill,
-after which the run reports WOKE; a holder of a witness that takes WITNESS_WAIT (5 s) after its run to die; a
-stall of WITNESS_WAIT in the stand-in of the parent-death vector; and the CHILD_TIMEOUT (60 s) bounds of the timer
-vector, the unarmed and audited descendant legs, the window sweeps and the live legs.
+bound); such a run is never read as a pass or as a failure. In the mutation aggregation a fixture gate run that
+GATE_TIMEOUT (3 s) overtakes is re-run once at the larger BLOCK_CONFIRM (10 s) bound, so a scheduling stall (which
+completes with more time) is told from a run the mutation left unbounded: the stall's completed result decides and
+it earns no exposure merely by hanging, while a run that still does not complete is a deterministic block (a
+control input opened without O_NONBLOCK blocks on a FIFO) and is a genuine exposure. Host scheduling can still
+fail a clean run where a bound has no such reading: a stall past BLOCK_CONFIRM in the gate run of a fixture vector
+(read as a block); one of HANG_SECONDS (60 s) between a witnessed run's deadline and its kill, after which the run
+reports WOKE; a holder of a witness that takes WITNESS_WAIT (5 s) after its run to die; the outer 2 * WITNESS_WAIT
+(10 s) bound of the parent-death vector (a stall of WITNESS_WAIT in its stand-in reads cannot-evaluate, not a
+failure); and the CHILD_TIMEOUT (60 s) bounds of the timer vector, the unarmed and audited descendant legs, the
+window sweeps, the _launch of each run/* and own-entry/* leg, and the live legs.
 
 The self-test requires Linux: its gate runner and witnesses use os.waitid with WNOWAIT, fcntl.F_SETSIG,
 os.pidfd_open and /proc. Elsewhere it never passes (the parent-death check fails without F_SETSIG, and a missing
@@ -99,6 +104,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 import ast
 import collections
 import contextlib
+import ctypes
 import dis
 import errno
 import fcntl
@@ -694,10 +700,10 @@ def _timer_kept(probe):
     however long a delay falls anywhere between the stamps. A change to the timer during the run moves that
     instant, later (a reset) or earlier (a rewind), and the intervals part, so the change is refused, only when the
     move is larger than TIMER_FLOOR plus how far each read lies from its bracket's edge on the side of the move,
-    which no stamp observes. A move of up to TIMER_FLOOR + 2 * TIMER_BRACKET (0.101 s) can therefore read as kept,
-    and a larger one never does. A reset to the starting countdown moves the instant by more than TIMER_SETTLE -
-    TIMER_FLOOR (the probe waits TIMER_SETTLE between arming the timer and reading it), so it never reads as
-    kept."""
+    which no stamp observes. A move of up to TIMER_FLOOR + 2 * TIMER_BRACKET (0.101 s), plus a sub-microsecond term
+    from the truncation of each timer read to the microsecond, can therefore read as kept, and a move larger than
+    that never does. A reset to the starting countdown moves the instant by more than TIMER_SETTLE - TIMER_FLOOR
+    (the probe waits TIMER_SETTLE between arming the timer and reading it), so it never reads as kept."""
     (before, _interval), (after, interval) = probe["before"], probe["after"]
     first, ran, done, last = probe["stamps"]
     if not (probe["code"] in (0, "hung") and interval == CALLER_TIMER[1] and probe["handler"] and probe["mask"]
@@ -815,50 +821,109 @@ def _late_read(closed):
         os.close(read_end)
 
 
-def _pipe_writer(pid, inode):
-    """Whether process pid holds the write end of the pipe with inode inode: a descriptor of it (read from /proc)
-    that links to that pipe and was opened write-only, as its fdinfo flags show. False when /proc cannot be
-    read."""
-    target = "pipe:[{}]".format(inode)
-    with contextlib.suppress(OSError):
-        for fd in os.listdir("/proc/{}/fd".format(pid)):
-            with contextlib.suppress(OSError, ValueError):
-                if os.readlink("/proc/{}/fd/{}".format(pid, fd)) == target:
-                    with open("/proc/{}/fdinfo/{}".format(pid, fd), encoding="ascii") as info:
-                        flags = next((line.split()[1] for line in info if line.startswith("flags:")), "0")
-                    if int(flags, 8) & os.O_ACCMODE == os.O_WRONLY:
-                        return True
-    return False
+# pidfd_getfd(2) duplicates a descriptor of another process into this one, binding its identity and access mode
+# to one open file description; CPython exposes no wrapper, so the syscall is made through ctypes. 438 is the
+# asm-generic number, shared by x86-64, arm64 and the other Linux ports this Linux-only self-test runs on.
+_SYS_pidfd_getfd = 438
+_libc = ctypes.CDLL(None, use_errno=True)
 
 
-def _pipe_writers(inode):
-    """Every process that holds the write end of the pipe with inode inode (_pipe_writer), from a scan of /proc:
-    found from the kernel's descriptor tables, never from what any process reported."""
+def _pidfd_getfd(pidfd, fd):
+    """Duplicate descriptor fd of the process pidfd names into this process (pidfd_getfd); the new descriptor, or
+    None when the kernel refuses (no such descriptor, or no permission to reach the process)."""
+    dup = _libc.syscall(_SYS_pidfd_getfd, pidfd, int(fd), 0)
+    return dup if dup >= 0 else None
+
+
+def _writer_bound(pidfd, fd, dev, ino):
+    """Whether descriptor fd of the process pidfd names is the pipe (dev, ino) held for writing, read from one
+    open file description: the descriptor is duplicated into this process through the pidfd (_pidfd_getfd), and the
+    duplicate's identity (os.fstat: st_dev and st_ino) and access mode (fcntl F_GETFL: O_WRONLY or O_RDWR) come
+    from that same description, so a descriptor swapped after the scan named it cannot be taken for a writer. None
+    when the duplicate cannot be taken (pidfd_getfd refused), so the holder cannot be cleared here."""
+    dup = _pidfd_getfd(pidfd, fd)
+    if dup is None:
+        return None
     try:
+        info = os.fstat(dup)
+        mode = fcntl.fcntl(dup, fcntl.F_GETFL) & os.O_ACCMODE
+    finally:
+        os.close(dup)
+    return info.st_dev == dev and info.st_ino == ino and mode in (os.O_WRONLY, os.O_RDWR)
+
+
+def _pipe_writer(pidfd, pid, dev, ino):
+    """Whether the process pidfd names holds the write end of the pipe (dev, ino), proven by binding: /proc names
+    each descriptor that links to the pipe, and each is bound to one open file description through the pidfd
+    (_writer_bound), which proves its identity and access mode together. Returns (holds, cleared): holds is True
+    when a bound writer is found; cleared is False when a candidate could not be bound (pidfd_getfd refused), so
+    the process cannot be cleared of holding the write end and must not be taken for spared."""
+    target = "pipe:[{}]".format(ino)
+    cleared = True
+    with contextlib.suppress(OSError):
+        for name in os.listdir("/proc/{}/fd".format(pid)):
+            with contextlib.suppress(OSError, ValueError):
+                if os.readlink("/proc/{}/fd/{}".format(pid, name)) != target:
+                    continue
+                bound = _writer_bound(pidfd, name, dev, ino)
+                if bound is None:
+                    cleared = False
+                elif bound:
+                    return True, cleared
+    return False, cleared
+
+
+def _pipe_writers(dev, ino):
+    """Every process that holds a descriptor linking to the pipe (dev, ino), from a scan of /proc: the candidates
+    _kill_holder binds before it signals, found from the kernel's descriptor tables, never from what any process
+    reported. Empty when this process's own /proc identity cannot be confirmed (os.readlink('/proc/self') must
+    name this process, so a scan whose /proc is a foreign pid namespace resolves no pid) or /proc cannot be read."""
+    target = "pipe:[{}]".format(ino)
+    try:
+        if os.readlink("/proc/self") != str(os.getpid()):
+            return []
         names = os.listdir("/proc")
     except OSError:
         return []
-    return [int(name) for name in names if name.isdigit() and _pipe_writer(int(name), inode)]
+    holders = []
+    for name in names:
+        if not name.isdigit():
+            continue
+        with contextlib.suppress(OSError):
+            for fd in os.listdir("/proc/{}/fd".format(name)):
+                with contextlib.suppress(OSError, ValueError):
+                    if os.readlink("/proc/{}/fd/{}".format(name, fd)) == target:
+                        holders.append(int(name))
+                        break
+    return holders
 
 
 def _kill_holder(pid, pipe):
-    """Send SIGKILL to pid only when it is not this process and is confirmed alive and holding the write end of
-    pipe (_pipe_writer): the kill goes through a pidfd opened first, which names one process and never a pid reused
-    since, and that process held the write end when /proc was read, as it had not exited when the pidfd was polled
-    after the read. This process is never signalled, whatever pid names, nor is a process that holds only the read
-    end. A process holds the write end by inheriting it from this process or by taking a copy (a fork by another
-    thread of this process, an open of /proc/<pid>/fd by a process of the same user, a descriptor passed over a
-    socket); such a process is killed as well."""
+    """Send SIGKILL to pid, and return None, only when it is not this process, is confirmed alive, and is bound to
+    hold the write end of pipe. The evidence is read from one open file description: a pidfd opened first names one
+    process and never a pid reused since, and each descriptor /proc shows it holding is duplicated through that
+    pidfd (_pipe_writer, _writer_bound), so the pipe identity (st_dev and st_ino) and the access mode (O_WRONLY or
+    O_RDWR) are read together, never a readlink or an fdinfo flag on its own. A process that holds only the read
+    end, or whose descriptor was swapped after the scan, is never a target. No kill is sent, and pid is returned as
+    a surviving holder, when the binding is unavailable or refused: no permission for pidfd_getfd, or a scan whose
+    /proc is a foreign pid namespace (os.readlink('/proc/self') must name this process, checked before the scan).
+    This process is never signalled, whatever pid names."""
     if pid == os.getpid():
-        return
+        return None
+    if os.readlink("/proc/self") != str(os.getpid()):
+        return pid
     try:
         pidfd = os.pidfd_open(pid)
     except ProcessLookupError:
-        return
+        return None
     try:
-        if _pipe_writer(pid, os.fstat(pipe).st_ino) and not select.select([pidfd], [], [], 0)[0]:
+        witness = os.fstat(pipe)
+        holds, cleared = _pipe_writer(pidfd, pid, witness.st_dev, witness.st_ino)
+        if holds and not select.select([pidfd], [], [], 0)[0]:
             with contextlib.suppress(ProcessLookupError):
                 signal.pidfd_send_signal(pidfd, signal.SIGKILL)
+            return None
+        return None if cleared else pid
     finally:
         os.close(pidfd)
 
@@ -897,7 +962,7 @@ def _kill_confirmed():
                 reading.kill()
                 holder.kill()
         pidfd = next((result for name, _arg, result in trace if name == "pidfd_open"), None)
-        through = trace == [("pidfd_open", holder.pid, pidfd), ("_pipe_writer", holder.pid, True),
+        through = trace == [("pidfd_open", holder.pid, pidfd), ("_pipe_writer", pidfd, (True, True)),
                             ("pidfd_send_signal", pidfd, None)]
         return not sent and through and status == -signal.SIGKILL, dict(sent=sent, trace=trace, holder=status)
     finally:
@@ -910,8 +975,10 @@ def _witnessed(launch, known=(), wait=None):
     (what launch returned, {role: pid} the processes reported, whether every holder of the witness died within
     wait seconds, WITNESS_WAIT by default). If one did not, every process then holding the witness write end is
     killed once confirmed alive and holding it (_kill_holder): each pid in known first (a list launch fills, as
-    with the pid of a child it forked), then each holder a scan of /proc finds (_pipe_writers), so a failing vector
-    leaves behind nothing that held the witness at the scan (a holder that forks after it can leave its child).
+    with the pid of a child it forked), then each holder a scan of /proc finds (_pipe_writers), each bound to one
+    file description before it is signalled, so a failing vector leaves behind no writer it could bind at the scan
+    (a holder that forks after it can leave its child; a writer whose binding is refused survives, named, and the
+    witness read has already read it as live).
     What a process reports on the witness never chooses a target: a report can name any pid, this process's own
     included, and this process, which by then holds only the read end, is never signalled (_kill_holder)."""
     read_end, write_end = os.pipe()
@@ -927,7 +994,8 @@ def _witnessed(launch, known=(), wait=None):
     finally:
         try:
             if not ended:
-                for pid in dict.fromkeys(itertools.chain(known, _pipe_writers(os.fstat(read_end).st_ino))):
+                witness = os.fstat(read_end)
+                for pid in dict.fromkeys(itertools.chain(known, _pipe_writers(witness.st_dev, witness.st_ino))):
                     _kill_holder(pid, read_end)
         finally:
             os.close(read_end)
@@ -989,6 +1057,87 @@ def _owner_spared():
             dict(owner=owner, child=returned, pids=pids, ended=ended, aimed=aimed, status=status))
 
 
+def _reuse_bound():
+    """Whether witness cleanup binds a holder's write end to one open file description before it signals.
+    Case A (descriptor reuse): a child holds only the read end and, the instant the scan has read that
+    descriptor's identity, swaps it to a write-only /dev/null; a bound cleanup reads the swapped description,
+    which is not the witness, so it signals nothing. Case B (binding refused): with the scan's /proc read as a
+    foreign pid namespace (os.readlink('/proc/self') does not name this process), a genuine writer is not
+    signalled but is returned as a surviving holder. (verdict, detail)."""
+    detail = {}
+
+    def swap_case():
+        read_end, write_end = os.pipe()
+        cmd_r, cmd_w = os.pipe()
+        ack_r, ack_w = os.pipe()
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        attempts, survivor = [], "unset"
+        child = os.fork()
+        if child == 0:
+            try:
+                os.close(write_end)
+                os.read(cmd_r, 1)
+                os.dup2(devnull, read_end)
+                os.write(ack_w, b"1")
+                time.sleep(HANG_SECONDS)
+            finally:
+                os._exit(0)
+        os.close(cmd_r)
+        os.close(ack_w)
+        os.close(devnull)
+        target = "pipe:[{}]".format(os.fstat(read_end).st_ino)
+        real_readlink = os.readlink
+
+        def readlink(path):
+            link = real_readlink(path)
+            if link == target and "/{}/fd/".format(child) in str(path):
+                os.write(cmd_w, b"1")
+                os.read(ack_r, 1)
+            return link
+        try:
+            with _patched(os, "readlink", readlink), _patched(
+                    signal, "pidfd_send_signal", lambda pidfd, signum: attempts.append(signum)):
+                survivor = _kill_holder(child, read_end)
+        finally:
+            os.close(write_end)
+            os.close(cmd_w)
+            os.close(ack_r)
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(child, signal.SIGKILL)
+            os.waitpid(child, 0)
+            os.close(read_end)
+        detail["swap"] = dict(attempts=attempts, survivor=survivor, child=child)
+        return not attempts and survivor is None
+
+    def refused_case():
+        read_end, write_end = os.pipe()
+        attempts, survivor = [], "unset"
+        child = os.fork()
+        if child == 0:
+            try:
+                os.close(read_end)
+                time.sleep(HANG_SECONDS)
+            finally:
+                os._exit(0)
+        real_readlink = os.readlink
+        try:
+            with _patched(os, "readlink",
+                          lambda path: "0" if path == "/proc/self" else real_readlink(path)), _patched(
+                    signal, "pidfd_send_signal", lambda pidfd, signum: attempts.append(signum)):
+                survivor = _kill_holder(child, read_end)
+        finally:
+            os.close(read_end)
+            os.close(write_end)
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(child, signal.SIGKILL)
+            os.waitpid(child, 0)
+        detail["refused"] = dict(attempts=attempts, survivor=survivor, child=child)
+        return not attempts and survivor == child
+
+    verdict = swap_case() and refused_case()
+    return verdict, detail
+
+
 def _reaped(pid):
     """Whether the child pid of this process was reaped already (a child still alive or a zombie was not; a
     zombie is reaped here)."""
@@ -1041,8 +1190,10 @@ def _witness_verdict(run, expected, late, roles, own="child", bound=WITNESS_WAIT
     never reported, or the result is late: the bound overtook the run before it did its part, as when the child
     starts late), or took bound or longer: its cleanup is proven (every holder ended, the child reaped, own
     reporting the forked pid, nothing outlived its sleep), so the overrun shows only that this process was slow, as
-    under host scheduling. An elapsed time cannot tell that from a cleanup that kills late but before any run
-    outlives its sleep, so such a cleanup also reads as cannot-evaluate, never as a pass. Else True."""
+    under host scheduling. An elapsed time cannot tell that from a cleanup that kills late by bound or more but
+    before any run outlives its sleep, so a cleanup that overruns the bound reads as cannot-evaluate, not as a
+    pass; one that kills late by less than bound is not told from a clean run and still reads as a pass. Else
+    True."""
     pids = run["pids"]
     if (run["pid"] is None or not run["ended"] or not run["reaped"] or not set(pids) <= roles
             or (own is not None and pids.get(own, run["pid"]) != run["pid"])
@@ -1402,17 +1553,54 @@ def _fixtures(base):
     return vectors
 
 
-def _run_vectors(module, vectors):
-    """Run every vector against module (this gate or a mutant of it); return [(vector id, ok, detail)]."""
-    results = []
-    for vector, root, code, text, patch in vectors:
+# A fixture gate run takes milliseconds; GATE_TIMEOUT (3 s) bounds it. When a run is overtaken by that bound it
+# is re-run once at this larger bound, to tell a scheduling stall (which completes with more time) from a run the
+# mutation left unbounded (a control input opened without O_NONBLOCK blocks on a FIFO), which never completes.
+BLOCK_CONFIRM = 10
+
+
+def _vector_outcome(module, vector):
+    """Run one vector against module, classifying its result as True (the vector holds), False (a genuine bounded
+    failure, an exposure) or 'blocked' (a run the mutation left unbounded, an exposure). A gate run overtaken by
+    GATE_TIMEOUT is re-run once at the larger BLOCK_CONFIRM bound: a scheduling stall completes there and its real
+    result decides, so a stall earns no exposure merely by hanging, while a run the mutation left unbounded (a
+    control input opened without O_NONBLOCK blocks on a FIFO) still does not complete and is a block. (outcome,
+    detail)."""
+    vid, root, code, text, patch = vector
+
+    def run(timeout):
         with contextlib.ExitStack() as stack:
             if patch is not None:
                 owner = check_ci_parity if patch[0] == "extract_local" else module
                 stack.enter_context(_patched(owner, patch[0], patch[1]))
-            got, output = _gate(module, root)
-        results.append((vector, got == code and text in output, (got, output)))
-    return results
+            return _gate(module, root, timeout=timeout)
+    got, output = run(GATE_TIMEOUT)
+    if got != "hung":
+        return (got == code and text in output), (got, output)
+    got, output = run(BLOCK_CONFIRM)
+    if got == "hung":
+        return "blocked", (got, output)
+    return (got == code and text in output), (got, output)
+
+
+def _run_vectors(module, vectors):
+    """Run every vector against module (this gate or a mutant of it): [(vector id, outcome, detail)], with outcome
+    as _vector_outcome gives it (True, False or 'blocked')."""
+    return [(vector[0],) + _vector_outcome(module, vector) for vector in vectors]
+
+
+def _mutation_verdicts(records, all_vectors):
+    """The two mutation-aggregation verdicts from records [(mutant, named vector, {vector: outcome})], outcome in
+    (True, False, 'blocked'). A False or a 'blocked' is an exposure (a genuine bounded failure, or a run the
+    mutation left unbounded); a True is not, so a scheduling stall that completed at BLOCK_CONFIRM to the expected
+    result earns no exposure by hanging. every-mutant-caught: False when a mutant's named vector held (its mutation
+    was not exposed), else True. every-vector-discriminates: False when a non-twin vector held under every mutant
+    (no mutation exposed it), else True. Returns (caught, discriminates, detail)."""
+    exposed = set(v for _m, _n, outcomes in records for v, ok in outcomes.items() if ok in (False, "blocked"))
+    missed = [(mutant, named) for mutant, named, outcomes in records
+              if outcomes.get(named) not in (False, "blocked")]
+    never = sorted(set(all_vectors) - exposed - UNMUTATED)
+    return (not missed), (not never), dict(missed=missed, never=never)
 
 
 # Each mutant removes one check (or one fail-closed path) from the gate half of this file's source, the
@@ -1504,8 +1692,9 @@ def self_test(report_path=None):
         vectors = _fixtures(base)
         # 1. every vector holds against this gate
         outcomes = _run_vectors(this, vectors)
-        failing = [(vector, detail) for vector, ok, detail in outcomes if not ok]
-        check("vector/every-vector-holds", vectors and len(outcomes) == len(vectors) and not failing, failing)
+        not_held = [(vector, detail) for vector, ok, detail in outcomes if ok is not True]
+        check("vector/every-vector-holds",
+              bool(vectors) and len(outcomes) == len(vectors) and not not_held, not_held)
 
         # 2. the splice reproduction, run directly: the intact script reaches its checks, and the spliced one,
         # a guard whose body only defines a function, a guard whose call follows a nested raise, and a
@@ -1537,22 +1726,33 @@ def self_test(report_path=None):
         # fails under at least one mutant
         gate_source, fixtures, self_test_source = Path(__file__).read_text(encoding="utf-8").partition(
             "\nINTACT = ")
-        exposed, uncaught = set(), []
+        all_vectors = [vector for vector, _root, _code, _text, _patch in vectors]
+        records, anchors = [], []
         mutant_dir = Path(base) / "mutants"
         mutant_dir.mkdir()
         for number, (mutant, old, new, vector) in enumerate(MUTANTS, 1):
             if gate_source.count(old) != 1:
-                uncaught.append((mutant, "anchor found {} times".format(gate_source.count(old))))
+                anchors.append((mutant, "anchor found {} times".format(gate_source.count(old))))
                 continue
             module = _load_mutant(gate_source.replace(old, new) + fixtures + self_test_source, mutant_dir,
                                   number)
-            failed = set(name for name, ok, _detail in _run_vectors(module, vectors) if not ok)
-            exposed |= failed
-            if vector not in failed:
-                uncaught.append((mutant, sorted(failed)))
-        check("mutant/every-mutant-caught", MUTANTS and not uncaught, uncaught)
-        never = sorted(set(vector for vector, _root, _code, _text, _patch in vectors) - exposed - UNMUTATED)
-        check("mutant/every-vector-discriminates", not never, never)
+            outcomes = dict((name, ok) for name, ok, _detail in _run_vectors(module, vectors))
+            records.append((mutant, vector, outcomes))
+        caught, discriminates, mdetail = _mutation_verdicts(records, all_vectors)
+        check("mutant/every-mutant-caught", bool(MUTANTS) and not anchors and caught,
+              dict(mdetail, anchors=anchors))
+        check("mutant/every-vector-discriminates", discriminates, mdetail)
+        # a scheduling stall (a run overtaken by GATE_TIMEOUT that completes at BLOCK_CONFIRM) earns no exposure by
+        # hanging: only a genuine bounded failure or a deterministic block credits a mutant, so a named vector that
+        # held (as a resolved stall does) leaves its mutant uncaught, while a block or a failure catches it
+        twin = next(iter(UNMUTATED))
+        pv = "probe/vector"
+        held = _mutation_verdicts([("probe", pv, dict([(pv, True)]))], [pv, twin])
+        blocked = _mutation_verdicts([("probe", pv, dict([(pv, "blocked")]))], [pv, twin])
+        failed = _mutation_verdicts([("probe", pv, dict([(pv, False)]))], [pv, twin])
+        check("mutant/hung-earns-no-credit",
+              held[:2] == (False, False) and blocked[:2] == (True, True) and failed[:2] == (True, True),
+              (held, blocked, failed))
 
         # 5. the gate runner borrows no process timer: an armed caller ITIMER_REAL keeps its interval, its SIGALRM
         # handler, its signal mask and its expiry instant through a paced gate run, to the precision of its stamps
@@ -1656,6 +1856,7 @@ def self_test(report_path=None):
               (overruns, unbounded, drained, stalled))
         check("gate/witness-kill-confirmed", *_kill_confirmed())
         check("gate/witness-cleanup-spares-owner", *_owner_spared())
+        check("gate/witness-cleanup-binds-write-end", *_reuse_bound())
 
         def sequence(*verdicts):
             queue = list(verdicts)
@@ -1729,8 +1930,8 @@ def self_test(report_path=None):
           "entries are findings; non-regular, unreadable, malformed and schema-invalid inputs fail closed; {} "
           "mutants each caught, every vector discriminating; this gate's own lost guard caught by the execution "
           "gate; a caller timer survives the gate runner and keeps its expiry instant to within {:g} s (a move "
-          "beyond that either way, and a reset to the starting countdown, are refused; a smaller move is not "
-          "seen) and a delayed timer read is no failure; an overrun is bounded as hung; an expired gate child, "
+          "beyond that either way, and a reset to the starting countdown, are refused; a smaller move may not "
+          "be seen) and a delayed timer read is no failure; an overrun is bounded as hung; an expired gate child, "
           "one that left its group, its descendants (an audit hook refusing the kills included) and an orphaned "
           "one are killed, and a run its bound overtook, or that overran its elapsed bound with its cleanup "
           "proven, is no failure, and a failure is never retried or masked; witness cleanup never signals this "

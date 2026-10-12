@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "4463162f851d37dcecf52c14ce75362f15e7ac7234bcd08b02380c9efa523ad3"
+tree-sha256 = "9ce1a2aace039603d58dee708f124e272755d40461941953e4ede02ec54ece87"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3311,8 +3311,8 @@ sha256 = "7c39892ff85304722c9b8f613f6e588d54e1bd33dd96d8b007887bae52b74921"
 
 [[sources]]
 path = "tools/check_entry_guard.py"
-bytes = 96881
-sha256 = "e30ed641cb950514d38c645e28e645353ea42fa69f966203ef51350cafaadbc9"
+bytes = 107676
+sha256 = "e8a6ca6bfac2f3210849110c3ce70187792c6047f3818467310bfb4eb3a8bfa3"
 
 [[sources]]
 path = "tools/check_footer.py"
@@ -3706,8 +3706,8 @@ sha256 = "1e2359aa0c0c6dd2a398c70a9eece680953443191d148664bc61d8e3ff245300"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 58771
-sha256 = "b31262f20009b8ba6c4c7fb049a6046c6da37a3ce724642d56b64a9363986852"
+bytes = 58846
+sha256 = "f6c9725f42d4ba340745b7b5f12c1e606338aee4763aff1f84c14c7c91aa66a6"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
