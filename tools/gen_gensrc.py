@@ -518,10 +518,11 @@ def main():
 #       bound after the roster, a dunder name bound before it, and a `# coding: utf-7` cookie hiding a
 #       rebinding of a roster name or of GENSRC_OUTPUTS each fail closed (exit 2); a leading BOM and bytes that
 #       are not UTF-8 stay refused (exit 2), and a utf-8 cookie on a valid generator generates (exit 0),
-#   (s) a parser stack overflow reading a generator fails closed (exit 2), never a traceback: a chain of 200,000
-#       unary minus signs as tools/gen_hooks.py and as another generator, and a RecursionError
-#       injected into every parse of tools/gen_hooks.py, each through run() and, for gen_hooks.py, through the
-#       roster read alone (discovery reads that file's declaration first).
+#   (s) a parser stack overflow reading a generator fails closed (exit 2) naming the cause "too deeply nested to
+#       parse", never a traceback: a chain of 200,000 unary minus signs as tools/gen_hooks.py and as another
+#       generator, a RecursionError injected into every parse of tools/gen_hooks.py, and a MemoryError injected into
+#       its byte parse alone, each through run() and, for gen_hooks.py, through the roster read alone (discovery
+#       reads that file's declaration first).
 # A raised SystemExit anywhere in a run() call is caught by run_quiet and returned as a non-int sentinel
 # string, so the self-test can never itself exit early (green or otherwise) on a raise: an UNEXPECTED
 # raise mismatches its case's expected exit code and registers as a FAILURE, while case (n) asserts the
@@ -776,14 +777,20 @@ _SOURCE_READS = {
     "a utf-8 coding cookie on the valid generator": (
         "gen_hooks.py", "# -*- coding: utf-8 -*-\n" + _FAKE_HOOKS_ROSTER, 0),
 }
-# Case (s): label -> (generator file name, its text, whether ast.parse raises an injected RecursionError on it). The
-# real vector overflows the parser (MemoryError on the CPython 3.14 this was written against), the injection pins
-# the other class.
+# Case (s): label -> (generator file name, its text, False or the overflow ast.parse raises on it: its class and
+# whether only the byte parse raises it). The real vector overflows the parser (MemoryError on the CPython 3.14 this
+# was written against, at the first parse, the UTF-8 text one); the injection into every parse pins the other class,
+# and the injection into the byte parse alone fails if that parse leaves the handler. Each vector must name the
+# cause, so an interpreter on which the chain parses, failing the vector for another reason, cannot pass it.
 _DEEP_SOURCE = "x = " + "-" * 200000 + "1\n"
+_DEEP_CAUSE = "too deeply nested to parse"
 _DEEP_READS = {
     "a chain of 200,000 unary minus signs as tools/gen_hooks.py": ("gen_hooks.py", _DEEP_SOURCE, False),
     "a chain of 200,000 unary minus signs as another generator": ("gen_selftestdeep.py", _DEEP_SOURCE, False),
-    "a RecursionError injected into every parse of tools/gen_hooks.py": ("gen_hooks.py", _FAKE_HOOKS_ROSTER, True),
+    "a RecursionError injected into every parse of tools/gen_hooks.py": (
+        "gen_hooks.py", _FAKE_HOOKS_ROSTER, (RecursionError, False)),
+    "a MemoryError injected into the byte parse alone of tools/gen_hooks.py": (
+        "gen_hooks.py", _FAKE_HOOKS_ROSTER, (MemoryError, True)),
 }
 
 
@@ -811,6 +818,16 @@ def self_test_main():
                 return run(root, check)
             except SystemExit as exc:
                 return "raised SystemExit({!r})".format(exc.code)
+
+    def run_stderr(root, check):
+        # run_quiet that also returns the captured stderr, so a vector can assert the cause it names.
+        err = io.StringIO()
+        with redirect_stdout(io.StringIO()), redirect_stderr(err):
+            try:
+                rc = run(root, check)
+            except SystemExit as exc:
+                rc = "raised SystemExit({!r})".format(exc.code)
+        return rc, err.getvalue()
 
     try:
         tmp = Path(tempfile.mkdtemp(prefix="aiqt-gen-gensrc-selftest-"))
@@ -1012,8 +1029,10 @@ def self_test_main():
         real_parse = ast.parse
 
         def overflow(source, *args, **kwargs):
-            if str(kwargs.get("filename", "")).endswith("gen_hooks.py"):
-                raise RecursionError("injected parser overflow")
+            exc_class, bytes_only = inject
+            if (str(kwargs.get("filename", "")).endswith("gen_hooks.py")
+                    and (isinstance(source, bytes) or not bytes_only)):
+                raise exc_class("injected parser overflow")
             return real_parse(source, *args, **kwargs)
 
         for idx, (label, (filename, text, inject)) in enumerate(_DEEP_READS.items()):
@@ -1021,22 +1040,24 @@ def self_test_main():
             _build_from(ddir, filename, text)
             if inject:
                 ast.parse = overflow
-            rc = None
+            rc, err = None, ""
             try:
-                rc = run_quiet(ddir, check=False)
+                rc, err = run_stderr(ddir, check=False)
                 # Discovery reads a gen_hooks.py declaration before its roster, so the roster read is also called
-                # alone and must raise ValueError (run maps it to exit 2).
+                # alone and must raise ValueError naming the cause (run maps it to exit 2).
                 if filename == ROSTER_GEN:
                     read_authoring_roster(ddir / "tools")
                     rc = "a roster read that raised nothing"
-            except ValueError:
-                pass
+            except ValueError as exc:
+                if _DEEP_CAUSE not in str(exc):
+                    rc = "a roster read that raised ValueError without the cause ({})".format(exc)
             except (MemoryError, RecursionError, SyntaxError) as exc:
                 rc = "raised {}".format(type(exc).__name__)
             finally:
                 ast.parse = real_parse
-            if rc != 2:
-                failures.append("parser overflow: {} expected exit 2, got {}".format(label, rc))
+            if rc != 2 or _DEEP_CAUSE not in err:
+                failures.append("parser overflow: {} expected exit 2 naming {!r}, got {}".format(
+                    label, _DEEP_CAUSE, rc))
     finally:
         if unread_tools is not None:
             os.chmod(unread_tools, 0o755)  # restore even on an unexpected early exit
@@ -1066,7 +1087,8 @@ def self_test_main():
           "name it uses) fails closed (exit 2); a roster name read through __doc__ or __name__, bound after the "
           "roster, or a dunder, a utf-7 cookie hiding a rebinding, a leading BOM and non-UTF-8 bytes fail closed "
           "(exit 2), while a utf-8 cookie generates; and a parser stack overflow (a chain of 200,000 unary minus "
-          "signs as tools/gen_hooks.py or another generator, and an injected RecursionError) fails closed (exit 2)"
+          "signs as tools/gen_hooks.py or another generator, a RecursionError injected into every parse and a "
+          "MemoryError into the byte parse alone) fails closed (exit 2) naming its cause"
           + note)
     return 0
 

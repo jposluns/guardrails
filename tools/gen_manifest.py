@@ -433,13 +433,22 @@ def cross_check_exclusions(root, exclusions):
                                 .format(sel.where, sel.raw, surface))
 
 
+def _stream_base(path):
+    """path with the NTFS stream suffix of each component removed: on NTFS a ':' in a name selects a stream of the
+    file or directory named by the part before it (".claude/settings.json::$DATA" is the default data stream of
+    .claude/settings.json), and a Win32 name cannot otherwise carry a ':'."""
+    return "/".join(segment.split(":", 1)[0] for segment in path.split("/"))
+
+
 def _portable_forms(path):
-    """The forms under which a case-insensitive or Unicode-normalizing filesystem may store path as one file:
-    its case fold and its NFC form (the two equivalences git_tracked refuses between tracked paths), and its
-    canonical caseless form (NFD of the case fold of its NFD), which folds both at once. Two paths alias when
-    any one form is equal."""
-    return (path.casefold(), unicodedata.normalize("NFC", path),
-            unicodedata.normalize("NFD", unicodedata.normalize("NFD", path).casefold()))
+    """The forms under which a case-insensitive, Unicode-normalizing or NTFS filesystem may store path as one
+    file, each taken with its NTFS stream suffixes removed (_stream_base): its case fold and its NFC form (the two
+    equivalences git_tracked refuses between tracked paths), its canonical caseless form (NFD of the case fold of
+    its NFD), which folds both at once, and str.upper (an upcase-table fold, as check_instruction_budget._fold_keys
+    compares, which also merges the dotless i with i). Two paths alias when any one form is equal."""
+    base = _stream_base(path)
+    return (base.casefold(), unicodedata.normalize("NFC", base),
+            unicodedata.normalize("NFD", unicodedata.normalize("NFD", base).casefold()), base.upper())
 
 
 def check_authoring_only(root, tracked, classes, exclusions):
@@ -457,16 +466,20 @@ def check_authoring_only(root, tracked, classes, exclusions):
     reconciling it); every tracked path of either roster is excluded by an EXACT [[exclusion]] literal, never a
     pattern and never a class row (classify() refuses a class selector that reaches an excluded path, so an
     excluded roster path is in no SOURCES, ARTIFACTS or .gitattributes line, and no release or pin install can
-    carry it to an adopter); and every tracked path of either roster is a regular file on disk (git_tracked
-    refuses a tracked symlink; this refuses a symlink or other non-regular file on disk under a regular index
-    entry). No tracked or classed path may alias a path of either roster: a path that differs from it in bytes
-    but is equal to it under case folding or Unicode normalization (_portable_forms: the case fold and the NFC
-    form git_tracked compares between two tracked paths, and both folded together) is refused whatever its
-    class or exclusion, naming both spellings, because a case-insensitive or normalizing install target would
-    store it as the roster path; the roster path itself still needs its exact literal. Disclosed residual: an
-    alias adding a trailing dot or space (".claude/settings.json."), which Win32 path normalization can trim,
-    is not refused, because the manifest's path rules (_check_rel_path, git_tracked) accept such names
-    everywhere else too. A tree tracking none of either roster (a synthetic fixture) obliges nothing. classes is
+    carry it to an adopter); and every tracked path of either roster is a regular file on disk under real
+    directories (git_tracked refuses a tracked symlink; this lstats each component of the path inside the
+    repository, never following one, so a symlink or other non-regular file on disk under a regular index entry,
+    and a symlink or other non-directory in place of a directory above it, are refused). A tracked or classed path
+    that differs from a path of either roster in bytes but aliases it under _portable_forms (the case fold and the
+    NFC form git_tracked compares between two tracked paths, both folded together, and the upcase fold, each with
+    NTFS stream suffixes removed, so ".claude/settings.json::$DATA" and a dotless-i spelling of "settings" alias
+    the settings) is refused whatever its class or exclusion, naming both spellings, because a case-insensitive,
+    normalizing or NTFS install target would store it as the roster path; the roster path itself still needs its
+    exact literal. Disclosed residual: an alias adding a trailing dot or space (".claude/settings.json."), which
+    Win32 path normalization can trim, is not refused, because the manifest's path rules (_check_rel_path,
+    git_tracked) accept such names everywhere else too; nor is an 8.3 short name (".claude/SETTIN~1.JSO"), which
+    a target may generate for the roster path, nor any other fold or alias a target applies beyond these forms.
+    A tree tracking none of either roster (a synthetic fixture) obliges nothing. classes is
     the classify() result, checked again here so a roster path that reached it is named as a would-ship error."""
     import gen_gensrc
     import gen_hooks
@@ -478,10 +491,10 @@ def check_authoring_only(root, tracked, classes, exclusions):
         path_forms = _portable_forms(path)
         for rel, rel_forms in forms:
             if path != rel and any(a == b for a, b in zip(path_forms, rel_forms)):
-                raise GateError("{} aliases the authoring-only path {} (equal under case folding or Unicode "
-                                "normalization, not in bytes): a case-insensitive or normalizing install target "
-                                "would store it as that path, so it is refused; rename it".format(
-                                    ascii(path), ascii(rel)))
+                raise GateError("{} aliases the authoring-only path {} (equal under case folding, the upcase fold "
+                                "or Unicode normalization once NTFS stream suffixes are removed, not in bytes): a "
+                                "case-insensitive, normalizing or NTFS install target would store it as that path, "
+                                "so it is refused; rename it".format(ascii(path), ascii(rel)))
     present = [rel for rel in roster if rel in tracked]
     if present and len(present) != len(roster):
         raise GateError("the authoring-only roster {} must be tracked together; tracked: {}".format(
@@ -495,6 +508,17 @@ def check_authoring_only(root, tracked, classes, exclusions):
                             "[[exclusion]] path literal".format(
                                 rel, "carries the release class {!r}".format(classes[rel]) if rel in classes
                                 else "is not excluded by an exact literal"))
+        parts = rel.split("/")
+        for depth in range(1, len(parts)):
+            parent = "/".join(parts[:depth])
+            try:
+                parent_st = os.lstat(root / parent)
+            except OSError as exc:
+                raise GateError("authoring-only path {} is tracked but its directory {} cannot be read ({}); "
+                                "fail-closed".format(rel, parent, exc))
+            if not stat.S_ISDIR(parent_st.st_mode):
+                raise GateError("authoring-only path {} must lie under real directories: {} is a symlink or other "
+                                "non-directory on disk".format(rel, parent))
         try:
             st = os.lstat(root / rel)
         except OSError as exc:
@@ -1344,12 +1368,17 @@ def _self_test_main_isolated():
             if subset["tools/gen_hooks.py"] == _GEN_LOCAL or fx is None or run_quiet(fx, check=False) != 2:
                 failures.append("authoring-only roster: a tree roster omitting {} given a release class expected "
                                 "exit 2".format(omitted))
-        # A tracked or classed path aliasing a roster path (equal to it under case folding or Unicode normalization,
-        # not in bytes) exits 2 naming both spellings: both roster paths tracked only as case variants, each
-        # classed; the settings tracked and declared as .claude/SETTINGS.JSON, classed, beside a tree roster of the
-        # marker alone; an NFC path, classed, beside a tree roster spelling it NFD; and an upper-case NFD path,
-        # classed, beside a tree roster spelling it lower-case NFC, which neither the case fold nor the NFC form alone
-        # equates. Each exited 0, the alias in the manifest, while only byte-equal paths were compared.
+        # A tracked or classed path aliasing a roster path (equal to it under _portable_forms, not in bytes) exits 2
+        # with the alias diagnostic naming both spellings, each roster path in fixtures of its own so the refusal of
+        # one cannot hide a regression on the other: both roster paths tracked only as case variants, each classed;
+        # the settings tracked and declared as .claude/SETTINGS.JSON, classed, beside a tree roster of the marker
+        # alone, and the marker tracked as .aiqt/AUTHORING.TOML, classed, beside a tree roster of the settings alone;
+        # an NFC path, classed, beside a tree roster spelling it NFD; an upper-case NFD path, classed, beside a tree
+        # roster spelling it lower-case NFC, which neither the case fold nor the NFC form alone equates; and each
+        # roster path, tracked and excluded, beside a classed dotless-i spelling of it (equal only under the upcase
+        # fold) and beside itself with the NTFS default stream suffix ::$DATA. Each exited 0, the alias in the
+        # manifest, while only byte-equal paths were compared (the dotless-i and stream vectors also while only the
+        # case and normalization forms were).
         nfd = "cafe\u0301.txt"
         nfc = unicodedata.normalize("NFC", nfd)
         variants = {k: v for k, v in _ROSTER_FILES.items()
@@ -1362,7 +1391,20 @@ def _self_test_main_isolated():
             "AUTHORING_ONLY_REL = (AUTHORING_MARKER_REL, PROJECT_SETTINGS_REL)",
             "AUTHORING_ONLY_REL = (AUTHORING_MARKER_REL,)").replace("\"target\": \".claude/settings.json\"",
                                                                    "\"target\": \".claude/SETTINGS.JSON\"")})
+        upper_marker = {k: v for k, v in _ROSTER_FILES.items() if k != ".aiqt/authoring.toml"}
+        upper_marker.update({".aiqt/AUTHORING.TOML": "format-version = 1\n", "tools/gen_hooks.py": _GEN_LOCAL.replace(
+            "AUTHORING_ONLY_REL = (AUTHORING_MARKER_REL, PROJECT_SETTINGS_REL)",
+            "AUTHORING_ONLY_REL = (PROJECT_SETTINGS_REL,)")})
         upper_nfd = nfd.upper()
+        roster_aliases = []
+        for rel, dotless in ((".claude/settings.json", ".claude/sett\u0131ngs.json"),
+                             (".aiqt/authoring.toml", ".aiqt/author\u0131ng.toml")):
+            for kind, alias in (("a dotless-i spelling of it (equal only under the upcase fold)", dotless),
+                                ("itself with the NTFS default stream suffix", rel + "::$DATA")):
+                beside = dict(_ROSTER_FILES)
+                beside[alias] = "alias\n"
+                roster_aliases.append(("{} tracked beside {}".format(rel, kind), class_row.format(alias)
+                                       + _EXCL_SETTINGS + _EXCL_MARKER, beside, alias, rel))
 
         def unicode_tree(rostered, tracked_as):
             return {"tools/gen_hooks.py": ("AUTHORING_ONLY_REL = ({},)\n".format(ascii(rostered))
@@ -1379,31 +1421,39 @@ def _self_test_main_isolated():
                 ("the settings tracked as .claude/SETTINGS.JSON beside a tree roster of the marker",
                  class_row.format(".claude/SETTINGS.JSON") + _EXCL_MARKER, upper, ".claude/SETTINGS.JSON",
                  ".claude/settings.json"),
+                ("the marker tracked as .aiqt/AUTHORING.TOML beside a tree roster of the settings",
+                 class_row.format(".aiqt/AUTHORING.TOML") + _EXCL_SETTINGS, upper_marker, ".aiqt/AUTHORING.TOML",
+                 ".aiqt/authoring.toml"),
                 ("an NFC path beside a tree roster spelling it NFD", class_row.format(nfc), unicode_tree(nfd, nfc),
                  nfc, nfd),
                 ("an upper-case NFD path beside a tree roster spelling it lower-case NFC (equal only when case and "
                  "normalization fold together)", class_row.format(upper_nfd), unicode_tree(nfc, upper_nfd),
-                 upper_nfd, nfc))):
+                 upper_nfd, nfc)) + tuple(roster_aliases)):
             fx = _roster_fixture(tmp / "roster-alias{}".format(i), _LOCAL_OUT_CLASS + extra, files)
             rc, err = run_stderr(fx) if fx is not None else (None, "")
-            if rc != 2 or ascii(alias) not in err or ascii(rel) not in err:
-                failures.append("authoring-only roster: {} expected exit 2 naming {} and {}, got {}".format(
-                    label, ascii(alias), ascii(rel), rc))
-        # Every tracked path of either roster is a regular file on disk, a shipped path the tree roster omits
-        # included. git_tracked refuses a tracked symlink; here the path is a symlink on disk under a regular index
-        # entry and exits 2: the marker beside a tree roster of the settings alone, and the settings beside a tree
-        # roster of the marker alone (dropped from GENSRC_OUTPUTS, so its exact exclusion swallows no gensrc
-        # target). The same tree with the regular file exits 0, so the refusal is the regular-file check. Each
-        # pair fails if the check reaches a shipped-only path only when it carries a class.
+            if (rc != 2 or "aliases the authoring-only path" not in err or ascii(alias) not in err
+                    or ascii(rel) not in err):
+                failures.append("authoring-only roster: {} expected exit 2 naming {} as an alias of {}, got {}"
+                                .format(label, ascii(alias), ascii(rel), rc))
+        # Every tracked path of either roster is a regular file on disk, each roster path in fixtures of its own.
+        # git_tracked refuses a tracked symlink; here the path is a symlink on disk under a regular index entry and
+        # exits 2 naming it: the marker beside a tree roster of the settings alone, the settings beside a tree roster
+        # of the marker alone (dropped from GENSRC_OUTPUTS, so its exact exclusion swallows no gensrc target), and
+        # each roster path beside a tree roster of both. The same tree with the regular file exits 0, so the refusal
+        # is the regular-file check. The pairs fail if the check reaches a shipped-only path only when it carries a
+        # class, or skips a path the tree roster names.
         settings_decl = ("    {\"target\": \".claude/settings.json\", \"kind\": \"file\",\n"
                          "     \"sources\": (\"src.txt\",), \"regenerate\": \"python3 tools/gen_local.py\"},\n")
         for i, (kept, rel, gen) in enumerate((
                 ("PROJECT_SETTINGS_REL", ".aiqt/authoring.toml", _GEN_LOCAL),
-                ("AUTHORING_MARKER_REL", ".claude/settings.json", _GEN_LOCAL.replace(settings_decl, "")))):
+                ("AUTHORING_MARKER_REL", ".claude/settings.json", _GEN_LOCAL.replace(settings_decl, "")),
+                (None, ".claude/settings.json", _GEN_LOCAL),
+                (None, ".aiqt/authoring.toml", _GEN_LOCAL))):
             subset = dict(_ROSTER_FILES)
-            subset["tools/gen_hooks.py"] = gen.replace(
-                "AUTHORING_ONLY_REL = (AUTHORING_MARKER_REL, PROJECT_SETTINGS_REL)",
-                "AUTHORING_ONLY_REL = ({},)".format(kept))
+            if kept is not None:
+                subset["tools/gen_hooks.py"] = gen.replace(
+                    "AUTHORING_ONLY_REL = (AUTHORING_MARKER_REL, PROJECT_SETTINGS_REL)",
+                    "AUTHORING_ONLY_REL = ({},)".format(kept))
             for link in (False, True):
                 fx = _roster_fixture(tmp / "roster-link{}-{}".format(i, int(link)),
                                      _LOCAL_OUT_CLASS + _EXCL_SETTINGS + _EXCL_MARKER, subset)
@@ -1413,10 +1463,28 @@ def _self_test_main_isolated():
                         os.symlink("../src.txt", fx / rel)
                     except OSError:
                         fx = None
-                if fx is None or run_quiet(fx, check=False) != (2 if link else 0):
-                    failures.append("authoring-only roster: {} {} beside a tree roster of {} alone expected exit {}"
-                                    .format(rel, "a symlink on disk" if link else "a regular file", kept,
-                                            2 if link else 0))
+                rc, err = run_stderr(fx) if fx is not None else (None, "")
+                if rc != (2 if link else 0) or (link and "{} must be a regular file".format(rel) not in err):
+                    failures.append("authoring-only roster: {} {} beside a tree roster of {} expected exit {}, got {}"
+                                    .format(rel, "a symlink on disk" if link else "a regular file",
+                                            "both" if kept is None else kept + " alone", 2 if link else 0, rc))
+        # A roster path under a symlinked directory exits 2 naming that directory, although lstat of the path alone
+        # follows the directory symlink and finds a regular file: the directory above each roster path (.claude, and
+        # .aiqt with the ownership map and the outputs) moved beside the fixture and replaced by a symlink to it.
+        # The base roster fixture above is the same tree with real directories and exits 0.
+        for i, (rel, parent) in enumerate(((".claude/settings.json", ".claude"), (".aiqt/authoring.toml", ".aiqt"))):
+            fx = _roster_fixture(tmp / "roster-parent{}".format(i), _LOCAL_OUT_CLASS + _EXCL_SETTINGS + _EXCL_MARKER)
+            if fx is not None:
+                moved = tmp / "roster-parent{}-moved".format(i)
+                try:
+                    os.rename(fx / parent, moved)
+                    os.symlink(moved, fx / parent)
+                except OSError:
+                    fx = None
+            rc, err = run_stderr(fx) if fx is not None else (None, "")
+            if rc != 2 or "{} must lie under real directories: {} is a symlink".format(rel, parent) not in err:
+                failures.append("authoring-only roster: {} under a symlinked {} expected exit 2 naming it, got {}"
+                                .format(rel, parent, rc))
         try:
             real_roster = gen_gensrc.read_authoring_roster(Path(__file__).resolve().parent)
         except (OSError, ValueError) as exc:
@@ -1451,9 +1519,10 @@ def _self_test_main_isolated():
           "excluded by exact literals passes and never reaches the manifest, while a roster path given a "
           "class, a pattern exclusion over it, the settings without the marker, an exact exclusion of a "
           "gensrc target off the roster, a tracked marker missing on disk, and a shipped roster path given a "
-          "class under a tree roster that omits it or in a tree with none, a path aliasing a roster path by "
-          "case or Unicode normalization, and a roster path the tree roster omits that is a symlink on disk "
-          "each fail closed (exit 2); "
+          "class under a tree roster that omits it or in a tree with none, a path aliasing either roster path "
+          "by case, the upcase fold, Unicode normalization or an NTFS stream suffix, a roster path that is a "
+          "symlink on disk whether the tree roster names or omits it, and a roster path under a symlinked "
+          "directory each fail closed (exit 2); "
           "and a vocabulary class "
           "recorded in neither FROZEN_CLASSES nor UNFROZEN_CLASSES, a class recorded in both, and a frozen "
           "class outside the vocabulary each fail the frozen floor closed (F-FROZEN-PARTITION)")
