@@ -5,7 +5,13 @@ Every case runs the real script in a throwaway git repository with controlled gh
 executables. The gh fixture emits paginated JSON for the script's real jq executable, separately for the
 head_sha-filtered query and the unfiltered run listing, and a separate check extracts that expression
 from ci-status.sh and exercises it directly against crafted JSON. Verdicts use the child's return code
-and complete captured output, never a success token.
+and complete captured output, never a success token. The fixture repository's origin remote names the
+repository the script must read; the gh fixture records every argv it receives and answers only for the
+repository a case serves, so a case can pin which repository was queried, or that gh was never run. A
+case that needs origin output real git cannot be configured to give puts a fixture git first on PATH,
+which answers only that query and runs the real git for every other command. No case reaches the real
+GitHub API: gh resolves to the fixture first on a controlled PATH, and the child environment is built
+from nothing, so it carries no GH_TOKEN, GITHUB_TOKEN, or gh configuration.
 
   selftest_ci_status.py                              exit 0 on self-test pass, 1 on assertion failure
   selftest_ci_status.py --execution-report ABS_PATH  also write the executed check IDs as JSON,
@@ -19,9 +25,13 @@ malformed expectation manifest (a suite container that is not an array of
 tables included), a ci-status.sh whose jq program cannot be extracted, a duplicate check id, and a
 diagnostic or result that cannot be printed or flushed. The execution set is reconciled against the
 manifest only when no check recorded a harness error, because an unevaluated check would also be
-reported missing. Bad arguments, a Python older than 3.14, a
-missing tomllib, and a refused arming of the execution-report finalizer are refused before any check
-runs, so they always exit 2.
+reported missing. Bad arguments, a Python older than 3.14 that can start this file, a missing
+tomllib, and a refused arming of the execution-report finalizer are refused before any check runs, so
+they exit 2. These exits hold while the tool's output (its diagnostic on stderr, and what it prints on
+stdout) can be written and flushed. A failing output stream can change the exit status and can lose
+output; a separate fix in progress addresses this. An older interpreter that cannot start this file
+fails with Python's own error first, and that exit is Python's: 1 for a compile failure, which reads as
+an assertion failure, or 2 for an interpreter predating -I when run with it.
 
 Reporting can never escape or change the rule (under --execution-report, a refusal of the report
 finalizer, described below, ends the run with 2 after reporting). An uncaught exception is recorded
@@ -52,11 +62,16 @@ rule. A PASS text on stdout that a later line voids is not a pass.
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: selftest_ci_status.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: selftest_ci_status.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 import contextlib
 import io
@@ -72,10 +87,15 @@ from pathlib import Path
 try:
     import tomllib
 except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships tomllib
-    sys.stderr.write(
-        "error: selftest_ci_status.py cannot import tomllib, part of the Python standard library; "
-        "this installation is incomplete. Nothing was run (cannot evaluate).\n")
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: selftest_ci_status.py cannot import tomllib, part of the Python standard library; "
+            "this installation is incomplete. Nothing was run (cannot evaluate).\n")
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _selftest_exit_report  # noqa: E402
@@ -93,6 +113,9 @@ JQ = "/usr/bin/jq"
 NO_AUTO_MAINTENANCE = ["-c", "gc.auto=0", "-c", "gc.autoDetach=false",
                        "-c", "maintenance.auto=false"]
 SCRIPT = ROOT / "tools" / "ci-status.sh"
+# The repository the fixture checkout's origin remote names, and so the one ci-status.sh must read.
+FIXTURE_REPO = "fixture/repository"
+FIXTURE_ORIGIN = "https://github.com/fixture/repository.git"
 CHECKS_MANIFEST = ROOT / "tools" / "selftest_checks.toml"
 SUITE_ID = "ci-status-behaviour-selftest"
 # The fixture commit's committer date and the fixture clock. The script scans the unfiltered listing
@@ -115,10 +138,13 @@ import sys
 # serves the same runs as one consistent listing, 100 per page), a dict with "filtered" and "scan" page
 # lists or "scan_every_page" (one page served for every page number), or a dict with "error" (first
 # query fails) or "scan_error" (only the unfiltered listing fails). Only the head_sha query advances the
-# poll counter; every unfiltered page number read is appended to the scan log.
+# poll counter; every unfiltered page number read is appended to the scan log. Every argv is recorded
+# first, and only the repository named by MOCK_GH_REPO is answered.
 args = sys.argv[1:]
+with open(os.environ["MOCK_GH_ARGV_LOG"], "a", encoding="utf-8") as handle:
+    handle.write(json.dumps(args) + "\n")
 endpoint = next((arg for arg in args if arg.startswith("repos/")), "")
-listing = "repos/fixture/repository/actions/runs"
+listing = "repos/" + os.environ["MOCK_GH_REPO"] + "/actions/runs"
 scan_prefix = listing + "?per_page=100&page="
 if (endpoint.startswith(listing + "?head_sha=") and endpoint.endswith("&per_page=100")
         and "--paginate" in args and "--slurp" in args):
@@ -199,6 +225,21 @@ try:
 except (IndexError, OSError, ValueError) as exc:
     print("sleep fixture: {}".format(exc), file=sys.stderr)
     sys.exit(1)
+"""
+
+FAKE_GIT = r"""import os
+import subprocess
+import sys
+
+# On PATH only for a case that passes git_remote to invoke(). It answers exactly
+# `git remote get-url --all origin` with the bytes and exit status the case sets, which real git cannot be
+# configured to produce; every other git command runs the real git with the same arguments, standard
+# streams, and exit status.
+args = sys.argv[1:]
+if args == ["remote", "get-url", "--all", "origin"]:
+    sys.stdout.write(os.environ["MOCK_GIT_REMOTE_STDOUT"])
+    sys.exit(int(os.environ["MOCK_GIT_REMOTE_RC"]))
+sys.exit(subprocess.run([os.environ["MOCK_GIT_REAL"]] + args).returncode)
 """
 
 
@@ -322,9 +363,11 @@ class Fixture:
     def __init__(self, base):
         self.repo = base / "repo"
         self.bin = base / "bin"
+        self.git_bin = base / "git-bin"
         self.home = base / "home"
         self.repo.mkdir()
         self.bin.mkdir()
+        self.git_bin.mkdir()
         self.home.mkdir()
         self.base_env = {
             "PATH": SYSTEM_PATH,
@@ -353,20 +396,48 @@ class Fixture:
             check=True, capture_output=True, text=True, timeout=30, env=self.base_env,
         )
         self.head_sha = result.stdout.strip()
+        self.set_remote("origin", FIXTURE_ORIGIN)
         self.response = base / "responses.json"
         self.counter = base / "calls.txt"
         self.clock = base / "clock.txt"
         self.scan_log = base / "scan-pages.txt"
         self.scan_pages = []
-        for name, body in (("gh", FAKE_GH), ("date", FAKE_DATE), ("sleep", FAKE_SLEEP)):
-            executable = self.bin / name
+        self.argv_log = base / "gh-argv.txt"
+        self.gh_argv = []
+        for directory, name, body in ((self.bin, "gh", FAKE_GH), (self.bin, "date", FAKE_DATE),
+                                      (self.bin, "sleep", FAKE_SLEEP), (self.git_bin, "git", FAKE_GIT)):
+            executable = directory / name
             executable.write_text("#!{}\n{}".format(sys.executable, body), encoding="utf-8")
             executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
 
-    def invoke(self, polls, wait=False, timeout="900", clock=NOW):
+    def set_remote(self, name, *urls):
+        # Replace the named remote's URLs; with no URL the remote is removed. Removing an absent remote
+        # fails, which is ignored: the add that follows is checked.
+        subprocess.run([GIT, "-C", str(self.repo)] + NO_AUTO_MAINTENANCE + ["remote", "remove", name],
+                       capture_output=True, timeout=30, env=self.base_env)
+        if urls:
+            subprocess.run([GIT, "-C", str(self.repo)] + NO_AUTO_MAINTENANCE
+                           + ["remote", "add", name, urls[0]],
+                           check=True, capture_output=True, timeout=30, env=self.base_env)
+        for url in urls[1:]:
+            subprocess.run([GIT, "-C", str(self.repo)] + NO_AUTO_MAINTENANCE
+                           + ["remote", "set-url", "--add", name, url],
+                           check=True, capture_output=True, timeout=30, env=self.base_env)
+
+    def reads_only(self, repo):
+        # True when the last invocation ran gh at least once and every gh call read repo's runs.
+        prefix = "repos/{}/actions/runs?".format(repo)
+        return bool(self.gh_argv) and all(
+            any(arg.startswith(prefix) for arg in argv) for argv in self.gh_argv)
+
+    def invoke(self, polls, wait=False, timeout="900", clock=NOW, override=FIXTURE_REPO,
+               served=FIXTURE_REPO, git_remote=None):
+        # override is CI_STATUS_REPO (None leaves it unset); served is the only repository gh answers for;
+        # git_remote, when given, is the (stdout, exit status) the fixture git gives for the origin's URLs.
         self.response.write_text(json.dumps({"polls": polls}), encoding="utf-8")
         self.counter.write_text("0\n", encoding="utf-8")
         self.scan_log.write_text("", encoding="utf-8")
+        self.argv_log.write_text("", encoding="utf-8")
         self.clock.write_text("{}\n".format(clock), encoding="utf-8")
         env = dict(self.base_env)
         env["PATH"] = str(self.bin) + os.pathsep + SYSTEM_PATH
@@ -374,7 +445,15 @@ class Fixture:
         env["MOCK_GH_COUNTER"] = str(self.counter)
         env["MOCK_CLOCK"] = str(self.clock)
         env["MOCK_GH_SCAN_LOG"] = str(self.scan_log)
-        env["CI_STATUS_REPO"] = "fixture/repository"
+        env["MOCK_GH_ARGV_LOG"] = str(self.argv_log)
+        env["MOCK_GH_REPO"] = served
+        if git_remote is not None:
+            env["PATH"] = str(self.git_bin) + os.pathsep + env["PATH"]
+            env["MOCK_GIT_REAL"] = GIT
+            env["MOCK_GIT_REMOTE_STDOUT"] = git_remote[0]
+            env["MOCK_GIT_REMOTE_RC"] = str(git_remote[1])
+        if override is not None:
+            env["CI_STATUS_REPO"] = override
         env["CI_STATUS_TIMEOUT"] = timeout
         command = [str(SCRIPT), "HEAD"]
         if wait:
@@ -383,6 +462,7 @@ class Fixture:
                                 capture_output=True, timeout=30)
         calls = int(self.counter.read_text(encoding="utf-8").strip())
         self.scan_pages = [int(line) for line in self.scan_log.read_text(encoding="utf-8").split()]
+        self.gh_argv = [json.loads(line) for line in self.argv_log.read_text(encoding="utf-8").splitlines()]
         return result.returncode, result.stdout + result.stderr, calls
 
 
@@ -732,11 +812,12 @@ def _run_checks():
         malformed_run_seen.append((rc, "malformed workflow run record" in output))
         check("ci/single-source-malformed-run-fail-closed", malformed_run_seen, [(2, True)] * 2)
 
-        # Round 2 MAJOR: completeness counts unique run IDs, not rows. A run ID listed twice by one source
-        # means offset pagination shifted between page reads and some other run went unseen: a scan page
-        # [ok, ok] with total_count 2 must not be green, two copies of another commit's run must not read
-        # as "no run", a duplicate on full pages that the age bound ended must not pass, and neither may
-        # a duplicate within the filtered source. Each is re-read once in one-shot mode, then exit 2.
+        # Round 2 MAJOR: a run ID listed twice by one source, in any shape other than the page shift merged
+        # by the checks below, means offset pagination shifted between page reads in a way that may hide
+        # another run: a scan page [ok, ok] with total_count 2 must not be green, two copies of another
+        # commit's run must not read as "no run", a duplicate on full pages that the age bound ended must
+        # not pass, and neither may a duplicate within the filtered source. Each is re-read once in
+        # one-shot mode, then exit 2.
         old_tail = other_commits[1:] + [dict(old_commits[0])]
         busy = [workflow_run(8000 + index, "completed", "success", "Busy run {}".format(index),
                              "e" * 40) for index in range(150)]
@@ -748,19 +829,112 @@ def _run_checks():
                 ([{"filtered": [page([success_a])],
                    "scan": [page(old_tail, 300), page(old_commits, 300)]}], "unfiltered"),
                 ([{"filtered": [page([success_a, success_a], 1)], "scan": [page([success_a])]}],
-                 "head_sha-filtered"),
-                # Round 3: a run created between the two page reads, on the first read and on the
-                # re-read alike, repeats runs[99] on page 2. Disclosed availability cost: exit 2.
-                ([{"filtered": [page([success_a])],
-                   "scan": [page(busy[:100], 150), page(busy[99:], 151)]}], "unfiltered")):
+                 "head_sha-filtered")):
             rc, output, calls = fixture.invoke(polls)
             duplicates.append(
                 (rc, calls, "duplicate run id within the {} listing".format(source) in output,
                  "no workflow run registered" in output))
-        check("ci/duplicate-run-id-fail-closed", duplicates, [(2, 2, True, False)] * 5)
+        check("ci/duplicate-run-id-fail-closed", duplicates, [(2, 2, True, False)] * 4)
 
-        # A scan that reached the end of the listing reconciles unique run IDs against total_count even
-        # when every page's own count is in range.
+        # TOOL-CI-STATUS-DUP-RUN-ID (A): runs created between two page reads push the previous page's
+        # trailing rows onto the next page. Repeated rows that are the next page's leading rows, identical
+        # in every field, and no more than the rise in total_count are merged, not an API error, so a read
+        # that merged them reports what it saw: this commit's failed run repeated across a short last page
+        # fails on the FIRST read, reported once; this commit's not-terminal run beside a repeat on full
+        # pages ended by the age bound is not green on the first read; and an all-success merged read is
+        # re-read once, each of this commit's two repeated runs reported once per read, and a clean re-read
+        # passes.
+        recent = [workflow_run(8200 + index, "completed", "success", "Recent run {}".format(index),
+                               "e" * 40) for index in range(200)]
+        failed_row = "Repository quality checks: completed / failure"
+        shifted_note = "shifted between page reads, so this all-success read is incomplete"
+        shifted_read = {"filtered": [page([])],
+                        "scan": [page(busy[:98] + [success_a, success_b], 150),
+                                 page([success_a, success_b] + busy[98:148], 152)]}
+        clean_read = {"filtered": [page([])],
+                      "scan": [page(busy[:98] + [success_a, success_b], 150), page(busy[98:148], 150)]}
+        merged = []
+        rc, output, calls = fixture.invoke([{
+            "filtered": [page([success_a, failed_b])],
+            "scan": [page(busy[:99] + [failed_b], 150), page([failed_b] + busy[99:149], 151)]}])
+        merged.append((rc, calls, output.count(failed_row), "duplicate run id" in output))
+        rc, output, calls = fixture.invoke([{
+            "filtered": [page([success_a, pending_b])],
+            "scan": [page(recent[:100], 400), page(recent[99:199], 401), page(old_commits, 401)]}])
+        merged.append((rc, calls, fixture.scan_pages, "not terminal" in output,
+                       "duplicate run id" in output))
+        rc, output, calls = fixture.invoke([shifted_read, clean_read])
+        merged.append((rc, calls, output.count("Web generator health: completed / success"),
+                       output.count("Repository quality checks: completed / success"),
+                       shifted_note + "; re-reading once" in output, "duplicate run id" in output))
+        check("ci/scan-identical-shift-repeat-merged", merged,
+              [(1, 1, 1, False), (1, 1, [1, 2, 3], True, False), (0, 2, 2, 2, True, False)])
+
+        # PR #486 QA round 1 MEDIUM-1: a run moving down across a page boundary offsets one moving up, so
+        # the repeat stays within the rise while the run that moved up is skipped. Page 1 holds runs
+        # 1001-1100 (total_count 320); before page 2 is read one run is created at the head, this commit's
+        # failed run 1151 moves above the boundary, and run 1021 moves below the scanned range, so page 2
+        # (total_count 321) starts with a repeat of run 1100 and run 1151 is on no page read; page 3 is
+        # older than the bound, and the filtered source drops the failed run. The parent commit of this
+        # fix exits 0 here. A merged read is never a pass: one-shot mode re-reads it once and a second
+        # merged all-success read is exit 2; a re-read that sees run 1151 fails; under --wait a merged
+        # read never settles, and one between clean reads restarts the settle count.
+        first_rows = [workflow_run(1001 + index, "completed", "success", "Listing run {}".format(index),
+                                   "e" * 40) for index in range(100)]
+        later_rows = [workflow_run(run_id, "completed", "success", "Listing run {}".format(run_id),
+                                   "e" * 40) for run_id in range(1101, 1202) if run_id != 1151]
+        moved_failure = workflow_run(1151, "completed", "failure", "Moved quality run", head_sha)
+        offsetting_read = {"filtered": [page([success_a])],
+                           "scan": [page(first_rows, 320), page([first_rows[99]] + later_rows[:99], 321),
+                                    page(old_commits, 321)]}
+        settled_read = {"filtered": [page([success_a])],
+                        "scan": [page([moved_failure] + first_rows[:20] + first_rows[21:], 321),
+                                 page(later_rows[:100], 321), page(old_commits, 321)]}
+        never_passes = []
+        rc, output, calls = fixture.invoke([offsetting_read])
+        never_passes.append((rc, calls, "ERROR: the unfiltered listing " + shifted_note in output,
+                             "duplicate run id" in output))
+        rc, output, calls = fixture.invoke([offsetting_read, settled_read])
+        never_passes.append((rc, calls, "Moved quality run: completed / failure" in output))
+        rc, output, calls = fixture.invoke([shifted_read], wait=True, timeout="90")
+        never_passes.append((rc, calls, "TIMEOUT after 90s; the unfiltered listing " + shifted_note in output))
+        rc, output, calls = fixture.invoke([clean_read] * 4 + [shifted_read] + [clean_read] * 5, wait=True)
+        never_passes.append((rc, calls))
+        check("ci/scan-shift-never-passes", never_passes,
+              [(2, 2, True, False), (1, 2, True), (1, 7, True), (0, 10)])
+
+        # (B): a repeated row that differs from the row it repeats stays an API error, re-read once in
+        # one-shot mode, then exit 2: another commit's run whose status, conclusion, or URL changed, and
+        # this commit's run whose creation time changed (no other check compares creation times).
+        conflicting = []
+        for earlier, later in (
+                (busy[99], dict(busy[99], status="in_progress", conclusion=None)),
+                (busy[99], dict(busy[99], conclusion="failure")),
+                (busy[99], dict(busy[99], html_url="https://example.invalid/runs/other")),
+                (success_b, dict(success_b, created_at=iso(COMMIT_TIME + 601)))):
+            rc, output, calls = fixture.invoke([{
+                "filtered": [page([success_a])],
+                "scan": [page(busy[:99] + [earlier], 150), page([later] + busy[100:], 151)]}])
+            conflicting.append((rc, calls, "duplicate run id within the unfiltered listing" in output))
+        check("ci/scan-conflicting-shift-repeat-fail-closed", conflicting, [(2, 2, True)] * 4)
+
+        # (C): a repeat that the rise in total_count does not cover stays an API error, on a short last
+        # page whose row count matches total_count and on full pages ended by the age bound; so does a
+        # repeat of a row that is not the earlier page's trailing row, and repeated rows in another order
+        # than the earlier page's trailing rows.
+        unexplained = []
+        for scan in ([page(busy[:100], 151), page(busy[99:], 151)],
+                     [page(recent[:100], 400), page(recent[99:199], 400), page(old_commits, 400)],
+                     [page(busy[:100], 150), page([busy[98]] + busy[100:], 151)],
+                     [page(busy[:100], 150), page([busy[99], busy[98]] + busy[100:], 152)]):
+            rc, output, calls = fixture.invoke([{"filtered": [page([success_a])], "scan": scan}])
+            unexplained.append(
+                (rc, calls, "duplicate run id within the unfiltered listing" in output))
+        check("ci/scan-unexplained-shift-repeat-fail-closed", unexplained, [(2, 2, True)] * 4)
+
+        # A scan that reached the end of the listing reconciles the rows it read (a merged repeat counts as
+        # the run created at the head that pushed it down) against total_count even when every page's own
+        # count is in range.
         rc, output, _calls = fixture.invoke([{
             "filtered": [page([success_a])], "scan": [page([success_a], 2)]}])
         check("ci/scan-end-unique-count-fail-closed",
@@ -853,6 +1027,152 @@ def _run_checks():
                 step_result = "jq-step setup failed: " + _safe_text(str, exc)
             check("ci/jq-step-direct-cases", step_result,
                   ((0, "stop"), (0, "more"), (0, "stop"), True, True, True, True, True))
+
+        # FIX-CISTATUS-R1: the repository read is the one this checkout's origin remote names, never a
+        # built-in name. The parent of this fix read a fixed repository whatever the origin was, so a copied,
+        # forked, or adopter checkout reported another repository's runs as its own. Each case serves (gh
+        # answers for) the repository a wrong rule would read, so only the right rule passes: a derived case
+        # serves the origin's repository and must read only it; a refused case serves the repository the
+        # refused input names and must exit 2 before running gh at all.
+        adopter = "adopter-org/adopter-repo"
+        green = [[page([success_a])]]
+        derived = []
+        for url, override in (("https://github.com/adopter-org/adopter-repo", None),
+                              ("https://github.com/adopter-org/adopter-repo.git", None),
+                              ("https://github.com/adopter-org/adopter-repo.git", adopter)):
+            fixture.set_remote("origin", url)
+            rc, _output, _calls = fixture.invoke(green, override=override, served=adopter)
+            derived.append((rc, fixture.reads_only(adopter)))
+        check("ci/repo-derived-https", derived, [(0, True)] * 3)
+
+        derived = []
+        for url in ("git@github.com:adopter-org/adopter-repo.git", "git@github.com:adopter-org/adopter-repo",
+                    "ssh://git@github.com/adopter-org/adopter-repo.git",
+                    "ssh://git@github.com/adopter-org/adopter-repo"):
+            fixture.set_remote("origin", url)
+            rc, _output, _calls = fixture.invoke(green, override=None, served=adopter)
+            derived.append((rc, fixture.reads_only(adopter)))
+        check("ci/repo-derived-ssh", derived, [(0, True)] * 4)
+
+        # CI_STATUS_REPO only confirms the derived name, compared exactly: another repository, the same
+        # name in another case, and the name with .git are each refused, although gh would answer for it.
+        fixture.set_remote("origin", "https://github.com/adopter-org/adopter-repo.git")
+        refused = []
+        for override in ("upstream-org/upstream-repo", "Adopter-Org/adopter-repo", adopter + ".git"):
+            rc, output, _calls = fixture.invoke(green, override=override, served=override)
+            refused.append((rc, fixture.gh_argv,
+                            "refusing to read another repository's CI runs" in output))
+        check("ci/repo-override-mismatch-refused", refused, [(2, [], True)] * 3)
+
+        # No origin remote: refused with and without CI_STATUS_REPO (which is never a fallback), and when
+        # another remote names a readable repository.
+        absent = []
+        fixture.set_remote("origin")
+        for override in (None, FIXTURE_REPO):
+            rc, output, _calls = fixture.invoke(green, override=override)
+            absent.append((rc, fixture.gh_argv, "has no origin remote" in output))
+        fixture.set_remote("upstream", FIXTURE_ORIGIN)
+        rc, output, _calls = fixture.invoke(green, override=None)
+        absent.append((rc, fixture.gh_argv, "has no origin remote" in output))
+        fixture.set_remote("upstream")
+        check("ci/repo-absent-remote-refused", absent, [(2, [], True)] * 3)
+
+        # Each URL below breaks a rule of the strict parse (host, scheme, user name or credentials, port, path
+        # shape, or a name's characters), most of them while otherwise matching an accepted form, and must be
+        # refused. The name length rules are pinned by ci/repo-name-length-bounds below.
+        malformed = []
+        for url in ("https://github.com/adopter-org",
+                    "https://github.com/adopter-org/adopter-repo/extra",
+                    "https://github.com/adopter-org/adopter-repo/",
+                    "https://github.com/adopter-org/.git",
+                    "https://github.com/adopter-org/..",
+                    "https://github.com/-adopter/adopter-repo",
+                    "https://github.com/adopter-org/adopter repo",
+                    "https://github.example/adopter-org/adopter-repo",
+                    "https://github.com.example/adopter-org/adopter-repo",
+                    "http://github.com/adopter-org/adopter-repo",
+                    "https://user:secret@github.com/adopter-org/adopter-repo",
+                    "https://github.com:443/adopter-org/adopter-repo",
+                    "ssh://git@github.com:22/adopter-org/adopter-repo",
+                    "git@github.example:adopter-org/adopter-repo",
+                    "github.com/adopter-org/adopter-repo",
+                    "/srv/git/adopter-org/adopter-repo.git"):
+            fixture.set_remote("origin", url)
+            rc, output, _calls = fixture.invoke(green, override=None, served=adopter)
+            malformed.append((url, rc, fixture.gh_argv, "origin remote URL is not one of" in output,
+                              "secret" in output))
+        check("ci/repo-malformed-url-refused", malformed,
+              [(url, 2, [], True, False) for url, *_rest in malformed])
+
+        # An origin with two URLs names no single repository, whichever of them gh would answer for.
+        fixture.set_remote("origin", "https://github.com/adopter-org/adopter-repo.git",
+                           "git@github.com:upstream-org/upstream-repo.git")
+        ambiguous = []
+        for served in (adopter, "upstream-org/upstream-repo"):
+            rc, output, _calls = fixture.invoke(green, override=None, served=served)
+            ambiguous.append((rc, fixture.gh_argv, "has more than one URL" in output))
+        check("ci/repo-ambiguous-remote-refused", ambiguous, [(2, [], True)] * 2)
+
+        # FIX-515-R2: git ends each URL it prints with a line feed, and command substitution strips every
+        # trailing one, so a URL that itself ends in a line feed, or a valid URL followed by a newline-only
+        # URL, read as one valid URL. Read byte for byte, both are refused before gh runs, although gh would
+        # answer for the repository they name.
+        line_break = []
+        for urls in (("https://github.com/adopter-org/adopter-repo.git\n",),
+                     ("https://github.com/adopter-org/adopter-repo.git", "\n")):
+            fixture.set_remote("origin", *urls)
+            rc, output, _calls = fixture.invoke(green, override=None, served=adopter)
+            line_break.append((rc, fixture.gh_argv, "has more than one URL" in output))
+        check("ci/repo-origin-line-break-refused", line_break, [(2, [], True)] * 2)
+
+        # A failing git remote get-url (an exit other than 0 or 2) is cannot-evaluate, whatever it printed:
+        # real git exits 128 on a url key with no value, and the fixture git prints a valid URL, then exits 1.
+        unreadable = []
+        config = fixture.repo / ".git" / "config"
+        saved_config = config.read_text(encoding="utf-8")
+        fixture.set_remote("origin")
+        config.write_text(config.read_text(encoding="utf-8") + '[remote "origin"]\n\turl\n', encoding="utf-8")
+        rc, output, _calls = fixture.invoke(green, override=None, served=adopter)
+        config.write_text(saved_config, encoding="utf-8")
+        unreadable.append((rc, fixture.gh_argv, "git could not read the origin remote URL" in output))
+        printed = "https://github.com/adopter-org/adopter-repo.git\n"
+        rc, output, _calls = fixture.invoke(green, override=None, served=adopter, git_remote=(printed, 1))
+        unreadable.append((rc, fixture.gh_argv, "git remote get-url exited 1)" in output))
+        check("ci/repo-origin-unreadable-refused", unreadable, [(2, [], True)] * 2)
+
+        # An origin read that succeeds with no URL (no output, or one empty line, which real git does not
+        # produce) is the no-origin refusal, never a parse of the empty string.
+        empty = []
+        for stdout in ("", "\n"):
+            rc, output, _calls = fixture.invoke(green, override=None, git_remote=(stdout, 0))
+            empty.append((rc, fixture.gh_argv,
+                          "has no origin remote, or its origin remote has no URL" in output))
+        check("ci/repo-origin-empty-refused", empty, [(2, [], True)] * 2)
+
+        # The name length bounds: the longest owner (39) and repository name (100) are read, and one character
+        # more is refused before gh runs, although gh would answer for it.
+        bounds = []
+        for owner, name in (("a" * 39, "adopter-repo"), ("adopter-org", "r" * 100),
+                            ("a" * 40, "adopter-repo"), ("adopter-org", "r" * 101)):
+            fixture.set_remote("origin", "https://github.com/{}/{}.git".format(owner, name))
+            rc, output, _calls = fixture.invoke(green, override=None, served=owner + "/" + name)
+            bounds.append((rc, fixture.reads_only(owner + "/" + name), fixture.gh_argv == [],
+                           "origin remote URL is not one of" in output))
+        check("ci/repo-name-length-bounds", bounds,
+              [(0, True, False, False)] * 2 + [(2, False, True, True)] * 2)
+
+        # The CI_STATUS_REPO refusal names only the derived repository and never echoes the override, which is
+        # unvalidated: neither a credential-bearing value nor one whose line break would forge a diagnostic
+        # line appears in the output, although gh would answer for the derived repository.
+        fixture.set_remote("origin", "https://github.com/adopter-org/adopter-repo.git")
+        not_echoed = []
+        for override in ("https://user:secret@github.com/" + adopter,
+                         adopter + "\nFORGED: diagnostic line", "upstream-org/upstream-repo"):
+            rc, output, _calls = fixture.invoke(green, override=override, served=adopter)
+            not_echoed.append((rc, fixture.gh_argv, "does not equal adopter-org/adopter-repo," in output,
+                               override in output, "secret" in output, "FORGED" in output))
+        check("ci/repo-override-mismatch-not-echoed", not_echoed, [(2, [], True, False, False, False)] * 3)
+        fixture.set_remote("origin", FIXTURE_ORIGIN)
 
     # Round 7: main() must print every collected failure and map the exit code by the module docstring's
     # rule on every path. Each case runs a nested main() on seeded state and restores the real state.

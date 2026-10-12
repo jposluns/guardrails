@@ -18,20 +18,29 @@ from urllib.parse import urlparse
 try:
     import tomllib
 except ModuleNotFoundError:
+    import os
     if tuple(sys.version_info[:2]) < (3, 14):
         # Reached only through an importer that carries no floor guard yet (every guarded
         # entrypoint refuses an older Python that can start it first; one that cannot start
         # it fails with Python's own error before reaching here): the version is the
-        # problem, so name it.
-        sys.stderr.write(
-            "error: the standards loader requires Python 3.14 or newer; this is Python %d.%d.%d "
-            "(%s). Nothing was run (cannot evaluate).\n"
-            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        # problem, so say so. The message is a literal, as the fallback grammar in
+        # tools/check_python_floor.py requires (it admits no call), so it names no version.
+        try:
+            sys.stderr.write(
+                "error: the standards loader requires Python 3.14 or newer, and this interpreter is "
+                "older. Nothing was run (cannot evaluate).\n")
+            sys.stderr.flush()
+        except BaseException:
+            pass
     else:  # every Python 3.14 ships tomllib, so this installation is incomplete
-        sys.stderr.write(
-            "error: the standards loader cannot import tomllib, part of the Python standard library; "
-            "this installation is incomplete. Nothing was run (cannot evaluate).\n")
-    raise SystemExit(2)
+        try:
+            sys.stderr.write(
+                "error: the standards loader cannot import tomllib, part of the Python standard library; "
+                "this installation is incomplete. Nothing was run (cannot evaluate).\n")
+            sys.stderr.flush()
+        except BaseException:
+            pass
+    os._exit(2)
 
 # Required top-level fields in every manifest. Attribution (licence, source-url) is intentionally NOT
 # required here: it is added, per-source verified, with the public NOTICE. This file's job is to make

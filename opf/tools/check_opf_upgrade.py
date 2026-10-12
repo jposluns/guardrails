@@ -119,11 +119,16 @@ Exit convention: 0 observed assertions pass; 1 an assertion fails; 2 cannot eval
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: check_opf_upgrade.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: check_opf_upgrade.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 import copy
 import os
@@ -1450,6 +1455,8 @@ def _suite_isolated():
             check("U17 above-tooling store refused (exit 2)", rc17a == EXIT_ERROR)
             check("U17 above-tooling refusal names the reason", "ABOVE the {}".format(
                 _opf_store.SUPPORTED_SPEC_VERSION) in out17a)
+            check("U17 above-tooling refusal states that no homes migration exists",
+                  "performs no homes migration" in out17a)
 
             s17b = base / "u17-noncanonical"
             s17b.mkdir()

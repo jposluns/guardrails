@@ -28,6 +28,99 @@ gen_manifest.py at build time).
   FAIL; the gate never picks the first occurrence. Uniqueness is within THAT ROW'S window only, not global,
   so several clause-ids may legitimately share one source sentence. (3.1 canonicalization of the source
   file itself is check_byte_canon.py's job, not re-scanned here.)
+  WHOLE-CLAUSE EDGES: a window line may hold several sentences, so a canonical-text may be shorter than
+  its window, but only by whole sentences or whole clauses. Both edges are judged against the WHOLE
+  source file (a line edge is no free pass) by ONE boundary grammar and ONE enclosure scan.
+  BOUNDARY: a position is a sentence or clause boundary when (c) it is at the start or end of the file,
+  or a blank line touches it (a PARAGRAPH or FILE edge; a single line break never is, so a row cannot
+  drop a wrapped line); (a) whitespace sits at it and the text before it, ignoring whitespace, ends with
+  one of . ? ! either bare, when the text after it, ignoring whitespace, starts with no opener (a double
+  quote, straight or curly, a bracket or a backtick) and, after a '?' or '!', with no lower-case ASCII
+  letter; or followed directly by closing double quotes or brackets when all three of these hold: the text
+  after it, ignoring whitespace, plainly starts a new sentence (it starts with an ASCII capital; a digit,
+  another quotation or bracket, a closer, or anything else is no start); each closer closes an enclosure,
+  or is a bracket that is text inside a quotation; and the outermost closed enclosure's opener itself sits
+  at such a boundary. So '"Stop." Then wait.' holds two sentences, while in '"Done." is printed.', in
+  '"Stop." (with no other words) is the command.', in 'Stop. (with no other words) is the command.' and in
+  'Ask why? before you delete anything.' a longer sentence goes on from the quotation, the '.' or the '?',
+  and neither side of it is a boundary. A bare '.' before a lower-case word stays a sentence end, since a
+  sentence may start with a command name ('git checkout -- <path> overwrites the tree.'). (b) whitespace
+  sits at it and the text before it ends with ';'; or it sits directly before a ';' that whitespace
+  follows. A comma or a colon is never a boundary: a cut at ", and" may split a list as easily as two
+  clauses, and a colon usually opens a list or an elaboration inside one sentence, so two obligations
+  joined by ", and" share one whole-sentence text (two clause-ids may carry identical canonical-text) or
+  are split at a ';' in the source.
+  ENCLOSURE: each edge must also sit at enclosure depth 0, counted from the start of the edge's own
+  paragraph in the SOURCE, never from the text alone, so an enclosure the text drops at both edges is
+  seen. The scan pairs inline code spans (a run of backticks, closed by the next run of the same length;
+  everything inside one is text, and one opens inside a quotation or bracket too), double quotes
+  (straight, and curly U+201C/U+201D) and the brackets ( ) [ ] and braces: a straight quote closes an
+  open straight quote on top and otherwise opens one; inside a quotation a bracket is text; a closer that
+  closes nothing open on top is text ("a) build", or a ")" in a quoted literal). An enclosure the text
+  touches at an edge is therefore one it contains whole, and a sentence end or ';' inside a code span, a
+  quotation or a bracket is no edge.
+  Every other edge is a FAIL, so, within one paragraph, a text cut short at a dropped final '.', a
+  dropped word, a comma, a colon, a dropped wrapped line, inside a code span, a double quotation or a
+  bracket, or at either side of a quoted or bracketed sentence that a longer sentence goes on from fails,
+  whatever the next word starts with (a lower-case letter, a digit, another quotation or bracket, a
+  closer, a code span, a single quote, markup), except for the residual shapes listed next. Two of those
+  turn on the next word: (2) passes a cut at a bare '.', '?' or '!' that ends no sentence unless that
+  word starts with an opener or, after a '?' or '!', a lower-case ASCII letter, and (6) passes a cut at
+  either side of a quoted or bracketed sentence only when that word starts with an ASCII capital. A blank
+  line is always an edge (c), so a cut there passes whatever sits on either side of it: '"Never delete."'
+  and '(the old rule) no longer applies.' each pass when a blank line parts them (see also (5)).
+  RESIDUAL, disclosed (shapes that still pass): (1) a row cut back to an EARLIER whole sentence or whole
+  clause still passes when what it drops sits on its end-line (a dropped part that fills a later line
+  breaks the tight window instead); (2) a bare sentence end (a '.', '?' or '!' that whitespace follows,
+  with no closer) reads as a sentence end even where it ends none, unless the next word starts with an
+  opener, or with a lower-case ASCII letter after a '?' or '!': so a cut passes at an abbreviation
+  ("e.g. "), an ellipsis ("... ") or a list number ("1. "); at a '!' or '?' inside a sentence before a capital
+  ('Yahoo!' and 'Mail is the only approved client.' from 'Yahoo! Mail is the only approved client.'); at a
+  '.' before a lower-case word ("the linter, on every file." from "Use a tool, e.g. the linter, on every
+  file."); and at any bare sentence end before anything else that is no opener, such as a digit, a single
+  quote, a closer, markup or a non-ASCII letter ('Stop.' from 'Stop. 3 times in a row halts the run.'); a
+  decimal point never reads as one, since no whitespace follows it; (3) single quotes are not paired,
+  because an apostrophe is the same character, so a cut inside a single-quoted sentence ("Go.' is
+  printed." from "'Stop. Go.' is printed.") passes; (4) a ';' that separates list items reads as a clause
+  separator, so one item passes ("the country;" from "Record the city, region; the country; and the
+  date."); (5) the enclosure scan works per paragraph, so a quotation, bracket or code span that spans a
+  blank line is not seen, and a stray straight double quote (an inch mark) reads as an opener and reverses
+  the pairing of the straight quotes after it in its paragraph, so a cut inside a later quotation there
+  can read as outside one ("Go." from 'Use a 3" pipe. Say "Stop. Go. Wait." now.'); (6) a quoted or
+  bracketed sentence that a longer sentence goes on from still reads as a whole sentence when the word
+  after it starts with an ASCII capital (a name, an acronym, "I"), so '"Stop."' passes from '"Stop." CI
+  treats as a hard halt.', and so does the rest of that sentence; when that word starts with a digit, a
+  quotation or bracket opener, or anything else, both cuts fail. The gate has no record of where an
+  obligation ends other than the source text.
+  FAIL-CLOSED OVER-FIRES, disclosed (whole obligations the gate refuses, exit 1; none is in the
+  register): a bullet item whose text leaves out its marker ("- ") or runs on to the next item with no
+  ending; a text after a bold or emphasised lead-in ("**Note.** "); a whole bold sentence without its
+  markup; a whole bold or italic sentence with its markup ("**Never push to main.**", "*Never push to
+  main.*") when more text follows in its paragraph; a text after a blockquote marker ("> ") or inside a
+  table cell ("| Keep the audit log. |"); a row on the line right after a heading with no blank line
+  between; a text that ends on a comma ("Alpha holds," before " and beta"); a lead-in that ends at a ':'
+  and a text after one; a sentence that ends inside a quotation or bracket opened mid-sentence ('Say
+  "stop."', "Stop (always.)") when more text follows in its paragraph, and the sentence after it; a
+  whole quoted or bracketed sentence, and the text after it, when that text starts with anything but an
+  ASCII capital: a lower-case word, a digit ('"Stop." 3 files remain.'), another quoted or bracketed
+  sentence (in '"Stop." "Go." Then wait.' every cut but the whole line fails: '"Stop."', '"Go."',
+  '"Stop." "Go."' and "Then wait."), markup such as "**", a code span, a single quote, or a non-ASCII
+  capital such as "\u00c9"; a sentence that ends inside single quotes and the sentence after it ("Then
+  wait." after "'Stop.' "); a sentence after a bare '?' or '!' that starts with a lower-case word, and the
+  sentence before it ("Is it gzip or zstd?" and "zstd is the default." from "Is it gzip or zstd? zstd is
+  the default."); a sentence after a bare sentence end that starts with an opener, and the sentence before
+  it ("Run it." and "`make check` must pass." from "Run it. `make check` must pass."), and so a whole
+  quoted or bracketed sentence there and the sentence after it too (in "Run the suite. (Optional.) Then
+  wait." every cut but the whole line fails); a quoted or bracketed sentence with whitespace between its
+  sentence end and its closer, and the sentence after it ('"Stop. "' and "Then wait." from '"Stop. " Then
+  wait.', with a space or a line break in the gap); a sentence that ends inside a code span and the
+  sentence after it ("Then wait." after "Type `exit.` "); a whole sentence inside a quotation or bracket
+  ("Rotate them." from 'He wrote: "Keep logs. Rotate them."'); a sentence after a sentence end and a
+  closer that closes nothing ("Then wait." after "Stop.) "), or a closing quote that is text inside
+  another quotation ("Then wait." after '"He said stop.\u201d" '); and every edge after an opener left
+  unclosed in its paragraph, such as an inch mark ('Use a 3" pipe.'), a stray backtick ("Use the ` key.")
+  or a half-open interval ("Keep values in [0, 1)."). The gate refuses such a row rather than guess; the
+  row is rewritten to a whole sentence, or the source gains a blank line or a ';'.
 
   `.aiqt/core/id-history.toml` (7.3), the pack-owned, append-only, cumulative register of every corpus-id
   AND clause-id ever assigned. Three arrays:
@@ -47,7 +140,8 @@ LEGS (all run at the default step-1 invocation; none needs a manifest):
                         byte-exact substring within that window, beginning on start-line and ending on
                         end-line (a tight window); the source digest is the SHA-256 of the whole source
                         file. Zero or more than one occurrence, an untight occurrence, an empty
-                        canonical-text, or a digest disagreement is a FAIL.
+                        canonical-text, an edge that is not a whole-sentence or whole-clause edge of
+                        the source file (a truncated text), or a digest disagreement is a FAIL.
   CUMULATIVE-MAX (7.1): each ordinal newly assigned this release (a born row at the newest release in the
                         register) strictly EXCEEDS the cumulative maximum ordinal EVER used for that
                         corpus-id, taken from the register's born rows (which persist for dead ids too), so
@@ -92,11 +186,16 @@ Exit convention (matches the repo's gates):
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: check_clauses.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: check_clauses.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 import hashlib
 import io
@@ -107,10 +206,15 @@ from pathlib import Path
 try:
     import tomllib
 except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships tomllib
-    sys.stderr.write(
-        "error: check_clauses.py cannot import tomllib, part of the Python standard library; "
-        "this installation is incomplete. Nothing was run (cannot evaluate).\n")
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: check_clauses.py cannot import tomllib, part of the Python standard library; "
+            "this installation is incomplete. Nothing was run (cannot evaluate).\n")
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml  # noqa: E402
@@ -538,6 +642,161 @@ def _span_content(text, start, end):
     return "\n".join(lines[start - 1:end])
 
 
+SENTENCE_ENDS = ".?!"  # a sentence end
+CLAUSE_SEPARATOR = ";"  # the one separator that closes a whole clause (a ':' never does)
+QUOTE_PAIRS = {"\u201c": "\u201d", '"': '"'}  # double quotes, curly and straight: opener -> closer
+BRACKET_PAIRS = {"(": ")", "[": "]", "{": "}"}  # opener -> closer
+_ENDING_RE = re.compile(r"[{}](?P<closers>[{}]*)\Z".format(
+    re.escape(SENTENCE_ENDS), re.escape("".join(QUOTE_PAIRS.values()) + "".join(BRACKET_PAIRS.values()))))
+# what may follow a sentence end that closing quotes or brackets follow: an ASCII capital only, the one
+# plain start of a new sentence (a digit or another opener may go on with the same sentence, as in
+# '"Stop." 3 times in a row halts' or '"Stop." (the default) halts'); the paragraph or file end is
+# handled before this test
+_NEXT_START_RE = re.compile(r"[A-Z]")
+CODE_MARK = "`"  # a run of backticks opens an inline code span; the next run of the same length closes it
+_CODE_RUN_RE = re.compile("`+")
+# what may not follow a BARE sentence end (one with no closer): an opener the enclosure scan pairs, a
+# double quote, a bracket or a backtick ('Stop. (with no other words) is the command'), and, after a '?'
+# or '!' only, a lower-case ASCII letter ('Ask why? before you delete'); a '.' before a lower-case word
+# stays a sentence end, since a sentence may start with a command name ('in it. git checkout -- <path>')
+_BARE_GOES_ON_RE = re.compile("[{}]".format(
+    re.escape("".join(QUOTE_PAIRS) + "".join(BRACKET_PAIRS) + CODE_MARK)))
+LOWER_CASE_ENDS = "?!"
+_LOWER_START_RE = re.compile(r"[a-z]")
+_PARAGRAPH_GAP_RE = re.compile(r"\n\s*\n")
+
+
+def _paragraph_start(source, pos):
+    """The index where pos's paragraph begins: just after the last blank line before pos, or 0."""
+    start = 0
+    for gap in _PARAGRAPH_GAP_RE.finditer(source, 0, pos):
+        start = gap.end()
+    return start
+
+
+def _enclosures(source, pos):
+    """Scan pos's paragraph of the whole source from its start up to pos for inline code spans, double
+    quotes and brackets. Returns (open, closed): open is the list of (opener, index) still open at pos,
+    innermost last (its length is pos's enclosure depth), and closed maps the index of each closer that
+    closed an enclosure to its opener's index. A run of backticks opens an inline code span and the next
+    run of the same length closes it; inside a code span every other character is text, and a code span
+    opens inside a quotation or bracket too. A straight double quote closes an open straight quote on top
+    and otherwise opens one; a curly opening quote opens and a curly closing quote closes an open curly
+    quote on top. Inside a quotation a bracket is text; outside one a bracket opener opens and a bracket
+    closer closes the same kind on top. Any other closer (one with no matching opener on top) is text, so a
+    lettered list marker ("a) build") or a ")" in a quoted literal never counts, while an opener left
+    unclosed (an inch mark, a stray backtick, a half-open interval "[0, 1)") holds the rest of its
+    paragraph inside an enclosure."""
+    stack, closed = [], {}
+    i = _paragraph_start(source, pos)
+    while i < pos:
+        ch = source[i]
+        top = stack[-1][0] if stack else None
+        if ch == CODE_MARK:
+            run = _CODE_RUN_RE.match(source, i).group()
+            if top == run:
+                closed[i] = stack.pop()[1]
+            elif top is None or top[0] != CODE_MARK:
+                stack.append((run, i))
+            i += len(run)
+            continue
+        if top is not None and top[0] == CODE_MARK:
+            pass  # inside a code span every other character is text
+        elif top is not None and ch == QUOTE_PAIRS.get(top):
+            closed[i] = stack.pop()[1]
+        elif ch in QUOTE_PAIRS:
+            stack.append((ch, i))
+        elif any(opener in QUOTE_PAIRS for opener, _at in stack):
+            pass  # inside a quotation a bracket is text
+        elif ch in BRACKET_PAIRS:
+            stack.append((ch, i))
+        elif top is not None and ch == BRACKET_PAIRS.get(top):
+            closed[i] = stack.pop()[1]
+        i += 1
+    return stack, closed
+
+
+def _quoted_text(source, i):
+    """True when the bracket closer at index i is text inside a quotation, as _enclosures reads it."""
+    still_open, _closed = _enclosures(source, i)
+    return source[i] in BRACKET_PAIRS.values() and any(opener in QUOTE_PAIRS for opener, _at in still_open)
+
+
+def _is_boundary(source, pos):
+    """True when position pos of the whole decoded source file is a sentence or clause boundary: the ONE
+    WHOLE-CLAUSE EDGES grammar, used for a text's leading and trailing edge alike. pos is a boundary when
+    (c) it is at the start or end of the file, or a blank line touches it (a paragraph or file edge; a
+    single line break is never enough, so a row cannot drop a wrapped line); (a) whitespace sits at pos
+    and the text before it, ignoring whitespace, ends with one of . ? ! either bare, where then the text
+    after pos, ignoring whitespace, begins with no opener (a double quote, a bracket or a backtick) and,
+    after a '?' or '!', with no lower-case ASCII letter (the sentence may go on there, as in 'Stop. (with
+    no other words) is' and 'Ask why? before'; a '.' before a lower-case word stays an end, since a
+    sentence may start with a command name), or followed directly by closing quotes or brackets, where
+    then the text after pos, ignoring whitespace, begins with an ASCII capital (a new sentence plainly
+    starts; a digit, another opener or a closer may go on with the same one), each closer either closes an
+    enclosure or is a bracket that is text inside a quotation (as _enclosures reads it), the last closer
+    closes one, and the outermost closed enclosure's opener itself sits at such a boundary (a sentence end
+    inside a quotation or bracket that opened mid-sentence, or a quoted or bracketed sentence that a
+    longer sentence goes on from, is no boundary); (b) whitespace sits at pos and the text before it ends
+    with ';'; or it sits directly before a ';' that whitespace follows. A comma or a colon is never a
+    boundary.
+    Enclosure DEPTH, including an inline code span, is judged separately (_edge_findings): this is the
+    boundary test alone."""
+    while True:
+        left, right = source[:pos], source[pos:]
+        kept, rest = left.rstrip(), right.lstrip()
+        gap = left[len(kept):] + right[:len(right) - len(rest)]
+        if not kept or not rest or gap.count("\n") >= 2:
+            return True
+        if right[:1] == CLAUSE_SEPARATOR and right[1:2].isspace():
+            return True
+        if not gap:
+            return False
+        if kept.endswith(CLAUSE_SEPARATOR):
+            return True
+        ending = _ENDING_RE.search(kept)
+        if ending is None:
+            return False
+        closers = ending.group("closers")
+        if not closers:
+            # a bare end: the sentence goes on before an opener, or before a lower-case word after '?' or '!'
+            return not (_BARE_GOES_ON_RE.match(rest)
+                        or (kept[-1] in LOWER_CASE_ENDS and _LOWER_START_RE.match(rest)))
+        if not _NEXT_START_RE.match(rest):
+            return False  # the sentence goes on after the closer ('"Done." is printed')
+        _open, closed = _enclosures(source, len(kept))
+        if any(i not in closed and not _quoted_text(source, i)
+               for i in range(len(kept) - len(closers), len(kept))):
+            return False  # a closer that closes nothing here (a single quote, or a stray closer)
+        if len(kept) - 1 not in closed:
+            return False  # the last closer is a bracket inside a quotation still open
+        pos = closed[len(kept) - 1]  # the outermost enclosure's opener must itself sit at a boundary
+
+
+def _edge_findings(source, begin, finish):
+    """WHOLE-CLAUSE EDGES (Model C). source is the whole decoded source file and [begin, finish) is the
+    one occurrence of a canonical-text in it (non-empty, no edge whitespace). Returns a list of edge
+    problems, empty when both edges are sentence or clause boundaries of the file (_is_boundary) and both
+    sit at enclosure depth 0 of the SOURCE (_enclosures, scanned from the edge's paragraph start), so any
+    quotation or bracket the text touches at an edge is one it contains whole. Judged on the file, not the
+    window or the text alone, so an edge at a line end or line start is checked against the next or
+    previous line too, and an enclosure dropped at both edges is seen. Anything else is a cut inside a
+    sentence, a clause, a quotation or a bracket (a truncated text), or one of the disclosed fail-closed
+    over-fires."""
+    problems = []
+    if not _is_boundary(source, begin):
+        problems.append("begins inside a clause (after {!r})".format(source[max(0, begin - 20):begin]))
+    if not _is_boundary(source, finish):
+        problems.append("ends inside a clause (before {!r})".format(source[finish:finish + 20]))
+    for name, pos in (("begins", begin), ("ends", finish)):
+        still_open, _closed = _enclosures(source, pos)
+        if still_open:
+            opener, at = still_open[-1]
+            problems.append("{} inside a quotation, bracket or code span (the {!r} opened after {!r})".format(
+                name, opener, source[max(0, at - 20):at]))
+    return problems
+
+
 def check_rows(root, rows, manifest_sources, rule_sources, rules_dir):
     """PER-ROW (7.2), Model C. For each row: the source file is read (its whole raw bytes hashed for the
     digest and its text sliced for the window); the [start,end] block resolves inside the file and is
@@ -550,7 +809,9 @@ def check_rows(root, rows, manifest_sources, rule_sources, rules_dir):
     finding (an out-of-rules-dir or wrong-file path). An empty or whitespace-only canonical-text never
     passes, and a canonical-text that begins or ends with whitespace is a finding (a leading or trailing
     space, tab, or newline would otherwise falsely satisfy the tight begin/end-line check). Zero or more
-    than one occurrence, an untight occurrence, or a digest disagreement is a finding. When manifest_sources
+    than one occurrence, an untight occurrence, an occurrence whose edges are not whole-sentence or
+    whole-clause edges of the source file (_edge_findings: a truncated canonical-text), or a digest
+    disagreement is a finding. When manifest_sources
     is not None (the DEFERRED leg armed) the digest is also cross-checked against the manifest's SOURCES
     entry. Returns a list of finding strings; a required field of the wrong type, including a non-integer or
     boolean start-line/end-line or a source-digest that is not 64 lowercase hex characters, is a GateError
@@ -645,6 +906,13 @@ def check_rows(root, rows, manifest_sources, rule_sources, rules_dir):
                     findings.append("{}: canonical-text resolves inside the window but does not begin on "
                                     "start-line and end on end-line (window not tight) in {}"
                                     .format(where, source_path))
+                window_at = len("\n".join(decoded.split("\n")[:start - 1])) + (1 if start > 1 else 0)
+                problems = _edge_findings(decoded, window_at + first, window_at + first + len(text_field))
+                if problems:
+                    findings.append("{}: canonical-text {} in {}; a canonical-text begins and ends at a "
+                                    "sentence or clause boundary outside any quotation or bracket, so "
+                                    "this is a truncated row or a shape the edge grammar refuses (see "
+                                    "WHOLE-CLAUSE EDGES)".format(where, " and ".join(problems), source_path))
         if digest_field != digest:
             findings.append("{}: source-digest does not match the SHA-256 of {}".format(where, source_path))
         try:
@@ -768,14 +1036,20 @@ def _canon(lines):
     return "\n".join(lines) + "\n"
 
 
-def _rule_lines(corpus_id, obligations):
+def _rule_lines(corpus_id, obligations, paragraphs=True):
     """A tiny canonical rule source: frontmatter carrying corpus-id, then one body line per obligation.
     Returns (lines, {ordinal_index -> 1-based body line number}). Obligations are placed on their own
-    lines so each clause span is a single line, keeping fixtures trivially verifiable."""
+    lines so each clause span is a single line, keeping fixtures trivially verifiable. With paragraphs
+    (the default) a blank line precedes each obligation, so each is a whole paragraph and its edges are
+    whole-clause edges; paragraphs=False keeps the obligation lines adjacent, for a multi-line span."""
     lines = ["---", "corpus-id: {}".format(corpus_id), "origin: pack", "slug: fixture", "---", "",
              "# Fixture rule"]
+    if not paragraphs:
+        lines.append("")
     line_of = {}
     for idx, text in enumerate(obligations):
+        if paragraphs:
+            lines.append("")
         lines.append(text)
         line_of[idx] = len(lines)  # 1-based line number of this obligation
     return lines, line_of
@@ -1010,12 +1284,12 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
                                  list(born), list(tombstones), list(successors))
             return base
 
-        def _model_c_case(corpus, obligations, clause_text, start_off, end_off):
+        def _model_c_case(corpus, obligations, clause_text, start_off, end_off, paragraphs=True):
             """Build a one-corpus, one-clause genesis corpus whose single row spans the obligation lines
             [start_off, end_off] (0-based indices into obligations) with canonical-text clause_text, then
             run the gate under --genesis and return its exit code. Exercises the Model C window/substring
-            resolution for a sub-line or multi-line obligation."""
-            lines, line_of = _rule_lines(corpus, obligations)
+            resolution for a sub-line or multi-line obligation (paragraphs=False for adjacent lines)."""
+            lines, line_of = _rule_lines(corpus, obligations, paragraphs)
             digest = _sha_of(lines)
             clause_id = "{}.1".format(corpus)
             row = {"clause-id": clause_id, "corpus-id": corpus,
@@ -1199,7 +1473,8 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
             # (15) Model C multi-line obligation: canonical-text carries an embedded line-wrap LF and spans
             # two source lines, in a tight 2-line window -> PASS (verifies the LF round-trips through TOML).
             if _model_c_case("cmulti", ["first half of the obligation", "second half of the obligation"],
-                             "first half of the obligation\nsecond half of the obligation", 0, 1) != 0:
+                             "first half of the obligation\nsecond half of the obligation", 0, 1,
+                             paragraphs=False) != 0:
                 failures.append("Model C multi-line embedded-LF obligation: expected exit 0")
 
             # (16) Model C canonical-text absent from its window -> FAIL.
@@ -1212,9 +1487,13 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
                 failures.append("Model C canonical-text occurring twice in window: expected exit 1")
 
             # (18) Model C window too wide: the occurrence is present but does not begin on start-line (a
-            # noise line precedes it inside the 3-line window) -> FAIL on tightness.
-            if _model_c_case("cwidew", ["noise before", "the obligation", "noise after"],
-                             "the obligation", 0, 2) != 1:
+            # whole noise sentence precedes it inside the oversized 3-line window) -> FAIL on tightness.
+            # Every line is a whole sentence, so the text's edges are clean sentence boundaries and only the
+            # tightness check can refuse it; the same text in its tight 1-line window passes.
+            wide = ["A noise sentence comes before.", "The obligation holds.", "A noise sentence follows."]
+            if _model_c_case("cwidet", wide, "The obligation holds.", 1, 1, paragraphs=False) != 0:
+                failures.append("Model C tight window over whole sentences: expected exit 0")
+            if _model_c_case("cwidew", wide, "The obligation holds.", 0, 2, paragraphs=False) != 1:
                 failures.append("Model C window not tight: expected exit 1")
 
             # (19) Model C empty canonical-text: an empty string trivially substring-matches, so the gate
@@ -1245,13 +1524,13 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
             # (21) tightness: a TRAILING newline in canonical-text no longer falsely satisfies end-on-end
             # (before the fix "actual obligation\n" spanning lines 8-9 passed) -> exit 1.
             if _model_c_case("ctailn", ["actual obligation", "noise"],
-                             "actual obligation\n", 0, 1) != 1:
+                             "actual obligation\n", 0, 1, paragraphs=False) != 1:
                 failures.append("tightness trailing-newline canonical-text: expected exit 1")
 
             # (22) tightness: a LEADING newline in canonical-text no longer falsely satisfies begin-on-start
             # -> exit 1.
             if _model_c_case("cleadn", ["noise", "actual obligation"],
-                             "\nactual obligation", 0, 1) != 1:
+                             "\nactual obligation", 0, 1, paragraphs=False) != 1:
                 failures.append("tightness leading-newline canonical-text: expected exit 1")
 
             # (23) source-path outside the rules dir now FAILS. The row points at a copy under .aiqt/ (not
@@ -1372,6 +1651,476 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
             base = _fresh({"cshare": lines}, shared, born)
             if _run_quiet(**_paths(base, genesis=True)) != 0:
                 failures.append("legitimate shared-window rows: expected exit 0")
+
+            # (50) WHOLE-CLAUSE EDGES: a canonical-text cut short inside a clause FAILS. Before the fix the
+            # window was checked by line, not by character, so each of these passed (exit 0). The first is
+            # the reported vector: only the final '.' removed, the cut inside the last line of the window.
+            stop = "Every pause is continuation, not a stop."
+            if _model_c_case("ctrnc1", [stop + " A later sentence follows."], stop, 0, 0) != 0:
+                failures.append("whole-clause edges, the whole sentence: expected exit 0")
+            if _model_c_case("ctrnc2", [stop + " A later sentence follows."], stop[:-1], 0, 0) != 1:
+                failures.append("whole-clause edges, final '.' dropped inside the line: expected exit 1")
+            if _model_c_case("ctrnc3", [stop], stop[:-1], 0, 0) != 1:
+                failures.append("whole-clause edges, final '.' dropped at the window end: expected exit 1")
+            if _model_c_case("ctrnc4", [stop], "Every pause is continuation, not a", 0, 0) != 1:
+                failures.append("whole-clause edges, last word dropped: expected exit 1")
+            if _model_c_case("ctrnc5", [stop], "Every pause is continuation", 0, 0) != 1:
+                failures.append("whole-clause edges, cut at a comma with no conjunction: expected exit 1")
+            if _model_c_case("ctrnc6", ["A first sentence ends. " + stop], stop[1:], 0, 0) != 1:
+                failures.append("whole-clause edges, first character dropped: expected exit 1")
+            # A dropped wrapped line with end-line moved up with it: the window is whole lines and tight,
+            # but the sentence continues on the next source line -> FAIL.
+            if _model_c_case("ctrnc7", ["Every pause is continuation and", "never a stop."],
+                             "Every pause is continuation and", 0, 0, paragraphs=False) != 1:
+                failures.append("whole-clause edges, wrapped last line dropped: expected exit 1")
+
+            # (51) WHOLE-CLAUSE EDGES: the legitimate clause splits PASS (exit 0): a split before ';' and after
+            # it (the clause after it keeping its own "and", the kltwat.3 shape), a second such split, a
+            # sentence after a sentence end on the same line, and two clause-ids that carry one identical
+            # whole sentence joined by ", and" (the tmrrst.4 / tmrrst.5 shape: a comma is never a boundary,
+            # so two obligations in one ", and" sentence share its whole text).
+            lines, line_of = _rule_lines("csplit", [
+                "Alpha holds the lease; and beta waits for it; gamma logs the wait.",
+                "Two steps hold; delta tests the build. Epsilon ships it.",
+                "Zeta keeps the lock, and eta logs it."])
+            digest = _sha_of(lines)
+            sp = ".aiqt/core/rules/csplit.md"
+            split_rows = []
+            for ordinal, (off, text) in enumerate(((0, "Alpha holds the lease"), (0, "and beta waits for it"),
+                                                   (0, "gamma logs the wait."), (1, "Two steps hold"),
+                                                   (1, "delta tests the build."), (1, "Epsilon ships it."),
+                                                   (2, "Zeta keeps the lock, and eta logs it."),
+                                                   (2, "Zeta keeps the lock, and eta logs it.")), 1):
+                split_rows.append({"clause-id": "csplit.{}".format(ordinal), "corpus-id": "csplit",
+                                   "source-path": sp, "start-line": line_of[off], "end-line": line_of[off],
+                                   "canonical-text": text, "source-digest": digest})
+            born = [("csplit", "1.1.0")] + [("csplit.{}".format(k), "1.1.0") for k in range(1, 9)]
+            base = _fresh({"csplit": lines}, split_rows, born)
+            if _run_quiet(**_paths(base, genesis=True)) != 0:
+                failures.append("whole-clause edges, legitimate clause splits: expected exit 0")
+
+            # (52) WHOLE-CLAUSE EDGES at a line start: the start-line edge is judged against the previous
+            # line, so a row that begins at the start of its line PASSES only when the sentence before it
+            # has ended. The FAIL case is the shape a whole-line overwrite leaves: the tail of the earlier
+            # sentence ("figures.") sat on the row's start-line and was overwritten with it, so the earlier
+            # sentence now runs straight into the row -> exit 1.
+            pinned = "A count is pinned to its predicate."
+            if _model_c_case("cline1", ["The earlier sentence yields two", "figures. " + pinned],
+                             pinned, 1, 1, paragraphs=False) != 0:
+                failures.append("whole-clause edges, a row after a sentence end on its own line: expected "
+                                "exit 0")
+            if _model_c_case("cline2", ["The earlier sentence yields two", pinned],
+                             pinned, 1, 1, paragraphs=False) != 1:
+                failures.append("whole-clause edges, a row at a line start after an unended sentence: "
+                                "expected exit 1")
+
+            # (53) WHOLE-CLAUSE EDGES: one vector per round-1 reproduction and per sub-predicate of the
+            # boundary grammar and the pairing check. Each row is (corpus, obligation lines, canonical-text,
+            # first and last obligation index, paragraphs, expected exit, label); removing or loosening any
+            # sub-predicate makes at least one row here, or in (50) to (52), disagree.
+            acc = "Keep accuracy, integrity, and trust."
+            phrase = 'The phrase "Stop. Go." is printed.'
+            gain = ["A gain in progress, speed, or cost never justifies any loss on the AIQT", "tier."]
+            dirs = "Never delete files, directories, or branches."
+            count = "Record the count, the unit, and the predicate."
+            v15 = "Version v1.5 holds."
+            curly = "The phrase \u201cStop. Go.\u201d is printed."
+            quoted = '"Alpha must retain records." Beta waits.'
+            bracketed = "(Alpha must retain records.) Beta waits."
+            lead3 = "Three things are never deleted: files, directories, and branches."
+            never = "Never do the following: delete a branch."
+            trig = ["A wind-down, or a turn handed back to the human, happens only on a named, "
+                    "externally-observable",
+                    "trigger: the task is complete; a human has explicitly stopped, paused, or changed the mode."]
+            why = 'Ask "why?" before you delete anything.'
+            edge_vectors = [
+                # round 1 (review A, finding 1): a cut inside a list or a quotation fails
+                ("wcx001", [acc], "trust.", 0, 0, True, 1, "list tail after ', and'"),
+                ("wcx002", [acc], "Keep accuracy, integrity", 0, 0, True, 1, "list head before ', and'"),
+                ("wcx003", [phrase], 'Go." is printed.', 0, 0, True, 1, "a cut inside a quotation"),
+                # round 1 (review A, finding 2): whole quoted and bracketed sentences pass
+                ("wcx004", [quoted], '"Alpha must retain records."', 0, 0, True, 0, "a whole quoted sentence"),
+                ("wcx005", [quoted], "Beta waits.", 0, 0, True, 0, "a sentence after a quoted one"),
+                ("wcx006", [bracketed], "(Alpha must retain records.)", 0, 0, True, 0,
+                 "a whole bracketed sentence"),
+                ("wcx007", [bracketed], "Beta waits.", 0, 0, True, 0, "a sentence after a bracketed one"),
+                # round 1 (review B, finding 1): a cut at ', or' / ', and' inside a list fails (prjint1.1)
+                ("wcl001", gain, "speed, or cost never justifies any loss on the AIQT\ntier.", 0, 1, False, 1,
+                 "a start inside a list"),
+                ("wcl002", gain, "or cost never justifies any loss on the AIQT\ntier.", 0, 1, False, 1,
+                 "a start at ', or' inside a list"),
+                ("wcl003", gain, "A gain in progress, speed", 0, 0, False, 1, "the subject alone"),
+                ("wcl004", gain, "\n".join(gain), 0, 1, False, 0, "the whole wrapped sentence"),
+                ("wcl005", [dirs], "Never delete files, directories", 0, 0, True, 1, "an end before ', or'"),
+                ("wcl006", [dirs], "or branches.", 0, 0, True, 1, "a start at ', or'"),
+                ("wcl007", [count], "Record the count, the unit", 0, 0, True, 1, "an end before ', and'"),
+                # round 1 (review B, finding 3): mutants M2 to M5 each meet a FAIL vector
+                ("wcm002", [stop], "not a stop.", 0, 0, True, 1, "a start after a plain comma"),
+                ("wcm003", ["Alpha holds the lease, then beta waits."], "beta waits.", 0, 0, True, 1,
+                 "a start after ', <word> '"),
+                ("wcm004", [v15], "5 holds.", 0, 0, True, 1, "a start after '.' with no space"),
+                ("wcm005", [v15], "Version v1.", 0, 0, True, 1, "an end on '.' with no following space"),
+                # round 2 (review A, finding 1): a colon is never a boundary, so a cut at a colon fails; the
+                # round-1 colon-split and mid-sentence quote-end vectors are flipped to FAIL (disclosed
+                # over-fires where the text is a whole obligation)
+                ("wcn001", ["Rule: never push to main."], "never push to main.", 0, 0, True, 1,
+                 "a start after ': '"),
+                ("wcn002", ["Never do these:", "- push to main"], "Never do these:", 0, 0, False, 1,
+                 "a lead-in that ends on ':'"),
+                ("wcn003", ['Say "stop." Then wait.'], 'Say "stop."', 0, 0, True, 1,
+                 "an end on a quote opened mid-sentence"),
+                ("wcn004", ["Stop (always.) Then wait."], "Stop (always.)", 0, 0, True, 1,
+                 "an end on a ')' opened mid-sentence"),
+                ("wcn005", [lead3], "files, directories, and branches.", 0, 0, True, 1, "a list after ': '"),
+                ("wcn006", [lead3], "Three things are never deleted:", 0, 0, True, 1, "a lead-in ending on ':'"),
+                ("wcn007", [never], "delete a branch.", 0, 0, True, 1, "a reversed obligation after ': '"),
+                ("wcn008", [never], "Never do the following", 0, 0, True, 1, "a lead-in before ': '"),
+                ("wcn009", trig, trig[0] + "\ntrigger", 0, 1, False, 1, "the cntdef.3 lead-in without its list"),
+                ("wcn010", trig, "the task is complete;", 1, 1, False, 1, "the cntdef.3 first trigger alone"),
+                # round 2 (review B, finding 1, and review A, finding 2): enclosure depth is judged from the
+                # source paragraph, so a fragment from inside a quotation or bracket fails, and a sentence end
+                # inside one that opened mid-sentence is no boundary
+                ("wen001", ['The phrase "Stop. Go. Wait." is printed.'], "Go.", 0, 0, True, 1,
+                 "a sentence inside a quotation"),
+                ("wen002", ["Keep logs (Stop. Go. Wait.) for audit."], "Go.", 0, 0, True, 1,
+                 "a sentence inside a bracket"),
+                ("wen003", ['Print "Stop. Go." then "Wait. Stay." now.'], 'Go." then "Wait.', 0, 0, True, 1,
+                 "a cut across two quotations"),
+                ("wen004", [phrase], "is printed.", 0, 0, True, 1, "a start after a mid-sentence quotation"),
+                ("wen005", [phrase], 'The phrase "Stop. Go."', 0, 0, True, 1,
+                 "an end on a mid-sentence quotation"),
+                ("wen006", [curly], "is printed.", 0, 0, True, 1, "a start after a mid-sentence curly quotation"),
+                ("wen007", ["Keep logs (Stop. Go.) for audit."], "for audit.", 0, 0, True, 1,
+                 "a start after a mid-sentence bracket"),
+                ("wen008", ["Keep logs (Stop. Go.) for audit."], "Keep logs (Stop. Go.)", 0, 0, True, 1,
+                 "an end on a mid-sentence bracket"),
+                ("wen009", [why], "before you delete anything.", 0, 0, True, 1, "a start after a quoted '?'"),
+                ("wen010", [why], 'Ask "why?"', 0, 0, True, 1, "an end on a quoted '?'"),
+                ("wen011", ["Delete the branch (after review!) and tag it."], "and tag it.", 0, 0, True, 1,
+                 "a start after a bracketed '!'"),
+                ("wen012", ['Print "A. B." and "C. D." now.'], 'B." and "C.', 0, 0, True, 1,
+                 "a cut across two straight quotations with an even quote count"),
+                ("wen013", ["Keep (alpha; beta) waiting."], "beta) waiting.", 0, 0, True, 1,
+                 "a start after a ';' inside a bracket"),
+                ("wen014", ['Print the character ")". Then wait.'], 'Print the character ")".', 0, 0, True, 0,
+                 "a closing bracket inside a quoted literal"),
+                ("wen015", ['Print the character "(". Then wait.'], "Then wait.", 0, 0, True, 0,
+                 "an opening bracket inside a quoted literal is text"),
+                ("wen016", ["Steps: a) build, b) test."], "Steps: a) build, b) test.", 0, 0, True, 0,
+                 "a closer with no opener is text"),
+                ("wen017", ['Use a 3" pipe.', "Keep the log."], "Keep the log.", 1, 1, True, 0,
+                 "an enclosure is scanned from its own paragraph start"),
+                ("wen018", ['"Stop." "Go." Then wait.'], "Then wait.", 0, 0, True, 1,
+                 "a start after two whole quoted sentences (a disclosed over-fire since round 4)"),
+                ("wen019", ['("Stop.") Then wait.'], "Then wait.", 0, 0, True, 0,
+                 "a start after nested enclosures, judged at the outermost opener"),
+                # the boundary sub-predicates
+                ("wsp001", ["Is it pinned? Then record it! Then stop."], "Then record it!", 0, 0, True, 0,
+                 "a start after '?' and an end on '!'"),
+                ("wsp002", ["Alpha holds the lease; beta waits."], "Alpha holds the lease;", 0, 0, True, 0,
+                 "an end on ';'"),
+                ("wsp003", ["Two steps hold: delta tests the build."], "Two steps hold", 0, 0, True, 1,
+                 "an end before ': '"),
+                ("wsp004", ["Fetch it from https://example.org today."], "Fetch it from https", 0, 0, True, 1,
+                 "an end before a ':' with no whitespace after it"),
+                ("wsp007", ["Alpha holds the lease ; beta waits."], "Alpha holds the lease", 0, 0, True, 1,
+                 "an end with whitespace before a ';' (the ';' is not directly ahead)"),
+                ("wsp008", ["Alpha holds the lease ; beta waits."], "Alpha holds the lease ;", 0, 0, True, 0,
+                 "an end on a ';' after whitespace"),
+                ("wsp009", ["Set x;y to zero."], "Set x", 0, 0, True, 1,
+                 "an end before a ';' with no whitespace after it"),
+                ("wsp005", ["Keep the log", "Rotate it weekly."], "Keep the log", 0, 0, True, 0,
+                 "an end at a paragraph edge with no ending"),
+                ("wsp006", ["Keep the log"], "Keep the log", 0, 0, True, 0, "an end at the file edge"),
+                # the pairing check, for each quote and bracket kind
+                ("wpr001", [curly], "Go.\u201d is printed.", 0, 0, True, 1, "an unopened curly quote"),
+                ("wpr002", [curly], "The phrase \u201cStop.", 0, 0, True, 1, "an unclosed curly quote"),
+                ("wpr003", ["Keep logs (Stop. Go.) for audit."], "Go.) for audit.", 0, 0, True, 1,
+                 "an unopened ')'"),
+                ("wpr004", ["Keep logs (Stop. Go.) for audit."], "Keep logs (Stop.", 0, 0, True, 1,
+                 "an unclosed '('"),
+                ("wpr005", ["Keep logs [Stop. Go.] for audit."], "Go.] for audit.", 0, 0, True, 1,
+                 "an unopened ']'"),
+                ("wpr006", ["Keep logs {Stop. Go.} for audit."], "Go.} for audit.", 0, 0, True, 1,
+                 "an unopened brace"),
+                ("wpr007", ["Note (one] holds."], "Note (one] holds.", 0, 0, True, 1, "a mismatched pair"),
+                # the disclosed fail-closed over-fires are refused (exit 1), never guessed at
+                ("wof001", ["Never do these:", "- push to main.", "- delete no branch."], "push to main.", 1, 1,
+                 False, 1, "a bullet item without its marker"),
+                ("wof002", ["**Note.** Never push to main."], "Never push to main.", 0, 0, True, 1,
+                 "a text after a bold lead-in"),
+                ("wof003", ["## Heading", "Never push to main."], "Never push to main.", 1, 1, False, 1,
+                 "a row right after a heading line"),
+                ("wof004", ["Alpha holds, and beta waits."], "Alpha holds,", 0, 0, True, 1,
+                 "a text that ends on a comma"),
+                ("wof005", ["Keep values in [0, 1). Then wait."], "Keep values in [0, 1).", 0, 0, True, 1,
+                 "a half-open interval leaves its bracket open"),
+                ("wof006", ['Use a 3" pipe.'], 'Use a 3" pipe.', 0, 0, True, 1,
+                 "an inch mark leaves a quotation open"),
+                ("wof007", ["**Never push to main.**"], "Never push to main.", 0, 0, True, 1,
+                 "a whole bold sentence without its markup"),
+                ("wof008", ['He wrote: "Keep logs. Rotate them."'], "Rotate them.", 0, 0, True, 1,
+                 "a whole sentence inside a quotation"),
+                ("wof009", ["Say 'stop.' Then wait."], "Then wait.", 0, 0, True, 1,
+                 "a start after a single-quoted sentence end"),
+                ("wof010", ["Stop.) Then wait."], "Then wait.", 0, 0, True, 1,
+                 "a start after a sentence end and a closer that closes nothing"),
+                # the disclosed residuals still pass (exit 0); a fix updates both the docstring and these
+                ("wrs001", ["Record the city, region; the country; and the date."], "the country;", 0, 0,
+                 True, 0,
+                 "a ';' between list items reads as a clause separator"),
+                ("wrs002", ["'Stop. Go.' is printed."], "Go.' is printed.", 0, 0, True, 0,
+                 "a cut inside a single-quoted sentence"),
+                # round 3 (review A, finding 1): a quoted or bracketed sentence that a longer sentence goes on
+                # from is no sentence end, so a cut at either side of it fails; the next sentence must start
+                # with an ASCII capital (since round 4; a digit or an opener no longer counts, see below)
+                ("wqs001", ['"Never delete." does not apply to scratch files.'], '"Never delete."', 0, 0, True, 1,
+                 "an end on a quoted sentence a longer sentence goes on from"),
+                ("wqs002", ['"Done." is printed only after the work is verified.'],
+                 "is printed only after the work is verified.", 0, 0, True, 1,
+                 "a start after a quoted sentence a longer sentence goes on from"),
+                ("wqs003", ['Run the suite. "Done." is printed only after it passes.'],
+                 "is printed only after it passes.", 0, 0, True, 1, "a start after a mid-paragraph quoted subject"),
+                ("wqs004", ['Run the suite. "Done." is printed only after it passes.'], 'Run the suite. "Done."', 0,
+                 0, True, 1, "an end on a mid-paragraph quoted subject"),
+                ("wqs005", ["(Optional.) is never a valid label for a mandatory step."],
+                 "is never a valid label for a mandatory step.", 0, 0, True, 1,
+                 "a start after a bracketed subject"),
+                ("wqs006", ["\u201cStop.\u201d is the only word that halts a run."],
+                 "is the only word that halts a run.", 0, 0, True, 1, "a start after a curly-quoted subject"),
+                ("wqs007", ['Keep logs; "Rotate weekly!" is the team motto.'], "is the team motto.", 0, 0, True, 1,
+                 "a start after a quoted subject opened at a ';'"),
+                # round 3 (review B, finding 1): a bracket inside a quotation is text to the closer test too
+                ("wqs008", ['"Keep logs (always.)" Then wait.'], '"Keep logs (always.)"', 0, 0, True, 0,
+                 "a whole quoted sentence that ends inside a bracket"),
+                ("wqs009", ['"Keep logs (always.)" Then wait.'], "Then wait.", 0, 0, True, 0,
+                 "a start after a quoted sentence that ends inside a bracket"),
+                # round 4 (reviews A and B): a whole sentence that starts with a digit or an opener after a
+                # quoted one is refused (a disclosed over-fire), since a longer sentence may go on there
+                ("wqs010", ['"Stop." 3 files remain.'], "3 files remain.", 0, 0, True, 1,
+                 "a next sentence that starts with a digit"),
+                ("wqs011", ['"Stop." "Go." Then wait.'], '"Go."', 0, 0, True, 1,
+                 "a next sentence that starts with a straight quote"),
+                ("wqs012", ['"Stop." \u201cGo.\u201d Then wait.'], "\u201cGo.\u201d", 0, 0, True, 1,
+                 "a next sentence that starts with a curly quote"),
+                ("wqs013", ['"Stop." (Go.) Then wait.'], "(Go.)", 0, 0, True, 1,
+                 "a next sentence that starts with '('"),
+                ("wqs014", ['"Stop." [Go.] Then wait.'], "[Go.]", 0, 0, True, 1,
+                 "a next sentence that starts with '['"),
+                ("wqs015", ['"Stop." {Go.} Then wait.'], "{Go.}", 0, 0, True, 1,
+                 "a next sentence that starts with a brace"),
+                ("wqs016", ['"Keep logs (always.) Then wait."'], 'Then wait."', 0, 0, True, 1,
+                 "a start after a bracket inside a quotation still open"),
+                # round 3 (review A, finding 2): an inline code span is an enclosure whose content is text
+                ("wcd001", ["Set `a. b` to on before you deploy."], "b` to on before you deploy.", 0, 0, True, 1,
+                 "a start after a '.' inside a code span"),
+                ("wcd002", ["Use `x ? y : z` in the config."], "y : z` in the config.", 0, 0, True, 1,
+                 "a start after a '?' inside a code span"),
+                ("wcd003", ["Run `make clean; make` before you push."], "make` before you push.", 0, 0, True, 1,
+                 "a start after a ';' inside a code span"),
+                ("wcd004", ["Run `make clean; make` before you push."], "Run `make clean;", 0, 0, True, 1,
+                 "an end on a ';' inside a code span"),
+                ("wcd005", ["Set `a. b` to on before you deploy."], "Set `a. b` to on before you deploy.", 0, 0,
+                 True, 0, "a whole sentence holding a code span"),
+                ("wcd006", ['Type `"` to quote. Then wait.'], "Then wait.", 0, 0, True, 0,
+                 "a quote inside a code span is text"),
+                ("wcd007", ["Type `(` to group. Then wait."], "Then wait.", 0, 0, True, 0,
+                 "a bracket inside a code span is text"),
+                ("wcd008", ["Use ``a ` b`` here. Then wait."], "Then wait.", 0, 0, True, 0,
+                 "a code span closes only at a backtick run of its own length"),
+                ("wcd009", ['"Use `"` here." Then wait.'], "Then wait.", 0, 0, True, 0,
+                 "a code span opens inside a quotation"),
+                ("wcd010", ["(Use `)` here.) Then wait."], "Then wait.", 0, 0, True, 0,
+                 "a code span opens inside a bracket"),
+                # round 3 (review A, findings 3 and 4): the enclosure scan crosses a single line break, and a
+                # straight quote opens inside a curly quotation
+                ("wen020", ['The phrase "Stop.', 'Go. Wait." is printed.'], "Go.", 1, 1, False, 1,
+                 "a sentence inside a quotation that a single line break wraps"),
+                ("wen021", ["Keep logs (Stop.", "Go. Wait.) for audit."], "Go.", 1, 1, False, 1,
+                 "a sentence inside a bracket that a single line break wraps"),
+                ("wen022", ['\u201cHe said "stop. Go.\u201d now. Then wait.'], "now.", 0, 0, True, 1,
+                 "a start inside a straight quote opened inside a curly quotation"),
+                ("wen023", ['\u201cHe said "stop. Go.\u201d Now. Then wait.'], "Now.", 0, 0, True, 1,
+                 "a start inside a straight quote opened inside a curly quotation, capitalised"),
+                # round 3 (review A, finding 5, and review B, finding 2): further disclosed over-fires
+                ("wof011", ["**Never push to main.** Then wait."], "**Never push to main.**", 0, 0, True, 1,
+                 "a whole bold sentence with its markup before more text"),
+                ("wof012", ["*Never push to main.* Then wait."], "*Never push to main.*", 0, 0, True, 1,
+                 "a whole italic sentence with its markup before more text"),
+                ("wof013", ["> Keep the audit log."], "Keep the audit log.", 0, 0, True, 1,
+                 "a text after a blockquote marker"),
+                ("wof014", ["| Keep the audit log. |"], "Keep the audit log.", 0, 0, True, 1,
+                 "a text inside a table cell"),
+                ("wof015", ["Type `exit.` Then wait."], "Then wait.", 0, 0, True, 1,
+                 "a start after a sentence end inside a code span"),
+                ("wof016", ["Use the ` key. Then wait."], "Then wait.", 0, 0, True, 1,
+                 "a stray backtick leaves a code span open"),
+                ("wof017", ['"Stop." **Then** wait.'], '"Stop."', 0, 0, True, 1,
+                 "a whole quoted sentence before a sentence that starts with markup"),
+                ("wof018", ['"Stop." \u00c9tape deux.'], '"Stop."', 0, 0, True, 1,
+                 "a whole quoted sentence before a non-ASCII capital"),
+                ("wof019", ['"He said stop.\u201d" Then wait.'], "Then wait.", 0, 0, True, 1,
+                 "a curly closing quote that is text inside a straight quotation"),
+                ("wof020", ["(Stop.]) Then wait."], "Then wait.", 0, 0, True, 1,
+                 "a stray bracket closer outside a quotation before a closer that closes"),
+                ("wrs003", ['"Stop." CI treats as a hard halt.'], '"Stop."', 0, 0, True, 0,
+                 "a quoted object before an acronym reads as a whole sentence"),
+                ("wrs004", ['"Stop." CI treats as a hard halt.'], "CI treats as a hard halt.", 0, 0, True, 0,
+                 "the rest of a sentence after a quoted object and an acronym reads as a whole sentence"),
+                # round 4 (review A, finding 1, and review B): a quoted or bracketed sentence before a digit,
+                # another quotation or bracket, a code span or a single quote is no sentence end, so a cut
+                # at either side of it fails; each opener kind and each refused start has its own vector
+                ("wqo001", ['"Stop." (with no other words) is the shutdown command.'], '"Stop."', 0, 0, True,
+                 1, "an end on a quoted subject before '('"),
+                ("wqo002", ['"Stop." (with no other words) is the shutdown command.'],
+                 "(with no other words) is the shutdown command.", 0, 0, True, 1,
+                 "a start at '(' after a quoted subject"),
+                ("wqo003", ['"Never delete." "unless approved" is the full instruction.'], '"Never delete."',
+                 0, 0, True, 1, "an end on a quoted subject before a straight quote"),
+                ("wqo004", ['"Never delete." "unless approved" is the full instruction.'],
+                 '"unless approved" is the full instruction.', 0, 0, True, 1,
+                 "a start at a straight quote after a quoted subject"),
+                ("wqo005", ['"Never delete." (the old rule) no longer applies.'], '"Never delete."', 0, 0,
+                 True, 1, "an end on a quoted subject before a bracketed aside"),
+                ("wqo006", ['"Never delete." (the old rule) no longer applies.'],
+                 "(the old rule) no longer applies.", 0, 0, True, 1, "a start at a bracketed aside"),
+                ("wqo007", ['"Stop." (the default) halts the run.'], '"Stop."', 0, 0, True, 1,
+                 "an end on a quoted subject before '(' and a verb"),
+                ("wqo008", ['"Stop." "Go." are the two commands.'], '"Stop."', 0, 0, True, 1,
+                 "an end on the first of two quoted subjects"),
+                ("wqo009", ['"Stop." "Go." are the two commands.'], '"Go." are the two commands.', 0, 0, True,
+                 1, "a start at the second of two quoted subjects"),
+                ("wqo010", ["(Optional.) [Deprecated.] marks a step you may skip."],
+                 "[Deprecated.] marks a step you may skip.", 0, 0, True, 1,
+                 "a start at '[' after a bracketed label"),
+                ("wqo011", ['"Stop." \u201cunless approved\u201d is the full instruction.'], '"Stop."', 0, 0,
+                 True, 1, "an end on a quoted subject before a curly quote"),
+                ("wqo012", ['"Stop." [the default] halts the run.'], '"Stop."', 0, 0, True, 1,
+                 "an end on a quoted subject before '['"),
+                ("wqo013", ['"Stop." {the default} halts the run.'], '"Stop."', 0, 0, True, 1,
+                 "an end on a quoted subject before a brace"),
+                ("wqo014", ['"Stop." 3 times in a row halts the run.'], '"Stop."', 0, 0, True, 1,
+                 "an end on a quoted subject before a digit"),
+                ("wqo015", ['"Stop." 3 times in a row halts the run.'], "3 times in a row halts the run.", 0, 0,
+                 True, 1, "a start at a digit after a quoted subject"),
+                ("wqo016", ['"Retry." `n` times is the limit.'], '"Retry."', 0, 0, True, 1,
+                 "an end on a quoted subject before a code span"),
+                ("wqo017", ['"Stop." \'halt\' and \'quit\' do the same.'], '"Stop."', 0, 0, True, 1,
+                 "an end on a quoted subject before a single quote"),
+                ("wqo018", ['"Stop." \u2018halt\u2019 does the same.'], '"Stop."', 0, 0, True, 1,
+                 "an end on a quoted subject before a curly single quote"),
+                ("wqo019", ['"Stop." Then wait.'], '"Stop."', 0, 0, True, 0,
+                 "a whole quoted sentence before a capital still ends"),
+                ("wqo020", ['"Stop." Then wait.'], "Then wait.", 0, 0, True, 0,
+                 "a sentence after a whole quoted sentence and a capital still starts"),
+                ("wqo021", ['"Stop." "Go." Then wait.'], '"Stop." "Go."', 0, 0, True, 1,
+                 "two whole quoted sentences before a capital (a disclosed over-fire)"),
+                # round 5 (review A, finding 1): a bare '?' or '!' before a lower-case word, and a bare
+                # sentence end before an opener, is no sentence end, so a cut at either side of it fails;
+                # each ending and each opener kind has its own vector
+                ("wbe001", ["Ask why? before you delete anything."], "Ask why?", 0, 0, True, 1,
+                 "an end on a bare '?' before a lower-case word"),
+                ("wbe002", ["Ask why? before you delete anything."], "before you delete anything.", 0, 0, True,
+                 1, "a start at a lower-case word after a bare '?'"),
+                ("wbe003", ["Log in to Yahoo! with the shared account."], "Log in to Yahoo!", 0, 0, True, 1,
+                 "an end on a bare '!' before a lower-case word"),
+                ("wbe004", ["Log in to Yahoo! with the shared account."], "with the shared account.", 0, 0,
+                 True, 1, "a start at a lower-case word after a bare '!'"),
+                ("wbe005", ["Ask why? and wait for the answer."], "Ask why?", 0, 0, True, 1,
+                 "an end on a bare '?' before a word that starts with 'a'"),
+                ("wbe006", ["Stop. (with no other words) is the shutdown command."], "Stop.", 0, 0, True, 1,
+                 "an end on a bare '.' before '('"),
+                ("wbe007", ["Stop. (with no other words) is the shutdown command."],
+                 "(with no other words) is the shutdown command.", 0, 0, True, 1,
+                 "a start at '(' after a bare '.'"),
+                ("wbe008", ["Stop. [the default] halts the run."], "Stop.", 0, 0, True, 1,
+                 "an end on a bare '.' before '['"),
+                ("wbe009", ["Stop. {the default} halts the run."], "Stop.", 0, 0, True, 1,
+                 "an end on a bare '.' before a brace"),
+                ("wbe010", ['Never delete. "unless approved" is the full instruction.'], "Never delete.", 0, 0,
+                 True, 1, "an end on a bare '.' before a straight quote"),
+                ("wbe011", ['Never delete. "unless approved" is the full instruction.'],
+                 '"unless approved" is the full instruction.', 0, 0, True, 1,
+                 "a start at a straight quote after a bare '.'"),
+                ("wbe012", ["Stop. \u201cunless approved\u201d is the full instruction."], "Stop.", 0, 0, True,
+                 1, "an end on a bare '.' before a curly quote"),
+                ("wbe013", ["Retry. `n` times is the limit."], "Retry.", 0, 0, True, 1,
+                 "an end on a bare '.' before a code span"),
+                ("wbe014", ["Ask why? (in writing) before you delete anything."], "Ask why?", 0, 0, True, 1,
+                 "an end on a bare '?' before '('"),
+                ("wbe015", ['Stop now! "or else" is no excuse.'], "Stop now!", 0, 0, True, 1,
+                 "an end on a bare '!' before a straight quote"),
+                # ... and the disclosed over-fires of that rule are refused (exit 1)
+                ("wbo001", ["Is it gzip or zstd? zstd is the default."], "zstd is the default.", 0, 0, True, 1,
+                 "a sentence after a bare '?' that starts with a lower-case word"),
+                ("wbo002", ["Run it. `make check` must pass."], "`make check` must pass.", 0, 0, True, 1,
+                 "a sentence after a bare '.' that starts with a code span"),
+                ("wbo007", ["Is it gzip or zstd? zstd is the default."], "Is it gzip or zstd?", 0, 0, True, 1,
+                 "a sentence before one that starts with a lower-case word after its bare '?'"),
+                ("wbo003", ["Run the suite. (Optional.) Then wait."], "Run the suite.", 0, 0, True, 1,
+                 "a sentence before a whole bracketed sentence"),
+                ("wbo004", ["Run the suite. (Optional.) Then wait."], "(Optional.)", 0, 0, True, 1,
+                 "a whole bracketed sentence after a bare '.'"),
+                ("wbo005", ["Run the suite. (Optional.) Then wait."], "Then wait.", 0, 0, True, 1,
+                 "a sentence after a whole bracketed sentence that follows a bare '.'"),
+                ("wbo006", ["Run the suite. (Optional.) Then wait."], "Run the suite. (Optional.) Then wait.",
+                 0, 0, True, 0, "the whole line still passes"),
+                ("wbo008", ['Run the suite. "Done." Then wait.'], "Then wait.", 0, 0, True, 1,
+                 "a sentence after a whole quoted sentence that follows a bare '.'"),
+                # round 5 (review B, finding 1): whitespace between a sentence end and its closer is refused
+                ("wws001", ['"Stop. " Then wait.'], '"Stop. "', 0, 0, True, 1,
+                 "a quoted sentence with a space before its closer"),
+                ("wws002", ['"Stop. " Then wait.'], "Then wait.", 0, 0, True, 1,
+                 "a start after a quoted sentence with a space before its closer"),
+                ("wws003", ['"Stop.', '" Then wait.'], '"Stop.\n"', 0, 1, False, 1,
+                 "a quoted sentence with a line break before its closer"),
+                # round 5 (review A, finding 2): a closer is no next start either
+                ("wnc001", ['"Stop." ) is the rule.'], '"Stop."', 0, 0, True, 1,
+                 "an end on a quoted sentence before a stray ')'"),
+                ("wnc002", ['"Stop." ] is the rule.'], '"Stop."', 0, 0, True, 1,
+                 "an end on a quoted sentence before a stray ']'"),
+                ("wnc003", ['"Stop." } is the rule.'], '"Stop."', 0, 0, True, 1,
+                 "an end on a quoted sentence before a stray brace"),
+                ("wnc004", ['"Stop." \u201d is the rule.'], '"Stop."', 0, 0, True, 1,
+                 "an end on a quoted sentence before a stray curly closing quote"),
+                # round 5: the disclosed residuals of residual (2), the bare sentence end, and of the
+                # paragraph edge (c) still pass (exit 0)
+                ("wrs005", ["Yahoo! Mail is the only approved client."], "Yahoo!", 0, 0, True, 0,
+                 "a bare '!' inside a name before a capital reads as a sentence end"),
+                ("wrs006", ["Yahoo! Mail is the only approved client."], "Mail is the only approved client.", 0,
+                 0, True, 0, "the rest of a sentence after a bare '!' and a capital reads as a whole sentence"),
+                ("wrs007", ["Use a tool, e.g. the linter, on every file."], "the linter, on every file.", 0, 0,
+                 True, 0, "a bare '.' before a lower-case word reads as a sentence end"),
+                ("wrs008", ["A revert drops the changes in it. git checkout -- <path> overwrites the tree."],
+                 "git checkout -- <path> overwrites the tree.", 0, 0, True, 0,
+                 "a sentence that starts with a lower-case command name after a bare '.'"),
+                ("wrs009", ["Stop. 3 times in a row halts the run."], "Stop.", 0, 0, True, 0,
+                 "a bare '.' before a digit reads as a sentence end"),
+                ("wrs010", ["Stop. 'halt' does the same."], "Stop.", 0, 0, True, 0,
+                 "a bare '.' before a single quote reads as a sentence end"),
+                ("wrs011", ["Stop. **now** is the rule."], "Stop.", 0, 0, True, 0,
+                 "a bare '.' before markup reads as a sentence end"),
+                ("wrs012", ["Ask why? \u00e9tape is the word."], "Ask why?", 0, 0, True, 0,
+                 "a bare '?' before a non-ASCII lower-case letter reads as a sentence end"),
+                ("wrs013", ['"Never delete."', "(the old rule) no longer applies."], '"Never delete."', 0, 0,
+                 True, 0, "a quoted sentence at a paragraph edge passes whatever the next paragraph starts with"),
+                ("wrs014", ['"Never delete."', "(the old rule) no longer applies."],
+                 "(the old rule) no longer applies.", 1, 1, True, 0,
+                 "a text at a paragraph start passes whatever the paragraph before it ends with"),
+            ]
+            # Every closer that may follow a sentence end, one vector each: after a whole enclosed sentence
+            # the next sentence starts cleanly (exit 0); single quotes are not paired, so a sentence end
+            # before one is refused (exit 1, a disclosed over-fire).
+            for k, (opener, closer, want) in enumerate((('"', '"', 0), ("'", "'", 1), ("\u201c", "\u201d", 0),
+                                                        ("\u2018", "\u2019", 1), ("(", ")", 0), ("[", "]", 0),
+                                                        ("{", "}", 0)), 1):
+                edge_vectors.append(("wclo0{}".format(k), ["{}Stop.{} Then wait.".format(opener, closer)],
+                                     "Then wait.", 0, 0, True, want, "a start after a closer, case {}".format(k)))
+            for corpus, obligations, text, first, last, paras, want, label in edge_vectors:
+                got = _model_c_case(corpus, obligations, text, first, last, paragraphs=paras)
+                if got != want:
+                    failures.append("whole-clause edges, {} ({}): expected exit {}, got {}".format(
+                        label, corpus, want, got))
 
             # (36) absolute source-path now FAILS. The row points at the ABSOLUTE path of its real scanned
             # source (matching digest and frontmatter), so pathlib would discard the root and only the
@@ -1552,7 +2301,25 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
               "and the Step-4 deferred items: a predecessor inventory with an integer or a malformed "
               "clause-id fails closed (exit 2, the hardened load_prev_ids), a successor-id already retired "
               "at an earlier release is a resurrection through the register (exit 1), and a same-release "
-              "pass-through fold is permitted (exit 0))"
+              "pass-through fold is permitted (exit 0); and the whole-clause edges: a whole sentence passes, a "
+              "canonical-text cut short inside a clause fails (final '.' dropped inside the line or at the "
+              "window end, last word dropped, cut at a plain comma, first character dropped, wrapped last "
+              "line dropped, a row at a line start after an unended sentence), the legitimate ';' "
+              "clause splits and a row after a sentence end on an earlier part of its line pass, the "
+              "round-1 reproductions hold (list and quotation cuts at ', and' / ', or' fail; whole quoted "
+              "and bracketed sentences pass), the round-2 reproductions hold (a cut at a colon fails; a "
+              "fragment from inside a quotation or bracket, judged from the source paragraph, fails; a "
+              "sentence end inside an enclosure opened mid-sentence is no boundary), the round-3 "
+              "reproductions hold (a cut at either side of a quoted or bracketed sentence that a longer "
+              "sentence goes on from fails; a whole quoted sentence that ends inside a bracket passes; a "
+              "cut inside a code span fails; the scan crosses a single line break), the round-4 "
+              "reproductions hold (a quoted or bracketed sentence ends only before an ASCII capital, so "
+              "a cut at either side of one before a digit, another quotation or bracket, a code span or "
+              "a single quote fails), the round-5 reproductions hold (a bare '?' or '!' before a lower-case "
+              "word, or a bare sentence end before an opener, is no sentence end, and a closer is no next "
+              "start), each boundary "
+              "sub-predicate and each quote and bracket kind has its own vector, the disclosed fail-closed "
+              "over-fires are refused, and the disclosed residuals pass)"
               .format(core))
     else:
         print("SELF-TEST PASS (PARTIAL): {}; the end-to-end fixture cases were SKIPPED (no writable temp "
