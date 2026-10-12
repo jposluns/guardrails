@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "877181315414c11d5745e5f744e841f44f6c8dbe6c121c1005bc90ca1299cf61"
+tree-sha256 = "811ff67f9e849b098285942dcf3f80850141ee51884a20a24de1876467863568"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3271,13 +3271,13 @@ sha256 = "5998a2d86d27082feb1b000238e8e737d339afe31d983bee76ed79cfb1bd2597"
 
 [[sources]]
 path = "tools/check_artifact_checksums.py"
-bytes = 24619
-sha256 = "3e11083f49a0fb3444b0c2dbf216983cf2d25b04bc778fe6bb07d4153ffe859f"
+bytes = 25873
+sha256 = "cb0763a16d0e871a81f535a26e67200c31416542aea9353c154faecf9265b947"
 
 [[sources]]
 path = "tools/check_branch_root.py"
-bytes = 25869
-sha256 = "69533529668ed5b0e8702ef623a367a32349aecaff18c9b501c531f29d4da1a6"
+bytes = 27774
+sha256 = "4a3ca07a1767c6a99e3669e419ed530ac71454aca16dbae8cf828c4f73390626"
 
 [[sources]]
 path = "tools/check_byte_canon.py"
@@ -3306,8 +3306,8 @@ sha256 = "33ccada0c54769f0fca09261ce2f8c1bc169c0a57be732c858c0bfc611a71dd8"
 
 [[sources]]
 path = "tools/check_derived_command_parameters.py"
-bytes = 52309
-sha256 = "7c39892ff85304722c9b8f613f6e588d54e1bd33dd96d8b007887bae52b74921"
+bytes = 54446
+sha256 = "ff99ee9584b15bc8cdce30b0a2b28d591b1b85ee81b22c2ab2423912470c7c5f"
 
 [[sources]]
 path = "tools/check_entry_guard.py"

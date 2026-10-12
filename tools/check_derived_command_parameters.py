@@ -503,8 +503,9 @@ def run(root):
 
 # --- self-test ---------------------------------------------------------------------------------------
 # The tokenization and value-classification cases are pure and ALWAYS run. An end-to-end layer over a real
-# synthetic tree (real reads, real containment) runs where a writable tempdir exists and is reported
-# PARTIAL where not. No wall clock, no randomness, no network.
+# synthetic tree (real reads, real containment) runs where a writable tempdir exists; where it (or a case's
+# symlink) cannot be made, each unrun case is a NAMED NOT RUN failure, never a skip beside a PASS. No wall
+# clock, no randomness, no network.
 
 def _run_quiet(root):
     import io
@@ -513,7 +514,45 @@ def _run_quiet(root):
         return run(root)
 
 
-def self_test_main():  # noqa: C901  a flat sequence of independent cases
+def _not_run(failures, case, cause):
+    """Record a self-test case that could not run as a NAMED failure (a counted cannot-evaluate that
+    fails the run), never a printed note beside a PASS: coverage that did not run is not coverage."""
+    failures.append("NOT RUN: {}: {}; coverage that did not run FAILS the self-test, never a silent "
+                    "PASS".format(case, cause))
+
+
+_E2E_CASES = "every end-to-end case over a real synthetic tree"
+_SYMLINK_CASE = "e2e (m) the symlink declared-surface fail-closed case"
+_DANGLING_CASE = "e2e (n) the dangling-symlink configuration fail-closed case"
+
+
+def _not_run_vectors(failures):
+    """Red-on-revert vectors for the skips that printed SELF-TEST PASS (PARTIAL) and exited 0: a nested
+    self-test run with an unavailable temp directory (mkdtemp raises OSError), and one with no symlink
+    support (symlink creation raises OSError), must each exit nonzero AND name every unrun case on a
+    NOT RUN line."""
+    import io
+    from contextlib import redirect_stderr, redirect_stdout
+
+    def _unavailable(*_args, **_kwargs):
+        raise OSError("injected: unavailable")
+
+    for label, kwargs, wants in (
+            ("no-tempdir", {"_mkdtemp": _unavailable},
+             ("NOT RUN: {}: no writable temp directory".format(_E2E_CASES),)),
+            ("no-symlink", {"_symlink": _unavailable},
+             ("NOT RUN: {}: no symlink support".format(_SYMLINK_CASE),
+              "NOT RUN: {}: no symlink support".format(_DANGLING_CASE)))):
+        out = io.StringIO()
+        with redirect_stdout(out), redirect_stderr(io.StringIO()):
+            rc = self_test_main(_vectors=False, **kwargs)
+        missing = [want for want in wants if want not in out.getvalue()]
+        if rc == 0 or missing:
+            failures.append("(NOT RUN vector {}) must exit nonzero AND record {!r}, never a PASS (PARTIAL) "
+                            "exit 0 (got exit {})".format(label, missing or wants, rc))
+
+
+def self_test_main(_mkdtemp=None, _symlink=None, _vectors=True):  # noqa: C901  a flat sequence of cases
     failures = []
     commands = {"sample-tool"}
     options = ["--target"]
@@ -630,19 +669,18 @@ def self_test_main():  # noqa: C901  a flat sequence of independent cases
     if not _ends_with_continuation("a \\") or _ends_with_continuation("a \\\\"):
         failures.append("_ends_with_continuation mis-graded an odd/even trailing backslash run")
 
-    # --- end-to-end layer over a real synthetic tree (runs where a writable tempdir exists) -------------
+    # --- end-to-end layer over a real synthetic tree (a NOT RUN failure where no tempdir exists) --------
     import shutil
     import tempfile
 
-    skipped = []
+    symlink = _symlink or Path.symlink_to
     try:
-        base_tmp = Path(tempfile.mkdtemp(prefix="aiqt-derived-cmd-selftest-"))
-    except OSError:
+        base_tmp = Path((_mkdtemp or tempfile.mkdtemp)(prefix="aiqt-derived-cmd-selftest-"))
+    except OSError as exc:
         base_tmp = None
+        _not_run(failures, _E2E_CASES, "no writable temp directory ({})".format(exc))
 
-    if base_tmp is None:
-        skipped.append("all end-to-end cases (no writable temp directory)")
-    else:
+    if base_tmp is not None:
         def _fresh(tag, config, surface_files):
             r = base_tmp / tag
             (r / ".aiqt").mkdir(parents=True, exist_ok=True)
@@ -776,13 +814,13 @@ def self_test_main():  # noqa: C901  a flat sequence of independent cases
             if _run_quiet(r) != 1:
                 failures.append("e2e: a directory-prefix selector did not scan a literal beneath it")
 
-            # (m) a symlink declared surface fails closed exit 2 (where the platform supports symlinks).
+            # (m) a symlink declared surface fails closed exit 2 (a NOT RUN failure without symlink support).
             r = _fresh("symlink", good_cfg, {"cmd/real.md": "sample-tool --target $CURRENT_TARGET\n"})
             link = r / "cmd" / "resume.md"
             try:
-                link.symlink_to(r / "cmd" / "real.md")
-            except (OSError, NotImplementedError):
-                skipped.append("the symlink fail-closed case (no symlink support)")
+                symlink(link, r / "cmd" / "real.md")
+            except (OSError, NotImplementedError) as exc:
+                _not_run(failures, _SYMLINK_CASE, "no symlink support ({})".format(exc))
             else:
                 if _run_quiet(r) != 2:
                     failures.append("e2e: a symlink declared surface expected fail-closed exit 2")
@@ -793,9 +831,9 @@ def self_test_main():  # noqa: C901  a flat sequence of independent cases
             (r / ".aiqt").mkdir(parents=True, exist_ok=True)
             cfg_link = r / ".aiqt" / "derived-command-parameters.toml"
             try:
-                cfg_link.symlink_to(r / ".aiqt" / "does-not-exist.toml")
-            except (OSError, NotImplementedError):
-                skipped.append("the dangling-symlink configuration case (no symlink support)")
+                symlink(cfg_link, r / ".aiqt" / "does-not-exist.toml")
+            except (OSError, NotImplementedError) as exc:
+                _not_run(failures, _DANGLING_CASE, "no symlink support ({})".format(exc))
             else:
                 if _run_quiet(r) != 2:
                     failures.append("e2e: a dangling-symlink configuration expected fail-closed exit 2")
@@ -860,6 +898,9 @@ def self_test_main():  # noqa: C901  a flat sequence of independent cases
         finally:
             shutil.rmtree(base_tmp, ignore_errors=True)
 
+    if _vectors:
+        _not_run_vectors(failures)
+
     if failures:
         print("SELF-TEST FAIL:")
         for f in failures:
@@ -872,17 +913,14 @@ def self_test_main():  # noqa: C901  a flat sequence of independent cases
             "env-assignment, command words match by basename (not by containment), bundled short-option "
             "clusters are matched, backslash-newline continuations join a split sink, the argument window "
             "is bounded, telemetry records the matched selectors, and multiple sinks are all checked")
-    if skipped:
-        print("SELF-TEST PASS (PARTIAL): {}; SKIPPED (UNVERIFIED this run): {}".format(
-            core, "; ".join(skipped)))
-    else:
-        print("SELF-TEST PASS: {}; and the end-to-end layer holds (NOT APPLICABLE, clean pass, literal "
-              "finding, malformed-version/duplicate-id/empty-scope/absolute/escaping/unmatched/non-UTF-8/"
-              "symlink-surface/dangling-symlink-config fail-closed, directory-prefix scanning, selector "
-              "reconciliation of an unmatched-command/unmatched-option/duplicate-path/overlapping-path/"
-              "duplicate-option control failing closed, a line-continuation split sink scanned whole, a "
-              "commented-out literal not firing, and a bundled short-option value scanned)"
-              .format(core))
+    print("SELF-TEST PASS: {}; and the end-to-end layer holds (NOT APPLICABLE, clean pass, literal "
+          "finding, malformed-version/duplicate-id/empty-scope/absolute/escaping/unmatched/non-UTF-8/"
+          "symlink-surface/dangling-symlink-config fail-closed, directory-prefix scanning, selector "
+          "reconciliation of an unmatched-command/unmatched-option/duplicate-path/overlapping-path/"
+          "duplicate-option control failing closed, a line-continuation split sink scanned whole, a "
+          "commented-out literal not firing, and a bundled short-option value scanned); an unavailable "
+          "temp directory or symlink support is a NOT RUN failure (nonzero exit), never a PASS (PARTIAL)"
+          .format(core))
     return 0
 
 
