@@ -795,6 +795,7 @@ expected-check-ids = [
 id = "git-fixture-env-selftest"
 runner = "tools/selftest_git_fixture_env.py"
 expected-check-ids = [
+  "config/member-bound-opf-selftest",
   "config/member-bound-table",
   "config/member-close-on-interrupt",
   "config/member-close-handlers",

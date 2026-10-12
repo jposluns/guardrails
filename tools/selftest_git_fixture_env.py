@@ -1452,7 +1452,8 @@ def _config_injection_lane(base):
 
 # Per-member time bounds (seconds) for _run_config_member. A member absent here keeps
 # CONFIG_MEMBER_BOUND_DEFAULT. config/member-bound-table pins this table (every key an exact
-# registered roster argv, the one override, the default); it does not test any sizing.
+# registered roster argv, each override, the default) and config/member-bound-opf-selftest pins
+# the opf.py --self-test entry (_member_bound_checks); neither tests any sizing.
 #
 # CONFIG_MEMBER_BOUND_DEFAULT is a DELIBERATE SHORTER DEADLINE, not a bound sized above every
 # member's own end-to-end budget. Budgets the members grant themselves, READ FROM SOURCE (not
@@ -1463,7 +1464,8 @@ def _config_injection_lane(base):
 # bounds", AGENTS.md) allows a deadline below a callee's budget only where cutting the work short
 # is the explicit intent, and only when reaching it is attributed to the deadline rather than
 # reported as the callee's failure.
-# CHOICE: the default is NOT raised above 5610 s; it stays a deliberate shorter deadline, and
+# CHOICE: the default is NOT raised above 5610 s, and neither is the opf.py --self-test entry
+# below (3600 s, sized from measured runs); each stays a deliberate shorter deadline, and
 # cutting a member short is the explicit intent here because this lane owns no member's verdict.
 # Every roster member is a registered step or the runner behind a registered --suite step
 # (_registered_selftests reads the CI workflow, both standalone runners and the suite manifest),
@@ -1483,6 +1485,15 @@ CONFIG_MEMBER_BOUNDS = {
     # count): 3600 s, about 6.2 times the measured run, covers load5 up to about 80; it also
     # exceeds the command's own T75 wait chain (540 s per call, 4 calls: 2160 s).
     ("opf/tools/check_opf_record.py", "--self-test", "--red-on-revert"): 3600,
+    # MEASURED (2026-10-12, nice 10, load5 about 18 to 21 on a 24-CPU host, one other nice 10
+    # self-test running beside it): one complete run took 467.16 s wall and 255.64 s CPU and
+    # passed. REPORTED, not reproduced here (2026-10-12): 730 s (nice 10, moderate load) and
+    # 1192 s (under load); the 1200 s default was reached four times in config/opf/rc or
+    # config/opf/malformed. The config lanes rerun up to four members at once (_config_results).
+    # ESTIMATED (assumes wall time grows roughly in proportion to load once load exceeds the CPU
+    # count): 3600 s, about 3.0 times the slowest reported run and 7.7 times the measured one; it
+    # stays below the 5610 s blocked-isolation budget (see CHOICE above).
+    ("opf/tools/opf.py", "--self-test"): 3600,
 }
 # After the process-group kill: the bounded drain of output still held by a descendant that left
 # the group (setsid or setpgid), the bounded reap of the leader, and the bounded wait for the group
@@ -5530,8 +5541,9 @@ def _member_timeout_controls(base):
     wait are pinned by _timeout_cleanup_order_controls; the member thread, the registry, the
     group kill after a normal return and the suite's close under a real SIGINT by
     _member_close_controls.
-    config/member-bound-table pins the per-member bound table against the registered roster. A
-    fixture that never got going inside its bound is attributed to that timeout, never a red."""
+    config/member-bound-table and config/member-bound-opf-selftest pin the per-member bound table
+    against the registered roster (_member_bound_checks). A fixture that never got going inside its
+    bound is attributed to that timeout, never a red."""
     import contextlib
     import io
     import time
@@ -5685,13 +5697,28 @@ def _member_timeout_controls(base):
     _timeout_cleanup_order_controls(sleeper)
     _member_close_controls(fixture)
 
-    roster = set(_registered_selftests())
+    _member_bound_checks(set(_registered_selftests()))
+
+
+def _member_bound_checks(roster):
+    """config/member-bound-table: no CONFIG_MEMBER_BOUNDS key outside the registered roster, the
+    bound applied to each key is exactly the override pinned here, the default is 1200 s, and
+    every other roster member gets the default. config/member-bound-opf-selftest:
+    opf/tools/opf.py --self-test is registered and the bound applied to it is its own 3600 s
+    entry, not the default (red when that entry is removed or changed)."""
     record = ("opf/tools/check_opf_record.py", "--self-test", "--red-on-revert")
+    opf_selftest = ("opf/tools/opf.py", "--self-test")
+    overrides = {record: 3600, opf_selftest: 3600}
     check("config/member-bound-table",
           (sorted(key for key in CONFIG_MEMBER_BOUNDS if key not in roster),
-           _config_member_bound(record), CONFIG_MEMBER_BOUND_DEFAULT,
-           sorted({_config_member_bound(argv) for argv in roster if argv != record})),
-          ([], 3600, 1200, [1200]))
+           {key: _config_member_bound(key) for key in CONFIG_MEMBER_BOUNDS},
+           CONFIG_MEMBER_BOUND_DEFAULT,
+           sorted({_config_member_bound(argv) for argv in roster if argv not in overrides})),
+          ([], overrides, 1200, [1200]))
+    check("config/member-bound-opf-selftest",
+          (opf_selftest in roster, CONFIG_MEMBER_BOUNDS.get(opf_selftest),
+           _config_member_bound(opf_selftest)),
+          (True, 3600, 3600))
 
 
 def _verdict(failures, cannot_evaluate, caused):
