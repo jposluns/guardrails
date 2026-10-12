@@ -437,7 +437,7 @@ def validate_bootstrap_provenance(raw, *, expected_basis=None, expected_source_d
         model = tomllib.loads(raw.decode("utf-8", errors="strict"))
     except UnicodeDecodeError:
         return _pv(INVALID, "ENCODING", "raw", "invalid UTF-8")
-    except (tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         return _pv(INVALID, "PARSE", "raw", "not TOML ({})".format(exc))
     if type(model) is not dict:
         return _pv(INVALID, "TYPE", "root", "must be a table")
@@ -579,7 +579,7 @@ def read_ancestral_counter_seed(store_root, *, pinned_head, evidence_commit, pre
         parsed = tomllib.loads(blob.decode("utf-8", errors="strict"))
     except UnicodeDecodeError:
         raise InitOperationError("ancestral counters blob is not decodable UTF-8; refusing")
-    except (tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise InitOperationError("ancestral counters blob is not valid TOML ({}); refusing".format(exc))
 
     baseline, importer, module = _roster_namespaces()
@@ -988,7 +988,10 @@ def build_view_roster(operation_id, manifest_payload, source_paths):
     InitOperationError."""
     try:
         manifest = tomllib.loads(manifest_payload.decode("utf-8", "strict"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, AttributeError):
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, AttributeError, RecursionError,
+            MemoryError):
+        # RecursionError: deep nesting and (CPython 3.14.8 on) a 1001-part key; MemoryError: a many-part key
+        # under a memory limit; ValueError: an over-long integer literal too.
         raise InitOperationError("the planned manifest payload is not TOML; the view roster cannot "
                                  "be derived")
     views = manifest.get("views")
@@ -1248,7 +1251,9 @@ def _validate_plan_payloads(plan, payloads, counters_basis):
             _plan_bad("S entry {} is not this generator's exact bytes".format(path))
     try:
         counters = tomllib.loads(payloads[COUNTERS_RELPATH].decode("utf-8", "strict"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError):
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError):
+        # RecursionError: deep nesting and (CPython 3.14.8 on) a 1001-part key; MemoryError: a many-part key
+        # under a memory limit; ValueError: an over-long integer literal too.
         _plan_bad("the counters payload is not TOML")
     if type(counters_basis) is not dict:
         _plan_bad("the counters basis must be a table")
@@ -1914,8 +1919,9 @@ def _health_check(root, root_fd, plan, binding):
     baseline, importer, _module = _roster_namespaces()
     try:
         counters = tomllib.loads(raw.decode("utf-8", "strict"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError):
-        # RecursionError: tomllib's refusal of deep nesting and (CPython 3.14.8 on) a 1001-part key.
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError):
+        # RecursionError: tomllib's refusal of deep nesting and (CPython 3.14.8 on) a 1001-part key;
+        # MemoryError: a many-part key under a memory limit.
         raise InitOperationError("the completed adoption's counters are not TOML")
     _hw, findings = validate_counters(counters, known_namespaces=baseline,
                                       optional_namespaces=importer)
@@ -2432,9 +2438,11 @@ def run_init_operation(product_root, *, ancestral=None, recover=False):
         if "preserved and refused" in str(exc):
             result.conflicts.append(str(exc).split(" ", 1)[0])
     except (_opf_oplock.OpLockError, _opf_init_substrate.InitSubstrateError,
-            _journal.JournalError, OSError, ValueError, RecursionError) as exc:
-        # RecursionError: a parse tomllib refuses that way (deep nesting, a 1001-part key) at a site with no
-        # local mapping is reported as CANNOT-EVALUATE, never raised out of the public seam.
+            _journal.JournalError, OSError, ValueError, RecursionError, MemoryError) as exc:
+        # RecursionError and MemoryError: this maps ANY unmapped one raised inside this protected region (from
+        # the mutex acquisition to the views-ready record), a tomllib parse refusal (deep nesting, a 1001-part
+        # key, a many-part key under a memory limit) at a site with no local mapping included, to
+        # CANNOT-EVALUATE. The preflight before this try and the cleanup in its finally are outside it.
         primary = {"code": CANNOT_EVALUATE, "detail": "{}: {}".format(type(exc).__name__, exc)}
     finally:
         if primary is not None:

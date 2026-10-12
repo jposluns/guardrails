@@ -1065,7 +1065,7 @@ def _control_payload(document, closed_keys, label):
         reparsed = tomllib.loads(text)
     # Defensive: emit_checked already reparsed. RecursionError too: tomllib raises it (not a
     # ValueError) on deep nesting (F-TOML-BARE-VALUEERROR-CLASS).
-    except (tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise OpLockError("emitted {} did not reparse ({})".format(label, exc))
     if set(reparsed) != set(closed_keys):
         raise OpLockError("{} top-level keys {} do not equal the closed set {}".format(
@@ -1110,7 +1110,7 @@ def _read_control_record(dir_fd, name, label):
         doc = tomllib.loads(bytes(data).decode("utf-8", errors="strict"))
     # RecursionError too: tomllib raises it (not a ValueError) on deep nesting
     # (F-TOML-BARE-VALUEERROR-CLASS).
-    except (tomllib.TOMLDecodeError, ValueError, UnicodeDecodeError, RecursionError) as exc:
+    except (tomllib.TOMLDecodeError, ValueError, UnicodeDecodeError, RecursionError, MemoryError) as exc:
         raise OpLockError("{} is not decodable UTF-8 TOML; refusing recovery ({})".format(label, exc))
     if not isinstance(doc, dict):
         raise OpLockError("{} is not a TOML table; refusing recovery".format(label))

@@ -164,8 +164,10 @@ def _validate(pack_dir):
     raw = _read_regular(pack_dir / MANIFEST_NAME, MAX_MANIFEST_BYTES, "manifest")
     try:
         doc = tomllib.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError, RecursionError) as exc:
-        # RecursionError: tomllib's refusal of deep nesting and (CPython 3.14.8 on) a 1001-part key.
+    except (ValueError, RecursionError, MemoryError) as exc:
+        # ValueError: tomllib.TOMLDecodeError, a UnicodeDecodeError and an over-long integer literal;
+        # RecursionError: deep nesting and (CPython 3.14.8 on) a 1001-part key; MemoryError: a many-part
+        # key under a memory limit.
         raise _Refusal(CANNOT_EVALUATE, "manifest-parse", "pack.toml does not parse: {}".format(exc))
 
     keys = set(doc)

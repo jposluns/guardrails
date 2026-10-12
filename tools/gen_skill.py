@@ -857,10 +857,14 @@ def plugin_identity(root, root_fd=None):
     path = root.joinpath(*IDENTITY_MANIFEST_PARTS)
     try:
         data = tomllib.loads(_read_input(root_fd, root, IDENTITY_MANIFEST_PARTS))
-    except RecursionError as exc:
-        # tomllib raises RecursionError (a RuntimeError, not a ValueError) on a deeply nested array or inline
-        # table; map it into the ValueError family build_outputs surfaces as exit 2
+    except (ValueError, RecursionError, MemoryError) as exc:
+        # A ValueError (a TOMLDecodeError or an over-long integer literal) is already the family
+        # build_outputs surfaces as exit 2 and passes unchanged. tomllib raises RecursionError (a RuntimeError)
+        # on a deeply nested array or inline table and, from CPython 3.14.8, on a key of more than 1000 dotted
+        # parts, and MemoryError on a many-part key under a memory limit; map each into that family
         # (F-TOML-BARE-VALUEERROR-CLASS).
+        if isinstance(exc, ValueError):
+            raise
         raise ValueError("{}: TOML nesting is too deep to parse ({})".format(path, exc)) from exc
     plugin = data.get("plugin") if isinstance(data, dict) else None
     name = plugin.get("author-name") if isinstance(plugin, dict) else None

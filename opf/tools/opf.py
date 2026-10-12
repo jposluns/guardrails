@@ -16417,8 +16417,10 @@ def _upgrade_run(root):
         try:
             manifest_model = tomllib.loads(manifest_bytes.decode("utf-8"))
             counters_model = tomllib.loads(counters_bytes.decode("utf-8"))
-        except (UnicodeError, tomllib.TOMLDecodeError, RecursionError) as exc:
-            # RecursionError: tomllib's refusal of deep nesting and (CPython 3.14.8 on) a 1001-part key.
+        except (ValueError, RecursionError, MemoryError) as exc:
+            # ValueError: tomllib.TOMLDecodeError, a UnicodeDecodeError and an over-long integer literal;
+            # RecursionError: deep nesting and (CPython 3.14.8 on) a 1001-part key; MemoryError: a many-part
+            # key under a memory limit.
             raise _UpgradeError("store manifest or counters does not parse as TOML ({})".format(exc))
 
         # spec_version triage: current is an idempotent byte no-op; above-tooling fails closed; only the
@@ -17055,7 +17057,7 @@ def _adopt_read_inputs(path):
         _opf_store._close_fd_exc_safe(fd)
     try:
         doc = tomllib.loads(raw.decode("utf-8"))
-    except (ValueError, RecursionError) as exc:   # UnicodeDecodeError and TOMLDecodeError are ValueErrors
+    except (ValueError, RecursionError, MemoryError) as exc:   # UnicodeDecodeError and TOMLDecodeError are ValueErrors
         raise ValueError("--inputs worksheet unreadable or malformed ({}): {}".format(path, exc))
     if not (isinstance(doc, dict) and type(doc.get("schema")) is int and doc.get("schema") == 1):
         raise ValueError("--inputs worksheet must be a TOML table carrying `schema = 1` (an integer 1, "

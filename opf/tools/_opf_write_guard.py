@@ -1222,9 +1222,10 @@ def _closed_lease_model(raw):
     payload each refuse upstream rather than ever reaching the holder comparison."""
     try:
         data = tomllib.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError, RecursionError):
-        # RecursionError: tomllib's refusal of deep nesting and (CPython 3.14.8 on) a 1001-part key, so
-        # such a lease is malformed like any other and recovery refuses it as held.
+    except (UnicodeDecodeError, ValueError, RecursionError, MemoryError):
+        # RecursionError: tomllib's refusal of deep nesting and (CPython 3.14.8 on) a 1001-part key, and
+        # MemoryError, a many-part key under a memory limit: such a lease is malformed like any other and
+        # recovery refuses it as held.
         return None
     if not isinstance(data, dict) or set(data) != set(_opf_check.LEASE_TOP_KEYS):
         return None

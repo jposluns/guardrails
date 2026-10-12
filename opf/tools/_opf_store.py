@@ -723,10 +723,11 @@ def _parse_store_toml(relpath, data):
         # ValueError base so a present-but-unparseable input is a fail-closed StoreError, never a crash
         # (check-fails-closed-on-unreadable; unreadable includes present-but-unparseable).
         raise StoreError("cannot parse {} ({})".format(relpath, exc))
-    except RecursionError as exc:
+    except (RecursionError, MemoryError) as exc:
         # tomllib raises RecursionError on a deeply-nested value and, from CPython 3.14.8, on a key of more
-        # than 1000 dotted parts: a present-but-unparseable input is a fail-closed StoreError (the caller
-        # routes it to CANNOT-EVALUATE), never an uncontrolled crash, and its message names both causes
+        # than 1000 dotted parts, and a many-part key can exhaust memory first (MemoryError under a memory
+        # limit): a present-but-unparseable input is a fail-closed StoreError (the caller routes it to
+        # CANNOT-EVALUATE), never an uncontrolled crash, and its message names both causes
         # (check-fails-closed-on-unreadable; unreadable includes present-but-unparseable).
         raise StoreError("cannot parse {} (input nesting is too deep or a dotted key has too many parts; present "
                          "but unparseable): {}".format(relpath, exc))
@@ -740,16 +741,21 @@ _ST_LONG_KEY_TOML = "k" + ".k" * 1000 + " = 1\n"
 
 
 class _StKeyPartCap:
-    """While held, tomllib refuses a key of more than 1000 parts with RecursionError: tomllib._parser.parse_key
-    is rebound on entry and restored on exit. Self-test only."""
+    """While held, tomllib refuses a key of more than 1000 parts with RecursionError (or the class given,
+    MemoryError to emulate a many-part key under a memory limit): tomllib._parser.parse_key is rebound on
+    entry and restored on exit. Self-test only; a vector asserts the class, never this message."""
+
+    def __init__(self, kind=RecursionError):
+        self._kind = kind
 
     def __enter__(self):
         real = self._real = tomllib._parser.parse_key
+        kind = self._kind
 
         def capped(src, pos):
             pos, key = real(src, pos)
             if len(key) > 1000:
-                raise RecursionError("TOML key has more than the allowed 1000 parts")
+                raise kind("emulated key-part cap")
             return pos, key
         tomllib._parser.parse_key = capped
         return self
@@ -3739,22 +3745,25 @@ def self_test():
         def recursion_refusal(text, capped):
             try:
                 if capped:
-                    with _StKeyPartCap():
+                    with _StKeyPartCap(capped):
                         _parse_store_toml("m/manifest.toml", text.encode("utf-8"))
                 else:
                     _parse_store_toml("m/manifest.toml", text.encode("utf-8"))
             except StoreError as exc:
-                return str(exc)
+                return type(exc.__context__).__name__, str(exc)
             except Exception as exc:  # noqa: BLE001  an escape is a failed check, never a suite abort
-                return "escaped " + type(exc).__name__
-            return "parsed"
+                return "escaped " + type(exc).__name__, ""
+            return "parsed", ""
+        # Message-free: the class tomllib raised and this module's own refusal text, never the parser's or the
+        # emulation's message, so a native 3.14.8 cap with any message of its own still passes.
         rec_head = ("cannot parse m/manifest.toml (input nesting is too deep or a dotted key has too many parts; "
                     "present but unparseable): ")
-        check("recursion-deep-nesting-names-both-causes",
-              recursion_refusal(_ST_DEEP_TOML, False).startswith(rec_head + "maximum recursion depth"))
-        check("recursion-1001-part-key-names-both-causes",
-              recursion_refusal(_ST_LONG_KEY_TOML, True)
-              == rec_head + "TOML key has more than the allowed 1000 parts")
+        for label, text, capped, kind in (("deep-nesting", _ST_DEEP_TOML, None, "RecursionError"),
+                                          ("1001-part-key", _ST_LONG_KEY_TOML, RecursionError, "RecursionError"),
+                                          ("many-part-key-memory", _ST_LONG_KEY_TOML, MemoryError, "MemoryError")):
+            got_kind, got_text = recursion_refusal(text, capped)
+            check("recursion-{}-names-both-causes".format(label),
+                  got_kind == kind and got_text.startswith(rec_head))
 
     finally:
         shutil.rmtree(base, ignore_errors=True)

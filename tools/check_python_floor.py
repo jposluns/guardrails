@@ -179,6 +179,26 @@ Legs, in order:
                  statement runs and is scanned, as are a def's decorators and a def's or lambda's
                  default values; a function or lambda body (a method's included) runs only when
                  called and is not scanned.
+  tomllib        always ON: every tomllib.load and tomllib.loads call in every .py file of the tree (.github
+                 and the vendored tree included; a directory in SKIPPED_DIR_NAMES is not walked), under
+                 every spelling the scan resolves (import tomllib, import tomllib as X, from tomllib import
+                 load or loads [as Y], the tomllib._parser submodule, and a module re-export such as
+                 _opf_store.tomllib or from M import tomllib), is HANDLED (the handlers of the try statements
+                 holding it in their body, in its own function, lambda or generator expression, together
+                 name RecursionError, MemoryError and ValueError, or a broader builtin class or a bare except;
+                 a handler that only re-raises covers nothing) or is classified by one row of the recorded
+                 table TOMLLIB_TABLE_REL: CALLER names a function in the same file that holds a HANDLED call
+                 of it, EXEMPT gives test-code, self-emitted-bytes or already-validated. A form the scan
+                 cannot resolve (a parser or the module saved, passed or read through getattr, from tomllib
+                 import *, the module named by a string to import_module, __import__ or find_spec or as a key
+                 of sys.modules, globals(), vars() or locals()) is a finding unless an EXEMPT row records it.
+                 A row whose count differs from the scan, whose CALLER no longer handles the call, or whose
+                 function holds nothing unhandled (the call removed or now HANDLED) is a finding; a table that
+                 does not parse or breaks its schema is cannot-evaluate. The scan is static: a parser reached
+                 through a name it does not resolve (a parameter, an attribute of an object, code in a string
+                 run by a child) is not seen, a CALLER row is checked only against its named caller (another
+                 caller of the same function is not), and, like the completeness leg, it walks the working
+                 tree, so an untracked .py file is scanned too.
   completeness   ON when the source sets completeness-check = true, as it does since the unit that
                  guarded tools/check_entry_guard.py, the last shipped entrypoint, switched it on (off,
                  an unlisted entrypoint is not a finding). The core-hook, preview-hook, adopter-tool
@@ -281,6 +301,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
     os._exit(2)
 
 import ast
+import builtins
 import importlib.util
 import json
 import os
@@ -567,9 +588,10 @@ def load_source(root):
     """Parse and schema-check the single source; return its normalized fields."""
     try:
         data = tomllib.loads(_read_text(root / SOURCE_REL))
-    except (tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
-        # tomllib raises a bare ValueError on an over-long integer literal and RecursionError on deep
-        # nesting or (CPython 3.14.8 on) a key of more than 1000 dotted parts: each is exit 2.
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
+        # tomllib raises a bare ValueError on an over-long integer literal, RecursionError on deep nesting or
+        # (CPython 3.14.8 on) a key of more than 1000 dotted parts, and MemoryError on a many-part key under a
+        # memory limit: each is exit 2.
         raise CannotEvaluate("{}: does not parse: {}".format(SOURCE_REL, exc))
     if set(data) != SOURCE_KEYS:
         raise CannotEvaluate("{}: keys {} (want exactly {})".format(
@@ -1367,9 +1389,9 @@ def _has_main_block(tree):
     return False
 
 
-def _python_files(root):
-    """Every repo-relative .py path outside EXCLUDED_TREES, directory by directory in sorted order
-    (a directory in SKIPPED_DIR_NAMES is not walked)."""
+def _python_files(root, every=False):
+    """Every repo-relative .py path outside EXCLUDED_TREES (inside them too when every is true),
+    directory by directory in sorted order (a directory in SKIPPED_DIR_NAMES is not walked)."""
     def _fail(exc):
         raise CannotEvaluate("cannot walk the tree: {}".format(exc))
 
@@ -1377,10 +1399,10 @@ def _python_files(root):
         rel_dir = Path(dirpath).relative_to(root).as_posix()
         prefix = "" if rel_dir == "." else rel_dir + "/"
         dirnames[:] = sorted(name for name in dirnames if name not in SKIPPED_DIR_NAMES
-                             and not _excluded(prefix + name + "/"))
+                             and (every or not _excluded(prefix + name + "/")))
         for name in sorted(filenames):
             rel = prefix + name
-            if name.endswith(".py") and not _excluded(rel):
+            if name.endswith(".py") and (every or not _excluded(rel)):
                 yield rel
 
 
@@ -1392,6 +1414,237 @@ def completeness_findings(root, surfaces):
     listed = set(surfaces)
     return ["{}: a shipped entrypoint missing from guarded-surfaces in {}".format(rel, SOURCE_REL)
             for rel in shipped_entrypoints(root) if rel not in listed]
+
+
+# The tomllib leg (see the module docstring): every tomllib.load and tomllib.loads call is HANDLED in its own
+# function or classified by one row of TOMLLIB_TABLE_REL, the one recorded table.
+TOMLLIB_TABLE_REL = "tools/tomllib_parse_sites.toml"
+TOMLLIB_PARSERS = frozenset(("load", "loads"))
+TOMLLIB_COVERED = (RecursionError, MemoryError, ValueError)
+TOMLLIB_EXEMPT_REASONS = frozenset(("test-code", "self-emitted-bytes", "already-validated"))
+TOMLLIB_ROW_KEYS = {"CALLER": frozenset(("path", "function", "form", "count", "class", "caller")),
+                    "EXEMPT": frozenset(("path", "function", "form", "count", "class", "reason"))}
+TOMLLIB_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.GeneratorExp)
+
+
+def _tomllib_module_name(name):
+    """True for the module name tomllib or a dotted submodule name under it (tomllib._parser)."""
+    return re.fullmatch(r"tomllib(?:\.[A-Za-z_][A-Za-z0-9_]*)*", name) is not None
+
+
+def _tomllib_bindings(tree):
+    """(module names, parser names, unresolved forms) a file binds anywhere in it: the bare name tomllib
+    always, `import tomllib [as X]` (a submodule such as tomllib._parser included), `from tomllib import
+    load, loads [as Y]`, `from tomllib import _parser [as Z]` and `from M import tomllib [as X]` (a module
+    re-export). `from tomllib import *` is an unresolved form."""
+    modules, parsers, unresolved = {"tomllib"}, set(), []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules.update(alias.asname or "tomllib" for alias in node.names
+                           if _tomllib_module_name(alias.name))
+        elif isinstance(node, ast.ImportFrom):
+            from_tomllib = node.level == 0 and _tomllib_module_name(node.module or "")
+            for alias in node.names:
+                if from_tomllib and alias.name == "*":
+                    unresolved.append((node, "from {} import *".format(node.module)))
+                elif from_tomllib and alias.name in TOMLLIB_PARSERS:
+                    parsers.add(alias.asname or alias.name)
+                elif alias.name == "tomllib" or (from_tomllib and alias.name == "_parser"):
+                    modules.add(alias.asname or alias.name)
+    return modules, parsers, unresolved
+
+
+def _tomllib_module_expr(expr, modules):
+    """True when expr names the tomllib module: a bound module name, any `<expr>.tomllib` (a module
+    re-export such as _opf_store.tomllib), or the _parser submodule of either."""
+    if isinstance(expr, ast.Name):
+        return expr.id in modules
+    if isinstance(expr, ast.Attribute):
+        return expr.attr == "tomllib" or (expr.attr == "_parser" and _tomllib_module_expr(expr.value, modules))
+    return False
+
+
+def _tomllib_namespace(expr):
+    """True when expr is a module or name table: X.modules (sys.modules) or a globals(), vars() or locals()
+    call."""
+    return (isinstance(expr, ast.Attribute) and expr.attr == "modules") or (
+        isinstance(expr, ast.Call) and isinstance(expr.func, ast.Name) and expr.func.id in ("globals", "vars", "locals"))
+
+
+def _tomllib_by_name(node, parent):
+    """True when the string node names the module to a loader or a module or name table: an argument of
+    import_module, __import__ or find_spec, a key passed to a method of such a table (sys.modules.get), or
+    a subscript of one (sys.modules["tomllib"], globals()["tomllib"])."""
+    if isinstance(parent, ast.Subscript):
+        return parent.slice is node and _tomllib_namespace(parent.value)
+    if not isinstance(parent, ast.Call) or node not in parent.args:
+        return False
+    func = parent.func
+    name = func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else None
+    return name in ("import_module", "__import__", "find_spec") or (isinstance(func, ast.Attribute)
+                                                                   and _tomllib_namespace(func.value))
+
+
+def _tomllib_covers(handler, kind):
+    """True when handler catches kind: a bare except, or a builtin class, named alone or in a tuple
+    literal, that is kind or a base of it. A handler whose body is one bare `raise` covers nothing, and
+    neither does a class the scan cannot read as a builtin (an attribute, a call, a name bound to a
+    tuple), so such a site needs a row."""
+    if len(handler.body) == 1 and isinstance(handler.body[0], ast.Raise) and handler.body[0].exc is None:
+        return False
+    if handler.type is None:
+        return True
+    for name in handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]:
+        named = getattr(builtins, name.id, None) if isinstance(name, ast.Name) else None
+        if isinstance(named, type) and issubclass(kind, named):
+            return True
+    return False
+
+
+def _tomllib_site(node, parents):
+    """(function, handled) for a node: the enclosing def, class, lambda and generator-expression names
+    joined by dots (<module> at module level), and whether the handlers of the try statements that hold
+    the node in their body (never a handler, else or finally), inside the same function, lambda or
+    generator expression, together cover RecursionError, MemoryError and ValueError."""
+    names, handlers, scoped, child, cur = [], [], False, node, parents.get(node)
+    while cur is not None:
+        if not scoped and isinstance(cur, (ast.Try, ast.TryStar)) and child in cur.body:
+            handlers.extend(cur.handlers)
+        scoped = scoped or isinstance(cur, TOMLLIB_SCOPES)
+        if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.append(cur.name)
+        elif isinstance(cur, ast.Lambda):
+            names.append("<lambda>")
+        elif isinstance(cur, ast.GeneratorExp):
+            names.append("<genexpr>")
+        child, cur = cur, parents.get(cur)
+    return (".".join(reversed(names)) or "<module>",
+            all(any(_tomllib_covers(handler, kind) for handler in handlers) for kind in TOMLLIB_COVERED))
+
+
+def tomllib_sites(tree):
+    """(sites, parents) for a parsed file. Each site is (line, function, form, text, handled): form "call"
+    is a direct call of tomllib.load or tomllib.loads under any spelling _tomllib_bindings and
+    _tomllib_module_expr resolve; form "alias" is a form the scan cannot follow, never handled: a parser
+    or the module used other than as a direct call (saved, passed, returned, read through getattr),
+    `from tomllib import *`, or a string naming the module to a loader or a module or name table
+    (_tomllib_by_name: importlib.import_module("tomllib"), sys.modules["tomllib"], globals()["tomllib"])."""
+    modules, parsers, unresolved = _tomllib_bindings(tree)
+    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    found = [(node, "alias", text) for node, text in unresolved]
+    for node in ast.walk(tree):
+        parent = parents.get(node)
+        load = isinstance(getattr(node, "ctx", None), ast.Load)
+        if (isinstance(node, ast.Attribute) and node.attr in TOMLLIB_PARSERS
+                and _tomllib_module_expr(node.value, modules)) or (isinstance(node, ast.Name)
+                                                                    and node.id in parsers):
+            if isinstance(parent, ast.Call) and parent.func is node:
+                found.append((parent, "call", ast.unparse(node)))
+            elif load:
+                found.append((node, "alias", ast.unparse(node) + " used other than as a direct call"))
+        elif load and _tomllib_module_expr(node, modules) and not (isinstance(parent, ast.Attribute)
+                                                                   and parent.value is node):
+            found.append((node, "alias", "the module " + ast.unparse(node) + " used as a value"))
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str) \
+                and _tomllib_module_name(node.value) and _tomllib_by_name(node, parent):
+            found.append((node, "alias", "the module named by the string {!r}".format(node.value)))
+    sites = []
+    for node, form, text in found:
+        function, handled = _tomllib_site(node, parents)
+        sites.append((node.lineno, function, form, text, handled and form == "call"))
+    return sorted(sites), parents
+
+
+def _tomllib_caller_handles(tree, parents, caller, function):
+    """True when the function named caller holds a HANDLED call of function (by its last name part, as
+    a plain name or an attribute)."""
+    callee = function.rsplit(".", 1)[-1]
+    for node in ast.walk(tree):
+        func = node.func if isinstance(node, ast.Call) else None
+        if (isinstance(func, ast.Name) and func.id == callee) or (isinstance(func, ast.Attribute)
+                                                                   and func.attr == callee):
+            if _tomllib_site(node, parents) == (caller, True):
+                return True
+    return False
+
+
+def _tomllib_table(root):
+    """The rows of TOMLLIB_TABLE_REL under root, keyed by (path, function, form). An absent table is an
+    empty one, so every unhandled call then fails; a table that does not parse or breaks the schema is
+    cannot-evaluate."""
+    path = root / TOMLLIB_TABLE_REL
+    if not os.path.lexists(path):
+        return {}
+    try:
+        data = tomllib.loads(_read_text(path))
+    except (ValueError, RecursionError, MemoryError) as exc:
+        raise CannotEvaluate("{}: does not parse: {}".format(TOMLLIB_TABLE_REL, exc))
+    if set(data) - {"site"} != {"format-version"} or type(data["format-version"]) is not int \
+            or data["format-version"] != 1 or not isinstance(data.get("site", []), list):
+        raise CannotEvaluate("{}: want format-version = 1 and [[site]] rows only".format(TOMLLIB_TABLE_REL))
+    table = {}
+    for index, row in enumerate(data.get("site", []), 1):
+        where = "{}: site {}".format(TOMLLIB_TABLE_REL, index)
+        kind = row.get("class") if isinstance(row, dict) else None
+        if kind not in TOMLLIB_ROW_KEYS or set(row) != TOMLLIB_ROW_KEYS[kind]:
+            raise CannotEvaluate("{}: want class CALLER with keys {} or class EXEMPT with keys {}".format(
+                where, sorted(TOMLLIB_ROW_KEYS["CALLER"]), sorted(TOMLLIB_ROW_KEYS["EXEMPT"])))
+        if type(row["count"]) is not int or row["count"] < 1 or not all(
+                isinstance(row[key], str) and row[key] for key in row if key != "count"):
+            raise CannotEvaluate("{}: count must be a positive integer and every other field a non-empty "
+                                 "string".format(where))
+        if row["form"] not in ("call", "alias"):
+            raise CannotEvaluate("{}: form must be call or alias".format(where))
+        if kind == "EXEMPT" and row["reason"] not in TOMLLIB_EXEMPT_REASONS:
+            raise CannotEvaluate("{}: reason {!r} is not one of {}".format(
+                where, row["reason"], ", ".join(sorted(TOMLLIB_EXEMPT_REASONS))))
+        if kind == "CALLER" and row["form"] != "call":
+            raise CannotEvaluate("{}: an alias form cannot be CALLER (the scan cannot follow it to a caller); "
+                                 "record it EXEMPT or remove it".format(where))
+        key = (row["path"], row["function"], row["form"])
+        if key in table:
+            raise CannotEvaluate("{}: repeats the row for {} {} {}".format(where, *key))
+        table[key] = row
+    return table
+
+
+def tomllib_findings(root):
+    """The tomllib leg: each unhandled parse call has a CALLER or EXEMPT row, each unresolved form an
+    EXEMPT row, each row the count the scan finds (and, for CALLER, a caller that still handles the
+    call), and no row names a function in which the scan finds nothing unhandled."""
+    table, findings, seen = _tomllib_table(root), [], set()
+    for rel in _python_files(root, every=True):
+        tree = _parse(root, rel)
+        try:
+            sites, parents = tomllib_sites(tree)
+            groups = {}
+            for line, function, form, text, handled in sites:
+                if not handled:
+                    groups.setdefault((rel, function, form), []).append((line, text))
+            for key, found in sorted(groups.items()):
+                seen.add(key)
+                row, (line, text) = table.get(key), found[0]
+                if row is None and key[2] == "call":
+                    findings.append("{}:{}: {} in {} is not HANDLED (no enclosing handler in that function "
+                                    "names RecursionError, MemoryError and ValueError, or a broader class) and "
+                                    "no row of {} classifies it CALLER or EXEMPT".format(
+                                        rel, line, text, key[1], TOMLLIB_TABLE_REL))
+                elif row is None:
+                    findings.append("{}:{}: {} in {}: a tomllib form the scan cannot resolve, and no EXEMPT "
+                                    "row of {} records it".format(rel, line, text, key[1], TOMLLIB_TABLE_REL))
+                elif row["count"] != len(found):
+                    findings.append("{}: the row for {} {} {} records {}, but the scan finds {} (lines {})".format(
+                        TOMLLIB_TABLE_REL, rel, key[1], key[2], row["count"], len(found),
+                        ", ".join(str(item[0]) for item in found)))
+                elif row["class"] == "CALLER" and not _tomllib_caller_handles(tree, parents, row["caller"],
+                                                                               key[1]):
+                    findings.append("{}: the CALLER row for {} {} names {}, which holds no HANDLED call of "
+                                    "it".format(TOMLLIB_TABLE_REL, rel, key[1], row["caller"]))
+        except (MemoryError, RecursionError) as exc:
+            raise _too_complex(rel, exc)
+    findings.extend("{}: the row for {} {} {} names a call that no longer exists or is now HANDLED; remove "
+                    "it".format(TOMLLIB_TABLE_REL, *key) for key in sorted(set(table) - seen))
+    return findings
 
 
 # The fallback leg's refusal guidance, shared by its findings.
@@ -1725,6 +1978,7 @@ def evaluate(root):
         findings.extend(guard_findings(root, source["surfaces"], floor, source["nonblocking"]))
         findings.extend(dynamic_findings(root, source["surfaces"], floor, source["nonblocking"]))
         findings.extend(fallback_findings(root))
+        findings.extend(tomllib_findings(root))
         if source["completeness"]:
             findings.extend(completeness_findings(root, source["surfaces"]))
         if source["documentation"]:
@@ -1734,7 +1988,7 @@ def evaluate(root):
         return 2, ["CANNOT EVALUATE: {}".format(exc)]
     if findings:
         return 1, ["FAIL: " + finding for finding in findings]
-    return 0, ["PASS: python floor {}.{} ({}): source, pins, guard, dynamic and fallback legs over {} "
+    return 0, ["PASS: python floor {}.{} ({}): source, pins, guard, dynamic, fallback and tomllib legs over {} "
                "guarded surface(s); completeness check {}, documentation and claims checks {}".format(
                    floor[0], floor[1], SOURCE_REL, len(source["surfaces"]),
                    "ON" if source["completeness"] else "OFF (completeness-check = false)",
@@ -1756,6 +2010,7 @@ REVERT_CALLS = (
     ("guard", "guard_findings(root, source[\"surfaces\"], floor, source[\"nonblocking\"])"),
     ("dynamic", "dynamic_findings(root, source[\"surfaces\"], floor, source[\"nonblocking\"])"),
     ("fallback", "fallback_findings(root)"),
+    ("tomllib", "tomllib_findings(root)"),
     ("completeness", "completeness_findings(root, source[\"surfaces\"])"),
     ("documentation", "documentation_findings(root, floor)"),
     ("claims", "documentation_claim_findings(root, floor)"),
@@ -1830,31 +2085,35 @@ LONG_KEY_TOML = "k" + ".k" * 1000 + " = 1\n"
 LONG_INT_TOML = "long = 1" + "0" * 5000 + "\n"
 
 
-def _key_part_capped(thunk):
+def _key_part_capped(thunk, kind=RecursionError):
     """thunk() with tomllib refusing a key of more than 1000 parts by RecursionError, as CPython 3.14.8
-    does. Self-test only: tomllib._parser.parse_key is rebound for the call and then restored."""
-    parser = tomllib._parser
-    real = parser.parse_key
+    does (or by kind, MemoryError to emulate a many-part key under a memory limit). Self-test only:
+    tomllib._parser.parse_key is rebound for the call and then restored; a vector asserts the class and
+    the caller's own refusal text, never this message."""
+    real = tomllib._parser.parse_key
 
     def capped(src, pos):
         pos, key = real(src, pos)
         if len(key) > 1000:
-            raise RecursionError("TOML key has more than the allowed 1000 parts")
+            raise kind("emulated key-part cap")
         return pos, key
-    parser.parse_key = capped
+    tomllib._parser.parse_key = capped
     try:
         return thunk()
     finally:
-        parser.parse_key = real
+        tomllib._parser.parse_key = real
 
 
 def _raises(text, kind, capped=False):
-    """True when tomllib refuses text with exactly the class kind, so the vector is live here."""
-    try:
-        _key_part_capped(lambda: tomllib.loads(text)) if capped else tomllib.loads(text)
-    except Exception as exc:  # noqa: BLE001  the class raised is the observation
-        return type(exc) is kind
-    return False
+    """True when tomllib refuses text with exactly the class kind (under the emulated key-part refusal of
+    that class when capped), so the vector is live here."""
+    def parse():
+        try:
+            tomllib.loads(text)
+        except Exception as exc:  # noqa: BLE001  the class raised is the observation
+            return type(exc) is kind
+        return False
+    return _key_part_capped(parse, kind) if capped else parse()
 
 
 def _manifest_refusal(base, text, capped=False):
@@ -1868,10 +2127,192 @@ def _manifest_refusal(base, text, capped=False):
     err = io.StringIO()
     try:
         with contextlib.redirect_stderr(err):
-            got = _key_part_capped(_expected_check_ids) if capped else _expected_check_ids()
+            got = (_key_part_capped(_expected_check_ids, RecursionError if capped is True else capped) if capped
+                   else _expected_check_ids())
     finally:
         CHECKS_MANIFEST = saved
     return got, err.getvalue()
+
+
+# Fixture modules for the tomllib leg: {head} is one line, so the parse call is on line 4; TOMLLIB_HANDLED_TEXT
+# wraps it in a try whose handler clause and body are given.
+TOMLLIB_SITE_TEXT = "{head}\n\ndef read(text):\n    return {call}(text)\n"
+TOMLLIB_HANDLED_TEXT = ("{head}\n\ndef read(text):\n    try:\n        return {call}(text)\n    except{handler}:\n"
+                        "        {body}\n")
+def _tomllib_row(function, form="call", count=1, caller=None, reason="test-code", path="tools/site.py"):
+    """One [[site]] row of the recorded table, CALLER when caller is given and EXEMPT otherwise."""
+    tail = "caller = {}\n".format(json.dumps(caller)) if caller else "reason = {}\n".format(json.dumps(reason))
+    return "[[site]]\npath = {}\nfunction = {}\nform = \"{}\"\ncount = {}\nclass = \"{}\"\n{}".format(
+        json.dumps(path), json.dumps(function), form, count, "CALLER" if caller else "EXEMPT", tail)
+
+
+def _tomllib_leg(base, text, *rows, table=None):
+    """(code, lines) of evaluate() over a clean fixture holding tools/site.py and, when rows or table
+    are given, a recorded table."""
+    files = {"tools/site.py": text}
+    if rows or table is not None:
+        files[TOMLLIB_TABLE_REL] = table if table is not None else "format-version = 1\n" + "".join(rows)
+    return evaluate(_fixture(base, files=files))
+
+
+def _load_path(name, path):
+    """A module loaded from path through importlib under name, never run as a script."""
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _tomllib_cases(base):
+    """The tomllib leg: each spelling unhandled fails and handled passes; each handler shape that is
+    not the three classes or broader fails; each unresolved form fails unless an EXEMPT row records it;
+    each table rule; and the production sites this leg found, each under deep nesting and both
+    emulated key-part refusals (RecursionError, MemoryError), each asserting the class and the site's own
+    refusal text, never a parser message."""
+    covered = " (ValueError, RecursionError, MemoryError) as exc"
+    for unhandled_id, handled_id, head, call in (
+            ("tomllib/spelling-import-unhandled-fails", "tomllib/spelling-import-handled-passes",
+             "import tomllib", "tomllib.loads"),
+            ("tomllib/spelling-import-load-unhandled-fails", "tomllib/spelling-import-load-handled-passes",
+             "import tomllib", "tomllib.load"),
+            ("tomllib/spelling-import-as-unhandled-fails", "tomllib/spelling-import-as-handled-passes",
+             "import tomllib as t", "t.loads"),
+            ("tomllib/spelling-from-import-unhandled-fails", "tomllib/spelling-from-import-handled-passes",
+             "from tomllib import loads", "loads"),
+            ("tomllib/spelling-from-import-as-unhandled-fails", "tomllib/spelling-from-import-as-handled-passes",
+             "from tomllib import loads as parse", "parse"),
+            ("tomllib/spelling-from-import-load-as-unhandled-fails", "tomllib/spelling-from-import-load-as-handled-passes",
+             "from tomllib import load as read_toml", "read_toml"),
+            ("tomllib/spelling-parser-submodule-unhandled-fails", "tomllib/spelling-parser-submodule-handled-passes",
+             "import tomllib._parser as p", "p.loads"),
+            ("tomllib/spelling-re-export-attribute-unhandled-fails", "tomllib/spelling-re-export-attribute-handled-passes",
+             "import helper", "helper.tomllib.loads"),
+            ("tomllib/spelling-re-export-from-unhandled-fails", "tomllib/spelling-re-export-from-handled-passes",
+             "from helper import tomllib as reexported", "reexported.loads")):
+        code, lines = _tomllib_leg(base, TOMLLIB_SITE_TEXT.format(head=head, call=call))
+        check(unhandled_id,
+              (code, _has(lines, "tools/site.py:4: {} in read is not HANDLED".format(call))), (1, True))
+        code, lines = _tomllib_leg(base, TOMLLIB_HANDLED_TEXT.format(head=head, call=call, handler=covered,
+                                                                    body="raise SystemExit(2)"))
+        check(handled_id, code, 0)
+    for check_id, handler, want in (("tomllib/handler-tuple", covered, 0), ("tomllib/handler-exception", " Exception", 0),
+                                ("tomllib/handler-base-exception", " BaseException", 0), ("tomllib/handler-bare", "", 0),
+                                ("tomllib/handler-runtime-error-base", " (ValueError, RuntimeError, MemoryError)", 0),
+                                ("tomllib/handler-no-memory-error", " (ValueError, RecursionError)", 1),
+                                ("tomllib/handler-no-recursion-error", " (ValueError, MemoryError)", 1),
+                                ("tomllib/handler-decode-error-not-value-error",
+                                 " (tomllib.TOMLDecodeError, RecursionError, MemoryError)", 1),
+                                ("tomllib/handler-unreadable-class", " ERRORS", 1)):
+        code, _lines = _tomllib_leg(base, TOMLLIB_HANDLED_TEXT.format(
+            head="import tomllib", call="tomllib.loads", handler=handler, body="raise SystemExit(2)"))
+        check(check_id, code, want)
+    code, _lines = _tomllib_leg(base, TOMLLIB_HANDLED_TEXT.format(
+        head="import tomllib", call="tomllib.loads", handler=" Exception", body="raise"))
+    check("tomllib/handler-bare-reraise-fails", code, 1)
+    code, _lines = _tomllib_leg(base, "import tomllib\n\n\ndef read(text):\n    try:\n        try:\n"
+                                "            return tomllib.loads(text)\n        except ValueError:\n"
+                                "            return None\n    except (RecursionError, MemoryError):\n"
+                                "        return None\n")
+    check("tomllib/handler-nested-union-passes", code, 0)
+    code, lines = _tomllib_leg(base, "import tomllib\n\n\ndef read(text):\n    try:\n"
+                                     "        return (lambda: tomllib.loads(text))()\n    except Exception:\n"
+                                     "        return None\n")
+    check("tomllib/lambda-inside-try-fails", (code, _has(lines, "in read.<lambda> is not HANDLED")), (1, True))
+    code, _lines = _tomllib_leg(base, "import tomllib\n\n\ndef read(text):\n    try:\n        return 1\n"
+                                      "    except Exception:\n        return tomllib.loads(text)\n")
+    check("tomllib/call-in-handler-fails", code, 1)
+    unresolved = "a tomllib form the scan cannot resolve"
+    for fail_id, exempt_id, text, function in (
+            ("tomllib/alias-saved-parser-fails", "tomllib/alias-saved-parser-recorded-exempt-passes",
+             "import tomllib\n\nparse = tomllib.loads\n", "<module>"),
+            ("tomllib/alias-getattr-module-fails", "tomllib/alias-getattr-module-recorded-exempt-passes",
+             "import tomllib\n\n\ndef read(text):\n    return getattr(tomllib, \"loads\")(text)\n",
+             "read"),
+            ("tomllib/alias-import-module-string-fails", "tomllib/alias-import-module-string-recorded-exempt-passes",
+             "import importlib\n\n\ndef read(text):\n"
+             "    return importlib.import_module(\"tomllib\").loads(text)\n", "read"),
+            ("tomllib/alias-star-import-fails", "tomllib/alias-star-import-recorded-exempt-passes",
+             "from tomllib import *\n", "<module>")):
+        code, lines = _tomllib_leg(base, text)
+        check(fail_id, (code, _has(lines, unresolved)), (1, True))
+        check(exempt_id,
+              _tomllib_leg(base, text, _tomllib_row(function, form="alias"))[0], 0)
+    helper = ("import tomllib\n\n\ndef parse(text):\n    return tomllib.loads(text)\n\n\ndef main(text):\n"
+              "    try:\n        return parse(text)\n    except{}:\n        return None\n")
+    check("tomllib/table-caller-handled-passes",
+          _tomllib_leg(base, helper.format(covered), _tomllib_row("parse", caller="main"))[0], 0)
+    code, lines = _tomllib_leg(base, helper.format(" ValueError"), _tomllib_row("parse", caller="main"))
+    check("tomllib/table-caller-unhandled-fails", (code, _has(lines, "which holds no HANDLED call")), (1, True))
+    code, lines = _tomllib_leg(base, helper.format(covered), _tomllib_row("parse", caller="absent"))
+    check("tomllib/table-caller-missing-fails", (code, _has(lines, "which holds no HANDLED call")), (1, True))
+    plain = TOMLLIB_SITE_TEXT.format(head="import tomllib", call="tomllib.loads")
+    check("tomllib/table-exempt-passes", _tomllib_leg(base, plain, _tomllib_row("read"))[0], 0)
+    code, lines = _tomllib_leg(base, plain, _tomllib_row("read"), _tomllib_row("gone"))
+    check("tomllib/table-stale-row-fails", (code, _has(lines, "names a call that no longer exists")), (1, True))
+    code, lines = _tomllib_leg(base, TOMLLIB_HANDLED_TEXT.format(
+        head="import tomllib", call="tomllib.loads", handler=covered, body="return None"), _tomllib_row("read"))
+    check("tomllib/table-row-for-handled-call-fails",
+          (code, _has(lines, "names a call that no longer exists or is now HANDLED")), (1, True))
+    code, lines = _tomllib_leg(base, plain, _tomllib_row("read", count=2))
+    check("tomllib/table-count-mismatch-fails", (code, _has(lines, "records 2, but the scan finds 1")), (1, True))
+    for check_id, rows, table in (
+            ("tomllib/table-unknown-reason-cannot-evaluate", (_tomllib_row("read", reason="trusted"),), None),
+            ("tomllib/table-caller-alias-cannot-evaluate", (_tomllib_row("read", form="alias", caller="main"),), None),
+            ("tomllib/table-duplicate-row-cannot-evaluate", (_tomllib_row("read"), _tomllib_row("read")), None),
+            ("tomllib/table-unknown-key-cannot-evaluate", ("[[site]]\npath = \"tools/site.py\"\nfunction = \"read\"\nform = \"call\"\n"
+                             "count = 1\nclass = \"EXEMPT\"\nreason = \"test-code\"\nnote = \"x\"\n",), None),
+            ("tomllib/table-deep-nesting-cannot-evaluate", (), DEEP_TOML), ("tomllib/table-overlong-integer-cannot-evaluate", (), LONG_INT_TOML)):
+        code, lines = _tomllib_leg(base, plain, *rows, table=table)
+        check(check_id, (code, _has(lines, TOMLLIB_TABLE_REL)), (2, True))
+    for check_id, kind in (("tomllib/table-key-1001-parts-RecursionError-cannot-evaluate", RecursionError),
+                           ("tomllib/table-key-1001-parts-MemoryError-cannot-evaluate", MemoryError)):
+        code, lines = _key_part_capped(lambda: _tomllib_leg(base, plain, table=LONG_KEY_TOML), kind)
+        check(check_id,
+              (code, _has(lines, TOMLLIB_TABLE_REL + ": does not parse")), (2, True))
+    _tomllib_production_cases(base)
+
+
+def _tomllib_production_cases(base):
+    """The production sites the tomllib leg found unhandled, each refusing deep nesting and both
+    emulated key-part refusals with its own documented result: the NEWTAB contract script exits 2
+    with its cannot-read diagnostic, never a traceback, and the deny hook's roster reader returns its
+    unparseable reason, so a machine-store manifest it cannot parse is "not a store"."""
+    newtab = _fixture(base, files={".github/check_newtab_contract.py":
+                                   _read_text(ROOT / ".github" / "check_newtab_contract.py")})
+    contract = _load_path("newtab_contract_floor_probe", newtab / ".github" / "check_newtab_contract.py")
+    hook = _load_path("pretooluse_deny_floor_probe", ROOT / "opf" / "enforcement" / "claude" / "pretooluse_deny.py")
+    import contextlib
+    import io
+    for newtab_id, deny_id, text, kind in (
+            ("tomllib/newtab-contract-deep-exit-2", "tomllib/deny-roster-deep-unparseable-not-a-store",
+             DEEP_TOML, None),
+            ("tomllib/newtab-contract-key-1001-recursion-exit-2", "tomllib/deny-roster-key-1001-recursion-unparseable-not-a-store",
+             LONG_KEY_TOML, RecursionError),
+            ("tomllib/newtab-contract-key-1001-memory-exit-2", "tomllib/deny-roster-key-1001-memory-unparseable-not-a-store",
+             LONG_KEY_TOML, MemoryError),
+            ("tomllib/newtab-contract-overlong-integer-exit-2", "tomllib/deny-roster-overlong-integer-unparseable-not-a-store",
+             LONG_INT_TOML, None)):
+        _write(newtab, ".aiqt/newtab.toml", text)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            try:
+                code = _key_part_capped(contract.main, kind) if kind else contract.main()
+            except Exception as exc:  # noqa: BLE001  an escape is the failure under test
+                code = "escaped " + type(exc).__name__
+        check(newtab_id,
+              (code, "error: cannot read NEWTAB repository declaration" in err.getvalue()), (2, True))
+        store = Path(tempfile.mkdtemp(prefix="deny-", dir=base))
+        _write(store, "m/manifest.toml", text)
+        try:
+            doc, reason = _key_part_capped(lambda: hook._read_roster_toml(
+                str(store / "m" / "manifest.toml"), "the machine-store manifest"), kind) if kind else \
+                hook._read_roster_toml(str(store / "m" / "manifest.toml"), "the machine-store manifest")
+            not_store = (_key_part_capped(lambda: hook._is_machine_store(str(store), "m"), kind) if kind
+                         else hook._is_machine_store(str(store), "m"))
+        except Exception as exc:  # noqa: BLE001  an escape is the failure under test
+            doc, reason, not_store = "escaped " + type(exc).__name__, "", None
+        check(deny_id,
+              (doc, "is unreadable or unparseable" in (reason or ""), not_store), (None, True, False))
 
 
 def _noflush_guard_text(name, floor, modes=None, code=REFUSAL_EXIT):
@@ -1950,6 +2391,14 @@ def _self_test_cases(base):
     got, err = _manifest_refusal(base, LONG_INT_TOML)
     check("harness/manifest-overlong-integer-harness-error",
           (got, "SELF-TEST HARNESS ERROR: cannot read" in err), (None, True))
+    code, lines = _key_part_capped(lambda: evaluate(_fixture(base, source=_source_text(extra=LONG_KEY_TOML))),
+                                   MemoryError)
+    check("source/key-1001-parts-memory-cannot-evaluate",
+          (_raises(LONG_KEY_TOML, MemoryError, capped=True), code, _has(lines, "does not parse")), (True, 2, True))
+    got, err = _manifest_refusal(base, LONG_KEY_TOML, capped=MemoryError)
+    check("harness/manifest-key-1001-parts-memory-harness-error",
+          (got, "SELF-TEST HARNESS ERROR: cannot read" in err), (None, True))
+    _tomllib_cases(base)
     check("source/unknown-key-cannot-evaluate",
           evaluate(_fixture(base, source=_source_text(extra="floor-note = \"x\"\n")))[0], 2)
     check("source/bool-format-version-cannot-evaluate", evaluate(_fixture(
@@ -2248,8 +2697,8 @@ def _self_test_cases(base):
            "as '3.10'".format(WORKFLOWS_REL)])
 
     check("guard/canonical-passes", evaluate(_fixture(base, source=listed, files=demo)), (0, [
-        "PASS: python floor 3.14 ({}): source, pins, guard, dynamic and fallback legs over 1 guarded "
-        "surface(s); completeness check OFF (completeness-check = false), documentation and claims "
+        "PASS: python floor 3.14 ({}): source, pins, guard, dynamic, fallback and tomllib legs over 1 "
+        "guarded surface(s); completeness check OFF (completeness-check = false), documentation and claims "
         "checks ON".format(SOURCE_REL)]))
     guard_marker = "canonical floor guard"
     for check_id, text in (
@@ -2753,11 +3202,11 @@ def _self_test_cases(base):
     check("fallback/function-body-not-scanned-passes", fallback_case(
         "import sys\n\n\ndef load():\n    try:\n        import tomllib\n"
         "    except ModuleNotFoundError:\n        sys.stderr.write(\"x\\n\")\n"
-        "        raise SystemExit(2)\n    return tomllib\n"), (0, False))
+        "        raise SystemExit(2)\n    return tomllib.TOMLDecodeError\n"), (0, False))
     check("fallback/method-body-not-scanned-passes", fallback_case(
         "import sys\n\n\nclass Loader:\n    def load(self):\n        try:\n            import tomllib\n"
         "        except ModuleNotFoundError:\n            sys.stderr.write(\"x\\n\")\n"
-        "            raise SystemExit(2)\n        return tomllib\n"), (0, False))
+        "            raise SystemExit(2)\n        return tomllib.TOMLDecodeError\n"), (0, False))
 
     code, lines = evaluate(_fixture(base, source=_source_text(documentation=False), declarations=False))
     check("switch/off-finding", (code, [line for line in lines if "documentation-check is" in line]),
@@ -2867,6 +3316,9 @@ def _red_on_revert(base, good):
             "import sys\n\ntry:\n    import tomllib\nexcept ModuleNotFoundError:\n"
             "    sys.stderr.write(\"error: no tomllib\\n\")\n    raise SystemExit(2)\n"))])),
          "departs here from the canonical write-flush-exit refusal"),
+        ("tomllib", dict(files={"tools/site.py": TOMLLIB_SITE_TEXT.format(head="import tomllib",
+                                                                          call="tomllib.loads")}),
+         "tools/site.py:4: tomllib.loads in read is not HANDLED"),
         ("completeness", dict(source=_source_text(completeness=True),
                               files={"tools/demo.py": _entry("import sys\n")}),
          "tools/demo.py: a shipped entrypoint"),
@@ -2887,6 +3339,7 @@ def _red_on_revert(base, good):
     check("revert/guard-leg", results["guard"], (1, True, 0))
     check("revert/dynamic-leg", results["dynamic"], (1, True, 0))
     check("revert/fallback-leg", results["fallback"], (1, True, 0))
+    check("revert/tomllib-leg", results["tomllib"], (1, True, 0))
     check("revert/completeness-leg", results["completeness"], (1, True, 0))
     check("revert/documentation-leg", results["documentation"], (1, True, 0))
     check("revert/claims-leg", results["claims"], (1, True, 0))
@@ -2987,7 +3440,7 @@ def _rule_reverts(base):
 def _expected_check_ids():
     try:
         manifest = tomllib.loads(_read_text(CHECKS_MANIFEST))
-    except (CannotEvaluate, tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+    except (CannotEvaluate, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         print("SELF-TEST HARNESS ERROR: cannot read {}: {}".format(CHECKS_MANIFEST, exc),
               file=sys.stderr)
         return None

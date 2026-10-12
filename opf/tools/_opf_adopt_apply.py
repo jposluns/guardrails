@@ -439,9 +439,10 @@ def _verify_bundle_at(root_fd, run_id, bundle, home_fd=None):
             try:
                 raw, _fst = read_retained(rel)
                 doc = tomllib.loads(raw.decode("utf-8"))
-            except (_journal.JournalError, OSError, UnicodeDecodeError, tomllib.TOMLDecodeError,
-                    RecursionError) as exc:
-                # RecursionError: tomllib's refusal of deep nesting and (CPython 3.14.8 on) a 1001-part key.
+            except (_journal.JournalError, OSError, ValueError, RecursionError, MemoryError) as exc:
+                # ValueError: tomllib.TOMLDecodeError, a UnicodeDecodeError and an over-long integer literal;
+                # RecursionError: deep nesting and (CPython 3.14.8 on) a 1001-part key; MemoryError: a many-part
+                # key under a memory limit.
                 return schema._cannot("inventory {!r} is unreadable or unparseable ({})".format(rel, exc))
             checked = validate_inventory(doc, run_id)
             if checked.status != store.VALID:

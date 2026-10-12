@@ -183,7 +183,7 @@ def registry_runners(root):
     data = _read_regular(Path(root) / REGISTRY_REL, REGISTRY_REL)
     try:
         manifest = tomllib.loads(data.decode("utf-8"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise CannotEvaluate("{}: malformed ({})".format(REGISTRY_REL, type(exc).__name__))
     violation = io.StringIO()
     with contextlib.redirect_stderr(violation):
@@ -485,7 +485,8 @@ def _registered_check_ids():
     None), or (None, reason)."""
     try:
         data = tomllib.loads(_read_regular(ROOT / REGISTRY_REL, REGISTRY_REL).decode("utf-8"))
-    except (CannotEvaluate, UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+    except (CannotEvaluate, UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError,
+            MemoryError) as exc:
         return None, "{}: {}".format(REGISTRY_REL, exc)
     with contextlib.redirect_stderr(io.StringIO()):
         rows = check_selftest_execution._manifest_rows(data, REGISTRY_REL)
@@ -647,7 +648,7 @@ MUTANTS = (
     ("roster-target", 'elif target != "gitleaks":', "elif False:", "roster/odd-target"),
     ("roster-nonempty", "if not scripts:", "if False:", "roster/no-python"),
     ("registry-parse",
-     "except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:",
+     "except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:",
      "except ZeroDivisionError as exc:", "registry/unparsable"),
     ("registry-schema", "if rows is None:", "if False:", "registry/format-version"),
     ("registry-runner", "if not check_ci_parity.PY_TARGET_RE.fullmatch(runner):", "if False:",
