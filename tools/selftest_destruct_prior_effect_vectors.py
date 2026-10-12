@@ -97,6 +97,27 @@ PRIOR_EFFECT_VECTORS = [
     ("pe-mysql-pager", 6, "mysql -e 'pager sh'", "deny"),
     ("pe-mysql-edit", 6, "mysql -e '\\e'", "deny"),
     ("pe-sqlite-output-pipe-single", 6, "sqlite3 :memory: \".output '|sh x'\"", "deny"),
+    # round 6 (codex Q6): the redesigned reader - a closed certain set, and an uncertain read (a construct
+    # that can run a command the reader does not model) denies when the command is also effectful (it
+    # creates/copies/links/writes a path, sets a command-valued variable, or names a destructive word).
+    # BLOCKER 1: a backslash-newline joins across a heredoc delimiter or substitution the reader cannot track.
+    ("pe-heredoc-delim-bs-join", 4, "cat <<EOF\nEO\\\nF\ncp helper {scratch}/zz; {scratch}/zz", "deny"),
+    ("pe-heredoc-body-bs-subst", 4, "cp helper {scratch}/zz; cat <<EOF\n$\\\n({scratch}/zz)\nEOF", "deny"),
+    # MAJOR 2: coproc runs a literal path the model does not place (unparseable and parseable forms).
+    ("pe-coproc-unparseable", 4, "cat <<< ok; cp helper {scratch}/zz; coproc {scratch}/zz", "deny"),
+    ("pe-coproc-parseable", 4, "cp helper {scratch}/zz; coproc {scratch}/zz", "deny"),
+    # MAJOR 3: the parseable-substitution residual - a written path run inside a $( ) or backtick
+    # substitution, in double quotes and unquoted, is now seen on the parseable path too.
+    ("pe-parseable-subst-dquote-run", 4, 'cp helper {scratch}/zz; echo "$({scratch}/zz)"', "deny"),
+    ("pe-parseable-subst-backtick-run", 4, "cp helper {scratch}/zz; echo `{scratch}/zz`", "deny"),
+    ("pe-parseable-subst-unquoted-run", 4, "cp helper {scratch}/zz; echo $({scratch}/zz)", "deny"),
+    # select and a function or alias defined and then called in one command are uncertain too.
+    ("pe-select-create-run", 4, "cp helper {scratch}/zz; select x in a; do {scratch}/zz; done", "deny"),
+    ("pe-funcdef-call-create-run", 4,
+     "runner() { {scratch}/zz; }; cp helper {scratch}/zz; runner", "deny"),
+    # MINOR 5: one nesting limit covers process substitutions too; beyond it the read is uncertain.
+    ("pe-deep-procsub-create-run", 4,
+     "cp helper {scratch}/zz; cat " + "<(cat " * 10 + "<({scratch}/zz)" + ")" * 10, "deny"),
 ]
 
 # Benign shapes that must keep allowing (false-deny controls; none names a destructive word).
@@ -115,4 +136,11 @@ PRIOR_EFFECT_CONTROLS = [
     ("pe-control-procsub-redirect", "while read -r l; do echo $l; done < <(ls)", "allow"),
     ("pe-control-commit-idiom-quotes", "git commit -m \"$(cat <<'EOF'\nFix \"foo's bar\nEOF\n)\"", "allow"),
     ("pe-control-unbalanced-quote", "ls \"unbalanced", "allow"),
+    # round 6 (codex Q6): the uncertain constructs with no effect stay allowed, and codex MEDIUM 4
+    # (a data 'case' argument) must not deny.
+    ("pe-control-coproc-benign", "coproc sleep 1", "allow"),
+    ("pe-control-select-benign", "select x in a b; do echo $x; done", "allow"),
+    ("pe-control-case-in-procsub", "cat <(printf case)", "allow"),
+    ("pe-control-quoted-heredoc-bs", "cat <<'EOF'\nEO\\\nF\nhello\nEOF", "allow"),
+    ("pe-control-deep-procsub-benign", "cat " + "<(cat " * 10 + "<(printf ok)" + ")" * 10, "allow"),
 ]
