@@ -10842,7 +10842,9 @@ def _self_test_checks():
                 dict(op="render-views", store_root=".",
                      members=[dict(path=v, digest=_digest(v.encode("utf-8"))) for v in views]),
                 schema.enforcement_install_op(bindings["enforcement"])]
-        sheet = dict(sources=["keep.md", "legacy.md"], targets=[".opf/hooks/pre-commit"], product="opf",
+        # The opf/ mirror the pack row plants (the pre-commit hook, the CI recipe and the tool entry point)
+        # lies outside every walked root, so its absence is a declared target.
+        sheet = dict(sources=["keep.md", "legacy.md"], targets=[schema.PACK_MIRROR_ROOT], product="opf",
                      decisions=[dict(path="keep.md", disposition="keep", actor="fixture"),
                                 dict(path="legacy.md", disposition="retire", actor="fixture")],
                      ops=rows, bindings=bindings)

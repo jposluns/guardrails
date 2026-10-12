@@ -669,7 +669,9 @@ def _self_test_checks():
                 dict(op="render-views", store_root=".",
                      members=[dict(path=v, digest=digest(v.encode("utf-8"))) for v in views]),
                 schema.enforcement_install_op(bindings["enforcement"])]
-        sheet = dict(sources=sorted(srcs), targets=[".opf/hooks/pre-commit"] + sorted(dests.values()),
+        # The opf/ mirror the pack row plants lies outside every walked root, so its absence is a declared
+        # target beside each explicit move destination.
+        sheet = dict(sources=sorted(srcs), targets=[schema.PACK_MIRROR_ROOT] + sorted(dests.values()),
                      product="opf",
                      decisions=[dict(path=p, disposition=d, actor="fixture",
                                      **(dict(destination=dests[p]) if p in dests else {}))

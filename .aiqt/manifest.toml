@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "b8dfde757994d04a593939fd6d4b59925eb21c94bbb264016970b532c2c4544f"
+tree-sha256 = "ab0fe9573897aa9e2b3e481a756d8110de4d9959d4cc691677fc714b9af44a71"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2661,13 +2661,13 @@ sha256 = "65ee9364396ac733e6717e905aaa50665ab68a091e97b6a82b47b56d3a5129ea"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_apply.py"
-bytes = 975020
-sha256 = "cebd939a52d2932f2b903642f17ed01433b189aeb19d65133eb5013da6cc4b8c"
+bytes = 975207
+sha256 = "85d615a656f3022866e9ce43afe0cc90ab63fc9b5795d22fc59735d8c7ebc66d"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_complete.py"
-bytes = 164463
-sha256 = "2fa0f8abf1c17b6fbb3908a74d4cfdbc36867bb8ef7ed4848a2e136661bb3ba8"
+bytes = 166376
+sha256 = "72131fdf70a716ff4877cc42c3888e1775d4d0f703fab1640abc7b4a326fae79"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_hook.py"
@@ -2686,8 +2686,8 @@ sha256 = "e33b39843c63121f1141f73c39caf54012c607ff38b943d111f70006c7f51e63"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_state.py"
-bytes = 110094
-sha256 = "2560ba95f1a0266c2a73fd365d04ced08fa25204e791c0949928962b1f07b9b6"
+bytes = 110257
+sha256 = "052891354f9fe02b7b1b80d345f43e3b3029ee8d45552319049b7759bb2cf922"
 
 [[sources]]
 path = "opf/tools/_opf_changelog.py"
@@ -3016,8 +3016,8 @@ sha256 = "ac02a68f8ed5520ee2caeaac5e4849d4a87cf0d40a9dbe10ff9f4309832c902a"
 
 [[sources]]
 path = "opf/tools/opf.py"
-bytes = 1163761
-sha256 = "32d1213dbc1a642ced9dc09d06029bbac5723179ac8c6e64ff5e12e2bbcbc835"
+bytes = 1163968
+sha256 = "ddea0236ad6a38988983a8e15762a59a5d59b18e7f98f8f0dc54c902f757b60d"
 
 [[sources]]
 path = "opf/tools/run_all_checks.sh"
