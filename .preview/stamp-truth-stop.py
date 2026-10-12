@@ -98,19 +98,28 @@ A pass rewrites an unavailable state so it recovers. State I/O never crashes.
 STOP_HOOK_ACTIVE (the corrective loop after a block): violations only in messages older than the final one
 never block; a bad FINAL message still blocks, and then older violations are reported with it. So a corrected
 final message always passes.
-BLOCK CAP (defence in depth against a loop the model cannot satisfy, for example a hook defect): when
-stop_hook_active is true AND this Stop would block, the consecutive block cycles of this hook immediately
+BLOCK CAP (defence in depth against a loop the model cannot satisfy, for example a hook defect): when this
+Stop would block and its stop_hook_active field is true OR ABSENT (round 38: an absent field is not read as a
+new turn, so the cap binds on a host that omits the field; before, the cap ran only under an explicit true,
+so such a host could be refused at every stop), the consecutive block cycles of this hook immediately
 preceding it are the LARGER of two counts (round 24). (i) The hook's own recovery-state counter: the state
-file (see WHICH MESSAGES) also records `blocks`, set to 1 by a block outside the corrective loop, incremented
-by each further block under stop_hook_active, kept at a capped allow AND at a pass under stop_hook_active
-(round 27), set to the cap at a fail-open allow and at a pass under stop_hook_active whose counter was
-unreadable (so the rest of that corrective loop stays capped), and reset to 0 ONLY by a Stop without
-stop_hook_active. While stop_hook_active is true the counter NEVER decreases, whatever the transcript shows
+file (see WHICH MESSAGES) also records `blocks`, set to 1 by a block that starts a count, incremented
+by each further block, kept at a capped allow AND at a pass that is not an observed new turn
+(rounds 27, 38), set to the cap at a fail-open allow and at such a pass whose counter was
+unreadable (so the rest of that corrective loop stays capped), and reset to 0 ONLY by an observable new-turn
+signal: a Stop whose stop_hook_active field is explicitly false (trusted as the platform's statement of a
+new turn, so the cap does not hold against a host that sends false on a Stop that continues a refusal), or a
+new genuine user message read past the boundary by a persisting Stop with a readable counter and no explicit
+true (this hook registers only Stop, so the transcript is its UserPromptSubmit analogue). An allowed stop
+alone never resets it. While stop_hook_active is true the counter NEVER decreases, whatever the transcript shows
 (round 26) and whatever the final message is (round 27): a transcript reset or rewrite, or a user-role entry
 read as a genuine user message, resets the boundary and the late-arrival exception but never the counter,
 and a clean pass inside the loop keeps it (in round 26 a clean pass reset it, so alternating with ANOTHER Stop
-hook that rejected the clean message, 1, 0, 1, 0, let this hook block every other Stop without limit). So
-within one continuous stop_hook_active run this hook blocks at most BLOCK_CAP times, for any interleaving of
+hook that rejected the clean message, 1, 0, 1, 0, let this hook block every other Stop without limit); where
+the host omits the field, a user-role entry read as a genuine user message can still restart the count, and
+an externally deleted state file reads as an established 0 (the round-26 protections need the explicit
+true), each a disclosed residual. So within one continuous run of Stops that carries no new-turn signal this
+hook blocks at most BLOCK_CAP times, for any interleaving of
 other hooks' feedback, transcript contents, and clean or violating messages (the argument is at the counter
 code in _evaluate()). Round 28: that bound assumes the Stops for one transcript are SERIALIZED (two concurrent
 evaluations, one loading the counter and saving it back after the other raised it, re-armed it every time),
@@ -155,7 +164,8 @@ locked when they were examined, and eligible ones the cursor has not reached yet
 prune (a prune runs only when a Stop creates a new transcript's subdirectory, so a backlog drains only as new
 transcripts arrive). Two concurrent prunes can each write the cursor, the later write winning; a name either
 skips is examined when the cursor next wraps round to it.
-Under stop_hook_active each save also re-reads the stored counter and never
+On each Stop that is not an observed new turn (stop_hook_active true or absent, round 38) the save also
+re-reads the stored counter and never
 writes a lower value, and a block whose write would not raise the stored counter fails open. It is written
 even when the transcript is unreadable (the boundary is then kept as loaded). (ii) The transcript count: walking back at
 most 8 MiB and 512 records from the transcript tail, each record that is this hook's own block feedback is a
@@ -174,7 +184,10 @@ entry, at the start of the file, or at the cap; an unreadable transcript, a coun
 byte bound leaves it unestablished. At 3 or more the Stop is ALLOWED instead, with a warning that says the cap
 was hit, counts the unresolved claims, and names the first (see MESSAGES). The own counter is the REQUIRED brake: whenever the counter is
 unusable under stop_hook_active (no usable private state dir, no transcript_path to key it, a state file that
-cannot be read, or a block that cannot be written to it), the hook could not establish whether it is looping,
+cannot be read, or a block that cannot be written to it), and equally on a Stop whose field is ABSENT when
+it has a transcript_path (round 38; with neither the field nor a transcript_path the Stop blocks normally,
+since nothing could key a counter to bound it, a disclosed residual), the hook could not establish whether
+it is looping,
 so the Stop FAILS OPEN at once with a one-line warning counting the unresolved claims and naming the
 first (see MESSAGES), WHATEVER the
 transcript count says (the transcript count alone is never the only brake). An ABSENT state file in a usable
@@ -185,7 +198,10 @@ missing mid-loop was removed by something else (a tmp cleaner deleting it betwee
 removed or replaced after the evaluation opened it) or pruned after 7 idle days,
 and the Stop FAILS OPEN at once as for an unusable counter,
 never restarting the count at 0; that closes the round-25 residual in which such a deletion, or a transcript
-reset or a synthetic user-role entry resetting the counter, let every corrective Stop block. Each warning is delivered to the user as a top-level {"systemMessage": ...} on stdout (the
+reset or a synthetic user-role entry resetting the counter, let every corrective Stop block. The absence test needs the explicit true: where the host
+omits the field an absent state still reads as an established count of 0 (otherwise the first Stop of every
+transcript would fail open), so there an externally deleted state file restarts the count, a disclosed
+residual (round 38). Each warning is delivered to the user as a top-level {"systemMessage": ...} on stdout (the
 hooks reference's common JSON output field), ONE line (see MESSAGES); its detail
 (the true UTC, elapsed, and the first violation in full) goes to ONE different diagnostic line on stderr, which
 on exit 0 reaches only the host's debug log, so stderr is diagnostic logging, not a user-visible channel.
@@ -328,7 +344,8 @@ ABSENT and fails open once. A same-uid process
 that rewrites the state file directly while holding no lock, or swaps a state directory holding a lower count
 into place, is outside the threat model (it can set the counter to any value anyway). Where flock is
 unavailable (no fcntl, or a filesystem that refuses it), no state is ever written, so, as with an unpersistable state, only final messages are
-checked and every violation under stop_hook_active is allowed with a warning. A record over 4 MiB and anything beyond
+checked and every violation on a Stop that is not an observed new turn (stop_hook_active true or absent,
+round 38) is allowed with a warning. A record over 4 MiB and anything beyond
 64 MiB back are not scanned. Only the host clock is authoritative, so a wrong host clock is enforced
 faithfully. The elapsed check is only as right as the lease (a stale, wrong-clock, or another session's
 lease yields a false block or a false pass; so does a stale Session-start-UTC value, trusted as written).
@@ -340,10 +357,12 @@ footer unchecked. Subagent output is not checked. BLOCK CAP: after 3
 consecutive block cycles a still-wrong final message PASSES with only a warning (by design: an unsatisfiable
 hook must not wedge the actor), and when the count cannot be established at all it PASSES at once with a
 one-line warning (the fail-open direction: a possible loop is never risked for an unverifiable count). The
-cap counts blocks per continuous stop_hook_active run, not per violation (round 27): a corrected message that
+cap counts blocks per continuous run without a new-turn signal, not per violation (round 27): a corrected message that
 passes here but is rejected by another Stop hook keeps the loop running, and a NEW violation later in that
 same loop gets only the blocks the run has left, possibly none (then a capped allow with a warning), until a
-Stop without stop_hook_active starts a new count. The cap exists ONLY as defence in depth against a loop the model cannot
+Stop whose stop_hook_active field is explicitly false, or a new genuine user message read by a persisting
+Stop with a readable counter and no explicit true, starts a new count (round 38: a Stop whose field is merely
+ABSENT does not). The cap exists ONLY as defence in depth against a loop the model cannot
 satisfy; it is not how a violation is normally resolved. The marker record shape (a user-role entry whose
 text starts "Stop hook feedback" and carries this hook's block-reason prefix) is INFERRED from the host's
 documented Stop feedback and has NOT been observed in a live transcript; if the host records Stop feedback in
@@ -352,9 +371,11 @@ reaches the cap, and the cap then rests on the hook's own recovery-state counter
 512-record tail is not counted; an isMeta user entry between cycles does not end the run, while any other
 user entry does; a corrective continuation longer than 10 assistant entries is not counted as a consecutive
 cycle by the transcript count (the own recovery-state counter still counts it). The counter lives in the
-same volatile per-user state as the boundary; with that state unusable, or absent, a Stop under
-stop_hook_active is allowed with a warning (fail open), so a violation in the corrective loop then goes
-unenforced. That includes a corrective loop this hook did not start (another Stop hook blocked) in a session
+same volatile per-user state as the boundary; with that state unusable (or absent under an explicit true,
+round 26), a Stop that is not an observed new turn (stop_hook_active true or absent, round 38) is allowed
+with a warning (fail open), so a violation in the corrective loop then goes
+unenforced. Where the host omits the field an absent state reads as an established count of 0, which still
+blocks below the cap. That includes a corrective loop this hook did not start (another Stop hook blocked) in a session
 where this hook has never yet written its state for the transcript (round 26: the absence cannot be told
 apart from a deletion, so it fails open rather than risk a loop). The capped
 warning reaches
@@ -1666,7 +1687,8 @@ def evaluate(payload, now, start, sdir=None, notes=None, report=None, diag=None)
     evaluation FAILS OPEN: it is allowed unchecked with a one-line warning appended to `notes`, and it reads and
     writes no state, so the counter is unchanged. A Stop that cannot lock for any other reason (locking
     unavailable, or no usable private state dir) is evaluated but WRITES NO STATE, exactly as for an
-    unpersistable state: only its final message can block, and under stop_hook_active nothing can block (a
+    unpersistable state: only its final message can block, and on a Stop that is not an observed new turn
+    (stop_hook_active true or absent, round 38) nothing can block (a
     block there must record its raised counter, and none is recorded, so every violation fails open with a
     warning), so the counter is unchanged and no loop can form. With no transcript_path there is nothing to key
     a state file and no state is ever read or written. Round 30: a Stop that CREATED its transcript's
@@ -1737,6 +1759,7 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None):
         offset, tail, pending, state_ok = load_state(None, tp, extra, dfd)
     blocks = extra.get("blocks")  # None: the counter is unavailable (no transcript_path, or unusable state)
     active = payload.get("stop_hook_active") is True
+    new_turn = payload.get("stop_hook_active") is False  # round 38: an ABSENT field is NOT a new turn
     if active and extra.get("absent"):
         # round 26: this hook writes the state at the block that starts a corrective loop, so an ABSENT state under
         # stop_hook_active (deleted between Stops, or its directory removed mid-call) is an UNKNOWN count, never 0
@@ -1744,10 +1767,20 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None):
     had_state = bool(offset or pending or blocks)
     t = turn_messages(tp, offset, tail) if tp else {"msgs": [], "size": None}
     msgs = t["msgs"]
-    if blocks is not None and not active:
-        # only a Stop outside the corrective loop starts the count again; under stop_hook_active the counter is
-        # PRESERVED whatever the transcript shows (round 26: a transcript rewrite that resets the boundary, or a
-        # user-role entry read as a genuine user message, reset it and let a loop block without limit)
+    # round 38: the count restarts ONLY at an observable new-turn signal: a Stop whose stop_hook_active field
+    # is explicitly false (the platform's statement that this stop does not continue a stop-hook refusal,
+    # trusted even over an unknown stored counter), or a NEW genuine user message past the boundary on a
+    # persisting Stop whose field is not explicitly true (this hook registers only Stop, so the transcript is
+    # its UserPromptSubmit analogue; trusted only with a readable counter and a boundary this Stop can advance,
+    # since a boundary that never moves would re-arm the signal at every Stop). Before round 38 any Stop
+    # without the field restarted the count, so on a host that omits the field the cap never bound and an
+    # unsatisfiable violation was refused at every stop. An allowed stop alone never resets. Under an explicit
+    # true the counter is PRESERVED whatever the transcript shows (round 26: a transcript rewrite that resets
+    # the boundary, or a user-role entry read as a genuine user message, reset it and let a loop block without
+    # limit; where the host omits the field, a user-role entry read as a genuine user message can still
+    # restart the count, a disclosed residual)
+    fresh = new_turn or (persist and not active and blocks is not None and bool(t.get("user")))
+    if fresh:
         blocks = 0
     if t.get("reset") or t.get("user"):
         pending = []  # a reset transcript or a new genuine user message invalidates the late-arrival exception
@@ -1793,25 +1826,33 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None):
     readable = bool(tp) and t["size"] is not None
     if not readable:
         earlier_bad = []  # no readable transcript size: no boundary can be persisted
-    # BLOCK CAP (round 24): under stop_hook_active the prior consecutive blocks are the larger of this hook's
-    # OWN counter in the recovery state and the transcript marker count; when neither can be established the
-    # Stop FAILS OPEN with a one-line warning, and at BLOCK_CAP it is allowed with the cap warning
+    # BLOCK CAP (round 24): on a Stop that is not an observed new turn (round 38: stop_hook_active true OR
+    # absent, so the cap binds on a host that omits the field) the prior consecutive blocks are the larger of
+    # this hook's OWN counter in the recovery state and the transcript marker count; when neither can be
+    # established the Stop FAILS OPEN with a one-line warning, and at BLOCK_CAP it is allowed with the cap
+    # warning. A Stop with neither the field nor a transcript_path blocks normally (nothing could key a
+    # counter to bound it, a disclosed residual)
     cap, tknown = None, False  # cap None: block normally; "cap" or "open": allow with a warning instead
-    if (final_bad or earlier_bad) and active:
+    if (final_bad or earlier_bad) and not fresh and (active or tp):
         tcount, tknown = block_cycles(tp) if tp else (0, False)
         known = [c for c in (blocks, tcount if tknown else None) if c is not None]
         # the transcript count is never the only brake: without a usable own counter, fail open (round 24)
         cap = "open" if blocks is None else "cap" if max(known) >= BLOCK_CAP else None
     will_block = bool(final_bad or earlier_bad) and cap is None
-    # The counter this Stop records (round 27: while stop_hook_active holds it NEVER decreases).
-    #   block: loaded + 1. A block under stop_hook_active happens only with a loaded integer counter below the
-    #          cap (an unknown one gives cap "open", a count at the cap gives "cap").
+    # The counter this Stop records (round 27: while stop_hook_active holds it NEVER decreases; round 38: nor
+    # does any other Stop that is not an observed new turn, an absent field included).
+    #   block: loaded + 1. A block on a Stop that is not a new turn happens only with a loaded integer counter
+    #          below the cap (an unknown one gives cap "open", a count at the cap gives "cap"; with neither
+    #          the field nor a transcript_path nothing is keyed, loaded, or saved).
+    #   a new-turn Stop (fresh: stop_hook_active explicitly false, or a new genuine user message read by a
+    #          persisting Stop with a readable counter and no explicit true): 0 then (+1 if it blocks); the
+    #          only resets (round 38: a Stop whose field is merely ABSENT is NOT a new turn and keeps the
+    #          counter, and an allowed stop alone never resets it).
     #   fail-open allow ("open"): BLOCK_CAP (round 26), so the rest of that corrective loop stays capped.
-    #   capped allow ("cap"), or a PASS, under stop_hook_active: the loaded counter, unchanged (round 27: a clean
+    #   capped allow ("cap"), or a PASS, on any other Stop: the loaded counter, unchanged (round 27: a clean
     #          pass inside the loop used to reset it to 0, so alternating with another Stop hook that rejected
     #          the clean message let this hook block every other Stop without limit); an UNKNOWN counter (the
     #          state unreadable, so none was loaded) is recorded as BLOCK_CAP, capped, never as 0.
-    #   any Stop without stop_hook_active: 0 then (+1 if it blocks); the only reset, since it starts a new turn.
     # CONCURRENCY (round 28). The argument below reads the file's successive values as a SEQUENCE of Stops, each
     # loading the counter and then saving what it computed from that load. That holds only if no two evaluations
     # for one transcript interleave between one's load and its save: round 27 assumed serialized Stops, and two
@@ -1841,17 +1882,23 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None):
     # the pruner removed it locks the removed inode, finds the state ABSENT, and cannot save (the rm -r case).
     # A Stop that finds the lock held reads and writes
     # nothing and allows; a Stop that cannot lock for another reason runs with `persist` False and writes
-    # nothing, so under stop_hook_active it cannot block (a block needs a recorded raise, below). Neither can
+    # nothing, so unless it is an observed new turn it cannot block (a block needs a recorded raise, below;
+    # round 38: an explicit-false Stop still blocks, starting a count it may fail to record). Neither can
     # move the counter or block inside the loop. So the Stops that write the state file are serialized, and each
     # one's load and save are adjacent in the sequence the argument reads. As defence in
-    # depth against a writer that ignores the (advisory) lock, save() below also re-reads the stored counter
-    # under stop_hook_active and never writes a value lower than it, and a block whose write would not RAISE
-    # the stored counter is not counted as recorded (it fails open instead). RESIDUAL: a same-uid process that
+    # depth against a writer that ignores the (advisory) lock, save() below also re-reads the stored counter on
+    # every Stop that is not an observed new turn and never writes a value lower than it, and a block whose
+    # write would not RAISE the stored counter is not counted as recorded (it fails open instead). RESIDUAL: a
+    # same-uid process that
     # rewrites the state file directly while holding no lock (or that swaps a directory holding a LOWER valid
     # count back into place) is outside the threat model: it can set the counter to any value anyway, so the
     # lock gives no protection against it and claims none.
-    # BOUND (round 27). Take one continuous run of Stops with stop_hook_active true for one transcript_path (so
-    # one state file). The state file is written only by save_state(), called through save() below with
+    # BOUND (round 27). Take one continuous run of Stops for one transcript_path (so one state file) in which
+    # no Stop is an observed new turn: none carries an explicit stop_hook_active false, and none reads a new
+    # genuine user message as a persisting Stop with a readable counter and no explicit true (round 38: a Stop
+    # whose field is ABSENT is inside the run, so the bound holds on a host that omits the field; a run of
+    # explicit trues is round 27's special case). The state file is written only by save_state(), called
+    # through save() below with
     # `new_blocks` (or, round 28, the higher stored value), and never deleted by this hook while in use (round
     # 30: prune_state() deletes only a subdirectory it has locked and that has gone unwritten for PRUNE_AGE_NS,
     # which this argument treats exactly as an external deletion); every write is an
@@ -1860,7 +1907,7 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None):
     # within the run w >= c whenever c is an integer (block c + 1, cap or pass c, open BLOCK_CAP >= c since no
     # write ever exceeds BLOCK_CAP: a block writes c + 1 only when c < BLOCK_CAP), and w = BLOCK_CAP whenever
     # c is None. So, reading the file's successive values across the run, the counter is non-decreasing and
-    # bounded by BLOCK_CAP. A Stop that BLOCKS under stop_hook_active must have loaded an integer c < BLOCK_CAP
+    # bounded by BLOCK_CAP. A Stop in the run that BLOCKS must have loaded an integer c < BLOCK_CAP
     # and SAVED c + 1 (a failed save turns it into a fail-open allow below), so each such block raises the
     # recorded counter by exactly 1; a non-decreasing integer in [0, BLOCK_CAP] can be raised by 1 at most
     # BLOCK_CAP times, so the run holds at most BLOCK_CAP blocks (at most BLOCK_CAP - 1 when the Stop that
@@ -1874,23 +1921,25 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None):
     # deliberately), or writing it while ignoring the lock: outside the threat model (see CONCURRENCY).
     if will_block:
         new_blocks = (blocks or 0) + 1
-    elif cap == "open" or (active and blocks is None):
+    elif fresh:
+        new_blocks = 0  # an observed new turn with a pass (blocks was already reset to 0 above)
+    elif cap == "open" or blocks is None:
         new_blocks = BLOCK_CAP
-    elif active:
-        new_blocks = blocks  # a capped allow or a pass inside the corrective loop: preserved (round 27)
     else:
-        new_blocks = 0  # outside the corrective loop (blocks was already reset to 0 above)
+        new_blocks = blocks  # a capped allow or a pass that is no observed new turn: preserved (rounds 27, 38)
 
     def save(off, tl, pend):
         """Write the state with `new_blocks`; True only when it was written and, for a block, the write RAISED the
-        stored counter. Round 28: under stop_hook_active the stored counter is re-read first (the lock is held)
-        and a lower value is never written over it; a block whose write would not raise it (another writer got
-        there first) returns False, so the block fails open as an unrecorded one. Round 29: the re-read and the
-        write are both relative to the locked directory descriptor."""
+        stored counter. Round 28: on a Stop that is not an observed new turn (round 38; before, only under
+        stop_hook_active) the stored counter is re-read first (the lock is held) and a lower value is never
+        written over it (an observed new turn writes its reset, or its fresh count of 1, as loaded); a block
+        whose write would not raise it (another writer got there first) returns False, so the block fails open
+        as an unrecorded one. Round 29: the re-read and the write are both relative to the locked directory
+        descriptor."""
         if not persist or dfd is None:
             return False
         nb, raised = new_blocks, True
-        if active:
+        if not fresh:
             cur = {}
             ok = load_state(None, tp, cur, dfd)[3]
             stored = cur.get("blocks") if ok and not cur.get("absent") else None
@@ -1911,8 +1960,11 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None):
             save(t["end"], t["tail"], remaining)
     elif tp and (blocks is not None or cap == "open") and (will_block or had_state or cap == "open"):
         saved = save(offset, tail, pending)  # keep the boundary, record the counter
-    if will_block and active and not saved:
-        cap = "open"  # this block could not be recorded in the own counter, so the next Stop could not cap
+    if will_block and not fresh and tp and not saved:
+        # this block could not be recorded in the own counter, so the next Stop could not cap (round 38: on
+        # any Stop that is not an observed new turn, an absent field included; with no transcript_path no
+        # counter exists at all and the block stands, the disclosed residual above)
+        cap = "open"
     add(final_bad)
     add(earlier_bad)
     if not bad:
@@ -2812,7 +2864,7 @@ def _self_test():
 
         def test_r8_block_cap_uncapped_still_blocks(self):
             for entries, active in ((self.cycles(2), True),  # under the cap
-                                    (self.cycles(3), False),  # the cap applies only under stop_hook_active
+                                    (self.cycles(3), False),  # an explicit false is a new turn: no cap holds
                                     # a genuine user message ends the run of consecutive cycles
                                     (self.cycles(2) + [self.user("try again"), self.asst("x"), self.block_entry(),
                                                        self.asst("y")], True)):
@@ -3595,7 +3647,7 @@ def _self_test():
             self.assertLessEqual(kinds.count("block"), BLOCK_CAP, kinds)
             self.assertEqual(kinds[BLOCK_CAP:], ["warn"] * (5 - BLOCK_CAP), kinds)
             self.assertIn("block cap hit", outs[-1]["systemMessage"])
-            # a Stop outside the corrective loop starts the count again, and so blocks
+            # a Stop with stop_hook_active explicitly false starts the count again, and so blocks
             p0 = json.dumps({"hook_event_name": "Stop", "stop_hook_active": False, "transcript_path": missing,
                              "last_assistant_message": "[2099-01-01T00:00Z] done"})
             self.assertEqual(json.loads(run_main(p0, lease)[1]).get("decision"), "block")
@@ -3616,9 +3668,16 @@ def _self_test():
                 self.assertNotIn("\n", notes[0])
                 self.assertIn("block count unknown", notes[0])
                 self.assertIn("UNRESOLVED", notes[0])
-            # outside the corrective loop nothing changes: the violation blocks
-            self.assertTrue(evaluate({"transcript_path": self.tr, "last_assistant_message": "[2099-01-01T00:00Z] x"},
+            # an explicit false is a new turn and still blocks; round 38: a Stop whose field is ABSENT is
+            # not, so with the counter unusable it fails open too
+            self.assertTrue(evaluate({"transcript_path": self.tr, "stop_hook_active": False,
+                                      "last_assistant_message": "[2099-01-01T00:00Z] x"},
                                      self.now, self.start, self.sdir).startswith(BLOCK_PREFIX))
+            notes = []
+            self.assertIsNone(evaluate({"transcript_path": self.tr,
+                                        "last_assistant_message": "[2099-01-01T00:00Z] x"},
+                                       self.now, self.start, self.sdir, notes))
+            self.assertIn("block count unknown", notes[0])
             self.assertEqual(block_cycles(self.tr), (0, False))
             self.assertEqual(block_cycles(os.path.join(self.tmp, "missing.jsonl")), (0, False))
             self.write(self.cycles(1))
@@ -3929,7 +3988,7 @@ def _self_test():
             kinds, counters = self.alternating(missing, os.path.join(self.tmp, "state-missing"), 17)
             self.assertLessEqual(kinds.count("block"), BLOCK_CAP, kinds)
             self.assertEqual(counters[1:], sorted(counters[1:]), counters)
-            # a Stop outside the loop starts a new count: the next violation blocks again
+            # a Stop with an explicit false starts a new count: the next violation blocks again
             self.assertTrue(self.ev(last_assistant_message="[2026-09-23T20:00Z] x").startswith(BLOCK_PREFIX))
 
         def test_r27_unknown_counter_pass_in_loop_records_cap(self):
@@ -3951,7 +4010,7 @@ def _self_test():
                                        self.sdir, notes))
             self.assertIn("block cap hit", notes[0])
             doc = " ".join(__doc__.split())
-            for s in ("reset to 0 ONLY by a Stop without stop_hook_active", "NEVER decreases",
+            for s in ("reset to 0 ONLY by an observable new-turn", "NEVER decreases",
                       "at most BLOCK_CAP times", "gets only the blocks the run has left"):
                 self.assertIn(s, doc)
             self.assertNotIn("reset to 0 only by a pass", doc)
@@ -4118,9 +4177,9 @@ def _self_test():
 
         def test_r28_lock_unavailable_writes_no_state(self):
             # locking unavailable (round 29: no fcntl, or a flock the filesystem refuses, on a usable private state
-            # dir): the Stop writes no state, so under stop_hook_active it cannot block (it fails open with a
-            # warning) and outside the loop only its final message can block, as for an unpersistable state
-            # (test_r7_state_unpersistable_...)
+            # dir): the Stop writes no state, so unless it is an explicit new turn it cannot block (it fails
+            # open with a warning; round 38: a Stop whose field is ABSENT fails open too); an explicit false
+            # still blocks on its final message, as for an unpersistable state (test_r7_state_unpersistable_...)
             import errno
             bad = "[2026-09-23T20:00Z] heartbeat"
             self.write([self.user("go"), self.asst(bad)])
@@ -4144,8 +4203,13 @@ def _self_test():
                                                 "last_assistant_message": bad}, self.now, self.start, self.sdir,
                                                notes), how)
                     self.assertIn("block count unknown", notes[0], how)
-                    self.assertTrue(evaluate({"transcript_path": self.tr, "last_assistant_message": bad}, self.now,
+                    self.assertTrue(evaluate({"transcript_path": self.tr, "stop_hook_active": False,
+                                              "last_assistant_message": bad}, self.now,
                                              self.start, self.sdir).startswith(BLOCK_PREFIX), how)
+                    notes = []
+                    self.assertIsNone(evaluate({"transcript_path": self.tr, "last_assistant_message": bad},
+                                               self.now, self.start, self.sdir, notes), how)
+                    self.assertIn("block count unknown", notes[0], how)
                     dfd, status = lock_state(self.sdir, self.tr)
                     try:
                         self.assertEqual(status, "unavailable", how)
@@ -4159,8 +4223,9 @@ def _self_test():
                     self.assertEqual(f.read(), before, how)
                 self.assertEqual(os.listdir(self.sdir), [state_subdir(self.tr)], how)
             # with no usable private state dir (not private; a symlink to a private dir, which is not followed; a
-            # regular file) there is nothing to serialize and no state can be read or written: outside the loop a
-            # bad final message still blocks, and inside it the Stop fails open as before
+            # regular file) there is nothing to serialize and no state can be read or written: on an explicit
+            # false a bad final message still blocks; under an explicit true, and (round 38) with the field
+            # absent, the Stop fails open as before
             public = os.path.join(self.tmp, "public")
             os.mkdir(public, 0o755)
             os.chmod(public, 0o755)
@@ -4171,8 +4236,13 @@ def _self_test():
                 f.write("x")
             for sdir in (public, link, plain):
                 self.assertEqual(lock_state(sdir, self.tr), (None, "nodir"), sdir)
-                self.assertTrue(evaluate({"transcript_path": self.tr, "last_assistant_message": bad}, self.now,
+                self.assertTrue(evaluate({"transcript_path": self.tr, "stop_hook_active": False,
+                                          "last_assistant_message": bad}, self.now,
                                          self.start, sdir).startswith(BLOCK_PREFIX), sdir)
+                notes = []
+                self.assertIsNone(evaluate({"transcript_path": self.tr, "last_assistant_message": bad},
+                                           self.now, self.start, sdir, notes), sdir)
+                self.assertIn("block count unknown", notes[0], sdir)
                 notes = []
                 self.assertIsNone(evaluate({"transcript_path": self.tr, "stop_hook_active": True,
                                             "last_assistant_message": bad}, self.now, self.start, sdir, notes), sdir)
@@ -4974,6 +5044,130 @@ def _self_test():
             self.assertIn("os.replace(tmp, PRUNE_CURSOR", src)
             self.assertNotIn("O_TRUNC", src)
             self.assertIn("never by opening the existing entry", " ".join(__doc__.split()))
+
+        # -- round 38 (backlog FIX-STAMP-TRUTH-STOP-CAP: an absent stop_hook_active field is not a new turn) --
+        def r38_ev(self, sdir, final, append=None):
+            """One Stop whose payload carries NO stop_hook_active field; returns (outcome kind, notes)."""
+            if append:
+                self.write(append, "a")
+            notes = []
+            r = evaluate({"transcript_path": self.tr, "hook_event_name": "Stop", "last_assistant_message": final},
+                         self.now, self.start, sdir, notes)
+            return ("block" if r else "cap" if notes and "block cap hit" in notes[0]
+                    else "open" if notes and "block count unknown" in notes[0] else "pass"), notes
+
+        def test_r38_cap_binds_when_the_field_is_absent(self):
+            # the defect: a Stop without the field was read as a new turn, so the count restarted at every Stop
+            # and the cap never bound; a host that omits the field could be refused at every stop. An absent
+            # field is not a new turn: the count goes on from the stored value and blocking stays capped. The
+            # first Stop (an absent state, outside any known loop) still read an established 0 and blocked
+            bad = "[2026-09-23T20:00Z] still wrong"
+            sdir = os.path.join(self.tmp, "state38")
+            self.write([self.user("go"), self.asst(bad)])
+            kinds = []
+            for k in range(6):
+                kind, _ = self.r38_ev(sdir, bad, append=[self.block_entry(), self.asst(bad)] if k else None)
+                kinds.append(kind)
+            self.assertEqual(kinds, ["block"] * BLOCK_CAP + ["cap"] * (6 - BLOCK_CAP))
+            extra = {}
+            self.assertTrue(load_state(sdir, self.tr, extra)[3])
+            self.assertEqual(extra["blocks"], BLOCK_CAP)
+
+        def test_r38_explicit_false_still_starts_a_new_count(self):
+            # a payload field of exactly False is a new-turn statement from the platform: the count restarts,
+            # so the next violating turn end is refused once more with a fresh count of 1
+            bad = "[2026-09-23T20:00Z] still wrong"
+            sdir = os.path.join(self.tmp, "state38f")
+            self.write([self.user("go"), self.asst(bad)])
+            self.r38_ev(sdir, bad)
+            for _ in range(3):
+                self.r38_ev(sdir, bad, append=[self.block_entry(), self.asst(bad)])
+            self.assertEqual(self.r38_ev(sdir, bad)[0], "cap")
+            payload = {"transcript_path": self.tr, "stop_hook_active": False, "last_assistant_message": bad}
+            r = evaluate(payload, self.now, self.start, sdir)
+            self.assertTrue(r and r.startswith(BLOCK_PREFIX))
+            extra = {}
+            self.assertTrue(load_state(sdir, self.tr, extra)[3])
+            self.assertEqual(extra["blocks"], 1)
+
+        def test_r38_allowed_stop_never_resets_the_count(self):
+            # a pass without the field preserves the count (two hooks that each reset at their own allowed
+            # stop could refuse in turn without bound), so after it the run has only its remaining blocks
+            bad = "[2026-09-23T20:00Z] still wrong"
+            sdir = os.path.join(self.tmp, "state38p")
+            self.write([self.user("go"), self.asst(bad)])
+            kinds = [self.r38_ev(sdir, bad)[0]]
+            kinds.append(self.r38_ev(sdir, bad, append=[self.block_entry(), self.asst(bad)])[0])
+            kinds.append(self.r38_ev(sdir, "Done.", append=[self.block_entry(), self.asst("Done.")])[0])
+            extra = {}
+            self.assertTrue(load_state(sdir, self.tr, extra)[3])
+            self.assertEqual(extra["blocks"], 2)  # the allowed stop neither reset nor raised the count
+            kinds.append(self.r38_ev(sdir, bad, append=[self.other_hook_feedback(), self.asst(bad)])[0])
+            kinds.append(self.r38_ev(sdir, bad, append=[self.block_entry(), self.asst(bad)])[0])
+            self.assertEqual(kinds, ["block", "block", "pass", "block", "cap"])
+
+        def test_r38_new_user_message_starts_a_new_count(self):
+            # a NEW genuine user message past the boundary is the observable new-turn signal (this hook
+            # registers only Stop, so the transcript is its UserPromptSubmit analogue): the count restarts;
+            # under an explicit true the same message never resets the counter (round 26)
+            bad = "[2026-09-23T20:00Z] still wrong"
+            sdir = os.path.join(self.tmp, "state38u")
+            self.write([self.user("go"), self.asst(bad)])
+            self.r38_ev(sdir, bad)
+            for _ in range(3):
+                self.r38_ev(sdir, bad, append=[self.block_entry(), self.asst(bad)])
+            self.assertEqual(self.r38_ev(sdir, bad, append=[self.block_entry(), self.asst(bad)])[0], "cap")
+            self.assertEqual(self.r38_ev(sdir, bad, append=[self.user("try again"), self.asst(bad)])[0], "block")
+            extra = {}
+            self.assertTrue(load_state(sdir, self.tr, extra)[3])
+            self.assertEqual(extra["blocks"], 1)
+            for _ in range(2):
+                self.r38_ev(sdir, bad, append=[self.block_entry(), self.asst(bad)])
+            self.write([self.user("try harder"), self.asst(bad)], "a")
+            notes = []
+            self.assertIsNone(evaluate({"transcript_path": self.tr, "stop_hook_active": True,
+                                        "last_assistant_message": bad}, self.now, self.start, sdir, notes))
+            self.assertIn("block cap hit", notes[0])
+
+        def test_r38_unusable_counter_without_the_field_fails_open(self):
+            # with the field absent the hook may be inside a corrective loop, so an unusable counter fails
+            # open exactly as under an explicit true (the own counter is the required brake), where such a
+            # turn end used to be refused with no bound available
+            bad = "[2026-09-23T20:00Z] still wrong"
+            self.write([self.user("go"), self.asst(bad)])
+            self.seed()
+            with open(self.key(), "w") as f:
+                f.write("{not json")
+            kind, notes = self.r38_ev(self.sdir, bad)
+            self.assertEqual(kind, "open")
+            self.assertIn("block count unknown", notes[0])
+            # the fail-open allow recorded the cap, so the loop stays capped until a new-turn signal
+            self.assertEqual(self.r38_ev(self.sdir, bad, append=[self.block_entry(), self.asst(bad)])[0], "cap")
+
+        def test_r38_save_never_lowers_counter_without_the_field(self):
+            # the save's monotonic re-read (round 28) also covers a Stop whose field is absent: a concurrent
+            # writer's higher count is never overwritten with a lower one, and a block whose write would not
+            # raise it fails open as unrecorded (test_r28_save_never_lowers_counter_inside_loop, field absent)
+            bad = "[2026-09-23T20:00Z] heartbeat"
+            real_tm = turn_messages
+
+            def raising(*a, **k):  # between this Stop's load and its save, another writer records 2
+                self.assertTrue(save_state(self.sdir, self.tr, 0, None, [], 2))
+                return real_tm(*a, **k)
+
+            for final, expect in (("Done.", "pass"), (bad, "open")):
+                # no genuine user message in the scanned span, so the Stop is not an observed new turn
+                self.write([self.block_entry(), self.asst(final)])
+                self.seed(1)
+                globals()["turn_messages"] = raising
+                try:
+                    kind, _ = self.r38_ev(self.sdir, final)
+                finally:
+                    globals()["turn_messages"] = real_tm
+                self.assertEqual(kind, expect, final)
+                extra = {}
+                self.assertTrue(load_state(self.sdir, self.tr, extra)[3])
+                self.assertEqual(extra["blocks"], 2, final)  # the other writer's higher value, never lowered
 
         # -- no wall-clock verdict (a 2.0 s ceiling failed at 2.53 s on a slower CI runner) --
         HANG_GUARD_TESTS = ()
