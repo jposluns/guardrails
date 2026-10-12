@@ -4450,17 +4450,28 @@ def self_test():
     check("imported-record-shared-empty-container-ok", _imp_ok(_imp_md(**{"x-aiqt": {"a": _empty, "b": _empty}}),
                                                                registered_vendors=REG))
 
-    # Depth alone is never refused: tomllib nests tables to any depth through a dotted key or a table
-    # header, so a deep value is plain and reaches its field rules (VALID where it is TOML and no rule reads
-    # it). Every finding renders a record value through _bounded_display, which is iterative and cut at
+    # Depth alone is never refused: tomllib nests tables through a dotted key or a table header, so a deep
+    # value is plain and reaches its field rules (VALID where it is TOML and no rule reads it). Every
+    # finding renders a record value through _bounded_display, which is iterative and cut at
     # _DISPLAY_BUDGET characters, so no vector raises (a RecursionError included) and no rendering in a
     # finding outgrows the budget: on the normal label, the refusal label, a key, and the import table.
+    # Some CPython patch levels refuse a TOML key of more than 1000 dotted parts (a RecursionError from
+    # tomllib), so a table nest deeper than that is built directly in the shape tomllib gives a table
+    # header, and every parsed vector keeps each key under 1000 parts; the parsed id takes wide parts, so
+    # its rendering still outgrows the budget.
     import tomllib
 
     def _nest(levels, inner=None):
         v = [] if inner is None else inner
         for _ in range(levels - 1):
             v = [v]
+        return v
+
+    def _nest_table(levels, part="a"):
+        # What tomllib gives for a table header of that many parts, each named part, holding v = 1.
+        v = {"v": 1}
+        for _ in range(levels):
+            v = {part: v}
         return v
 
     _cut_len = _DISPLAY_BUDGET + len(_DISPLAY_CUT)
@@ -4481,10 +4492,17 @@ def self_test():
     _deep_key_unplain = _imp_md()
     _deep_key_unplain[_deep_key] = _Str("x")
     _path600 = ".".join(["a"] * 600)
-    _deep_doc_id = tomllib.loads("[id." + ".".join(["a"] * 100000) + "]\nv = 1")["id"]
+    _deep_doc_id = _nest_table(100000)
+    # 999 parts: id and 998 wide ones, whose openings alone take more than the budget.
+    _wide = "a" * 16
+    _wide_open = "{'" + _wide + "': "
+    _parsed_deep_id = tomllib.loads("[id." + ".".join([_wide] * 998) + "]\nv = 1")["id"]
+    check("imported-record-deep-table-is-tomllib-shape", _parsed_deep_id == _nest_table(998, _wide)
+          and 998 * len(_wide_open) > _DISPLAY_BUDGET)
     for _name, _rec, _needle in (
             ("id", _imp_md(id=_very_deep), _deep_label + "id " + _deep_list + " is not an imported-series"),
-            ("parsed-id", _imp_md(id=_deep_doc_id), "imported record {'a': {'a': "),
+            ("table-id", _imp_md(id=_deep_doc_id), "imported record {'a': {'a': "),
+            ("parsed-id", _imp_md(id=_parsed_deep_id), "imported record " + _wide_open + _wide_open),
             ("source", _imp_md(**dict([("import", _imp_table(source=_very_deep))])),
              _md4 + "import.source " + _deep_list + " is not a canonical"),
             ("key", _deep_key_rec, _md4 + "unknown key " + _deep_tuple + " (schemas are closed")):
@@ -4505,7 +4523,8 @@ def self_test():
             ("list-100000", {"lane": _very_deep}),
             ("dotted-600", tomllib.loads("lane." + _path600 + " = 1")),
             ("header-600", tomllib.loads("[lane." + _path600 + "]\nv = 1")),
-            ("header-100000", tomllib.loads("[lane." + ".".join(["a"] * 100000) + "]\nv = 1")),
+            ("table-100000", {"lane": _nest_table(100000)}),
+            ("header-999", tomllib.loads("[lane." + ".".join(["a"] * 998) + "]\nv = 1")),
             ("header-and-array", tomllib.loads("[lane." + ".".join(["a"] * 300) + "]\nv = " + "[" * 300
                                                + "]" * 300)),
             ("arrays-400", tomllib.loads("lane = " + "[" * 400 + "]" * 400))):
@@ -4555,7 +4574,9 @@ def self_test():
             ("list-one-over", ["x" * (_DISPLAY_BUDGET - 3)], repr(["x" * (_DISPLAY_BUDGET - 3)])[:_DISPLAY_BUDGET]),
             ("deep-list", _very_deep, "[" * _DISPLAY_BUDGET),
             ("deep-tuple", _deep_key, "(" * _DISPLAY_BUDGET),
-            ("parsed-header", _deep_doc_id, ("{'a': " * (_DISPLAY_BUDGET // 6 + 1))[:_DISPLAY_BUDGET])):
+            ("table", _deep_doc_id, ("{'a': " * (_DISPLAY_BUDGET // 6 + 1))[:_DISPLAY_BUDGET]),
+            ("parsed-header", _parsed_deep_id,
+             (_wide_open * (_DISPLAY_BUDGET // len(_wide_open) + 1))[:_DISPLAY_BUDGET])):
         check("imported-bounded-display-cut-" + _name, _bounded_display(_val) == _want + _DISPLAY_CUT)
     # A str cut short keeps the quote its whole repr takes, chosen from the whole str, so the cut rendering
     # is the repr's prefix also when the quote that decides it lies past the cut. An oversized int past the
