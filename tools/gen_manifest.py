@@ -441,11 +441,12 @@ def _stream_base(path):
 
 
 def _portable_forms(path):
-    """The forms under which a case-insensitive, Unicode-normalizing or NTFS filesystem may store path as one
-    file, each taken with its NTFS stream suffixes removed (_stream_base): its case fold and its NFC form (the two
-    equivalences git_tracked refuses between tracked paths), its canonical caseless form (NFD of the case fold of
-    its NFD), which folds both at once, and str.upper (an upcase-table fold, as check_instruction_budget._fold_keys
-    compares, which also merges the dotless i with i). Two paths alias when any one form is equal."""
+    """The forms check_authoring_only compares to decide that two paths alias, each taken with its NTFS stream
+    suffixes removed (_stream_base): its case fold and its NFC form (the two equivalences git_tracked refuses between
+    tracked paths), its canonical caseless form (NFD of the case fold of its NFD), which folds both at once, and
+    str.upper (an upcase-table fold, as check_instruction_budget._fold_keys compares, which also merges the dotless i
+    with i). Two paths alias when any one form is equal. These are the forms compared, not every alias a
+    case-insensitive, Unicode-normalizing or NTFS filesystem may apply; check_authoring_only discloses the rest."""
     base = _stream_base(path)
     return (base.casefold(), unicodedata.normalize("NFC", base),
             unicodedata.normalize("NFD", unicodedata.normalize("NFD", base).casefold()), base.upper())
@@ -467,20 +468,27 @@ def check_authoring_only(root, tracked, classes, exclusions):
     pattern and never a class row (classify() refuses a class selector that reaches an excluded path, so an
     excluded roster path is in no SOURCES, ARTIFACTS or .gitattributes line, and no release or pin install can
     carry it to an adopter); and every tracked path of either roster is a regular file on disk under real
-    directories (git_tracked refuses a tracked symlink; this lstats each component of the path inside the
-    repository, never following one, so a symlink or other non-regular file on disk under a regular index entry,
-    and a symlink or other non-directory in place of a directory above it, are refused). A tracked or classed path
+    directories (git_tracked refuses a tracked symlink; this lstats each directory above the path inside the
+    repository in turn from the top, then the path, so a symlink or other non-regular file on disk under a regular
+    index entry, and a symlink or other non-directory in place of a directory above it, present when the check
+    runs, are refused; a directory that cannot be lstat'd fails closed). A tracked or classed path
     that differs from a path of either roster in bytes but aliases it under _portable_forms (the case fold and the
     NFC form git_tracked compares between two tracked paths, both folded together, and the upcase fold, each with
     NTFS stream suffixes removed, so ".claude/settings.json::$DATA" and a dotless-i spelling of "settings" alias
     the settings) is refused whatever its class or exclusion, naming both spellings, because a case-insensitive,
     normalizing or NTFS install target would store it as the roster path; the roster path itself still needs its
-    exact literal. Disclosed residual: an alias adding a trailing dot or space (".claude/settings.json."), which
+    exact literal. Disclosed residuals: an alias adding a trailing dot or space (".claude/settings.json."), which
     Win32 path normalization can trim, is not refused, because the manifest's path rules (_check_rel_path,
     git_tracked) accept such names everywhere else too; nor is an 8.3 short name (".claude/SETTIN~1.JSO"), which
-    a target may generate for the roster path, nor any other fold or alias a target applies beyond these forms.
-    A tree tracking none of either roster (a synthetic fixture) obliges nothing. classes is
-    the classify() result, checked again here so a roster path that reached it is named as a would-ship error."""
+    a target may generate for the roster path; nor a spelling that differs from a roster path only by Unicode
+    default-ignorable code points (U+200C, U+200D, U+FEFF and the like, which some filesystems ignore in names);
+    nor any other fold or alias a target applies beyond these forms. The directory walk is a sequence of lstat
+    calls on paths from the repository root, not an atomic no-follow traversal (it holds no directory handle), so
+    a directory above a roster path replaced by a symlink while the walk runs, after its own lstat, is followed by
+    the later calls and not refused: the check binds the tree as it stands when it runs, an accepted residual for
+    a generator run over the maintainer's own checkout. A tree tracking none of either roster (a synthetic
+    fixture) obliges nothing. classes is the classify() result, checked again here so a roster path that reached
+    it is named as a would-ship error."""
     import gen_gensrc
     import gen_hooks
     shipped = tuple(gen_hooks.AUTHORING_ONLY_REL)
@@ -859,10 +867,12 @@ def main():
 #       exclusion of a gensrc target off the roster, and a tracked marker missing on disk each exit 2; a
 #       roster bound by the tree under check (its own tools/gen_hooks.py) is honoured, while a tree with none,
 #       and a tree roster omitting either shipped roster path, still refuses that path a release class (exit 2),
-#       a tracked or classed path aliasing a roster path by case, by Unicode normalization or by both exits 2
-#       naming both spellings, a shipped roster path the tree roster omits that is a symlink on disk under a
-#       regular index entry exits 2 (the same tree with a regular file exits 0), and the real one reads as
-#       exactly the two shipped roster paths;
+#       a tracked or classed path aliasing a roster path by case, by Unicode normalization or by both, by the
+#       upcase fold, or by an NTFS stream suffix on it or on its directory exits 2 naming both spellings, a
+#       shipped roster path the tree roster omits that is a symlink on disk under a regular index entry exits 2
+#       (the same tree with a regular file exits 0), a roster path under a symlinked directory at the first,
+#       second or third level, or under a directory whose lstat fails, exits 2 naming it (the same tree with real
+#       directories exits 0), and the real one reads as exactly the two shipped roster paths;
 #   F-FROZEN-PARTITION: a vocabulary class in neither FROZEN_CLASSES nor UNFROZEN_CLASSES, a class in both,
 #       and a class outside the vocabulary each fail closed.
 
@@ -1376,9 +1386,10 @@ def _self_test_main_isolated():
         # an NFC path, classed, beside a tree roster spelling it NFD; an upper-case NFD path, classed, beside a tree
         # roster spelling it lower-case NFC, which neither the case fold nor the NFC form alone equates; and each
         # roster path, tracked and excluded, beside a classed dotless-i spelling of it (equal only under the upcase
-        # fold) and beside itself with the NTFS default stream suffix ::$DATA. Each exited 0, the alias in the
-        # manifest, while only byte-equal paths were compared (the dotless-i and stream vectors also while only the
-        # case and normalization forms were).
+        # fold), beside itself with the NTFS default stream suffix ::$DATA, and beside itself with the directory
+        # stream suffix ::$INDEX_ALLOCATION on its directory, which fails if only the last component's suffix is
+        # removed. Each exited 0, the alias in the manifest, while only byte-equal paths were compared (the dotless-i
+        # and stream vectors also while only the case and normalization forms were).
         nfd = "cafe\u0301.txt"
         nfc = unicodedata.normalize("NFC", nfd)
         variants = {k: v for k, v in _ROSTER_FILES.items()
@@ -1400,7 +1411,9 @@ def _self_test_main_isolated():
         for rel, dotless in ((".claude/settings.json", ".claude/sett\u0131ngs.json"),
                              (".aiqt/authoring.toml", ".aiqt/author\u0131ng.toml")):
             for kind, alias in (("a dotless-i spelling of it (equal only under the upcase fold)", dotless),
-                                ("itself with the NTFS default stream suffix", rel + "::$DATA")):
+                                ("itself with the NTFS default stream suffix", rel + "::$DATA"),
+                                ("itself with the NTFS directory stream suffix on its directory",
+                                 rel.replace("/", "::$INDEX_ALLOCATION/", 1))):
                 beside = dict(_ROSTER_FILES)
                 beside[alias] = "alias\n"
                 roster_aliases.append(("{} tracked beside {}".format(rel, kind), class_row.format(alias)
@@ -1485,6 +1498,47 @@ def _self_test_main_isolated():
             if rc != 2 or "{} must lie under real directories: {} is a symlink".format(rel, parent) not in err:
                 failures.append("authoring-only roster: {} under a symlinked {} expected exit 2 naming it, got {}"
                                 .format(rel, parent, rc))
+        # The walk covers every directory above a roster path, not only the first: a synthetic roster path three
+        # directories deep (cfg/a/b/roster.json, rostered by the tree alone and excluded by an exact literal) exits 0
+        # under real directories, and exits 2 naming the directory when cfg/a or cfg/a/b is a symlink to a real
+        # directory, or when the lstat of cfg/a raises PermissionError. That error is injected (os.lstat patched for
+        # that one path, restored on every path), so the vector holds whatever the uid; the leaf lstat alone would
+        # follow either symlink and succeed, so a walk of the first directory only, or one that skips a directory
+        # whose lstat fails, fails these.
+        deep = "cfg/a/b/roster.json"
+        deep_excl = '\n[[exclusion]]\npath = "{}"\nreason = "authoring-only"\n'.format(deep)
+        real_lstat = os.lstat
+
+        def lstat_denying(denied):
+            def lstat(path, *args, **kwargs):
+                if os.fspath(path) == os.fspath(denied):
+                    raise PermissionError(13, "Permission denied (injected)", os.fspath(path))
+                return real_lstat(path, *args, **kwargs)
+            return lstat
+        for i, (parent, how) in enumerate(((None, "real"), ("cfg/a", "symlink"), ("cfg/a/b", "symlink"),
+                                           ("cfg/a", "unreadable"))):
+            fx = _roster_fixture(tmp / "roster-deep{}".format(i), _LOCAL_OUT_CLASS + deep_excl,
+                                 unicode_tree(deep, deep))
+            if fx is not None and how == "symlink":
+                moved = tmp / "roster-deep{}-moved".format(i)
+                try:
+                    os.rename(fx / parent, moved)
+                    os.symlink(moved, fx / parent)
+                except OSError:
+                    fx = None
+            if fx is not None and how == "unreadable":
+                os.lstat = lstat_denying(fx / parent)
+            try:
+                rc, err = run_stderr(fx) if fx is not None else (None, "")
+            finally:
+                os.lstat = real_lstat
+            want = {"real": None,
+                    "symlink": "{} must lie under real directories: {} is a symlink".format(deep, parent),
+                    "unreadable": "{} is tracked but its directory {} cannot be read".format(deep, parent)}[how]
+            if rc != (0 if want is None else 2) or (want is not None and want not in err):
+                failures.append("authoring-only roster: {} with {} expected exit {}{}, got {}".format(
+                    deep, "real directories" if want is None else "{} {}".format(parent, how),
+                    0 if want is None else 2, "" if want is None else " naming it", rc))
         try:
             real_roster = gen_gensrc.read_authoring_roster(Path(__file__).resolve().parent)
         except (OSError, ValueError) as exc:
@@ -1520,9 +1574,10 @@ def _self_test_main_isolated():
           "class, a pattern exclusion over it, the settings without the marker, an exact exclusion of a "
           "gensrc target off the roster, a tracked marker missing on disk, and a shipped roster path given a "
           "class under a tree roster that omits it or in a tree with none, a path aliasing either roster path "
-          "by case, the upcase fold, Unicode normalization or an NTFS stream suffix, a roster path that is a "
-          "symlink on disk whether the tree roster names or omits it, and a roster path under a symlinked "
-          "directory each fail closed (exit 2); "
+          "by case, the upcase fold, Unicode normalization or an NTFS stream suffix on it or its directory, a "
+          "roster path that is a symlink on disk whether the tree roster names or omits it, and a roster path "
+          "under a symlinked directory at any of three levels or under a directory whose lstat fails each fail "
+          "closed (exit 2); "
           "and a vocabulary class "
           "recorded in neither FROZEN_CLASSES nor UNFROZEN_CLASSES, a class recorded in both, and a frozen "
           "class outside the vocabulary each fail the frozen floor closed (F-FROZEN-PARTITION)")
