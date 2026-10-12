@@ -7,8 +7,8 @@ and refuses a missing journal. It never bootstraps a replacement recovery histor
 
 This is an in-process cooperation boundary, not protection from a malicious same-user writer.
 It inherits the journal's accident-recovery and single-writer assumptions. Callers must not
-fork while using the capability. Legacy journal transport belongs to the migration reader;
-it must preserve original frame bytes and bind their new location through a receipt.
+fork while using the capability. Homes 2 has no homes migration and no legacy journal transport
+(spec 4.2): no API here reads, moves or recovers from a homes-1 journal.
 """
 import contextlib
 import os
