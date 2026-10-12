@@ -8785,11 +8785,20 @@ def _main_isolated(monitor):
                            "honours the entry in every tree"):
             if _gs_phrase not in _gs_residue:
                 failures.append("(gs-res-scope) the residue must state the authoring scope: {!r}".format(_gs_phrase))
+        # (gs-res-local) Beside the Bash residual, the residue discloses that a Write to a sibling settings file is not
+        # judged (gs-auth-b-local below) yet can change hook behaviour for later sessions, and that gen_hooks applies
+        # the same marker size bound as the guard (gs-auth-f below).
+        for _gs_phrase in ("A Write to a sibling settings file such as .claude/settings.local.json is not judged by "
+                           "this guard", "can change hook behaviour for later sessions",
+                           "the two apply the same size bound"):
+            if _gs_phrase not in _gs_residue:
+                failures.append("(gs-res-local) the residue must state: {!r}".format(_gs_phrase))
 
         # === gs-auth: an authoring-scoped registry entry never blocks an adopter's own settings ==========
         # The fixtures hold the REAL .aiqt/gensrc.json bytes this repository ships (tools/gen_gensrc.py scopes
         # its .claude/settings.json entry "authoring"), so a generator that drops the scope, or a guard that
-        # ignores it, fails gs-auth-a; the authoring fixture also holds the REAL .aiqt/authoring.toml bytes.
+        # ignores it, fails gs-auth-a. The authoring fixture holds the exact marker, spelled literally here because the
+        # shipped tree carries no .aiqt/authoring.toml (never read from the repo root); gs-auth-f pins it to gen_hooks.
         def _gs_auth_reason(cwd, rel):
             _code, _obj, _err = aiqt_hooks.gensrc_guard(
                 {"hook_event_name": "PreToolUse", "tool_name": "Write",
@@ -8799,16 +8808,16 @@ def _main_isolated(monitor):
             except (TypeError, KeyError):
                 return ""
 
+        _gs_exact_marker = b"format-version = 1\nrole = \"pack-authoring-repository\"\n"
         try:
             _gs_real_registry = (repo_root() / ".aiqt" / "gensrc.json").read_bytes()
-            _gs_real_marker = (repo_root() / ".aiqt" / "authoring.toml").read_bytes()
             gs_adopt = _gs_init("gsadopt")          # the shipped registry, no marker: an adopter tree
             gs_author = _gs_init("gsauthor")        # the shipped registry and the real marker
             gs_badm = _gs_init("gsbadmarker")       # the shipped registry and a mutable malformed marker
             for _gs_root in (gs_adopt, gs_author, gs_badm):
                 os.makedirs(str(_gs_root / ".aiqt"), exist_ok=True)
                 (_gs_root / ".aiqt" / "gensrc.json").write_bytes(_gs_real_registry)
-            (gs_author / ".aiqt" / "authoring.toml").write_bytes(_gs_real_marker)
+            (gs_author / ".aiqt" / "authoring.toml").write_bytes(_gs_exact_marker)
         except (OSError, subprocess.SubprocessError) as exc:
             print("SELF-TEST ERROR: could not build the gensrc authoring-scope fixtures: {}".format(exc),
                   file=sys.stderr)
@@ -8828,6 +8837,10 @@ def _main_isolated(monitor):
         # (gs-auth-b) The authoring tree still denies it, naming gen_hooks and its source.
         gexpect("(gs-auth-b) the authoring tree denies a Write to .claude/settings.json", "deny",
                 tool="Write", file_path=os.path.join(gau, _gs_settings), cwd=gau)
+        # (gs-auth-b-local) The disclosed residual: a sibling settings file is local and ungenerated, so no registry
+        # entry covers it and a Write to it in the authoring tree is not judged (allowed silently).
+        gexpect("(gs-auth-b-local) the authoring tree does not judge a Write to .claude/settings.local.json", "allow",
+                tool="Write", file_path=os.path.join(gau, ".claude", "settings.local.json"), cwd=gau)
         _gs_why = _gs_auth_reason(gau, _gs_settings)
         if ("python3 tools/gen_hooks.py" not in _gs_why or ".aiqt/core/hooks/manifest.toml" not in _gs_why
                 or "authoring marker" in _gs_why):
@@ -8836,7 +8849,7 @@ def _main_isolated(monitor):
         # (gs-auth-c) A PRESENT marker that is not exact denies fail-closed (tools/gen_hooks.py exits 2 on each)
         # and names the marker, never the regenerate command: other content, a bool format-version (true == 1
         # in Python), unparseable, non-UTF-8, empty, a directory, a symlink to the real marker (lstat, never
-        # followed), a FIFO (lstat first, so no open and no hang) and a delete race (regular at the lstat,
+        # followed), a FIFO (lstat first, so no open and no hang), one byte over the size bound and a delete race (regular at the lstat,
         # gone at the open). (gs-auth-d) With a malformed marker present, every other edit is unaffected.
         _gs_marker = gs_badm / ".aiqt" / "authoring.toml"
         _gs_real_lstat = os.lstat
@@ -8846,6 +8859,9 @@ def _main_isolated(monitor):
             if str(p).endswith(os.path.join("gsbadmarker", ".aiqt", "authoring.toml")):
                 return _gs_regular_st
             return _gs_real_lstat(p, *a, **k)
+
+        def _gs_padded_marker(size):
+            return _gs_exact_marker + b"#" + b"x" * (size - len(_gs_exact_marker) - 2) + b"\n"
 
         def _gs_plant(kind):
             if kind == "other content":
@@ -8865,6 +8881,8 @@ def _main_isolated(monitor):
                 os.symlink(os.path.join(gau, ".aiqt", "authoring.toml"), str(_gs_marker))
             elif kind == "a FIFO":
                 os.mkfifo(str(_gs_marker))
+            elif kind == "one byte over the bound":
+                _gs_marker.write_bytes(_gs_padded_marker(aiqt_hooks._GENSRC_MAX_BYTES + 1))
 
         def _gs_clear():
             if os.path.isdir(str(_gs_marker)) and not os.path.islink(str(_gs_marker)):
@@ -8873,7 +8891,7 @@ def _main_isolated(monitor):
                 os.remove(str(_gs_marker))
 
         for _gs_kind in ("other content", "a bool format-version", "unparseable", "non-UTF-8", "empty",
-                         "a directory", "a symlink", "a FIFO", "a delete race"):
+                         "a directory", "a symlink", "a FIFO", "one byte over the bound", "a delete race"):
             try:
                 _gs_clear()
                 if _gs_kind == "a delete race":
@@ -8914,7 +8932,7 @@ def _main_isolated(monitor):
                     tool="Edit", file_path=os.path.join(gr3, _gs_rel), cwd=gr3)
         _gs_marker3 = gs_repo3 / ".aiqt" / "authoring.toml"
         try:
-            _gs_marker3.write_bytes(_gs_real_marker)
+            _gs_marker3.write_bytes(_gs_exact_marker)
             for _gs_rel in ("GEN.md", os.path.join("gen", "part.md")):
                 gexpect("(gs-auth-e-exact) a scoped {} with the exact marker DENIES".format(_gs_rel), "deny",
                         tool="Edit", file_path=os.path.join(gr3, _gs_rel), cwd=gr3)
@@ -8935,6 +8953,35 @@ def _main_isolated(monitor):
             failures.append("(gs-auth-f-marker) the guard marker must equal gen_hooks.AUTHORING_MARKER(_REL)")
         if aiqt_hooks._GENSRC_SCOPES != (gen_gensrc.SCOPE_AUTHORING,):
             failures.append("(gs-auth-f-scope) the guard scopes must be exactly gen_gensrc.SCOPE_AUTHORING")
+        # The literal marker bytes above are the ones gen_hooks reads as the authoring tree, and the two readers share
+        # one size bound: a marker of exactly the bound is the authoring marker to both (the guard denies naming
+        # gen_hooks, not the marker), and one byte over it is refused by both (gs-auth-c above for the guard).
+        if aiqt_hooks._GENSRC_MAX_BYTES != gen_hooks.AUTHORING_MARKER_MAX_BYTES:
+            failures.append("(gs-auth-f-bound) the guard marker bound must equal gen_hooks.AUTHORING_MARKER_MAX_BYTES")
+
+        def _gs_gen_reads(root):
+            try:
+                return gen_hooks.authoring_tree(root)
+            except (ValueError, OSError) as exc:
+                return "refused ({})".format(exc)
+        if _gs_gen_reads(gs_author) is not True:
+            failures.append("(gs-auth-f-bytes) gen_hooks must read the literal marker as the authoring tree, got "
+                            "{!r}".format(_gs_gen_reads(gs_author)))
+        try:
+            _gs_marker.write_bytes(_gs_padded_marker(aiqt_hooks._GENSRC_MAX_BYTES))
+            _gs_why = _gs_auth_reason(gbm, _gs_settings)
+            if "python3 tools/gen_hooks.py" not in _gs_why or "authoring marker" in _gs_why:
+                failures.append("(gs-auth-f-at-bound-guard) a marker of exactly the bound must be honoured by the guard, "
+                                "got {!r}".format(_gs_why))
+            if _gs_gen_reads(gs_badm) is not True:
+                failures.append("(gs-auth-f-at-bound-gen) gen_hooks must read a marker of exactly the bound as the "
+                                "authoring tree, got {!r}".format(_gs_gen_reads(gs_badm)))
+            _gs_marker.write_bytes(_gs_padded_marker(aiqt_hooks._GENSRC_MAX_BYTES + 1))
+            if _gs_gen_reads(gs_badm) is True:
+                failures.append("(gs-auth-f-over-bound) gen_hooks must refuse a marker one byte over the bound")
+            os.remove(str(_gs_marker))
+        except OSError as exc:
+            failures.append("(gs-auth-f-setup) could not plant a marker at the size bound: {}".format(exc))
 
         # === abspth: absolute paths across typed-path tools and the Bash cwd floor (GS-7) ============
         # FAILING-FIRST battery: no abspth coverage existed before GS-7, and every case here is one the

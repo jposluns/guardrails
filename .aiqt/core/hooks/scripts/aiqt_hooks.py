@@ -8387,7 +8387,8 @@ _GENSRC_MAX_BYTES = 1_000_000  # the real registry is ~5 KB; a larger one is mal
 # registry keeps its own .claude/settings.json. Any other value is a malformed entry.
 _GENSRC_SCOPES = ("authoring",)
 # The authoring marker tools/gen_hooks.py reads (AUTHORING_MARKER_REL, AUTHORING_MARKER), spelled here because
-# the dispatcher imports nothing from tools/; tools/selftest_aiqt_hooks.py pins both against gen_hooks.
+# the dispatcher imports nothing from tools/; tools/selftest_aiqt_hooks.py pins both, and _GENSRC_MAX_BYTES as the
+# marker size bound (AUTHORING_MARKER_MAX_BYTES), against gen_hooks.
 _GENSRC_MARKER_REL = os.path.join(".aiqt", "authoring.toml")
 _GENSRC_MARKER = {"format-version": 1, "role": "pack-authoring-repository"}
 
@@ -8551,10 +8552,10 @@ def _gensrc_authoring_marker(root):
     never the bool true, which == 1 in Python) is the authoring tree; everything else is BAD and the caller
     denies fail-closed: any other lstat fault, a symlink, FIFO, directory or other non-regular file (lstat
     is probed BEFORE the open, so a STATIONARY FIFO never blocks), a marker gone at the open (a delete race
-    in the lstat->open window, never read as absent), an unreadable, oversized (over _GENSRC_MAX_BYTES, a
-    bound gen_hooks does not apply; both deny here, only the message differs), non-UTF-8, unparseable or too
-    deeply nested file, or any other content. A marker SWAPPED to another type in the lstat->open window is
-    the same disclosed residual as the registry read."""
+    in the lstat->open window, never read as absent), an unreadable, oversized (over _GENSRC_MAX_BYTES, the
+    same bound gen_hooks applies), non-UTF-8, unparseable or too deeply nested file, or any other content. A
+    marker SWAPPED to another type in the lstat->open window is the same disclosed residual as the registry
+    read."""
     path = os.path.join(root, _GENSRC_MARKER_REL)
     try:
         st = os.lstat(path)
@@ -8654,7 +8655,10 @@ def gensrc_guard(data):
     fires only when the file_path resolves onto a kind=file or kind=tree registry entry. Coverage is
     exactly the registry, so an ABSENT registry is the inert ALLOW by design; kind=block entries are
     EXCLUDED (a path guard cannot see which lines an edit touches); Bash is EXCLUDED by design
-    (regeneration itself runs through Bash), so the matcher is Write|Edit|MultiEdit only. NO-ASK posture:
+    (regeneration itself runs through Bash), so the matcher is Write|Edit|MultiEdit only. A Write to a sibling
+    settings file such as .claude/settings.local.json (local and ungenerated, so no registry entry) is not
+    judged either, yet it can change hook behaviour for later sessions; the settings precedence Claude Code
+    gives it is not verified by this pack. NO-ASK posture:
     a CONFIRMED registry match DENIES and names the source to edit and the regenerate command (a reachable
     correct action). A PRESENT-but-unreadable/malformed registry ALSO DENIES, fail-closed (round-2 finding
     8): a corrupted registry must not silently disable the generated-artefact protection, so a cannot-read of

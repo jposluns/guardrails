@@ -49,6 +49,7 @@ import json
 import os
 import re
 import stat
+import tomllib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -84,12 +85,16 @@ PROJECT_SCRIPT_PATH = '"$CLAUDE_PROJECT_DIR"/' + SCRIPT_REL
 # release class), so no release, pin or install puts it in an adopter tree. The test reads the generated tree
 # itself, never an environment variable or the cwd, so the tree tested is the tree written. Without the
 # marker (every adopter tree) .claude/settings.json is never created, overwritten or deleted. A present
-# marker that is not a regular file holding exactly AUTHORING_MARKER fails closed (exit 2), so damage to it
-# here cannot silently drop the drift check. AUTHORING_ONLY_REL is the never-shipped roster gen_manifest binds;
-# gen_gensrc reads it statically and scopes its registry entries "authoring", so gensrc_guard enforces them only
-# where this marker is exact (keep it a tuple of names bound once to str literals, or literals).
+# marker that is not a regular file of at most AUTHORING_MARKER_MAX_BYTES (the bound gensrc_guard applies,
+# _GENSRC_MAX_BYTES, pinned by tools/selftest_aiqt_hooks.py) holding exactly AUTHORING_MARKER fails closed
+# (exit 2), so damage to it here cannot silently drop the drift check. AUTHORING_ONLY_REL is the never-shipped
+# roster: gen_gensrc and gen_manifest both read it from this file statically (gen_gensrc.read_authoring_roster),
+# gen_gensrc scopes its registry entries "authoring", so gensrc_guard enforces them only where this marker is
+# exact, and gen_manifest keeps them out of the release. Keep it a tuple of literals, or of names each bound
+# exactly once, by one plain top-level assignment, to a str literal; any other binding fails closed.
 AUTHORING_MARKER_REL = ".aiqt/authoring.toml"
 AUTHORING_MARKER = {"format-version": 1, "role": "pack-authoring-repository"}
+AUTHORING_MARKER_MAX_BYTES = 1_000_000
 AUTHORING_ONLY_REL = (AUTHORING_MARKER_REL, PROJECT_SETTINGS_REL)
 
 # The event whitelist, in the fixed render order (doc-confirmed event names, 2026-08-17; SessionStart
@@ -319,11 +324,13 @@ def render_project_settings(hooks, ids=PROJECT_HOOK_IDS):
 
 
 def authoring_tree(root):
-    """True when root is the pack authoring repository: AUTHORING_MARKER_REL is a regular file holding
-    exactly AUTHORING_MARKER (format-version the integer 1, never the bool true). False when it is absent (an
-    adopter tree). Raises ValueError on a marker that is present but is not a regular file (a symlink is not
-    followed; a directory, FIFO, ...) or holds anything else, and OSError on an unreadable path; the caller
-    maps both to exit 2."""
+    """True when root is the pack authoring repository: AUTHORING_MARKER_REL is a regular file of at most
+    AUTHORING_MARKER_MAX_BYTES holding exactly AUTHORING_MARKER (format-version the integer 1, never the bool
+    true). False when it is absent (an adopter tree). Raises ValueError on a marker that is present but is not
+    a regular file (a symlink is not followed; a directory, FIFO, ...; lstat is probed before the open, so a
+    stationary FIFO never blocks), is over the bound, is not UTF-8 TOML, or holds anything else, and OSError on
+    an unreadable path; the caller maps both to exit 2. The bound and every refusal match gensrc_guard
+    (_gensrc_authoring_marker), so the two never disagree on which tree is the authoring tree."""
     path = root / AUTHORING_MARKER_REL
     try:
         st = os.lstat(path)
@@ -331,7 +338,16 @@ def authoring_tree(root):
         return False
     if not stat.S_ISREG(st.st_mode):
         raise ValueError("{}: the authoring marker must be a regular file".format(AUTHORING_MARKER_REL))
-    data = load_toml(path)
+    with open(path, "rb") as handle:
+        raw = handle.read(AUTHORING_MARKER_MAX_BYTES + 1)
+    if len(raw) > AUTHORING_MARKER_MAX_BYTES:
+        raise ValueError("{}: the authoring marker exceeds the {}-byte bound".format(
+            AUTHORING_MARKER_REL, AUTHORING_MARKER_MAX_BYTES))
+    try:
+        data = tomllib.loads(raw.decode("utf-8"))  # UnicodeDecodeError and TOMLDecodeError are ValueErrors
+    except RecursionError as exc:
+        raise ValueError("{}: the authoring marker nests too deeply to parse ({})".format(
+            AUTHORING_MARKER_REL, exc)) from exc
     # type() as well as equality: the TOML bool true == 1 in Python, and gensrc_guard (which honours an
     # authoring-scoped registry entry on this same marker) reads exactly the integer.
     if data != AUTHORING_MARKER or type(data.get("format-version")) is not int:
@@ -467,7 +483,8 @@ def main():
 #  20. an adopter-shaped tree (no authoring marker) never creates, overwrites or deletes .claude/settings.json,
 #      in write or check mode, whatever the cwd, while its plugin surface still generates,
 #  21. a present marker that is not exactly the authoring marker (other content, a bool format-version,
-#      unparseable, a directory, a symlink) fails closed (exit 2) and renders no project settings.
+#      unparseable, a directory, a symlink, a FIFO, empty, non-UTF-8, one byte over the size bound) fails
+#      closed (exit 2) and renders no project settings, while a valid marker of exactly the bound renders them.
 
 _APEX = """---
 corpus-id: apex01
@@ -555,6 +572,14 @@ def gensrc_guard(data):
 
 # The authoring marker, spelled literally (never built from AUTHORING_MARKER), so a renamed key or role fails.
 _MARKER_TEXT = 'format-version = 1\nrole = "pack-authoring-repository"\n'
+# The marker size bound, spelled literally like _MARKER_TEXT (gensrc_guard _GENSRC_MAX_BYTES, which
+# tools/selftest_aiqt_hooks.py pins AUTHORING_MARKER_MAX_BYTES to), and the valid marker padded by a TOML comment
+# to exactly `size` bytes.
+_MARKER_BOUND = 1_000_000
+
+
+def _padded_marker(size):
+    return _MARKER_TEXT + "#" + "x" * (size - len(_MARKER_TEXT) - 2) + "\n"
 
 
 def _write_marker(base, text=_MARKER_TEXT):
@@ -901,18 +926,30 @@ def self_test_main():
             failures.append("adopter tree: the plugin surface must still generate")
 
         # 21. A present marker that is not exactly the authoring marker fails closed (exit 2) and renders no
-        #     settings: other content, unparseable text, a directory, and a symlink to a valid marker
-        #     (lstat, never followed).
+        #     settings: other content, unparseable text, a directory, a symlink to a valid marker (lstat, never
+        #     followed), a FIFO (lstat first, so no open and no hang), an empty file, non-UTF-8 bytes, and a valid
+        #     marker padded one byte over the bound. 21b. The same marker padded to exactly the bound is the
+        #     authoring marker (exit 0, settings rendered), so the bound is not off by one.
         bad_markers = [("other content", lambda b: _write_marker(b, 'format-version = 1\nrole = "adopter"\n')),
                        ("a bool format-version", lambda b: _write_marker(
                            b, 'format-version = true\nrole = "pack-authoring-repository"\n')),
                        ("unparseable", lambda b: _write_marker(b, "not toml [\n")),
-                       ("a directory", lambda b: (b / ".aiqt" / "authoring.toml").mkdir())]
+                       ("a directory", lambda b: (b / ".aiqt" / "authoring.toml").mkdir()),
+                       ("empty", lambda b: _write_marker(b, "")),
+                       ("non-UTF-8", lambda b: (b / ".aiqt" / "authoring.toml").write_bytes(
+                           b"\xff\xfe format-version = 1\n")),
+                       ("one byte over the bound", lambda b: _write_marker(b, _padded_marker(_MARKER_BOUND + 1)))]
 
         def _plant_link(b):
             (b / "real-marker.toml").write_text(_MARKER_TEXT, encoding="utf-8")
             os.symlink(b / "real-marker.toml", b / ".aiqt" / "authoring.toml")
         bad_markers.append(("a symlink", _plant_link))
+
+        def _plant_fifo(b):
+            if not hasattr(os, "mkfifo"):
+                raise NotImplementedError("no os.mkfifo on this platform")
+            os.mkfifo(str(b / ".aiqt" / "authoring.toml"))
+        bad_markers.append(("a FIFO", _plant_fifo))
         for i, (label, plant) in enumerate(bad_markers):
             badm = tmp / "badmarker{}".format(i)
             badm.mkdir()
@@ -926,6 +963,12 @@ def self_test_main():
                 failures.append("a marker that is {} expected exit 2 (fail-closed)".format(label))
             if os.path.lexists(badm / ".claude" / "settings.json"):
                 failures.append("a marker that is {} must not render project settings".format(label))
+        at_bound = tmp / "markerbound"
+        at_bound.mkdir()
+        _build_project_tree(at_bound, authoring=False)
+        _write_marker(at_bound, _padded_marker(_MARKER_BOUND))
+        if run_project(at_bound, check=False) != 0 or not (at_bound / PROJECT_SETTINGS_REL).is_file():
+            failures.append("a valid marker padded to exactly the bound expected exit 0 with project settings")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -949,7 +992,9 @@ def self_test_main():
           ".claude/settings.json renders one isolated PreToolUse group with the manifest matcher, is "
           "drift-checked by run(), stays out of build_desired(), and fails closed without its control, "
           "in the authoring tree only: an adopter-shaped tree never gets, loses or changes a "
-          ".claude/settings.json whatever the cwd, and a malformed authoring marker fails closed" + note)
+          ".claude/settings.json whatever the cwd, and a malformed authoring marker (a FIFO, an empty, a non-UTF-8 "
+          "and a one-byte-oversize one included) fails closed while one of exactly the size bound is accepted"
+          + note)
     return 0
 
 

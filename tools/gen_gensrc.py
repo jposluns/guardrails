@@ -87,6 +87,52 @@ ROSTER_NAME = "AUTHORING_ONLY_REL"
 SCOPE_AUTHORING = "authoring"
 
 
+def _reject_rebinding(tree, name, allowed, where, assignment):
+    """Raise ValueError (naming `where`) when the parsed module `tree` binds `name` anywhere other than the
+    Store-context Name node(s) whose id() is in `allowed`: the single-binding discipline _read_declaration
+    (GENSRC_OUTPUTS) and read_authoring_roster (the roster and every name it uses) share. The WHOLE tree is
+    walked, so a binding nested in an if, try, for, with, def or class body is refused like a top-level one.
+    A single Store-/Del-context Name rule covers plain/augmented/annotated assignment, del, walrus, tuple/star
+    unpack, and for/with targets (all bind through such a Name; so does a `type` alias statement); a second
+    rule covers the string-name binders, whose bound name is a str attribute, not a Name node (dotted/wildcard
+    import, def/class, except-as, match capture incl. MatchMapping.rest, a parameter, global/nonlocal).
+    `assignment` names the one allowed form in the message ("literal", "plain")."""
+    binder = ("{}: {} must not be rebound by {{}}; exactly one top-level {} assignment "
+              "is allowed (fail-closed)").format(where, name, assignment)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            if node.id == name and isinstance(node.ctx, (ast.Store, ast.Del)) and id(node) not in allowed:
+                raise ValueError("{}: {} must not be rebound (a second/nested/conditional "
+                                 "assignment, an augmented or annotated assignment, a del, a walrus, a "
+                                 "tuple/star unpack, or a for/with target); exactly one top-level {} "
+                                 "assignment is allowed (fail-closed)".format(where, name, assignment))
+        elif isinstance(node, ast.alias):
+            # An alias with no asname binds the ROOT of a (possibly dotted) name: `import X.child` binds `X`,
+            # so compare on name.partition(".")[0]. A wildcard (`from x import *`, name == "*") can bind
+            # `name` and is statically undecidable, so fail closed. `import X.child as y` binds only `y`.
+            bound = node.asname if node.asname is not None else node.name.partition(".")[0]
+            if bound == name or (node.asname is None and node.name == "*"):
+                raise ValueError(binder.format("an import"))
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if node.name == name:
+                raise ValueError(binder.format("a def/class"))
+        elif isinstance(node, ast.ExceptHandler):
+            if node.name == name:
+                raise ValueError(binder.format("an except-as"))
+        elif isinstance(node, (ast.MatchAs, ast.MatchStar)):
+            if node.name == name:
+                raise ValueError(binder.format("a match capture"))
+        elif isinstance(node, ast.MatchMapping):
+            if node.rest == name:  # `case {**name}` binds the rest to that name
+                raise ValueError(binder.format("a match capture"))
+        elif isinstance(node, ast.arg):
+            if node.arg == name:  # a function/lambda parameter, incl. */**/kw-only
+                raise ValueError(binder.format("a parameter"))
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            if name in node.names:
+                raise ValueError(binder.format("a global/nonlocal declaration"))
+
+
 def _read_declaration(path, where):
     """Return the value of path's single module-level GENSRC_OUTPUTS literal, recovered by parsing the
     file to an AST and evaluating ONLY that literal with ast.literal_eval. The module is never imported
@@ -126,54 +172,14 @@ def _read_declaration(path, where):
                    if isinstance(node, ast.Assign)
                    and any(isinstance(t, ast.Name) and t.id == "GENSRC_OUTPUTS" for t in node.targets)]
     the_assign = top_assigns[0] if len(top_assigns) == 1 else None
-    # Walk the WHOLE tree and reject any binding of GENSRC_OUTPUTS OTHER than the_assign's own target(s),
-    # closing the entire rebind class. The one allowed binding is the_assign's GENSRC_OUTPUTS Store-Name
-    # target node(s), tracked by identity; every other way Python can bind the name is rejected. A single
-    # Store-/Del-context Name rule covers plain/augmented/annotated assignment, del, walrus, tuple/star
-    # unpack, and for/with targets (all bind through such a Name); a second rule covers the string-name
-    # binders, whose bound name is a str attribute, not a Name node (dotted/wildcard import, def/class,
-    # except-as, match capture incl. MatchMapping.rest, global/nonlocal). A `type GENSRC_OUTPUTS = ...`
-    # needs no branch: its target is itself a Store-context Name caught by the first rule.
+    # Walk the WHOLE tree and reject any binding of GENSRC_OUTPUTS OTHER than the GENSRC_OUTPUTS target(s) of
+    # the_assign, closing the entire rebind class (_reject_rebinding, shared with read_authoring_roster). The
+    # one allowed binding is those Store-Name target node(s), tracked by identity.
     allowed = set()
     if the_assign is not None:
         allowed = {id(t) for t in the_assign.targets
                    if isinstance(t, ast.Name) and t.id == "GENSRC_OUTPUTS"}
-    binder = ("{}: GENSRC_OUTPUTS must not be rebound by {{}}; exactly one top-level literal assignment "
-              "is allowed (fail-closed)").format(where)
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Name):
-            if (node.id == "GENSRC_OUTPUTS" and isinstance(node.ctx, (ast.Store, ast.Del))
-                    and id(node) not in allowed):
-                raise ValueError("{}: GENSRC_OUTPUTS must not be rebound (a second/nested/conditional "
-                                 "assignment, an augmented or annotated assignment, a del, a walrus, a "
-                                 "tuple/star unpack, or a for/with target); exactly one top-level literal "
-                                 "assignment is allowed (fail-closed)".format(where))
-        elif isinstance(node, ast.alias):
-            # An alias with no asname binds the ROOT of a (possibly dotted) name: `import
-            # GENSRC_OUTPUTS.child` binds `GENSRC_OUTPUTS`, so compare on name.partition('.')[0]. A
-            # wildcard (`from x import *`, name == "*") can bind GENSRC_OUTPUTS and is statically
-            # undecidable, so fail closed. `import GENSRC_OUTPUTS.child as y` binds only `y`, allowed.
-            bound = node.asname if node.asname is not None else node.name.partition(".")[0]
-            if bound == "GENSRC_OUTPUTS" or (node.asname is None and node.name == "*"):
-                raise ValueError(binder.format("an import"))
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            if node.name == "GENSRC_OUTPUTS":
-                raise ValueError(binder.format("a def/class"))
-        elif isinstance(node, ast.ExceptHandler):
-            if node.name == "GENSRC_OUTPUTS":
-                raise ValueError(binder.format("an except-as"))
-        elif isinstance(node, (ast.MatchAs, ast.MatchStar)):
-            if node.name == "GENSRC_OUTPUTS":
-                raise ValueError(binder.format("a match capture"))
-        elif isinstance(node, ast.MatchMapping):
-            if node.rest == "GENSRC_OUTPUTS":  # `case {**GENSRC_OUTPUTS}` binds the rest to that name
-                raise ValueError(binder.format("a match capture"))
-        elif isinstance(node, ast.arg):
-            if node.arg == "GENSRC_OUTPUTS":  # a function/lambda parameter, incl. */**/kw-only
-                raise ValueError(binder.format("a parameter"))
-        elif isinstance(node, (ast.Global, ast.Nonlocal)):
-            if "GENSRC_OUTPUTS" in node.names:
-                raise ValueError(binder.format("a global/nonlocal declaration"))
+    _reject_rebinding(tree, "GENSRC_OUTPUTS", allowed, where, "literal")
     if the_assign is None:
         raise ValueError("{} does not declare GENSRC_OUTPUTS; a generator cannot ship without declaring "
                          "its outputs (fail-closed)".format(where))
@@ -310,15 +316,20 @@ def _validate_entry(raw, where, root, seen):
 def read_authoring_roster(tools_dir):
     """The authoring-only roster, tools/gen_hooks.py AUTHORING_ONLY_REL, read STATICALLY (parsed, never
     imported or run, like every declaration here). Its value must be a tuple or list whose items are
-    non-empty str literals, or names bound once at module level to one (gen_hooks spells it from
-    AUTHORING_MARKER_REL and PROJECT_SETTINGS_REL), each a clean POSIX-relative path. Returns () when
-    tools_dir holds no gen_hooks.py: a tree without that generator has no authoring-only target (the
-    synthetic trees here and in check_gensrc_failclose). Fail-closed: a present gen_hooks.py that cannot be
-    parsed, that binds AUTHORING_ONLY_REL (or a name it uses) other than exactly once by a module-level
-    assignment, or whose items do not resolve to str literals raises ValueError, and a read fault raises
-    OSError; the caller maps both to exit 2, so a renamed or computed roster can never silently drop the
-    scope. Bounded like _read_declaration: only module-level bindings are inspected, and a dynamic
-    rebinding is out of scope."""
+    non-empty str literals, or names bound to one (gen_hooks spells it from AUTHORING_MARKER_REL and
+    PROJECT_SETTINGS_REL), each a clean POSIX-relative path. Returns () when tools_dir holds no gen_hooks.py:
+    a tree without that generator has no authoring-only target (the synthetic trees here and in
+    check_gensrc_failclose). Fail-closed: a present gen_hooks.py that cannot be parsed, or whose items do not
+    resolve to str literals, raises ValueError, and a read fault raises OSError; the caller maps both to exit
+    2, so a renamed or computed roster can never silently drop the scope. AUTHORING_ONLY_REL and every name
+    it uses must be bound exactly once, by one plain top-level assignment (a single Name target), and nowhere
+    else: the _reject_rebinding walk _read_declaration uses refuses every other binding of those names
+    anywhere in the module (tuple or star unpacking, augmented or annotated assignment, a for, with, import,
+    def or class binding, a walrus, a del, a global or nonlocal declaration, an except-as, a match capture,
+    a parameter, and any binding nested in a block or a function), so the parsed value is the value the
+    module binds. Bounded like _read_declaration: the walk is conservative (an unrelated local reuse of one
+    of these names inside a function is refused too, failing safe), a dynamic rebinding (globals(),
+    setattr, exec) is out of scope, and a PEP-695 type parameter is not inspected."""
     path = Path(tools_dir) / ROSTER_GEN
     try:
         source = path.read_text(encoding="utf-8")
@@ -328,20 +339,18 @@ def read_authoring_roster(tools_dir):
         tree = ast.parse(source, filename=str(path))
     except SyntaxError as exc:
         raise ValueError("{}: cannot parse for its {} roster ({})".format(ROSTER_GEN, ROSTER_NAME, exc))
-    bindings = {}
+    plain = {}
     for node in tree.body:
-        if isinstance(node, ast.Assign):
-            names = [t.id for t in node.targets if isinstance(t, ast.Name)]
-        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)) and isinstance(node.target, ast.Name):
-            names = [node.target.id]
-        else:
-            continue
-        for name in names:
-            bindings.setdefault(name, []).append(node)
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            plain.setdefault(node.targets[0].id, []).append(node)
 
     def _bound_once(name):
-        nodes = bindings.get(name, [])
-        if len(nodes) != 1 or not isinstance(nodes[0], ast.Assign) or len(nodes[0].targets) != 1:
+        nodes = plain.get(name, [])
+        # The one allowed binding is the Name target of a single plain top-level assignment; any other
+        # binding of the name anywhere in the module fails closed (a second plain assignment included).
+        _reject_rebinding(tree, name, {id(nodes[0].targets[0])} if len(nodes) == 1 else set(), ROSTER_GEN,
+                          "plain")
+        if len(nodes) != 1:
             raise ValueError("{}: {} must be bound exactly once, by a plain module-level assignment "
                              "(fail-closed)".format(ROSTER_GEN, name))
         return nodes[0].value
@@ -469,7 +478,11 @@ def main():
 #       shared _gen_common.reconcile guard rather than a raw traceback,
 #   (o) the tools/gen_hooks.py AUTHORING_ONLY_REL roster marks exactly its entry "scope": "authoring",
 #   (p) a roster path under a tree or declared as a block, an unbound, computed or doubly bound roster, and a
-#       declaration carrying its own scope each fail closed (exit 2).
+#       declaration carrying its own scope each fail closed (exit 2),
+#   (q) every binding of the roster or of a name it uses other than its one plain top-level assignment (tuple
+#       or star unpacking, augmented or annotated assignment, top-level or nested, a for/with/import/def/class
+#       binding, a walrus, a del, a global declaration, a plain assignment nested in a block) fails closed
+#       (exit 2).
 # A raised SystemExit anywhere in a run() call is caught by run_quiet and returned as a non-int sentinel
 # string, so the self-test can never itself exit early (green or otherwise) on a raise: an UNEXPECTED
 # raise mismatches its case's expected exit code and registers as a FAILURE, while case (n) asserts the
@@ -655,6 +668,39 @@ _ROSTER_FAULTS = {
     "a roster name bound twice": _ROSTER_NAMES + 'PROJECT_SETTINGS_REL = "x"\n' + _ROSTER + _NO_ROSTER_DECL,
     "a declaration carrying its own scope": _ROSTER_NAMES + _ROSTER + _hooks_decl(
         (".claude/settings.json", "file", ', "scope": "authoring"')),
+}
+# Case (q): every binding of the roster, or of a name it uses, other than its one plain top-level assignment
+# fails closed (exit 2), one vector per binding form, each appended to the valid case (o) generator (the
+# augmented and annotated forms also nested in a block, which only the whole-module walk reaches). The first
+# is the reported fixture: a tuple-unpack rebinds PROJECT_SETTINGS_REL before the roster reads it, so the
+# module binds .claude/other.json while a parse of the first assignment reads .claude/settings.json.
+_ROSTER_REBINDS = {
+    "a tuple-unpack rebinding a used name before the roster (the reported fixture)": (
+        "PROJECT_SETTINGS_REL = \".claude/settings.json\"\n"
+        "PROJECT_SETTINGS_REL, = (\".claude/other.json\",)\n"
+        "AUTHORING_ONLY_REL = (PROJECT_SETTINGS_REL,)\n"
+        "GENSRC_OUTPUTS = (\n"
+        "    {\"target\": \".claude/other.json\", \"kind\": \"file\",\n"
+        "     \"sources\": (\"src.txt\",),\n"
+        "     \"regenerate\": \"python3 tools/gen_hooks.py\"},\n"
+        ")\n"),
+    "a tuple unpack of the roster": "AUTHORING_ONLY_REL, _x = (\".claude/other.json\",), 1\n",
+    "a star unpack of a used name": "*PROJECT_SETTINGS_REL, = \"ab\"\n",
+    "an augmented assignment of the roster": "AUTHORING_ONLY_REL += (\".claude/other.json\",)\n",
+    "an augmented assignment nested in an if": "if True:\n    AUTHORING_ONLY_REL += (\".claude/other.json\",)\n",
+    "an annotated assignment of a used name": "PROJECT_SETTINGS_REL: str = \".claude/other.json\"\n",
+    "an annotated assignment nested in a try": ("try:\n    PROJECT_SETTINGS_REL: str = \".claude/other.json\"\n"
+                                                "except Exception:\n    pass\n"),
+    "a for target": "for PROJECT_SETTINGS_REL in (\".claude/other.json\",):\n    pass\n",
+    "a with target": "with x as AUTHORING_MARKER_REL:\n    pass\n",
+    "an import alias": "from os import sep as PROJECT_SETTINGS_REL\n",
+    "a plain import": "import AUTHORING_ONLY_REL\n",
+    "a def": "def PROJECT_SETTINGS_REL():\n    pass\n",
+    "a class": "class AUTHORING_ONLY_REL:\n    pass\n",
+    "a walrus": "(PROJECT_SETTINGS_REL := \".claude/other.json\")\n",
+    "a del": "del AUTHORING_MARKER_REL\n",
+    "a global declaration": "def _f():\n    global AUTHORING_ONLY_REL\n",
+    "a plain assignment nested in an if": "if True:\n    PROJECT_SETTINGS_REL = \".claude/other.json\"\n",
 }
 
 
@@ -854,6 +900,16 @@ def self_test_main():
             _build_from(rdir, "gen_hooks.py", text)
             if run_quiet(rdir, check=True) != 2:
                 failures.append("authoring-only roster: {} expected exit 2 (fail-closed)".format(label))
+
+        # (q) Every other binding of the roster or of a name it uses fails closed (exit 2), so the parsed roster
+        #     is the bound one. The reported fixture is a whole generator; each other snippet is appended to the
+        #     valid case (o) generator, which alone generates cleanly there.
+        for idx, (label, snippet) in enumerate(_ROSTER_REBINDS.items()):
+            qdir = tmp / "rosterrebind{}".format(idx)
+            text = snippet if "GENSRC_OUTPUTS" in snippet else _FAKE_HOOKS_ROSTER + snippet
+            _build_from(qdir, "gen_hooks.py", text)
+            if run_quiet(qdir, check=False) != 2:
+                failures.append("authoring-only roster: {} expected exit 2 (single binding)".format(label))
     finally:
         if unread_tools is not None:
             os.chmod(unread_tools, 0o755)  # restore even on an unexpected early exit
@@ -879,7 +935,8 @@ def self_test_main():
           "a tree-descendant overlap (both orders and a nested tree), and an invalid-UTF-8 registry target "
           "all fail closed (exit 2); the gen_hooks AUTHORING_ONLY_REL roster scopes exactly its entry "
           "\"authoring\", and every roster fault (a roster path under a tree or as a block, an unbound, "
-          "computed or doubly bound roster, a self-declared scope) fails closed (exit 2)" + note)
+          "computed or doubly bound roster, a self-declared scope, and every other binding of the roster or a "
+          "name it uses) fails closed (exit 2)" + note)
     return 0
 
 
