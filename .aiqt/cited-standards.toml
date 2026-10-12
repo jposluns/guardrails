@@ -1,0 +1,16 @@
+# .aiqt/cited-standards.toml: this repository's reviewed corpus for tools/check_cited_standards.py.
+# Repository-local: tracked, not shipped (an [[exclusion]] in .aiqt/core/ownership.toml). This repository's
+# CI (.github/workflows/quality.yml) and tools/run_all_checks.sh pass it with --config; an adopter install
+# never reads it and keeps the gate's built-in default corpus, the rule files alone.
+#
+# The corpus is the rule files plus the OPF prompt-pack members, the adopter-facing skills that
+# opf/prompt-pack/pack.toml lists. The members sit one directory down (adopt/, flow/), so the glob is
+# recursive. Each glob must match at least one file, so an emptied directory fails closed (exit 2). The glob
+# reads Markdown only: every member pack.toml lists is a .md file, and pack.toml itself (member paths and
+# digests, not prose) is not scanned. A member added with another extension is not scanned until a glob
+# names it.
+#
+# No exclusion is recorded: when the prompt-pack glob was added, the wider scan found no numbered standard
+# designator in any member (nor in pack.toml).
+format-version = 1
+corpus = [".aiqt/core/rules/*.md", "opf/prompt-pack/**/*.md"]

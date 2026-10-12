@@ -231,7 +231,8 @@ run_gate "applies-selftest" python3 -I -B tools/check_applies.py --self-test
 run_gate "applies"         python3 -I -B tools/check_applies.py
 run_gate "mappings"       python3 -I -B tools/check_mappings.py
 run_gate "cited-standards-selftest" python3 -I -B tools/check_cited_standards.py --self-test
-run_gate "cited-standards"          python3 -I -B tools/check_cited_standards.py
+# This repository only: the reviewed corpus adds the OPF prompt-pack members to the rule corpus.
+run_gate "cited-standards"          python3 -I -B tools/check_cited_standards.py --config .aiqt/cited-standards.toml
 run_gate "conformance-selftest" python3 -I -B tools/conformance.py --self-test
 run_gate "conformance"    python3 -I -B tools/conformance.py --root .
 run_gate "commonmark-headings-selftest" python3 -I -B opf/tools/selftest_commonmark_headings.py

@@ -44,6 +44,10 @@ reason = "Repository-local NEWTAB coverage declaration; tracked, not shipped. Ad
 path = ".aiqt/char-policy.json"
 reason = "Repository-local character policy read by tools/check_no_dashes.py and the char-policy-write preview hook; tracked, not shipped. Adopters own their roots (an absent file applies the gate's built-in default), like .aiqt/newtab.toml; this tracked file belongs to concern 1, not the untracked concern-2 namespace."
 
+[[exclusion]]
+path = ".aiqt/cited-standards.toml"
+reason = "Repository-local corpus config for tools/check_cited_standards.py, passed with --config by this repository's CI and tools/run_all_checks.sh to add the OPF prompt-pack members to the rule corpus; tracked, not shipped. An adopter install never reads it: without --config the gate applies its built-in default corpus (the rule files alone) and reads no default file."
+
 # --- concern-1: manifest-self and the managed block ----------------------------------------------------
 
 [[release-class]]

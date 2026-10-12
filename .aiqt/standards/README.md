@@ -47,9 +47,11 @@ residual are in the docstring of `tools/check_cited_standards.py`.
   private source catalogues.
 - `tools/check_cited_standards.py` (a CI gate, and part of `run_all_checks.sh`) scans the rule corpus for
   numbered standard designators in its grammar's spellings and fails on one that no manifest's `name` or
-  `edition` carries and no recorded exclusion covers. It prints its residual on every run, the self-test
-  and a usage error included; a clean result is not a complete enumeration of the standards the prose
-  names.
+  `edition` carries and no recorded exclusion covers. This repository's CI and `run_all_checks.sh` pass
+  `--config .aiqt/cited-standards.toml` (tracked, not shipped), which adds the OPF prompt-pack Markdown
+  members (`opf/prompt-pack/**/*.md`); without `--config` the gate scans the rule files alone. It prints
+  its residual on every run, the self-test and a usage error included; a clean result is not a complete
+  enumeration of the standards the prose names.
 
 ## Manifest schema
 
