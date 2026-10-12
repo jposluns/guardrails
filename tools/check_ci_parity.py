@@ -4774,7 +4774,9 @@ def self_test():
     # text under the parity guarantee: the sites parse Python sources for
     # ast (the F-367 maintenance-pin scan included), read harness, stub
     # call and Trace2 event logs (the F-367 maintenance probe), write the
-    # selftest report, or split text the reader or a screen has already
+    # selftest report, read the config-member timeout control's pid file
+    # and /proc stat, split the timeout controls' captured diagnostics,
+    # or split text the reader or a screen has already
     # validated. A read
     # spelled another way (getattr, an alias) is outside this tripwire, as
     # the module docstring discloses. This vector fails without the
@@ -4838,12 +4840,35 @@ def self_test():
             ("_binding_calls", "read_text"): 1,
             ("_caller_env_archive_only", "read_text"): 1,
             ("_calls_any", "read_text"): 1,
+            # The suite's own source, parsed for ast to classify the
+            # registry-lock acquisitions in _close_members: no runner
+            # text. The path is _close_members.__code__.co_filename, the
+            # file that defined it, so no caller input reaches the read.
+            # Disclosed residual: this entry pins only the per-function
+            # count of text-mode open() calls, not the path the one call
+            # reads, so a reviewed count with a changed read target stays
+            # inside the allowlist.
+            ("_close_lock_sites", "open-text"): 1,
             ("_maintenance_pin_scan", "read_text"): 1,
             ("_manifest_extra_setup_failures", "read_text"): 1,
+            # The member-timeout control's fixture pid file: no runner text.
+            ("_member_timeout_controls", "read_text"): 1,
+            # The cleanup-failure control's captured diagnostic lines: no runner text.
+            ("_member_timeout_controls", "splitlines"): 1,
             ("_opf_home_lifecycles", "read_text"): 1,
+            # /proc/<pid>/stat, the timeout control's liveness probe.
+            ("_pid_state", "open-text"): 1,
             ("_registered_selftests", "splitlines"): 1,
             ("_require_wrapper_observed", "splitlines"): 1,
             ("_scrub_scoped_first", "read_text"): 1,
+            # The suite's own source again, parsed for ast to classify the
+            # kill-sweep call sites in _config_results (_sweep_call_sites,
+            # the same reviewed pattern as _close_lock_sites above): no
+            # runner text, and the path is _config_results' recorded
+            # co_filename, so no caller input reaches the read. The same
+            # disclosed residual applies: the pin is the per-function count
+            # of text-mode open() calls, not the read target.
+            ("_sweep_call_sites", "open-text"): 1,
             ("_system_pin_checks", "read_text"): 1,
             ("_system_pin_probe", "splitlines"): 1,
             ("prepare", "read_text"): 1,

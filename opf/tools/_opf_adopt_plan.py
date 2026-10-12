@@ -34,7 +34,11 @@ never a candidate, and a decision naming it refuses.
 A move decision without a destination plans the spec 14.2 default,
 .working/archive/moved/<source-path>, from the source row's own path, never stripped;
 its store base must be observed (an excluded or unobserved nearest ancestor is
-cannot-evaluate) and an occupied default destination is a collision. Every move
+cannot-evaluate) and an occupied default destination is a collision. A declared
+destination whose file name is an enforcement launcher's (opf.yml, opf-ci.sh, pre-commit
+or install.sh, compared case-insensitively) refuses unless it lies beneath that Move
+archive: no enforcement row can name a moved file, so the frozen plan would refuse it as
+an uninspected launcher (_opf_adopt._launcher_writes). Every move
 destination and archive preservation copy is checked against the one
 protected-destination predicate the apply shell shares (_opf_adopt.protected_destination).
 DISCLOSED-STRICTER (disclose-guard-residuals): spec 14.2 requires only the default Move
@@ -586,9 +590,10 @@ def _decisions(observation, decisions, run_id, managed):
     under the adoption archive, a move included. A move destination and every
     preservation destination alike need observed absence (an occupied destination
     is a collision, never an overwrite). A move without a destination takes the spec
-    14.2 default (_default_move_destination). A keep's register-unmanaged row is minted
-    here without its manifest digests, which _bind_registrations adds once the
-    program is ordered."""
+    14.2 default (_default_move_destination); a declared one under a launcher's file
+    name refuses unless it lies beneath the Move archive. A keep's register-unmanaged
+    row is minted here without its manifest digests, which _bind_registrations adds
+    once the program is ordered."""
     if type(decisions) is not list:
         raise PlanError("decisions must be a list")
     machine_rel, view_targets = managed
@@ -639,6 +644,18 @@ def _decisions(observation, decisions, run_id, managed):
                 destination = _default_move_destination(kinds, path)
             else:
                 destination = _path(row["destination"])
+                # A moved file is never an enforcement member (a member is installed by an install op,
+                # which would write its path twice), so the frozen plan refuses a launcher-named move
+                # destination outside the Move archive as uninspected; refuse it here with the remedy.
+                if (schema._launcher_of(destination) is not None
+                        and not schema._in_move_archive(destination, ".")):
+                    raise PlanError(
+                        "move destination {!r} of {!r} has an enforcement launcher's file name "
+                        "(opf.yml, opf-ci.sh, pre-commit or install.sh, in any case) outside {}/, "
+                        "and no enforcement row can name a moved file, so the plan would refuse it "
+                        "as an uninspected launcher; omit the destination to take the default, or "
+                        "choose another file name".format(
+                            destination, path, schema.ARCHIVE_REL + "/moved"))
                 # Only observed absence is accepted: the destination's own absent entry, or an
                 # absent or walked ancestor. Declare a destination outside the walked roots in
                 # targets when investigating, then pass the same targets to plan.
@@ -897,8 +914,9 @@ def self_test():
             self.views = sorted(v["target"] for v in views)
 
         def all_targets(self):
-            # The pre-commit hook lies outside every walked root, so its absence is a declared target.
-            return sorted(set(self.targets) | {".opf/hooks/pre-commit"})
+            # The opf/ mirror the pack row plants (the pre-commit hook, the CI recipe and the tool entry
+            # point) lies outside every walked root, so its absence is a declared target.
+            return sorted(set(self.targets) | {schema.PACK_MIRROR_ROOT})
 
         def base_ops(self):
             # Scaffold the default store (unless one resolves), render its declared views and plant
@@ -1048,7 +1066,8 @@ def self_test():
                                              "preservation": preserved}])
             # The exact effects: the preservation copy, the scaffolded manifest and every enforcement
             # member, each tied to the op that writes it, beside the retire removal.
-            pack = [dict(m) for row in self.bindings["enforcement"] for m in row["members"]]
+            # (a member two rows share, the mirrored tool entry point, is one creation)
+            pack = schema.enforcement_install_op(self.bindings["enforcement"])["members"]
             init, render, _ = self.base_ops()
             creations = sorted([{"path": preserved, "digest": digest}] + init["members"]
                                + render["members"] + pack, key=lambda r: sorted(r.items()))
@@ -1148,6 +1167,46 @@ def self_test():
                 with self.subTest(destination=destination):
                     result = self.make_plan(decisions=[dict(decision, destination=destination)])
                     self.assertEqual(result.status, status, result.findings)
+
+        def test_launcher_named_move_destination(self):
+            # A declared move destination whose file name is a launcher's, in any case, refuses before
+            # the plan freezes, naming the remedy: the frozen plan would refuse it as an uninspected
+            # launcher, since no enforcement row can name a moved file. The default destination, a
+            # declared one beneath the Move archive, and another file name still plan.
+            (self.root / ".opf/hooks").mkdir(parents=True)
+            for name in ("pre-commit", "install.sh"):
+                (self.root / ".opf/hooks" / name).write_bytes(b"#!/bin/sh\n")
+            self.sources = [".opf"]
+            moved = ".working/archive/moved/old/pre-commit"
+            self.targets = ["legacy", moved]
+            for source, destination in ((".opf/hooks/pre-commit", "legacy/hooks/pre-commit"),
+                                        (".opf/hooks/install.sh", "legacy/hooks/install.sh"),
+                                        (".opf/hooks/pre-commit", "legacy/hooks/PRE-COMMIT"),
+                                        (".opf/hooks/pre-commit", "legacy/OPF.yml"),
+                                        (".opf/hooks/install.sh", "legacy/opf-ci.sh")):
+                with self.subTest(destination=destination):
+                    other = (".opf/hooks/install.sh" if source.endswith("pre-commit")
+                             else ".opf/hooks/pre-commit")
+                    result = self.make_plan(decisions=[
+                        dict(path=source, disposition="move", destination=destination, actor="fixture"),
+                        dict(path=other, disposition="retire", actor="fixture")])
+                    self.assertEqual(result.status, store.CANNOT_EVALUATE, result.findings)
+                    self.assertIsNone(result.plan)
+                    self.assertEqual(len(result.findings), 1, result.findings)
+                    self.assertTrue(result.findings[0].startswith(
+                        "move destination {!r} of {!r} has an enforcement launcher's file name".format(
+                            destination, source)), result.findings)
+                    self.assertIn("omit the destination to take the default, or choose another "
+                                  "file name", result.findings[0])
+            for destination in (None, moved, "legacy/hooks/pre-commit.old"):
+                with self.subTest(destination=destination):
+                    decision = dict(path=".opf/hooks/pre-commit", disposition="move", actor="fixture")
+                    if destination is not None:
+                        decision["destination"] = destination
+                    result = self.make_plan(decisions=[
+                        decision,
+                        dict(path=".opf/hooks/install.sh", disposition="retire", actor="fixture")])
+                    self.assertEqual(result.status, store.VALID, result.findings)
 
         def test_default_move_destination(self):
             # A move without a destination plans the spec 14.2 default from the row's own path,

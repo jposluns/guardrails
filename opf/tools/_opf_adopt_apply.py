@@ -54,7 +54,7 @@ The adoption journal root is `.aiqt/adopt/journal` at the PRODUCT root: the home
 of `.aiqt/record/journal` and `.aiqt/import/journal`. It is anchored there, never under the store, because
 recovery of an interrupted apply MUST resolve from the apply journal alone and MUST NOT require the live
 tree to resolve as a store (spec 14.2): an apply that archived and removed an occupying manifest leaves no
-store to resolve. reconcile() therefore never resolves the store. Homes 2 relocates transaction records
+store to resolve. reconcile() therefore never resolves the store. Homes 2 keeps transaction records
 under `.working/journals/adoption/` and forbids OPF state under `.aiqt/` (spec 4.2, 14.2); homes 2 is not
 activated in this build (SUPPORTED_HOMES = 1).
 

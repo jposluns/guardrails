@@ -16455,8 +16455,9 @@ def _upgrade_run(root):
         except ValueError:
             sv_tuple = None
         if sv_tuple is not None and sv_tuple > tuple(int(p) for p in _UPGRADE_TO.split(".")):
-            raise _UpgradeError("store declares spec_version {!r} ABOVE the {} this tooling implements; "
-                                "a newer store is never downgraded (fail-closed)".format(sv, _UPGRADE_TO))
+            raise _UpgradeError("store declares spec_version {!r} ABOVE the {} upgrade target; opf upgrade "
+                                "never downgrades a store and performs no homes migration (fail-closed)".format(
+                                    sv, _UPGRADE_TO))
         minor = sv == _UPGRADE_MID
 
         # PRECONDITION (spec 9.2): re-emitting the UNCHANGED parsed model reproduces the on-disk bytes
