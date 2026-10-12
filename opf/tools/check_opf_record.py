@@ -94,7 +94,7 @@ Each case runs on its own copy of that template; the root is removed in a finall
       transaction under the LEGACY dotted name an earlier build minted is still reconciled, at kill
       points on both sides of COMPLETE (flip: a recovery that enumerates only grammar-named
       transactions)
-  T20 a legacy .aiqt/record/journal on a homes-2 store is refused by name, never recovered in place,
+  T20 a legacy .aiqt/record/journal on a homes-2 store is refused by name and never recovered,
       with the .aiqt subtree byte-unchanged and no typed journal home created (flip: probe the
       generation as 1, under which the legacy journal is reconciled in place)
   T21 a direct homes-2 _publish lands ONE capability-bound transaction in
@@ -2421,9 +2421,9 @@ def flip_t19_legacy():
 
 
 def t20_homes2_legacy_refused(fx):
-    """A legacy .aiqt/record/journal found on a homes-2 store is refused by name and never recovered in
-    place: the .aiqt subtree stays byte-unchanged (the T15 leftover lock included) and no typed journal
-    home is created."""
+    """A legacy .aiqt/record/journal found on a homes-2 store is refused by name and never recovered: the
+    .aiqt subtree stays byte-unchanged (the T15 leftover lock included) and no typed journal home is
+    created."""
     env = fx.env
     root = fx.case("t20-homes2-legacy")
     proc = child(env, root, CREATE, flip=FAILING_LOCK_RELEASE)
@@ -2433,7 +2433,9 @@ def t20_homes2_legacy_refused(fx):
         aiqt_before = subtree(root, ".aiqt")
         result = record_cli(env, root, CREATE)
         refused(result, "legacy record journal")
-        assert "never recovered" in result[2] and "homes migration transports it" in result[2], result[2][-800:]
+        assert "it is never recovered: homes 2 has no homes migration (spec 4.2)" in result[2] \
+            and "left unread and unchanged" in result[2] and "transports" not in result[2] \
+            and "in place" not in result[2], result[2][-800:]
         assert subtree(root, ".aiqt") == aiqt_before, "T20 the .aiqt subtree is byte-unchanged"
         assert not (Path(root) / ".working/journals").exists(), "T20 no typed journal home is created"
 
@@ -2776,7 +2778,7 @@ def t28_spec15_sentence(fx):
     flat = " ".join(spec15_text().split())
     assert "## 15. Genericization boundary" in flat, "T28 the spec 15 heading is present"
     section = flat.partition("## 15. Genericization boundary")[2]
-    assert "Only homes migration MAY read explicitly inventoried OPF artefacts" in section, \
+    assert "OPF MUST NOT read OPF artefacts from former `.aiqt/` locations" in section, \
         "T28 the spec 15 anchor is present"
     assert SPEC15_SENTENCE in section, "T28 the spec 15 probe sentence is present"
 
