@@ -138,10 +138,15 @@ def _parse_module(path):
     decodes the source as an import would (a UTF-8 text read of a file declaring `# coding: utf-7` parses
     other statements than the module runs). The bytes must also decode as UTF-8 and parse as that text, so a
     file the text read refused (bytes that are not UTF-8, a leading BOM) stays refused. Raises OSError on a
-    read fault, UnicodeDecodeError (a ValueError) or SyntaxError; each caller maps them to exit 2."""
+    read fault, UnicodeDecodeError (a ValueError) or SyntaxError, and re-raises a parser stack overflow on very
+    deep nesting (MemoryError or RecursionError, the classes gen_renderers._PARSE_ERRORS also maps) as
+    SyntaxError; each caller maps them all to exit 2."""
     data = path.read_bytes()
-    ast.parse(data.decode("utf-8"), filename=str(path))
-    return ast.parse(data, filename=str(path))
+    try:
+        ast.parse(data.decode("utf-8"), filename=str(path))
+        return ast.parse(data, filename=str(path))
+    except (MemoryError, RecursionError) as exc:
+        raise SyntaxError("too deeply nested to parse ({}: {})".format(type(exc).__name__, exc)) from exc
 
 
 def _read_declaration(path, where):
@@ -339,8 +344,9 @@ def read_authoring_roster(tools_dir):
     def or class binding, a walrus, a del, a global or nonlocal declaration, an except-as, a match capture,
     a parameter, and any binding nested in a block or a function). Each name the roster uses must also be
     bound in a statement BEFORE the roster assignment (the module reads it at that line, so a later
-    assignment is not the value the roster takes) and must not be a dunder name (__doc__, __name__ and the
-    rest), which the interpreter binds itself (a module docstring binds __doc__). The file is parsed from its
+    assignment is not the value the roster takes) and must not be dunder-shaped (begin and end with __): the
+    interpreter binds some such names itself (a module docstring binds __doc__), so every name of that shape is
+    refused, one the interpreter never binds included (failing safe). The file is parsed from its
     bytes (_parse_module), so a PEP 263 coding cookie is honoured as an import honours it. Within those rules
     the parsed value is the value the module binds. Bounded like _read_declaration: the walk is conservative
     (an unrelated local reuse of one of these names inside a function is refused too, failing safe), a
@@ -379,8 +385,9 @@ def read_authoring_roster(tools_dir):
     for item in value.elts:
         if isinstance(item, ast.Name):
             if item.id.startswith("__") and item.id.endswith("__"):
-                raise ValueError("{}: {} must not use the dunder name {}, which the interpreter binds itself "
-                                 "(fail-closed)".format(ROSTER_GEN, ROSTER_NAME, item.id))
+                raise ValueError("{}: {} must not use {}, a dunder-shaped name (every name that begins and ends "
+                                 "with __ is refused, since the interpreter binds some, such as __doc__ and "
+                                 "__name__, itself) (fail-closed)".format(ROSTER_GEN, ROSTER_NAME, item.id))
             bound = _bound_once(item.id)
             if position[id(bound)] >= position[id(roster_node)]:
                 raise ValueError("{}: {} must be bound before {} reads it (fail-closed)".format(
@@ -510,7 +517,11 @@ def main():
 #   (r) a source is read as the interpreter binds it: a roster name read through __doc__ or __name__, a name
 #       bound after the roster, a dunder name bound before it, and a `# coding: utf-7` cookie hiding a
 #       rebinding of a roster name or of GENSRC_OUTPUTS each fail closed (exit 2); a leading BOM and bytes that
-#       are not UTF-8 stay refused (exit 2), and a utf-8 cookie on a valid generator generates (exit 0).
+#       are not UTF-8 stay refused (exit 2), and a utf-8 cookie on a valid generator generates (exit 0),
+#   (s) a parser stack overflow reading a generator fails closed (exit 2), never a traceback: a chain of 200,000
+#       unary minus signs as tools/gen_hooks.py and as another generator, and a RecursionError
+#       injected into every parse of tools/gen_hooks.py, each through run() and, for gen_hooks.py, through the
+#       roster read alone (discovery reads that file's declaration first).
 # A raised SystemExit anywhere in a run() call is caught by run_quiet and returned as a non-int sentinel
 # string, so the self-test can never itself exit early (green or otherwise) on a raise: an UNEXPECTED
 # raise mismatches its case's expected exit code and registers as a FAILURE, while case (n) asserts the
@@ -765,6 +776,15 @@ _SOURCE_READS = {
     "a utf-8 coding cookie on the valid generator": (
         "gen_hooks.py", "# -*- coding: utf-8 -*-\n" + _FAKE_HOOKS_ROSTER, 0),
 }
+# Case (s): label -> (generator file name, its text, whether ast.parse raises an injected RecursionError on it). The
+# real vector overflows the parser (MemoryError on the CPython 3.14 this was written against), the injection pins
+# the other class.
+_DEEP_SOURCE = "x = " + "-" * 200000 + "1\n"
+_DEEP_READS = {
+    "a chain of 200,000 unary minus signs as tools/gen_hooks.py": ("gen_hooks.py", _DEEP_SOURCE, False),
+    "a chain of 200,000 unary minus signs as another generator": ("gen_selftestdeep.py", _DEEP_SOURCE, False),
+    "a RecursionError injected into every parse of tools/gen_hooks.py": ("gen_hooks.py", _FAKE_HOOKS_ROSTER, True),
+}
 
 
 def _build_from(base, filename, text):
@@ -987,6 +1007,36 @@ def self_test_main():
             (sdir / "tools" / filename).write_bytes(raw)
             if run_quiet(sdir, check=False) != want:
                 failures.append("source read: {} expected exit {}".format(label, want))
+
+        # (s) A parser stack overflow is exit 2, never a traceback; one that escapes run() is caught here and named.
+        real_parse = ast.parse
+
+        def overflow(source, *args, **kwargs):
+            if str(kwargs.get("filename", "")).endswith("gen_hooks.py"):
+                raise RecursionError("injected parser overflow")
+            return real_parse(source, *args, **kwargs)
+
+        for idx, (label, (filename, text, inject)) in enumerate(_DEEP_READS.items()):
+            ddir = tmp / "deep{}".format(idx)
+            _build_from(ddir, filename, text)
+            if inject:
+                ast.parse = overflow
+            rc = None
+            try:
+                rc = run_quiet(ddir, check=False)
+                # Discovery reads a gen_hooks.py declaration before its roster, so the roster read is also called
+                # alone and must raise ValueError (run maps it to exit 2).
+                if filename == ROSTER_GEN:
+                    read_authoring_roster(ddir / "tools")
+                    rc = "a roster read that raised nothing"
+            except ValueError:
+                pass
+            except (MemoryError, RecursionError, SyntaxError) as exc:
+                rc = "raised {}".format(type(exc).__name__)
+            finally:
+                ast.parse = real_parse
+            if rc != 2:
+                failures.append("parser overflow: {} expected exit 2, got {}".format(label, rc))
     finally:
         if unread_tools is not None:
             os.chmod(unread_tools, 0o755)  # restore even on an unexpected early exit
@@ -1015,7 +1065,9 @@ def self_test_main():
           "computed or doubly bound roster, a self-declared scope, and every other binding of the roster or a "
           "name it uses) fails closed (exit 2); a roster name read through __doc__ or __name__, bound after the "
           "roster, or a dunder, a utf-7 cookie hiding a rebinding, a leading BOM and non-UTF-8 bytes fail closed "
-          "(exit 2), while a utf-8 cookie generates" + note)
+          "(exit 2), while a utf-8 cookie generates; and a parser stack overflow (a chain of 200,000 unary minus "
+          "signs as tools/gen_hooks.py or another generator, and an injected RecursionError) fails closed (exit 2)"
+          + note)
     return 0
 
 

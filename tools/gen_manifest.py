@@ -433,6 +433,15 @@ def cross_check_exclusions(root, exclusions):
                                 .format(sel.where, sel.raw, surface))
 
 
+def _portable_forms(path):
+    """The forms under which a case-insensitive or Unicode-normalizing filesystem may store path as one file:
+    its case fold and its NFC form (the two equivalences git_tracked refuses between tracked paths), and its
+    canonical caseless form (NFD of the case fold of its NFD), which folds both at once. Two paths alias when
+    any one form is equal."""
+    return (path.casefold(), unicodedata.normalize("NFC", path),
+            unicodedata.normalize("NFD", unicodedata.normalize("NFD", path).casefold()))
+
+
 def check_authoring_only(root, tracked, classes, exclusions):
     """The authoring-only roster (root/tools/gen_hooks.py AUTHORING_ONLY_REL: the authoring-tree marker and the
     repository-local .claude/settings.json it gates) is tracked in this repository and NEVER shipped. It is
@@ -448,18 +457,35 @@ def check_authoring_only(root, tracked, classes, exclusions):
     reconciling it); every tracked path of either roster is excluded by an EXACT [[exclusion]] literal, never a
     pattern and never a class row (classify() refuses a class selector that reaches an excluded path, so an
     excluded roster path is in no SOURCES, ARTIFACTS or .gitattributes line, and no release or pin install can
-    carry it to an adopter); and every tracked path of either roster is a regular file on disk. A tree
-    tracking none of either roster (a synthetic fixture) obliges nothing. classes is the classify() result,
-    checked again here so a roster path that reached it is named as a would-ship error."""
+    carry it to an adopter); and every tracked path of either roster is a regular file on disk (git_tracked
+    refuses a tracked symlink; this refuses a symlink or other non-regular file on disk under a regular index
+    entry). No tracked or classed path may alias a path of either roster: a path that differs from it in bytes
+    but is equal to it under case folding or Unicode normalization (_portable_forms: the case fold and the NFC
+    form git_tracked compares between two tracked paths, and both folded together) is refused whatever its
+    class or exclusion, naming both spellings, because a case-insensitive or normalizing install target would
+    store it as the roster path; the roster path itself still needs its exact literal. Disclosed residual: an
+    alias adding a trailing dot or space (".claude/settings.json."), which Win32 path normalization can trim,
+    is not refused, because the manifest's path rules (_check_rel_path, git_tracked) accept such names
+    everywhere else too. A tree tracking none of either roster (a synthetic fixture) obliges nothing. classes is
+    the classify() result, checked again here so a roster path that reached it is named as a would-ship error."""
     import gen_gensrc
     import gen_hooks
     shipped = tuple(gen_hooks.AUTHORING_ONLY_REL)
     roster = gen_gensrc.read_authoring_roster(root / "tools") or shipped
+    never_ship = roster + tuple(rel for rel in shipped if rel not in roster)
+    forms = [(rel, _portable_forms(rel)) for rel in never_ship]
+    for path in sorted(set(tracked) | set(classes)):
+        path_forms = _portable_forms(path)
+        for rel, rel_forms in forms:
+            if path != rel and any(a == b for a, b in zip(path_forms, rel_forms)):
+                raise GateError("{} aliases the authoring-only path {} (equal under case folding or Unicode "
+                                "normalization, not in bytes): a case-insensitive or normalizing install target "
+                                "would store it as that path, so it is refused; rename it".format(
+                                    ascii(path), ascii(rel)))
     present = [rel for rel in roster if rel in tracked]
     if present and len(present) != len(roster):
         raise GateError("the authoring-only roster {} must be tracked together; tracked: {}".format(
             ", ".join(roster), ", ".join(present)))
-    never_ship = roster + tuple(rel for rel in shipped if rel not in roster)
     exact = {sel.exact for sel, _ in exclusions if sel.exact is not None}
     for rel in never_ship:
         if rel not in tracked and rel not in classes:
@@ -809,7 +835,10 @@ def main():
 #       exclusion of a gensrc target off the roster, and a tracked marker missing on disk each exit 2; a
 #       roster bound by the tree under check (its own tools/gen_hooks.py) is honoured, while a tree with none,
 #       and a tree roster omitting either shipped roster path, still refuses that path a release class (exit 2),
-#       and the real one reads as exactly the two shipped roster paths;
+#       a tracked or classed path aliasing a roster path by case, by Unicode normalization or by both exits 2
+#       naming both spellings, a shipped roster path the tree roster omits that is a symlink on disk under a
+#       regular index entry exits 2 (the same tree with a regular file exits 0), and the real one reads as
+#       exactly the two shipped roster paths;
 #   F-FROZEN-PARTITION: a vocabulary class in neither FROZEN_CLASSES nor UNFROZEN_CLASSES, a class in both,
 #       and a class outside the vocabulary each fail closed.
 
@@ -1027,6 +1056,16 @@ def _self_test_main_isolated():
                 return run(root, check)
             except SystemExit as exc:
                 return "raised SystemExit({!r})".format(exc.code)
+
+    def run_stderr(root):
+        # run_quiet that also returns the captured stderr, so a vector can assert which refusal fired.
+        err = io.StringIO()
+        with redirect_stdout(io.StringIO()), redirect_stderr(err):
+            try:
+                rc = run(root, False)
+            except SystemExit as exc:
+                rc = "raised SystemExit({!r})".format(exc.code)
+        return rc, err.getvalue()
 
     def run_main_quiet(argv):
         # Exercise main()'s argv parsing (where the unknown-option guard lives), pointing --root at a fixture.
@@ -1305,6 +1344,79 @@ def _self_test_main_isolated():
             if subset["tools/gen_hooks.py"] == _GEN_LOCAL or fx is None or run_quiet(fx, check=False) != 2:
                 failures.append("authoring-only roster: a tree roster omitting {} given a release class expected "
                                 "exit 2".format(omitted))
+        # A tracked or classed path aliasing a roster path (equal to it under case folding or Unicode normalization,
+        # not in bytes) exits 2 naming both spellings: both roster paths tracked only as case variants, each
+        # classed; the settings tracked and declared as .claude/SETTINGS.JSON, classed, beside a tree roster of the
+        # marker alone; an NFC path, classed, beside a tree roster spelling it NFD; and an upper-case NFD path,
+        # classed, beside a tree roster spelling it lower-case NFC, which neither the case fold nor the NFC form alone
+        # equates. Each exited 0, the alias in the manifest, while only byte-equal paths were compared.
+        nfd = "cafe\u0301.txt"
+        nfc = unicodedata.normalize("NFC", nfd)
+        variants = {k: v for k, v in _ROSTER_FILES.items()
+                    if k not in (".claude/settings.json", ".aiqt/authoring.toml")}
+        variants.update({".Claude/settings.json": "{}\n", ".aiqt/Authoring.toml": "format-version = 1\n",
+                         "tools/gen_hooks.py": _GEN_LOCAL.replace("\"target\": \".claude/settings.json\"",
+                                                                  "\"target\": \".Claude/settings.json\"")})
+        upper = {k: v for k, v in _ROSTER_FILES.items() if k != ".claude/settings.json"}
+        upper.update({".claude/SETTINGS.JSON": "{}\n", "tools/gen_hooks.py": _GEN_LOCAL.replace(
+            "AUTHORING_ONLY_REL = (AUTHORING_MARKER_REL, PROJECT_SETTINGS_REL)",
+            "AUTHORING_ONLY_REL = (AUTHORING_MARKER_REL,)").replace("\"target\": \".claude/settings.json\"",
+                                                                   "\"target\": \".claude/SETTINGS.JSON\"")})
+        upper_nfd = nfd.upper()
+
+        def unicode_tree(rostered, tracked_as):
+            return {"tools/gen_hooks.py": ("AUTHORING_ONLY_REL = ({},)\n".format(ascii(rostered))
+                                           + "GENSRC_OUTPUTS = (\n"
+                                           "    {\"target\": \"local-out.txt\", \"kind\": \"file\",\n"
+                                           "     \"sources\": (\"src.txt\",),\n"
+                                           "     \"regenerate\": \"python3 tools/gen_local.py\"},\n"
+                                           ")\n"),
+                    tracked_as: "cafe\n", "local-out.txt": "local\n"}
+        for i, (label, extra, files, alias, rel) in enumerate((
+                ("both roster paths tracked only as case variants", class_row.format(".Claude/settings.json")
+                 + class_row.format(".aiqt/Authoring.toml"), variants, ".Claude/settings.json",
+                 ".claude/settings.json"),
+                ("the settings tracked as .claude/SETTINGS.JSON beside a tree roster of the marker",
+                 class_row.format(".claude/SETTINGS.JSON") + _EXCL_MARKER, upper, ".claude/SETTINGS.JSON",
+                 ".claude/settings.json"),
+                ("an NFC path beside a tree roster spelling it NFD", class_row.format(nfc), unicode_tree(nfd, nfc),
+                 nfc, nfd),
+                ("an upper-case NFD path beside a tree roster spelling it lower-case NFC (equal only when case and "
+                 "normalization fold together)", class_row.format(upper_nfd), unicode_tree(nfc, upper_nfd),
+                 upper_nfd, nfc))):
+            fx = _roster_fixture(tmp / "roster-alias{}".format(i), _LOCAL_OUT_CLASS + extra, files)
+            rc, err = run_stderr(fx) if fx is not None else (None, "")
+            if rc != 2 or ascii(alias) not in err or ascii(rel) not in err:
+                failures.append("authoring-only roster: {} expected exit 2 naming {} and {}, got {}".format(
+                    label, ascii(alias), ascii(rel), rc))
+        # Every tracked path of either roster is a regular file on disk, a shipped path the tree roster omits
+        # included. git_tracked refuses a tracked symlink; here the path is a symlink on disk under a regular index
+        # entry and exits 2: the marker beside a tree roster of the settings alone, and the settings beside a tree
+        # roster of the marker alone (dropped from GENSRC_OUTPUTS, so its exact exclusion swallows no gensrc
+        # target). The same tree with the regular file exits 0, so the refusal is the regular-file check. Each
+        # pair fails if the check reaches a shipped-only path only when it carries a class.
+        settings_decl = ("    {\"target\": \".claude/settings.json\", \"kind\": \"file\",\n"
+                         "     \"sources\": (\"src.txt\",), \"regenerate\": \"python3 tools/gen_local.py\"},\n")
+        for i, (kept, rel, gen) in enumerate((
+                ("PROJECT_SETTINGS_REL", ".aiqt/authoring.toml", _GEN_LOCAL),
+                ("AUTHORING_MARKER_REL", ".claude/settings.json", _GEN_LOCAL.replace(settings_decl, "")))):
+            subset = dict(_ROSTER_FILES)
+            subset["tools/gen_hooks.py"] = gen.replace(
+                "AUTHORING_ONLY_REL = (AUTHORING_MARKER_REL, PROJECT_SETTINGS_REL)",
+                "AUTHORING_ONLY_REL = ({},)".format(kept))
+            for link in (False, True):
+                fx = _roster_fixture(tmp / "roster-link{}-{}".format(i, int(link)),
+                                     _LOCAL_OUT_CLASS + _EXCL_SETTINGS + _EXCL_MARKER, subset)
+                if fx is not None and link:
+                    try:
+                        (fx / rel).unlink()
+                        os.symlink("../src.txt", fx / rel)
+                    except OSError:
+                        fx = None
+                if fx is None or run_quiet(fx, check=False) != (2 if link else 0):
+                    failures.append("authoring-only roster: {} {} beside a tree roster of {} alone expected exit {}"
+                                    .format(rel, "a symlink on disk" if link else "a regular file", kept,
+                                            2 if link else 0))
         try:
             real_roster = gen_gensrc.read_authoring_roster(Path(__file__).resolve().parent)
         except (OSError, ValueError) as exc:
@@ -1339,7 +1451,9 @@ def _self_test_main_isolated():
           "excluded by exact literals passes and never reaches the manifest, while a roster path given a "
           "class, a pattern exclusion over it, the settings without the marker, an exact exclusion of a "
           "gensrc target off the roster, a tracked marker missing on disk, and a shipped roster path given a "
-          "class under a tree roster that omits it or in a tree with none each fail closed (exit 2); "
+          "class under a tree roster that omits it or in a tree with none, a path aliasing a roster path by "
+          "case or Unicode normalization, and a roster path the tree roster omits that is a symlink on disk "
+          "each fail closed (exit 2); "
           "and a vocabulary class "
           "recorded in neither FROZEN_CLASSES nor UNFROZEN_CLASSES, a class recorded in both, and a frozen "
           "class outside the vocabulary each fail the frozen floor closed (F-FROZEN-PARTITION)")
