@@ -10,7 +10,11 @@ generator alone cannot assert:
     loader's closed sets KINDS/STATUSES/CATALOGUES;
   - closed-set parity between _standards.KINDS/STATUSES and their programmatic copies (gen_mappings
     RELATION/RELATION_PROSE/STATUS_PILL/STATUS_DESC and the currency POLICY);
-  - the deferred-frameworks negative check (no vendored framework is still listed "Not yet vendored");
+  - the deferred-frameworks negative check (no vendored framework is still listed "Not yet vendored"):
+    every case-insensitive "not yet vendored" occurrence in .aiqt/standards/README.md is read, the phrase
+    also matched across a line wrap; for each it reads the whole table row (the whole table when the phrase
+    is in the header row) or else the whole blank-line-delimited paragraph, before the phrase as well as
+    after it, and matches each manifest name case-insensitively with whitespace runs collapsed;
   - the subset-denominator invariant, checked structure-aware wherever the coverage of a curated-subset
     manifest is rendered: the registry row (name and coverage in one <tr>), the reverse view (name in a
     <summary>, coverage in a later <p> of the same <details>), AND the machine-readable JSON export (a
@@ -57,6 +61,8 @@ FAMILY_ALIAS = {"OWASP Foundation": "OWASP", "NIST": "NIST", "MITRE": "MITRE ATL
                 "ISO/IEC": "ISO/IEC", "Cloud Security Alliance": "CSA"}
 
 PAREN = re.compile(r"frameworks \(([^)]*)\)")
+DEFERRED = re.compile(r"not\s+yet\s+vendored", re.I)
+TABLE_DELIMITER = re.compile(r"^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?\s*$")
 N_OF_M = re.compile(r"\b\d+ of \d+\b")
 
 
@@ -138,16 +144,50 @@ def check_parity(findings):
                 name, ", ".join(sorted(got)), ", ".join(sorted(expect))))
 
 
+def deferred_blocks(text):
+    """Yield (line_number, block) for every case-insensitive "not yet vendored" occurrence: the whole table
+    row it sits in (the whole table when it sits in the header row, since that column then marks every
+    row), or else its whole blank-line-delimited paragraph. Every occurrence is read, not only the first,
+    and the block holds the text before the phrase as well as after it."""
+    lines = text.split("\n")
+    starts, pos = [], 0
+    for line in lines:
+        starts.append(pos)
+        pos += len(line) + 1
+    for m in DEFERRED.finditer(text):
+        i = max(k for k, start in enumerate(starts) if start <= m.start())
+        if lines[i].lstrip().startswith("|"):
+            first = i
+            while first > 0 and lines[first - 1].lstrip().startswith("|"):
+                first -= 1
+            last = i
+            while last + 1 < len(lines) and lines[last + 1].lstrip().startswith("|"):
+                last += 1
+            header = i == first and first < last and TABLE_DELIMITER.match(lines[first + 1])
+            block = lines[first:last + 1] if header else [lines[i]]
+        else:
+            first = i
+            while first > 0 and lines[first - 1].strip():
+                first -= 1
+            last = i
+            while last + 1 < len(lines) and lines[last + 1].strip():
+                last += 1
+            block = lines[first:last + 1]
+        yield i + 1, "\n".join(block)
+
+
+def _folded(s):
+    return " ".join(s.split()).lower()
+
+
 def check_deferred(root, manifests, findings):
     text = _read(root / ".aiqt" / "standards" / "README.md")
-    m = re.search(r"Not yet vendored.*?(?:\n\n|\Z)", text, re.S)
-    if not m:
-        return  # no deferred paragraph is a legitimate state, not a missing surface
-    para = m.group(0)
-    for man in manifests.values():
-        if man.name in para:
-            findings.append("standards README: vendored framework {!r} still listed as not yet "
-                            "vendored".format(man.name))
+    for lineno, block in deferred_blocks(text):
+        folded = _folded(block)
+        for man in manifests.values():
+            if _folded(man.name) in folded:
+                findings.append("standards README:{}: vendored framework {!r} still listed as not yet "
+                                "vendored".format(lineno, man.name))
 
 
 def check_subset_denominator(root, manifests, findings):
@@ -264,6 +304,12 @@ def main():
 #   4. a schema `kind` row missing a kind -> finding,
 #   5. a parity break (a POLICY key removed via a patched dict) -> finding,
 #   6. a manifest whose name appears in the "Not yet vendored" paragraph -> finding,
+#  6b-6f, 6h-6j. the same fact in the forms the first-match, after-the-phrase, case-sensitive read missed, each
+#      -> finding: a table row whose name cell precedes the status cell, a second deferred paragraph, a
+#      case variant, a phrase wrapped across a line, and a header row that marks the whole table; 6h. a
+#      name on a paragraph line before the phrase, 6i. a name wrapped across a line and 6j. a name in
+#      another case -> finding; and
+#  6g. a vendored name in a paragraph without the phrase stays clean (the read is scoped to the block),
 #   7. a subset manifest rendered "3 of 3" in the fixture registry row -> finding (the CWE regression),
 #   8. a missing site/mappings.html -> exit 2 (fail-closed, not a skip),
 #   9. an unreadable standards dir (chmod 0) -> exit 2 via load_manifests/ensure_listable,
@@ -440,6 +486,44 @@ def self_test_main():
         if run_quiet(deferred) != 1:
             failures.append("a vendored name in the deferred paragraph expected exit 1")
 
+        # 6b-6f, 6h-6j. the deferred fact in the forms a first-match, after-the-phrase, case-sensitive
+        #        read missed; each must be a finding (exit 1). All but 6f pass that read.
+        prose = "Not yet vendored (their keys stay inert until a manifest lands): Google SAIF and OWASP SCVS.\n"
+        for label, readme in (
+                ("6b table row, name cell before the status cell", _README.replace(prose, (
+                    "| Framework | Status |\n| --- | --- |\n"
+                    "| Fixture Full Framework | Not yet vendored |\n| Google SAIF | Not yet vendored |\n"))),
+                ("6c second deferred paragraph", _README + (
+                    "\nA later note, also Not yet vendored: Fixture Full Framework.\n")),
+                ("6d case variant", _README.replace(prose, (
+                    "NOT YET VENDORED (their keys stay inert until a manifest lands): Google SAIF, OWASP "
+                    "SCVS and Fixture Full Framework.\n"))),
+                ("6e phrase wrapped across a line", _README.replace(prose, (
+                    "Not yet\nvendored (their keys stay inert until a manifest lands): Google SAIF and "
+                    "Fixture Full Framework.\n"))),
+                ("6f header row marking the whole table", _README.replace(prose, (
+                    "| Not yet vendored | Reason |\n| --- | --- |\n| Google SAIF | licence |\n"
+                    "| Fixture Full Framework | none |\n"))),
+                ("6h name on a paragraph line before the phrase", _README.replace(prose, (
+                    "Google SAIF and Fixture Full Framework are both\nNot yet vendored; their keys stay "
+                    "inert.\n"))),
+                ("6i name wrapped across a line", _README.replace(prose, (
+                    "Not yet vendored (their keys stay inert until a manifest lands): Google SAIF and Fixture "
+                    "Full\nFramework.\n"))),
+                ("6j name in another case", _README.replace(prose, (
+                    "Not yet vendored (their keys stay inert until a manifest lands): Google SAIF and FIXTURE "
+                    "FULL FRAMEWORK.\n")))):
+            case = tmp / ("deferred-" + label.split()[0])
+            _write_fixture(case, readme=readme)
+            if run_quiet(case) != 1:
+                failures.append("a vendored name listed as not yet vendored ({}) expected exit 1".format(label))
+
+        # 6g. a vendored name in a paragraph that does not carry the phrase stays clean.
+        scoped = tmp / "deferred-scoped"
+        _write_fixture(scoped, readme=_README + "\nFixture Full Framework is vendored and mapped.\n")
+        if run_quiet(scoped) != 0:
+            failures.append("a vendored name outside any deferred row or paragraph expected exit 0")
+
         # 7. a subset manifest rendered "3 of 3" -> finding (the CWE regression case).
         denom = tmp / "denom"
         _write_fixture(denom, page=_PAGE.replace(
@@ -541,9 +625,11 @@ def self_test_main():
     note = ("" if not skipped else
             " NOTE: skipped {} case(s) the runner cannot exercise (chmod-0 still readable): {}"
             .format(len(skipped), ", ".join(skipped)))
-    print("SELF-TEST PASS: a clean fixture passes; a meta/disclosure parenthetical mismatch, a schema-enum "
-          "gap, a closed-set parity break, a vendored name in the deferred paragraph, a subset manifest "
-          "rendered with an edition denominator in the registry row or the reverse-view <p>, and a subset "
+    print("SELF-TEST PASS: a clean fixture and a vendored name outside a deferred block pass; a "
+          "meta/disclosure parenthetical mismatch, a schema-enum gap, a closed-set parity break, a vendored "
+          "name listed as not yet vendored (in a paragraph, a table row, a second paragraph, a case "
+          "variant, a wrapped phrase, a header-marked table, a paragraph line before the phrase, a wrapped "
+          "name or a name in another case), a subset manifest rendered with an edition denominator in the registry row or the reverse-view <p>, and a subset "
           "framework carrying ids_total in the JSON export each report a finding (exit 1); and a missing "
           "page, a missing JSON export, an unreadable standards dir, a missing/invalid catalogue, and an "
           "unaliased publisher all fail closed (exit 2)" + note)

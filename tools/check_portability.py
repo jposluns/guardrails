@@ -27,10 +27,11 @@ What portability adds beyond the leak gate (nothing here duplicates it):
      the wrong tool; a small in-gate plaintext list is matched with the SAME n-gram normalization the leak
      gate uses (imported _tokens/ngram_forms), so spaced/hyphenated/camelCase variants all match one term.
      The relative PATHNAME is scanned too, so a file named session-handoff.md is a finding on its name alone.
-  C3 unscannable content: check_leaks silently skips binaries and non-UTF-8; in the shippable surface that
-     is a fail-open, so here every file outside the text-suffix set (or failing UTF-8 decode) must be on the
-     binary allow-list or it is a finding, an allow-listed binary is OPENED so an unreadable one fails
-     closed, and a symlink or unsupported entry type under a shipped root is itself a finding.
+  C3 unscannable content: check_leaks names a file it cannot decode on a SKIP line and counts it, but still
+     passes; in the shippable surface that is a fail-open, so here every file outside the text-suffix set
+     (or failing UTF-8 decode) must be on the binary allow-list or it is a finding, an allow-listed binary
+     is OPENED so an unreadable one fails closed, and a symlink or unsupported entry type under a shipped
+     root is itself a finding.
   C4 tracked-surface existence and enumerability: check_leaks has no concept of a required surface; here
      every required root must be tracked-non-empty and enumerable from git (a failed enumeration, an absent
      or empty root, or an untracked required file is fail-closed, never "nothing to scan"), and enumeration
@@ -255,7 +256,7 @@ OPERATIONAL_TERMS = [
 ]
 
 # Text suffixes scanned as content. Mirrors check_leaks.TEXT_SUFFIXES, plus .csv (the shippable mappings
-# artefact, which check_leaks treats as non-text but which is portable text this gate does scan).
+# artefact, outside the leak gate's declared text suffixes; check_leaks scans it when it decodes as UTF-8).
 TEXT_SUFFIXES = {".md", ".mdc", ".py", ".sh", ".yml", ".yaml", ".toml", ".json", ".txt",
                  ".html", ".css", ".js", ".cfg", ".ini", ".conf", ".svg", ".csv"}
 

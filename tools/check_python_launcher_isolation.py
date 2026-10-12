@@ -42,10 +42,18 @@ launcher is isolated iff ``I`` is among those option letters, or all of ``P``, `
 Options after the script are never credited, and environment variables (PYTHONSAFEPATH and the like) are
 never credited.
 
+WORKFLOW run: GRAMMAR. A workflow `run:` value is read line-lexically. A block-scalar header is read under the
+full YAML block-header grammar: the ``|`` or ``>`` indicator, an optional indentation digit (1-9) and an
+optional chomping indicator (``+``/``-``) in either order, and an optional trailing comment (``run: | # x``,
+``run: |2``, ``run: >-2``); every content line of that block is scanned. Any other ``run:`` value that
+starts with ``|`` or ``>``, a value that opens with a node property or alias (``&``, ``!``, ``*``), and a
+plain scalar continued onto a deeper-indented line are cannot-evaluate (exit 2), never skipped.
+
 EXIT CONVENTION: 0 every recognized launcher is isolated; 1 at least one recognized launcher is not
 isolated; 2 cannot-evaluate (a required input missing, unreadable, non-regular, or malformed; a JSON
 parse error; a shell line carrying a python token whose command-word position cannot be established; a
-hook entry with a missing type/command or a non-list args; or the gate's own interpreter not isolated).
+workflow `run:` value outside the run: grammar above; a hook entry with a missing type/command or a
+non-list args; or the gate's own interpreter not isolated).
 Diagnostics are deterministic, sorted by relative path then line then location.
 
 DISCLOSED RESIDUAL (this gate does not catch): wrapper or indirect launchers (``bash -c "python3 ..."``,
@@ -147,9 +155,17 @@ PY_WORD_RE = re.compile(r"^python(3(\.\d+)?)?$")     # a whole token that is a p
 PY_TOKEN_RE = re.compile(r"\bpython3?\b")            # a python word anywhere in a line (a fast pre-filter)
 QUOTE_OR_ESCAPE_RE = re.compile(r"""['"\\]""")       # a quote or backslash that could obfuscate a launcher name
 ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")  # a shell VAR=val inline assignment
-# YAML `run:` key, optionally under a `- ` sequence dash; captures the leading indent and the scalar value.
-RUN_RE = re.compile(r"^(?P<indent>\s*)(?:-\s+)?run:(?:[ \t]+(?P<val>.*))?$")
-BLOCK_INDICATORS = {"|", ">", "|-", ">-", "|+", ">+"}
+# YAML `run:` key, optionally under a `- ` sequence dash; captures the leading indent, the key itself (its
+# column is the parent mapping indentation), and the scalar value.
+RUN_RE = re.compile(r"^(?P<indent>\s*)(?:-\s+)?(?P<key>run):(?:[ \t]+(?P<val>.*))?$")
+# A YAML block-scalar header, read under the full block-header grammar: the `|` or `>` indicator, then an
+# optional indentation digit (1-9) and an optional chomping indicator (`+` or `-`) in either order, then an
+# optional comment (whitespace, then `#`). Any other `run:` value that starts with `|` or `>` is outside the
+# supported grammar and is a cannot-evaluate, never an inline scalar whose block content goes unread.
+BLOCK_HEADER_RE = re.compile(r"^[|>](?:[1-9][+-]?|[+-][1-9]?)?(?:[ \t]+#.*)?$")
+# A `run:` value that opens with a YAML node property or alias (an `&anchor`, a `!tag`, a `*alias`) does not
+# carry its shell text where this line grammar reads it, so it is a cannot-evaluate too.
+NODE_PROPERTY_LEADS = ("&", "!", "*")
 # Shell separators (as whole tokens after shlex) that end one simple command and begin the next.
 SEPARATORS = {";", ";;", "|", "||", "&&", "&"}
 # Unquoted shell operators separated from adjacent words before tokenizing, longest first so `;;`,
@@ -429,12 +445,18 @@ def _check_shell_line(rel, lineno, line, errors, failures):
 
 
 def _yaml_run_lines(text):
-    """Yield (lineno, shell_line) for every YAML `run:` scalar and every line inside a `run: |`/`run: >`
-    block. A line-lexical extraction (no YAML library): a block's content is the run of lines indented
-    deeper than the `run:` key; it ends at the first non-blank line indented no deeper. Only `run:`
-    payloads are yielded, so `uses:`/`with:` lines (setup-python and the like) are never scanned."""
+    """Return (lines, unsupported): lines is a (lineno, shell_line) for every YAML `run:` scalar and every
+    line inside a `run:` block scalar; unsupported is a (lineno, message) for every `run:` value this line
+    grammar cannot read, which the caller reports as a cannot-evaluate. A line-lexical extraction (no YAML
+    library). A block header is read under the full block-header grammar (BLOCK_HEADER_RE: indicator,
+    optional indentation digit and chomping indicator in either order, optional comment); the block's
+    content is the run of lines indented deeper than the `run:` key, ending at the first non-blank line
+    indented no deeper. Unsupported: any other value starting with `|` or `>`, a value opening with a node
+    property or alias, and a plain scalar continued onto a deeper-indented line (YAML folds it into the
+    command, so a launcher there would otherwise go unread). Only `run:` payloads are yielded, so
+    `uses:`/`with:` lines (setup-python and the like) are never scanned."""
     lines = text.splitlines()
-    out = []
+    out, unsupported = [], []
     i, n = 0, len(lines)
     while i < n:
         m = RUN_RE.match(lines[i])
@@ -443,7 +465,7 @@ def _yaml_run_lines(text):
             continue
         val = (m.group("val") or "").strip()
         key_indent = len(m.group("indent"))
-        if val in BLOCK_INDICATORS:
+        if BLOCK_HEADER_RE.match(val):
             j = i + 1
             while j < n:
                 content = lines[j]
@@ -456,12 +478,31 @@ def _yaml_run_lines(text):
                 j += 1
             i = j
             continue
+        if val[:1] in ("|", ">"):
+            unsupported.append((i + 1, "run: value {!r} starts like a YAML block scalar but its header is "
+                                       "outside the block-header grammar".format(val)))
+            i += 1
+            continue
+        if val[:1] in NODE_PROPERTY_LEADS:
+            unsupported.append((i + 1, "run: value {!r} opens with a YAML node property or alias, outside "
+                                       "the supported line grammar".format(val)))
+            i += 1
+            continue
         if val:
+            j = i + 1
+            while j < n and lines[j].strip() == "":
+                j += 1
+            if j < n:
+                nxt = lines[j]
+                if (len(nxt) - len(nxt.lstrip(" ")) > m.start("key")
+                        and not nxt.lstrip().startswith("#")):
+                    unsupported.append((j + 1, "run: plain scalar continues on a deeper-indented line, "
+                                               "outside the supported line grammar"))
             if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
                 val = val[1:-1]
             out.append((i + 1, val))
         i += 1
-    return out
+    return out, unsupported
 
 
 def _check_hooks_json(rel, text, errors, failures):
@@ -592,7 +633,10 @@ def _scan_workflows(root, errors, failures):
         except (OSError, UnicodeError) as exc:
             errors.append((rel, 0, "", "cannot read workflow: {}".format(exc)))
             continue
-        for lineno, line in _yaml_run_lines(text):
+        run_lines, unsupported = _yaml_run_lines(text)
+        for lineno, message in unsupported:
+            errors.append((rel, lineno, "", message))
+        for lineno, line in run_lines:
             _check_shell_line(rel, lineno, line, errors, failures)
 
 
@@ -717,6 +761,14 @@ def main():
 #      guard proving the settings path (which already decoded first) still agrees with the shell path.
 #  32. real bash confirms the obfuscated names `pyt\hon3`, `pyt"hon"3`, `py'thon'3` all resolve to the
 #      token `python3` (the fail-to-pass witness for the decode-then-decide shell-line fix).
+#  33. a QA-suite Python source reintroducing a sys.path index-0 insertion is a finding (exit 1).
+#  34. a `run:` block header in the full block-header grammar (`| # comment`, `|2`, `|2-`, `>+9`,
+#      `>-2 # note`) is read as a block: a bare launcher in its content fails (exit 1), and the isolated
+#      form under `| # comment` passes (exit 0),
+#  35. any other `run:` value starting with `|` or `>` (`|0`, `|#x`, `|2x`, `|-+`, `>>`), a value opening
+#      with a node property or alias (`&a |`, `!!str |`, `*a`), and a plain scalar continued onto a
+#      deeper-indented line are cannot-evaluate (exit 2), while a sibling key at the run: key column after
+#      an inline scalar stays clean (exit 0).
 
 SCRIPT = "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py"
 
@@ -1165,6 +1217,48 @@ def self_test_main():
             failures.append("a missing required QA-suite Python source expected exit 2 (fail-closed, "
                             "finding-6)")
 
+        # 34. A block header in the full block-header grammar is read as a block: a bare launcher in its
+        #     content fails (exit 1). The `| # comment` and `|2` forms passed unread before this case.
+        for label, header in (("comment", "| # comment"), ("indent", "|2"), ("indent-chomp", "|2-"),
+                              ("keep-indent", ">+9"), ("strip-indent-comment", ">-2 # note")):
+            wf_text = ("name: Q\njobs:\n  q:\n    steps:\n      - run: " + header +
+                       "\n          set -e\n          python3 tools/alpha.py\n")
+            if run_quiet(_build(tmp / ("header-" + label), workflow=wf_text)) != 1:
+                failures.append("a bare launcher under the block header {!r} expected exit 1".format(header))
+        iso_comment = ("name: Q\njobs:\n  q:\n    steps:\n      - run: | # comment\n"
+                       "          python3 -I -B tools/alpha.py\n")
+        if run_quiet(_build(tmp / "header-comment-iso", workflow=iso_comment)) != 0:
+            failures.append("an isolated launcher under the block header '| # comment' expected exit 0")
+
+        # 35. A run: value outside the supported grammar is cannot-evaluate (exit 2), never skipped: a
+        #     malformed block header, a node property or alias, and a plain scalar continued onto a deeper
+        #     line. A sibling key at the run: key column after an inline scalar is not a continuation.
+        # Each malformed header is tried with block content (a deeper line) and with a sibling key next, so
+        # the header rule itself, not only the continuation rule, must refuse it.
+        for label, value in (("zero", "|0"), ("glued-comment", "|#x"), ("trailing", "|2x"),
+                             ("double-chomp", "|-+"), ("double", ">>")):
+            for form, after in (("content", "\n          python3 tools/alpha.py\n"),
+                                ("sibling", "\n        shell: bash\n")):
+                wf_text = "name: Q\njobs:\n  q:\n    steps:\n      - run: " + value + after
+                if run_quiet(_build(tmp / ("unsupported-" + label + "-" + form), workflow=wf_text)) != 2:
+                    failures.append("a run: value {!r} outside the grammar ({}) expected exit 2".format(
+                        value, form))
+        # A node property or alias, followed by a sibling key (no deeper line), so only the node-property
+        # rule can refuse it; read as an inline scalar it would pass clean.
+        for label, value in (("anchor", "&a |"), ("tag", "!!str |"), ("alias", "*a")):
+            wf_text = ("name: Q\njobs:\n  q:\n    steps:\n      - run: " + value +
+                       "\n        shell: bash\n")
+            if run_quiet(_build(tmp / ("unsupported-" + label), workflow=wf_text)) != 2:
+                failures.append("a run: value {!r} outside the grammar expected exit 2".format(value))
+        continued = ("name: Q\njobs:\n  q:\n    steps:\n      - run: echo a &&\n"
+                     "          python3 tools/alpha.py\n")
+        if run_quiet(_build(tmp / "unsupported-continued", workflow=continued)) != 2:
+            failures.append("a plain run: scalar continued onto a deeper line expected exit 2")
+        sibling = ("name: Q\njobs:\n  q:\n    steps:\n      - run: python3 -I -B tools/alpha.py\n"
+                   "        shell: bash\n")
+        if run_quiet(_build(tmp / "inline-sibling-key", workflow=sibling)) != 0:
+            failures.append("an inline run: scalar followed by a sibling key expected exit 0")
+
         # 10. The gate REFUSES (exit 2) when its own interpreter is not isolated (a real subprocess: no
         #     -I, so the bootstrap self-guard fires before any scan or sibling import).
         refuse = subprocess.run([sys.executable, str(Path(__file__).resolve())], capture_output=True,
@@ -1224,7 +1318,10 @@ def self_test_main():
           "string (exit 1) with its isolated form passing (exit 0), confirmed against real bash; a "
           "QA-suite Python source that reintroduces a sys.path index-0 insertion is a finding (exit 1) "
           "while the sanctioned sys.path.append form is clean (exit 0) and a missing required QA source "
-          "fails closed (exit 2); and "
+          "fails closed (exit 2); a run: block header in the full block-header grammar (a trailing "
+          "comment, an indentation digit, a chomping indicator in either order) is read as a block, while "
+          "any other run: value starting with | or >, a node property or alias, and a continued plain "
+          "scalar are cannot-evaluate (exit 2); and "
           "the gate refuses to run non-isolated (exit 2), with stderr on /dev/full and with descriptor "
           "2 closed too" + note)
     return 0
