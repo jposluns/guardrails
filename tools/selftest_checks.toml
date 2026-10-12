@@ -426,6 +426,12 @@ expected-check-ids = [
   "core/wake-hygiene-below-cap-denies",
   "core/wake-hygiene-at-cap-findings",
   "core/bound-and-cap-relieve-above-the-limit-not-only-at-it",
+  "core/one-live-worker-stop-allows",
+  "core/one-live-plus-queued-denies",
+  "core/one-live-named-idle-allows",
+  "core/one-live-queued-idle-denies",
+  "core/queued-loop-bound-findings",
+  "core/external-shed-blocker-exhausts",
   # ---------- C.2: the attestation register for blocker evidence ----------
   "attest/no-snapshot-stop-holds",
   "attest/no-snapshot-schedule-denies",
