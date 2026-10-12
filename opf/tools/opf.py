@@ -14039,8 +14039,11 @@ def _init_repo(root):
     repo = Path(os.path.abspath(os.fsdecode(lines[2])))
     if root != repo and repo not in root.parents:
         raise RuntimeError("git preflight: reported repository does not contain root")
-    # A no-follow probe only, closed unread: traverse_only, so an enclosing repository with search but
-    # no read permission (0111) above a nested product root is confirmed rather than refused EACCES (#516).
+    # A no-follow probe only, closed unread: traverse_only. Where os.O_PATH exists the probe needs search
+    # permission only, so an enclosing repository with search but no read permission (0111) above a nested
+    # product root is confirmed rather than refused EACCES (#516). Without os.O_PATH the walk opens every
+    # component O_RDONLY, so such a repository still refuses EACCES (fail-closed), first at _init_main's
+    # readable root walk through it; see _opf_store._open_dir_nofollow.
     repo_fd = _opf_store._open_dir_nofollow(repo, traverse_only=True)
     _opf_store._journal._close_fd_propagating(repo_fd)
     if _init_git(git, repo, args) != raw:
@@ -15358,7 +15361,10 @@ def _init_no_prior_store(git, repo, root):
 
 
 def _init_same_root(root, root_fd):
-    # fstat only, never listed or read: traverse_only, so the identity check needs search permission only.
+    # fstat only, never listed or read: traverse_only. Where os.O_PATH exists the identity check needs search
+    # permission only, so a search-only (0111) root binds. Without os.O_PATH the walk opens every component
+    # O_RDONLY, so the check needs read permission on the root and each ancestor, and a search-only root
+    # still refuses EACCES (fail-closed); see _opf_store._open_dir_nofollow.
     check_fd = _opf_store._open_dir_nofollow(root, traverse_only=True)
     try:
         current = os.fstat(check_fd)

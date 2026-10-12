@@ -39,6 +39,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 
 import ast
 import contextlib
+import errno
 import io
 import json
 import os
@@ -2084,61 +2085,125 @@ def _suite_isolated(invoke):
                 # #516: a NESTED product root beneath an enclosing repository with search but no read
                 # permission (0111). _init_repo opens the repository root only as a no-follow probe it
                 # closes unread, and _init_same_root only fstat-s its descriptor, so both open
-                # traverse_only: init proceeds, and a search-only root binds. DISCRIMINATORS: the
-                # readable open restored at either site refuses EACCES (the nested init exits 2 in
-                # preflight; the identity check raises PermissionError). Mode bits do not bind uid 0,
-                # so that run discloses a skip; without os.O_PATH the walk keeps its documented
-                # O_RDONLY fallback, so the EACCES refusal is asserted there instead (fail-closed).
-                so_repo = make_git("search-only-enclosing-repo")
-                so_product = so_repo / "product"
-                so_product.mkdir()
-                so_root = base / "search-only-root"
-                so_root.mkdir()
-                so_other = base / "search-only-root-other"
-                so_other.mkdir()
-                if hasattr(os, "geteuid") and os.geteuid() == 0:
-                    print("check_opf_init: DISCLOSED SKIP: search-only (0111) enclosing repository and root "
-                          "vectors not run (uid 0 is not bound by mode bits)", file=sys.stderr)
-                else:
+                # traverse_only: where os.O_PATH exists init proceeds and a search-only root binds.
+                # DISCRIMINATORS: the readable open restored at either site refuses EACCES (the nested
+                # init exits 2 in preflight; the identity check raises PermissionError). Mode bits do not
+                # bind uid 0, so that run discloses a skip. Without os.O_PATH the walk keeps its
+                # documented O_RDONLY fallback, so the EACCES refusal is asserted there instead
+                # (fail-closed); the root refusal is compared by its errno (errno.EACCES, never the
+                # "[Errno N]" text, which ascii() of an OSError omits) and by the refused component, the
+                # fixture root itself, and an injected EIO refusal of the same root is a control that
+                # must not pass for it. The fallback runs natively where os.O_PATH is absent and is
+                # SIMULATED where it exists, as simulated_fallback in check_opf_init_observe.py does:
+                # os.O_PATH is hidden and _opf_store._WALK_O_TRAVERSE set to os.O_RDONLY, with the nested
+                # init driven in process. The simulation opens each strict ancestor of the fixture
+                # parent in the native traverse mode, so a search-only ancestor of the temporary
+                # directory (a root-owned 0711 scratch root) cannot answer EACCES for the fixture: only
+                # the mode bits of the fixture decide. A native run without O_PATH is not claimed by it.
+                from unittest import mock
+
+                def search_only_vectors(prefix, label, init_run):
+                    so_repo = make_git(prefix + "search-only-enclosing-repo")
+                    so_product = so_repo / "product"
+                    so_product.mkdir()
+                    so_root = base / (prefix + "search-only-root")
+                    so_root.mkdir()
+                    so_other = base / (prefix + "search-only-root-other")
+                    so_other.mkdir()
                     os.chmod(so_repo, 0o111)
                     try:
-                        rc, output = run(so_product)
+                        rc, output = init_run(so_product)
                     finally:
                         os.chmod(so_repo, 0o755)
+
+                    def same_root(candidate, fd):
+                        # A refusal keeps its errno and the component it names.
+                        try:
+                            opf._init_same_root(candidate, fd)
+                            return ("bound",)
+                        except RuntimeError as exc:
+                            return ("moved", str(exc))
+                        except OSError as exc:
+                            return ("refused", exc.errno, exc.filename)
+
+                    def injected_eio(path, **kwargs):
+                        raise OSError(errno.EIO, os.strerror(errno.EIO), Path(path).name)
+
                     so_fd = _opf_store._open_dir_nofollow(str(so_root), traverse_only=True)
                     try:
                         os.chmod(so_root, 0o111)
                         try:
-                            try:
-                                opf._init_same_root(so_root, so_fd)
-                                so_bound = "bound"
-                            except OSError as exc:
-                                so_bound = ascii(exc)
-                            try:
-                                opf._init_same_root(so_other, so_fd)
-                                so_moved = "bound"
-                            except RuntimeError as exc:
-                                so_moved = str(exc)
-                            except OSError as exc:
-                                so_moved = ascii(exc)
+                            so_bound = same_root(so_root, so_fd)
+                            so_moved = same_root(so_other, so_fd)
+                            with mock.patch.object(_opf_store, "_open_dir_nofollow", injected_eio):
+                                so_eio = same_root(so_root, so_fd)
                         finally:
                             os.chmod(so_root, 0o755)
                     finally:
                         os.close(so_fd)
-                    check("the root identity check still refuses a different directory",
-                          so_moved == "root changed since its contained directory was opened")
+                    check(label + "the root identity check still refuses a different directory",
+                          so_moved == ("moved", "root changed since its contained directory was opened"))
                     if hasattr(os, "O_PATH"):
-                        check("a nested product root beneath a search-only (0111) enclosing repository "
-                              "initializes", rc == EXIT_OK and valid_sources(so_product))
-                        check("the root identity check binds a search-only (0111) root",
-                              so_bound == "bound")
-                    else:
-                        check("without os.O_PATH a search-only (0111) enclosing repository keeps the "
-                              "documented EACCES refusal",
-                              rc == EXIT_ERROR and inert("Permission denied") in output
-                              and not (so_product / working).exists())
-                        check("without os.O_PATH a search-only (0111) root keeps the documented EACCES "
-                              "refusal", "[Errno 13]" in so_bound)
+                        check(label + "a nested product root beneath a search-only (0111) enclosing "
+                              "repository initializes", rc == EXIT_OK and valid_sources(so_product))
+                        check(label + "the root identity check binds a search-only (0111) root",
+                              so_bound == ("bound",))
+                        return
+
+                    def documented_refusal(outcome):
+                        return outcome == ("refused", errno.EACCES, so_root.name)
+
+                    # The preflight refusal names EACCES at the enclosing repository component itself.
+                    repo_refusal = PermissionError(errno.EACCES, os.strerror(errno.EACCES), so_repo.name)
+                    check(label + "without os.O_PATH a search-only (0111) enclosing repository keeps the "
+                          "documented EACCES refusal",
+                          rc == EXIT_ERROR and "PermissionError(" + inert(str(repo_refusal)) + ")" in output
+                          and not (so_product / working).exists())
+                    check(label + "without os.O_PATH a search-only (0111) root keeps the documented EACCES "
+                          "refusal", documented_refusal(so_bound))
+                    check(label + "control: an injected EIO refusal of the root is not the documented "
+                          "EACCES refusal",
+                          so_eio == ("refused", errno.EIO, so_root.name) and not documented_refusal(so_eio))
+
+                if hasattr(os, "geteuid") and os.geteuid() == 0:
+                    print("check_opf_init: DISCLOSED SKIP: search-only (0111) enclosing repository and root "
+                          "vectors not run (uid 0 is not bound by mode bits)", file=sys.stderr)
+                else:
+                    search_only_vectors("", "", run)
+                if hasattr(os, "O_PATH") and not (hasattr(os, "geteuid") and os.geteuid() == 0):
+                    real_open = os.open
+                    saved_path, saved_walk = os.O_PATH, _opf_store._WALK_O_TRAVERSE
+                    above = set()
+                    for ancestor in base.parents:
+                        ancestor_stat = os.stat(ancestor)
+                        above.add((ancestor_stat.st_dev, ancestor_stat.st_ino))
+
+                    def native_above(path, flags, *args, dir_fd=None, **kwargs):
+                        # Only a read-only directory open of a strict ancestor of the fixture parent is
+                        # given the native traverse mode; a symlink is never an ancestor (lstat identity).
+                        if flags & os.O_DIRECTORY and flags & os.O_ACCMODE == os.O_RDONLY:
+                            try:
+                                target = os.stat(path, dir_fd=dir_fd, follow_symlinks=False)
+                            except OSError:
+                                target = None
+                            if target is not None and (target.st_dev, target.st_ino) in above:
+                                flags |= saved_path
+                        return real_open(path, flags, *args, dir_fd=dir_fd, **kwargs)
+
+                    # native_above forwards dir_fd, so it joins os.supports_dir_fd: the containment
+                    # probe (_journal.require_containment) must not refuse the in-process init instead.
+                    simulated_dir_fd = os.supports_dir_fd | {native_above}
+                    del os.O_PATH
+                    _opf_store._WALK_O_TRAVERSE = os.O_RDONLY
+                    try:
+                        with mock.patch.object(os, "open", native_above):
+                            with mock.patch.object(os, "supports_dir_fd", simulated_dir_fd):
+                                search_only_vectors(
+                                    "simulated-", "simulated no-O_PATH fallback: ",
+                                    lambda root: fd_capture(lambda: opf._cmd_init(["--root", str(root)])))
+                    finally:
+                        os.O_PATH = saved_path
+                        _opf_store._WALK_O_TRAVERSE = saved_walk
 
                 # QA round 3 MINOR 3: the missing-newline and NUL arms of the info/grafts shape
                 # check. Real git always ends the line with a newline and cannot print a NUL in
