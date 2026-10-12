@@ -88,7 +88,7 @@ This register lists every rule and the shipped mechanical controls linked to it.
 | Express authorization before execution | `exauth` | None | Enforcement has not been built yet. |
 | Human oversight and the autonomy threshold | `humovs` | Enforced | `hook:orch-ask-unattended`, class b |
 | Do not bury the review surface under raw dumps | `cnsdif` | Enforced | `hook:diff-source`, class b; `hook:diff-wall-stop`, class b |
-| An orchestrator keeps a mistakes register | `mstreg` | Enforced | `gate:mistakes-register`, class a |
+| An orchestrator keeps a mistakes register | `mstreg` | Enforced | `gate:mistakes-register`, class a; `gate:mistakes-register-append-selftest`, class a |
 | Reconcile the record against reality | `recncl` | Enforced | `gate:record-drift`, class a; `gate:record-sections`, class c; `hook:orch-resume-audit`, class b; `hook:orch-resume-barrier`, class b |
 | Records first | `recfst` | Enforced | `hook:orch-ask-unattended`, class b; `hook:orch-dispatch-ledger`, class c |
 | Close each session on green | `sescls` | None | Enforcement has not been built yet. |
@@ -478,6 +478,20 @@ Technical limits (from the enforcement ledger):
 
 ```
 Total over the declared register: a broken digest chain or sequence, a reused id, an illegal status transition, a rewrite of anchored or merge-base rows, and an unverifiable landed row always fail; a declared-but-unreadable register is exit 2. A same-authority local file offers no protection against an actor who rewrites the WHOLE chain and the anchor together, which defeats the untracked mode (the tracked mode is bounded by merge-base history instead), so rewrites are DETECTABLE within those bounds, never prevented; adopters needing real separation bind the same interface to a server-side append store. The landed-row check proves the cited commit and check path exist, not that the check semantically guards the mistake. In a checkout with no registry the live leg is NOT APPLICABLE with the self-test as assurance.
+```
+
+### `gate:mistakes-register-append-selftest`
+
+- Platform: `ci`
+- Default: `block`
+- Entry point: `tools/orch_register.py`
+- Class: `a`
+- Channel: `repository gate`
+
+Technical limits (from the enforcement ledger):
+
+```
+A synthetic self-test of the appender's write-time validation, not a live gate. On hermetic fixture registers it shows that an append whose resulting register fails the register gate's own verify_lines or verify_append_only (an illegal status transition, an unknown status, a landed row without an existing commit or repo-relative check_ref, a row that would fuse onto an unterminated last line, an anchored row rewritten in place) is refused with exit 1, that a tracked register with no computable merge-base is refused as cannot-evaluate with exit 2, that every refusal leaves the register and its anchor byte-identical (an absent register and its directory stay absent), and that clean appends, an AT- attestation row included, still land. It binds only appends made through tools/orch_register.py: a hand edit or any other writer is caught later by the mistakes-register gate, not here. An untracked register with no anchor is validated under the gate's --update-anchor bootstrap allowance, so its append-only leg is vacuous until an anchor exists, and an unreadable register is refused with exit 2. The read, the validation and the append are not one atomic step, so a concurrent writer between them is outside this check.
 ```
 
 ### `gate:notice-drift`

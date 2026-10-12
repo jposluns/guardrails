@@ -149,7 +149,7 @@
             <tr id="rule-exauth"><td>Express authorization before execution</td><td><code>exauth</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
             <tr id="rule-humovs"><td>Human oversight and the autonomy threshold</td><td><code>humovs</code></td><td>Enforced</td><td><a href="#mechanism-hook-orch-ask-unattended"><code>hook:orch-ask-unattended</code></a>, class b</td></tr>
             <tr id="rule-cnsdif"><td>Do not bury the review surface under raw dumps</td><td><code>cnsdif</code></td><td>Enforced</td><td><a href="#mechanism-hook-diff-source"><code>hook:diff-source</code></a>, class b; <a href="#mechanism-hook-diff-wall-stop"><code>hook:diff-wall-stop</code></a>, class b</td></tr>
-            <tr id="rule-mstreg"><td>An orchestrator keeps a mistakes register</td><td><code>mstreg</code></td><td>Enforced</td><td><a href="#mechanism-gate-mistakes-register"><code>gate:mistakes-register</code></a>, class a</td></tr>
+            <tr id="rule-mstreg"><td>An orchestrator keeps a mistakes register</td><td><code>mstreg</code></td><td>Enforced</td><td><a href="#mechanism-gate-mistakes-register"><code>gate:mistakes-register</code></a>, class a; <a href="#mechanism-gate-mistakes-register-append-selftest"><code>gate:mistakes-register-append-selftest</code></a>, class a</td></tr>
             <tr id="rule-recncl"><td>Reconcile the record against reality</td><td><code>recncl</code></td><td>Enforced</td><td><a href="#mechanism-gate-record-drift"><code>gate:record-drift</code></a>, class a; <a href="#mechanism-gate-record-sections"><code>gate:record-sections</code></a>, class c; <a href="#mechanism-hook-orch-resume-audit"><code>hook:orch-resume-audit</code></a>, class b; <a href="#mechanism-hook-orch-resume-barrier"><code>hook:orch-resume-barrier</code></a>, class b</td></tr>
             <tr id="rule-recfst"><td>Records first</td><td><code>recfst</code></td><td>Enforced</td><td><a href="#mechanism-hook-orch-ask-unattended"><code>hook:orch-ask-unattended</code></a>, class b; <a href="#mechanism-hook-orch-dispatch-ledger"><code>hook:orch-dispatch-ledger</code></a>, class c</td></tr>
             <tr id="rule-sescls"><td>Close each session on green</td><td><code>sescls</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
@@ -539,6 +539,20 @@
             </ul>
             <p class="ledger-residual-label">Technical limits (from the enforcement ledger)</p>
             <blockquote class="ledger-residual" data-mech="gate:mistakes-register">Total over the declared register: a broken digest chain or sequence, a reused id, an illegal status transition, a rewrite of anchored or merge-base rows, and an unverifiable landed row always fail; a declared-but-unreadable register is exit 2. A same-authority local file offers no protection against an actor who rewrites the WHOLE chain and the anchor together, which defeats the untracked mode (the tracked mode is bounded by merge-base history instead), so rewrites are DETECTABLE within those bounds, never prevented; adopters needing real separation bind the same interface to a server-side append store. The landed-row check proves the cited commit and check path exist, not that the check semantically guards the mistake. In a checkout with no registry the live leg is NOT APPLICABLE with the self-test as assurance.</blockquote>
+          </div>
+        </details>
+        <details class="more" id="mechanism-gate-mistakes-register-append-selftest">
+          <summary><code>gate:mistakes-register-append-selftest</code></summary>
+          <div class="inner">
+            <ul>
+              <li>Platform: <code>ci</code></li>
+              <li>Default: <code>block</code></li>
+              <li>Entry point: <code>tools/orch_register.py</code></li>
+              <li>Class: <code>a</code></li>
+              <li>Channel: <code>repository gate</code></li>
+            </ul>
+            <p class="ledger-residual-label">Technical limits (from the enforcement ledger)</p>
+            <blockquote class="ledger-residual" data-mech="gate:mistakes-register-append-selftest">A synthetic self-test of the appender's write-time validation, not a live gate. On hermetic fixture registers it shows that an append whose resulting register fails the register gate's own verify_lines or verify_append_only (an illegal status transition, an unknown status, a landed row without an existing commit or repo-relative check_ref, a row that would fuse onto an unterminated last line, an anchored row rewritten in place) is refused with exit 1, that a tracked register with no computable merge-base is refused as cannot-evaluate with exit 2, that every refusal leaves the register and its anchor byte-identical (an absent register and its directory stay absent), and that clean appends, an AT- attestation row included, still land. It binds only appends made through tools/orch_register.py: a hand edit or any other writer is caught later by the mistakes-register gate, not here. An untracked register with no anchor is validated under the gate's --update-anchor bootstrap allowance, so its append-only leg is vacuous until an anchor exists, and an unreadable register is refused with exit 2. The read, the validation and the append are not one atomic step, so a concurrent writer between them is outside this check.</blockquote>
           </div>
         </details>
         <details class="more" id="mechanism-gate-notice-drift">
