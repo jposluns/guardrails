@@ -48,7 +48,14 @@ Legs, in order:
                                 executable step (no key but name and run) whose run: is GATE_RUN;
                  suite-step     an executable step after the setup-python step runs the job's suite,
                                 HOST_SUITES (opf-host-patch: the OPF tooling self-test;
-                                git-fixture-env-host-patch: the git-fixture-env behaviour self-test).
+                                git-fixture-env-host-patch: the git-fixture-env behaviour self-test);
+                 outside-judge  the judge step holds its place: exactly one step outside the HOST_JOBS
+                                jobs runs this gate with --jobs-only (JOBS_ONLY_RUN), no line of a
+                                HOST_JOBS job names --jobs-only, and neither the job nor the step that
+                                carries the judge carries env: (a job-level env: can silence, in CI,
+                                every step of the carrying job, and a step-level env: the judge step
+                                itself, leaving the jobs leg without its one CI run outside the
+                                host-patch jobs).
                So a top-level key outside TOP_KEYS, another runner or checkout, an env: on a
                host-patch job or on any of its steps, removing or moving a
                host-patch job, its setup-python step, its Python host pin step or its suite step, changing a
@@ -58,6 +65,9 @@ Legs, in order:
                A line that still carries a carriage return once its one trailing CR is removed, or carries
                U+0085, U+2028 or U+2029 (LINE_BREAKS, the set the python-floor gate refuses), is
                cannot-evaluate: a YAML reader may break the line there and read a key this model does not see.
+               A host-patch-job line carrying a form feed or a vertical tab (CONTROL_CHARS) is also
+               cannot-evaluate: neither is a YAML line break, and this model refuses every such line
+               rather than modelling which of them another reader accepts.
                A top-level line is a plain key, a colon, then nothing or a value (TOP_RE); any other top-level
                line (a quoted or explicit key, a flow mapping, a document marker) and a repeated top-level key
                are cannot-evaluate. Under the top-level jobs: key, a job is a plain key at indent 2 and its
@@ -80,42 +90,56 @@ Legs, in order:
                                         OUTSIDE the host-patch jobs this gate judges, so an edit to
                                         those jobs cannot silence every CI run of the jobs leg, and
                                         which pins the floor '3.14', not the host patch, so the
-                                        interpreter leg cannot run there
+                                        interpreter leg cannot run there (the outside-judge rule holds
+                                        that step's placement and its freedom from env:)
   check_python_host_pin.py --self-test  fixture trees for every leg and every job rule, plus red-on-revert:
                                         for each finding leg, a copy of this gate loaded through importlib
                                         with that leg's call removed passes the fixture the intact gate
                                         refuses; for each job rule, a copy with that rule removed from
                                         JOB_RULES passes each of that rule's cases; a copy without the
-                                        line-break refusal reads each line-break case; and a copy whose
-                                        source parse maps only TOMLDecodeError lets a parser RecursionError
-                                        escape
+                                        line-break refusal reads each line-break case; a copy without
+                                        the control-character refusal reads each form-feed and
+                                        vertical-tab case; a copy whose source parse maps only
+                                        TOMLDecodeError lets a parser RecursionError escape; and the
+                                        --jobs-only CLI wiring runs through main() on a pristine copy,
+                                        with a copy that stops forwarding the flag and a copy whose main
+                                        returns 0 without evaluating each red
 
 Exit convention: 0 every leg passes; 1 a finding; 2 usage or cannot-evaluate (a missing, unreadable,
 non-regular, symlinked, non-UTF-8 or malformed source or workflow, a workflow line carrying a line-break
-character, a top-level line that is not a plain key, a repeated top-level key, a line the line model cannot
+character, a host-patch-job line carrying a form feed or a vertical tab, a top-level
+line that is not a plain key, a repeated top-level key, a line the line model cannot
 place or read, a pin line outside the strict form, unavailable temporary storage).
 
-DISCLOSED RESIDUAL. The jobs leg reads only quality.yml: its top-level keys and, in the HOST_JOBS jobs, their
-keys, runner, checkout step, the env: of every step, setup-python step, Python host pin step and suite step.
-Another step in a host-patch job runs as written once it carries no env:, and what the suites test is
-theirs: a step whose run: command starts another interpreter, appends to GITHUB_PATH or GITHUB_ENV, changes
-the checked-out tree or uses a local or composite action is not judged here. tools/check_ci_parity.py is the
-second holder for those edits: in every job it refuses a uses: of an action other than actions/checkout and
+DISCLOSED RESIDUAL. The jobs leg reads only quality.yml: its top-level keys; in the HOST_JOBS jobs, their
+keys, runner, checkout step, the env: of every step, setup-python step, Python host pin step and suite step;
+and, outside those jobs, only the --jobs-only judge step's placement and the env: of the job and step that
+carry it (outside-judge). Another step in a host-patch job is only partly held: this gate refuses its env:
+(step-env) and a line naming --jobs-only (outside-judge), and accepts a step-level shell:,
+working-directory: or if: on it, which changes what, where or whether that step runs; and what the suites
+test is theirs: a step whose run: command starts another interpreter, appends to GITHUB_PATH or GITHUB_ENV,
+changes the checked-out tree or uses a local or composite action is not judged here.
+tools/check_ci_parity.py is the second holder for those edits: its step grammar accepts only name:, uses:,
+run:, env: and with: as step keys, so a step-level shell:, working-directory: or if: is cannot-evaluate for
+it (measured at this commit on an extra host-patch-job step carrying each of the three: this gate passed,
+check_ci_parity refused), and in every job it refuses a uses: of an action other than actions/checkout and
 actions/setup-python and a run: command outside its parity grammar. In CI the jobs leg runs inside the
-host-patch jobs (their Python host pin steps) and once outside them, as the --jobs-only step of the registry
-job, so an edit inside the host-patch jobs alone (a job-level env: or defaults: that silences every CI step
-of those jobs among them) cannot silence every CI run of this gate. What stays CI-blind after that is an
-edit that also silences the registry job's own steps. A top-level defaults: or env: silences, in CI, every
-run step of every job, the --jobs-only step included, so CI cannot report it; this gate (workflow-keys) and
-check_ci_parity refuse it where they run outside that workflow, in tools/run_all_checks.sh. A job-level
-env: (a BASH_ENV value) on the registry job silences, in CI, that job's steps, check_ci_parity's and the
---jobs-only step included; it is inside check_ci_parity's disclosed environment-value residual, which that
-gate's docstring owns, and no gate refuses it in CI, so the surface that refuses it together with any
-host-patch-job edit is this gate's jobs leg run outside CI, in tools/run_all_checks.sh (a job-level
-defaults:, container:, continue-on-error: or uses: there is a check_ci_parity finding, reported in
-tools/run_all_checks.sh when CI is silenced). A host-job line carrying a form feed or a vertical tab passes
-this gate's line model while the python-floor grammar refuses it; neither is a YAML line break, so the two
-gates differ in which lines they accept, not in the line-break refusal. The grammar of the whole workflow,
+host-patch jobs (their Python host pin steps) and once outside them, as the --jobs-only judge step of the
+registry job, and the outside-judge rule holds that placement, so moving the judge into a host-patch job,
+removing or doubling it, or an env: on the job or the step that carries it is a finding, which the
+host-patch jobs' own Python host pin steps report in CI while those steps still run, and which
+tools/run_all_checks.sh reports in every local run. What stays CI-blind is an edit that leaves no CI run of
+the jobs leg at all. A top-level defaults: or env: silences, in CI, every run step of every job, the judge
+step included, so CI cannot report it; this gate (workflow-keys) and check_ci_parity refuse it where they
+run outside that workflow, in tools/run_all_checks.sh. An edit that silences every step of both host-patch
+jobs (a job-level env:, a BASH_ENV value, in each) and with it silences or removes the judge (a
+job-level env: on the registry job, which sits inside check_ci_parity's disclosed environment-value
+residual, which that gate's docstring owns; an env: on the judge step itself; or removing the judge step
+together with its tools/run_all_checks.sh member, which keeps check_ci_parity's set parity) leaves no CI
+run of the jobs leg, so CI cannot report it either; each such pairing is a finding of this gate's jobs leg
+run outside CI, in tools/run_all_checks.sh, which owns that surface (a job-level defaults:, container:,
+continue-on-error: or uses: on the registry job is a check_ci_parity finding, reported in
+tools/run_all_checks.sh when CI is silenced). The grammar of the whole workflow,
 the setup-python uses: shape and every other pin
 belong to the python-floor gate (tools/check_python_floor.py), which accepts a pin of a patch release only
 inside the HOST_JOBS jobs of quality.yml and only when it equals this source, and holds every other
@@ -150,6 +174,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
     os._exit(2)
 
 import importlib.util
+import io
 import os
 import re
 import stat
@@ -191,7 +216,24 @@ RUN_KEYS = {"name", "run"}
 # The rules of the jobs leg; the self-test removes each from a copy of this gate to show its cases red on
 # revert.
 JOB_RULES = frozenset({"workflow-keys", "job-keys", "runner", "checkout", "step-env", "setup", "pin",
-                       "gate-step", "suite-step"})
+                       "gate-step", "suite-step", "outside-judge"})
+# The jobs leg run outside the host-patch jobs: the one step of quality.yml outside HOST_JOBS that runs
+# this gate with --jobs-only (in the committed workflow, the registry job's judge step). The outside-judge
+# rule holds its placement: no host-patch-job line names the flag, exactly one step outside those jobs
+# runs the command, and neither the job nor the step that carries it carries env:.
+JOBS_ONLY_FLAG = "--jobs-only"
+JOBS_ONLY_RUN = GATE_RUN + " " + JOBS_ONLY_FLAG
+JOBS_ONLY_RE = re.compile(r" *(?:- +)?run *: +" + re.escape(JOBS_ONLY_RUN) + r"(?:[ \t]+#.*|[ \t]*)")
+# A list-item opener, a job-level env: (a job property line at indent 4) and an env: key in the judge
+# step, read textually: the carrying job is not a HOST_JOBS job, so the strict job model above does not
+# read it, and these shapes are all the outside-judge rule needs.
+DASH_RE = re.compile(r"( *)- ")
+JOB_ENV_RE = re.compile(r"    env *:(?:[ \t].*)?")
+STEP_ENV_RE = re.compile(r" *(?:- +)?env *:(?:[ \t].*)?")
+# Control characters refused in any host-patch-job line: neither is a YAML line break (LINE_BREAKS), and
+# before this refusal some such lines passed this line model while others were cannot-evaluate by
+# position, so the refusal holds every one of them out rather than modelling which.
+CONTROL_CHARS = {"\f": "a form feed", "\v": "a vertical tab"}
 # MAJOR.MINOR.PATCH, no leading zero, at most four digits in each component.
 PATCH_RE = re.compile(r"([1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})")
 PIN_KEY = "python-version"
@@ -435,11 +477,65 @@ def _host_job_findings(job, tree, want):
     return found
 
 
+def _judge_findings(host_judges, other_lines):
+    """The outside-judge rule over the whole workflow: host_judges the (job, line number) of each
+    non-comment HOST_JOBS line naming JOBS_ONLY_FLAG, other_lines the non-comment (line number, line) of
+    each job outside HOST_JOBS. Exactly one step outside the host-patch jobs runs JOBS_ONLY_RUN, no
+    host-patch-job line names the flag, and neither the job nor the step that carries the judge carries
+    env: (in CI a job-level env: such as a BASH_ENV value can silence every step of the carrying job and
+    a step-level env: the judge step itself, leaving the jobs leg without its one CI run outside the
+    host-patch jobs)."""
+    found = []
+    for job, number in host_judges:
+        found.append("{}:{}: names {} inside the host-patch job {}: the jobs leg's outside run never "
+                     "sits inside a host-patch job it judges".format(
+                         WORKFLOW_REL, number, JOBS_ONLY_FLAG, job))
+    judges = []
+    for job, lines in other_lines.items():
+        for index, (number, line) in enumerate(lines):
+            if JOBS_ONLY_RE.fullmatch(line):
+                judges.append((job, index))
+    if len(judges) != 1:
+        found.append("{}: {} steps outside the host-patch jobs run {} (want exactly one: the one CI run "
+                     "of the jobs leg that an edit inside the host-patch jobs cannot silence)".format(
+                         WORKFLOW_REL, len(judges), JOBS_ONLY_RUN))
+        return found
+    job, index = judges[0]
+    lines = other_lines[job]
+    for number, line in lines:
+        if JOB_ENV_RE.fullmatch(line):
+            found.append("{}:{}: the job {} carries the --jobs-only judge step and sets a job-level "
+                         "env:, which in CI can silence every step of that job, the judge step "
+                         "included".format(WORKFLOW_REL, number, job))
+    start, dash = None, None
+    for position in range(index, -1, -1):
+        match = DASH_RE.match(lines[position][1])
+        if match:
+            start, dash = position, len(match.group(1))
+            break
+    if start is None:
+        raise CannotEvaluate("{}:{}: the --jobs-only judge line sits in no \"- \" step of the job {}; "
+                             "this model cannot place it".format(WORKFLOW_REL, lines[index][0], job))
+    end = len(lines)
+    for position in range(start + 1, len(lines)):
+        text = lines[position][1]
+        if len(text) - len(text.lstrip(" ")) <= dash:
+            end = position
+            break
+    for number, line in lines[start:end]:
+        if STEP_ENV_RE.fullmatch(line):
+            found.append("{}:{}: the step that carries the --jobs-only judge sets env:, which in CI can "
+                         "change or silence what it runs (a BASH_ENV value among them)".format(
+                             WORKFLOW_REL, number))
+    return found
+
+
 def job_findings(root, patch):
     """The top level of WORKFLOW_REL and each HOST_JOBS job in it are whole (JOB_RULES), and each such job
     pins the host patch."""
     want = _patch_text(patch)
     entries = {job: [] for job in HOST_JOBS}
+    host_judges, other_lines = [], {}
     seen, tops, in_jobs, job = set(), {}, False, None
     for number, line in enumerate(_read_text(root / WORKFLOW_REL).split("\n"), 1):
         line = line[:-1] if line.endswith("\r") else line
@@ -479,12 +575,20 @@ def job_findings(root, patch):
                                      "content at indent 4 or deeper; this line model cannot place it".format(
                                          WORKFLOW_REL, number))
         if job not in entries:
+            if job is not None and not comment:
+                other_lines.setdefault(job, []).append((number, line))
             continue
+        for char, label in CONTROL_CHARS.items():
+            if char in line:
+                raise CannotEvaluate("{}:{}: carries {} in the host-patch job {}; this line model does "
+                                     "not accept it".format(WORKFLOW_REL, number, label, job))
         if PIN_KEY in line.lower() and (comment or PIN_LINE_RE.fullmatch(line) is None):
             raise CannotEvaluate("{}:{}: names python-version in the host-patch job {} but is not one strict "
                                  "pin line; write it as python-version: '{}'".format(
                                      WORKFLOW_REL, number, job, want))
         if not comment:
+            if JOBS_ONLY_FLAG in line:
+                host_judges.append((job, number))
             entries[job].append(_entry(job, number, line))
     findings = []
     if "workflow-keys" in JOB_RULES:
@@ -493,6 +597,8 @@ def job_findings(root, patch):
                 findings.append("{}:{}: carries the top-level key {}:, which can change how every run step "
                                 "of every job executes (a defaults: or env: block among them); the workflow "
                                 "carries only {}".format(WORKFLOW_REL, number, key, ", ".join(TOP_KEYS)))
+    if "outside-judge" in JOB_RULES:
+        findings.extend(_judge_findings(host_judges, other_lines))
     for name in HOST_JOBS:
         if name not in seen:
             findings.append("{}: carries no job {} (a host-patch job, HOST_JOBS in "
@@ -529,7 +635,8 @@ def evaluate(root, version, jobs_only=False):
         return 1, ["FAIL: " + finding for finding in findings]
     report = ("PASS: python host patch {} ({}): {} carries only the top-level keys {}, its host-patch jobs "
               "{} each run on {}, carry env: on no job key or step, check out as written, pin it in their "
-              "one setup-python step, run this gate right after it and run their suite".format(
+              "one setup-python step, run this gate right after it and run their suite, and one step "
+              "outside them carries the jobs leg's --jobs-only judge, its job and step free of env:".format(
                   _patch_text(patch), SOURCE_REL, WORKFLOW_REL, ", ".join(TOP_KEYS), ", ".join(HOST_JOBS),
                   RUNNER))
     if jobs_only:
@@ -555,6 +662,11 @@ FLOOR_JOB = ("  floor:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ac
              "      - run: python3 -I -B tools/x.py\n")
 SETUP_STEP = "      - uses: actions/setup-python@v5\n        with:\n          " + PIN + "\n\n"
 GATE_STEP = "      - name: Python host pin\n        run: " + GATE_RUN + "\n\n"
+JUDGE_STEP = ("      - name: Python host pin (jobs leg, outside the host-patch jobs)\n"
+              "        run: " + JOBS_ONLY_RUN + "\n")
+REGISTRY_JOB = ("  registry:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n"
+                "      - uses: actions/setup-python@v5\n        with:\n          python-version: '3.14'\n"
+                + JUDGE_STEP)
 HEAD = "name: Quality\n\non: push\n\npermissions:\n  contents: read\n\njobs:\n"
 
 
@@ -565,6 +677,15 @@ def check(name, got, want):
     EXECUTED.append(name)
     if got != want:
         FAILURES.append("{}: got {!r}, want {!r}".format(name, got, want))
+
+
+class _FakeSys:
+    """A stand-in for the sys module main() reads: a chosen version_info and swallowed output streams."""
+
+    def __init__(self, version):
+        self.version_info = version
+        self.stdout = io.StringIO()
+        self.stderr = io.StringIO()
 
 
 def _write(root, rel, data):
@@ -606,10 +727,14 @@ def _edited(text, edits, part):
 
 
 def _workflow(edits=(), omit=()):
-    """quality.yml: HEAD, a floor job, then each host-patch job not in omit, with the edits applied in order;
-    an edit (job, old, new) replaces the one occurrence of old in that job, or in HEAD when job is None."""
+    """quality.yml: HEAD, a floor job, each host-patch job not in omit, then a registry job carrying the
+    --jobs-only judge step (part name "registry" for edits, omitted when omit names it), with the edits
+    applied in order; an edit (job, old, new) replaces the one occurrence of old in that job, or in HEAD
+    when job is None."""
     jobs = [_edited(HEAD, edits, None), FLOOR_JOB]
     jobs.extend(_edited(_host_job(job), edits, job) for job in HOST_JOBS if job not in omit)
+    if "registry" not in omit:
+        jobs.append(_edited(REGISTRY_JOB, edits, "registry"))
     return "".join(jobs)
 
 
@@ -728,8 +853,10 @@ def _job_cases():
     """Each jobs-leg finding case: (check id, edits, omitted jobs, a marker of its finding, and the one
     JOB_RULES rule whose removal lets it pass, or None where no one rule decides it:
     jobs/second-pin-line-finding and jobs/job-env-pin-finding are each refused by two overlapping rules,
-    and pins/host-job-missing-finding is refused by the unconditional missing-job check in job_findings,
-    which no JOB_RULES rule controls)."""
+    jobs/jobs-only-moved-and-host-jobs-env-finding and jobs/jobs-only-step-env-and-host-jobs-env-finding
+    are each refused by both the outside-judge and job-keys rules, and pins/host-job-missing-finding is
+    refused by the unconditional missing-job check in job_findings, which no JOB_RULES rule
+    controls)."""
     suite = {job: _suite_step(job) for job in HOST_JOBS}
     gate_name = "      - name: Python host pin\n"
     suite_name = "      - name: Suite\n"
@@ -814,7 +941,7 @@ def _job_cases():
          ((None, "jobs:\n", "defaults:\n  run:\n    shell: \"true {0}\"\n\njobs:\n"),), (),
          "carries the top-level key defaults:", "workflow-keys"),
         ("jobs/workflow-defaults-after-jobs-finding",
-         ((GFE, suite[GFE], suite[GFE] + "\ndefaults:\n  run:\n    shell: echo {0}\n"),), (),
+         (("registry", JUDGE_STEP, JUDGE_STEP + "\ndefaults:\n  run:\n    shell: echo {0}\n"),), (),
          "carries the top-level key defaults:", "workflow-keys"),
         ("jobs/workflow-env-finding", ((None, "jobs:\n", "env:\n  FOO: bar\n\njobs:\n"),), (),
          "carries the top-level key env:", "workflow-keys"),
@@ -839,6 +966,43 @@ def _job_cases():
          ((OPF, runs, "    env:\n      BASH_ENV: '$(: > \"$0\")'\n" + runs),
           (GFE, runs, "    env:\n      BASH_ENV: '$(: > \"$0\")'\n" + runs)), (),
          "carries env:", "job-keys"),
+        # The outside judge: relocating the --jobs-only step into a host-patch job, removing it (or its
+        # whole job), doubling it, and an env: on the step or on the job that carries it are each refused
+        # by the outside-judge rule.
+        ("jobs/jobs-only-into-host-job-finding",
+         (("registry", JUDGE_STEP, ""),
+          (OPF, suite[OPF], suite[OPF] + "\n      - name: Python host pin jobs leg\n        run: "
+           + JOBS_ONLY_RUN + "\n")), (),
+         "names --jobs-only inside the host-patch job opf-host-patch", "outside-judge"),
+        ("jobs/jobs-only-step-removed-finding", (("registry", JUDGE_STEP, ""),), (),
+         "0 steps outside the host-patch jobs run", "outside-judge"),
+        ("jobs/jobs-only-job-omitted-finding", (), ("registry",),
+         "0 steps outside the host-patch jobs run", "outside-judge"),
+        ("jobs/jobs-only-step-twice-finding", (("registry", JUDGE_STEP, JUDGE_STEP + JUDGE_STEP),), (),
+         "2 steps outside the host-patch jobs run", "outside-judge"),
+        ("jobs/jobs-only-step-env-finding",
+         (("registry", JUDGE_STEP,
+           JUDGE_STEP + "        env:\n          BASH_ENV: '$(: > \"$0\")'\n"),), (),
+         "the step that carries the --jobs-only judge sets env:", "outside-judge"),
+        ("jobs/jobs-only-job-env-finding",
+         (("registry", "    runs-on: ", "    env:\n      BASH_ENV: '$(: > \"$0\")'\n    runs-on: "),), (),
+         "sets a job-level env:", "outside-judge"),
+        # Reviewer reproductions: the relocation above with a job-level env: (BASH_ENV) in both
+        # host-patch jobs, and an env: on the judge step with the same host-job env:; the outside-judge
+        # and job-keys rules both refuse each.
+        ("jobs/jobs-only-moved-and-host-jobs-env-finding",
+         (("registry", JUDGE_STEP, ""),
+          (OPF, suite[OPF], suite[OPF] + "\n      - name: Python host pin jobs leg\n        run: "
+           + JOBS_ONLY_RUN + "\n"),
+          (OPF, runs, "    env:\n      BASH_ENV: '$(: > \"$0\")'\n" + runs),
+          (GFE, runs, "    env:\n      BASH_ENV: '$(: > \"$0\")'\n" + runs)), (),
+         "names --jobs-only inside the host-patch job", None),
+        ("jobs/jobs-only-step-env-and-host-jobs-env-finding",
+         (("registry", JUDGE_STEP,
+           JUDGE_STEP + "        env:\n          BASH_ENV: '$(: > \"$0\")'\n"),
+          (OPF, runs, "    env:\n      BASH_ENV: '$(: > \"$0\")'\n" + runs),
+          (GFE, runs, "    env:\n      BASH_ENV: '$(: > \"$0\")'\n" + runs)), (),
+         "the step that carries the --jobs-only judge sets env:", None),
         ("jobs/checkout-ref-finding", ((OPF, fetch_tags, fetch_tags + "          ref: main\n"),), (),
          "opf-host-patch: its first step is not the checkout step as written", "checkout"),
         ("jobs/checkout-repository-finding",
@@ -1032,6 +1196,22 @@ def _self_test_cases(base):
         code, lines = evaluate(root, HOST)
         check(check_id, (code, _has(lines, "carries " + LINE_BREAKS[char]), breaks.evaluate(root, HOST)[0]),
               (2, True, 0))
+    # A form feed or a vertical tab in a host-patch-job line: cannot-evaluate (CONTROL_CHARS), and a copy
+    # of this gate without the refusal reads each line as part of the job and passes (red on revert).
+    anchor = "for char, label in " + "CONTROL_CHARS.items():"
+    if source.count(anchor) != 1:
+        raise CannotEvaluate("red-on-revert anchor for the control-character refusal occurs {} "
+                             "times".format(source.count(anchor)))
+    controls = _copy(base, "python_host_pin_without_control_chars",
+                     source.replace(anchor, "for char, label in ():"))
+    for check_id, char in (
+            ("jobs/form-feed-cannot-evaluate", "\f"),
+            ("jobs/vertical-tab-cannot-evaluate", "\v")):
+        root = _fixture(base, workflow=_workflow(((OPF, "    name: " + OPF + "\n",
+                                                   "    name: " + OPF + char + " tooling\n"),)))
+        code, lines = evaluate(root, HOST)
+        check(check_id, (code, _has(lines, "carries " + CONTROL_CHARS[char]),
+                         controls.evaluate(root, HOST)[0]), (2, True, 0))
 
     for check_id, version, shown in (
             ("interpreter/newer-patch-finding", (3, 14, 8, "final"), "Python 3.14.8 (final)"),
@@ -1055,6 +1235,36 @@ def _self_test_cases(base):
                                               (GFE, "    runs-on: ", env_edit))))
     code, lines = evaluate(root, HOST, jobs_only=True)
     check("jobs/jobs-only-still-refuses-host-job-env", (code, _has(lines, "carries env:")), (1, True))
+
+    # The --jobs-only CLI wiring: main() itself, on a pristine copy of this gate with its ROOT and sys
+    # replaced, forwards the flag (the interpreter leg skipped on a mismatched interpreter, the jobs leg
+    # still run on a damaged host-patch job). Red on revert: a copy whose main no longer forwards the
+    # flag (jobs_only=False) fails the clean tree on the interpreter leg, and a copy whose main returns 0
+    # without evaluating passes the damaged tree the intact main refuses.
+    cli = _copy(base, "python_host_pin_cli", source)
+    clean = _fixture(base)
+    damaged = _fixture(base, workflow=_workflow(((OPF, "    runs-on: ", env_edit),
+                                                 (GFE, "    runs-on: ", env_edit))))
+    cli.ROOT, cli.sys = clean, _FakeSys((3, 14, 8, "final", 0))
+    check("cli/jobs-only-skips-interpreter-leg", (cli.main(["--jobs-only"]), cli.main([])), (0, 1))
+    cli.ROOT = damaged
+    check("cli/jobs-only-refuses-damaged-host-job", cli.main(["--jobs-only"]), 1)
+    anchor = "jobs_only=" + "bool(argv)"
+    if source.count(anchor) != 1:
+        raise CannotEvaluate("red-on-revert anchor for the CLI forwarding occurs {} times".format(
+            source.count(anchor)))
+    forced = _copy(base, "python_host_pin_cli_without_forwarding",
+                   source.replace(anchor, "jobs_only=" + "False"))
+    forced.ROOT, forced.sys = clean, _FakeSys((3, 14, 8, "final", 0))
+    check("cli/forwarding-mutant-fails-clean-tree-red", forced.main(["--jobs-only"]), 1)
+    anchor = 'if not argv or argv == ["--jobs-' + 'only"]:'
+    if source.count(anchor) != 1:
+        raise CannotEvaluate("red-on-revert anchor for the CLI dispatch occurs {} times".format(
+            source.count(anchor)))
+    silent = _copy(base, "python_host_pin_cli_silent_pass",
+                   source.replace(anchor, "if argv:\n        return 0\n    " + anchor))
+    silent.ROOT, silent.sys = damaged, _FakeSys((3, 14, 4, "final", 0))
+    check("cli/silent-pass-mutant-passes-damaged-tree-red", silent.main(["--jobs-only"]), 0)
 
     try:
         real = load_source(ROOT) + ("final",)
