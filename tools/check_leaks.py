@@ -21,9 +21,13 @@ SCANNED SET. The walk yields every file in the working tree except the .git, nod
 __pycache__ subtrees (the denylist file included). Each yielded path is first CLASSIFIED by a stat probe
 (a metadata check, not a content read), then its content is read as bytes and handled one of four ways:
   - it decodes as UTF-8: it is scanned, whatever its suffix (a .csv, .example or .sha256 included);
-  - it starts with a UTF-16 byte-order mark and decodes as UTF-16: it is scanned and counted as a
-    lossless decode (any other multibyte encoding without that mark falls to the byte decode below,
-    where the patterns cannot match across its wide characters; a disclosed residual);
+  - it starts with a UTF-16 or UTF-32 byte-order mark: it is decoded as the declared encoding AND
+    decoded losslessly as bytes, and BOTH views are scanned (a leak one view hides, the other still
+    shows, so a fake mark over single-byte text cannot hide it), counted as one lossless decode; a
+    BOM-declared stream that does not decode as its declared encoding (an odd length, an unpaired
+    surrogate) is a read error (exit 2, naming the file), never an ineffective clean scan (a wide
+    encoding WITHOUT such a mark still falls to the byte decode below, where the patterns cannot
+    match across its wide characters; a disclosed residual);
   - its suffix is on the named binary allow-list BINARY_SUFFIXES (matched case-insensitively; an
     archive): it is named on a SKIP line and counted, never passed silently;
   - anything else holding a non-UTF-8 byte, whatever its suffix or that suffix's case (a missing suffix
@@ -178,30 +182,41 @@ def _read_bytes(path):
 
 
 def read_scan_text(path):
-    """Read one walked file for the scan. Returns (text, lossless, skip_reason): text is the content to
-    scan, or None when the file is skipped; lossless is True when a non-UTF-8 file was decoded without
-    dropping or replacing a byte; skip_reason says why a file is not scanned. The policy, in order: a
-    non-regular file (the stat probe follows a file symlink, so a symlink to a regular file reads as its
-    target) is a named SKIP whose content is never opened; UTF-8 content is scanned whatever the suffix;
-    content behind a UTF-16 byte-order mark is decoded as UTF-16 and scanned; a remaining non-UTF-8 file
-    whose suffix is on BINARY_SUFFIXES (case-insensitively) is a named SKIP; anything else is decoded
-    losslessly with surrogateescape and scanned, whatever its suffix. A read error raises OSError for
-    the caller's fail-closed exit 2 (a dangling symlink included)."""
+    """Read one walked file for the scan. Returns (texts, lossless, skip_reason): texts is a tuple of
+    the decoded views to scan, or None when the file is skipped; lossless is True when a non-UTF-8 file
+    was decoded without dropping or replacing a byte; skip_reason says why a file is not scanned. The
+    policy, in order: a non-regular file (the stat probe follows a file symlink, so a symlink to a
+    regular file reads as its target) is a named SKIP whose content is never opened; UTF-8 content is
+    scanned whatever the suffix; content behind a UTF-16 or UTF-32 byte-order mark is decoded as the
+    declared encoding AND decoded losslessly with surrogateescape, BOTH views scanned (so a fake mark
+    over single-byte text cannot hide it in the wide view), and a stream that does not decode as its
+    declared encoding raises OSError naming the file (fail-closed exit 2, never an ineffective clean
+    scan; the four-byte UTF-32 marks are probed before the two-byte UTF-16 prefix they embed); a
+    remaining non-UTF-8 file whose suffix is on BINARY_SUFFIXES (case-insensitively) is a named SKIP;
+    anything else is decoded losslessly with surrogateescape and scanned, whatever its suffix. A read
+    error raises OSError for the caller's fail-closed exit 2 (a dangling symlink included)."""
     if not stat.S_ISREG(_stat_mode(path)):
         return None, False, "not a regular file"
     data = _read_bytes(path)
     try:
-        return data.decode("utf-8"), False, None
+        return (data.decode("utf-8"),), False, None
     except UnicodeDecodeError:
         pass
-    if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
+    bom_encoding = None
+    if data[:4] in (b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff"):
+        bom_encoding = "utf-32"
+    elif data[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        bom_encoding = "utf-16"
+    if bom_encoding is not None:
         try:
-            return data.decode("utf-16"), True, None
-        except UnicodeDecodeError:
-            pass  # an odd-length or malformed stream: fall through to the lossless byte decode
+            wide = data.decode(bom_encoding)
+        except UnicodeDecodeError as exc:
+            raise OSError("{}: byte-order mark declares {} but the stream does not decode as it "
+                          "({}); fail-closed".format(path, bom_encoding, exc))
+        return (wide, data.decode("utf-8", errors="surrogateescape")), True, None
     if path.suffix.lower() in BINARY_SUFFIXES:
         return None, False, "not UTF-8, on the binary allow-list (suffix {})".format(path.suffix.lower())
-    return data.decode("utf-8", errors="surrogateescape"), True, None
+    return (data.decode("utf-8", errors="surrogateescape"),), True, None
 
 
 def scan_tree(root):
@@ -216,15 +231,18 @@ def scan_tree(root):
     symlink_dirs = []
     for path in sorted(walk_files(root, SKIP_DIRS, symlink_dirs=symlink_dirs)):
         rel = _display(path.relative_to(root))
-        text, decoded_lossless, reason = read_scan_text(path)
-        if text is None:
+        texts, decoded_lossless, reason = read_scan_text(path)
+        if texts is None:
             skipped.append("{} ({})".format(rel, reason))
             continue
         scanned += 1
         lossless += decoded_lossless
-        for number, label in scan_text(text, hashes, maxn, honor_leak_allow=True):
-            findings.append("{}:{}: {}".format(rel, number, label) if number is not None
-                            else "{}: {}".format(rel, label))
+        seen = set()
+        for text in texts:
+            for number, label in scan_text(text, hashes, maxn, honor_leak_allow=True):
+                seen.add("{}:{}: {}".format(rel, number, label) if number is not None
+                         else "{}: {}".format(rel, label))
+        findings.extend(sorted(seen))
     for link in symlink_dirs:
         skipped.append("{} (symlinked directory; not followed)".format(_display(link.relative_to(root))))
     skipped.sort()
@@ -269,13 +287,18 @@ def main():
 #      list) is decoded losslessly and found,
 #   3. a host path in a Latin-1 .md is a finding, decoded losslessly; 3b. the same in a Latin-1
 #      README.MD (an upper-case suffix) is found, not skipped; 3c. a host path in a UTF-16 file with a
-#      byte-order mark is decoded as UTF-16 and found,
+#      byte-order mark is decoded as UTF-16 and found; 3d. a fake UTF-16 byte-order mark over
+#      single-byte text hides nothing (the lossless byte view is scanned beside the wide view);
+#      3e/3f. an odd-length or unpaired-surrogate BOM-declared UTF-16 stream fails closed (exit 2);
+#      3g. a host path in a valid UTF-32 file with a byte-order mark is decoded as UTF-32 and found;
+#      3h. a malformed BOM-declared UTF-32 stream fails closed (exit 2),
 #   4. a codename in a Latin-1 .txt matches the hash layer (exit 1); 4b. the denylist file itself is
 #      scanned (a private IP in one of its comment lines is a finding); 4c. a suffixless Latin-1 file is
 #      decoded losslessly and its host path found,
 #   5. an undecodable .zip is named on a SKIP line and counted (exit 0); 5b. the allow-list match is
 #      case-insensitive (an undecodable .ZIP is the same named SKIP),
-#   6. a non-regular file (injected FIFO mode) is named on a SKIP line, its planted IP never read
+#   6. a non-regular file (injected FIFO mode) is named on a SKIP line, its content NEVER read (the
+#      read seam raises for it, so a read-before-SKIP regression fails the case outright)
 #      (exit 0); 6b. a symlink to a regular file is followed and its target scanned (exit 1); 6c. a
 #      symlinked directory is named on a SKIP line, never silently dropped (exit 0); 6d. a dangling
 #      symlink fails closed (exit 2),
@@ -283,9 +306,11 @@ def main():
 # Cases 1 through 6 each fail on the original pre-531 scan. Against the round-1 revision this replaces,
 # 2b, 3b, 3c and 6c are new findings or named skips, 6 and 7 run where that revision skipped, and 4b,
 # 4c, 5b, 6b and 6d pin behaviours a mutant could drop (the denylist walk, the suffixless decode, the
-# case-insensitive allow-list, the stat-follows-a-file-symlink rule, the dangling-symlink error). The
-# planted host path and private IP are assembled from pieces so this source stays clean under its own
-# scan.
+# case-insensitive allow-list, the stat-follows-a-file-symlink rule, the dangling-symlink error).
+# Against the round-2 revision this replaces, 3d and 3g are new findings and 3e, 3f and 3h pin the
+# fail-closed malformed-BOM contract, while the raising read seam in 6 makes a read-before-SKIP
+# regression fail rather than pass. The planted host path and private IP are assembled from pieces so
+# this source stays clean under its own scan.
 _HOST_PATH = "/" + "opt/" + "fixture-host/private/path"
 _PRIVATE_IP = "10." + "20.30.40"
 
@@ -367,6 +392,50 @@ def self_test_main():
             failures.append("a host path in a UTF-16 .md with a BOM expected exit 1, decoded as UTF-16 "
                             "(got {}: {!r})".format(rc, out))
 
+        # 3d. a fake UTF-16 byte-order mark over single-byte text cannot hide it: both the wide view
+        #     and the lossless byte view are scanned, so the host path behind the mark is found.
+        files = dict(clean_files)
+        files["docs/fake.md"] = b"\xff\xfe" + ("see " + _HOST_PATH + " \n").encode("ascii")
+        rc, out = run_capture(tree("fake-bom", files))
+        if (rc != 1 or "docs/fake.md:1: absolute host path" not in out
+                or "1 non-UTF-8 text file(s) decoded losslessly" not in out):
+            failures.append("a host path behind a fake UTF-16 BOM expected exit 1 via the byte view "
+                            "(got {}: {!r})".format(rc, out))
+
+        # 3e/3f. a BOM-declared UTF-16 stream that does not decode as UTF-16 (an odd length; an
+        #     unpaired surrogate) fails closed (exit 2) naming the file, never an ineffective clean
+        #     scan.
+        files = dict(clean_files)
+        files["docs/odd.md"] = ("see " + _HOST_PATH + "\n").encode("utf-16") + b"x"
+        rc, out = run_capture(tree("utf16-odd", files))
+        if rc != 2:
+            failures.append("an odd-length BOM-declared UTF-16 stream expected exit 2, fail-closed "
+                            "(got {}: {!r})".format(rc, out))
+        files = dict(clean_files)
+        files["docs/surrogate.md"] = ("see " + _HOST_PATH + "\n").encode("utf-16") + b"\x00\xd8"
+        rc, out = run_capture(tree("utf16-surrogate", files))
+        if rc != 2:
+            failures.append("an unpaired-surrogate BOM-declared UTF-16 stream expected exit 2, "
+                            "fail-closed (got {}: {!r})".format(rc, out))
+
+        # 3g. a UTF-32 byte-order mark is honoured (probed before the UTF-16 prefix it embeds): a host
+        #     path in a valid UTF-32 file is found in the wide view and counted as a lossless decode.
+        files = dict(clean_files)
+        files["docs/wide32.md"] = ("# note\nsee " + _HOST_PATH + "\n").encode("utf-32")
+        rc, out = run_capture(tree("utf32", files))
+        if (rc != 1 or "docs/wide32.md:2: absolute host path" not in out
+                or "1 non-UTF-8 text file(s) decoded losslessly" not in out):
+            failures.append("a host path in a UTF-32 .md with a BOM expected exit 1, decoded as UTF-32 "
+                            "(got {}: {!r})".format(rc, out))
+
+        # 3h. a BOM-declared UTF-32 stream that does not decode as UTF-32 fails closed (exit 2).
+        files = dict(clean_files)
+        files["docs/bad32.md"] = b"\xff\xfe\x00\x00" + b"\x01"
+        rc, out = run_capture(tree("utf32-bad", files))
+        if rc != 2:
+            failures.append("a malformed BOM-declared UTF-32 stream expected exit 2, fail-closed "
+                            "(got {}: {!r})".format(rc, out))
+
         # 4. a codename in a .txt holding a Latin-1 byte matches the hash layer.
         rc, out = run_capture(tree("codename", dict(clean_files, **{
             "tools/leak-hashes.txt": (term_hash("fixture codename") + "\n").encode("ascii"),
@@ -411,8 +480,10 @@ def self_test_main():
 
         # 6. a non-regular file is named on a SKIP line and counted, its content never read.
         #    Deterministic: the stat seam reports a FIFO mode for one fixture file, so the case runs on
-        #    every runner (no /dev/null dependency), and the file plants a private IP that must stay
-        #    unseen because the skip happens before any content read.
+        #    every runner (no /dev/null dependency). The read seam RAISES for that file, so a scan that
+        #    reads the content before (or instead of) skipping fails this case outright (exit 2 and no
+        #    SKIP line), not only when the planted private IP happens to surface; on a real FIFO such a
+        #    read could block the gate.
         files = dict(clean_files)
         files["docs/fifo.md"] = ("fd " + _PRIVATE_IP + "\n").encode("ascii")
         base = tree("nonreg", files)
@@ -422,11 +493,19 @@ def self_test_main():
             if path.name == "fifo.md":
                 return stat.S_IFIFO | 0o644
             return _real(path)
+        saved_read6 = module._read_bytes
+        def _refuse_fifo_read(path, _real=saved_read6):
+            if path.name == "fifo.md":
+                raise OSError("self-test seam: the non-regular fifo.md was content-read; the SKIP "
+                              "must happen before any read")
+            return _real(path)
         module._stat_mode = _fifo_mode
+        module._read_bytes = _refuse_fifo_read
         try:
             rc, out = run_capture(base)
         finally:
             module._stat_mode = saved_mode
+            module._read_bytes = saved_read6
         if (rc != 0 or "SKIP (not scanned): docs/fifo.md (not a regular file)" not in out
                 or "1 file(s) skipped" not in out):
             failures.append("a non-regular file expected exit 0 with a SKIP line naming it and its "
@@ -483,13 +562,15 @@ def self_test_main():
             print("  - " + failure)
         return 1
     print("SELF-TEST PASS: a clean tree passes and states its scanned and skipped counts; a private IP in a "
-          ".csv or a Latin-1 .tsv, a host path in a Latin-1 .md, a Latin-1 README.MD, a UTF-16 file with a "
-          "byte-order mark, a suffixless Latin-1 file or a symlinked regular file's target, a codename in "
-          "a Latin-1 .txt, and a private IP inside the denylist file are each a finding (exit 1); an "
-          "undecodable .zip (in either suffix case) and an injected non-regular file are each named on a "
-          "SKIP line and counted, the non-regular content never read; a symlinked directory is named on a "
-          "SKIP line, never silently dropped; and a dangling symlink and an injected unreadable file each "
-          "fail closed (exit 2)")
+          ".csv or a Latin-1 .tsv, a host path in a Latin-1 .md, a Latin-1 README.MD, a UTF-16 or UTF-32 "
+          "file with a byte-order mark, single-byte text behind a fake UTF-16 mark (the byte view is "
+          "scanned beside the wide view), a suffixless Latin-1 file or a symlinked regular file's target, "
+          "a codename in a Latin-1 .txt, and a private IP inside the denylist file are each a finding "
+          "(exit 1); an undecodable .zip (in either suffix case) and an injected non-regular file are "
+          "each named on a SKIP line and counted, the non-regular content never read (its read seam "
+          "raises if it is); a symlinked directory is named on a SKIP line, never silently dropped; and "
+          "a dangling symlink, an injected unreadable file, and a BOM-declared UTF-16 or UTF-32 stream "
+          "that does not decode as declared each fail closed (exit 2)")
     return 0
 
 

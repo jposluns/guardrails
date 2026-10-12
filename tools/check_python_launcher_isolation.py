@@ -47,13 +47,17 @@ never credited.
 WORKFLOW run: GRAMMAR. A workflow `run:` value is read line-lexically. A block-scalar header is read under the
 full YAML block-header grammar: the ``|`` or ``>`` indicator, an optional indentation digit (1-9) and an
 optional chomping indicator (``+``/``-``) in either order, and an optional trailing comment (``run: | # x``,
-``run: |2``, ``run: >-2``); every content line of that block is scanned. An EMPTY same-line value whose
-next non-blank line is deeper than the key is read the same way: that deeper line is either the block
-header (its content lines are scanned) or the plain-scalar command itself; an empty value with no deeper
-line is a null scalar carrying no command text. Any other ``run:`` value that starts with ``|`` or ``>``
-(on the key line or on the deeper line), a value that opens with a node property or alias (``&``, ``!``,
-``*``), and a plain scalar continued onto a further deeper-indented line are cannot-evaluate (exit 2),
-never skipped.
+``run: |2``, ``run: >-2``); every content line of that block is scanned. An EMPTY same-line value is
+read ONLY in the two proven shapes: the next non-blank, NON-COMMENT line, when deeper than the key, is
+either the plain-scalar command itself or a block header whose content is deeper than both the header
+and the key (its content lines, bounded by the key column, are scanned); the value is null (no command
+text) only when that next non-blank, non-comment line is not deeper than the key, or the file ends. Any
+other arrangement after an empty ``run:`` (a comment line before a deeper value, a header with no
+content deeper than the key, block content at or above the header's column, a comment line inside the
+block before its content), any other ``run:`` value that starts with ``|`` or ``>`` (on the key line or
+on the deeper line), a value that opens with a node property or alias (``&``, ``!``, ``*``), and a
+plain scalar continued onto a further deeper-indented line are cannot-evaluate (exit 2), never
+skipped.
 
 EXIT CONVENTION: 0 every recognized launcher is isolated; 1 at least one recognized launcher is not
 isolated; 2 cannot-evaluate (a required input missing, unreadable, non-regular, or malformed; a JSON
@@ -457,14 +461,18 @@ def _yaml_run_lines(text):
     library). A block header is read under the full block-header grammar (BLOCK_HEADER_RE: indicator,
     optional indentation digit and chomping indicator in either order, optional comment); the block's
     content is the run of lines indented deeper than the `run:` key, ending at the first non-blank line
-    indented no deeper. An EMPTY same-line value whose next non-blank, non-comment line is deeper than
-    the key is read the same way: that deeper line is either a block header (its content lines, deeper
-    than the header line, are yielded) or the plain-scalar command itself; an empty value with no deeper
-    line is a null scalar carrying no command text, so nothing is yielded for it. Unsupported: any other
-    value starting with `|` or `>` (on the key line or the deeper line), a value opening with a node
-    property or alias, and a plain scalar continued onto a further deeper-indented line (YAML folds it
-    into the command, so a launcher there would otherwise go unread). Only `run:` payloads are yielded,
-    so `uses:`/`with:` lines (setup-python and the like) are never scanned."""
+    indented no deeper. An EMPTY same-line value is read ONLY in the two shapes proven against PyYAML:
+    the next non-blank, NON-COMMENT line, when deeper than the key, is either the plain-scalar command
+    itself or a block header whose content is deeper than both the header and the key (its content
+    lines, bounded by the key column, are yielded). The value is null (nothing is yielded) only when
+    that next non-blank, non-comment line is not deeper than the key, or the text ends. Unsupported
+    (cannot-evaluate, never a silent null): a comment line between an empty `run:` and a deeper value
+    line, a next-line block header with no content deeper than the key, block content at or above that
+    header's column, a comment line inside that block before its content, any other value starting with
+    `|` or `>` (on the key line or the deeper line), a value opening with a node property or alias, and
+    a plain scalar continued onto a further deeper-indented line (YAML folds it into the command, so a
+    launcher there would otherwise go unread). Only `run:` payloads are yielded, so `uses:`/`with:`
+    lines (setup-python and the like) are never scanned."""
     lines = text.splitlines()
     out, unsupported = [], []
     i, n = 0, len(lines)
@@ -476,30 +484,63 @@ def _yaml_run_lines(text):
         val = (m.group("val") or "").strip()
         key_indent = len(m.group("indent"))
         if not val:
-            # An empty same-line value: YAML reads the run: value from the following deeper-indented
-            # line (a plain scalar or a block whose header sits on that line). Read it under the same
-            # grammar as a same-line value; a next line at the key column or shallower is a null scalar
-            # with no command text, so there is nothing to scan and nothing to skip.
+            # An empty same-line value: YAML reads the run: value from a following deeper-indented
+            # line. FAIL-CLOSED BOUNDS: the value is read ONLY in the two shapes proven against
+            # PyYAML (a next-line plain scalar; a next-line block header whose content is deeper
+            # than both the header and the key, the content run bounded by the key column). The
+            # null decision skips comment lines (a YAML comment carries no value): the value is
+            # null ONLY when the next non-blank, NON-COMMENT line is not deeper than the key, or
+            # the text ends. Any other arrangement (a comment line before a deeper value, a header
+            # with no content deeper than the key, block content at or above the header's column,
+            # a comment line inside the block before its content) is a cannot-evaluate, never a
+            # silent null and never a partial read.
             j = i + 1
-            while j < n and lines[j].strip() == "":
+            saw_comment = False
+            while j < n and (lines[j].strip() == "" or lines[j].lstrip().startswith("#")):
+                if lines[j].strip():
+                    saw_comment = True
                 j += 1
             if j >= n:
                 i += 1
                 continue
             nxt = lines[j]
             nxt_indent = len(nxt) - len(nxt.lstrip(" "))
-            if nxt_indent <= m.start("key") or nxt.lstrip().startswith("#"):
+            if nxt_indent <= m.start("key"):
                 i += 1
+                continue
+            if saw_comment:
+                unsupported.append((j + 1, "run: value on the line after an empty run: follows a "
+                                          "comment line, outside the supported line grammar"))
+                i = j + 1
                 continue
             nval = nxt.strip()
             if BLOCK_HEADER_RE.match(nval):
                 k = j + 1
+                while k < n and lines[k].strip() == "":
+                    k += 1
+                if k >= n or len(lines[k]) - len(lines[k].lstrip(" ")) <= m.start("key"):
+                    unsupported.append((j + 1, "block header on the line after an empty run: has no "
+                                              "content deeper than the key, outside the supported "
+                                              "line grammar"))
+                    i = j + 1
+                    continue
+                if lines[k].lstrip().startswith("#"):
+                    unsupported.append((k + 1, "comment line inside the block after an empty run: "
+                                              "before its content, outside the supported line "
+                                              "grammar"))
+                    i = j + 1
+                    continue
+                if len(lines[k]) - len(lines[k].lstrip(" ")) <= nxt_indent:
+                    unsupported.append((k + 1, "block content after an empty run: is not deeper than "
+                                              "its header, outside the supported line grammar"))
+                    i = j + 1
+                    continue
                 while k < n:
                     content = lines[k]
                     if content.strip() == "":
                         k += 1
                         continue
-                    if len(content) - len(content.lstrip(" ")) <= nxt_indent:
+                    if len(content) - len(content.lstrip(" ")) <= m.start("key"):
                         break
                     out.append((k + 1, content))
                     k += 1
@@ -865,12 +906,17 @@ def main():
 #      deeper-indented line are cannot-evaluate (exit 2), while a sibling key at the run: key column after
 #      an inline scalar stays clean (exit 0),
 #  36. every *.yml workflow candidate is classified with a no-follow, error-preserving probe: a
-#      dangling, looping or resolvable symlink (none followed), a directory, and an injected
+#      dangling, looping or resolvable symlink (none followed; a readable, CLEAN target included, the
+#      vector that discriminates no-follow on a non-root runner), a directory, and an injected
 #      non-regular mode are each a named cannot-evaluate (exit 2),
-#  37. an empty run: value followed by a deeper line is read, never skipped: the plain-scalar and
-#      block forms carry a bare launcher (exit 1) or an isolated one (exit 0); an anchored value, a
-#      malformed header and a further continuation on the next line are cannot-evaluate (exit 2); a
-#      null run: (next line not deeper) carries no command text (exit 0).
+#  37. an empty run: value is read ONLY in the two proven shapes (a next-line plain scalar; a
+#      next-line block header whose content is deeper than both the header and the key): each carries
+#      a bare launcher (exit 1) or an isolated one (exit 0); an anchored value, a malformed header, a
+#      further continuation, a comment line before a deeper value, a header with no content deeper
+#      than the key or with content at or above its own column, and a comment inside the block before
+#      its content are cannot-evaluate (exit 2); a null run: (next non-blank, non-comment line not
+#      deeper than the key) carries no command text (exit 0), a comment line alone never making it
+#      one.
 
 SCRIPT = "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py"
 
@@ -1384,6 +1430,8 @@ def self_test_main():
 
         # 36. Every *.yml workflow candidate is classified with a no-follow, error-preserving probe: a
         #     dangling symlink, a looping symlink, a symlink to a regular (even unreadable) target, a
+        #     symlink to a READABLE and CLEAN target (the vector that discriminates the no-follow rule
+        #     on a non-root runner: a probe that follows it scans the clean target and passes), a
         #     directory, and an injected non-regular mode are each a named cannot-evaluate (exit 2);
         #     case 2's regular file is the positive control. Before this rule each was a silent pass.
         wf_extra = Path(".github") / "workflows" / "extra.yml"
@@ -1408,6 +1456,15 @@ def self_test_main():
         if rc != 2:
             failures.append("a workflow symlink to a regular target expected exit 2 (no-follow), even "
                             "when the target is unreadable and holds a bare launcher")
+        linked_clean_wf = _build(tmp / "wf-linked-clean")
+        clean_target = linked_clean_wf / "clean-target.yml"
+        clean_target.write_text("name: Q\njobs:\n  q:\n    steps:\n"
+                                "      - run: python3 -I -B tools/alpha.py\n", encoding="utf-8")
+        os.symlink(str(clean_target), str(linked_clean_wf / wf_extra))
+        if run_quiet(linked_clean_wf) != 2:
+            failures.append("a workflow symlink to a READABLE, clean regular target expected exit 2 "
+                            "(no-follow): a probe that follows the link scans the clean target and "
+                            "passes, so this vector discriminates the rule on a non-root runner")
         dir_wf = _build(tmp / "wf-dir")
         (dir_wf / ".github" / "workflows" / "sub.yml").mkdir()
         if run_quiet(dir_wf) != 2:
@@ -1427,12 +1484,16 @@ def self_test_main():
         if rc != 2:
             failures.append("a non-regular workflow candidate (injected FIFO mode) expected exit 2")
 
-        # 37. An empty run: value followed by a deeper line is read, never skipped: a plain scalar on
-        #     the next line (P3) and a block header on the next line (P4) carry a bare launcher (exit 1)
-        #     with their isolated forms passing (exit 0); an anchored next-line value, a malformed
-        #     next-line header, and a further-continued next-line scalar are cannot-evaluate (exit 2);
-        #     an empty run: whose next line is a sibling key is a null value with no command text
-        #     (exit 0). Each bare form passed unread before this rule.
+        # 37. An empty run: value is read ONLY in the two proven shapes, else cannot-evaluate: a plain
+        #     scalar on the next line (P3) and a block header on the next line with deeper content (P4)
+        #     carry a bare launcher (exit 1) with their isolated forms passing (exit 0); an anchored
+        #     next-line value, a malformed next-line header, a further-continued next-line scalar, a
+        #     comment line before a deeper value, a header whose content sits at or above the header's
+        #     own column or not deeper than the key, and a comment inside the block before its content
+        #     are each cannot-evaluate (exit 2); an empty run: whose next non-blank, NON-COMMENT line
+        #     is not deeper than the key is a null value with no command text (exit 0), a comment line
+        #     alone never making it one. The bare forms passed unread, and the exit-2 arrangements
+        #     passed as silent nulls or partial reads, before this rule.
         head = "name: Q\njobs:\n  q:\n    steps:\n      - run:\n"
         for label, tail, want in (
                 ("p3-bare", "          python3 tools/alpha.py\n", 1),
@@ -1442,6 +1503,13 @@ def self_test_main():
                 ("anchored", "          &a python3 tools/alpha.py\n", 2),
                 ("bad-header", "          |0\n            python3 tools/alpha.py\n", 2),
                 ("continued", "          echo a &&\n          python3 tools/alpha.py\n", 2),
+                ("comment-first", "          # setup\n          python3 tools/alpha.py\n", 2),
+                ("comment-in-block",
+                 "          |\n          # x\n            python3 tools/alpha.py\n", 2),
+                ("header-equal-content", "          |\n          python3 tools/alpha.py\n", 2),
+                ("header-deeper-than-content", "            |\n          python3 tools/alpha.py\n", 2),
+                ("header-no-content", "          |\n        shell: bash\n", 2),
+                ("comment-then-null", "          # note\n        shell: bash\n", 0),
                 ("null-value", "        shell: bash\n", 0)):
             if run_quiet(_build(tmp / ("empty-run-" + label), workflow=head + tail)) != want:
                 failures.append("an empty run: followed by the {} form expected exit {}".format(
@@ -1508,8 +1576,12 @@ def self_test_main():
           "while the sanctioned sys.path.append form is clean (exit 0) and a missing required QA source "
           "fails closed (exit 2); a run: block header in the full block-header grammar (a trailing "
           "comment, an indentation digit, a chomping indicator in either order) is read as a block; an "
-          "empty run: whose next line is deeper is read as that block or plain scalar (a bare launcher "
-          "there fails, an isolated one passes) while a null run: stays clean; any other run: value "
+          "empty run: is read only in the two proven shapes (a next-line plain scalar, or a next-line "
+          "block header with content deeper than both the header and the key; a bare launcher there "
+          "fails, an isolated one passes) while a null run: (next non-blank, non-comment line not "
+          "deeper than the key) stays clean; a comment line before a deeper value, a header without "
+          "content deeper than the key or with content at or above its own column, and a comment "
+          "inside the block before its content are cannot-evaluate (exit 2); any other run: value "
           "starting with | or > on either line, a node property or alias, and a further-continued plain "
           "scalar are cannot-evaluate (exit 2); every *.yml workflow candidate that is not a regular "
           "file (a symlink of any kind, a directory, or another non-regular entry) is a named "

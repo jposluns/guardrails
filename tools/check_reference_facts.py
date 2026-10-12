@@ -12,12 +12,16 @@ generator alone cannot assert:
     RELATION/RELATION_PROSE/STATUS_PILL/STATUS_DESC and the currency POLICY);
   - the deferred-frameworks negative check (no vendored framework is still listed "Not yet vendored"):
     every occurrence of the phrase in .aiqt/standards/README.md is read, matched case-insensitively with
-    its words joined by any mix of whitespace, line wraps, hyphens or blockquote markers; the block read
-    follows the Markdown structure of the line the phrase starts on (a GFM table row with outer pipes
-    optional on any row, the whole table when the phrase is in the header row, an ATX heading's whole
-    section to the next heading of the same or a higher level, the whole surrounding list even when
-    loose or nested, else the whole blank-line-delimited paragraph, before the phrase as well as after
-    it), and each manifest name is matched case-insensitively with whitespace runs collapsed;
+    its words joined by any mix of whitespace, line wraps, hyphens, inline emphasis or strikethrough
+    markers, or blockquote markers; the checked region is the WHOLE SECTION the phrase occurs in (from
+    the nearest preceding ATX heading, or the top of the file, to the next heading of the same or a
+    higher level), with headings found fence-aware (a '#' line inside an open ``` or ~~~ fence is
+    content, not a heading) and an unterminated fence failing closed (exit 2, naming the file and the
+    fence's opening line), and each manifest name is matched case-insensitively with whitespace runs
+    collapsed, anywhere in that region; a table with pipe-free rows, a lazy list continuation, a
+    blockquoted list and an emphasis-split phrase are inside the region by construction, at the
+    disclosed cost of OVER-REFUSAL (a vendored name mentioned anywhere else in the same section is a
+    finding too);
   - the subset-denominator invariant, checked structure-aware wherever the coverage of a curated-subset
     manifest is rendered: the registry row (name and coverage in one <tr>), the reverse view (name in a
     <summary>, coverage in a later <p> of the same <details>), AND the machine-readable JSON export (a
@@ -64,10 +68,12 @@ FAMILY_ALIAS = {"OWASP Foundation": "OWASP", "NIST": "NIST", "MITRE": "MITRE ATL
                 "ISO/IEC": "ISO/IEC", "Cloud Security Alliance": "CSA"}
 
 PAREN = re.compile(r"frameworks \(([^)]*)\)")
-DEFERRED = re.compile(r"not[\s-]+yet[\s-]+vendored", re.I)
-TABLE_DELIMITER = re.compile(r"^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?\s*$")
+# The deferred phrase, its words joined by whitespace, line wraps, hyphens, or the inline emphasis or
+# strikethrough markers (*, _, ~), so "Not *yet* vendored" and "Not-yet-vendored" both match.
+DEFERRED = re.compile(r"not[\s*_~-]+yet[\s*_~-]+vendored", re.I)
 HEADING = re.compile(r"^ {0,3}(#{1,6})(?:\s|$)")
-LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d{1,9}[.)])\s")
+# A fenced-code-block fence (CommonMark: three or more backticks or tildes, up to 3 spaces of indent).
+FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 BLOCKQUOTE = re.compile(r"^ {0,3}> ?")
 N_OF_M = re.compile(r"\b\d+ of \d+\b")
 
@@ -162,109 +168,62 @@ def _unquoted_lines(text):
     return out
 
 
-def _table_extent(lines, i):
-    """(first, last, is_table) for the contiguous run of pipe-carrying lines around line i. The run is
-    a GFM table only when its second line is a delimiter row; outer pipes are optional on every row, so
-    the run is keyed on carrying a pipe at all, not on starting with one."""
-    if "|" not in lines[i]:
-        return i, i, False
-    first = i
-    while first > 0 and "|" in lines[first - 1]:
-        first -= 1
-    last = i
-    while last + 1 < len(lines) and "|" in lines[last + 1]:
-        last += 1
-    is_table = first < last and bool(TABLE_DELIMITER.match(lines[first + 1]))
-    return first, last, is_table
-
-
-def _list_extent(lines, i):
-    """(first, last) for the whole list around the list-item line i: list-item lines, their indented
-    continuation lines, and the blank lines INSIDE a loose list, in both directions. The list ends at a
-    blank line followed by a non-list line, at a flush non-list line, or at the text's edge."""
-    def in_list(k):
-        return bool(lines[k].strip()) and (LIST_ITEM.match(lines[k]) is not None
-                                           or lines[k][:1] in (" ", "\t"))
-    first = i
-    while first > 0:
-        k = first - 1
-        if lines[k].strip():
-            if in_list(k):
-                first = k
-                continue
-            break
-        j = k
-        while j > 0 and not lines[j - 1].strip():
-            j -= 1
-        if j > 0 and in_list(j - 1):
-            first = j - 1
+def _heading_levels(lines, where):
+    """{line_index: level} for every ATX heading, FENCE-AWARE: a '#' line inside an open ``` or ~~~
+    fenced code block is content, not a heading (so a fenced example cannot end a section early). A
+    fence closes only on a line holding at least as many of the same fence character and nothing else;
+    a fence still open at the end of the text means the section reader cannot bound a section through
+    it, so this raises OSError naming the file and the fence's opening line (exit 2 via run(),
+    fail-closed, never a partial read)."""
+    headings = {}
+    fence_char, fence_len, fence_line = None, 0, 0
+    for k, line in enumerate(lines):
+        fm = FENCE.match(line)
+        if fence_char is not None:
+            if (fm and fm.group(1)[0] == fence_char and len(fm.group(1)) >= fence_len
+                    and not line.strip().strip(fence_char)):
+                fence_char = None
             continue
-        break
-    last = i
-    n = len(lines)
-    while last + 1 < n:
-        k = last + 1
-        if lines[k].strip():
-            if in_list(k):
-                last = k
-                continue
-            break
-        j = k
-        while j + 1 < n and not lines[j + 1].strip():
-            j += 1
-        if j + 1 < n and in_list(j + 1):
-            last = j + 1
+        if fm:
+            fence_char, fence_len, fence_line = fm.group(1)[0], len(fm.group(1)), k + 1
             continue
-        break
-    return first, last
+        hm = HEADING.match(line)
+        if hm:
+            headings[k] = len(hm.group(1))
+    if fence_char is not None:
+        raise OSError("{}: unterminated code fence opened at line {}; cannot bound the section "
+                      "(fail-closed)".format(where, fence_line))
+    return headings
 
 
-def deferred_blocks(text):
-    """Yield (line_number, block) for every occurrence of the deferred phrase (case-insensitive, its
-    words joined by any run of whitespace, line wraps, hyphens or blockquote markers; blockquote markers
-    are stripped per line before matching). The block read follows the Markdown structure of the line
-    the phrase starts on:
-      - a GFM table (a contiguous run of pipe-carrying lines whose second line is a delimiter row; outer
-        pipes optional on every row): the phrase's own row, or the WHOLE table when the phrase is in the
-        header row, since that column then marks every row (a header-row phrase is read even when no row
-        is deferred, deliberately erring toward a finding);
-      - an ATX heading: the heading's whole section, to the next heading of the same or a higher level;
-      - a list item: the whole surrounding list, loose or nested, blank lines inside it included;
-      - anything else: the whole blank-line-delimited paragraph.
-    Every occurrence is read, not only the first, and the block holds the text before the phrase as
-    well as after it."""
+def deferred_sections(text, where):
+    """Yield (line_number, section) for every occurrence of the deferred phrase (case-insensitive, its
+    words joined by any run of whitespace, line wraps, hyphens, inline emphasis/strikethrough markers
+    or blockquote markers; blockquote markers are stripped per line before matching). The section is
+    the WHOLE region from the nearest preceding ATX heading (or the top of the text) to the next
+    heading of the same or a higher level (or any heading, for the pre-heading preamble), headings
+    found fence-aware by _heading_levels. No finer Markdown block model is applied, so a table with
+    pipe-free rows, a lazy list continuation, a blockquoted list and an emphasis-split phrase all sit
+    inside the checked region by construction. The DISCLOSED COST is over-refusal: a vendored name
+    mentioned anywhere else in the same section is read too."""
     lines = _unquoted_lines(text)
-    text = "\n".join(lines)
+    headings = _heading_levels(lines, where)
+    joined = "\n".join(lines)
     starts, pos = [], 0
     for line in lines:
         starts.append(pos)
         pos += len(line) + 1
-    for m in DEFERRED.finditer(text):
+    for m in DEFERRED.finditer(joined):
         i = max(k for k, start in enumerate(starts) if start <= m.start())
-        first, last, is_table = _table_extent(lines, i)
-        if is_table:
-            block = lines[first:last + 1] if i == first else [lines[i]]
-        elif HEADING.match(lines[i]):
-            level = len(HEADING.match(lines[i]).group(1))
-            last = i
-            while last + 1 < len(lines):
-                nxt = HEADING.match(lines[last + 1])
-                if nxt and len(nxt.group(1)) <= level:
-                    break
-                last += 1
-            block = lines[i:last + 1]
-        elif LIST_ITEM.match(lines[i]):
-            first, last = _list_extent(lines, i)
-            block = lines[first:last + 1]
+        preceding = [k for k in headings if k <= i]
+        if preceding:
+            first = max(preceding)
+            level = headings[first]
+            end = min((k for k in headings if k > i and headings[k] <= level), default=len(lines))
         else:
-            first = i
-            while first > 0 and lines[first - 1].strip():
-                first -= 1
-            last = i
-            while last + 1 < len(lines) and lines[last + 1].strip():
-                last += 1
-            block = lines[first:last + 1]
-        yield i + 1, "\n".join(block)
+            first = 0
+            end = min((k for k in headings if k > i), default=len(lines))
+        yield i + 1, "\n".join(lines[first:end])
 
 
 def _folded(s):
@@ -273,7 +232,7 @@ def _folded(s):
 
 def check_deferred(root, manifests, findings):
     text = _read(root / ".aiqt" / "standards" / "README.md")
-    for lineno, block in deferred_blocks(text):
+    for lineno, block in deferred_sections(text, "standards README"):
         folded = _folded(block)
         for man in manifests.values():
             if _folded(man.name) in folded:
@@ -403,9 +362,16 @@ def main():
 #  6k-6p. the Markdown structures the pipe-led row read missed, each -> finding: a table body row
 #      without outer pipes, a table delimiter row without outer pipes, an ATX heading whose section
 #      lists the name, a blockquote-wrapped phrase, a loose list under the phrase item, and a
-#      hyphenated phrase; and
-#  6g. a vendored name in a paragraph without the phrase, and 6q. one after the next same-level
-#      heading, stay clean (the read is scoped to the block),
+#      hyphenated phrase;
+#  6r-6z, 6za, 6zb. the structures a per-block read still missed, each -> finding by the whole-section
+#      read: a table body row with no pipe at all, a pipe-free row under a pipe-light header
+#      (two-column and one-column), a lazy list continuation (plain, name-splitting, and blockquoted),
+#      an emphasis-split phrase, a lazy continuation above a nested list, a phrase on a list
+#      continuation line, a heading section holding a '#' line inside a fence (which must not end the
+#      section), and the disclosed over-refusal (a vendored name elsewhere in the same section,
+#      outside any deferred block, is a finding too); and
+#  6g. a vendored name in a section without the phrase, and 6q. one after the next same-level
+#      heading, stay clean (the read is scoped to the section),
 #   7. a subset manifest rendered "3 of 3" in the fixture registry row -> finding (the CWE regression),
 #   8. a missing site/mappings.html -> exit 2 (fail-closed, not a skip),
 #   9. an unreadable standards dir (chmod 0, or an injected permission failure where chmod cannot
@@ -416,7 +382,9 @@ def main():
 #  12. a subset reverse-view <p> coverage mutated to "N of M" -> finding (the structure-aware case: the
 #      name is in the <summary>, the denominator in a later <p>, so a same-line scan would miss it),
 #  13. a subset framework carrying ids_total in the JSON export -> finding (the export invariant),
-#  14. a missing site/downloads/mappings.json -> exit 2 (fail-closed, not a skip).
+#  14. a missing site/downloads/mappings.json -> exit 2 (fail-closed, not a skip),
+#  15. an unterminated code fence in the README -> exit 2 (the section reader cannot bound a section
+#      through it, fail-closed).
 # (1, 7, 12, 13 are the invariant-bearing cases; the rest complete the fail-closed contract.)
 
 _MANIFEST = (
@@ -620,17 +588,44 @@ def self_test_main():
                 ("6o loose list under the phrase item", _README.replace(prose, (
                     "- Not yet vendored:\n\n  - Fixture Full Framework\n"))),
                 ("6p hyphenated phrase", _README.replace(prose, (
-                    "Not-yet-vendored: Fixture Full Framework.\n")))):
+                    "Not-yet-vendored: Fixture Full Framework.\n"))),
+                ("6r table body row with no pipe at all", _README.replace(prose, (
+                    "| Not yet vendored | Reason |\n| --- | --- |\n| Google SAIF | none |\n"
+                    "Fixture Full Framework\n"))),
+                ("6s pipe-free row under a pipe-light header", _README.replace(prose, (
+                    "Not yet vendored | Reason\n--- | ---\nFixture Full Framework\n"))),
+                ("6t pipe-free row under a one-column header", _README.replace(prose, (
+                    "Not yet vendored |\n--- |\nFixture Full Framework\n"))),
+                ("6u lazy list continuation", _README.replace(prose, (
+                    "- Not yet vendored: Google SAIF and\nFixture Full Framework.\n"))),
+                ("6v name split across a lazy continuation", _README.replace(prose, (
+                    "- Not yet vendored: Google SAIF and Fixture Full\nFramework.\n"))),
+                ("6w blockquoted lazy list continuation", _README.replace(prose, (
+                    "> - Not yet vendored: Google SAIF and\n> Fixture Full Framework.\n"))),
+                ("6x emphasis-split phrase", _README.replace(prose, (
+                    "Not *yet* vendored: Fixture Full Framework.\n"))),
+                ("6y lazy continuation above a nested list", _README.replace(prose, (
+                    "- Not yet vendored:\ncontinued explanation\n\n  - Fixture Full Framework\n"))),
+                ("6z phrase on a list continuation line", _README.replace(prose, (
+                    "- Status:\n  Not yet vendored:\n\n  - Fixture Full Framework\n"))),
+                ("6za fenced '#' line not ending the heading section", _README.replace(prose, (
+                    "### Not yet vendored\n\n```text\n# example\n```\n\n"
+                    "- Fixture Full Framework\n"))),
+                ("6zb disclosed over-refusal (a name elsewhere in the same section)",
+                 _README + "\nFixture Full Framework is vendored and mapped.\n")):
             case = tmp / ("deferred-" + label.split()[0])
             _write_fixture(case, readme=readme)
             if run_quiet(case) != 1:
                 failures.append("a vendored name listed as not yet vendored ({}) expected exit 1".format(label))
 
-        # 6g. a vendored name in a paragraph that does not carry the phrase stays clean.
+        # 6g. a vendored name in a SECTION that does not carry the phrase stays clean (the section
+        #     read is bounded by headings; the same text without the heading is case 6zb's disclosed
+        #     over-refusal finding).
         scoped = tmp / "deferred-scoped"
-        _write_fixture(scoped, readme=_README + "\nFixture Full Framework is vendored and mapped.\n")
+        _write_fixture(scoped, readme=_README +
+                       "\n## Vendored\n\nFixture Full Framework is vendored and mapped.\n")
         if run_quiet(scoped) != 0:
-            failures.append("a vendored name outside any deferred row or paragraph expected exit 0")
+            failures.append("a vendored name in a section without the phrase expected exit 0")
 
         # 6q. a heading's section ends at the next heading of the same or a higher level: a vendored
         #     name after that boundary stays clean (the heading read is scoped, not greedy to the end).
@@ -738,6 +733,13 @@ def self_test_main():
         (nojson / "site" / "downloads" / "mappings.json").unlink()
         if run_quiet(nojson) != 2:
             failures.append("a missing mappings.json expected exit 2 (fail-closed)")
+
+        # 15. an unterminated code fence: the section reader cannot bound a section through it, so it
+        #     fails closed (exit 2), never a partial or truncated section read.
+        unfenced = tmp / "unfenced"
+        _write_fixture(unfenced, readme=_README + "\n```text\nnever closed\n")
+        if run_quiet(unfenced) != 2:
+            failures.append("an unterminated code fence expected exit 2 (fail-closed)")
     finally:
         if unreadable_std is not None:
             os.chmod(unreadable_std, 0o755)  # restore even on an unexpected early exit
@@ -748,15 +750,17 @@ def self_test_main():
         for failure in failures:
             print("  - " + failure)
         return 1
-    print("SELF-TEST PASS: a clean fixture and a vendored name outside a deferred block pass; a "
+    print("SELF-TEST PASS: a clean fixture and a vendored name in a section without the phrase pass; a "
           "meta/disclosure parenthetical mismatch, a schema-enum gap, a closed-set parity break, a vendored "
-          "name listed as not yet vendored (in a paragraph, a table row, a second paragraph, a case "
-          "variant, a wrapped phrase, a header-marked table, a table without outer pipes, a heading's "
-          "section, a blockquote, a loose list, a hyphenated phrase, a paragraph line before the phrase, a wrapped "
-          "name or a name in another case), a subset manifest rendered with an edition denominator in the registry row or the reverse-view <p>, and a subset "
-          "framework carrying ids_total in the JSON export each report a finding (exit 1); and a missing "
-          "page, a missing JSON export, an unreadable standards dir, a missing/invalid catalogue, and an "
-          "unaliased publisher all fail closed (exit 2)")
+          "name in the same section as the deferred phrase (a paragraph, a table row in any pipe form "
+          "with pipe-free rows included, a second paragraph, a case variant, a wrapped or emphasis-split "
+          "or hyphenated phrase, a header-marked table, a heading's section with a fenced '#' line not "
+          "ending it, a blockquote, a loose or lazily continued list, a name before the phrase, a wrapped "
+          "name, a name in another case, or a name elsewhere in the section: the disclosed over-refusal), "
+          "a subset manifest rendered with an edition denominator in the registry row or the reverse-view "
+          "<p>, and a subset framework carrying ids_total in the JSON export each report a finding (exit "
+          "1); and a missing page, a missing JSON export, an unreadable standards dir, an unterminated "
+          "code fence, a missing/invalid catalogue, and an unaliased publisher all fail closed (exit 2)")
     return 0
 
 
