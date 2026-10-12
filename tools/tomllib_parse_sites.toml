@@ -1,10 +1,14 @@
 # The tomllib parse-site table read by the tomllib leg of tools/check_python_floor.py (see its docstring).
-# A tomllib.load or tomllib.loads call that no handler in its own function covers for RecursionError,
-# MemoryError and ValueError (or a broader class) must have one row here: class CALLER names the function
-# in the same file whose handler covers the call, and class EXEMPT gives a reason from the closed
-# vocabulary test-code, self-emitted-bytes or already-validated. A form the scan cannot resolve (form
-# alias) is EXEMPT only. count is the number of unhandled calls or forms in that function; a row whose
-# function no longer holds one, or holds another number, fails the gate.
+# A tomllib.load or tomllib.loads call that is not HANDLED in its own function (per class, for each of
+# RecursionError, MemoryError and ValueError, the FIRST handler that would catch it must be readable and
+# must dispose of it without a possible re-raise) must have one row here: class CALLER names the function
+# in the same file whose handler covers the call (the callee is matched by its full qualified name), and
+# class EXEMPT gives a reason from the closed vocabulary test-code, self-emitted-bytes, already-validated
+# or valueerror-passthrough (call forms only; the scan verifies that the deciding handler's only re-raise
+# is the single statement of `if isinstance(<bound name>, ValueError): raise`, so nothing but the
+# ValueError family can escape to the callers the site's docstring binds). A form the scan cannot resolve
+# (form alias) is EXEMPT only. count is the number of unhandled calls or forms in that function; a row
+# whose function no longer holds one, or holds another number, fails the gate.
 
 format-version = 1
 
@@ -236,6 +240,17 @@ count = 1
 class = "EXEMPT"
 reason = "test-code"
 
+# the round-trip reparse of the bytes emit_checked itself just emitted; the cancellation and
+# decode-error clauses are hostile-tomllib seams the scan cannot read, and the ordered BaseException
+# backstop converts everything else to EmitError
+[[site]]
+path = "opf/tools/_opf_emit.py"
+function = "emit_checked"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "self-emitted-bytes"
+
 [[site]]
 path = "opf/tools/_opf_emit.py"
 function = "self_test"
@@ -259,6 +274,16 @@ form = "call"
 count = 1
 class = "EXEMPT"
 reason = "test-code"
+
+# only the ValueError family reaches the @_validation wrapper, which refuses it as MALFORMED;
+# RecursionError and MemoryError are mapped into it with the same detail
+[[site]]
+path = "opf/tools/_opf_init_p0.py"
+function = "_manifest"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "valueerror-passthrough"
 
 [[site]]
 path = "opf/tools/_opf_fuzz.py"
@@ -423,6 +448,24 @@ path = "opf/tools/_opf_pack_manifest.py"
 function = "self_test"
 form = "alias"
 count = 4
+class = "EXEMPT"
+reason = "test-code"
+
+# the self-test seam that rebinds tomllib._parser.parse_key to emulate the key-part cap
+[[site]]
+path = "opf/tools/_opf_store.py"
+function = "_StKeyPartCap.__enter__"
+form = "alias"
+count = 2
+class = "EXEMPT"
+reason = "test-code"
+
+# the seam's restore of tomllib._parser.parse_key
+[[site]]
+path = "opf/tools/_opf_store.py"
+function = "_StKeyPartCap.__exit__"
+form = "alias"
+count = 1
 class = "EXEMPT"
 reason = "test-code"
 
@@ -626,6 +669,15 @@ count = 1
 class = "EXEMPT"
 reason = "test-code"
 
+# fixture parses inside the isolated suite harness (its own try maps a harness exception to exit 2)
+[[site]]
+path = "opf/tools/check_opf_upgrade.py"
+function = "_suite_isolated"
+form = "call"
+count = 2
+class = "EXEMPT"
+reason = "test-code"
+
 [[site]]
 path = "opf/tools/check_opf_upgrade.py"
 function = "_suite_isolated.<genexpr>"
@@ -698,6 +750,16 @@ count = 2
 class = "EXEMPT"
 reason = "test-code"
 
+# callers fail closed on the ValueError family by contract; RecursionError and MemoryError are
+# mapped into it at the parse locus (F-TOML-BARE-VALUEERROR-CLASS)
+[[site]]
+path = "tools/_gen_common.py"
+function = "load_toml"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "valueerror-passthrough"
+
 [[site]]
 path = "tools/check_crosswalk.py"
 function = "self_test"
@@ -735,6 +797,15 @@ path = "tools/check_newtab.py"
 function = "_self_test"
 form = "call"
 count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+# the self-test seam that rebinds and restores tomllib._parser.parse_key (_key_part_capped)
+[[site]]
+path = "tools/check_python_floor.py"
+function = "_key_part_capped"
+form = "alias"
+count = 3
 class = "EXEMPT"
 reason = "test-code"
 
@@ -844,6 +915,16 @@ count = 2
 class = "EXEMPT"
 reason = "test-code"
 
+# build_outputs surfaces the ValueError family as exit 2 by contract; RecursionError and
+# MemoryError are mapped into it at the parse locus (F-TOML-BARE-VALUEERROR-CLASS)
+[[site]]
+path = "tools/gen_skill.py"
+function = "plugin_identity"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "valueerror-passthrough"
+
 [[site]]
 path = "tools/gen_skill.py"
 function = "self_test_main"
@@ -868,6 +949,16 @@ form = "alias"
 count = 5
 class = "EXEMPT"
 reason = "test-code"
+
+# the ValueError family passes unchanged to do_pin's handler by contract; RecursionError and
+# MemoryError become a fail-closed PinError at the parse locus (F-TOML-BARE-VALUEERROR-CLASS)
+[[site]]
+path = "tools/pin.py"
+function = "_read_release"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "valueerror-passthrough"
 
 [[site]]
 path = "tools/pin.py"

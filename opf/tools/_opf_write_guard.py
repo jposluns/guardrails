@@ -1025,7 +1025,12 @@ def lease_held_message(pfd, name, lease_rel, verb):
                 detail = "a present non-regular lease (held)"
             else:
                 raw = os.read(fd, 65536)
-                data = tomllib.loads(raw.decode("utf-8"))
+                try:
+                    data = tomllib.loads(raw.decode("utf-8"))
+                except (ValueError, RecursionError, MemoryError):
+                    # disposed at the parse (deep nesting, a many-part key, an over-long integer or
+                    # undecodable bytes keep the generic detail); the outer handler stays the backstop
+                    data = None
                 if isinstance(data, dict):
                     detail = "held by {!r} (operation {!r}, acquired_at {!r})".format(
                         data.get("holder"), data.get("operation"), data.get("acquired_at"))
@@ -1136,7 +1141,12 @@ def lease_holder_of(raw):
     if raw is None:
         return "absent or a non-regular entry"
     try:
-        data = tomllib.loads(raw.decode("utf-8"))
+        try:
+            data = tomllib.loads(raw.decode("utf-8"))
+        except (ValueError, RecursionError, MemoryError):
+            # disposed at the parse (deep nesting, a many-part key, an over-long integer or undecodable
+            # bytes fall through to the malformed-replacement text); the outer handler stays the backstop
+            data = None
         if isinstance(data, dict) and data.get("holder") is not None:
             return "holder {!r}".format(data.get("holder"))
     except Exception:  # noqa: BLE001  diagnostic only; an unreadable replacement still refuses above

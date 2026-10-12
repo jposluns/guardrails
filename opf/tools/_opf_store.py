@@ -743,7 +743,10 @@ _ST_LONG_KEY_TOML = "k" + ".k" * 1000 + " = 1\n"
 class _StKeyPartCap:
     """While held, tomllib refuses a key of more than 1000 parts with RecursionError (or the class given,
     MemoryError to emulate a many-part key under a memory limit): tomllib._parser.parse_key is rebound on
-    entry and restored on exit. Self-test only; a vector asserts the class, never this message."""
+    entry and restored on exit. The given class is injected even when the underlying parse_key refuses the
+    key first (an interpreter with its own cap, CPython 3.14.8 on, raises RecursionError inside it), so the
+    class a vector asserts never depends on the host. Self-test only; a vector asserts the class, never
+    this message."""
 
     def __init__(self, kind=RecursionError):
         self._kind = kind
@@ -753,7 +756,11 @@ class _StKeyPartCap:
         kind = self._kind
 
         def capped(src, pos):
-            pos, key = real(src, pos)
+            try:
+                pos, key = real(src, pos)
+            except (RecursionError, MemoryError):
+                # the interpreter's own key-part cap fired first; still inject the requested class
+                raise kind("emulated key-part cap") from None
             if len(key) > 1000:
                 raise kind("emulated key-part cap")
             return pos, key
@@ -3764,6 +3771,13 @@ def self_test():
             got_kind, got_text = recursion_refusal(text, capped)
             check("recursion-{}-names-both-causes".format(label),
                   got_kind == kind and got_text.startswith(rec_head))
+        # The emulation injects the class it is given even when an underlying key-part cap (here the
+        # emulation itself, standing in for a CPython 3.14.8 interpreter cap) refuses the key first with
+        # RecursionError: the memory vector must observe MemoryError, never the underlying class.
+        with _StKeyPartCap(RecursionError):
+            got_kind, got_text = recursion_refusal(_ST_LONG_KEY_TOML, MemoryError)
+        check("recursion-many-part-key-memory-independent-of-underlying-cap",
+              got_kind == "MemoryError" and got_text.startswith(rec_head))
 
     finally:
         shutil.rmtree(base, ignore_errors=True)
