@@ -5552,10 +5552,13 @@ def _watchdog_bound_faults(bounds, budgets):
 _WATCHDOG_FLAT_BUDGET = (
     "a flat declared budget not derived from the leg's permitted paths: the runtime ledger "
     "charges the registered waits each run actually makes, so a run whose realized charges "
-    "exceed the budget fails the leg (a loud FAIL or a kill at its bound), but nothing checks "
-    "the budget against any path's cost: a slower permitted path can exceed a budget that a "
-    "fast run fits within (the leg then fails on that run only), and a budget above what "
-    "every permitted path needs is not refused")
+    "exceed the budget fails the leg (a loud FAIL or a kill at its bound), but no check "
+    "compares the budget with a path's cost except one floor, for a leg that runs other "
+    "cases' modes in its own process (deadline-flips): it must carry at least the sum of "
+    "those modes' declared budgets (_watchdog_dispatch_faults), a floor blind to the leg's "
+    "own waits; so a slower permitted path can exceed a budget that a fast run fits within "
+    "(the leg then fails on that run only), and a budget above what every permitted path "
+    "needs is not refused")
 _WATCHDOG_UNDERIVED_LEGS = dict(
     [(leg, _WATCHDOG_FLAT_BUDGET) for leg in (
         "audit-ignore", "reaper", "nonce", "fixture-id", "status", "early-exit",
@@ -5578,15 +5581,78 @@ _WATCHDOG_CASE_PREFIXES = (("_watchdog_deadline_case", ""), ("_watchdog_safety_c
                            ("_watchdog_overlap_case", "overlap-"),
                            ("_watchdog_completion_case", "completion-"),
                            ("_watchdog_ledger_case", "ledger-"))
-# The case functions the regression runner launches that the dispatch scan
-# does NOT read, each with its reason: every other launched case function
-# must be one of _WATCHDOG_CASE_PREFIXES, or the scan refuses the runner.
+# The module functions the regression runner's launch sources name that the
+# dispatch scan does NOT read, each with its reason. The runner reads EVERY
+# launch source (each fixture's code: the entries, the ledger vectors and
+# blocked-isolation) for the opf.<name> functions it names, and each must be
+# one of _WATCHDOG_CASE_PREFIXES or carry an entry here, or the scan refuses
+# the runner.
 _WATCHDOG_UNSCANNED_CASES = {
     "_watchdog_launcher_case": (
         "runs a whole runner, or one shared launch, with every fixture launch patched to one "
         "exit-37 process, and is priced from those launches (nested_launches in the runner), "
         "not from a mode; it reaches the case functions through the runner it runs, so a "
-        "scanned case that spells its name is refused as a helper that can reach a case")}
+        "scanned case that spells its name is refused as a helper that can reach a case"),
+    "_watchdog_leg_entry": (
+        "the leg wrapper every entry launch calls: it runs the one function and arguments its "
+        "launch source passes it under that leg's declared budget and selects no mode itself, "
+        "so the case function named beside it is the one reconciled here"),
+    "_bootstrap": (
+        "imports the _opf_* helper modules and binds each to a module global: the process "
+        "setup blocked-isolation runs before its leg, running no case function"),
+    "_self_tests": (
+        "the self-test table blocked-isolation takes its leg from by the key "
+        "opf-watchdog-isolation (the timer-case isolation suite, priced in the runner as 31 "
+        "timer cases of one 180 s fixture call each), not a dispatched mode")}
+# The module routes: the identifiers through which code obtains a module object
+# or a module's namespace by name, or walks the import system to one, and so
+# reaches any function of this module, a case function included, without
+# spelling its name. They are this module's own names as an importer or a
+# bound name sees them (_WATCHDOG_MODULE_NAMES), the module table and the
+# import machinery that fills it (sys.modules, importlib, __import__, a module
+# spec or loader, runpy, pkgutil, zipimport, inspect.getmodule), and a module
+# namespace (globals(), a function's __globals__, a frame's f_globals).
+# _watchdog_dispatch_faults refuses each anywhere in a scanned case and counts
+# a top-level statement that spells one as able to reach a case.
+_WATCHDOG_MODULE_NAMES = ("opf", "__main__")
+_WATCHDOG_MODULE_ROUTES = _WATCHDOG_MODULE_NAMES + (
+    "modules", "importlib", "import_module", "__import__", "__spec__", "__loader__",
+    "meta_path", "path_hooks", "path_importer_cache", "find_spec", "find_module",
+    "load_module", "exec_module", "module_from_spec", "spec_from_file_location",
+    "spec_from_loader", "runpy", "run_path", "run_module", "pkgutil", "resolve_name",
+    "zipimport", "getmodule", "globals", "__globals__", "f_globals")
+# The only functions through which a scanned case reads the module table, each
+# with its reason: a gate's own def is exempt from the module-route reach seed
+# (and only from it), so a case may call it, and each must be bound exactly
+# once, by that def, or the scan refuses it.
+_WATCHDOG_MODULE_GATES = {
+    "_watchdog_module_loaded": (
+        "answers whether sys.modules holds a name with a bool, never a module object"),
+    "_watchdog_evict_cold_modules": (
+        "drops a FIXED set (ctypes, its submodules and array) from sys.modules and returns "
+        "a callable restoring them; it takes no name from its caller, so it never holds or "
+        "returns this module")}
+
+
+def _watchdog_module_loaded(name):
+    """Whether sys.modules holds `name` (one of _WATCHDOG_MODULE_GATES)."""
+    return name in sys.modules
+
+
+def _watchdog_evict_cold_modules():
+    """Drop ctypes, its submodules and array from sys.modules (the
+    guardian-preload leg's cold start) and return a callable that puts each
+    dropped module back unless a fresh import replaced it (one of
+    _WATCHDOG_MODULE_GATES)."""
+    popped = dict()
+    for name in list(sys.modules):
+        if name in ("ctypes", "array") or name.startswith("ctypes."):
+            popped[name] = sys.modules.pop(name)
+
+    def restore():
+        for name, module in popped.items():
+            sys.modules.setdefault(name, module)
+    return restore
 
 
 def _watchdog_derivation_faults(source, budgets, launched=(), exempt=None):
@@ -5674,61 +5740,107 @@ def _watchdog_derivation_faults(source, budgets, launched=(), exempt=None):
     return faults
 
 
-def _watchdog_dispatch_faults(budgets, module=None, cases=None):
+def _watchdog_dispatch_faults(budgets, module=None, cases=None, scanned=None):
     """Every case branch that runs another case's mode in its own process (the
     safety leg lost-cleanup runs the completion mode no-signal-echild) is priced
     from what it dispatches, read from `module` (the source text defining the
-    _WATCHDOG_CASE_PREFIXES functions; default this module's own): a branch
-    whose whole body is `return <case>(<mode>)` must carry exactly that mode's
-    budget, and any other dispatching branch at least the sum of its dispatched
-    modes' budgets (a floor only: its own waits, and a dispatched mode run under
-    a patched bound, may need more). The scan ATTRIBUTES only a direct call, by
-    name or attribute, to a case function with a constant string mode, made
-    once inside one `mode == ...` or `mode in (...)` branch; anywhere in a case
-    function it refuses, as a fault, everything else it can see that may
-    dispatch: (1) a case call it cannot attribute (a non-constant mode, a call
-    outside any mode test, or one inside a loop, comprehension, nested function
-    or lambda, which may run any number of times); (2) any other spelling of a
-    case function: its name or attribute read or bound anywhere but as the
-    callee of a call the scan handles (an alias, an argument such as one to
-    functools.partial, a container entry), or a string constant equal to its
-    name (a getattr, globals() or patch.object lookup); and (3) any spelling,
-    called or not, of a name that can REACH a case function: a top-level
-    definition, class or assignment in `module` whose statement spells a case
-    function or another such name in any of those ways, closed over the whole
-    module, so a call through a helper is refused, never priced. A case
-    function not bound exactly once at the top level, by its def, is a fault;
-    with `cases` (the case functions the runner launches) given, each must be
-    scanned or carry a reasoned _WATCHDOG_UNSCANNED_CASES entry, and each such
-    entry must name a launched one.
+    scanned case functions, `scanned` or by default _WATCHDOG_CASE_PREFIXES;
+    default this module's own): a branch whose whole body is `return
+    <case>(<mode>)` must carry exactly that mode's budget, and any other
+    dispatching branch at least the sum of its dispatched modes' budgets (a
+    floor only: its own waits, and a dispatched mode run under a patched bound,
+    may need more). The scan ATTRIBUTES only a direct call, by name or
+    attribute, to a case function with a constant string mode, made once inside
+    one `mode == ...` or `mode in (...)` branch. Everything else it can read
+    that may bind or obtain a case function it refuses, as a fault, anywhere in
+    a case function (its nested functions, classes and lambdas included). It
+    reads every identifier a node carries, from ALL of the node's fields (a
+    name, an attribute, an import name, module or alias, a def, class, argument
+    or keyword name, a global or nonlocal, an except or match capture), and
+    every string constant, whole and, when it is a dotted or colon-joined path
+    (a patch or resolve_name target), part by part, a module-name part excepted
+    ("opf.py" names a file). It refuses:
+    (1) a case call it cannot attribute (a non-constant mode, a call outside
+    any mode test, or one inside a loop, comprehension, nested function or
+    lambda, which may run any number of times);
+    (2) any other spelling of a case function: an alias, an import or import
+    alias (`from opf import <case> as <name>`, from any module), an argument
+    such as one to functools.partial, a container entry or keyword, or a
+    string naming it (a getattr, globals(), patch or patch.object lookup);
+    (3) any spelling of a module route (_WATCHDOG_MODULE_ROUTES): this
+    module's own name as an import, a bound name or a whole string, the module
+    table and the import machinery (sys.modules, importlib, __import__, a
+    module spec or loader, runpy, pkgutil, inspect.getmodule), or a module
+    namespace (globals(), __globals__, f_globals), each of which reaches every
+    function of this module, a case function included, by a name the scan
+    need not see; and
+    (4) any spelling, called or not, of a name that can REACH a case function:
+    a top-level definition, class, import or assignment in `module` whose
+    statement spells a case function, a module route or another such name in
+    any of those ways, closed over the whole module, so a call through a
+    helper is refused, never priced.
+    Rules (2) to (4) fail closed: they refuse a spelling, not a proven use, so
+    harmless spellings are refused too (a string "main" names the entry point,
+    which reaches the runner and so the cases; an unrelated attribute named
+    modules or globals is a route), and the case code avoids them rather than
+    the rules loosening: the cases rebind this module's constants through
+    `global` statements and read the module table only through the
+    _WATCHDOG_MODULE_GATES functions, whose defs alone are exempt from rule
+    (4)'s module-route seed (a gate that spells a case still reaches one). A
+    case function or a gate not bound exactly once at the top level, by its
+    def, is a fault. With `cases` (every module function a runner launch
+    source names) given, each must be scanned or carry a reasoned
+    _WATCHDOG_UNSCANNED_CASES entry, and each such entry must name a launched
+    one.
 
-    The remaining static-analysis boundary, exactly: the scan reads only names
-    spelled in `module`'s text, so it does not see a case function reached
-    through a name computed at run time (a getattr, vars(), sys.modules or
-    __globals__ lookup, or a key built from data: the case functions use these
-    on other names, so the forms cannot be refused outright), through code
-    compiled from a string (the case functions exec mutant sources), through a
-    callable or object from outside `module` (another module, or a value a
-    caller supplies), or through a rebinding made at run time by code outside
-    the case bodies (a global statement, setattr or patch.object). Returns the
-    faults."""
+    The remaining static-analysis boundary, exactly: the scan reads only the
+    identifiers and string constants written in `module`'s text, so it does
+    not see a case function reached (a) through a name assembled or decoded
+    at run time (concatenated or formatted text, bytes, data read from
+    elsewhere) and looked up on an object the code holds without a route:
+    another module (the cases read vars(emit)), sys (sys.modules under a
+    computed attribute name) or builtins (__import__ under a computed key);
+    the case functions make computed lookups on other names, so these forms
+    cannot be refused outright; (b) through code compiled from a string
+    (exec, eval, compile: the case functions exec mutant sources); (c)
+    through runtime state or an object that holds one: a frame's locals
+    (sys._getframe, inspect or a traceback; the leg entry's frame holds the
+    case function it runs), a closure cell or default argument, a bound
+    method's __self__, a mock's recorded calls, the garbage collector
+    (gc.get_objects, gc.get_referrers), or a library that resolves names
+    itself (pickle and other deserializers); (d) through a callable or
+    object from outside `module` (another module that holds this one or one
+    of its functions, or a value a caller supplies); or (e) through a
+    rebinding made at run time by code outside the case bodies (a global
+    statement, setattr or patch.object in other code). Returns the faults."""
     import ast
     import inspect
     import math
-    prefixes = dict(_WATCHDOG_CASE_PREFIXES)
+    import re
+    prefixes = dict(_WATCHDOG_CASE_PREFIXES if scanned is None else scanned)
+    gates = _WATCHDOG_MODULE_GATES
+    routes, module_names = set(_WATCHDOG_MODULE_ROUTES), set(_WATCHDOG_MODULE_NAMES)
+    dotted = re.compile(r"[A-Za-z_]\w*(?:[.:][A-Za-z_]\w*)+\Z")
+    route = object()  # the reach seed a module route plants in a statement
     if module is None:
         module = inspect.getsource(sys.modules[__name__])
     tree = ast.parse(module)
 
     def spelled(node):
-        # The name a node spells: a Name's id, an attribute, or a string constant.
-        if isinstance(node, ast.Name):
-            return node.id
-        if isinstance(node, ast.Attribute):
-            return node.attr
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            return node.value
-        return None
+        # Every identifier a node spells, from all of its fields: no
+        # identifier-bearing field is skipped. A string spells its value and,
+        # as a dotted or colon-joined path, each part but a module name.
+        if isinstance(node, ast.Constant):
+            if not isinstance(node.value, str):
+                return set()
+            parts = set(re.split("[.:]", node.value)) if dotted.match(node.value) else set()
+            return set([node.value]) | (parts - module_names)
+        names = set()
+        for _field, value in ast.iter_fields(node):
+            for item in value if isinstance(value, list) else [value]:
+                if isinstance(item, str):
+                    names.update(item.split("."))
+        return names
 
     def tested(test):
         if (not isinstance(test, ast.Compare) or not isinstance(test.left, ast.Name)
@@ -5753,7 +5865,8 @@ def _watchdog_dispatch_faults(budgets, module=None, cases=None):
 
     # Each top-level binding (a def or class, or any name a statement binds:
     # an assignment or import target, or a def, class or target inside a
-    # compound statement) and every name its statement spells.
+    # compound statement) and every name its statement spells, with the
+    # route seed when it spells a module route and is not a gate's own def.
     defs = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
     spells, bindings = {}, {}
     for statement in tree.body:
@@ -5767,11 +5880,16 @@ def _watchdog_dispatch_faults(budgets, module=None, cases=None):
                          for node in ast.walk(statement)
                          if isinstance(node, (ast.Import, ast.ImportFrom))
                          for alias in node.names)
-        names = set(spelled(node) for node in ast.walk(statement))
+        names = set()
+        for node in ast.walk(statement):
+            names.update(spelled(node))
+        if names & routes and not (isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
+                                   and statement.name in gates):
+            names.add(route)
         for name in bound:
             spells.setdefault(name, set()).update(names)
             bindings.setdefault(name, []).append(statement)
-    reaching, grew = set(prefixes), True
+    reaching, grew = set(prefixes) | set([route]), True
     while grew:
         grew = False
         for name, names in spells.items():
@@ -5781,6 +5899,12 @@ def _watchdog_dispatch_faults(budgets, module=None, cases=None):
     repeated = (ast.For, ast.AsyncFor, ast.While, ast.ListComp, ast.SetComp, ast.DictComp,
                 ast.GeneratorExp, ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
     faults, priced = [], {}
+    for gate in sorted(gates):
+        found = bindings.get(gate, [])
+        if (len(found) != 1 or not isinstance(found[0], (ast.FunctionDef, ast.AsyncFunctionDef))
+                or not isinstance(gates[gate], str) or not gates[gate].strip()):
+            faults.append("%s: a module gate bound %d time(s) at the module top level, want "
+                          "exactly its one def and a reason" % (gate, len(found)))
     for case in sorted(prefixes):
         found = bindings.get(case, [])
         if (len(found) != 1 or not isinstance(found[0], (ast.FunctionDef, ast.AsyncFunctionDef))
@@ -5816,19 +5940,31 @@ def _watchdog_dispatch_faults(budgets, module=None, cases=None):
                             (prefixes[callee(node)] + arg.value, id(node) in pure))
             stack.extend((child, modes, looped) for child in ast.iter_child_nodes(node))
         for node in ast.walk(definition):
-            name = spelled(node)
-            if name not in reaching or id(node) in handled:
+            if node is definition or id(node) in handled:
                 continue
-            where = "%s line %d" % (case, node.lineno)
-            if name not in prefixes:
-                faults.append("%s: spells %s, which can reach a case function, so the scan "
-                              "cannot attribute what it runs" % (where, name))
-            elif isinstance(node, ast.Constant):
-                faults.append("%s: names the case function %s in a string, a lookup by name "
-                              "the scan cannot attribute" % (where, name))
-            else:
-                faults.append("%s: reads the case function %s outside a direct call the scan "
-                              "attributes" % (where, name))
+            names = spelled(node)
+            where = "%s line %d" % (case, getattr(node, "lineno", definition.lineno))
+            if names & routes:
+                faults.append("%s: spells %s, a module route (it obtains a module object or "
+                              "namespace by name), so the scan cannot attribute the case "
+                              "functions it reaches" % (where, ", ".join(sorted(names & routes))))
+            for name in sorted(names & reaching):
+                if name not in prefixes:
+                    faults.append("%s: spells %s, which can reach a case function, so the scan "
+                                  "cannot attribute what it runs" % (where, name))
+                elif isinstance(node, ast.Constant):
+                    faults.append("%s: names the case function %s in a string, a lookup by name "
+                                  "the scan cannot attribute" % (where, name))
+                elif isinstance(node, (ast.Name, ast.Attribute)):
+                    faults.append("%s: reads the case function %s outside a direct call the scan "
+                                  "attributes" % (where, name))
+                elif isinstance(node, (ast.alias, ast.Import, ast.ImportFrom)):
+                    faults.append("%s: imports the case function %s, a binding the scan cannot "
+                                  "attribute" % (where, name))
+                else:
+                    faults.append("%s: binds or names the case function %s (ast.%s) outside a "
+                                  "direct call the scan attributes" % (
+                                      where, name, type(node).__name__))
     if cases is not None:
         for case in sorted(set(cases) - set(prefixes)):
             reason = _WATCHDOG_UNSCANNED_CASES.get(case)
@@ -7028,13 +7164,13 @@ def _watchdog_ledger_case(mode, budget):
             in_conversion.wait()
             return EXIT_OK
 
-        module = sys.modules[_watchdog_leg_entry.__module__]
-        saved = module._WATCHDOG_CLOSE_BOUND
-        module._WATCHDOG_CLOSE_BOUND = 0.2
+        global _WATCHDOG_CLOSE_BOUND  # this module's own, rebound with no module object
+        saved = _WATCHDOG_CLOSE_BOUND
+        _WATCHDOG_CLOSE_BOUND = 0.2
         try:
             result = _watchdog_leg_entry(budget, leg)
         finally:
-            module._WATCHDOG_CLOSE_BOUND = saved
+            _WATCHDOG_CLOSE_BOUND = saved
             release.release()
         worker.join()  # untimed; the late landing stays inert in the closed ledger
         return result if (handed and not errors) else 3
@@ -7374,14 +7510,14 @@ def _watchdog_ledger_case(mode, budget):
             time.sleep(0.05)  # never suppressed by a step whose call is over
             return outcome(state["raised"], True)
 
-        module = sys.modules[_watchdog_leg_entry.__module__]
-        saved_bound = module._WATCHDOG_CLOSE_BOUND
+        global _WATCHDOG_CLOSE_BOUND  # as in unlanded_charge: no module object
+        saved_bound = _WATCHDOG_CLOSE_BOUND
         saved = signal.signal(signal.SIGUSR1, handler)
-        module._WATCHDOG_CLOSE_BOUND = 0.2
+        _WATCHDOG_CLOSE_BOUND = 0.2
         try:
             return _watchdog_leg_entry(budget, leg)
         finally:
-            module._WATCHDOG_CLOSE_BOUND = saved_bound
+            _WATCHDOG_CLOSE_BOUND = saved_bound
             signal.signal(signal.SIGUSR1, saved)
 
     def fork_in_charge():
@@ -7931,6 +8067,11 @@ def _watchdog_completion_case(mode):
     from unittest.mock import patch
     import _opf_emit as emit
     import _optlevel
+    # The module globals two legs rebind and restore (deadline-flips: the
+    # execution bound; census-exception: the handoff-pair factory) are this
+    # module's own, rebound through this statement with no module object, a
+    # route _watchdog_dispatch_faults refuses in a case.
+    global _DEADLINE_EXECUTION_BOUND, _pidfd_handoff_pair
 
     # QA8 (codex blocker class) as narrowed by D-385-CURRENT-CHILD: arm
     # PR_SET_CHILD_SUBREAPER so a fixture orphan (its guardian dead and
@@ -8124,11 +8265,13 @@ def _watchdog_completion_case(mode):
         # window, not on the load-tolerant shared bound: pinning the bound
         # to the window keeps the mutant red under any load (load only
         # delays the retried send further; F-335-LOAD-FLAKE-PIPE-STALL).
-        import sys as sys_module
-        runner_module = sys_module.modules[__name__]
-        with patch.object(emit, "_fixture_signal", census_only), \
-                patch.object(runner_module, "_DEADLINE_EXECUTION_BOUND", 1.6):
-            assert _watchdog_deadline_case("transient-census") == EXIT_FINDING
+        saved_bound = _DEADLINE_EXECUTION_BOUND
+        _DEADLINE_EXECUTION_BOUND = 1.6
+        try:
+            with patch.object(emit, "_fixture_signal", census_only):
+                assert _watchdog_deadline_case("transient-census") == EXIT_FINDING
+        finally:
+            _DEADLINE_EXECUTION_BOUND = saved_bound
     elif mode == "subject-setup":
         real_subreaper, real_setsid = emit._fixture_subreaper, os.setsid
         in_guardian = [False]
@@ -8975,37 +9118,32 @@ def _watchdog_completion_case(mode):
         # QA19 F4: socket.send_fds/recv_fds cold-import array inside their own
         # bodies (importing socket alone does not load it), so the receipt path
         # needs array preloaded too.
-        def pop_cold():
-            popped = dict()
-            for name in list(sys.modules):
-                if name in ("ctypes", "array") or name.startswith("ctypes."):
-                    popped[name] = sys.modules.pop(name)
-            return popped
-
-        popped = pop_cold()
+        # The module table is read only through the _WATCHDOG_MODULE_GATES
+        # functions, never directly (a module route the dispatch scan refuses).
+        restore = _watchdog_evict_cold_modules()
         try:
             child = emit._FixtureProcess(time.monotonic() + 5, subject=lambda: None)
             try:
                 missing = [name for name in emit._FIXTURE_GUARDIAN_MODULES
-                           if name not in sys.modules]
+                           if not _watchdog_module_loaded(name)]
                 assert not missing, missing
-                assert "array" in sys.modules, \
+                assert _watchdog_module_loaded("array"), \
                     "the receipt path's send_fds/recv_fds array import stayed cold"
             finally:
                 child.close()
             # Flip: without the preload the guardian dependency set stays cold.
-            pop_cold()
+            _watchdog_evict_cold_modules()
             with patch.object(emit, "_fixture_preload", lambda: None):
                 flip_child = emit._FixtureProcess(time.monotonic() + 5,
                                                   subject=lambda: None)
                 try:
-                    assert "ctypes" not in sys.modules, "the flip still preloaded"
-                    assert "array" not in sys.modules, "the flip still preloaded array"
+                    assert not _watchdog_module_loaded("ctypes"), "the flip still preloaded"
+                    assert not _watchdog_module_loaded("array"), \
+                        "the flip still preloaded array"
                 finally:
                     flip_child.close()
         finally:
-            for name, module in popped.items():
-                sys.modules.setdefault(name, module)
+            restore()
     elif mode == "subject-receipt":
         import time
         caller = os.getpid()
@@ -12650,8 +12788,7 @@ def _watchdog_completion_case(mode):
         baseline = live_pidfds()
         with tempfile.TemporaryDirectory(prefix="opf-fdleak-") as directory:
             leak_release = os.pipe()
-            pair_globals = _pidfd_handoff_fork_send.__globals__
-            pair_globals["_pidfd_handoff_pair"] = holding_pair
+            _pidfd_handoff_pair = holding_pair
             forked = []
             real_fork, fork_owner = os.fork, os.getpid()
 
@@ -12667,7 +12804,7 @@ def _watchdog_completion_case(mode):
                     refuses(RuntimeError,
                             lambda: frozen_pair(Path(directory), leak_release))
             finally:
-                pair_globals["_pidfd_handoff_pair"] = real_pair
+                _pidfd_handoff_pair = real_pair
             assert held_pairs, "the holder saw no handoff pair"
             assert all(end.fileno() == -1
                        for pair in held_pairs for end in pair), (
@@ -12827,8 +12964,7 @@ def _watchdog_completion_case(mode):
         baseline = live_handoff_resources()
         with tempfile.TemporaryDirectory(prefix="opf-fdleak2-") as directory:
             leak_release = os.pipe()  # a pipe: outside the pidfd/socket census
-            pair_globals = _pidfd_handoff_fork_send.__globals__
-            pair_globals["_pidfd_handoff_pair"] = recording_pair
+            _pidfd_handoff_pair = recording_pair
             forked = []
             real_fork, fork_owner = os.fork, os.getpid()
 
@@ -12844,7 +12980,7 @@ def _watchdog_completion_case(mode):
                     refuses(RuntimeError,
                             lambda: frozen_pair(Path(directory), leak_release))
             finally:
-                pair_globals["_pidfd_handoff_pair"] = real_pair
+                _pidfd_handoff_pair = real_pair
             assert created_pairs, "the recorder saw no handoff pair"
             assert all(end.fileno() == -1
                        for pair in created_pairs for end in pair), (
@@ -19344,6 +19480,7 @@ def _watchdog_regression_self_test():
     import inspect
     import io
     import queue
+    import re
     import select
     import signal
     import subprocess
@@ -19660,7 +19797,8 @@ def _watchdog_regression_self_test():
     # and nothing else (an alias in _watchdog_safety_case), so it carries
     # that mode's derived budget; _watchdog_dispatch_faults prices each
     # dispatch it attributes (exactly for such an alias, as a floor
-    # otherwise) and refuses every other spelling of a case it can see.
+    # otherwise) and refuses every other route to a case it can read, within
+    # the boundary its docstring states.
     budgets["lost-cleanup"] = budgets["completion-no-signal-echild"]
     # The isolation matrix: 31 timer cases, each one 180 s fixture call.
     budgets["blocked-isolation"] = 31 * _deadline_case_budget(180)
@@ -20236,9 +20374,15 @@ def _watchdog_regression_self_test():
     # below the mode it runs, deadline-flips one second below the modes it
     # runs, and the alias dispatch moved into a loop; at the head of the
     # audit-ignore branch (away from that alias), the mode no-signal-echild
-    # dispatched through a local alias, a getattr lookup by name and a
-    # module-level helper; a case function bound twice at the top level; and
-    # a launched case function neither scanned nor exempted.
+    # dispatched through a local alias, a getattr lookup by name, a
+    # module-level helper, an import alias, a module-table lookup and an
+    # importlib import of this module (each under a computed name, so only
+    # the module-route rule can see it), a helper that returns the module
+    # object, a helper that imports the case under an alias, and the case
+    # named in a dotted target string; a case function bound twice at the
+    # top level; a module gate bound twice; a launched case function neither
+    # scanned nor exempted; and the ledger case, which only the ledger
+    # vectors' launch sources name, dropped from the scanned set.
     runner_source = inspect.getsource(_watchdog_regression_self_test)
     launched = set(live)
     # Assembled, never one literal, so each marker occurs once: in the comment.
@@ -20299,18 +20443,38 @@ def _watchdog_regression_self_test():
     looped_alias = ("        for _ in (1, 2):\n"
                     "            _watchdog_completion_case(\"no-signal-echild\")\n")
     module_source = inspect.getsource(sys.modules[__name__])
-    launched_cases = set(case for _label, case, _args in entries)
+    # Every module function a launch source names, read from each fixture's
+    # code (the entries, the ledger vectors and blocked-isolation alike).
+    launched_cases = set(name for _label, code, _timeout in cases
+                         for name in re.findall(r"\bopf\.(\w+)", code))
     # Indirect dispatches planted at the head of the audit-ignore branch, away
     # from the lost-cleanup alias, each hiding the mode no-signal-echild.
     branch_head = "    elif mode == \"audit-ignore\":\n"
+    computed = "\"_watchdog_\" + \"completion_case\""
     hidden_by = dict(
         alias=("        hidden = _watchdog_completion_case\n"
                "        return hidden(\"no-signal-echild\")\n"),
         getattr=("        return getattr(sys.modules[__name__], \"_watchdog_completion_case\")"
                  "(\"no-signal-echild\")\n"),
-        helper="        return _watchdog_hidden_dispatch()\n")
+        helper="        return _watchdog_hidden_dispatch()\n",
+        import_alias=("        from opf import _watchdog_completion_case as hidden\n"
+                      "        return hidden(\"no-signal-echild\")\n"),
+        module_lookup=("        return vars(sys.modules[__name__])[" + computed
+                       + "](\"no-signal-echild\")\n"),
+        importlib=("        import importlib\n"
+                   "        return getattr(importlib.import_module(\"opf\"), " + computed
+                   + ")(\"no-signal-echild\")\n"),
+        module_helper=("        return getattr(_watchdog_hidden_module(), " + computed
+                       + ")(\"no-signal-echild\")\n"),
+        import_helper="        return _watchdog_hidden_import()\n",
+        dotted="        return dict(target=\"opf._watchdog_completion_case\")\n")
     helper_def = ("\n\ndef _watchdog_hidden_dispatch():\n"
                   "    return _watchdog_completion_case(\"no-signal-echild\")\n")
+    module_helper_def = ("\n\ndef _watchdog_hidden_module():\n"
+                         "    return sys.modules[__name__]\n")
+    import_helper_def = ("\n\ndef _watchdog_hidden_import():\n"
+                         "    from opf import _watchdog_completion_case as run\n"
+                         "    return run(\"no-signal-echild\")\n")
 
     def hidden(how, extra=""):
         return module_source.replace(branch_head, branch_head + hidden_by[how]) + extra
@@ -20332,15 +20496,37 @@ def _watchdog_regression_self_test():
              "names the case function _watchdog_completion_case in a string"),
             ("dispatch through a module-level helper", budgets, hidden("helper", helper_def),
              launched_cases, "spells _watchdog_hidden_dispatch, which can reach a case function"),
+            ("dispatch through an import alias", budgets, hidden("import_alias"), launched_cases,
+             "imports the case function _watchdog_completion_case"),
+            ("dispatch through a module-table lookup", budgets, hidden("module_lookup"),
+             launched_cases, "spells modules, a module route"),
+            ("dispatch through an importlib import", budgets, hidden("importlib"),
+             launched_cases, "spells importlib, a module route"),
+            ("dispatch through a helper returning the module", budgets,
+             hidden("module_helper", module_helper_def), launched_cases,
+             "spells _watchdog_hidden_module, which can reach a case function"),
+            ("dispatch through a helper importing the case", budgets,
+             hidden("import_helper", import_helper_def), launched_cases,
+             "spells _watchdog_hidden_import, which can reach a case function"),
+            ("case named in a dotted target string", budgets, hidden("dotted"), launched_cases,
+             "names the case function _watchdog_completion_case in a string"),
             ("case function bound twice", budgets,
              module_source + "\n_watchdog_completion_case = _watchdog_safety_case\n",
              launched_cases, "_watchdog_completion_case: bound 2 time(s)"),
+            ("module gate bound twice", budgets,
+             module_source + "\n_watchdog_module_loaded = sys.modules.__contains__\n",
+             launched_cases, "_watchdog_module_loaded: a module gate bound 2 time(s)"),
             ("launched case neither scanned nor exempted", budgets, module_source,
              launched_cases | {"_watchdog_unlisted_case"},
              "_watchdog_unlisted_case: a case function the runner launches")):
         if needle not in "\n".join(_watchdog_dispatch_faults(flip_budgets, flip_module,
                                                              flip_cases)):
             flip_missed.append("dispatch flip not refused: " + flip)
+    unscanned_ledger = tuple(pair for pair in _WATCHDOG_CASE_PREFIXES
+                             if pair[0] != "_watchdog_ledger_case")
+    if "_watchdog_ledger_case: a case function the runner launches" not in "\n".join(
+            _watchdog_dispatch_faults(budgets, module_source, launched_cases, unscanned_ledger)):
+        flip_missed.append("dispatch flip not refused: ledger case dropped from the scan")
     if module_source.count(alias) != 1 or module_source.count(branch_head) != 1:
         flip_missed.append("dispatch flip anchors not found once in the module")
     floor = _watchdog_bound_faults(live, budgets)
