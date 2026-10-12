@@ -1330,9 +1330,8 @@ _DISPLAY_CONTAINERS = (dict, list, tuple, set, frozenset)       # exact types; a
 _DISPLAY_TIMES = (datetime.datetime, datetime.date, datetime.time)   # exact types, as tomllib builds them
 _DISPLAY_ATOM = re.compile(r"\\(?:x[0-9a-f]{2}|u[0-9a-f]{4}|U[0-9a-f]{8}|.)|.", re.DOTALL)
 _DISPLAY_ATOM_MAX = 10       # the longest _DISPLAY_ATOM: a backslash, U and eight hex digits
-_DISPLAY_END = object()      # the exhausted-iterator sentinel of _display_snapshot
 _DISPLAY_STOP = ("stop",)    # the _display_snapshot entry where the copy reached _DISPLAY_MAX_NODES values
-_DISPLAY_INT_CEILING = 10 ** _DISPLAY_MAX_CHARS          # the least int whose repr() is too wide
+_DISPLAY_INT_CEILING = 10 ** _DISPLAY_MAX_CHARS          # the least positive int whose repr() is too wide
 _DISPLAY_INT_FLOOR = -(10 ** (_DISPLAY_MAX_CHARS - 1))   # the greatest negative int whose repr() is too wide
 _TYPE_NAME = type.__dict__["__name__"]   # the getter of type itself, so a metaclass __name__ never runs
 
@@ -1460,25 +1459,31 @@ def _display_brackets(kind, size):
 
 def _display_snapshot(value):
     """One bounded private copy of `value`, taken before anything is rendered: _display_render reads only this
-    copy, so each member of a live container is read exactly once, and a member another thread replaces after
-    it was read is never rendered. An entry is ("leaf", v) for a supported scalar (_display_scalar_ok, so v
-    is immutable and stays supported); ("text", marker) for an unsupported value (its _display_unsupported
-    marker, built at once) or for a container _DISPLAY_MAX_DEPTH levels deep (a depth marker); ("box", kind,
-    members) for a container of an exact _DISPLAY_CONTAINERS type, members being a fresh list of the entries
-    of its members (a dict as key, value, key, value); and _DISPLAY_STOP where the copy reached
-    _DISPLAY_MAX_NODES values. The walk is depth first in rendering order, iterative, and steps through each
-    container with its built-in iterator, so it copies at most _DISPLAY_MAX_NODES values and holds at most
-    2 * _DISPLAY_MAX_DEPTH + 1 iterators whatever the size, depth or width of the input. It reads only exact
+    copy, so a member another thread replaces after it was read is never rendered. Each member is read once
+    for each occurrence the walk reaches: a container the value holds more than once (aliased, repeated, or
+    on a cycle) is read again at each occurrence, each read checked as it is made, so its occurrences can
+    differ when another thread changes it in between. An entry is ("leaf", v) for a supported scalar
+    (_display_scalar_ok, so v is immutable and stays supported); ("text", marker) for an unsupported value (its
+    _display_unsupported marker, built at once) or for a container _DISPLAY_MAX_DEPTH levels deep (a depth
+    marker); ("box", kind, members) for a container of an exact _DISPLAY_CONTAINERS type, members being a
+    fresh list of the entries of its members (a dict as key, value, key, value); and _DISPLAY_STOP where the
+    copy reached _DISPLAY_MAX_NODES values. The walk is depth first in rendering order, iterative, and steps
+    through each container with its built-in iterator, so it copies at most _DISPLAY_MAX_NODES values and holds
+    at most 2 * _DISPLAY_MAX_DEPTH + 1 iterators whatever the size, depth or width of the input. A frame ends
+    when its iterator raises StopIteration, never on a member compared with a marker, so any value supplied
+    as data, an object of this module included, is copied as a member like any other. It reads only exact
     built-in types (never len() of a live container), so no method a caller can define runs."""
     nodes = 0
     top = []
     frames = [(iter((value,)), top, 0, False)]   # (member iterator, entries copied, member depth, dict pairs)
     while frames:
         members, copied, depth, pairs = frames[-1]
-        item = next(members, _DISPLAY_END)
-        if item is _DISPLAY_END:
+        try:
+            item = next(members)
+        except StopIteration:
             frames.pop()
-        elif pairs:
+            continue
+        if pairs:
             frames.append((iter(item), copied, depth, False))   # a (key, value) pair from dict.items()
         else:
             nodes += 1
@@ -1560,8 +1565,11 @@ def _safe_display(value):
       3. No container is passed to repr() or str(). The renderer takes ONE bounded copy first
          (_display_snapshot: exact types only, at most _DISPLAY_MAX_NODES values and _DISPLAY_MAX_DEPTH
          container levels) and renders only that copy (_display_render), spelling each value as repr() does.
-         Each member of a live container is read exactly once, so a member another thread replaces after it
-         was read is never rendered, and no method a caller can define runs on the value.
+         A member another thread replaces after it was read is never rendered, and no method a caller can
+         define runs on the value. Each member is read once for each occurrence the copy reaches, so a
+         container the value holds more than once (aliased, repeated, or on a cycle) is read at each
+         occurrence, each read checked as it is made, and its occurrences can differ when another thread
+         changes it in between.
       4. A value whose members are all supported, whose containers nest at most _DISPLAY_MAX_DEPTH deep and
          hold at most _DISPLAY_MAX_NODES values in all, and whose repr() is at most _DISPLAY_MAX_CHARS
          characters renders as repr(value), byte for byte; that is the whole byte-identity guarantee. Any
@@ -1573,7 +1581,11 @@ def _safe_display(value):
       5. The result is at most _DISPLAY_MAX_CHARS + _DISPLAY_MARKER_MAX characters: content is cut on a whole
          escape at _DISPLAY_MAX_CHARS, and the marker after a cut is ...<truncated> (14 characters) or
          ...<str of N chars> (at most 37, N being a str length and so at most sys.maxsize). The work is
-         bounded by the _DISPLAY_ constants whatever the size, depth or width of the input.
+         bounded by the _DISPLAY_ constants whatever the size, depth or width of the input, with one
+         exception: a set or dict whose table deletions left sparse is scanned by its built-in iterator up to
+         the size the table reached, so stepping through its members takes time in proportion to that size,
+         not to the members left. A value tomllib builds holds no set and no table it deleted from, so a
+         parsed value cannot reach this.
       6. Residual: a MemoryError, a RuntimeError (another thread resizing a dict or set while it is copied) or
          a ValueError yields the fixed placeholder <unrenderable-value>; an asynchronous exception
          (KeyboardInterrupt, or one a signal handler raises) is not caught and propagates. A container another
@@ -3921,7 +3933,7 @@ def self_test():
             timeout_s=60) == "True|True|True")
         check("deeprender-store-control-roots-deep-homes-refused", run_bounded(_dr_path_helper(
             store_control_roots, "unknown homes generation: "), timeout_s=60) == "True|True|True")
-        # Round 3: a renderer reads each member of a live container exactly once, into one bounded private copy,
+        # Round 3: a renderer reads each live member once per occurrence, into one bounded private copy,
         # and renders only that copy. A profile hook stands in for another thread: it replaces a member at the
         # N-th profile event of one render, for every N an unmutated render reaches, so each interleaving at
         # event granularity is tried deterministically. Wherever the replacement lands, the member read is the
@@ -3977,10 +3989,22 @@ def self_test():
         check("deeprender-member-replaced-mid-render-never-rendered",
               all(_dr_race_sweep(f, make, put, allowed) for f in (_safe_display, _safe_str)
                   for make, put, allowed in _dr_cases))
+        # Round 4: another thread resizing a dict or set while it is copied makes its iterator raise RuntimeError,
+        # which both renderers turn into the fixed placeholder <unrenderable-value>. A profile hook grows a dict
+        # and a set at each profile event of one render, as above, so the result is the original, the grown
+        # value or the placeholder, and all three must occur. Red when RuntimeError is dropped from the except
+        # clause of either renderer: the RuntimeError escapes.
+        _dr_grown = ((lambda: {"k": 1}, lambda v: v.__setitem__("n", 2),
+                      (_dr_kq + "1}", _dr_kq + "1, " + _dr_q + "n" + _dr_q + ": 2}", "<unrenderable-value>")),
+                     (lambda: {1}, lambda v: v.add(2), ("{1}", "{1, 2}", "<unrenderable-value>")))
+        check("deeprender-resized-mid-copy-placeholder",
+              all(_dr_race_sweep(f, make, grow, allowed) for f in (_safe_display, _safe_str)
+                  for make, grow, allowed in _dr_grown))
         # Round 3: a type name is escaped, so a newline in it cannot forge a line, and since it can be a str
         # subclass of any length it is read only through the str slots: no method of the subclass runs and only
-        # _DISPLAY_NAME_MAX characters are copied. Red on the round-2 renderer, which copied a str-subclass name
-        # whole (about 1 MB traced for a 1,000,000-character name).
+        # _DISPLAY_NAME_MAX characters are copied. The copy check (deeprender-type-name-copy-bounded) is red on
+        # the round-2 renderer, which copied a str-subclass name whole (about 1 MB traced for a 1,000,000-character
+        # name); the escape check passes there and is red when the type name is not escaped.
 
         class _DrName(str):
             def __len__(self):
@@ -4101,6 +4125,57 @@ def self_test():
         _dr_expected = "ordinary operation target {}{}...<str of {} chars> overlaps the journal home".format(
             chr(39), _dr_target[:_DISPLAY_MAX_CHARS - 1], len(_dr_target))
         check("deeprender-ordinary-target-refusal-bounded", _dr_refusal == _dr_expected)
+        # Round 4: a frame of the copy ends when its iterator raises StopIteration, never on a member compared
+        # with a marker, so whatever object a value holds renders the same at the root, in a list, as a dict key
+        # and as a dict value. Each bare object() this module holds, a fresh one and the stop entry _DISPLAY_STOP
+        # are tried against their exact renderings, and every other value this module holds renders in a list
+        # and in a dict as it renders alone in a list, so a sentinel held here is caught whatever its type (a
+        # value too long to place with three more members is skipped). Red on the round-3 renderer, which ended
+        # a frame on a module sentinel (a bare object()): supplied as data, that sentinel raised IndexError at
+        # the root, ended a list or a dict early ([1] for [1, sentinel, 2, 3]) and, as a dict value, rendered the
+        # next key as its value.
+
+        def _dr_positions(render, obj, mark):
+            shown = []
+            for value in (obj, [1, obj, 2, 3], {obj: 1}, {"k": obj, "j": 2}):
+                try:
+                    shown.append(render(value))
+                except Exception as exc:  # noqa: BLE001  the round-3 escape: recorded, so the check fails
+                    shown.append(type(exc).__name__)
+            return shown == [mark, "[1, " + mark + ", 2, 3]", "{" + mark + ": 1}",
+                             _dr_kq + mark + ", " + _dr_q + "j" + _dr_q + ": 2}"]
+
+        def _dr_in_place(render, obj):
+            try:
+                inner = render([obj])[1:-1]
+                if len(inner) > 500 or "...<" in inner:
+                    return True   # too long to take three more members inside both bounds
+                try:
+                    keyed = {obj: 1}
+                except TypeError:   # an unhashable value is never a dict key
+                    keyed = None
+                return (render([1, obj, 2, 3]) == "[1, " + inner + ", 2, 3]"
+                        and render({"k": obj, "j": 2}) == _dr_kq + inner + ", " + _dr_q + "j" + _dr_q + ": 2}"
+                        and (keyed is None or render(keyed) == "{" + inner + ": 1}"))
+            except Exception:  # noqa: BLE001  an escape is recorded, so the check fails
+                return False
+        _dr_objects = [(v, "<unrenderable object>") for v in globals().values() if type(v) is object]
+        _dr_objects += [(object(), "<unrenderable object>"), (_DISPLAY_STOP, repr(_DISPLAY_STOP))]
+        check("deeprender-module-objects-render-as-data",
+              all(_dr_positions(f, v, mark) for f in (_safe_display, _safe_str) for v, mark in _dr_objects)
+              and all(_dr_in_place(f, v) for f in (_safe_display, _safe_str) for v in list(globals().values())))
+        # Round 4: the node bound stops a render with the truncation marker. A list holding one chain of 31
+        # nested lists around 0 sixteen times is 513 values as the copy counts them (each occurrence is copied),
+        # so the copy stops before the last 0 and the render is the 1,007-character prefix of repr() before it,
+        # then ...<truncated>, within the character bound. Red when the stop drops its marker (the same prefix,
+        # unmarked) and when the node bound is removed (1,024 characters, cut by the character bound).
+        _dr_chain = 0
+        for _ in range(31):
+            _dr_chain = [_dr_chain]
+        _dr_link = "[" * 31
+        check("deeprender-node-bound-stop-marked",
+              _safe_display([_dr_chain] * 16) == _safe_str([_dr_chain] * 16)
+              == "[" + ", ".join([_dr_link + "0" + "]" * 31] * 15) + ", " + _dr_link + "...<truncated>")
 
         # NEW-5: the store-read cap is enforced on the bytes ACTUALLY read, not only the pre-open lstat, so a
         # file reporting a small size at lstat but reading over the cap (a raced swap) is refused. The lstat is
