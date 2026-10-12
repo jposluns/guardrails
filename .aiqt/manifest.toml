@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "433de2afc2be0797c4bcd48e7f9bfe0bae86769eef97f8b3089bd62316e7d199"
+tree-sha256 = "a2baacb6574acc7d5ac93cdfeef7afc09e58e8bf7cdea7c33d13970da4b19dc9"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -61,8 +61,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 287478
-sha256 = "7909890915a0952eb8360a1371853372a4d4879679ee0731bc339c793503dd93"
+bytes = 288052
+sha256 = "91a9d98d096e0555dbab7cee8d6b0f272891ff197544672cfef25802b495e156"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -801,8 +801,8 @@ sha256 = "c24eca7f5f6af796c69a0796d6f99586bbce90c6b9a11d2e60232f1942440c8c"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 497347
-sha256 = "605f1d0e5405830e026a41d1bf0e8c2673ba601372ccb69b30c8122a5a4d9198"
+bytes = 499643
+sha256 = "a41a3f300a5c1c3ba1aba8dcb53a5ef61435c979e930b46b2dc4b85fa54eb3bd"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -2336,8 +2336,8 @@ sha256 = "001c5c3f13e7a7b0bc8c283ca1770545d7ba27cb734eff6517b6c03a868225ee"
 
 [[sources]]
 path = "ENFORCEMENT.md"
-bytes = 274449
-sha256 = "c33c3f9aff38895934c264c5164f7b79872f5e7e6194dd75e762c887c141e24c"
+bytes = 275023
+sha256 = "4d90bc22a2e9b5c5da03d829f85f2d91debca1c021b8596fce0c2b5f47d1ae2b"
 
 [[sources]]
 path = "GEMINI.md"
@@ -3126,8 +3126,8 @@ sha256 = "e5760448ade9fc0d5f59b9a6761e07f5e0e122157379ae7fcc0aa1fc59f0d0c2"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 327881
-sha256 = "2f633af14a00367775c0a0b5db980fb7f47eea03cd6c7b297a308a57483226e6"
+bytes = 328455
+sha256 = "3a5b9f732c6f235921178f663ed4ec8be8a673420e517560d9a3c9e724b2cbba"
 
 [[sources]]
 path = "site/evidence.html"
@@ -3336,8 +3336,8 @@ sha256 = "907968f4e82509cb18b55ade0c7605de95895e163ba0c593dbe2c25b89ea5da6"
 
 [[sources]]
 path = "tools/check_import_closure.py"
-bytes = 228875
-sha256 = "46aa72ceffcd1cad8a5eee2d5f94cabf90a95b1479623922861a679b6260b7b5"
+bytes = 230761
+sha256 = "c9da625c9faca94d280b440323b5a5afb7226b303e4be8c3cfe8bd58903cdd4f"
 
 [[sources]]
 path = "tools/check_install_page.py"
