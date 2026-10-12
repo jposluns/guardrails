@@ -568,6 +568,53 @@ jobs:
       - name: Git-fixture-env behaviour self-test (execution-reconciled)
         run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-selftest
 
+  # The host-patch legs. Every job above and below pins '3.14', which the runner resolves to the newest
+  # 3.14 patch release; these two run the suites a newer patch release most often breaks on the exact patch
+  # release the maintainer host runs, so a passing local suite predicts a required CI leg, and a failure on
+  # the '3.14' legs alone points at a patch-release difference. Their pin is the release that
+  # .aiqt/python-host.toml names: tools/check_python_host_pin.py holds the two equal and, as the first gate
+  # of each job, fails when the job does not run that release. Both are required through Quality gates.
+  opf-host-patch:
+    name: OPF tooling (host patch)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        run: python3 -I -B tools/check_python_host_pin.py
+
+      - name: Python host pin self-test
+        run: python3 -I -B tools/check_python_host_pin.py --self-test
+
+      - name: OPF tooling self-test (host patch)
+        run: python3 -I -B opf/tools/opf.py --self-test
+
+  git-fixture-env-host-patch:
+    name: Git-fixture-env self-test (host patch)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        run: python3 -I -B tools/check_python_host_pin.py
+
+      - name: Git-fixture-env behaviour self-test (execution-reconciled, host patch)
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-selftest
+
   registry:
     name: Records, manifest and parity
     runs-on: ubuntu-latest
@@ -758,6 +805,8 @@ jobs:
       - generated
       - selftest-execution
       - git-fixture-env
+      - opf-host-patch
+      - git-fixture-env-host-patch
       - registry
       - byte-canon-matrix
     runs-on: ubuntu-latest

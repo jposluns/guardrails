@@ -41,6 +41,10 @@ path = ".aiqt/newtab.toml"
 reason = "Repository-local NEWTAB coverage declaration; tracked, not shipped. Adopters own their roots, like .aiqt/derived-command-parameters.toml; this tracked file belongs to concern 1, not the untracked concern-2 namespace."
 
 [[exclusion]]
+path = ".aiqt/python-host.toml"
+reason = "Repository-local CI configuration: the exact CPython patch release the maintainer host runs, read by tools/check_python_host_pin.py and tools/check_python_floor.py to hold the host-patch CI jobs to it; tracked, not shipped, like .aiqt/newtab.toml. An adopter has no such jobs."
+
+[[exclusion]]
 path = ".aiqt/char-policy.json"
 reason = "Repository-local character policy read by tools/check_no_dashes.py and the char-policy-write preview hook; tracked, not shipped. Adopters own their roots (an absent file applies the gate's built-in default), like .aiqt/newtab.toml; this tracked file belongs to concern 1, not the untracked concern-2 namespace."
 

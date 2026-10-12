@@ -123,6 +123,7 @@ guarded-surfaces = [
     "tools/check_overclaim.py",
     "tools/check_portability.py",
     "tools/check_python_floor.py",
+    "tools/check_python_host_pin.py",
     "tools/check_python_launcher_isolation.py",
     "tools/check_record_drift.py",
     "tools/check_record_sections.py",

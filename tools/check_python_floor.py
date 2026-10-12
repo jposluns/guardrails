@@ -53,6 +53,12 @@ Legs, in order:
                  quote or a flow indicator and does not close on its own line is cannot-evaluate. A
                  plain (unquoted) pin of a floor whose text ends in 0 is a finding, since YAML reads
                  a plain 3.20 as the number 3.2.
+                 In a file under .github/workflows, a pin that is a patch release of the floor
+                 (MAJOR.MINOR.PATCH, HOST_PATCH_RE) passes only when it equals the python-host-patch
+                 that HOST_SOURCE_REL names (the host-patch CI jobs, which tools/check_python_host_pin.py
+                 also holds to it); that source is read only for such a pin, and a missing, unreadable
+                 or malformed one is cannot-evaluate. A patch-release pin anywhere else (a PIN_FILES
+                 entry, a local action file) is a finding, as is any other release.
                  The key is found without regard to case, since the runner reads an input by its
                  upper-cased name: a strict pin whose key is in any other case is cannot-evaluate,
                  and so is any line, script text included, that names INPUT_PYTHON-VERSION
@@ -306,6 +312,11 @@ SOURCE_KEYS = {"format-version", "python-floor", "guarded-surfaces", "nonblockin
 WORKFLOWS_REL = ".github/workflows"
 PIN_FILES = ("opf/enforcement/ci/github-actions.yml", "opf/tools/check_opf_doctor.py")
 PIN_KEY = "python-version"
+# The host-patch CI jobs: in a file under WORKFLOWS_REL, a pin that is a patch release of the floor passes
+# only when it equals the python-host-patch this repository-local source names (_host_patch_pin).
+HOST_SOURCE_REL = ".aiqt/python-host.toml"
+HOST_SOURCE_KEYS = {"format-version", "python-host-patch"}
+HOST_PATCH_RE = re.compile(r"([1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
 # The step environment variable the Actions toolkit reads the input from ("INPUT_" plus the upper-cased
 # name). A line naming it can set the input outside a pin.
 INPUT_ENV = "INPUT_" + PIN_KEY.upper()
@@ -625,6 +636,41 @@ def switch_findings(source):
     return []
 
 
+def load_host_patch(root):
+    """The python-host-patch that HOST_SOURCE_REL names, schema-checked: a missing, unreadable or malformed
+    source is cannot-evaluate, never a pass."""
+    try:
+        data = tomllib.loads(_read_text(root / HOST_SOURCE_REL))
+    except tomllib.TOMLDecodeError as exc:
+        raise CannotEvaluate("{}: does not parse: {}".format(HOST_SOURCE_REL, exc))
+    # tomllib also raises a BARE ValueError on an integer literal past CPython's int-string limit, and a
+    # RecursionError on a deeply nested array or inline table or, in a release that bounds key depth, on a
+    # key of more than 1000 dotted parts: each is cannot-evaluate, never a traceback.
+    except (ValueError, RecursionError) as exc:
+        raise CannotEvaluate("{}: does not parse ({}): {}".format(HOST_SOURCE_REL, type(exc).__name__,
+                                                                     exc))
+    patch = data.get("python-host-patch")
+    if set(data) != HOST_SOURCE_KEYS or type(data["format-version"]) is not int \
+            or data["format-version"] != 1 or not isinstance(patch, str) \
+            or HOST_PATCH_RE.fullmatch(patch) is None:
+        raise CannotEvaluate("{}: want exactly format-version = 1 and python-host-patch = "
+                             "\"MAJOR.MINOR.PATCH\"".format(HOST_SOURCE_REL))
+    return patch
+
+
+def _host_patch_pin(root, rel, value, want, host):
+    """Whether a pin that differs from the floor is the host patch: rel is a file under WORKFLOWS_REL, value
+    is a patch release of the floor, and it equals the python-host-patch HOST_SOURCE_REL names. The source
+    is read only here, once per run (cached in host), so it is cannot-evaluate only when such a pin needs
+    it."""
+    if not rel.startswith(WORKFLOWS_REL + "/") or not value.startswith(want + ".") \
+            or HOST_PATCH_RE.fullmatch(value) is None:
+        return False
+    if "patch" not in host:
+        host["patch"] = load_host_patch(root)
+    return value == host["patch"]
+
+
 def pin_findings(root, floor):
     want = "%d.%d" % floor
     try:
@@ -636,7 +682,7 @@ def pin_findings(root, floor):
     targets += [(rel, True) for rel in PIN_FILES]
     if "action-files" in RULES:
         targets += [(rel, False) for rel in _action_files(root)]
-    findings, seen = [], set()
+    findings, seen, host = [], set(), {}
     while targets:
         rel, required = targets.pop(0)
         if rel in seen:
@@ -683,10 +729,10 @@ def pin_findings(root, floor):
             plain = match.group("plain")
             value = next(group for group in match.group("plain", "single", "double")
                          if group is not None)
-            if value != want:
+            if value != want and not _host_patch_pin(root, rel, value, want, host):
                 findings.append("{}:{}: python-version {!r} differs from the floor {!r}".format(
                     rel, number, value, want))
-            elif plain is not None and want.endswith("0"):
+            elif value == want and plain is not None and want.endswith("0"):
                 findings.append("{}:{}: python-version {} is unquoted; YAML reads it as a number, so "
                                 "quote it as '{}'".format(rel, number, value, want))
         if required and not pins:
@@ -1863,6 +1909,32 @@ def _old_guard_text(name, floor, modes=None, code=REFUSAL_EXIT):
     return "\n".join(out)
 
 
+def _key_depth_bounded(real):
+    """tomllib's key parser, made to raise RecursionError on a key of more than 1000 dotted parts, as a
+    release that bounds key depth does."""
+    def parse_key(src, pos):
+        pos, key = real(src, pos)
+        if len(key) > 1000:
+            raise RecursionError("injected: a key of more than 1000 dotted parts")
+        return pos, key
+    return parse_key
+
+
+def _host_parse_refusal(root, bound):
+    """(exit code, whether the report says HOST_SOURCE_REL does not parse) for evaluate over root, with
+    tomllib's key parser bounded when bound is true; "raised NAME" when the exception escapes."""
+    real = tomllib._parser.parse_key
+    if bound:
+        tomllib._parser.parse_key = _key_depth_bounded(real)
+    try:
+        code, lines = evaluate(root)
+    except (RecursionError, ValueError) as exc:
+        return "raised " + type(exc).__name__
+    finally:
+        tomllib._parser.parse_key = real
+    return code, _has(lines, HOST_SOURCE_REL + ": does not parse")
+
+
 def _self_test_cases(base):
     floor = FLOOR
     good = guard_text("demo.py", floor)
@@ -2026,6 +2098,43 @@ def _self_test_cases(base):
         "      - run: echo done"), pin_quote=""))
     check("pins/block-scalar-pin-finding",
           (code, _has(lines, "quality.yml:8: python-version '3.12' differs")), (1, True))
+    # The host-patch jobs: a workflow pin that is a patch release of the floor passes only when it equals the
+    # python-host-patch HOST_SOURCE_REL names, and only in a file under WORKFLOWS_REL.
+    host = {HOST_SOURCE_REL: "format-version = 1\npython-host-patch = \"3.14.4\"\n"}
+    check("pins/host-patch-workflow-passes",
+          evaluate(_fixture(base, workflow_pin="3.14.4", files=host))[0], 0)
+    code, lines = evaluate(_fixture(base, workflow_pin="3.14.8", files=host))
+    check("pins/other-patch-workflow-finding",
+          (code, _has(lines, "quality.yml:6: python-version '3.14.8' differs")), (1, True))
+    code, lines = evaluate(_fixture(base, template_pin="3.14.4", files=host))
+    check("pins/host-patch-template-finding",
+          (code, _has(lines, PIN_FILES[0] + ":3: python-version '3.14.4' differs")), (1, True))
+    code, lines = evaluate(_fixture(base, workflow_pin="3.14.4"))
+    check("pins/host-patch-source-missing-cannot-evaluate",
+          (code, _has(lines, HOST_SOURCE_REL + ": cannot stat")), (2, True))
+    code, lines = evaluate(_fixture(base, workflow_pin="3.14.4", files={
+        HOST_SOURCE_REL: "format-version = 1\npython-host-patch = \"3.14\"\n"}))
+    check("pins/host-patch-source-malformed-cannot-evaluate",
+          (code, _has(lines, HOST_SOURCE_REL + ": want exactly")), (2, True))
+    code, lines = evaluate(_fixture(base, workflow_pin="3.13.4", files={
+        HOST_SOURCE_REL: "format-version = 1\npython-host-patch = \"3.13.4\"\n"}))
+    check("pins/off-floor-host-patch-finding",
+          (code, _has(lines, "quality.yml:6: python-version '3.13.4' differs")), (1, True))
+    # tomllib refuses some host sources outside TOMLDecodeError: a RecursionError on deep nesting (a real
+    # payload, far past any default recursion limit) and on a key of more than 1000 dotted parts
+    # (INJECTED: the running release may not bound key depth, so its key parser is patched to raise as one
+    # that does), and a bare ValueError on an over-long integer literal. Each is cannot-evaluate; an
+    # exception that escapes evaluate() is recorded as raised, so each case is red when its mapping is
+    # removed.
+    for check_id, extra, bound in (
+            ("pins/host-patch-source-deep-nesting-cannot-evaluate",
+             "x = " + "[" * 10000 + "]" * 10000 + "\n", False),
+            ("pins/host-patch-source-long-dotted-key-cannot-evaluate", ".".join(["k"] * 1001) + " = 1\n",
+             True),
+            ("pins/host-patch-source-long-integer-cannot-evaluate", "x = " + "1" * 5000 + "\n", False)):
+        root = _fixture(base, workflow_pin="3.14.4",
+                        files={HOST_SOURCE_REL: host[HOST_SOURCE_REL] + extra})
+        check(check_id, _host_parse_refusal(root, bound), (2, True))
     # An explicit-key entry whose value is a quoted scalar over several lines is outside the grammar.
     code, lines = evaluate(_fixture(base, files={WORKFLOWS_REL + "/attack.yml": (
         "name: attack\non: push\njobs:\n  q:\n    runs-on: ubuntu-latest\n    steps:\n"

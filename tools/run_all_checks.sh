@@ -217,6 +217,10 @@ run_gate "launcher-isolation-selftest" python3 -I -B tools/check_python_launcher
 run_gate "launcher-isolation" python3 -I -B tools/check_python_launcher_isolation.py
 run_gate "python-floor-selftest" python3 -I -B tools/check_selftest_execution.py --suite python-floor-selftest
 run_gate "python-floor" python3 -I -B tools/check_python_floor.py
+# The host-patch pin: the CI host-patch jobs pin the release .aiqt/python-host.toml names, and the live leg
+# fails when this interpreter is another release, so a passing local run predicts those required CI legs.
+run_gate "python-host-pin-selftest" python3 -I -B tools/check_python_host_pin.py --self-test
+run_gate "python-host-pin" python3 -I -B tools/check_python_host_pin.py
 run_gate "renderers-selftest"    python3 -I -B tools/gen_renderers.py --self-test
 run_gate "renderers-drift"       python3 -I -B tools/gen_renderers.py --check
 run_gate "manifest-gen-selftest" python3 -I -B tools/gen_manifest.py --self-test
