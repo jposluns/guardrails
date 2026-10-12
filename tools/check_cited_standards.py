@@ -849,6 +849,8 @@ _VECTORS += (
 # V104 expects a designator in a prompt-pack member to fail the gate; run with the built-in default, which never reads
 # the prompt pack, the gate passes and V104 fails. V105 pins that default, and V106 that an exclusion may name a
 # member. Each has no patch (None) and, as an eighth element, the files written outside the rules directory.
+# They carry their own corpus and read neither .aiqt/cited-standards.toml nor the runners that pass it; the
+# repository-only .github/check_cited_standards_contract.py pins that config and wiring.
 _PACK = {"opf/prompt-pack/flow/SKILL.md": "# Flow\n\nFollow ISO/IEC 99999:2031 here.\n"}
 _WIDE = 'format-version = 1\ncorpus = [".aiqt/core/rules/*.md", "opf/prompt-pack/**/*.md"]\n'
 _VECTORS += (

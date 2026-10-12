@@ -37,6 +37,10 @@ path = ".github/check_newtab_contract.py"
 reason = "Repository-local NEWTAB declaration-content assertion; tracked, not shipped."
 
 [[exclusion]]
+path = ".github/check_cited_standards_contract.py"
+reason = "Repository-local assertion that .aiqt/cited-standards.toml keeps the rule files and every OPF prompt-pack member pack.toml lists in its corpus, and that both runners pass it with --config; tracked, not shipped."
+
+[[exclusion]]
 path = ".aiqt/newtab.toml"
 reason = "Repository-local NEWTAB coverage declaration; tracked, not shipped. Adopters own their roots, like .aiqt/derived-command-parameters.toml; this tracked file belongs to concern 1, not the untracked concern-2 namespace."
 
@@ -46,7 +50,7 @@ reason = "Repository-local character policy read by tools/check_no_dashes.py and
 
 [[exclusion]]
 path = ".aiqt/cited-standards.toml"
-reason = "Repository-local corpus config for tools/check_cited_standards.py, passed with --config by this repository's CI and tools/run_all_checks.sh to add the OPF prompt-pack members to the rule corpus; tracked, not shipped. An adopter install never reads it: without --config the gate applies its built-in default corpus (the rule files alone) and reads no default file."
+reason = "Repository-local corpus config for tools/check_cited_standards.py, passed with --config by this repository's CI and tools/run_all_checks.sh to add the OPF prompt-pack members to the rule corpus, and pinned by .github/check_cited_standards_contract.py; tracked, not shipped. Run without --config, the gate applies its built-in default corpus (the rule files alone) and reads no default file. The shipped tools/run_all_checks.sh still passes --config, so in a tree without this file (an adopter install) its cited-standards gate exits 2 (cannot evaluate) and the runner ends RESULT: FAIL, as its newtab-repo-contract and cited-standards-repo-contract gates do there."
 
 # --- concern-1: manifest-self and the managed block ----------------------------------------------------
 

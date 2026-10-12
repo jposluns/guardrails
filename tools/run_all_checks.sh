@@ -231,8 +231,11 @@ run_gate "placement"      python3 -I -B tools/check_rule_placement.py
 run_gate "applies-selftest" python3 -I -B tools/check_applies.py --self-test
 run_gate "applies"         python3 -I -B tools/check_applies.py
 run_gate "mappings"       python3 -I -B tools/check_mappings.py
+# Repository-only assertion lives outside the shipped tooling: it pins the corpus below and both runners' --config.
+run_gate "cited-standards-repo-contract" python3 -I -B .github/check_cited_standards_contract.py
 run_gate "cited-standards-selftest" python3 -I -B tools/check_cited_standards.py --self-test
-# This repository only: the reviewed corpus adds the OPF prompt-pack members to the rule corpus.
+# This repository only: the reviewed corpus adds the OPF prompt-pack members to the rule corpus. The config is not
+# shipped, so in a tree without it this gate exits 2 (cannot evaluate), as the two repo-contract gates do there.
 run_gate "cited-standards"          python3 -I -B tools/check_cited_standards.py --config .aiqt/cited-standards.toml
 run_gate "conformance-selftest" python3 -I -B tools/conformance.py --self-test
 run_gate "conformance"    python3 -I -B tools/conformance.py --root .

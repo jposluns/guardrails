@@ -308,8 +308,11 @@ MASKED_REF_EXPRESSIONS = frozenset({
     "$PR_HEAD_SHA",
 })
 
-# One repository-local, non-shipped gate; no general .github executable allowance.
-REPO_GATE = ".github/check_newtab_contract.py"
+# The repository-local, non-shipped gates, each named; no general .github executable allowance.
+REPO_GATES = frozenset({
+    ".github/check_cited_standards_contract.py",
+    ".github/check_newtab_contract.py",
+})
 
 # The one status branch protection requires. In a workflow with more than one job,
 # exactly one job carries this name, a job-level if: of always(), and a needs: list
@@ -510,7 +513,8 @@ JOB_PROPERTY_KEYS = frozenset({
 _TOOL_NONDELIM = r"[^\s'\"(),:=`;{}\[\]]"  # a char that is NOT a legitimate delimiter
 TOOL_RE = re.compile(
     r"(?:(?<!" + _TOOL_NONDELIM + r")|(?<=(?<!" + _TOOL_NONDELIM + r")\./))"
-    r"(?:(?:opf/)?tools/[A-Za-z0-9_.-]+\.(?:py|sh)|" + re.escape(REPO_GATE) + r")\b"
+    r"(?:(?:opf/)?tools/[A-Za-z0-9_.-]+\.(?:py|sh)|"
+    + "|".join(re.escape(gate) for gate in sorted(REPO_GATES)) + r")\b"
 )
 PY_TARGET_RE = re.compile(r"^(?:opf/)?tools/[A-Za-z0-9_.-]+\.py$")
 ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
@@ -674,14 +678,15 @@ def normalize(tokens):
                 "dynamic-target",
                 "gate target must be a literal tools/*.py path",
             )
-        if (target != REPO_GATE and not PY_TARGET_RE.fullmatch(target)
+        if (target not in REPO_GATES and not PY_TARGET_RE.fullmatch(target)
                 or ".." in target.split("/")):
             return Result(
                 False,
                 None,
                 "gate-target",
                 "unsupported gate target {!r}; expected a literal "
-                "tools/*.py path, {} or gitleaks dir".format(target, REPO_GATE),
+                "tools/*.py path, {} or gitleaks dir".format(
+                    target, " or ".join(sorted(REPO_GATES))),
             )
         canonical = [target]
 
@@ -3244,19 +3249,27 @@ def self_test():
         0,
     )
 
-    repo_command = "python3 -I -B " + REPO_GATE
-    case("01b repository gate matched",
-         evaluate(local_fixture(common + (repo_command,)),
-                  ci_fixture(common + (repo_command,)), ()), 0)
-    case("01c repository gate local-only",
-         evaluate(local_fixture(common + (repo_command,)), ci_fixture(common), ()),
-         1, ("local-only",), (REPO_GATE,), ())
-    case("01d repository gate ci-only",
-         evaluate(local_fixture(common), ci_fixture(common + (repo_command,)), ()),
-         1, ("ci-only",), (), (REPO_GATE,))
-    case("01e repository gate shadow scan",
-         evaluate(local_fixture(common, ("echo " + REPO_GATE,)), ci_fixture(common), ()),
-         2)
+    for repo_gate in sorted(REPO_GATES):
+        repo_command = "python3 -I -B " + repo_gate
+        case("01b repository gate matched: " + repo_gate,
+             evaluate(local_fixture(common + (repo_command,)),
+                      ci_fixture(common + (repo_command,)), ()), 0)
+        case("01c repository gate local-only: " + repo_gate,
+             evaluate(local_fixture(common + (repo_command,)), ci_fixture(common), ()),
+             1, ("local-only",), (repo_gate,), ())
+        case("01d repository gate ci-only: " + repo_gate,
+             evaluate(local_fixture(common), ci_fixture(common + (repo_command,)), ()),
+             1, ("ci-only",), (), (repo_gate,))
+        case("01e repository gate shadow scan: " + repo_gate,
+             evaluate(local_fixture(common, ("echo " + repo_gate,)), ci_fixture(common), ()),
+             2)
+        # The runner's echo line is refused by its own grammar too; a workflow step name is
+        # not, so only the shadow scan's match on this repository gate refuses it.
+        case("01g repository gate shadow scan in a step name: " + repo_gate,
+             evaluate(local_fixture(common), ci_fixture(common, (
+                 "      - name: Run " + repo_gate,
+                 "        run: python3 -I -B tools/check_ci_parity.py",
+             )), ()), 2)
     unknown = "python3 -I -B .github/unrecognized.py"
     case("01f unknown repository executable refused",
          evaluate(local_fixture(common + (unknown,)),
