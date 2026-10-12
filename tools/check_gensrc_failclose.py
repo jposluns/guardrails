@@ -142,6 +142,7 @@ from pathlib import Path  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root  # noqa: E402
+import _load_bound  # noqa: E402  hang-versus-slowness bounds shared by the self-tests and gates
 import gen_gensrc  # noqa: E402  reuse its validated, fail-closed registry loader (do not re-parse the JSON)
 
 # Directory names never copied into a sandbox and never recorded in the real-tree manifest: version
@@ -155,10 +156,17 @@ INVALID_UTF8 = b"\xff\xfe\x00 not-utf8 \x80\x81"
 VALID_MARKER = b"\n# aiqt-failclose: valid-but-different content marker\n"
 # The regenerate grammar the gate recognizes: exactly `python3 tools/gen_<stem>.py`, validated with shlex.
 REGEN_RE = re.compile(r"^tools/gen_([A-Za-z0-9_]+)\.py$")
-PROBE_TIMEOUT = 120  # seconds per subprocess --check; a hung generator is cannot-evaluate, not a hang
-TOTAL_TIMEOUT = 1800  # seconds backstop for the whole sweep; exceeding it is cannot-evaluate, never a hang
+# Both bounds are in LOAD-ADJUSTED seconds (tools/_load_bound.py): they stretch while the host runs more
+# work than it has CPUs, so a loaded host slows the sweep without turning it into cannot-evaluate, and a
+# probe is also stopped early once its process tree makes no CPU or output progress for PROBE_STALL_S
+# wall seconds (a hang, not slowness). Either stop is cannot-evaluate (exit 2), never a verdict.
+PROBE_TIMEOUT = 120  # per subprocess --check; a hung generator is cannot-evaluate, not a hang
+PROBE_STALL_S = 60  # wall seconds without CPU or output progress that mark a probe as hung
+TOTAL_TIMEOUT = 1800  # backstop for the whole sweep; exceeding it is cannot-evaluate, never a hang
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)  # Linux/CI have it; degrade safely where the platform lacks it
-_now = time.monotonic  # module-level indirection so the self-test can inject a monotonic clock (deadline)
+_load_factor = _load_bound.load_factor  # module-level indirection so the self-test can inject host load
+# The sweep clock: monotonic, load-adjusted; module-level so the self-test can inject a clock (deadline).
+_now = _load_bound.LoadClock(factor=lambda: _load_factor())
 _mkdtemp = tempfile.mkdtemp  # module-level indirection so the self-test can inject a sandbox-setup failure
 # Spliced into EVERY template git command (init/add/commit/ls-files/gc): no detached auto-gc/maintenance
 # may churn template/.git while a per-call copytree reads it (F-367). An explicit `git gc` is foreground,
@@ -393,12 +401,13 @@ def _materialize_git(template, real_root):
 def _run_check(script_path, cwd, timeout=PROBE_TIMEOUT, env_overrides=None):
     """Run `python3 <script_path> --check` as a subprocess and return its exit code. shell=False, the
     interpreter pinned to sys.executable, a sanitized env carrying the per-call HOME/TMPDIR overrides, cwd
-    anchored on the sandbox, a bounded timeout. Module-level so the self-test can substitute it. Raises
-    subprocess.TimeoutExpired or OSError on a hung or unlaunchable probe; the caller maps that to
-    cannot-evaluate."""
-    proc = subprocess.run([sys.executable, str(script_path), "--check"], cwd=str(cwd),
-                          env=_sanitized_env(env_overrides), capture_output=True, timeout=timeout,
-                          shell=False)
+    anchored on the sandbox, a load-tolerant bound (timeout load-adjusted seconds, or PROBE_STALL_S wall
+    seconds without progress). Module-level so the self-test can substitute it. Raises
+    subprocess.TimeoutExpired (_load_bound.Hung) or OSError on a hung or unlaunchable probe; the caller
+    maps that to cannot-evaluate."""
+    proc = _load_bound.run([sys.executable, str(script_path), "--check"], budget_s=timeout,
+                           stall_s=PROBE_STALL_S, cwd=str(cwd), env=_sanitized_env(env_overrides),
+                           clock=_load_bound.LoadClock(factor=lambda: _load_factor()))
     return proc.returncode
 
 
@@ -724,7 +733,7 @@ def sweep(real_root):
                 if _now() > deadline:
                     raise _DeadlineExceeded()
             except _DeadlineExceeded:
-                cannot.append("total-runtime backstop of {}s exceeded; the sweep did not finish "
+                cannot.append("total-runtime backstop of {} load-adjusted s exceeded; the sweep did not finish "
                               "(fail-closed)".format(TOTAL_TIMEOUT))
     except Exception as exc:  # noqa: BLE001  an unexpected error is fail-closed, never a silent pass
         unexpected = exc
@@ -828,6 +837,9 @@ def main() -> int:
 #   (m) a BLOCK-kind generator that reads+decodes the whole target and fail-closes (non-zero) on invalid
 #       UTF-8 passes the sweep (exit 0): the gate probes a block target with invalid UTF-8 only and the
 #       generator rejects it, exercising the is_block probe path no other fixture covers.
+#   (n) load tolerance: under an injected host load a generator slower than a 1 s per-probe bound passes
+#       while printing progress, a silent hang is still stopped (exit 2), and the same slow generator
+#       on an idle host overruns the bound (exit 2); the shared _load_bound vectors also run here.
 # Every fixture is synthetic; any invalid-UTF-8 corruption bytes are assembled from non-secret parts so
 # this file never trips the repo secret scan.
 
@@ -1296,7 +1308,8 @@ def _self_test_main_isolated():
         print("SELF-TEST ERROR: no writable temporary directory: {}".format(exc), file=sys.stderr)
         return 2
     failures = []
-    global _run_check, _now, _mkdtemp
+    global _run_check, _now, _mkdtemp, _load_factor, PROBE_TIMEOUT, PROBE_STALL_S
+    saved_bounds = (_load_factor, PROBE_TIMEOUT, PROBE_STALL_S)
     saved_run_check = _run_check
     saved_now = _now
     saved_mkdtemp = _mkdtemp
@@ -1436,6 +1449,33 @@ def _self_test_main_isolated():
         if rc_deadline != 2:
             failures.append("total-runtime deadline overrun: expected cannot-evaluate exit 2, got "
                             "{!r}".format(rc_deadline))
+
+        # (n) Load tolerance. With the per-probe bound cut to 1 s and the host load injected at the cap, a
+        #     generator that takes about 2 s while printing progress passes every probe (a 1 s wall-clock
+        #     bound would have made it cannot-evaluate); a generator that sleeps silently is still stopped
+        #     by the stall bound (exit 2); and on an idle host the same slow generator overruns the 1 s
+        #     budget (exit 2), so the pass is owed to the load adjustment. The shared vectors follow.
+        slow_main = ("def main():\n    import time\n    for _ in range(8):\n"
+                     "        print(\"working\", flush=True)\n        time.sleep(0.25)\n")
+        slow = _build_repo(tmp / "slow", {"goodfile": _GOODFILE.replace("def main():\n", slow_main)})
+        hang = _build_repo(tmp / "hang", {"goodfile": _GOODFILE.replace(
+            "def main():\n", "def main():\n    import time\n    if \"--check\" in sys.argv[1:]:\n"
+            "        time.sleep(3600)\n")})  # hangs on --check only, so the fixture build still writes
+        PROBE_TIMEOUT, PROBE_STALL_S = 1, 1
+        try:
+            _load_factor = lambda: _load_bound.MAX_LOAD_FACTOR  # noqa: E731
+            _now = _load_bound.LoadClock(factor=lambda: _load_factor())
+            rc_slow, rc_hang = sweep_quiet(slow), sweep_quiet(hang)
+            _load_factor = lambda: 1.0  # noqa: E731
+            _now = _load_bound.LoadClock(factor=lambda: _load_factor())
+            rc_idle = sweep_quiet(slow)
+        finally:
+            _load_factor, PROBE_TIMEOUT, PROBE_STALL_S = saved_bounds
+            _now = saved_now
+        if (rc_slow, rc_hang, rc_idle) != (0, 2, 2):
+            failures.append("load tolerance: expected (slow under load, silent hang, slow on an idle host) "
+                            "= (0, 2, 2), got {!r}".format((rc_slow, rc_hang, rc_idle)))
+        failures.extend(_load_bound.vector_failures(sys.executable))
 
         # (l) A sandbox-setup mkdtemp failure (injected OSError) returns cannot-evaluate (exit 2), not an
         #     escaping raise (the work-dir mkdtemp now lives inside the try).
@@ -1577,6 +1617,7 @@ def _self_test_main_isolated():
         _run_check = saved_run_check
         _now = saved_now
         _mkdtemp = saved_mkdtemp
+        _load_factor, PROBE_TIMEOUT, PROBE_STALL_S = saved_bounds
         try:
             shutil.rmtree(tmp)  # no ignore_errors: a self-test cleanup failure must surface, not hide
         except OSError as exc:
@@ -1605,7 +1646,9 @@ def _self_test_main_isolated():
           "whose corrupted probe raises (itself exit 2); a generator changing a real-tree file's mode is "
           "detected (exit 2); a decode-only generator is caught (exit 1) specifically by a "
           "valid-but-different / same-length content probe; a total-runtime deadline overrun returns exit "
-          "2; a sandbox-setup mkdtemp failure returns exit 2; a block-kind generator that fail-closes "
+          "2; a generator slower than the per-probe bound passes under host load while a silent hang and the "
+          "same slow generator on an idle host each return exit 2 (load-tolerant bounds, shared vectors "
+          "included); a sandbox-setup mkdtemp failure returns exit 2; a block-kind generator that fail-closes "
           "on invalid UTF-8 passes (exit 0), exercising the invalid-UTF-8-only block probe path; a "
           "git-reading generator passes (exit 0) because the D6 template materializes a real git "
           "repository so its baseline git ls-files succeeds; a repo-local core.fsmonitor hook is NEVER "
