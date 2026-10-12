@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "afc7d47d1b052c0e5cccf5f50481114c596a2d2c30382b1fc6c7c09d5e84cc8e"
+tree-sha256 = "d88b91c842d524e327d83237ab5d5793843a7a68913a0f0c40a35de980bc8069"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3406,8 +3406,8 @@ sha256 = "614d59d7ccf5c4ddd6fe9b6002c4c605aae817a3c8d584258fc4c6fdb6f4ed2f"
 
 [[sources]]
 path = "tools/check_opf_standalone_closure.py"
-bytes = 33955
-sha256 = "ebad0cc354b56091b30ccf5f1d2487069febe3596007976b2dde3f9fc855a5b1"
+bytes = 33828
+sha256 = "c67d1090162148d4f9415a448ec1431d30c2f7ba14b22514917f43ab6f1c51fc"
 
 [[sources]]
 path = "tools/check_overclaim.py"
