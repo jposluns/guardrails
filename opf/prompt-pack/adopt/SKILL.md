@@ -113,7 +113,9 @@ comparison follows Unicode case folding, not a filesystem's own rule: two names 
 as one but Unicode folding keeps apart are not caught. Before the walk it resolves the store exactly
 as investigation does: it reads the two pointer files and probes `manifest.toml` in each immediate
 subdirectory of `.working`, control-area names included, reading each one present, and reads
-nothing else in the store tree. The output has one item per line: the status, then each finding,
+nothing else in the store tree. It refuses a `.working` that holds a `.git` or `.aiqt` directory
+before resolving, but one added while resolution runs can be opened to probe its `manifest.toml`.
+The output has one item per line: the status, then each finding,
 proposal, ruled-out entry and searched directory. Every path and reason is escaped to printable
 ASCII, so a backslash sequence such as `\n` stands for a character in a file name; a file name
 cannot add a line.
@@ -121,17 +123,22 @@ cannot add a line.
 - Status VALID: present the whole result to the adopter in one message: each proposal with its
   reason, the directories searched, and each ruled-out entry with its reason (an excluded area, a
   symlink, a hard-linked or oversized file). Say that the signals are a heuristic: a proposal can
-  be wrong, and an old record under an unusual name or heading is not proposed. A change during
-  discovery that leaves file metadata equal, such as a write through a shared memory mapping, is
-  detected only at the start of a file proposed for its heading; elsewhere the list can miss a file,
-  name one that is gone, or reflect the store as discovery first read it.
+  be wrong, and an old record under an unusual name or heading is not proposed. Discovery compares
+  samples, not a snapshot: a change made after discovery last observes a byte or an entry can
+  escape, including a write that leaves file metadata equal, such as one through a shared memory
+  mapping, made to the start of a proposed file while discovery reads it for the last time. So VALID
+  does not mean the list describes one consistent state of the tree. Such an equal-metadata change
+  made earlier is detected only at the start of a file proposed for its heading. A change that
+  escapes can leave the list missing a file, naming one that is gone, proposing a file for a heading
+  it no longer has, or reflecting the store as store resolution read it before the walk.
 - Status CANNOT-EVALUATE: report the findings. Any of these leaves no list at all, never a
   partial one: a bound reached (a tree or store too large or too deep to walk); a store that does
   not resolve; a `.working` holding a `.git` or `.aiqt` directory; an `[unmanaged]` entry that
   overlaps a reserved store path or equals or contains a pointer file or a store manifest that
-  resolution reads; or a change during discovery that its recheck detects: a change to the metadata
-  (identity, type and mode, link count, size, timestamps) of any examined entry or store input, or
-  to the start of a file proposed for its heading. Then ask the adopter which old operational
+  resolution reads; or a change during discovery that it detects, during the walk or at its recheck:
+  a change to the metadata (identity, type and mode, link count, size, timestamps) of the product
+  root, of any examined entry or of any store input, or to the start of a file proposed for its
+  heading. Then ask the adopter which old operational
   files exist, and say why you are asking.
 
 The adopter confirms or removes each proposal and adds any file discovery did not propose. Only

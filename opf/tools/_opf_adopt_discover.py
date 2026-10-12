@@ -36,9 +36,12 @@ and stops at the smaller of the resolver cap and what is left, never reading a b
 that does not fit is cannot-evaluate. So, whatever a concurrent writer does, resolution reads at most the
 bytes discovery charged, each pointer or manifest at most store.MAX_STORE_READ_BYTES, and every byte
 discovery reads from the product tree, re-reads included, is within MAX_TOTAL_BYTES. The listings are not
-metered: a writer that adds entries to `.working` between the listing discovery makes and the one the
-resolver makes can make the resolver list and probe entries not charged to the entry and path-byte
-budgets (a manifest it then reads still draws on the allowance); the recheck below then finds the change.
+metered: a writer that adds entries to `.working` after the listing discovery makes, and before the
+resolver or the planner existence proof lists it, can make them list and probe entries not charged to the
+entry and path-byte budgets. Such an entry can be a `.git` or `.aiqt` subdirectory, which they then open
+to probe its `manifest.toml` (the resolver reads one present there, drawing on the allowance), so store
+resolution can enter one despite the refusal above. The recheck below sees such an addition only through
+the `.working` stamp, subject to its limits.
 
 The walk is bounded like the planner (its MAX_ENTRIES, MAX_DEPTH, MAX_PATH_BYTES, MAX_FILE_BYTES and
 MAX_TOTAL_BYTES), never follows a symlink, lists each directory in sorted order and writes nothing. It
@@ -62,35 +65,42 @@ and would take it as a source. Folding follows Unicode full case folding, not a 
 a pair of names a filesystem equates that Unicode folding keeps apart is not caught. The other
 inventoried paths compare byte-exact, as the planner compares them: on a case-insensitive filesystem a
 variant such as `changelog.md` names the inventoried `CHANGELOG.md` and can be read and proposed, a
-duplicate of what investigation reads, not a read the spec forbids. Each excluded entry, each symlink, special file, hard-linked file, file over
-the planner byte bound, and each name outside the contained-path grammar is reported as ruled out,
-with its reason.
+duplicate of what investigation reads, not a read the spec forbids. Each excluded entry, each symlink,
+special file, hard-linked file, file over the planner byte bound, and each name outside the
+contained-path grammar is reported as ruled out, with its reason.
 
 A store that does not resolve is accepted only where the planner accepts one: no pointer names another
 root, and no `.working` subdirectory holds a candidate manifest (_opf_adopt_plan._require_no_store_manifest),
 so no unmanaged registration can exist that discovery would miss. Any other unresolved store and any
 bound reached is cannot-evaluate with no proposals, never a partial list presented as complete.
 
-Concurrent change: after the walk, discovery reopens the product root by path, no-follow, and compares
-the stamp (device, inode, mode, link count, size, mtime and ctime) of every directory it listed, every
-entry it examined by lstat (each proposed file included) and every store-resolution input with the
-stamp it recorded first; and it reads again the prefix of each file proposed for its heading, charged to
-the content-byte budget, and compares its SHA-256 with that of the bytes the walk read. A difference, a
-vanished or new input, or a root path that no longer names the walked directory is cannot-evaluate with
-no proposals. The limit: outside those heading prefixes the recheck compares metadata, not contents, so
-a change there that leaves every stamp field equal is missed. Such changes include a write through a
-shared writable mapping whose page is already dirty (it takes no write fault, so mtime and ctime need
-not move), a same-size edit within the filesystem timestamp granularity, a writer able to set the
-system clock, and a stale attribute cache on a network filesystem; that list is not exhaustive. What a
-missed change can do: in a directory, add or remove an entry unseen, so the list can miss a file or name
-one that is gone; in a file read but not proposed, add a heading unseen, so a proposal can be missing,
-never wrongly present; in a file not read or proposed by name, nothing, as no result rests on its
-contents; in a store-resolution input, leave the scope as the resolver read it. Files read but not
-proposed are not read again: that would double the content-byte charge of every scanned file, and a
-missed change there can only withhold a proposal. A change after the recheck
-is not seen, so a VALID list describes the tree as rechecked, not as it is when the adopter reads it. An
-entry ruled out by name is never examined, so its contents are not compared; a rename into or out of it
-changes the stamp of the directory that holds it.
+Concurrent change: discovery compares samples; it does not take a snapshot. After the walk, discovery
+reopens the product root by path, no-follow, and compares the stamp (device, inode, mode, link count, size,
+mtime and ctime) of every directory it listed, every entry it examined by lstat (each proposed file
+included) and every store-resolution input with the stamp it recorded first; and it reads again the prefix
+of each file proposed for its heading, charged to the content-byte budget, and compares its SHA-256 with
+that of the bytes the walk read. A difference, a vanished or new input, or a root path that no longer
+names the walked directory is cannot-evaluate with no proposals. Each comparison holds only when it is
+made: a change made after a byte or an entry is last observed can escape. That includes any change after
+the recheck, a change to an entry after the recheck has compared it, and a write that leaves every stamp
+field equal made to a heading prefix during the recheck read itself, after the bytes are returned and
+before that read and the recheck finish: the recheck hashes the bytes the read returned, and the closing
+fstat of the read sees the same stamp (test_change_after_final_observation_escapes pins that this reads
+VALID). So VALID does not establish one consistent tree state: neither the tree as the adopter later
+finds it nor the tree at any one instant of discovery. A second limit: outside those heading prefixes the
+recheck compares metadata, not contents, so a change there that leaves every stamp field equal is missed
+even when it is made before the recheck. Such changes include a write through a shared writable mapping
+whose page is already dirty (it takes no write fault, so mtime and ctime need not move), a same-size edit
+within the filesystem timestamp granularity, a writer able to set the system clock, and a stale
+attribute cache on a network filesystem; that list is not exhaustive. What a change that escapes can do:
+in a directory, add or remove an entry unseen, so the list can miss a file or name one that is gone; in a
+file proposed for its heading, leave the proposal resting on a heading the file no longer holds; in a
+file read but not proposed, add a heading unseen, so a proposal can be missing, never wrongly present; in
+a file proposed by name or not read, nothing, as no result rests on its contents; in a store-resolution
+input, leave the scope as the resolver read it. Files read but not proposed are not read again: that
+would double the content-byte charge of every scanned file, and a missed change there can only withhold
+a proposal. An entry ruled out by name is never examined, so its contents are not compared; a rename into
+or out of it changes the stamp of the directory that holds it.
 
 Signals: the file name of a file with a NAME_SUFFIXES suffix (NAME_SIGNALS, on the lowercased name before
 its first dot with everything but letters and digits removed, so todo.py is not proposed), else the first
@@ -1042,6 +1052,57 @@ def self_test():
             self.assertEqual((result.status, result.proposals), (store.CANNOT_EVALUATE, ()))
             if equal == [True]:
                 self.assertEqual(result.findings, (changed,))
+
+        def test_change_after_final_observation_escapes(self):
+            import mmap
+            stale = (("notes.md", "heading 'TODO' looks like a TODO list"),)
+            real_read_prefix, real_read = _read_prefix, os.read
+            # Discovery compares samples, not a snapshot (module docstring). A write through a shared writable
+            # mapping whose page is already dirty, made to a heading prefix during the recheck read after its
+            # bytes are returned, or after that read, escapes: the run reads VALID with the stale proposal. A
+            # change that turns this red detects more than the docstring and the gate residue state, so
+            # restate them with it.
+            for label in ("during-recheck-read", "after-recheck-read"):
+                with self.subTest(change=label):
+                    self.reset(label)
+                    self.write("notes.md", b"# TODO\n")
+                    target = self.root / "notes.md"
+                    inode = target.stat().st_ino
+                    reads, equal = [], []
+                    with open(target, "r+b") as handle, mmap.mmap(handle.fileno(), 0) as view:
+                        view[0:1] = b"#"
+
+                        def write():
+                            before = planning._stamp(os.stat(target))
+                            view[2:6] = b"NOPE"
+                            equal.append(planning._stamp(os.stat(target)) == before)
+
+                        def read(fd, size):
+                            block = real_read(fd, size)
+                            if os.fstat(fd).st_ino == inode:
+                                reads.append(len(block))
+                                if label == "during-recheck-read" and len(reads) == 2:
+                                    write()
+                            return block
+
+                        def read_prefix(fd, name, before, budget):
+                            data = real_read_prefix(fd, name, before, budget)
+                            if label == "after-recheck-read" and len(reads) == 2 and not equal:
+                                write()
+                            return data
+                        with mock.patch.object(os, "read", read), mock.patch.object(
+                                module, "_read_prefix", read_prefix):
+                            result = discover_sources(self.root)
+                    if label == "during-recheck-read" and equal == [False]:
+                        # A filesystem where the mapping write moves a stamp refuses at the closing fstat.
+                        self.assertEqual((result.status, result.proposals, result.findings), (
+                            store.CANNOT_EVALUATE, (), ("file changed during read: " + repr("notes.md"),)))
+                    else:
+                        self.assertEqual((result.status, result.proposals), (store.VALID, stale),
+                                         result.findings)
+                    # Not vacuous: the walk read and the recheck read, each the whole file, and the one write.
+                    self.assertEqual((reads, len(equal)), ([len(b"# TODO\n")] * 2, 1))
+                    self.assertEqual(target.read_bytes(), b"# NOPE\n")
 
         def test_unmanaged_refusals(self):
             self.write("TODO.md")

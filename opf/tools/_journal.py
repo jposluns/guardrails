@@ -50,7 +50,7 @@ lifetime, is a tracked post-1.0.0 hardening.
 Exit convention of the CLIs built on this module: 0 clean/NA, 1 finding, 2 malformed or read error.
 
   _journal.py --self-test   the #378 close vectors and the descriptor-helper vectors (read-error
-                            conversion, quiet cleanup close)
+                            conversion, the stop_at_cap read bound, quiet cleanup close)
 """
 import sys
 
@@ -3097,11 +3097,63 @@ def _st_anon_reuse_close_fault():
     return raised and _st_fd_table() == before
 
 
+def _st_stop_at_cap():
+    """R1-stop-at-cap: _read_fd with stop_at_cap set never asks os.read for a byte past the cap, so it
+    never reads one, and never asks for zero bytes (at the cap the opened file size, not a read, shows
+    whether more remains). Over regular files in a temporary directory: a file of exactly the cap returns
+    its bytes; a file one byte over the cap and a non-empty file under a zero cap are each a JournalError,
+    never a truncated result; an empty file under a zero cap returns empty with no read. Each leg opens its
+    own descriptor and closes it once, and the patched os.read is restored in a finally. Returns
+    (exact, over, zero_empty, zero_over)."""
+    import shutil
+    import tempfile
+    base = tempfile.mkdtemp(prefix="aiqt-journal-stop-at-cap-")
+    saved_read = os.read
+
+    def leg(data, cap):
+        path = os.path.join(base, "file")
+        with open(path, "wb") as handle:
+            handle.write(data)
+        asked, taken = [], [0]
+
+        def counted_read(fd, n):
+            asked.append(n)
+            block = saved_read(fd, n)
+            taken[0] += len(block)
+            return block
+
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            os.read = counted_read
+            try:
+                got = _read_fd(fd, cap=cap, stop_at_cap=True)
+            except JournalError:
+                got = None
+            finally:
+                os.read = saved_read
+        finally:
+            os.close(fd)
+        return got, taken[0], asked
+
+    try:
+        results = []
+        for data, cap, want in ((b"123456", 6, b"123456"), (b"1234567", 6, None), (b"", 0, b""),
+                                (b"x", 0, None)):
+            got, taken, asked = leg(data, cap)
+            results.append(got == want and taken <= cap and sum(asked) <= cap and 0 not in asked)
+        return tuple(results)
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
 def _st_descriptor_helper_checks():
     """Descriptor-helper vectors, ported from the retired import engine's self-test (their only former
     home), each driving the helper directly, with a patched os primitive where the contract needs one:
       C1-osread  _read_fd converts a read-time OSError to a JournalError, never a raw OSError or a
                  truncated result (with a positive control: a readable descriptor returns its bytes).
+      R1         _read_fd with stop_at_cap never asks for or reads a byte past the cap, nor asks for zero:
+                 an exact fit returns its bytes, one byte over and a non-empty file under a zero cap refuse,
+                 and an empty file under a zero cap returns empty with no read (_st_stop_at_cap).
       N2a        _close_fd_quietly swallows a close-time EBADF rather than propagating it.
       N2d        _close_fd_quietly never raises and closes exactly once (P1, #378): its one close fails while
                  stderr itself is broken, and the helper still returns without a second close.
@@ -3115,12 +3167,18 @@ def _st_descriptor_helper_checks():
       F4         _st_fd_table lists a held descriptor whose link read fails ENOENT with no kind (None).
       F5         _st_anon_reuse leaves no descriptor open when its epoll's close raises. Run where epoll
                  and eventfd exist (Linux).
-    No store, no journal and no subprocess; every patched primitive is restored in a finally, and each
-    leg's descriptors are its own, closed once. Returns (failures, checks)."""
+    No store, no journal and no subprocess (R1 alone writes temporary files, removed after it); every
+    patched primitive is restored in a finally, and each leg's descriptors are its own, closed once.
+    Returns (failures, checks)."""
     import errno
     n2d_returned, n2d_single = _st_n2d()
+    cap_exact, cap_over, cap_zero_empty, cap_zero_over = _st_stop_at_cap()
     results = (("C1-osread-control-reads", _st_c1_control()),
                ("C1-osread-converts-to-journalerror", _st_c1_osread()),
+               ("R1-stop-at-cap-exact-fit-returns", cap_exact),
+               ("R1-stop-at-cap-over-refuses-at-cap", cap_over),
+               ("R1-stop-at-cap-zero-cap-empty-returns", cap_zero_empty),
+               ("R1-stop-at-cap-zero-cap-nonempty-refuses", cap_zero_over),
                ("N2a-close-quietly-swallows-oserror", _st_n2a()),
                ("N2d-close-quietly-nonthrow", n2d_returned),
                ("N2d-close-quietly-single-close", n2d_single),
