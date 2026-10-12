@@ -108,8 +108,8 @@ the counters without ever un-publishing an observed id. Homes 2 (the irrevocable
 journals/<kind>/allocations reservation, spec 4.2) is not active in this build (the record reservation
 is a separate later change), and the seam refuses it fail-closed rather than claim through the homes-1
 path, so on a homes-2 store every subcommand still refuses before publication. A legacy
-.aiqt/record/journal found on a homes-2 store is refused, never recovered in place: the homes migration
-transports it (spec 4.2).
+.aiqt/record/journal found on a homes-2 store is refused and never recovered: homes 2 has no homes
+migration to carry it (spec 4.2).
 
 Exit contract: 0 recorded and doctor-VALID, or carrying only that pending cannot-evaluate (uncommitted);
 2 refusal or cannot-evaluate, with recovery text where the working tree changed. Exit 1 is not used (it
@@ -1864,7 +1864,7 @@ def _reconcile_journal(ctx):
     committed), the lease release is attempted with a failure surfaced, and the run refuses (exit 2)
     naming each outcome: the operator inspects the result before re-running. On a homes-2 store the
     record journal lives in the typed capability home instead: a legacy .aiqt/record/journal found
-    there is REFUSED read-only, never recovered in place (the homes migration transports it, spec 4.2),
+    there is REFUSED read-only and never recovered (homes 2 has no homes migration, spec 4.2),
     and the typed home is reconciled through the capability-bound API (_reconcile_capability_journal)."""
     if ctx.journal_rel != JOURNAL_REL:
         _refuse_legacy_journal(ctx)
@@ -1906,17 +1906,17 @@ def _reconcile_journal(ctx):
 
 
 def _refuse_legacy_journal(ctx):
-    """A legacy .aiqt/record/journal present on a homes-2 store is refused, never recovered in place:
-    the homes migration transports it with its bytes preserved (spec 4.2). Read-only."""
+    """A legacy .aiqt/record/journal present on a homes-2 store is refused and never recovered: homes 2
+    has no homes migration to carry it (spec 4.2). Read-only."""
     try:
         st = _journal._lstat_contained(ctx.root_fd, JOURNAL_REL)
     except (_journal.JournalError, OSError) as exc:
         raise RecordError("cannot inspect the legacy record journal {} ({}); fail-closed".format(
             JOURNAL_REL, exc))
     if st is not None:
-        raise RecordError("a legacy record journal {} is present on a homes-2 store; it is never recovered "
-                          "in place: the homes migration transports it (spec 4.2). Nothing written "
-                          "(fail-closed)".format(JOURNAL_REL))
+        raise RecordError("a legacy record journal {} is present on a homes-2 store; it is never recovered: "
+                          "homes 2 has no homes migration (spec 4.2), and the legacy journal is left unread "
+                          "and unchanged. Nothing written (fail-closed)".format(JOURNAL_REL))
 
 
 def _reconcile_capability_journal(ctx):
