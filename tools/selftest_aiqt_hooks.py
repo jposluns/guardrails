@@ -1998,6 +1998,15 @@ def _test_destructive_guard(failures, tmp):
         def blank_client(name):
             return ("_DESTRUCT_SQL_EXEC_RE", dict(saved_sql_exec, **{name: never_match}))
 
+        saved_writers = aiqt_hooks._DESTRUCT_WRITER_RES
+
+        def blank_writer(sample):
+            # Replace exactly the one writer pattern that matches sample. A dead pattern matches nothing,
+            # so its mutant would be a no-op and its witness would stay deny, failing the flip check: each
+            # writer mutant is also a liveness pin on its own pattern (FIX-514-R7B).
+            return ("_DESTRUCT_WRITER_RES",
+                    tuple(never_match if rx.search(sample) else rx for rx in saved_writers))
+
         branch_mutants = [
             ("names", "pe-func-shadows-known-pure",
              ("_destruct_prior_effects", blank_field("names", set))),
@@ -2024,6 +2033,28 @@ def _test_destructive_guard(failures, tmp):
             ("sql-sqlite3-single-quote", "pe-sqlite-output-pipe-single",
              ("_DESTRUCT_SQL_EXEC_RE", dict(saved_sql_exec, sqlite3=re.compile(
                  saved_sql_exec["sqlite3"].pattern.replace("\\x27", ""), saved_sql_exec["sqlite3"].flags)))),
+            # round 7b (FIX-514-R7B): the branches this round added or restored, one isolating witness each.
+            # Collapsing the sentinel to the unmarked raw erases the quoted/unquoted distinction, so the
+            # run-path-only restriction spreads to every substitution group (the round-7 regression): the
+            # unquoted-substitution client witness must then allow.
+            ("subst-restrict", "pe-unquoted-subst-sql-run", ("_LEX_SUBST_RUNPATH_RAW", "")),
+            # Emptying the keyword set reverts the case refusal to bare command-word position only (the
+            # round-7 bug): the reserved-position witness must then allow.
+            ("case-reserved", "pe-case-reserved-procsub-run", ("_DESTRUCT_KEYWORDS", frozenset())),
+            # With the predicate off, the parseable path discards a still-runs stop and falls back to the
+            # plain read (the round-7 behaviour): the fallback witness must then allow.
+            ("parseable-stillruns", "pe-parseable-fallback-stillruns-run",
+             ("_destruct_parseable_stillruns", lambda rf: False)),
+            ("redir-write", "pe-heredoc-delim-bs-redir", ("_DESTRUCT_REDIR_WRITE_RE", never_match)),
+            # The round-6 creator list without the round-7 additions.
+            ("creator-additions", "pe-select-install-run",
+             ("_DESTRUCT_CREATOR_RE", re.compile(r"(?<![\w.-])(?:cp|mv|ln|tee|mkdir|touch)(?![\w.-])"))),
+            ("writer-curl", "pe-writer-curl-run", blank_writer("curl -o f")),
+            ("writer-wget", "pe-writer-wget-run", blank_writer("wget -O f")),
+            ("writer-tar", "pe-writer-tar-run", blank_writer("tar -x -C d")),
+            ("writer-unzip", "pe-writer-unzip-run", blank_writer("unzip z -d d")),
+            ("writer-chmod", "pe-writer-chmod-run", blank_writer("chmod +x f")),
+            ("writer-interp", "pe-writer-interp-run", blank_writer("perl -e x")),
         ]
         for branch, label, (attr, replacement) in branch_mutants:
             command = prior_command(templates[label])
@@ -2040,6 +2071,60 @@ def _test_destructive_guard(failures, tmp):
             if mutated != "allow":
                 failures.append("(dz-branch-mutant-{}) disabling only the {} branch must allow {!r}, "
                                 "got {}".format(branch, branch, command, mutated))
+        # DIFFERENTIAL (FIX-514 round 7, claude MEDIUM 6 / codex MEDIUM 6): the base hook (the parent of this
+        # round, 3123dbce) and the new hook are both run over the committed vector corpus, the controls and
+        # every round-7 reproduction; a command the BASE denies and the NEW hook allows is a deny-to-allow
+        # regression and FAILS, unless it is on the reviewed allow-list of intended false-deny fixes (today only
+        # the data case argument cat <(printf case)). An unreachable base FAILS the self-test naming the
+        # cause: a check that cannot read its required input fails closed (FIX-514-R7B); the CI quality
+        # job checks out with fetch-depth 0, so the base is reachable there.
+        import importlib.util as _ilu
+        _basesha = "3123dbcef602f1e89d68febc4354107a47116696"
+        _relpath = ".aiqt/core/hooks/scripts/aiqt_hooks.py"
+        _reporoot = Path(aiqt_hooks.__file__).resolve().parents[4]
+        try:
+            _blob = subprocess.run(["git", "-C", str(_reporoot), "show", _basesha + ":" + _relpath],
+                                   check=True, capture_output=True, text=True, timeout=30,
+                                   env=git_fixture_env()).stdout
+        except (OSError, subprocess.SubprocessError):
+            _blob = None
+        if not _blob:
+            failures.append("(dz-differential-base) the differential base {} could not be extracted "
+                            "from git, so the deny-to-allow regression gate cannot run; a check that cannot "
+                            "read its required input fails closed (the CI quality job checks out with "
+                            "fetch-depth 0, so the base is reachable there)".format(_basesha[:12]))
+        else:
+            _bpath = base / "base_hooks_differential.py"
+            _bpath.write_text(_blob, encoding="utf-8")
+            _bspec = _ilu.spec_from_file_location("aiqt_hooks_base_differential", str(_bpath))
+            _bmod = _ilu.module_from_spec(_bspec)
+            _bspec.loader.exec_module(_bmod)
+            _saved_base_roots = _bmod._destruct_scratch_roots
+
+            def run_base(command, cwd, opts):
+                os.environ["HOME"] = opts.get("home", home0)
+                _bmod._destruct_scratch_roots = (saved_roots if opts.get("real_roots")
+                                                 else (lambda: [scratch_real]))
+                try:
+                    return _decision(_bmod.destructive_guard, command, cwd=cwd)
+                finally:
+                    os.environ["HOME"] = home0
+                    _bmod._destruct_scratch_roots = _saved_base_roots
+
+            _repro = ['(rm {absent}/x)', '(shred {absent}/x)', '(eval rm {absent}/x)', "(r''m {absent}/x)", 'true; (rm {absent}/x)', 'true | (rm {absent}/x)', 'f() ( rm {absent}/x )', 'if true; then (rm {absent}/x); fi', '( (rm {absent}/x) )', '(cd / && rm -rf srv)', '(dd if=/dev/zero of=/dev/sda)', '(truncate -s 0 {absent}/db)', '(find {absent} -delete)', "(psql -c 'drop database prod')", 'echo $(rm {absent}/x)', "echo $(sqlite3 :memory: '.shell sh')", "echo $(psql -c '\\! sh')", 'cp helper {scratch}/zz; cat <(if true; then case x in x) {scratch}/zz;; esac; fi)', 'cp helper {scratch}/zz; cat <(! case x in x) {scratch}/zz;; esac)', 'cp helper {scratch}/zz; cat <({ case x in x) {scratch}/zz;; esac; })', 'cp helper {scratch}/zz; cat <(for i in 1; do case x in x) {scratch}/zz;; esac; done)', 'cp helper {scratch}/zz; cat <(time case x in x) {scratch}/zz;; esac)', 'cp helper {scratch}/zz; echo $({ case x in x) {scratch}/zz;; esac; })', 'cp helper {scratch}/zz; echo "$(case x in x) {scratch}/zz;; esac)"', 'cat <(cat <(cat <(cat <(cat <(cat <(cat <(cat <(cat <(cat <(cat <(printf ok > {scratch}/zz; {scratch}/zz)))))))))))', 'cat <<EOF\nEO\\\nF\nprintf ok > {scratch}/zz; {scratch}/zz']
+            _corpus = [(c, cwd, opts) for _l, _r, c, cwd, _w, opts in vectors]
+            _corpus += [(prior_command(t), rp, {}) for _l, _c, t, _w in PRIOR_EFFECT_VECTORS]
+            _corpus += [(prior_command(t), rp, {}) for _l, t, _w in PRIOR_EFFECT_CONTROLS]
+            _corpus += [(prior_command(t), rp, {}) for t in _repro]
+            _allow = {"cat <(printf case)": "a data case argument, not a case statement (round-7 false-deny fix)"}
+            _regress = []
+            for _c, _cwd, _opts in _corpus:
+                if run_base(_c, _cwd, _opts) == "deny" and run(_c, _cwd, _opts) != "deny" and _c not in _allow:
+                    _regress.append(_c)
+            for _c in sorted(set(_regress)):
+                failures.append("(dz-differential) base DENIES and the new hook ALLOWS {!r}; a deny-to-allow "
+                                "regression not on the reviewed allow-list".format(_c))
+
         # Outcomes that are not rule-attributed: the boundary, the fail posture, and the snapshot evidence.
         before = _recovery_refs(repo)
         for label, command, cwd, want in (

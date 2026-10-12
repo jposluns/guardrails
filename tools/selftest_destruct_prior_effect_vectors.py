@@ -110,14 +110,45 @@ PRIOR_EFFECT_VECTORS = [
     # substitution, in double quotes and unquoted, is now seen on the parseable path too.
     ("pe-parseable-subst-dquote-run", 4, 'cp helper {scratch}/zz; echo "$({scratch}/zz)"', "deny"),
     ("pe-parseable-subst-backtick-run", 4, "cp helper {scratch}/zz; echo `{scratch}/zz`", "deny"),
-    ("pe-parseable-subst-unquoted-run", 4, "cp helper {scratch}/zz; echo $({scratch}/zz)", "deny"),
+    # round 7b (FIX-514-R7B): red on revert - the base discarded a still-runs stop inside a parseable
+    # substitution and fell back to the plain read, so the written path ran unseen there
+    ('pe-parseable-fallback-stillruns-run', 4,
+     'cp helper {scratch}/zz; echo "$(case x in x) {scratch}/zz;; esac)"', 'deny'),
     # select and a function or alias defined and then called in one command are uncertain too.
-    ("pe-select-create-run", 4, "cp helper {scratch}/zz; select x in a; do {scratch}/zz; done", "deny"),
+    # round 7b: red on revert - the base creator list had no install, so this select form allowed there
+    ('pe-select-install-run', 4, 'install helper {scratch}/zz; select x in a; do {scratch}/zz; done', 'deny'),
     ("pe-funcdef-call-create-run", 4,
      "runner() { {scratch}/zz; }; cp helper {scratch}/zz; runner", "deny"),
-    # MINOR 5: one nesting limit covers process substitutions too; beyond it the read is uncertain.
-    ("pe-deep-procsub-create-run", 4,
-     "cp helper {scratch}/zz; cat " + "<(cat " * 10 + "<({scratch}/zz)" + ")" * 10, "deny"),
+    # round 7b: red on revert - the base creator list had no rsync and no funcdef-call uncertainty
+    # (the depth-limit class keeps pe-deep-procsub-redir-run and its benign control below)
+    ('pe-funcdef-rsync-run', 4, 'zzgo() { {scratch}/zz; }; rsync helper {scratch}/zz; zzgo', 'deny'),
+    # round 7 (FIX-514): claude MINOR A - psql \ev, mysql \P, mariadb \e / \P / pager / edit
+    ('pe-psql-edit-view', 6, "psql -c '\\ev'", 'deny'),
+    ('pe-mysql-pager-shortcut', 6, "mysql -e '\\P sh'", 'deny'),
+    ('pe-mariadb-edit-shortcut', 6, "mariadb -e '\\e'", 'deny'),
+    ('pe-mariadb-pager-shortcut', 6, "mariadb -e '\\P sh'", 'deny'),
+    ('pe-mariadb-pager-word', 6, "mariadb -e 'pager sh'", 'deny'),
+    ('pe-mariadb-edit-word', 6, "mariadb -e 'edit'", 'deny'),
+    # round 7 (FIX-514): item 3 - an uncertain read (nesting limit, heredoc backslash-newline) with a
+    # raw-visible redirect write is effectful and denies; base denied the depth form, missed the heredoc form
+    ('pe-deep-procsub-redir-run', 4,
+     "cat " + "<(cat " * 10 + "<(printf ok > {scratch}/zz; {scratch}/zz)" + ")" * 10, 'deny'),
+    ('pe-heredoc-delim-bs-redir', 4, 'cat <<EOF\nEO\\\nF\nprintf ok > {scratch}/zz; {scratch}/zz', 'deny'),
+    # round 7b (FIX-514-R7B): one deny vector per writer creator on an uncertain read (a funcdef-call
+    # or a coproc), each red when only its own writer pattern is removed (the writer-* branch mutants);
+    # the option-absent controls live in PRIOR_EFFECT_CONTROLS.
+    ('pe-writer-curl-run', 4, 'zzf() { {scratch}/zz; }; curl -so {scratch}/zz http://127.0.0.1/x; zzf', 'deny'),
+    ('pe-writer-wget-run', 4, 'zzf() { {scratch}/zz; }; wget -O {scratch}/zz http://127.0.0.1/x; zzf', 'deny'),
+    ('pe-writer-tar-run', 4, 'tar -xf a.tar -C {scratch}; coproc {scratch}/zz', 'deny'),
+    ('pe-writer-unzip-run', 4, 'unzip a.zip -d {scratch}; coproc {scratch}/zz', 'deny'),
+    ('pe-writer-chmod-run', 4, 'chmod +x {scratch}/zz; coproc {scratch}/zz', 'deny'),
+    ('pe-writer-interp-run', 4,
+     "zzf() { {scratch}/zz; }; python3 -c 'open(\"{scratch}/zz\",\"w\")'; zzf", "deny"),
+    # round 7b: witnesses for the subst-restrict and case-reserved branch mutants; both ALSO deny on
+    # the base (isolation witnesses, not revert discriminators - those are the replaced vectors above).
+    ("pe-unquoted-subst-sql-run", 6, "echo $(psql -c '\\! sh')", "deny"),
+    ("pe-case-reserved-procsub-run", 4,
+     "cp helper {scratch}/zz; cat <(! case x in x) {scratch}/zz;; esac)", "deny"),
 ]
 
 # Benign shapes that must keep allowing (false-deny controls; none names a destructive word).
@@ -143,4 +174,11 @@ PRIOR_EFFECT_CONTROLS = [
     ("pe-control-case-in-procsub", "cat <(printf case)", "allow"),
     ("pe-control-quoted-heredoc-bs", "cat <<'EOF'\nEO\\\nF\nhello\nEOF", "allow"),
     ("pe-control-deep-procsub-benign", "cat " + "<(cat " * 10 + "<(printf ok)" + ")" * 10, "allow"),
+    # round 7b: each writer creator with its WRITE option absent stays allowed on the same uncertain read
+    ('pe-control-curl-no-output', 'zzf() { {scratch}/zz; }; curl http://127.0.0.1/x; zzf', 'allow'),
+    ('pe-control-wget-no-output', 'zzf() { {scratch}/zz; }; wget http://127.0.0.1/x; zzf', 'allow'),
+    ('pe-control-tar-no-chdir', 'tar -xf a.tar; coproc {scratch}/zz', 'allow'),
+    ('pe-control-unzip-no-destdir', 'unzip a.zip; coproc {scratch}/zz', 'allow'),
+    ('pe-control-chmod-no-execbit', 'chmod 600 {scratch}/zz; coproc {scratch}/zz', 'allow'),
+    ('pe-control-interp-no-inline', 'zzf() { {scratch}/zz; }; python3 {scratch}/s.py; zzf', 'allow'),
 ]

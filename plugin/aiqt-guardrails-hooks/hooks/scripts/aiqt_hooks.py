@@ -868,6 +868,16 @@ class _LexUncertain(_LexUnmodelled):
 _LEX_RECOVER_DEPTH = 8  # nested substitution groups a recover-mode read follows before it stops
 
 
+# A recover-mode group opened for a quoted "$( )" or a backtick substitution carries this
+# sentinel in the raw field of its opening ( segment, so the parseable-path scan restricts its inner
+# segments to the run-path check alone (the destructive-word/shadow/runner rules for that substitution
+# text stay with the outer segment text scan). A plain subshell, a function body, a brace group, an
+# unquoted $( ) and a process substitution carry no sentinel and get the full classification, exactly as
+# on the base revision. The NUL prefix cannot occur in a parseable command (the lexer rejects a NUL), so
+# the sentinel never collides with a real segment raw on the path that consults it.
+_LEX_SUBST_RUNPATH_RAW = "\x00subst-runpath"
+
+
 def _backtick_body(text, i, n, dquote):
     """(inner, end) for a backtick substitution whose body starts at index i (just past the opening
     backtick): inner is the command text bash runs (a backslash is removed before $, a backtick or a
@@ -996,7 +1006,7 @@ def _lex_command(command, partial=False, recover=False, _start=0, _close=False, 
         seg_start[0] = at + 2
         return at + 2
 
-    def nested(text, at, close):
+    def nested(text, at, close, restrict=False):
         # the '(' ... ')' group of a nested command list and the index just past it (close: the
         # ')'-closed list starting at index at of text; otherwise the whole of text). The limit counts every
         # enclosing group, process substitutions (the open groups) included, so one depth governs all.
@@ -1008,18 +1018,20 @@ def _lex_command(command, partial=False, recover=False, _start=0, _close=False, 
             exc = _LexUncertain if failure[1] == 2 else _LexUnmodelled
             raise exc("a nested command list it cannot read ({})".format(failure[2]))
         closing = [] if close else [_Segment([], ")", [], "", False, [], [])]
-        return [_Segment([], "(", [], "", False, [], [])] + inner + closing, end
+        opener_raw = _LEX_SUBST_RUNPATH_RAW if restrict else ""
+        return [_Segment([], "(", [], opener_raw, False, [], [])] + inner + closing, end
 
     def subst(kind, at, dquote):
         # the _read_word callback for a substitution inside a word: queue its group, return its end
+        restrict = dquote or kind == "`"
         if kind == "`":
             found = _backtick_body(command, at, n, dquote)
             if found is None:
                 raise ValueError("unterminated backtick substitution")
-            group, _end = nested(found[0], 0, False)
+            group, _end = nested(found[0], 0, False, restrict)
             end = found[1]
         else:
-            group, end = nested(command, at, True)
+            group, end = nested(command, at, True, restrict)
         segments.extend(group)
         return end
 
@@ -1173,10 +1185,15 @@ def _lex_command(command, partial=False, recover=False, _start=0, _close=False, 
                     i = consume_redirect(op, oplen, j, None)
                     continue
                 raise ValueError("unsupported {fd} redirect")
-            if groups and text == "case" and not argv and not redirects:
-                # 'case' confuses group counting only as a RESERVED WORD (its pattern ')' closes the group
-                # early); as a plain argument (cat <(printf case)) it is data, so refuse it only in
-                # command-word position - the first word of the current simple command (codex MEDIUM 4).
+            if (groups and text == "case"
+                    and all(w in _DESTRUCT_KEYWORDS or w == "time"
+                            for w in argv[_command_word_index(argv):])):
+                # case confuses group counting only as a RESERVED WORD (its pattern ) closes the group
+                # early); as a plain argument (cat <(printf case)) it stays data. case is reserved only in
+                # command-word position: the first word of the simple command once leading assignments and
+                # the reserved words that keep case in command position (then, do, else, !, {, time and kin)
+                # are skipped. A real command word before it proves an argument; if that proof is absent the
+                # read stops (FIX-514 round 7, restoring the round-6 refusal in every non-argument position).
                 raise _LexUnmodelled("a case statement inside a nested group")
             if started:
                 argv.append(text)
@@ -8045,10 +8062,12 @@ def _destruct_next_cwd(seg, cwd, prev_sep, depth, scoped, cdpath_risk):
 
 def _destruct_runpath_only(seg, cwd, ctx):
     """Only the prior-effect run-path verdict for a segment: whether its command runs a literal path an
-    earlier segment wrote, copied or linked. On the PARSEABLE path the segments nested inside a $( ) or
-    backtick substitution are classified ONLY this way, since the destructive-word, shadow and runner rules
-    for substitution text are owned by the outer segment's text scan; this closes the disclosed residual (a
-    written path run inside a substitution) without re-attributing those other rules' denials."""
+    earlier segment wrote, copied or linked. On the PARSEABLE path the segments nested inside a QUOTED
+    "$( )" or a backtick substitution are classified ONLY this way (the destructive-word, shadow and
+    runner rules for that substitution text are owned by the outer segment text scan); a plain subshell, a
+    function body, a brace group, an unquoted $( ) and a process substitution are NOT restricted here and
+    get the full classification. A best-effort partial for a written path run inside a quoted substitution,
+    not a proof the substitution is effect-free."""
     prior = ctx.get("prior")
     if not prior:
         return []
@@ -8064,9 +8083,11 @@ def _destruct_scan(command, segments, cwd, optout=True, restrict_groups=False):
     verdict pairs, any optout notes, and the monotonic deadline the snapshot reduction reuses. Shared by
     the whole-command path and the unparseable-command path, which classifies the segments the
     recover-mode lexer read (before, inside and after a here-string, a process substitution or an unquoted
-    heredoc) and inspects only their deny verdicts. With restrict_groups (the PARSEABLE path, whose only
-    groups are $( )/backtick substitutions) a segment nested inside a group is classified by the run-path
-    check alone, leaving the destructive-word/shadow/runner rules for substitution text to the outer scan.
+    heredoc) and inspects only their deny verdicts. With restrict_groups (the PARSEABLE path) a segment
+    nested inside a QUOTED "$( )" or a backtick substitution group (marked by _LEX_SUBST_RUNPATH_RAW)
+    is classified by the run-path check alone, leaving the destructive-word/shadow/runner rules for that
+    text to the outer scan; a plain subshell, a function body, a brace group, an unquoted $( ) and a
+    process substitution get the full classification, exactly as on the base revision.
 
     OPT-OUT POLICY: optout=True (the whole-command path) honours a truthy GUARDRAIL_ALLOW_DESTRUCTIVE
     leading a segment's own command: that segment is skipped with a note. optout=False (the
@@ -8075,6 +8096,7 @@ def _destruct_scan(command, segments, cwd, optout=True, restrict_groups=False):
     verdicts = []
     notes = []
     depth = 0
+    restrict_stack = []
     nest = 0
     broken = False
     prev_sep = ""
@@ -8098,7 +8120,8 @@ def _destruct_scan(command, segments, cwd, optout=True, restrict_groups=False):
             m = _DESTRUCT_OPTOUT_RE.fullmatch(tok)
             if m:
                 last = m.group(1)
-        if restrict_groups and depth > 0:
+        restrict_now = bool(restrict_stack) and restrict_stack[-1]
+        if restrict_groups and restrict_now:
             verdicts.extend(_destruct_runpath_only(seg, cwd, ctx))
         elif (optout and "optout" in _DESTRUCT_RULES and last is not None
                 and last.lower() not in _DISCARD_FALSY and _destruct_segment(seg, cwd, deadline, ctx)):
@@ -8136,9 +8159,13 @@ def _destruct_scan(command, segments, cwd, optout=True, restrict_groups=False):
         prev_sep = seg.sep_after
         if seg.sep_after == "(":
             depth += 1
+            restrict_stack.append((bool(restrict_stack) and restrict_stack[-1])
+                                  or seg.raw == _LEX_SUBST_RUNPATH_RAW)
         elif seg.sep_after == ")":
             if depth:
                 depth -= 1
+                if restrict_stack:
+                    restrict_stack.pop()
             elif not nest:
                 broken = True  # an unbalanced close outside a case pattern: the scope model is lost
     return verdicts, notes, deadline
@@ -8155,9 +8182,31 @@ _DESTRUCT_SHADOW_SKIP = _DESTRUCT_KNOWN | frozenset(_DESTRUCT_WRAPPER_SPECS)
 # Raw signals of an EFFECTFUL command, read when an uncertain read may have mis-swallowed the structured
 # tokens: a creator command word (cp/mv/ln/tee/mkdir/touch) and a command-valued environment assignment.
 # They over-match toward DENY, which is the safe direction for an already-uncertain read.
-_DESTRUCT_CREATOR_RE = re.compile(r"(?<![\w.-])(?:cp|mv|ln|tee|mkdir|touch)(?![\w.-])")
+_DESTRUCT_CREATOR_RE = re.compile(r"(?<![\w.-])(?:cp|mv|ln|tee|mkdir|touch|install|rsync)(?![\w.-])")
 _DESTRUCT_CMDVAR_RE = re.compile(
     r"(?<![\w.-])(?:" + "|".join(sorted(_DESTRUCT_COMMAND_ENV)) + r")\+?=")
+
+
+# A redirect that WRITES a path the raw scan can see: the output forms and the numbered forms. A
+# descriptor dup and the input forms are not writes. Over-matches toward DENY (the safe direction for an
+# already-uncertain read): this signal is read only on an uncertain or stopped read.
+_DESTRUCT_REDIR_WRITE_RE = re.compile(r"(?<![0-9<>])(?:[0-9]*>>?|&>>?|>\|)(?!&)")
+# Further creators the effectful predicate knows, each gated on the option that makes it WRITE a path: a
+# download to a file (curl with -o/-O/-sO/--output, wget with -O/--output-document), an extraction
+# to a directory (tar with -C, unzip with -d), an executable bit (chmod +x), and an inline-program
+# interpreter that can write (python3?/perl/ruby/node with -c or -e). A word boundary follows each
+# creator word and the option gap stops at the first separator byte (a newline, ;, &, |, a paren or a
+# backtick), a TEXTUAL bound keeping the option on its own command. Any OTHER creator - a
+# download with an unrecognized flag, a non-shell interpreter writing a path by another route, a computed
+# destination - is NOT seen here (disclosed in the residue); over-match toward DENY is the safe direction.
+_DESTRUCT_WRITER_RES = (
+    re.compile(r"(?<![\w.-])curl(?![\w.-])[^\n;&|()`]*?(?<![\w.-])(?:-[oO]|-s[oO]|--output)(?![\w.-])"),
+    re.compile(r"(?<![\w.-])wget(?![\w.-])[^\n;&|()`]*?(?<![\w.-])(?:-O|--output-document)(?![\w.-])"),
+    re.compile(r"(?<![\w.-])tar(?![\w.-])[^\n;&|()`]*?(?<![\w.-])-C(?![\w.-])"),
+    re.compile(r"(?<![\w.-])unzip(?![\w.-])[^\n;&|()`]*?(?<![\w.-])-d(?![\w.-])"),
+    re.compile(r"(?<![\w.-])chmod(?![\w.-])[^\n;&|()`]*?\+x"),
+    re.compile(r"(?<![\w.-])(?:python3?|perl|ruby|node)(?![\w.-])[^\n;&|()`]*?(?<![\w.-])-[ce](?![\w.-])"),
+)
 
 
 def _destruct_uncertain_words(segments):
@@ -8196,7 +8245,8 @@ def _destruct_effectful(command, segments):
     names an in-scope destructive word. An UNCERTAIN read denies only on an effectful command; otherwise it
     allows, so an ordinary command carrying a heredoc, a here-string or a benign coproc stays allowed."""
     if (_destruct_text_marker(command) or _DESTRUCT_CREATOR_RE.search(command)
-            or _DESTRUCT_CMDVAR_RE.search(command)):
+            or _DESTRUCT_CMDVAR_RE.search(command) or _DESTRUCT_REDIR_WRITE_RE.search(command)
+            or any(rx.search(command) for rx in _DESTRUCT_WRITER_RES)):
         return True
     for effect in _destruct_prior_effects(segments):
         if effect["outputs"] or effect["links"] or effect["env"] or effect["config"]:
@@ -8208,6 +8258,14 @@ def _destruct_effectful(command, segments):
 # on cannot start another command: none of these characters (a newline, a list or pipeline operator, a
 # group, a redirect or process substitution, a backtick or $( ) substitution) appears in it.
 _DESTRUCT_RECOVER_STOPS = "\n;&|()<>`"
+
+
+def _destruct_parseable_stillruns(rf):
+    """True when the parseable path's recover read stopped on a category bash still runs past (category
+    1): such a stop is never discarded by falling back to the plain read; the caller denies wholesale,
+    exactly as the unparseable path does (FIX-514 round 7). A module-level predicate so the self-test can
+    isolate this branch with an attribute mutant."""
+    return rf is not None and rf[1] == 1
 
 
 def destructive_guard(data):
@@ -8234,23 +8292,25 @@ def destructive_guard(data):
     here-string, a process substitution, an unquoted heredoc) whose text, read through its quoting context with
     line continuations joined, names one.
 
-    ONE READING (certain set), both paths: every command is read by the recover-mode lexer (_lex_command
-    recover=True), which models a CLOSED set with certainty - plain words and quotes and escapes, the
+    ONE READING (a best-effort model), both paths: the recover-mode lexer (_lex_command recover=True) reads
+    each command against the set it models - plain words and quotes and escapes, the
     recognized redirects and separators, subshell/process-substitution/command-substitution/backtick groups
     up to ONE nesting limit (_LEX_RECOVER_DEPTH, process substitutions included), here-strings, and quoted
     AND unquoted heredocs whose body it reads. A $( ) or backtick substitution (in double quotes AND
     unquoted) and a substitution in an unquoted heredoc body each become a nested group placed ahead of the
     segment that uses them, so a prior-effect operation inside a substitution (running a path an earlier
-    segment wrote) is seen on the parseable path too. On the PARSEABLE path the segments nested inside such
-    a substitution group are classified by the run-path check alone (the destructive-word/shadow/runner
-    rules for substitution text stay with the outer segment's text scan), the opt-out is honoured, and a
+    segment wrote) is seen on the parseable path too. On the PARSEABLE path the segments nested inside a
+    QUOTED "$( )" or a backtick substitution are classified by the run-path check alone (the
+    destructive-word/shadow/runner rules for that text stay with the outer segment text scan), while a plain
+    subshell, a function body, a brace group, an unquoted $( ) and a process substitution get the full
+    classification; the opt-out is honoured, and a
     recover read that hits a still-runs or syntax quirk inside a substitution falls back to the plain
     reading. On the UNPARSEABLE path (the default lexer raised: a here-string, a process substitution, an
     unquoted heredoc, an unbalanced quote, a '{fd}>' redirect, a NUL) the text scan above runs first, then
     every segment the recover read reaches - before, inside and after those constructs - gets the full
     classification, the prior-effect pass included, with the opt-out NOT honoured, and any deny denies.
 
-    UNCERTAIN READS: a construct OUTSIDE the certain set that can run a command - a backslash-newline inside
+    UNCERTAIN READS: a construct OUTSIDE the modelled set that can run a command - a backslash-newline inside
     an unquoted heredoc body or delimiter, coproc, select, a function or alias defined and then called in
     one command, a process substitution nested beyond the limit (and a NUL or a case statement inside a
     substitution, which stop the read) - makes the read UNCERTAIN. An uncertain read DENIES whenever the
@@ -8343,11 +8403,18 @@ def destructive_guard(data):
     grammars, downloads and create-then-run across turns remain unseen. Tracked-clean state is intentionally
     not invalidated by the bounded partial. Existing environment/configuration, read/stdin-supplied
     settings, computed commands arriving on stdin, SQL from -f FILE or stdin, and database clients outside
-    psql/mysql/mariadb/sqlite3 remain residuals. A $( ) or backtick substitution (in double quotes and
-    unquoted) is now lexed as a nested group on BOTH the parseable and the unparseable path, so a
-    prior-effect operation inside one (running a path an earlier segment wrote) IS seen (the former
-    parseable-substitution residual is closed); the destructive-word scan of substitution text stays the
-    outer segment's text scan.
+    psql/mysql/mariadb/sqlite3 remain residuals. A QUOTED "$( )" or backtick substitution is
+    read as a nested group whose inner segments get the run-path check while the outer text scan reads its
+    text for a destructive word; an unquoted $( ), a plain subshell, a function body and a brace group get
+    the full classification. This guard is BEST-EFFORT, not a proof that a command is effect-free: several
+    forms it reads as certain can still run a written path - brace expansion, a glob, an ANSI-C escaped
+    word, a variable command word, a PATH lookup, and an eval, xargs, watch, flock, chroot, find -exec
+    or trap of a written path, or a time/eval/trap call of a defined function - and are NOT modelled this
+    round. The effectful test behind an uncertain read knows the creators cp, mv, ln, tee, mkdir, touch,
+    install and rsync, a curl or wget download to a file, a tar -C or unzip -d extraction, chmod +x, a
+    python/perl/ruby/node -c or -e, a redirect that writes a path, and a command-valued assignment, each writer
+    option read in the same command segment as its creator word (a textual bound); any other creator is
+    not seen.
 
     FAIL POSTURE: a missing tool_name or an unreadable command DENIES (fail closed); a non-Bash tool ALLOWS; a
     failed status probe DENIES; one deadline (_DESTRUCT_BUDGET) covers the whole classification: repository
@@ -8439,14 +8506,24 @@ def destructive_guard(data):
         return _allow()
     # PARSEABLE COMMAND: ONE reading - the recover-mode read also lexes $( ) and backtick substitutions
     # (inside double quotes and unquoted) as nested groups, so a prior-effect operation inside a substitution
-    # is seen on the parseable path too (closing the disclosed parseable-substitution residual). It is gated
+    # is seen (a best-effort partial for a written path run inside a substitution, not a closed residual). It is gated
     # by the subst rule so the subst text-scan's isolating mutant still discriminates; a recover read that
-    # hits a still-runs or syntax quirk inside a substitution falls back to the plain reading (the text scan
-    # already covers a destructive word there).
+    # hits a STILL-RUNS stop inside a substitution denies wholesale (never discarded), and one that hits a
+    # syntax quirk falls back to the plain reading (the text scan already covers a destructive word there).
     rfail = None
     used_groups = False
     if "subst" in _DESTRUCT_RULES and "prior-effect" in _DESTRUCT_RULES:
         rseg, rf, _endr = _lex_command(command, recover=True)
+        if _destruct_parseable_stillruns(rf):
+            # A still-runs stop inside a substitution on the PARSEABLE path is NOT discarded by falling
+            # back to the plain read: bash runs a construct the reader cannot classify past, so it denies
+            # wholesale, exactly as the unparseable path does (FIX-514 round 7).
+            return _deny("AIQT rules sechau/secrst (fail-closed): a substitution in this command carries "
+                         "a construct bash still runs that the reader cannot classify past ({}), so this "
+                         "guard denies rather than run (fail closed). Re-issue it as a parseable command "
+                         "with literal targets. {}".format(rf[2], _DESTRUCT_ALTS),
+                         "AIQT guardrail: denied a command whose substitution carries an unclassifiable "
+                         "construct (rules sechau, secrst, fail-closed).")
         if rf is None or rf[1] == 2:
             segments, rfail, used_groups = rseg, rf, True
         else:
