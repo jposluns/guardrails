@@ -49,34 +49,73 @@ variables, the allowlist unit checks covering the rest of the GIT_-prefixed fami
   selftest_git_fixture_env.py                              exit 0 on pass, 1 on assertion failure
   selftest_git_fixture_env.py --execution-report ABS_PATH  also write the executed check IDs as JSON
 
-Exit 2 is a harness/setup error, including bad arguments, no git binary, no writable temp directory,
-a failed report write, or an unreadable, malformed, or suite-missing expectation manifest.
+Exit 2 is cannot-evaluate: a harness/setup error, including bad arguments, no git binary, no writable
+temp directory, a failed report write, or an unreadable, malformed, or suite-missing expectation
+manifest; and a bounded child that reached its time bound (see _run_bounded): a config-injection
+member (_run_config_member) or a corpus leak lane (_run_corpus, _run_corpus_imported). A member
+reached its time bound, so this run is no verdict on that member: the timeout is listed under SELF-TEST
+CANNOT EVALUATE, never as a failure of that member. A finding is folded into the cannot-evaluate
+list only when it is attributed to a recorded timeout (see _timeout_cause and
+_registered_offenders: the finding's own result is that timeout's message, which names the member,
+or it lists only members whose run timed out with no hook, monitor or exposure evidence, or, for a
+check over several scenarios, every scenario that did not time out matched; see
+_partial_timeout_cause); every other finding is definite and outranks cannot-evaluate, so the run
+exits 1 (SELF-TEST FAIL, with the timeouts listed beside it). TIMING ALONE IS NEVER A DEFINITE
+FINDING: an observation whose only evidence of a defect is timing (a deadline missed, a signal
+late, a signal the harness owed but never sent, a completion budget exceeded) is recorded under
+cannot-evaluate, which fails the run closed and is never a pass; a definite finding needs
+non-timing evidence the code under test produced (state it left, an exit status, a refusal
+record or a message). An observation carrying ANY recorded timeout keeps only the explicit
+_STATE_EVIDENCE allowlist of final-state fields compared and stands every other field down
+(_scenario_timeout_record), so no timeout site decides per field what stays definite. A definite finding over a lane never
+names a member whose run only timed out: that member is listed by its own timeout message under
+cannot evaluate (_registered_offenders, _lifecycle_finding). tools/check_selftest_execution.py treats any child exit outside {0, 1}
+as CANNOT EVALUATE and itself exits 2 (its self-test leg st/child-rc2-2), so a timeout never reads as
+a pass or as a code failure there either.
+
+Only those children are bounded this way. The suite's own git probes and fixture setup commands
+keep their 60 s subprocess timeouts, and reaching one of those raises (a traceback, exit 1) instead
+of becoming cannot-evaluate; the other helper children keep the timeout handling each documents.
 """
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: selftest_git_fixture_env.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: selftest_git_fixture_env.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 import ast
+import errno
 import hashlib
 import json
 import os
 import shutil
+import signal
 import subprocess
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 try:
     import tomllib
 except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships tomllib
-    sys.stderr.write(
-        "error: selftest_git_fixture_env.py cannot import tomllib, part of the Python standard library; "
-        "this installation is incomplete. Nothing was run (cannot evaluate).\n")
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: selftest_git_fixture_env.py cannot import tomllib, part of the Python standard library; "
+            "this installation is incomplete. Nothing was run (cannot evaluate).\n")
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _git_fixture_env  # noqa: E402
@@ -89,6 +128,9 @@ CHECKS_MANIFEST = ROOT / "tools" / "selftest_checks.toml"
 CORPUS_SELFTEST = ROOT / "tools" / "selftest_aiqt_corpus.py"
 SUITE_ID = "git-fixture-env-selftest"
 FAILURES = []
+CANNOT_EVALUATE = []
+# finding text -> the timeout messages it is attributed to (see _verdict).
+TIMEOUT_CAUSED = {}
 EXECUTED = []
 _EXECUTED_SET = set()
 
@@ -115,14 +157,38 @@ POISON_VARS = {
 SENTINEL = "AIQT_FIXTURE_ENV_SENTINEL"
 
 
-def check(name, got, want):
+def check(name, got, want, cause=None):
+    """Record one check. A mismatch whose result is wholly a timeout (cause, or _timeout_cause(got)
+    when cause is None) is attributed to those timeout messages in TIMEOUT_CAUSED; _verdict folds
+    it into cannot-evaluate only when each of them was recorded."""
     if name in _EXECUTED_SET:
         print("SELF-TEST HARNESS ERROR: duplicate check id {!r}".format(name), file=sys.stderr)
         sys.exit(2)
     _EXECUTED_SET.add(name)
     EXECUTED.append(name)
     if got != want:
-        FAILURES.append("{}: got {!r}, want {!r}".format(name, got, want))
+        finding = "{}: got {!r}, want {!r}".format(name, got, want)
+        FAILURES.append(finding)
+        cause = _timeout_cause(got) if cause is None else tuple(cause)
+        if cause:
+            TIMEOUT_CAUSED[finding] = cause
+
+
+def _is_timeout(value):
+    return isinstance(value, str) and value.startswith("TIMEOUT: ")
+
+
+def _timeout_cause(got):
+    """The timeout messages a mismatching member result is wholly explained by, or () when any
+    part of it is not: the result is a timeout message (which names the member), or it is a list
+    of one member's registered argument variants (_member_result's exit-code column) each either
+    exit 0 or a timeout message."""
+    if _is_timeout(got):
+        return (got,)
+    if isinstance(got, list) and any(_is_timeout(value) for value in got) and all(
+            _is_timeout(value) or (type(value) is int and value == 0) for value in got):
+        return tuple(value for value in got if _is_timeout(value))
+    return ()
 
 
 def _poison_environ():
@@ -531,6 +597,18 @@ def _config_results(roster, env, marker, monitor_marker, system=False):
     bypass and exits nonzero; _require_wrapper_observed then fails the run
     closed instead of accepting an unobserved, apparently clean result.
     _prepared_before_pool_control pins the preparation ordering itself.
+    The members run on the pool's worker threads (_run_bounded inline there). When the pool's
+    results raise (an interrupt reaching the main thread, or a failed member), closing is set
+    FIRST, as a plain store (so no signal handler raises once the main thread takes the registry
+    lock) and then under the lock (so a worker still in its setup steps, the positive control,
+    can never start a member after the sweep), then no queued member starts and every registered
+    member group is killed (_signal_member_groups) BEFORE the wait for the workers, and every
+    running member stops waiting (_run_member), so that wait never runs to a member's bound.
+    config/member-close-on-interrupt pins it with a real SIGINT,
+    config/member-failed-no-late-launch with a failed member and a worker that reaches its member
+    only after the sweep, and config/member-close-signal-sweep with a signal at every point of
+    this branch through main()'s closes and restore. A caller that catches that raise and goes on
+    clears closing again (_reopen_members).
     """
     import shlex
     from concurrent.futures import ThreadPoolExecutor
@@ -614,8 +692,25 @@ def _config_results(roster, env, marker, monitor_marker, system=False):
             private = stage / "member-{:03d}".format(index)
             private.mkdir()
             prepared.append(prepare(private, argv))
-        with ThreadPoolExecutor(max_workers=4) as pool:
+        pool = ThreadPoolExecutor(max_workers=4)
+        try:
             results = dict(pool.map(run, prepared))
+        except BaseException:
+            # An interrupt or a failed member: closing is set (a plain store before the lock is
+            # taken, then under the lock), no queued member starts, and every running one is
+            # killed now, so the wait below returns at once instead of at each member's bound.
+            _MEMBERS["closing"] = True
+            try:
+                with _MEMBERS_LOCK:
+                    _MEMBERS["closing"] = True
+            except RegistryLockTimeout as exc:
+                # The plain store already refuses every later start; the refusal is recorded.
+                _lock_refused("failed-member branch", exc)
+            pool.shutdown(wait=False, cancel_futures=True)
+            _signal_member_groups()
+            raise
+        finally:
+            pool.shutdown(wait=True)
     finally:
         shutil.rmtree(stage, ignore_errors=True)
     marker.write_bytes(b"")
@@ -753,6 +848,7 @@ def _wrapper_bypass_control(base, env, marker, monitor_marker):
         message = str(exc)
         outcome = (message.startswith("config observer wrapper was bypassed")
                    and "member run: tools/bypass-control-probe --self-test" in message)
+    _reopen_members()
     check("config/wrapper-bypass-fails-closed",
           (held, refused, released, outcome),
           ((66, b"bypassed\n", b""), True, (0, b"", b"wrapper\n"), True))
@@ -850,6 +946,7 @@ def _prepared_before_pool_control(env, marker, monitor_marker):
         got = "config run raised: {}".format(exc)
     finally:
         _WRITE_RECORDERS.remove(record)
+    _reopen_members()
     check("config/executables-prepared-before-pool", got,
           (True, ([], [], []), ([], [], [("git", "os.chmod")])))
 
@@ -1195,8 +1292,8 @@ def _config_injection_lane(base):
     _wrapper_bypass_control(base, env, marker, monitor_marker)
     _prepared_before_pool_control(env, marker, monitor_marker)
     combined = _config_results(roster, env, marker, monitor_marker)
-    check("config/registered-combined", [argv for argv, value in combined.items()
-                                       if value != (0, b"", b"", b"")], [])
+    offenders, cause = _registered_offenders(combined)
+    check("config/registered-combined", offenders, [], cause)
     for rc_id, hooks_id, member in (
             ("config/selftest_aiqt_corpus/rc", "config/selftest_aiqt_corpus/hooks",
              "tools/selftest_aiqt_corpus.py"),
@@ -1294,8 +1391,8 @@ def _config_injection_lane(base):
     malformed_results = _config_results(
         [argv for argv in roster if _command_identity(argv) not in CONFIG_EXCLUSIONS["malformed"]],
         env, marker, monitor_marker)
-    check("config/registered-malformed", [argv for argv, value in malformed_results.items()
-                                        if value != (0, b"", b"", b"")], [])
+    offenders, cause = _registered_offenders(malformed_results)
+    check("config/registered-malformed", offenders, [], cause)
     for malformed_id, member in (
             ("config/selftest_aiqt_corpus/malformed", "tools/selftest_aiqt_corpus.py"),
             ("config/selftest_orch_hooks/malformed", "tools/selftest_orch_hooks.py"),
@@ -1348,21 +1445,4284 @@ def _config_injection_lane(base):
     check("config/system-control", (probe.returncode, bool(monitor_marker.read_bytes())),
           (0, True))
     system_results = _config_results(roster, system_env, marker, monitor_marker, system=True)
-    check("config/registered-system", [argv for argv, value in system_results.items()
-                                     if value != (0, b"", b"", b"")], [])
+    offenders, cause = _registered_offenders(system_results)
+    check("config/registered-system", offenders, [], cause)
     return system_results
 
 
-def _run_config_member(member, env):
+# Per-member time bounds (seconds) for _run_config_member. A member absent here keeps
+# CONFIG_MEMBER_BOUND_DEFAULT. config/member-bound-table pins this table (every key an exact
+# registered roster argv, the one override, the default); it does not test any sizing.
+#
+# CONFIG_MEMBER_BOUND_DEFAULT is a DELIBERATE SHORTER DEADLINE, not a bound sized above every
+# member's own end-to-end budget. Budgets the members grant themselves, READ FROM SOURCE (not
+# measured): opf/tools/opf.py --self-test grants its blocked-isolation case 31 * 180 + 30 = 5610 s
+# (the isolation matrix's 31 cases at 180 s each plus a 30 s launch margin), above this default;
+# the tools/check_selftest_execution.py members set no internal bound of their own (the CI job
+# timeout is their outer bound). The kill-timeout rule ("A kill timeout outlives the wait it
+# bounds", AGENTS.md) allows a deadline below a callee's budget only where cutting the work short
+# is the explicit intent, and only when reaching it is attributed to the deadline rather than
+# reported as the callee's failure.
+# CHOICE: the default is NOT raised above 5610 s; it stays a deliberate shorter deadline, and
+# cutting a member short is the explicit intent here because this lane owns no member's verdict.
+# Every roster member is a registered step or the runner behind a registered --suite step
+# (_registered_selftests reads the CI workflow, both standalone runners and the suite manifest),
+# and that step runs the member to completion under no deadline from this suite, so no member's
+# pass or fail depends on this bound. This lane asks a different question (does the
+# member stay clean under injected caller hooks, ignore files, attributes and fsmonitor), it
+# reruns each member in three config lanes (combined, malformed, system), and the bound caps how
+# long one stalled rerun can hold that answer back. Cutting a rerun short leaves the question
+# unanswered, never answered wrongly: reaching the bound is cannot-evaluate (exit 2 when nothing
+# definite was found), never a FAIL of that member and never a pass.
+CONFIG_MEMBER_BOUND_DEFAULT = 1200
+CONFIG_MEMBER_BOUNDS = {
+    # MEASURED (2026-10-07, nice 10, load5 about 12 to 14 on a 16-CPU host): one complete run took
+    # 582.30 s wall and 425.55 s CPU and passed; two plain runs were still running at 585 s and
+    # 590 s. The previous 1200 s default was reached twice at load5 above 20 (2026-10-07).
+    # ESTIMATED (assumes wall time grows roughly in proportion to load once load exceeds the CPU
+    # count): 3600 s, about 6.2 times the measured run, covers load5 up to about 80; it also
+    # exceeds the command's own T75 wait chain (540 s per call, 4 calls: 2160 s).
+    ("opf/tools/check_opf_record.py", "--self-test", "--red-on-revert"): 3600,
+}
+# After the process-group kill: the bounded drain of output still held by a descendant that left
+# the group (setsid or setpgid), the bounded reap of the leader, and the bounded wait for the group
+# to be confirmed empty (_member_group_empty).
+CONFIG_MEMBER_DRAIN_SECONDS = 30
+CONFIG_MEMBER_REAP_SECONDS = 5
+CONFIG_MEMBER_EMPTY_SECONDS = 5
+# The corpus leak lanes' bound (_run_corpus, _run_corpus_imported).
+CORPUS_BOUND = 300
+# Linux's PIDFD_SIGNAL_PROCESS_GROUP (include/uapi/linux/pidfd.h, Linux 6.9 and later): a
+# pidfd_send_signal flag that signals the process group the pidfd's process leads.
+PIDFD_SIGNAL_PROCESS_GROUP = getattr(signal, "PIDFD_SIGNAL_PROCESS_GROUP", 1 << 2)
+
+
+def _config_member_bound(member):
+    return CONFIG_MEMBER_BOUNDS.get(tuple(member), CONFIG_MEMBER_BOUND_DEFAULT)
+
+
+# THE MEMBER REGISTRY. Every bounded child (_run_bounded) leads its own session and process group
+# and is registered here when it starts (_start_member_group), as a _MemberGroup; it is removed
+# only once its group is confirmed empty (_end_member_group). "closing" is set by main()'s finally
+# and the suite's close (_close_members), by the failed-member branch of the config pool
+# (_config_results) and by the first SIGINT or SIGTERM while main() runs (_close_on_signal); once
+# it is set no member starts. The lock is held across the closing test, the Popen and the
+# registration, so a member either is registered before the close takes its list or never starts.
+# THE MAIN THREAD NEVER TAKES THE LOCK WHILE A SIGNAL CAN RAISE: every main-thread path that takes
+# it during a run (the close, the failed-member branch) first stores closing = True as a PLAIN
+# store, with no lock, so _close_on_signal is a no-op before the lock is ever taken there (a
+# handler raising between the acquire and the protected range of a with statement would leave the
+# lock held). Every acquire is also BOUNDED (_RegistryLock, REGISTRY_LOCK_SECONDS): one not granted
+# raises RegistryLockTimeout, which each caller reports AND records in _MEMBERS["refused"]
+# (_lock_refused), so no path blocks forever on it and a refusal at any of the five sites (a member
+# start, a release, a kill sweep, any of the close's own three acquires, the config pool's
+# failed-member branch) makes the run cannot-evaluate (_final_verdict) even when a later close gets
+# the lock and ends cleanly. config/member-close-lock pins the bound;
+# config/member-close-unresolved-verdict pins the persistence at each of the five sites
+# ("start-timeout", "release-timeout", "sweep-refused", "failed-refused"), the close at each of its
+# three acquires ("close-refused", "close-wait-refused", "close-left-refused").
+REGISTRY_LOCK_SECONDS = 60
+
+
+class RegistryLockTimeout(RuntimeError):
+    """The member registry lock was not granted within REGISTRY_LOCK_SECONDS."""
+
+
+class _RegistryLock:
+    """The registry's threading.Lock, taken by a with statement under a bounded acquire."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+
+    def acquire(self, timeout=-1):
+        return self._lock.acquire(True, timeout)
+
+    def release(self):
+        self._lock.release()
+
+    def __enter__(self):
+        if not self.acquire(REGISTRY_LOCK_SECONDS):
+            raise RegistryLockTimeout("the member registry lock was not granted within {} s".format(
+                REGISTRY_LOCK_SECONDS))
+        return self
+
+    def __exit__(self, *exc_info):
+        self.release()
+
+
+_MEMBERS_LOCK = _RegistryLock()
+# "raised": the strongest SIGINT or SIGTERM raised so far in this run, by _close_on_signal or by
+# _raise_held (None until one has), so a later drain never ranks below it. "held": EVERY SIGINT or
+# SIGTERM _close_on_signal deferred because closing was set or one had already raised, in the
+# order received (none is dropped); main() raises the strongest after its second close and the
+# restore (_raise_held), and _reopen_members raises it when it clears closing. Inside a run, closing
+# is cleared only by _reopen_members (the controls that drive the failed-member branch on purpose,
+# and _closing_refusal_control, which sets and clears closing alone and never restores the whole
+# registry, so a signal held inside it is raised right after it). "refused": every registry lock
+# refusal of this run (_lock_refused).
+_MEMBERS = {"closing": False, "raised": None, "held": [], "refused": [], "groups": set()}
+# How often a member's wait (_run_member) looks at closing: a member whose wait sees it set stops
+# waiting and runs its own cleanup at once, instead of waiting on to its bound.
+MEMBER_WAIT_SLICE_SECONDS = 0.5
+
+
+def _lock_refused(what, exc):
+    """Record a registry lock refusal (exc, a RegistryLockTimeout, met by what) in
+    _MEMBERS["refused"] and return the message: main()'s verdict reads every refusal of the run,
+    so it stays cannot-evaluate even when a later close gets the lock and ends cleanly."""
+    message = "{}: {}".format(what, exc)
+    _MEMBERS["refused"].append(message)
+    return message
+
+
+class _MemberGroup:
+    """One bounded child's process group: proc, the Popen of its leader (the group id is
+    proc.pid); pidfd, os.pidfd_open of the leader taken at spawn while it was an unreaped child
+    (None where unavailable); ended, set once its own thread's cleanup has run."""
+    __slots__ = ("proc", "pidfd", "ended")
+
+    def __init__(self, proc, pidfd):
+        self.proc, self.pidfd, self.ended = proc, pidfd, False
+
+
+def _start_member_group(argv, cwd, env):
+    """Start argv as the leader of a new session and process group and register it; raise
+    subprocess.SubprocessError, starting nothing, once the suite is closing (RegistryLockTimeout,
+    starting nothing, when the registry lock is not granted)."""
+    with _MEMBERS_LOCK:
+        if _MEMBERS["closing"]:
+            raise subprocess.SubprocessError("the suite is closing: no new member starts")
+        proc = subprocess.Popen(argv, cwd=cwd, env=env, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True, errors="replace",
+                                start_new_session=True)
+        try:
+            pidfd = os.pidfd_open(proc.pid)
+        except (AttributeError, OSError):  # no pidfd here: the group is named by number
+            pidfd = None
+        group = _MemberGroup(proc, pidfd)
+        _MEMBERS["groups"].add(group)
+    return group
+
+
+def _signal_member_group(group, sig):
+    """Send sig to every process in group's process group; return False when it was not sent
+    (below), and raise ProcessLookupError when the group has no process left. With a pidfd, the
+    kernel addresses the group through the leader's own pid record (pidfd_send_signal with
+    PIDFD_SIGNAL_PROCESS_GROUP), which a reused pid number never names, so this is exact before
+    AND after the leader is reaped. Without one (no pidfd, or a kernel before Linux 6.9 refusing
+    the flag with EINVAL) the group is named by number (os.killpg), which is exact while the
+    leader is unreaped (its pid, and with it the group id, stays allocated until the reap); after
+    the reap only signal 0 is sent by number (a reused number is then only probed, never
+    signalled), and any other signal returns False unsent."""
+    if group.pidfd is not None:
+        try:
+            signal.pidfd_send_signal(group.pidfd, sig, None, PIDFD_SIGNAL_PROCESS_GROUP)
+            return True
+        except OSError as exc:
+            if exc.errno != errno.EINVAL:
+                raise
+    if sig and group.proc.returncode is not None:
+        return False
+    os.killpg(group.proc.pid, sig)
+    return True
+
+
+def _signal_member_groups():
+    """SIGKILL every registered member group, under the registry lock (so a group whose pidfd is
+    being released is never signalled through it); return the problems met, a lock not granted
+    among them."""
+    problems = []
     try:
-        proc = subprocess.run([sys.executable, "-I", "-B", str(ROOT / member[0]), *member[1:]],
-                              cwd=ROOT, env=env, capture_output=True, text=True, errors="replace", timeout=1200)
-        if proc.returncode:
-            print("CONFIG-INJECTION {}:\n{}".format(member, proc.stdout + proc.stderr),
-                  file=sys.stderr)
-        return proc.returncode
+        with _MEMBERS_LOCK:
+            for group in list(_MEMBERS["groups"]):
+                try:
+                    _signal_member_group(group, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                except Exception as exc:  # reported, never raised
+                    problems.append("group {} kill refused ({}: {})".format(
+                        group.proc.pid, type(exc).__name__, exc))
+    except RegistryLockTimeout as exc:
+        problems.append(_lock_refused("no group signalled", exc))
+    return problems
+
+
+def _stop_member_group(group):
+    """Bounded cleanup of a bounded child that must end, on EVERY exit of its wait: SIGKILL its
+    whole process group (_signal_member_group; never conditioned on the leader's returncode, so a
+    descendant left in the group after the leader exited or was reaped dies too), falling back to
+    the leader alone when the group kill is refused; then drain its output for at most
+    CONFIG_MEMBER_DRAIN_SECONDS and reap the leader for at most CONFIG_MEMBER_REAP_SECONDS.
+    Returns the problems met ([] when clean); a step that raises is recorded and the cleanup goes
+    on. It runs on the member's own thread, never the main thread (_run_bounded), so no signal
+    handler raises inside it."""
+    proc, problems = group.proc, []
+    try:
+        _signal_member_group(group, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except Exception as exc:  # any refusal is reported, never raised
+        problems.append("group kill refused ({}: {}); killed the leader alone, so a "
+                        "descendant in its group may survive".format(type(exc).__name__, exc))
+        try:
+            proc.kill()
+        except Exception as kill_exc:
+            problems.append("leader kill failed ({}: {})".format(type(kill_exc).__name__,
+                                                                 kill_exc))
+    try:
+        proc.communicate(timeout=CONFIG_MEMBER_DRAIN_SECONDS)
+    except subprocess.TimeoutExpired:
+        problems.append("output still held after the {} s drain; the pipes are closed "
+                        "unread".format(CONFIG_MEMBER_DRAIN_SECONDS))
+    except Exception as exc:
+        problems.append("drain failed ({}: {})".format(type(exc).__name__, exc))
+    if proc.returncode is None:
+        try:
+            proc.wait(timeout=CONFIG_MEMBER_REAP_SECONDS)
+        except Exception as exc:
+            problems.append("leader not reaped within {} s ({}: {})".format(
+                CONFIG_MEMBER_REAP_SECONDS, type(exc).__name__, exc))
+    return problems
+
+
+def _member_group_empty(group):
+    """None once group's process group is confirmed empty (signal 0 finds no process in it,
+    polled for at most CONFIG_MEMBER_EMPTY_SECONDS), else the problem. Without a pidfd and after
+    the leader's reap, the probe is by number, so a reused number reads as not empty (a false
+    alarm, never a kill)."""
+    deadline = time.monotonic() + CONFIG_MEMBER_EMPTY_SECONDS
+    while True:
+        try:
+            _signal_member_group(group, 0)
+        except ProcessLookupError:
+            return None
+        except Exception as exc:
+            return "group {} emptiness not confirmed ({}: {})".format(
+                group.proc.pid, type(exc).__name__, exc)
+        if time.monotonic() >= deadline:
+            return ("group {} still has a process {} s after the cleanup; it stays registered "
+                    "for the suite's close".format(group.proc.pid, CONFIG_MEMBER_EMPTY_SECONDS))
+        time.sleep(0.05)
+
+
+def _release_member_group(group):
+    """Remove a group confirmed empty from the registry and close its pidfd, exactly once; None,
+    or the problem when the registry lock is not granted (the group then stays registered, and the
+    refusal is recorded for main()'s verdict, _lock_refused)."""
+    try:
+        with _MEMBERS_LOCK:
+            _MEMBERS["groups"].discard(group)
+            fd, group.pidfd = group.pidfd, None
+    except RegistryLockTimeout as exc:
+        return _lock_refused("group {} not released".format(group.proc.pid), exc)
+    if fd is not None:
+        os.close(fd)
+    return None
+
+
+def _end_member_group(group, sink, banner, timed_out):
+    """Kill and reap group (_stop_member_group), release it once it is confirmed empty
+    (_member_group_empty; a group not confirmed stays registered for the suite's close), and
+    close its pipes. Every problem, and an exception escaping the cleanup, is reported as ONE line
+    on sink through _report_guarded: banner, a header naming the outcome (a recorded timeout when
+    timed_out is truthy, else the wait that ended otherwise), then the problems; none is raised,
+    so the outcome the cleanup follows (a return, or an exception already propagating) stands."""
+    try:
+        problems = _stop_member_group(group)
+    except BaseException as exc:
+        problems = ["cleanup raised ({}: {})".format(type(exc).__name__, exc)]
+    try:
+        unconfirmed = _member_group_empty(group)
+    except BaseException as exc:
+        unconfirmed = "emptiness check raised ({}: {})".format(type(exc).__name__, exc)
+    group.ended = True
+    if unconfirmed is None:
+        unconfirmed = _release_member_group(group)
+    if unconfirmed is not None:
+        problems.append(unconfirmed)
+    for stream in (group.proc.stdout, group.proc.stderr):
+        try:
+            stream.close()
+        except OSError:
+            pass
+    if problems:
+        _report_guarded("{}cleanup after {}: {}".format(
+            banner, "that timeout was incomplete (the timeout stays cannot-evaluate)"
+            if timed_out else "the wait ended was incomplete (that outcome stands)",
+            "; ".join(problems)), sink)
+
+
+def _close_members():
+    """THE SUITE'S CLOSE (main() runs it twice on every exit): set closing, FIRST as a plain store
+    with no lock held (so _close_on_signal is a no-op before this takes the registry lock), then
+    under the lock (so no member starts after it); SIGKILL every registered group, wait (bounded)
+    until every registered group's own thread has run its cleanup, then SIGKILL and probe whatever
+    is still registered, releasing each group now confirmed empty. Returns the problems met, a
+    group still not confirmed empty and a registry lock not granted (the close then stops) among
+    them. Each of its three with statements takes the lock through the bounded acquire, and a
+    refusal at each is pinned ("close-refused", "close-wait-refused", "close-left-refused")."""
+    _MEMBERS["closing"] = True
+    problems = []
+    try:
+        with _MEMBERS_LOCK:
+            _MEMBERS["closing"] = True
+        problems += _signal_member_groups()
+        deadline = time.monotonic() + (CONFIG_MEMBER_DRAIN_SECONDS + CONFIG_MEMBER_REAP_SECONDS
+                                       + CONFIG_MEMBER_EMPTY_SECONDS + 10)
+        while True:
+            with _MEMBERS_LOCK:
+                pending = [group for group in _MEMBERS["groups"] if not group.ended]
+            if not pending or time.monotonic() >= deadline:
+                break
+            time.sleep(0.05)
+        problems += ["group {} cleanup still running at the close's deadline".format(
+            group.proc.pid) for group in pending]
+        with _MEMBERS_LOCK:
+            left = [group for group in _MEMBERS["groups"] if group.ended]
+        if left:
+            problems += _signal_member_groups()
+            for group in left:
+                unconfirmed = _member_group_empty(group)
+                if unconfirmed is None:
+                    unconfirmed = _release_member_group(group)
+                if unconfirmed is not None:
+                    problems.append(unconfirmed)
+    except RegistryLockTimeout as exc:
+        problems.append(_lock_refused("close stopped", exc))
+    return problems
+
+
+def _close_on_signal(signum, frame):
+    """main()'s SIGINT and SIGTERM handler, FIRST RAISE THEN DEFER: the first one, while closing is
+    clear and none has raised, sets closing (no member starts after it), records itself in raised
+    and raises (_raise_signal_exception), so main()'s finally closes every member group. Every
+    later one (once one has raised, or once closing is set by main()'s finally, the close or the
+    config pool's failed-member branch) is DEFERRED, never raised: each deferred one is appended to
+    held, in order, and main() raises the strongest of the run's signals once, after its second
+    close and the restore (_raise_held: SIGTERM over SIGINT), so no second or later signal can cut
+    either close short, and none is dropped. It never takes the registry lock, and it never raises
+    while the main thread holds it: every main-thread path that takes the lock during a run sets
+    closing first. (Residual: CPython clears a signal's pending flag before it calls the handler, so
+    a handler cut off at its own entry, before its first statement, by a newly arrived signal whose
+    handler raises is lost; the sweep injects nothing inside this function for that reason.)"""
+    if _MEMBERS["closing"] or _MEMBERS["raised"]:
+        _MEMBERS["held"].append(signum)
+        return
+    _MEMBERS["closing"] = True
+    _MEMBERS["raised"] = signum
+    _raise_signal_exception(signum)
+
+
+def _raise_signal_exception(signum):
+    """Raise what signum's default disposition means here: KeyboardInterrupt for SIGINT (Python's
+    default handler), SystemExit(128 + signum) for SIGTERM (143, the default action's exit code)."""
+    if signum == signal.SIGINT:
+        raise KeyboardInterrupt
+    raise SystemExit(128 + signum)
+
+
+def _raise_held():
+    """THE DEFERRED-SIGNAL PRECEDENCE. When _close_on_signal deferred any signal (held, every one in
+    the order received), clear held, record the strongest of the run's signals in raised, and raise
+    it once: the strongest of the one raised before (raised, by _close_on_signal or by an earlier
+    drain) and every held one, SIGTERM over SIGINT whatever the order, so SystemExit 143 whenever a
+    SIGTERM was received and KeyboardInterrupt otherwise. Recording it keeps the precedence across
+    every drain: a SIGTERM held inside a control and raised by _reopen_members still outranks a
+    SIGINT held during main()'s later closes, so a terminate request delivered before the restore
+    is not downgraded to a KeyboardInterrupt a caller may catch, and a later SIGTERM replaces an
+    earlier SIGINT's exception still propagating. Residual, disclosed by main(): a SIGINT
+    delivered after SIGINT's restore takes the restored disposition instead, and one handled at
+    or after this drain's entry raises before held is read, so the signals still held, a SIGTERM
+    among them, are then dropped. Nothing when none was
+    deferred: the exception already propagating, if any, stands. main() calls it after its second
+    close and the restore, and _reopen_members when it clears closing. config/member-close-handlers
+    pins the precedence across a control and main()'s closes (the "split-..." scenarios)."""
+    held, _MEMBERS["held"] = _MEMBERS["held"], []
+    if held:
+        _MEMBERS["raised"] = (signal.SIGTERM if signal.SIGTERM in [_MEMBERS["raised"]] + held
+                              else signal.SIGINT)
+        _raise_signal_exception(_MEMBERS["raised"])
+
+
+def _reopen_members():
+    """Clear closing after a control drove _config_results into its failed-member branch on
+    purpose and caught the raise (production never clears it inside a run: that raise ends the
+    suite), or after _closing_refusal_control. A SIGINT or SIGTERM deferred while closing was set
+    is raised now (_raise_held, which records it, so main()'s final drain never ranks below it),
+    closing set again, instead of being lost."""
+    _MEMBERS["closing"] = False
+    if _MEMBERS["held"]:
+        _MEMBERS["closing"] = True
+        _raise_held()
+
+
+def _install_signal_handlers(previous):
+    """Install _close_on_signal for SIGINT (when it has Python's default handler) and SIGTERM
+    (when it has the default action), on the main thread only, recording {signum: previous} in
+    previous for _restore_signal_handlers BEFORE each install, so a signal raising right after the
+    install still leaves the caller's disposition recorded. A signal the caller set to be ignored,
+    or gave its own handler, is left as it is."""
+    if threading.current_thread() is not threading.main_thread():
+        return
+    for name, default in (("SIGINT", signal.default_int_handler), ("SIGTERM", signal.SIG_DFL)):
+        signum = getattr(signal, name, None)
+        if signum is None:
+            continue
+        current = signal.getsignal(signum)
+        if current == default:
+            previous[signum] = current
+            signal.signal(signum, _close_on_signal)
+
+
+def _restore_signal_handlers(previous):
+    """Restore the dispositions _install_signal_handlers recorded, ONCE, after main()'s second
+    close, in REVERSE order of installation, so SIGTERM is restored first and SIGINT (whose restored
+    handler raises) last: a SIGINT arriving between the two finds _close_on_signal and is deferred,
+    and one arriving after SIGINT's restore raises with SIGTERM already restored, never leaving
+    _close_on_signal installed. main() then raises a deferred signal (_raise_held).
+    config/member-close-signal-sweep pins the order (the signal.signal calls made here are
+    recorded) and a signal at every point of this function."""
+    for signum in reversed(list(previous)):
+        signal.signal(signum, previous[signum])
+
+
+def _finish_members():
+    """Run the suite's close (_close_members) and report its problems on stdout; return them.
+    Idempotent: main() runs it twice, with the close handlers installed throughout."""
+    problems = _close_members()
+    if problems:
+        _report_guarded("MEMBER CLOSE: {}".format("; ".join(problems)), sys.stdout)
+    return problems
+
+
+def _final_verdict(code, unresolved, refused=()):
+    """main()'s exit code after the suite's close. code is _suite_main's (0 when nothing was found);
+    unresolved, the problems main()'s second close still met (a group not confirmed empty, a kill
+    refused, a registry lock not granted), and refused, every registry lock refusal of the run
+    (_lock_refused at its five sites: a member start, a release, a kill sweep, any of the close's
+    own three acquires and the config pool's failed-member branch, even one a later close made
+    good), make the
+    run cannot-evaluate: 0 becomes 2, a definite failure's 1 and a harness error's 2
+    stand, and the problems are listed. The PASS line is printed here, after the close, and only
+    for a run that is still 0."""
+    problems = list(unresolved) + [entry for entry in refused if entry not in unresolved]
+    if problems:
+        note = ("the suite's close left member process groups unresolved" if unresolved else
+                "the member registry lock was refused during the run")
+        print(("  also cannot evaluate ({}):" if code == 1 else
+               "SELF-TEST CANNOT EVALUATE: {}:").format(note), flush=True)
+        for problem in problems:
+            print("  - " + problem, flush=True)
+        return code or 2
+    if code == 0:
+        print("SELF-TEST PASS: {} unique checks executed; execution set reconciled against "
+              "tools/selftest_checks.toml".format(len(EXECUTED)), flush=True)
+    return code
+
+
+def _report_guarded(text, sink):
+    """Print a secondary diagnostic line on sink. A stream that refuses it loses that line: the
+    diagnostic never replaces the result it accompanies or an exception already propagating."""
+    try:
+        print(text, file=sink, flush=True)
+    except Exception:  # a refused secondary diagnostic is dropped, never raised
+        pass
+
+
+def _run_bounded(argv, cwd, env, bound, label, banner, cannot_evaluate=None, report=None):
+    """Run argv under a time bound; return (returncode, stdout, stderr), or (message, "", "") for
+    a launch error (str(exc)) or a timeout ("TIMEOUT: ..."). The child leads its own session and
+    process group (the start_new_session and killpg pattern of opf/tools/_opf_pack_manifest.py),
+    so its cleanup kills the WHOLE group: a grandchild holding the output pipe, or one left behind
+    by a leader that already exited, dies with it.
+    A timeout is RECORDED FIRST, in cannot_evaluate (default CANNOT_EVALUATE), and announced as
+    banner + message on report (default sys.stdout, never stderr: the cannot-evaluate path is a
+    stdout report plus exit 2, and the execution gate requires the suite's error stream to hold
+    only declared bytes); only then is the child cleaned up. An OSError, SubprocessError or
+    ValueError from the wait is returned as its message; any other exception from the wait or the
+    timeout handler (the message, the record, the announcement) propagates unchanged.
+    THE MEMBER NEVER RUNS ON THE MAIN THREAD. Called from the main thread, this starts the child,
+    waits for it and cleans it up on a separate thread and joins it (the result, or the exception
+    it raised, is handed back); called from any other thread (the config lanes' pool workers) it
+    does so inline. CPython raises a signal handler's exception only on the main thread, so no
+    interrupt can land between Popen and the registration, inside communicate() (whose own
+    interrupt handling reaps the leader), or inside the cleanup. An interrupt reaching the main
+    thread while it waits propagates at once; the member's group stays registered and main()'s
+    close kills it (_close_members). The wait is taken in slices of MEMBER_WAIT_SLICE_SECONDS, and
+    once closing is set the member stops waiting and runs its own cleanup (its result is then the
+    message "<label> was stopped by the suite's close (no result)"), so after an interrupt or a
+    failed member no member thread waits on to its bound.
+    CLEANUP ON EVERY EXIT OF THE WAIT: the child is registered when it starts
+    (_start_member_group), and a finally ends its group however the wait ends, a normal return
+    included (_end_member_group: the group SIGKILL, the bounded drain and reap, the bounded
+    confirmation that the group is empty, then the release). THE OUTCOME WINS: the return or the
+    exception already propagating is never replaced by the cleanup; a cleanup problem is reported
+    as one line on the same stream (_report_guarded).
+    config/member-timeout-record-before-cleanup, config/member-timeout-cleanup-on-raise,
+    config/member-timeout-diagnostic-guarded, config/member-timeout-interrupt-cleanup,
+    config/member-off-main-thread, config/member-grandchild-after-normal-exit and
+    config/member-close-on-interrupt pin that order and those guards.
+    DISCLOSED RESIDUALS: without a pidfd process-group signal (no os.pidfd_open, or Linux before
+    6.9) a group whose leader was already reaped (a normal return) is not killed, since its
+    number could then name a reused group, so a descendant left in it survives there, the group
+    stays registered (the emptiness probe finds it) and the close's problems make the run
+    cannot-evaluate; config/member-grandchild-after-normal-exit pins BOTH paths on every kernel
+    (the pidfd path where the kernel has it, and the fallback forced with a flag the kernel
+    refuses with EINVAL): retention, then release once the survivor is killed. Which path the CI
+    runner's kernel takes is not known here. A thread other than the member's own could also read
+    the leader as unreaped just before the member thread reaps it and signal the number then. A
+    descendant that moved itself to another process group (setsid or setpgid) survives the kill
+    and can hold the member's output pipe: on a normal wait the member then waits to its bound, and
+    after the bound, or once closing is set (an interrupt, a failed member, the close), its cleanup
+    drains for at most CONFIG_MEMBER_DRAIN_SECONDS before the pipes are closed. After an interrupt
+    the member thread therefore ends within MEMBER_WAIT_SLICE_SECONDS + CONFIG_MEMBER_DRAIN_SECONDS
+    + CONFIG_MEMBER_REAP_SECONDS + CONFIG_MEMBER_EMPTY_SECONDS (about 40.5 s), inside the close's
+    own wait (that sum minus the slice, plus 10 s); config/member-close-on-interrupt pins that
+    with a setsid pipe holder. In its own session the child has no controlling terminal: a read of
+    an inherited terminal fails."""
+    args = (argv, cwd, env, bound, label, banner, cannot_evaluate, report)
+    if threading.current_thread() is not threading.main_thread():
+        return _run_member(*args)
+    outcome = []
+
+    def member():
+        try:
+            outcome.append((_run_member(*args), None))
+        except BaseException as exc:  # handed back to the main thread and raised there
+            outcome.append((None, exc))
+
+    worker = threading.Thread(target=member, name="bounded member")
+    worker.start()
+    worker.join()
+    result, exc = outcome[0]
+    if exc is not None:
+        raise exc
+    return result
+
+
+def _run_member(argv, cwd, env, bound, label, banner, cannot_evaluate, report):
+    """_run_bounded's body, on a thread other than the main thread."""
+    sink = sys.stdout if report is None else report
+    try:
+        group = _start_member_group(argv, cwd, env)
     except (OSError, subprocess.SubprocessError) as exc:
-        return str(exc)
+        return str(exc), "", ""
+    except RegistryLockTimeout as exc:
+        message = "TIMEOUT: {} (cannot evaluate)".format(_lock_refused(
+            "{} not started".format(label), exc))
+        (CANNOT_EVALUATE if cannot_evaluate is None else cannot_evaluate).append(message)
+        print(banner + message, file=sink, flush=True)
+        return message, "", ""
+    proc, recorded = group.proc, []
+    deadline = time.monotonic() + bound
+    try:
+        while True:
+            try:
+                stdout, stderr = proc.communicate(timeout=min(
+                    MEMBER_WAIT_SLICE_SECONDS, max(deadline - time.monotonic(), 0)))
+                break
+            except subprocess.TimeoutExpired:
+                if _MEMBERS["closing"]:
+                    return "{} was stopped by the suite's close (no result)".format(label), "", ""
+                if time.monotonic() < deadline:
+                    continue
+                message = "TIMEOUT: {} reached its {} s bound (cannot evaluate)".format(label,
+                                                                                      bound)
+                (CANNOT_EVALUATE if cannot_evaluate is None else cannot_evaluate).append(message)
+                recorded.append(message)
+                print(banner + message, file=sink, flush=True)
+                return message, "", ""
+            except (OSError, subprocess.SubprocessError, ValueError) as exc:
+                return str(exc), "", ""
+        return proc.returncode, stdout, stderr
+    finally:
+        _end_member_group(group, sink, banner, recorded)
+
+
+def _run_config_member(member, env, bound=None, cannot_evaluate=None, report=None):
+    """Run one registered member under its bound (_config_member_bound) through _run_bounded;
+    return its exit code, or a string for a launch error or a timeout. A member that exits
+    non-zero has its output printed on report (default sys.stdout, never stderr), so the
+    execution gate reads a real member failure as the suite's FAIL (exit 1), not as undeclared
+    stderr (cannot evaluate)."""
+    bound = _config_member_bound(member) if bound is None else bound
+    rc, stdout, stderr = _run_bounded(
+        [sys.executable, "-I", "-B", str(ROOT / member[0]), *member[1:]], ROOT, env, bound,
+        " ".join(member), "CONFIG-INJECTION ", cannot_evaluate, report)
+    if not isinstance(rc, str) and rc:
+        print("CONFIG-INJECTION {}:\n{}".format(member, stdout + stderr),
+              file=sys.stdout if report is None else report, flush=True)
+    return rc
+
+
+def _split_offenders(results, recorded=None):
+    """The registered argv whose config run was not clean, split in results order into
+    (definite, timed_out, timeout messages). A member is timed_out when its run only TIMED OUT:
+    its exit-code slot is a timeout message (which names it) recorded in recorded (default
+    CANNOT_EVALUATE), with no hook, monitor or exposure evidence. A timed-out member that also
+    leaked, an unrecorded timeout message, and every other unclean result are definite."""
+    recorded = CANNOT_EVALUATE if recorded is None else recorded
+    clean = (0, b"", b"", b"")
+    definite, timed_out, causes = [], [], []
+    for argv, value in results.items():
+        if value == clean:
+            continue
+        if (isinstance(value, tuple) and len(value) == 4 and _is_timeout(value[0])
+                and value[1:] == (b"", b"", b"") and value[0] in recorded):
+            timed_out.append(argv)
+            causes.append(value[0])
+        else:
+            definite.append(argv)
+    return definite, timed_out, tuple(causes)
+
+
+def _registered_offenders(results, recorded=None):
+    """(offenders, cause) for a config lane's check (_split_offenders). When any definite
+    offender exists, offenders lists ONLY the definite ones and cause is (): the FAIL never names
+    a member whose run only timed out, which is reported by its own recorded timeout message on
+    the cannot-evaluate list instead. Otherwise offenders lists the timed-out members and cause
+    their timeout messages, so the finding is attributed to those timeouts."""
+    definite, timed_out, causes = _split_offenders(results, recorded)
+    if definite:
+        return definite, ()
+    return timed_out, causes
+
+
+def _pid_state(pid, proc_root="/proc"):
+    """"alive", "dead", or "cannot-evaluate: ..." for pid, read from proc_root/<pid>/stat. A
+    zombie or dead state is "dead" (a killed orphan awaiting its reaper); an absent entry is
+    "dead" only while proc_root/self proves the process table readable. Unreadable or malformed
+    evidence is cannot-evaluate, never "dead"."""
+    try:
+        with open(os.path.join(proc_root, str(pid), "stat"), encoding="utf-8") as stat:
+            state = stat.read().rsplit(")", 1)[1].split()[0]
+    except FileNotFoundError:
+        if os.path.isdir(os.path.join(proc_root, "self")):
+            return "dead"
+        return "cannot-evaluate: {} has no self entry".format(proc_root)
+    except (OSError, ValueError, IndexError) as exc:
+        return "cannot-evaluate: {}: {}".format(type(exc).__name__, exc)
+    if state in ("Z", "X", "x"):
+        return "dead"
+    if state in ("R", "S", "D", "T", "t", "W", "P", "I", "K"):
+        return "alive"
+    return "cannot-evaluate: unknown state {!r}".format(state)
+
+
+# The child for config/member-timeout-main-verdict: main() runs with its lanes replaced by one
+# real config-member timeout under the production defaults (the default bound lookup with a
+# short default, CANNOT_EVALUATE, sys.stdout), a finding attributed to it, and in the definite
+# scenario one unrelated definite finding; the expectation set is the executed set.
+_MAIN_VERDICT_CHILD = "\n".join((
+    "import os, sys",
+    "sys.path.insert(0, sys.argv[1])",
+    "import selftest_git_fixture_env as suite",
+    "member, scenario = sys.argv[2], sys.argv[3]",
+    "suite.CONFIG_MEMBER_BOUND_DEFAULT = 5",
+    "def lanes(base):",
+    "    suite.check('probe/attributed-rc', suite._run_config_member((member,), dict(os.environ)), 0)",
+    "    if scenario == 'definite':",
+    "        suite.check('probe/definite', 1, 0)",
+    "suite._expected_check_ids = lambda: set(suite.EXECUTED)",
+    "sys.exit(suite.main(None, lanes))",
+))
+MAIN_VERDICT_EXPECTED = [(True, True, True, False, False, True, ""),
+                         (True, True, False, True, True, True, "")]
+
+
+def _partial_timeout_cause(observed, expected):
+    """The timeout messages a per-scenario observation list is attributed to: its timed-out
+    entries, and only when every entry that did NOT time out equals its own expectation. A
+    definite mismatch in any other entry returns (), so the finding stays definite (exit 1)."""
+    timeouts = tuple(entry for entry in observed if _is_timeout(entry))
+    if timeouts and len(observed) == len(expected) and all(
+            _is_timeout(entry) or entry == want for entry, want in zip(observed, expected)):
+        return timeouts
+    return ()
+
+
+def _main_verdict_scenarios(sleeper, fixture, run=None):
+    """Run _MAIN_VERDICT_CHILD for the attributed and the definite scenario through run (default
+    _run_bounded); return (observed, cause) for config/member-timeout-main-verdict. An entry is
+    the scenario's observation tuple, or its timeout message when that child reached its own
+    bound; cause is _partial_timeout_cause against MAIN_VERDICT_EXPECTED, so one scenario's
+    timeout never hides the other scenario's definite mismatch."""
+    run = _run_bounded if run is None else run
+    observed = []
+    for scenario, want_rc in (("attributed", 2), ("definite", 1)):
+        line = "CONFIG-INJECTION TIMEOUT: {} reached its 5 s bound (cannot evaluate)\n".format(
+            sleeper)
+        rc, out, err = run(
+            [sys.executable, "-I", "-B", "-c", _MAIN_VERDICT_CHILD, str(ROOT / "tools"),
+             str(sleeper), scenario], str(fixture), dict(os.environ), 300,
+            "member-timeout-main-verdict child ({})".format(scenario), "CONTROL ")
+        if _is_timeout(rc):
+            observed.append(rc)
+            continue
+        observed.append((rc == want_rc, line in out, "SELF-TEST CANNOT EVALUATE" in out,
+                         "SELF-TEST FAIL" in out, "probe/definite" in out,
+                         "probe/attributed-rc" in out, err))
+    return observed, _partial_timeout_cause(observed, MAIN_VERDICT_EXPECTED)
+
+
+def _main_verdict_control(sleeper, fixture, run=None):
+    """The production config/member-timeout-main-verdict check: _main_verdict_scenarios through
+    run (default _run_bounded), checked with its own partial cause. _mixed_timeout_controls runs
+    this same function over an injected runner, so the cause this check passes is pinned."""
+    observed, cause = _main_verdict_scenarios(sleeper, fixture, run)
+    check("config/member-timeout-main-verdict", observed, MAIN_VERDICT_EXPECTED, cause)
+    return observed
+
+
+def _mixed_timeout_controls(sleeper):
+    """config/member-timeout-main-verdict-mixed: _main_verdict_control (the production check
+    call, against a private finding record) over an injected runner in which one scenario's
+    child reaches its bound while the other returns, in BOTH scenario orders: a definite
+    mismatch beside the timeout (the attributed child times out and the definite child exits 2,
+    or the definite child times out and the attributed child exits 1) keeps the finding definite
+    and _verdict exits 1; a correct result beside the timeout is attributed and exits 2.
+    config/timeout-offenders-split: a lane with one member that only timed out and one definite
+    offender lists ONLY the definite one, in _registered_offenders and in _lifecycle_finding, in
+    both results orders; with only the timed-out member the finding is attributed; an
+    unrecorded timeout message is definite; a lifecycle probe problem beside a member that only
+    timed out keeps the lifecycle finding definite."""
+    import contextlib
+    import io
+    from unittest.mock import patch
+
+    this = sys.modules[__name__]
+
+    line = "CONFIG-INJECTION TIMEOUT: {} reached its 5 s bound (cannot evaluate)\n".format(sleeper)
+    right = {"attributed": (2, line + "SELF-TEST CANNOT EVALUATE\n  - probe/attributed-rc\n", ""),
+             "definite": (1, line + "SELF-TEST FAIL:\n  - probe/definite\n  - "
+                          "probe/attributed-rc\n", "")}
+    codes = []
+    for plan in ({"attributed": "timeout", "definite": (2, "", "")},
+                 {"attributed": (1, "", ""), "definite": "timeout"},
+                 {"attributed": "timeout", "definite": "right"},
+                 {"attributed": "right", "definite": "timeout"}):
+        def fake(argv, cwd, env, bound, label, banner, plan=plan):
+            outcome = plan[argv[-1]]
+            if outcome == "timeout":
+                return "TIMEOUT: {} reached its {} s bound (cannot evaluate)".format(
+                    label, bound), "", ""
+            return right[argv[-1]] if outcome == "right" else outcome
+
+        failures, caused, executed = [], {}, []
+        with patch.object(this, "FAILURES", failures), \
+                patch.object(this, "TIMEOUT_CAUSED", caused), \
+                patch.object(this, "EXECUTED", executed), \
+                patch.object(this, "_EXECUTED_SET", set()):
+            observed = _main_verdict_control(sleeper, sleeper.parent, fake)
+        timeouts = [entry for entry in observed if _is_timeout(entry)]
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = _verdict(failures, timeouts, caused)
+        codes.append((executed, len(failures), [len(cause) for cause in caused.values()], code))
+    ran = ["config/member-timeout-main-verdict"]
+    check("config/member-timeout-main-verdict-mixed", codes,
+          [(ran, 1, [], 1), (ran, 1, [], 1), (ran, 1, [1], 2), (ran, 1, [1], 2)])
+
+    timeout = "TIMEOUT: opf/tools/x.py --self-test reached its 1 s bound (cannot evaluate)"
+    stalled = (("opf/tools/x.py", "--self-test"), (timeout, b"", b"", b""))
+    failed = (("opf/tools/y.py", "--self-test"), (1, b"", b"", b""))
+    got = []
+    for pairs in ((stalled, failed), (failed, stalled), (stalled,)):
+        results = dict(pairs)
+        got.append((_registered_offenders(results, [timeout]),
+                    _lifecycle_finding(list(results), results, set(), [], [timeout])))
+    got.append(_registered_offenders(dict((stalled,)), []))
+    got.append(_lifecycle_finding([stalled[0]], dict((stalled,)), set(), ["m.e: (1, [])"],
+                                  [timeout]))
+    check("config/timeout-offenders-split", got,
+          [(([("opf/tools/y.py", "--self-test")], ()), ((["opf/tools/y.py"], []), ())),
+           (([("opf/tools/y.py", "--self-test")], ()), ((["opf/tools/y.py"], []), ())),
+           (([("opf/tools/x.py", "--self-test")], (timeout,)),
+            ((["opf/tools/x.py"], []), (timeout,))),
+           ([("opf/tools/x.py", "--self-test")], ()),
+           (([], ["m.e: (1, [])"]), ())])
+
+
+def _timeout_cleanup_order_controls(sleeper):
+    """config/member-timeout-record-before-cleanup: when _run_bounded's cleanup starts, the
+    timeout is already in the record (a cleanup moved ahead of the record fails this).
+    config/member-timeout-cleanup-on-raise: when the announcement stream raises, or the record
+    itself raises, the exception still propagates AND the child has been killed and reaped
+    (returncode -SIGKILL) first (a cleanup skipped by the raise leaves returncode None and fails
+    this). config/member-timeout-diagnostic-guarded: with a cleanup problem injected and a
+    stream that refuses the cleanup diagnostic, a successful record still returns the timeout
+    tuple, and a failed record still propagates the record's own exception, the child reaped in
+    both. config/member-timeout-interrupt-cleanup: a KeyboardInterrupt injected into the wait
+    still propagates, after the child has been killed and reaped. Every child spawned here is
+    killed afterwards whatever the code under test did."""
+    import contextlib
+    import io
+    from unittest.mock import patch
+
+    this = sys.modules[__name__]
+    real_stop = _stop_member_group
+    real_popen = subprocess.Popen
+    spawned, interrupt = [], []
+
+    def spawn(*args, **kwargs):
+        child = real_popen(*args, **kwargs)
+        spawned.append(child)
+        if interrupt:
+            interrupt_first_wait(child)
+        return child
+
+    class RaisingStream:
+        def write(self, text):
+            raise RuntimeError("injected announcement failure")
+
+        def flush(self):
+            pass
+
+    class RaisingRecord:
+        def append(self, entry):
+            raise RuntimeError("injected record failure")
+
+    class RefusingCleanupReport(io.StringIO):
+        def write(self, text):
+            if "cleanup after" in text:
+                raise OSError("injected cleanup-report failure")
+            return super().write(text)
+
+    class InjectedInterrupt(KeyboardInterrupt):
+        pass
+
+    def interrupt_first_wait(child):
+        real_communicate, calls = child.communicate, []
+
+        def communicate(*c_args, **c_kwargs):
+            calls.append(c_kwargs.get("timeout"))
+            if len(calls) == 1:
+                raise InjectedInterrupt("injected interrupt in the wait")
+            return real_communicate(*c_args, **c_kwargs)
+
+        child.communicate = communicate
+
+    def stop_with_problem(proc):
+        return real_stop(proc) + ["injected cleanup problem"]
+
+    argv = [sys.executable, "-I", "-B", str(sleeper)]
+    snapshots = []
+    recorded = []
+
+    def stop_after_record(proc):
+        snapshots.append(list(recorded))
+        return real_stop(proc)
+
+    order, outcomes, guarded, interrupted = "not run", [], [], "not run"
+    try:
+        with patch.object(subprocess, "Popen", spawn), \
+                patch.object(this, "_stop_member_group", stop_after_record), \
+                contextlib.redirect_stderr(io.StringIO()):
+            rc, _, _ = _run_bounded(argv, str(sleeper.parent), dict(os.environ), 2,
+                                    "record-order control", "CONTROL ", recorded, io.StringIO())
+        order = (_is_timeout(rc), recorded == [rc], snapshots == [[rc]])
+        for record, stream in (([], RaisingStream()), (RaisingRecord(), io.StringIO())):
+            first = len(spawned)
+            try:
+                with patch.object(subprocess, "Popen", spawn), \
+                        contextlib.redirect_stderr(io.StringIO()):
+                    _run_bounded(argv, str(sleeper.parent), dict(os.environ), 2,
+                                 "cleanup-on-raise control", "CONTROL ", record, stream)
+                raised = None
+            except RuntimeError as exc:
+                raised = str(exc)
+            outcomes.append((raised, [child.returncode for child in spawned[first:]],
+                             [_is_timeout(entry) for entry in record]
+                             if isinstance(record, list) else None))
+        for record in ([], RaisingRecord()):
+            first, stream, rc, raised = len(spawned), RefusingCleanupReport(), None, None
+            try:
+                with patch.object(subprocess, "Popen", spawn), \
+                        patch.object(this, "_stop_member_group", stop_with_problem), \
+                        contextlib.redirect_stderr(io.StringIO()):
+                    rc, _, _ = _run_bounded(argv, str(sleeper.parent), dict(os.environ), 2,
+                                            "diagnostic-guard control", "CONTROL ", record,
+                                            stream)
+            except Exception as exc:
+                raised = "{}: {}".format(type(exc).__name__, exc)
+            guarded.append((raised, _is_timeout(rc),
+                            [entry == rc for entry in record] if isinstance(record, list)
+                            else None,
+                            stream.getvalue() == ("CONTROL {}\n".format(rc)
+                                                  if _is_timeout(rc) else ""),
+                            [child.returncode for child in spawned[first:]]))
+        first, raised = len(spawned), None
+        interrupt.append(True)
+        try:
+            with patch.object(subprocess, "Popen", spawn), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                _run_bounded(argv, str(sleeper.parent), dict(os.environ), 60,
+                             "interrupt control", "CONTROL ", [], io.StringIO())
+        except (InjectedInterrupt, Exception) as exc:
+            raised = "{}: {}".format(type(exc).__name__, exc)
+        finally:
+            interrupt.clear()
+        interrupted = (raised, [child.returncode for child in spawned[first:]])
+    finally:
+        for child in spawned:
+            if child.poll() is None:
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except OSError:
+                    child.kill()
+                try:
+                    child.wait(timeout=CONFIG_MEMBER_REAP_SECONDS)
+                except subprocess.TimeoutExpired:
+                    pass
+    check("config/member-timeout-record-before-cleanup", order, (True, True, True))
+    check("config/member-timeout-cleanup-on-raise", outcomes,
+          [("injected announcement failure", [-signal.SIGKILL], [True]),
+           ("injected record failure", [-signal.SIGKILL], None)])
+    check("config/member-timeout-diagnostic-guarded", guarded,
+          [(None, True, [True], True, [-signal.SIGKILL]),
+           ("RuntimeError: injected record failure", False, None, True, [-signal.SIGKILL])])
+    check("config/member-timeout-interrupt-cleanup", interrupted,
+          ("InjectedInterrupt: injected interrupt in the wait", [-signal.SIGKILL]))
+
+
+# The member fixture for config/member-grandchild-after-normal-exit and the _CLOSE_PROBE_CHILD
+# checks, run as <fixture> <folder> <tag> <mode>: it records "pid starttime" in
+# <folder>/<tag>.leader, starts a grandchild in the member's own process group with its stdio on
+# /dev/null (so the grandchild never holds the member's pipes) that records itself in
+# <folder>/<tag>.grandchild and sleeps, then either sleeps (mode "sleep") or exits 0 once the
+# grandchild is recorded (mode "exit"). Mode "setsid" instead starts a grandchild that calls
+# setsid (leaving the member's group, so the group kill never reaches it) and keeps the member's
+# stdout, a pipe holder, and then sleeps.
+_GROUP_MEMBER_FIXTURE = "\n".join((
+    "import os, subprocess, sys, time",
+    "def stamp(path):",
+    "    with open('/proc/self/stat', encoding='utf-8') as stat:",
+    "        start = stat.read().rsplit(')', 1)[1].split()[19]",
+    "    with open(path + '.tmp', 'w', encoding='utf-8') as out:",
+    "        out.write('{} {}'.format(os.getpid(), start))",
+    "    os.replace(path + '.tmp', path)",
+    "if sys.argv[1] in ('--grandchild', '--setsid'):",
+    "    if sys.argv[1] == '--setsid':",
+    "        os.setsid()",
+    "    stamp(sys.argv[2])",
+    "    time.sleep(600)",
+    "    sys.exit(0)",
+    "folder, tag, mode = sys.argv[1:4]",
+    "stamp(os.path.join(folder, tag + '.leader'))",
+    "holder = mode == 'setsid'",
+    "subprocess.Popen([sys.executable, '-I', '-B', __file__, '--setsid' if holder else",
+    "                  '--grandchild', os.path.join(folder, tag + '.grandchild')],",
+    "                 stdin=subprocess.DEVNULL, stdout=None if holder else subprocess.DEVNULL,",
+    "                 stderr=subprocess.DEVNULL)",
+    "deadline = time.monotonic() + 60",
+    "while not os.path.exists(os.path.join(folder, tag + '.grandchild')):",
+    "    if time.monotonic() > deadline:",
+    "        sys.exit(3)",
+    "    time.sleep(0.05)",
+    "if mode in ('sleep', 'setsid'):",
+    "    time.sleep(600)",
+))
+
+# The child for the member-close checks (_member_close_controls): main() with its lanes replaced,
+# in its own interpreter (the suite's signal handlers are process-wide), with a 90 s member bound,
+# a 3 s drain and a 2 s registry-lock bound. Scenarios: "pooled", two members through the
+# production _config_results pool, a REAL SIGINT to the main thread once both run; "communicate",
+# one member through _run_bounded from the main thread, the SIGINT sent once the member thread is
+# inside the real subprocess communicate(); "leader-first", the same with the member's leader
+# killed alone first, so communicate() itself reaps it; "setsid", the same with a setsid pipe
+# holder (the member thread must stop waiting at once, not at its bound); "sigterm", the same with
+# a process-directed SIGTERM; "install", a real SIGINT delivered inside the installation of the
+# SIGINT handler; "close", a member left running on a non-main thread when the lanes return and a
+# real SIGINT at the ENTRY of each close (both deferred, the handler installed at both entries,
+# and _raise_held raising once after the second close); "split-<inside>-<after>" (T for a SIGTERM,
+# I for a SIGINT, each sent to the main thread and handled before the next is sent), the signals
+# <inside> sent inside _closing_refusal_control (held there and raised by _reopen_members right
+# after it), then the signals <after> one at the ENTRY of each of main()'s closes in turn (held
+# there): "split-T-I", "split-T-II", "split-TI-I" and "split-IT-I" must each end in SystemExit 143,
+# the precedence holding across the control's drain and main()'s final one;
+# "lock", the registry lock wrapped so a real SIGINT is raised right after an acquire by the main
+# thread: _close_members called directly with closing clear, a 2 s loop of _close_members under
+# real SIGINTs from another thread (each interrupted close must leave the lock free), a member
+# start and a close with the lock held by another thread (each must give up at the lock bound),
+# then main() with the wrapper armed for the close; "failed", the production pool with member a
+# failing its positive control (ValueError) once member b's worker is running (so the branch's
+# cancel_futures never cancels b) and member b reaching its member only after the kill sweep.
+# Member b times the sweep in stages: it first waits on member a's raise (set however member a's
+# branch ends; its expiry is a harness handshake when member a's positive control was observed
+# at all, and the "missing" member a observed when the code under test never ran it), then on
+# the sweep wrapper's entry (the failed-member branch calling the kill sweep), then on the
+# wrapper's release of the harness lock holders (harness-owned), then on the real sweep's
+# return. TIMING ALONE IS NEVER A DEFINITE FINDING: every expiry of one of these bounds,
+# whoever was slow, only ever records WHICH bound was reached, and the parent grades every
+# reached bound cannot-evaluate (fail closed, never a pass, _scenario_timeout_record); the
+# monitor likewise records under "unsent" every signal it owed but returned without sending
+# (a reached registration or in-communicate bound), and the parent stands down every field
+# outside the _STATE_EVIDENCE allowlist while that allowlist stays compared; a
+# definite finding needs non-timing evidence the code under test produced (its outcome, the
+# registry and recorded process state it left, a refusal record, the "evidence" flags below).
+# Member a takes its "sent" stamp only AFTER every harness preparation of its own (the lock
+# holder's start and acquire), right before its injected failure or its deliberate handshake
+# expiry raises, and the sweep wrapper adds the measured release time to "stalls", which the
+# timeliness report discounts, so a harness-held release rarely reaches the completion budget;
+# when anything does reach it, that too is cannot-evaluate, never definite. The sweep wrapper
+# appends to "branch_swept" when its caller is _config_results itself, and the report's
+# "evidence" extra carries, read AFTER main() ended, whether the failed-member branch called
+# the kill sweep and that the wrapper's caller check discriminates (a sweep called here,
+# outside _config_results, is not counted). Both appends run synchronously inside the sweep
+# call, with no bound between the call and the append, and every bound of this scenario
+# raises INTO the failed-member handler (the injected ValueError, a HandshakeTimeout and the
+# positive control's own TimeoutExpired all surface where the pool's results are consumed),
+# so a bound can only enter the branch, never skip it: a False flag is a code fact, which is
+# why "evidence" sits on the _STATE_EVIDENCE allowlist, kept compared under any recorded
+# timeout. Whether member a's positive control ran and whether member a raised is the
+# "member_a" extra, OFF the allowlist: the positive control's 60 s subprocess bound sits
+# between member a's worker entering run and those flags, so a merely slow git leaves both
+# False with the code healthy (round 17), and no earlier flag is bound-free either (an
+# entered-run marker would rest on the pool consuming results in order, a property of the
+# code under test, and would still leave a window between the worker's dequeue and the
+# marker). A WRONG member_a IS NEVER DEFINITE: member a takes its "sent" stamp only after
+# a_arrived is set (failed-signal's interrupt is armed by member a too), and a_raises is set
+# in a finally the pool's waiting shutdown joins, so any member_a other than [True, True]
+# leaves the send list empty, the timeliness field False and the completion budget
+# recorded, which stands member_a down; only a right member_a is ever compared. A pool that
+# never ran member a is therefore fail closed, never a pass: the main thread blocks on
+# member a's pending result until the parent's 300 s bound ends the child (cannot
+# evaluate, no report), or member b's 120 s wait records the "member a observed" bound and
+# the budget is reached, which stands the run down;
+# "failed-signal", the same with the lock wrapper armed for the failed-member branch;
+# "failed-handshake", the same with member b never reporting running, so member a's handshake
+# (1 s here) expires and member a raises HandshakeTimeout, never the injected failure;
+# "failed-stalled", the deterministic twin of the slow positive control: ONE member, whose
+# injected failure raises BEFORE a_arrived is set, before any handshake and before any send,
+# so member a's arrival and raise and the send list hold, in every run on any host, exactly
+# the state a merely slow git leaves them in, while the branch still sweeps and every
+# compared field (member_a [False, False] included) is structural; the empty send list is
+# the scenario itself, deliberate (_DELIBERATE_EMPTY_SEND), so nothing stands down in a
+# healthy run and a producer tied to those facts on code this run executes, not also
+# dependent on any other state that differs from a slow "failed" run, mismatches
+# definitely (what it does not reach is THE RESIDUAL stated in _allowlist_producers);
+# only a positive control slower than its 60 s bound is recorded (as the reached bound
+# "positive control a observed") and stands the run down, cannot-evaluate, never definite. Every
+# wait the child makes is bounded, and an expiry is recorded under one of two keys by WHO sets
+# the state waited on. HARNESS-ARRANGED state (member b arrived or running, member a's raise
+# reaching member b once its positive control was observed, a lock holder's own acquire granted,
+# the sweep wrapper's release of those holders, the members' grandchild records
+# written by the fixture, a monitor, holder or sender thread finished) expires into the extras
+# ("handshake"): the harness could not arrange the scenario, so the parent records that run
+# as a harness timeout, cannot-evaluate (_handshake_expired), unless it is the scenario's own
+# deliberate expiry; a kind naming a thread its bounded join left alive (its entry ends
+# " finished") replaces the whole observation, and every other kind stands down every field
+# outside the _STATE_EVIDENCE allowlist (_scenario_timeout_record). State only the CODE UNDER TEST sets (the members' registration,
+# _start_member_group; a member thread inside the real communicate, which _run_bounded owns;
+# member a's positive control observed at all; the failed-member branch entering its kill sweep
+# and the real sweep returning; a delivered signal's deferral growing
+# held) expires into the extras ("missing"), naming the reached bound; the parent grades BOTH
+# keys cannot-evaluate (_scenario_timeout_record): a reached bound is timing alone, whoever was
+# slow, so it fails the run closed and is never a pass, and it is never a definite finding
+# either; the defect has to show in the _STATE_EVIDENCE fields, which stay compared beside
+# the recorded timeout;
+# "unresolved", a member exiting 0 whose group's emptiness probes raise PermissionError (main()
+# must exit 2 and never print PASS), then the injection removed and _close_members releasing the
+# group; "release-timeout", a member exiting 0 whose release is refused (another thread takes the
+# registry lock right after the member's kill and holds it past a 0.2 s lock bound, freeing it once
+# _run_bounded returns, so main()'s closes then release the group cleanly), and "start-timeout",
+# a member start refused the same way (its timeout recorded only in a private list);
+# "sweep-refused", "close-refused", "close-wait-refused", "close-left-refused" and "failed-refused",
+# the same refusal (lock bound 0.2 s) at the first close's kill sweep, at each of the first close's
+# own three acquires (its first, the wait for the members' cleanup, the sweep of the groups left;
+# the extras name the refused with statement's line offset, _close_lock_sites), and at the
+# failed-member branch's acquire (member a failing as in "failed", the lanes catching the ValueError and clearing
+# closing with _reopen_members, as the suite's own failed-member controls do), each of which
+# main() must still end with exit 2, the CANNOT EVALUATE line, no PASS line and one recorded
+# refusal; "closing-control", _closing_refusal_control with a real SIGINT at its _run_bounded
+# entry: the start refused with the SIGINT held and closing set inside, then the SIGINT raised
+# right after the control (nothing after it in the lanes runs), so main() ends in
+# KeyboardInterrupt; "late-monitor", the monitor's in_communicate observation gated (held) until
+# main()'s teardown releases it right before the post-main worker joins, the member's own 10 s
+# bound ending main() first. The teardown installs a deferring SIGINT/SIGTERM handler across the
+# joins (with a 0.05 s drain for a process-directed signal still in flight) and then reinstalls
+# exactly what main() left, so a worker's signal delivered during a join is absorbed and recorded
+# as the "late <name>" handshake instead of destroying the report; a non-deliberate late
+# signal is timing alone (no stamp can prove who was slow), so _scenario_timeout_record grades
+# it cannot-evaluate, never definite: every field outside the _STATE_EVIDENCE allowlist is
+# stood down and the allowlist stays compared; the few statements between
+# main()'s end and that install are the disclosed residual window. It prints one PROBE-REPORT
+# line: the outcome, how many groups are still
+# registered after main(), every recorded process's state (_recorded_states), whether main() ended
+# within 30 s of every signal or injected failure (less the stalls the harness's own lock-holder
+# releases measurably spent inside that window; a False here is the completion budget
+# reached, which the parent records and stands down as cannot-evaluate, never definite), and
+# the extras: the handlers restored after
+# main() and a real SIGINT raising again, the lock free, the PASS and CANNOT EVALUATE lines, and
+# each scenario's own observations.
+_CLOSE_PROBE_CHILD = "\n".join((
+    "import contextlib, io, json, os, random, signal, sys, threading, time",
+    "sys.path.insert(0, sys.argv[1])",
+    "import selftest_git_fixture_env as suite",
+    "scenario, folder, fixture = sys.argv[2], sys.argv[3], sys.argv[4]",
+    "suite.CONFIG_MEMBER_BOUND_DEFAULT = 90",
+    "suite.CONFIG_MEMBER_DRAIN_SECONDS = 3",
+    "suite.REGISTRY_LOCK_SECONDS = 0.2 if scenario.endswith('-refused') else 2",
+    "main_id, sent, extra, fire, workers, stalls = threading.main_thread().ident, [], {}, [], [], []",
+    "def interrupt():",
+    "    sent.append(time.monotonic())",
+    "    signal.pthread_kill(main_id, signal.SIGINT)",
+    "class HandshakeTimeout(Exception):",
+    "    pass",
+    "def handshake(event, bound, what):",
+    "    if not event.wait(bound):",
+    "        extra.setdefault('handshake', []).append(what)",
+    "        raise HandshakeTimeout('{} not within {} s'.format(what, bound))",
+    "SIGNALS = {'I': signal.SIGINT, 'T': signal.SIGTERM}",
+    "def deliver(code):",
+    "    count = len(suite._MEMBERS['held'])",
+    "    sent.append(time.monotonic())",
+    "    signal.pthread_kill(main_id, SIGNALS[code])",
+    "    deadline = time.monotonic() + 10",
+    "    while len(suite._MEMBERS['held']) == count:",
+    "        if time.monotonic() >= deadline:",
+    "            extra.setdefault('missing', []).append('signal ' + code + ' deferred')",
+    "            break",
+    "real_acquire = suite._MEMBERS_LOCK.acquire",
+    "def acquire(timeout=-1):",
+    "    got = real_acquire(timeout)",
+    "    if got and fire and threading.current_thread() is threading.main_thread():",
+    "        del fire[:]",
+    "        interrupt()",
+    "    return got",
+    "suite._MEMBERS_LOCK.acquire = acquire",
+    "def lock_free():",
+    "    free = suite._MEMBERS_LOCK.acquire(0)",
+    "    if free:",
+    "        suite._MEMBERS_LOCK.release()",
+    "    return free",
+    "def hold_lock(bound=30):",
+    "    taken, done = threading.Event(), threading.Event()",
+    "    def holder():",
+    "        got = real_acquire(10)",
+    "        if got:",
+    "            taken.set()",
+    "        if not done.wait(bound):",
+    "            extra.setdefault('handshake', []).append('lock hold expired')",
+    "        if got:",
+    "            suite._MEMBERS_LOCK.release()",
+    "    thread = threading.Thread(target=holder, daemon=True)",
+    "    thread.start()",
+    "    if not taken.wait(30):",
+    "        extra.setdefault('handshake', []).append('lock held')",
+    "    def release():",
+    "        done.set()",
+    "        thread.join(30)",
+    "        if thread.is_alive():",
+    "            extra.setdefault('handshake', []).append('lock holder finished')",
+    "    return release",
+    "def over_bound(started, bound, what, sink=None):",
+    "    if time.monotonic() - started < bound:",
+    "        return False",
+    "    (extra.setdefault('missing', []) if sink is None else sink).append(what)",
+    "    return True",
+    "def ready(tags, bound=60):",
+    "    deadline = time.monotonic() + bound",
+    "    while len(suite._MEMBERS['groups']) != len(tags):",
+    "        if time.monotonic() >= deadline:",
+    "            extra.setdefault('missing', []).append('members registered')",
+    "            return False",
+    "        time.sleep(0.05)",
+    "    while not all(os.path.exists(os.path.join(folder, tag + '.grandchild'))",
+    "                  for tag in tags):",
+    "        if time.monotonic() >= deadline:",
+    "            extra.setdefault('handshake', []).append('member records')",
+    "            return False",
+    "        time.sleep(0.05)",
+    "    return True",
+    "def in_communicate():",
+    "    for ident, frame in sys._current_frames().items():",
+    "        while ident != main_id and frame is not None:",
+    "            if frame.f_code.co_name == 'communicate' and frame.f_code.co_filename.endswith(",
+    "                    'subprocess.py'):",
+    "                return True",
+    "            frame = frame.f_back",
+    "    return False",
+    "gate = threading.Event()",
+    "real_in_communicate = in_communicate",
+    "def gated_in_communicate():",
+    "    seen = real_in_communicate()",
+    "    if seen:",
+    "        gate.wait(150)",
+    "    return seen",
+    "if scenario == 'late-monitor':",
+    "    in_communicate = gated_in_communicate",
+    "def monitor(tags, bound=60):",
+    "    owed = 'SIGTERM' if scenario == 'sigterm' else 'SIGINT'",
+    "    if not ready(tags, bound):",
+    "        extra.setdefault('unsent', []).append(owed)",
+    "        return",
+    "    deadline = time.monotonic() + bound",
+    "    while scenario != 'pooled' and not in_communicate():",
+    "        if time.monotonic() >= deadline:",
+    "            extra.setdefault('missing', []).append('member in communicate')",
+    "            extra.setdefault('unsent', []).append(owed)",
+    "            return",
+    "        time.sleep(0.01)",
+    "    if scenario == 'leader-first':",
+    "        with open(os.path.join(folder, 'a.leader'), encoding='utf-8') as record:",
+    "            os.kill(int(record.read().split()[0]), signal.SIGKILL)",
+    "    if scenario == 'sigterm':",
+    "        sent.append(time.monotonic())",
+    "        os.kill(os.getpid(), signal.SIGTERM)",
+    "    else:",
+    "        interrupt()",
+    "def member(tag, mode='sleep'):",
+    "    return (fixture, folder, tag, mode)",
+    "def argv(tag, mode='sleep'):",
+    "    return [sys.executable, '-I', '-B', *member(tag, mode)]",
+    "def pool(tags):",
+    "    poison = suite.Path(folder) / 'poison'",
+    "    poison.mkdir()",
+    "    marker, monitor_marker = poison / 'marker', poison / 'monitor'",
+    "    marker.write_bytes(b'')",
+    "    monitor_marker.write_bytes(b'')",
+    "    env = {'PATH': os.environ.get('PATH', os.defpath), 'HOME': folder,",
+    "           'XDG_CONFIG_HOME': folder}",
+    "    suite._config_results(tuple(member(tag) for tag in tags), env, marker, monitor_marker)",
+    "def stray():",
+    "    thread = threading.Thread(target=suite._run_bounded, args=(argv('a'), folder,",
+    "                              dict(os.environ), 30, 'close probe', 'PROBE '))",
+    "    workers.append(('stray member', thread))",
+    "    thread.start()",
+    "    ready(('a',))",
+    "def direct():",
+    "    previous = signal.signal(signal.SIGINT, suite._close_on_signal)",
+    "    try:",
+    "        suite._MEMBERS.update(closing=False, raised=None, held=[])",
+    "        fire.append(True)",
+    "        try:",
+    "            problems, raised = suite._close_members(), None",
+    "        except KeyboardInterrupt:",
+    "            problems, raised = None, 'KeyboardInterrupt'",
+    "        del fire[:]",
+    "        return [raised, lock_free(), problems]",
+    "    finally:",
+    "        suite._MEMBERS['closing'] = True",
+    "        signal.signal(signal.SIGINT, previous)",
+    "def loop(seconds):",
+    "    stop, hits, stuck = threading.Event(), [0], []",
+    "    def sender():",
+    "        while not stop.is_set():",
+    "            signal.pthread_kill(main_id, signal.SIGINT)",
+    "            time.sleep(random.uniform(0, 0.002))",
+    "    previous = signal.signal(signal.SIGINT, suite._close_on_signal)",
+    "    thread = threading.Thread(target=sender, daemon=True)",
+    "    thread.start()",
+    "    end = time.monotonic() + seconds",
+    "    try:",
+    "        while True:",
+    "            try:",
+    "                if time.monotonic() >= end:",
+    "                    break",
+    "                suite._MEMBERS.update(closing=False, raised=None, held=[])",
+    "                problems = suite._close_members()",
+    "                if problems:",
+    "                    stuck.append(problems)",
+    "                    break",
+    "            except KeyboardInterrupt:",
+    "                hits[0] += 1",
+    "    finally:",
+    "        suite._MEMBERS['closing'] = True",
+    "        stop.set()",
+    "        thread.join(30)",
+    "        if thread.is_alive():",
+    "            extra.setdefault('handshake', []).append('signal sender finished')",
+    "        signal.signal(signal.SIGINT, previous)",
+    "    print('LOCK-LOOP interrupts {}'.format(hits[0]), flush=True)",
+    "    return [stuck, lock_free()]",
+    "def held_elsewhere():",
+    "    release = hold_lock()",
+    "    try:",
+    "        suite._MEMBERS['closing'], record, started = False, [], time.monotonic()",
+    "        rc = suite._run_bounded([sys.executable, '-I', '-B', '-c', 'pass'], folder,",
+    "                                dict(os.environ), 30, 'held probe', 'PROBE ', record)[0]",
+    "        problems = suite._close_members()",
+    "        over_bound(started, 20, 'held probe within bound')",
+    "        return [suite._is_timeout(rc), record == [rc],",
+    "                ['not granted' in problem for problem in problems]]",
+    "    finally:",
+    "        release()",
+    "        suite._MEMBERS['closing'] = True",
+    "def lanes(base):",
+    "    if scenario == 'pooled':",
+    "        thread = threading.Thread(target=monitor, args=(('a', 'b'),), daemon=True)",
+    "        workers.append(('monitor', thread))",
+    "        thread.start()",
+    "        pool(('a', 'b'))",
+    "    elif scenario == 'failed-refused':",
+    "        try:",
+    "            pool(('a', 'b'))",
+    "        except ValueError as exc:",
+    "            extra['caught'] = str(exc)",
+    "        suite._reopen_members()",
+    "    elif scenario == 'failed-stalled':",
+    "        pool(('a',))",
+    "    elif scenario.startswith('failed'):",
+    "        pool(('a', 'b'))",
+    "    elif scenario == 'closing-control' or scenario.startswith('split-'):",
+    "        inside, after = scenario.split('-')[1:] if scenario != 'closing-control' else ('', '')",
+    "        real_bounded, real_close = suite._run_bounded, suite._close_members",
+    "        def close():",
+    "            index = len(extra.get('closes', []))",
+    "            if index < len(after):",
+    "                deliver(after[index])",
+    "            extra.setdefault('closes', []).append(list(suite._MEMBERS['held']))",
+    "            return real_close()",
+    "        if after:",
+    "            suite._close_members = close",
+    "        def bounded(*args, **kwargs):",
+    "            if inside:",
+    "                for code in inside:",
+    "                    deliver(code)",
+    "            else:",
+    "                interrupt()",
+    "            result = real_bounded(*args, **kwargs)",
+    "            extra['control'] = [result[0], list(suite._MEMBERS['held']),",
+    "                                suite._MEMBERS['closing']]",
+    "            return result",
+    "        suite._run_bounded = bounded",
+    "        try:",
+    "            extra['rc'] = suite._closing_refusal_control(suite.Path(folder),",
+    "                                                         suite.subprocess.Popen)",
+    "        finally:",
+    "            suite._run_bounded = real_bounded",
+    "        extra['after'] = True",
+    "    elif scenario in ('close-refused', 'sweep-refused'):",
+    "        name = '_close_members' if scenario == 'close-refused' else '_signal_member_groups'",
+    "        real_step = getattr(suite, name)",
+    "        def refused_once():",
+    "            setattr(suite, name, real_step)",
+    "            release = hold_lock()",
+    "            try:",
+    "                return real_step()",
+    "            finally:",
+    "                release()",
+    "        setattr(suite, name, refused_once)",
+    "        sent.append(time.monotonic())",
+    "    elif scenario in ('close-wait-refused', 'close-left-refused'):",
+    "        real_close, sites, releases = suite._close_members, [], []",
+    "        target = 2 if scenario == 'close-wait-refused' else 3",
+    "        def site_acquire(timeout=-1):",
+    "            caller = sys._getframe(2)",
+    "            if caller.f_code is real_close.__code__ and caller.f_lineno not in sites:",
+    "                sites.append(caller.f_lineno)",
+    "                if len(sites) == target:",
+    "                    extra['site'] = caller.f_lineno - real_close.__code__.co_firstlineno",
+    "                    releases.append(hold_lock())",
+    "            return acquire(timeout)",
+    "        def refused_at_site():",
+    "            suite._close_members, suite._MEMBERS_LOCK.acquire = real_close, site_acquire",
+    "            try:",
+    "                return real_close()",
+    "            finally:",
+    "                suite._MEMBERS_LOCK.acquire = acquire",
+    "                for release in releases:",
+    "                    release()",
+    "        suite._close_members = refused_at_site",
+    "        sent.append(time.monotonic())",
+    "    elif scenario in ('close', 'lock'):",
+    "        stray()",
+    "        if scenario == 'lock':",
+    "            fire.append(True)",
+    "        else:",
+    "            real_close = suite._close_members",
+    "            def close():",
+    "                extra.setdefault('protected', []).append(",
+    "                    signal.getsignal(signal.SIGINT) is suite._close_on_signal)",
+    "                interrupt()",
+    "                return real_close()",
+    "            suite._close_members = close",
+    "    elif scenario == 'unresolved':",
+    "        suite._run_bounded([sys.executable, '-I', '-B', '-c', 'pass'], folder,",
+    "                           dict(os.environ), 90, 'unresolved probe', 'PROBE ')",
+    "        sent.append(time.monotonic())",
+    "    elif scenario.endswith('-timeout'):",
+    "        suite.REGISTRY_LOCK_SECONDS = 0.2",
+    "        record, real_stop, releases = [], suite._stop_member_group, []",
+    "        def stop(group):",
+    "            problems = real_stop(group)",
+    "            releases.append(hold_lock())",
+    "            return problems",
+    "        if scenario == 'start-timeout':",
+    "            releases.append(hold_lock())",
+    "        else:",
+    "            suite._stop_member_group = stop",
+    "        try:",
+    "            rc = suite._run_bounded([sys.executable, '-I', '-B', '-c', 'pass'], folder,",
+    "                                    dict(os.environ), 90, 'lock probe', 'PROBE ', record)[0]",
+    "        finally:",
+    "            for release in releases:",
+    "                release()",
+    "        extra['run'] = [str(rc)[:9], len(record)]",
+    "        sent.append(time.monotonic())",
+    "    else:",
+    "        thread = threading.Thread(target=monitor, args=(('a',),), daemon=True)",
+    "        workers.append(('monitor', thread))",
+    "        thread.start()",
+    "        suite._run_bounded(argv('a', 'setsid' if scenario == 'setsid' else 'sleep'), folder,",
+    "                           dict(os.environ), 10 if scenario == 'late-monitor' else 90,",
+    "                           'probe', 'PROBE ')",
+    "real_signal, real_pidfd, real_killpg = signal.signal, signal.pidfd_send_signal, os.killpg",
+    "if scenario == 'lock':",
+    "    extra['monitor_pin'] = []",
+    "    for pin_tags in (('never',), ()):",
+    "        monitor(pin_tags, 0.1)",
+    "        extra['monitor_pin'].append([extra.pop('missing', None), extra.pop('unsent', None),",
+    "                                     len(sent)])",
+    "    release, expiry_deadline = hold_lock(0.2), time.monotonic() + 30",
+    "    while (time.monotonic() < expiry_deadline",
+    "           and 'lock hold expired' not in (extra.get('handshake') or ())):",
+    "        time.sleep(0.01)",
+    "    release()",
+    "    # seen and free are read only AFTER release() joined the holder: a holder paused",
+    "    # between recording its expiry and releasing the lock can never pin free=False, and",
+    "    # a holder the join left alive is 'lock holder finished', whole replacement.",
+    "    seen, free = (extra.get('handshake') or []).count('lock hold expired'), lock_free()",
+    "    if seen:",
+    "        extra['handshake'].remove('lock hold expired')",
+    "        if not extra['handshake']:",
+    "            del extra['handshake']",
+    "    else:",
+    "        extra.setdefault('handshake', []).append('expiry pin')",
+    "    extra['expiry_pin'] = [min(seen, 1), free]",
+    "    pin_sink = []",
+    "    extra['bound_pin'] = [over_bound(time.monotonic() - 1, 0.5, 'pin', pin_sink),",
+    "                          list(pin_sink), over_bound(time.monotonic(), 3600, 'pin',",
+    "                          pin_sink), list(pin_sink)]",
+    "    extra['direct'], extra['loop'], extra['held'] = direct(), loop(2), held_elsewhere()",
+    "    del sent[:]",
+    "elif scenario == 'install':",
+    "    def installing(signum, handler):",
+    "        old = real_signal(signum, handler)",
+    "        if handler is suite._close_on_signal and signum == signal.SIGINT and not sent:",
+    "            interrupt()",
+    "        return old",
+    "    signal.signal = installing",
+    "elif scenario.startswith('failed'):",
+    "    swept, b_running, b_arrived = threading.Event(), threading.Event(), threading.Event()",
+    "    a_arrived, a_raises, late, releases = threading.Event(), threading.Event(), [], []",
+    "    sweep_entered, released, branch_swept = threading.Event(), threading.Event(), []",
+    "    real_sweep, real_observed = suite._signal_member_groups, suite._require_wrapper_observed",
+    "    real_member = suite._run_config_member",
+    "    def sweep():",
+    "        frame = sys._getframe(1)",
+    "        while frame is not None and frame.f_code.co_name != '_config_results':",
+    "            frame = frame.f_back",
+    "        if frame is not None:",
+    "            branch_swept.append(True)",
+    "        sweep_entered.set()",
+    "        if releases:",
+    "            start = time.monotonic()",
+    "            for release in releases:",
+    "                release()",
+    "            del releases[:]",
+    "            stalls.append(time.monotonic() - start)",
+    "        released.set()",
+    "        problems = real_sweep()",
+    "        swept.set()",
+    "        return problems",
+    "    def observed(bypass, what):",
+    "        real_observed(bypass, what)",
+    "        if what.startswith('positive control') and what.endswith(' a sleep'):",
+    "            if scenario == 'failed-stalled':",
+    "                # The deterministic twin of a merely slow git (round 20): member a",
+    "                # fails WITHOUT arriving, so a_arrived, a_raises and the send list",
+    "                # leave this run in the exact state a slow positive control leaves",
+    "                # a 'failed' run in, in every run, on any host.",
+    "                raise ValueError('injected failed member a')",
+    "            a_arrived.set()",
+    "            try:",
+    "                if scenario == 'failed-handshake':",
+    "                    try:",
+    "                        handshake(b_arrived, 30, 'member b arrived')",
+    "                        handshake(b_running, 1, 'member b running')",
+    "                    finally:",
+    "                        sent.append(time.monotonic())",
+    "                else:",
+    "                    handshake(b_running, 30, 'member b running')",
+    "                    if scenario == 'failed-signal':",
+    "                        fire.append(True)",
+    "                    if scenario == 'failed-refused':",
+    "                        releases.append(hold_lock())",
+    "                    sent.append(time.monotonic())",
+    "                raise ValueError('injected failed member a')",
+    "            finally:",
+    "                a_raises.set()",
+    "        if what.startswith('positive control') and what.endswith(' b sleep'):",
+    "            b_arrived.set()",
+    "            if scenario != 'failed-handshake':",
+    "                b_running.set()",
+    "            if not a_raises.wait(120):",
+    "                if a_arrived.is_set():",
+    "                    extra.setdefault('handshake', []).append('member a raised')",
+    "                else:",
+    "                    extra.setdefault('missing', []).append('member a observed')",
+    "            elif not sweep_entered.wait(30):",
+    "                extra.setdefault('missing', []).append('kill sweep')",
+    "            elif not released.wait(30):",
+    "                extra.setdefault('handshake', []).append('lock released')",
+    "            elif not swept.wait(30):",
+    "                extra.setdefault('missing', []).append('kill sweep finished')",
+    "    def run_member(member_argv, env, *rest, **kwargs):",
+    "        rc = real_member(member_argv, env, *rest, **kwargs)",
+    "        late.append([member_argv[2], rc])",
+    "        return rc",
+    "    suite._signal_member_groups, suite._require_wrapper_observed = sweep, observed",
+    "    suite._run_config_member = run_member",
+    "    extra['late'] = late",
+    "elif scenario == 'unresolved':",
+    "    def unreadable(real):",
+    "        def probe(target, sig, *rest):",
+    "            if sig == 0:",
+    "                raise PermissionError(1, 'injected unreadable group')",
+    "            return real(target, sig, *rest)",
+    "        return probe",
+    "    signal.pidfd_send_signal, os.killpg = unreadable(real_pidfd), unreadable(real_killpg)",
+    "suite._expected_check_ids = lambda: set(suite.EXECUTED)",
+    "captured = io.StringIO()",
+    "try:",
+    "    with contextlib.redirect_stdout(captured):",
+    "        outcome = 'returned {}'.format(suite.main(None, lanes))",
+    "except KeyboardInterrupt:",
+    "    outcome = 'KeyboardInterrupt'",
+    "except SystemExit as exc:",
+    "    outcome = 'SystemExit {}'.format(exc.code)",
+    "except Exception as exc:",
+    "    outcome = '{}: {}'.format(type(exc).__name__, exc)",
+    "ended = time.monotonic()",
+    "del fire[:]",
+    "def absorb(signum, frame):",
+    "    extra.setdefault('handshake', []).append('late ' + signal.Signals(signum).name)",
+    "left = [real_signal(signal.SIGINT, absorb), real_signal(signal.SIGTERM, absorb)]",
+    "signal.signal, signal.pidfd_send_signal, os.killpg = real_signal, real_pidfd, real_killpg",
+    "gate.set()",
+    "for name, thread in workers:",
+    "    thread.join(120)",
+    "    if thread.is_alive():",
+    "        extra.setdefault('handshake', []).append(name + ' finished')",
+    "time.sleep(0.05)",
+    "real_signal(signal.SIGINT, left[0])",
+    "real_signal(signal.SIGTERM, left[1])",
+    "registered = len(suite._MEMBERS['groups'])",
+    "if scenario.startswith('failed'):",
+    "    # member a's arrival and raise sit BEHIND the positive control's 60 s subprocess",
+    "    # bound: a merely slow git leaves both False with the code healthy, so they are",
+    "    # the member_a extra, off the _STATE_EVIDENCE allowlist (a wrong member_a always",
+    "    # comes with the completion budget recorded, so it is never definite; in",
+    "    # 'failed-stalled' the empty send list is the scenario itself, deliberate, and",
+    "    # member_a [False, False] is compared definitely). evidence keeps only the",
+    "    # branch facts no bound shapes; producer-map pins what it reads, and the",
+    "    # 'failed-stalled' run pins part of the same class BY VALUE; what neither",
+    "    # reaches is THE RESIDUAL the suite's _allowlist_producers states.",
+    "    if scenario == 'failed-stalled' and outcome.startswith('TimeoutExpired'):",
+    "        # Only a positive control slower than its 60 s bound reaches here: the",
+    "        # reached bound is recorded and the run stands down, cannot-evaluate,",
+    "        # never a definite mismatch on a merely slow host.",
+    "        extra.setdefault('missing', []).append('positive control a observed')",
+    "    extra['member_a'] = [a_arrived.is_set(), a_raises.is_set()]",
+    "    extra['evidence'] = [bool(branch_swept)]",
+    "    witnessed = len(branch_swept)",
+    "    sweep()",
+    "    extra['evidence'].append(len(branch_swept) == witnessed)",
+    "if scenario == 'unresolved':",
+    "    problems = suite._close_members()",
+    "    extra['released'] = [problems, len(suite._MEMBERS['groups'])]",
+    "if scenario.endswith(('-timeout', '-refused')):",
+    "    extra['refused'] = len(suite._MEMBERS['refused'])",
+    "restored = [signal.getsignal(signal.SIGINT) is signal.default_int_handler,",
+    "            signal.getsignal(signal.SIGTERM) == signal.SIG_DFL]",
+    "try:",
+    "    signal.pthread_kill(main_id, signal.SIGINT)",
+    "    restored.append(False)",
+    "except KeyboardInterrupt:",
+    "    restored.append(True)",
+    "extra.update(restored=restored, lock_free=lock_free(), lines=[",
+    "    'SELF-TEST PASS' in captured.getvalue(),",
+    "    'SELF-TEST CANNOT EVALUATE' in captured.getvalue()])",
+    "print(captured.getvalue(), end='', flush=True)",
+    "print('PROBE-REPORT ' + json.dumps([outcome, registered, suite._recorded_states(folder),",
+    "      bool(sent) and all(ended - when - sum(stalls) < 30 for when in sent), extra]), flush=True)",
+))
+
+
+# The child config/member-close-signal-sweep runs (python3 -I -B -c, argv: the tools directory):
+# THE SIGNAL-BOUNDARY SWEEP of main(), over two suite bodies: "body" returns 0; "branch" drives
+# the config pool's REAL failed-member branch (_config_results with an empty roster and a stub pool
+# whose map raises ValueError, so main() ends in that ValueError when no signal is sent). The
+# registry holds one group whose own cleanup has run, and the only stubs are the process-touching
+# ones (the group kill is recorded, its emptiness probe finds the group empty), the pool, a recorder
+# around _close_members and a recorder of the signal.signal calls _restore_signal_handlers makes;
+# main(), _finish_members, _close_members, the kill sweep, the release, the bounded registry lock
+# (0.01 s here), the failed-member branch and the handlers are the production ones. Each run
+# delivers REAL signals (signal.raise_signal, so the handler installed at that point runs) at one
+# point of the window from the body's first line through the end of _restore_signal_handlers:
+# "line", a SIGINT, and separately a SIGTERM, at every line event (sys.settrace); "instruction", the
+# same before every bytecode instruction (sys.monitoring); "pair", a first signal at every line
+# event and a second of the other kind at every later line event of that run (sys.monitoring:
+# CPython drops a trace function that raised, so sys.settrace cannot deliver a second signal after a
+# first that raised). A signal is sent only while its handler is _close_on_signal, or, for SIGINT,
+# the restored default handler (a SIGTERM restored to its default action would end the child);
+# nothing is injected inside _close_on_signal itself (a handler cut off at its entry is the residual
+# main() discloses; after its entry it has no signal-delivery point before it records the signal).
+# Every run must end with EXACTLY the outcome the deferred-signal precedence gives for the signals
+# sent (_raise_held: SIGTERM over SIGINT whatever the order; a SIGINT after SIGINT's restore raises
+# there, and the strongest held one, if any, replaces it; with no signal, the body's own outcome),
+# no close cut short, at least one close completed clean, the registry empty, the lock free, the
+# handlers restored by exactly the calls SIGTERM then SIGINT and nothing left deferred. It prints
+# one SWEEP-REPORT line: each body's baseline run, per body, mode and first signal the runs made and
+# the first five failing ones (point, offset of the second, the signals sent with how each was
+# handled and whether it raised, the outcome, the expected one, each close's problems, groups left,
+# the restores), the functions the window reached and the seconds taken. Model-only points: a signal
+# at the failed-member branch's except line or at its plain closing store raises before the branch's
+# cancel and kill sweep (main()'s closes still end every group, which the run requires); those
+# instructions (exception match, forward jump, constant and global loads, the dict store) include no
+# call, function entry or backward jump, the points where CPython runs a Python signal handler, so a
+# real signal cannot raise there.
+_CLOSE_SWEEP_CHILD = "\n".join((
+    "import concurrent.futures, contextlib, io, json, shutil, signal, sys, tempfile, time",
+    "sys.path.insert(0, sys.argv[1])",
+    "import selftest_git_fixture_env as suite",
+    "suite.REGISTRY_LOCK_SECONDS = 0.01",
+    "tempfile.tempdir = tempfile.mkdtemp(prefix='member-close-sweep-')",
+    "M, TOOL = sys.monitoring, sys.monitoring.DEBUGGER_ID",
+    "SUITE_FILE = suite.main.__code__.co_filename",
+    "RESTORE = suite._restore_signal_handlers.__code__",
+    "HANDLER = suite._close_on_signal.__code__",
+    "OUTCOME = {signal.SIGINT: 'KeyboardInterrupt', signal.SIGTERM: 'SystemExit 143'}",
+    "def body(report_path, lanes):",
+    "    code = 0",
+    "    return code",
+    "class Pool:",
+    "    def __init__(self, max_workers):",
+    "        pass",
+    "    def map(self, fn, items):",
+    "        raise ValueError('injected failed member')",
+    "    def shutdown(self, wait=True, cancel_futures=False):",
+    "        pass",
+    "concurrent.futures.ThreadPoolExecutor = Pool",
+    "def branch(report_path, lanes):",
+    "    suite._config_results((), {}, None, None)",
+    "    return 0",
+    "BODIES = {body.__code__: 'returned 0', branch.__code__: 'ValueError: injected failed member'}",
+    "class Proc:",
+    "    pid, returncode, stdout, stderr = 0, 0, None, None",
+    "def signal_group(group, sig):",
+    "    if sig == 0:",
+    "        raise ProcessLookupError(3, 'the group is empty')",
+    "    st['kills'] += 1",
+    "    return True",
+    "real_close, real_signal = suite._close_members, signal.signal",
+    "def close():",
+    "    st['closes'].append(None)",
+    "    problems = real_close()",
+    "    st['closes'][-1] = problems",
+    "    return problems",
+    "def recording_signal(signum, handler):",
+    "    if sys._getframe(1).f_code is RESTORE:",
+    "        st['restores'].append(int(signum))",
+    "    return real_signal(signum, handler)",
+    "suite._close_members, signal.signal = close, recording_signal",
+    "suite._signal_member_group = signal_group",
+    "suite._expected_check_ids = lambda: set(suite.EXECUTED)",
+    "st = {}",
+    "def send(sig):",
+    "    handler = signal.getsignal(sig)",
+    "    how = ('ours' if handler is suite._close_on_signal else",
+    "           'restored' if handler is signal.default_int_handler else None)",
+    "    if how is None:",
+    "        return",
+    "    entry = [int(sig), how, False]",
+    "    st['sent'].append(entry)",
+    "    try:",
+    "        signal.raise_signal(sig)",
+    "    except BaseException:",
+    "        entry[2] = True",
+    "        raise",
+    "def step(code):",
+    "    if code.co_filename != SUITE_FILE and code not in BODIES:",
+    "        return False",
+    "    if not st['open']:",
+    "        if code is not st['body']:",
+    "            return True",
+    "        st['open'] = True",
+    "    if st['shut'] or code is HANDLER:",
+    "        return True",
+    "    if code is RESTORE:",
+    "        st['restoring'] = True",
+    "    elif st['restoring']:",
+    "        st['shut'] = True",
+    "        return True",
+    "    st['n'] += 1",
+    "    st['names'].add(code.co_name)",
+    "    plan = st['plan']",
+    "    if plan[0] == st['n']:",
+    "        st['first'] = st['n']",
+    "        send(plan[1])",
+    "    elif st['sent'] and plan[2] and st['n'] == st['first'] + plan[2]:",
+    "        send(plan[3])",
+    "    return True",
+    "def tracer(frame, event, arg):",
+    "    if event == 'call':",
+    "        code = frame.f_code",
+    "        return tracer if code.co_filename == SUITE_FILE or code in BODIES else None",
+    "    if event == 'line':",
+    "        step(frame.f_code)",
+    "    return tracer",
+    "def on_event(code, where):",
+    "    return None if step(code) else M.DISABLE",
+    "def lock_free():",
+    "    free = suite._MEMBERS_LOCK.acquire(0)",
+    "    if free:",
+    "        suite._MEMBERS_LOCK.release()",
+    "    return free",
+    "def strongest(sigs):",
+    "    return OUTCOME[signal.SIGTERM if signal.SIGTERM in sigs else signal.SIGINT]",
+    "def expected(sent, baseline):",
+    "    ours = [sig for sig, how, raised in sent if how == 'ours']",
+    "    if any(how == 'restored' for sig, how, raised in sent):",
+    "        held = [sig for sig, how, raised in sent if how == 'ours' and not raised]",
+    "        return strongest(ours) if held else 'KeyboardInterrupt'",
+    "    return strongest(ours) if ours else baseline",
+    "def run(how, suite_body, plan):",
+    "    st.clear()",
+    "    st.update(open=False, shut=False, restoring=False, n=0, first=0, plan=plan, sent=[],",
+    "              closes=[], kills=0, names=set(), restores=[], body=suite_body.__code__)",
+    "    group = suite._MemberGroup(Proc(), None)",
+    "    group.ended = True",
+    "    suite._MEMBERS['groups'].clear()",
+    "    suite._MEMBERS['groups'].add(group)",
+    "    suite._suite_main = suite_body",
+    "    real_signal(signal.SIGINT, signal.default_int_handler)",
+    "    real_signal(signal.SIGTERM, signal.SIG_DFL)",
+    "    if how == 'trace':",
+    "        sys.settrace(tracer)",
+    "    else:",
+    "        M.restart_events()",
+    "        M.set_events(TOOL, M.events.LINE if how == 'line' else M.events.INSTRUCTION)",
+    "    try:",
+    "        with contextlib.redirect_stdout(io.StringIO()):",
+    "            outcome = 'returned {}'.format(suite.main(None, None))",
+    "    except KeyboardInterrupt:",
+    "        outcome = 'KeyboardInterrupt'",
+    "    except SystemExit as exc:",
+    "        outcome = 'SystemExit {}'.format(exc.code)",
+    "    except BaseException as exc:",
+    "        outcome = '{}: {}'.format(type(exc).__name__, exc)",
+    "    finally:",
+    "        sys.settrace(None)",
+    "        M.set_events(TOOL, 0)",
+    "    sent, closes = st['sent'], st['closes']",
+    "    want = expected(sent, BODIES[st['body']])",
+    "    good = (outcome == want and None not in closes and [] in closes",
+    "            and (sent or len(closes) == 2) and not suite._MEMBERS['groups'] and lock_free()",
+    "            and st['restores'] == [signal.SIGTERM, signal.SIGINT]",
+    "            and signal.getsignal(signal.SIGINT) is signal.default_int_handler",
+    "            and signal.getsignal(signal.SIGTERM) == signal.SIG_DFL",
+    "            and suite._MEMBERS['held'] == [])",
+    "    return (st['first'] != 0, sent, good,",
+    "            [outcome, want, closes, len(suite._MEMBERS['groups']), st['restores']])",
+    "def sweep_mode(suite_body, how, pairs, first, second):",
+    "    points, bad, point = 0, [], 1",
+    "    while len(bad) < 5:",
+    "        offset = 1 if pairs else 0",
+    "        while True:",
+    "            reached, sent, good, seen = run(how, suite_body, (point, first, offset, second))",
+    "            if not sent:",
+    "                break",
+    "            names.update(st['names'])",
+    "            points += 1",
+    "            if not good:",
+    "                bad.append([point, offset, sent, seen])",
+    "            if not pairs or len(sent) < 2 or len(bad) >= 5:",
+    "                break",
+    "            offset += 1",
+    "        if not reached:",
+    "            break",
+    "        point += 1",
+    "    return [points, bad]",
+    "def sweep():",
+    "    report = {}",
+    "    for prefix, suite_body in (('', body), ('branch ', branch)):",
+    "        baseline = run('trace', suite_body, (0, 0, 0, 0))",
+    "        report[prefix + 'baseline'] = [baseline[2], baseline[3]]",
+    "        for how, pairs, label in (('trace', False, 'line'),",
+    "                                  ('instruction', False, 'instruction'),",
+    "                                  ('line', True, 'pair')):",
+    "            for first, second in ((signal.SIGINT, signal.SIGTERM),",
+    "                                  (signal.SIGTERM, signal.SIGINT)):",
+    "                report['{}{} {}'.format(prefix, label, signal.Signals(first).name)] = (",
+    "                    sweep_mode(suite_body, how, pairs, first, second))",
+    "    report['names'] = sorted(names)",
+    "    return report",
+    "M.use_tool_id(TOOL, 'member close sweep')",
+    "M.register_callback(TOOL, M.events.LINE, on_event)",
+    "M.register_callback(TOOL, M.events.INSTRUCTION, on_event)",
+    "started, names = time.monotonic(), set()",
+    "try:",
+    "    report = sweep()",
+    "finally:",
+    "    shutil.rmtree(tempfile.tempdir, ignore_errors=True)",
+    "report['seconds'] = round(time.monotonic() - started, 1)",
+    "print('SWEEP-REPORT ' + json.dumps(report), flush=True)",
+))
+
+
+def _read_record(path):
+    """The (pid, start time) pair a _GROUP_MEMBER_FIXTURE record holds, read as bytes."""
+    with open(path, "rb") as record:
+        pid, start = record.read().decode("ascii").split()
+    return int(pid), start
+
+
+def _recorded_states(folder):
+    """{record name: state} for every <tag>.leader and <tag>.grandchild record in folder (written
+    by _GROUP_MEMBER_FIXTURE): "alive" only when /proc shows that pid live (_pid_state) AND its
+    start time equals the recorded one, so a reused pid never reads as the recorded process;
+    otherwise "dead", or "cannot-evaluate: ..." for unreadable evidence."""
+    states = {}
+    for name in sorted(os.listdir(folder)):
+        if not name.endswith((".leader", ".grandchild")):
+            continue
+        try:
+            pid, start = _read_record(os.path.join(folder, name))
+            state = _pid_state(pid)
+            if state == "alive":
+                with open("/proc/{}/stat".format(pid), "rb") as stat:
+                    if stat.read().decode("ascii", "replace").rsplit(")", 1)[1].split()[19] \
+                            != start:
+                        state = "dead"
+        except FileNotFoundError:
+            state = "dead"
+        except (OSError, ValueError, IndexError) as exc:
+            state = "cannot-evaluate: {}: {}".format(type(exc).__name__, exc)
+        states[name] = state
+    return states
+
+
+def _kill_recorded(folder):
+    """Harness cleanup: SIGKILL every recorded process still alive with its recorded start time,
+    through a pidfd opened BEFORE the start time is re-read, so the signal reaches that process
+    and never a later one reusing its pid. Never builds its list from a command-line pattern."""
+    for name, state in _recorded_states(folder).items():
+        if state != "alive":
+            continue
+        try:
+            fd = os.pidfd_open(_read_record(os.path.join(folder, name))[0])
+        except (OSError, ValueError):
+            continue
+        try:
+            if _recorded_states(folder).get(name) == "alive":
+                signal.pidfd_send_signal(fd, signal.SIGKILL)
+        except OSError:
+            pass
+        finally:
+            os.close(fd)
+
+
+def _pidfd_group_signal_supported():
+    """True when this process can signal a process group through a pidfd
+    (_signal_member_group's exact path): os.pidfd_open exists and the kernel accepts
+    PIDFD_SIGNAL_PROCESS_GROUP. Probed with signal 0 through a pidfd of this process: the flag
+    addresses the group this pid leads, so ProcessLookupError (no such group: this process leads
+    none) or success both mean the flag was accepted; a kernel without it raises EINVAL."""
+    try:
+        fd = os.pidfd_open(os.getpid())
+    except (AttributeError, OSError):
+        return False
+    try:
+        signal.pidfd_send_signal(fd, 0, None, PIDFD_SIGNAL_PROCESS_GROUP)
+        return True
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+
+
+# The _CLOSE_PROBE_CHILD handshakes whose expiry is the scenario itself: in "failed-handshake"
+# member b never reports running, so member a's 1 s handshake expires and nothing is injected; in
+# "late-monitor" the monitor deliberately fires only after main() ended, so its SIGINT is absorbed
+# by the teardown's deferring handler and recorded as the "late SIGINT" handshake.
+_DELIBERATE_HANDSHAKES = dict([("failed-handshake", ("member b running",)),
+                               ("late-monitor", ("late SIGINT",))])
+
+# The scenarios whose EMPTY send list is the scenario itself: "failed-stalled" owes no signal
+# by construction (its one member fails without arriving, deterministically, so nothing is
+# ever sent and the completion budget measures nothing), the same way _DELIBERATE_HANDSHAKES
+# names each scenario's own deliberate expiry. Only the completion-budget record is exempt:
+# a reached code-owned bound, an owed signal or an expired handshake in such a run is still
+# recorded and stands the observation down. The "record-map" vectors pin both halves.
+_DELIBERATE_EMPTY_SEND = ("failed-stalled",)
+
+
+def _handshake_expired(scenario, extra):
+    """The harness-timeout message for a _CLOSE_PROBE_CHILD run one of whose handshakes expired
+    (extra["handshake"], beyond the scenario's deliberate one); None when every handshake was
+    met. The "handshake" extras hold ONLY state the harness's own threads arrange (member b's
+    arrival and report, member a's raise reaching member b once member a's positive control was
+    observed, a holder thread's own acquire granted, the sweep wrapper's release of those
+    holders, the members' grandchild records written by the fixture, a monitor, holder or sender
+    thread finished) and the signals the teardown absorbed after main() ("late <name>");
+    progress the code under test owns (the members' registration, a member thread inside the
+    real communicate, member a's positive control observed at all, the failed-member branch
+    entering its kill sweep and the real sweep returning, a delivered signal's deferral) expires
+    into the "missing" extras instead, which _scenario_timeout_record records as its own
+    reached-bound timeout, never folded here: timing alone is never a definite finding, so a
+    reached code-owned bound is cannot-evaluate too, fail closed, never a pass, and the defect
+    has to show in the _STATE_EVIDENCE fields, which stay compared beside the recorded timeout. A
+    handshake the handshake() helper raised expired
+    BEFORE the injected failure could be sent, so that failure is never sent after one of those;
+    a holder or release expiry ("lock held", "lock holder finished", "lock released") only
+    records its entry and the run continues, member a's raise included. How the parent grades
+    each expiry, including the late-signal rule, is _scenario_timeout_record's."""
+    expired = [what for what in extra.get("handshake") or ()
+               if what not in _DELIBERATE_HANDSHAKES.get(scenario, ())]
+    if not expired:
+        return None
+    return "TIMEOUT: member-close child ({}): handshake not met: {} (cannot evaluate)".format(
+        scenario, ", ".join(expired))
+
+
+# THE ALLOWLIST: the only fields of a _CLOSE_PROBE_CHILD observation that stay definite when
+# the observation carries ANY recorded timeout (a reached code-owned bound, an owed signal
+# never sent, the completion budget, an expired harness handshake of any kind, the expiry
+# pin). A field may sit here only because its value is read from FINAL state, after main()
+# ended and after every worker, holder and sender thread was joined, so no scheduling delay
+# can have produced it; every field outside this tuple (the outcome, the registry count, the
+# recorded process states, the timeliness, the printed lines and every other extras key) can
+# be shaped by WHEN something ran, so under any recorded timeout it stands down (_stood_down),
+# cannot-evaluate, never definite, with no per-site choice a new timeout site could forget.
+# Each entry's justification traces its producer to its read with no bound, timeout or
+# scheduling delay between the fact and the read, and names the vector pinning it:
+# - "restored": whether main() left the handlers restored. Producer: main()'s restore path
+#   either ran or did not by the time main() ended; read by getsignal and a real SIGINT
+#   raised AFTER the report's join loop, a direct read of final handler state with no wait
+#   in it. A thread a bounded join left alive, the one remaining way timing could still
+#   change the handlers, replaces the whole observation (the alive-kind record-map vector),
+#   so only a defect in the restore itself, never a slow thread, makes this false (the
+#   restoration and stray-defect record-map vectors keep that defect definite).
+# - "lock_free": the registry lock's final state. Producer: the last joined holder's
+#   release (or leak); read by a zero-timeout acquire AFTER the join loop, so the read
+#   itself carries no bound, and a joined holder has released or leaked for good. A holder
+#   still alive is "lock holder finished", whole replacement (the alive-kind record-map
+#   vector); the expiry-pin record-map vectors pin the stand-down of the timing-shaped
+#   pin fields beside it.
+# - "evidence": whether the failed-member branch itself called the kill sweep, and that
+#   the sweep wrapper's caller check discriminates. Producer: the wrapper appends to
+#   branch_swept synchronously inside the sweep call (the frame walk is pure computation),
+#   so the append IS the fact and no bound sits between the fact and the post-main read;
+#   every bound of the failed scenarios raises INTO the handler that calls the sweep, so a
+#   bound can only make the branch run, never skip it, and the second flag comes from a
+#   direct post-main call. The slow-positive-control record-map vectors are CLASSIFIER
+#   pins (the mapping, on a hand-written observation): flags at their want beside the
+#   60 s positive-control bound make the run cannot-evaluate, never a definite mismatch,
+#   while a false flag beside the same record stays definite. That the child's flags
+#   ARE at their want then rests on the producer pin ("producer-map" below) and the
+#   "failed-stalled" value pin, short of THE RESIDUAL (_allowlist_producers). Member a's own
+#   arrival and raise came OFF this entry (round 17): that 60 s bound sits between
+#   member a's worker entering run and those flags, so a merely slow git leaves them
+#   False with the code healthy; they are the "member_a" extra, never definite when
+#   wrong (a wrong member_a leaves the send list empty, so the completion budget is
+#   recorded beside it and it stands down).
+# THE PRODUCER PIN, two independent nets, neither complete: the "producer-map" entry
+# (_allowlist_producers) pins, read from the child's source and fail closed on the
+# constructs it refuses, the exact names every write of each entry above reads, closed
+# over their origins through the forms it traces, so a producer re-tied to timing
+# (member a's arrival or raise, the send list, a stall) through one of those forms, by a
+# read that adds a name to the pinned signature, fails definitively in a healthy run
+# too; "producer-oracle" pins that discrimination, one probe per rule it names, on
+# mutated copies of the child source. THE VALUE PIN: the
+# "failed-stalled" scenario holds member a's arrival and raise and the send list,
+# deterministically and in every run, in the exact state a merely slow git leaves them
+# in, with every compared field structural, so an edit tying an allowlisted field to
+# those facts, on code that run executes, yields there the value a slow-git run would
+# give it (a wrong VALUE, reflection and module attributes included) unless it also
+# depends on ANY other state that differs between the two runs (the scenario's name,
+# member b's presence or absence, the exception outcome's text and similar); a stall's
+# presence is pinned the same way by "failed-refused" (stalls nonempty) beside "failed"
+# (stalls empty). Neither net catches more than its own mechanics reach: the value pin
+# catches a producer only by a compared field differing from its want (a missing report
+# included) in a run the scenarios make within their bounds, and the oracle only by a
+# refusal or by a change to a pinned signature (a traced read adding a name to it, or a
+# name leaving it). So ANY producer that neither net catches passes both nets, whatever the
+# condition under which it changes an allowlisted field (what a slow positive control
+# alters: arrival, raise, send list, member b's presence, the exception outcome's text; a
+# stall's length; the Python version, wall clock or environment; or anything else) and
+# whatever carries it (a form the oracle neither traces nor refuses, or a traced test whose
+# names are all pinned already, such as pinned_version's if sys.version_info >= (3, 99) or
+# a pure-local gate such as if len(branch_swept) > 1): THE RESIDUAL, stated in
+# _allowlist_producers beside the oracle's DISCLOSED BOUNDARIES, whose named residual
+# probes are examples of it, not the class. Only a run in which that condition holds where
+# the producer runs can catch it (a slow positive control is one such run, for a condition
+# it alters), and such a catch is never a pin.
+# A handshake kind naming a thread its bounded join left ALIVE (the report's join loop,
+# hold_lock's release and loop's sender join all record "<name> finished" exactly then) can
+# still poison any field, the allowlist included (a live holder owns the lock; a live
+# monitor can raise), so it replaces the whole observation (_scenario_timeout_record).
+# The record-map pins this tuple's exact membership VERBATIM and the stand-down of every
+# extras key the child writes, so adding any key (late, direct, member_a or a new one) or
+# removing one fails a vector; the producer-map pins what each kept key reads.
+_STATE_EVIDENCE = ("evidence", "lock_free", "restored")
+
+
+def _stood_down(entry, message):
+    """entry (a 7-field observation, or its want) stood down under a recorded timeout: every
+    field outside the _STATE_EVIDENCE allowlist becomes message (the outcome, the registry
+    count, the recorded process states, the timeliness) or is dropped (every extras key off
+    the allowlist), and the extras carry stood_down=message. _scenario_timeout_record applies
+    it to the observed side and _stood_down_wants mirrors it onto the want, keyed on that
+    marker, so every comparison timing could shape is neutral on both sides while a mismatch
+    in an allowlisted field stays a definite finding."""
+    down = {key: value for key, value in entry[6].items() if key in _STATE_EVIDENCE}
+    down["stood_down"] = message
+    return entry[:1] + (message, message, message, message, message, down)
+
+
+def _scenario_timeout_record(scenario, observation, extra, recorded=None):
+    """The got entry for one _CLOSE_PROBE_CHILD observation, under the rule that TIMING ALONE
+    IS NEVER A DEFINITE FINDING: an observation whose only evidence of a defect is timing (a
+    deadline missed, a signal late, a signal never sent, a completion budget exceeded, a
+    merely slow thread) is recorded as a timeout (default CANNOT_EVALUATE), which fails the
+    run closed (exit 2) and is never a pass. Every timeout record, whatever produced it, is
+    graded by ONE rule instead of a per-site choice of fields: a "missing" entry (a bounded
+    wait on code-owned state reached its bound) and an "unsent" entry (the monitor returned
+    without sending a signal the harness owed) are popped and recorded; a False timeliness
+    field (the completion budget) is recorded, unless the unsent record already covers the
+    empty send list or the scenario owes no signal by construction (_DELIBERATE_EMPTY_SEND,
+    whose other records stay graded like any scenario's); a non-deliberate expired handshake
+    is recorded by _handshake_expired.
+    When ANYTHING was recorded, an expired kind naming a thread its bounded join left alive
+    (its entry ends " finished") replaces the whole observation with the recorded message (a
+    live thread can poison every field, the allowlist included), and otherwise the
+    observation is stood down to the last recorded message by _stood_down: only the
+    _STATE_EVIDENCE allowlist stays compared, mirrored on the wants side by
+    _stood_down_wants, so a restoration defect, a held lock or a false evidence flag beside
+    the timeout is STILL A DEFINITE FINDING while every field timing could shape is neutral.
+    No field stays definite through a per-timeout decision: a new timeout site gets the
+    stand-down for free, and widening or narrowing the allowlist fails the "record-map"
+    vectors, which pin each mapping, the _STATE_EVIDENCE tuple's exact membership verbatim
+    and the stand-down of every extras key the child writes (member_a, late, direct and the
+    rest), so admitting any existing child field fails a vector too."""
+    sink = CANNOT_EVALUATE if recorded is None else recorded
+    messages = []
+    missing = extra.pop("missing", None)
+    if missing:
+        messages.append("TIMEOUT: member-close child ({}): code-owned bound reached: {} "
+                        "(cannot evaluate)".format(scenario, ", ".join(missing)))
+    unsent = extra.pop("unsent", None)
+    if unsent:
+        messages.append("TIMEOUT: member-close child ({}): owed signal never sent: {} "
+                        "(cannot evaluate)".format(scenario, ", ".join(unsent)))
+    if (not unsent and scenario not in _DELIBERATE_EMPTY_SEND
+            and isinstance(observation, tuple) and len(observation) == 7
+            and observation[5] is False):
+        messages.append("TIMEOUT: member-close child ({}): completion budget reached "
+                        "(cannot evaluate)".format(scenario))
+    expired_message = _handshake_expired(scenario, extra)
+    if expired_message is not None:
+        messages.append(expired_message)
+    sink.extend(messages)
+    if not messages:
+        return observation
+    message = messages[-1]
+    if not (isinstance(observation, tuple) and len(observation) == 7):
+        return message
+    expired = [what for what in extra.get("handshake") or ()
+               if what not in _DELIBERATE_HANDSHAKES.get(scenario, ())]
+    if any(what.endswith(" finished") for what in expired):
+        return message
+    return _stood_down(observation, message)
+
+
+def _stood_down_wants(observed, wants):
+    """The wants with _scenario_timeout_record's stand-downs mirrored, because timing alone
+    is never a definite finding: an observed entry _stood_down reshaped carries the recorded
+    timeout message under its "stood_down" extras key, and the matching want is reshaped by
+    the same _stood_down with the same allowlist, so every comparison timing could shape is
+    neutral while the _STATE_EVIDENCE fields are still compared and a mismatch there stays a
+    definite finding. Every other entry's want is returned unchanged; an observed extras
+    dict can carry the marker through no other path (the child never writes a "stood_down"
+    extra, its own "unsent" extra is a list of signal names and is popped before comparison,
+    and a whole-observation replacement is a plain message, never a tuple). The "record-map"
+    entry pins the substitutions and the pass-through."""
+    adjusted = []
+    for entry, want in zip(observed, wants):
+        if (isinstance(entry, tuple) and len(entry) == 7
+                and isinstance(want, tuple) and len(want) == 7):
+            extras = entry[6] if isinstance(entry[6], dict) else {}
+            if _is_timeout(extras.get("stood_down")):
+                want = _stood_down(want, extras["stood_down"])
+        adjusted.append(want)
+    return adjusted
+
+
+def _close_lock_sites(close=None):
+    """Every acquisition of the registry lock in _close_members, read from the source, in source
+    order, each as (line offset from its def line, form): form "with" for a with statement
+    directly on _MEMBERS_LOCK (the bounded acquire, _RegistryLock.__enter__) and "acquire" for a
+    direct _MEMBERS_LOCK.acquire(...) call; EVERY other reference to the lock's name in the
+    function (a bare release, the raw ._lock, an alias, the name passed on, an ATTRIBUTE named
+    _MEMBERS_LOCK, as in a module-object access, or the STRING constant "_MEMBERS_LOCK", as in a
+    globals() subscript or a getattr call) comes back as "unrecognized", never skipped. config/member-close-unresolved-verdict requires exactly one "with" per
+    refused-site scenario ("close-refused", "close-wait-refused" and "close-left-refused" refuse
+    the first, second and third through the bounded acquire), so a fourth acquisition, a direct
+    acquire call or an unrecognized form fails that pin definitively, and a site that stopped
+    taking the lock through the bounded acquire is refused nowhere and fails its scenario. Raises
+    LookupError, which the caller records as cannot-evaluate, when the source cannot be read or
+    no def NAMED _close_members sits at its recorded line (a def under any other name there, the
+    renamed-def mutant, is never accepted), never an empty fail-open result. close (default
+    _close_members) is the function whose recorded file and line are read: the "close-oracle"
+    control passes probes written to the fixture, so the renamed-def mutant stays pinned.
+    Syntactic limit, disclosed: only references inside _close_members' own body that spell the
+    name _MEMBERS_LOCK as the bare global name, as an attribute of any value, or as that exact
+    string constant are seen; an acquisition through another name bound to the lock (an alias
+    made outside the function, a parameter, a container holding it), through a string built at
+    run time, or inside a helper it calls is outside this oracle (the helpers' own acquisitions
+    have their own refusal scenarios)."""
+    close = _close_members if close is None else close
+    first = close.__code__.co_firstlineno
+    filename = close.__code__.co_filename
+    try:
+        with open(filename, encoding="utf-8") as source:
+            tree = ast.parse(source.read())
+    except (OSError, SyntaxError, ValueError) as exc:
+        raise LookupError("the close-lock-site oracle cannot read {}: {}".format(filename, exc))
+    for node in tree.body:
+        if (isinstance(node, ast.FunctionDef) and node.lineno == first
+                and node.name == "_close_members"):
+            break
+    else:
+        raise LookupError("the close-lock-site oracle found no def named _close_members at line "
+                          "{} of {}: it cannot read _close_members".format(first, filename))
+    parents = {}
+    for parent in ast.walk(node):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+    sites = []
+    for name in ast.walk(node):
+        if (isinstance(name, ast.Attribute) and name.attr == "_MEMBERS_LOCK") or (
+                isinstance(name, ast.Constant) and name.value == "_MEMBERS_LOCK"):
+            sites.append((name.lineno - first, "unrecognized"))
+            continue
+        if not (isinstance(name, ast.Name) and name.id == "_MEMBERS_LOCK"):
+            continue
+        parent = parents.get(name)
+        grand = parents.get(parent)
+        if isinstance(parent, ast.withitem) and parent.context_expr is name:
+            sites.append((parents[parent].lineno - first, "with"))
+        elif (isinstance(parent, ast.Attribute) and parent.attr == "acquire"
+                and isinstance(grand, ast.Call) and grand.func is parent):
+            sites.append((grand.lineno - first, "acquire"))
+        else:
+            sites.append((name.lineno - first, "unrecognized"))
+    return sorted(sites)
+
+
+def _sweep_call_sites(config=None):
+    """Every reference to _signal_member_groups in _config_results, read from the source in
+    source order like _close_lock_sites, each as (line offset from the def line, form): form
+    "except-before-wait" for a call directly on that name inside an except handler of a try
+    statement whose finally block waits for the workers (a shutdown(...) call carrying
+    wait=True in its finalbody), AND with no worker wait inside the handler itself before
+    the call: shutdown(...) waits unless it carries a literal wait=False, so any shutdown
+    call positioned before the sweep call in the handler without that literal refuses the
+    form (the "sweep-oracle" bare, positional and cancel probes pin this rule: a bare
+    shutdown(), a positional shutdown(True, ...) and shutdown(wait=True,
+    cancel_futures=False) each refuse, so a detector counting only a literal wait=True,
+    or exempting a literal False on any keyword, fails them). The except handler's body
+    then runs the kill sweep
+    before any wait for the workers, so the sweep precedes that wait STRUCTURALLY, a
+    source-order fact with no
+    deadline involved. EVERY other reference (a call outside such a handler, the call moved
+    after the wait into the finally block, a call after a handler-body wait, a bare name, an
+    attribute or a string constant spelling of the name) comes back "unrecognized", never
+    skipped. config/member-failed-no-late-launch requires exactly one "except-before-wait"
+    site ("sweep-site"), so the mutant that moves the kill sweep after the worker wait,
+    turns the handler's own shutdown into a waiting one, or removes the sweep, fails that
+    pin definitively. Raises LookupError, which the caller records as cannot-evaluate (never
+    a fail-open empty result), when the source cannot be read or no def NAMED
+    _config_results sits at its recorded line; the "sweep-oracle" entry pins this
+    discrimination on compiled probes. The same syntactic limits as _close_lock_sites apply:
+    a sweep called through another name bound to it, or a worker wait spelled through
+    anything but a shutdown call (a join, a future's result), is outside this oracle (the
+    sweep wrapper's runtime caller witness, the second "evidence" flag, and member b's
+    staged bounds cover the ordering dynamically, fail closed)."""
+    config = _config_results if config is None else config
+    first = config.__code__.co_firstlineno
+    filename = config.__code__.co_filename
+    try:
+        with open(filename, encoding="utf-8") as source:
+            tree = ast.parse(source.read())
+    except (OSError, SyntaxError, ValueError) as exc:
+        raise LookupError("the sweep-site oracle cannot read {}: {}".format(filename, exc))
+    for node in tree.body:
+        if (isinstance(node, ast.FunctionDef) and node.lineno == first
+                and node.name == "_config_results"):
+            break
+    else:
+        raise LookupError("the sweep-site oracle found no def named _config_results at line "
+                          "{} of {}: it cannot read _config_results".format(first, filename))
+    parents = {}
+    for parent in ast.walk(node):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+
+    def waited_finally(handler):
+        wrapper = parents.get(handler)
+        if not isinstance(wrapper, ast.Try):
+            return False
+        for final in wrapper.finalbody:
+            for inner in ast.walk(final):
+                if (isinstance(inner, ast.Call) and isinstance(inner.func, ast.Attribute)
+                        and inner.func.attr == "shutdown"
+                        and any(key.arg == "wait" and isinstance(key.value, ast.Constant)
+                                and key.value.value is True for key in inner.keywords)):
+                    return True
+        return False
+
+    def waits_before(handler, call):
+        # A worker wait inside the handler ITSELF, before the sweep call, breaks the pinned
+        # ordering exactly as the finally wait would. shutdown(...) waits unless it carries
+        # a literal wait=False, so any shutdown call in the handler without that literal,
+        # positioned before the sweep call, refuses the form (fail closed: the site comes
+        # back "unrecognized" and the one-site pin fails definitively). The "bare" and
+        # "positional" sweep-oracle probes pin the literal rule: a detector counting only
+        # a literal wait=True accepts both and fails their vectors; the "cancel" probe
+        # (wait=True, cancel_futures=False) pins that the exemption reads the wait
+        # keyword itself, so a detector exempting any literal False keyword fails it.
+        for inner in ast.walk(handler):
+            if (isinstance(inner, ast.Call) and isinstance(inner.func, ast.Attribute)
+                    and inner.func.attr == "shutdown"
+                    and not any(key.arg == "wait" and isinstance(key.value, ast.Constant)
+                                and key.value.value is False for key in inner.keywords)
+                    and (inner.lineno, inner.col_offset) < (call.lineno, call.col_offset)):
+                return True
+        return False
+
+    sites = []
+    for name in ast.walk(node):
+        if (isinstance(name, ast.Attribute) and name.attr == "_signal_member_groups") or (
+                isinstance(name, ast.Constant) and name.value == "_signal_member_groups"):
+            sites.append((name.lineno - first, "unrecognized"))
+            continue
+        if not (isinstance(name, ast.Name) and name.id == "_signal_member_groups"):
+            continue
+        parent = parents.get(name)
+        form = "unrecognized"
+        if isinstance(parent, ast.Call) and parent.func is name:
+            ancestor = parents.get(parent)
+            while ancestor is not None and not isinstance(
+                    ancestor, (ast.ExceptHandler, ast.FunctionDef)):
+                ancestor = parents.get(ancestor)
+            if (isinstance(ancestor, ast.ExceptHandler) and waited_finally(ancestor)
+                    and not waits_before(ancestor, parent)):
+                form = "except-before-wait"
+        sites.append((name.lineno - first, form))
+    return sorted(sites)
+
+
+# The methods through which a name of the child is taken to gain a value: a call of one of
+# these on the bare name (anywhere in the child, a helper's body included) is one of that
+# name's origins, with its arguments' reads, in _allowlist_producers.
+_PRODUCER_MUTATORS = ("append", "extend", "insert", "add", "update", "setdefault")
+
+# Reflective builtins that can reach any binding without spelling its name: ANY use of one of
+# these names in the child is "unrecognized" (fail closed), so a producer reaching state
+# through them is refused. getattr, setattr and delattr are refused the same way unless
+# called directly on an import-bound module object, whose attribute state is a disclosed
+# boundary of the oracle.
+_REFLECTIVE_NAMES = ("globals", "vars", "locals", "eval", "exec", "compile", "__import__")
+
+
+def _allowlist_producers(source=None):
+    """The producer pin of the _STATE_EVIDENCE allowlist, read from the _CLOSE_PROBE_CHILD
+    source (source, default _CLOSE_PROBE_CHILD) and never run: a dict giving, for each
+    allowlisted extras key, the sorted names its producers READ, and under "unrecognized"
+    every construct this oracle refuses, as (line, form). The record-map vectors pin the
+    classifier (which fields a recorded timeout keeps); this pins what feeds the kept
+    fields, and the "failed-stalled" scenario pins part of the same class BY VALUE (its run
+    holds member a's arrival and raise and the send list in the slow-git state while every
+    compared field is structural), so a child that ties evidence, lock_free or restored to
+    member a's arrival or raise or to the send list fails a check even in a healthy run,
+    where no timeout ever exercises the classifier, when this oracle traces the tie
+    through a read that adds a name to a pinned signature or the stalled run executes it
+    as a slow run would; THE RESIDUAL below is what neither net catches. A stall's
+    presence is pinned by "failed-refused" (stalls nonempty) beside "failed" (stalls
+    empty).
+    A producer is every write of an allowlisted key: extra['<key>'] = value (a tuple target
+    is paired element by element), extra['<key>'].<mutator>(args) and extra.update(<key>=
+    value). Its reads are the names loaded in the written value, plus the names loaded in
+    the test of every if, while or conditional expression enclosing the write and in every
+    operand short-circuiting ahead of it inside an enclosing and/or, closed transitively
+    over each read name's origins in the child: an assignment to the name at module scope
+    or under a global declaration (paired the same way; a walrus included), a subscript
+    store into it (the index's reads included), a _PRODUCER_MUTATORS call on it, a call
+    taking the bare non-module name as an argument (the whole call is read: the callee may
+    bind or mutate it), each origin with its own enclosing tests up to the enclosing def,
+    and, for a module-level def, the names its body loads that it does not bind.
+    FAIL CLOSED on the extras dict: EVERY reference through the NAME extra that could
+    write an allowlisted key comes back "unrecognized", never skipped: a subscript with a
+    non-constant key, an allowlisted key read in any other way (an alias), deleted or
+    augmented, a method call other than setdefault, pop, get and update, or one of those
+    naming an allowlisted key or a non-constant key (update with positional or **
+    arguments included), an attribute not called, a rebinding other than the one binding
+    to {}, and a bare use other than as an element of the report list passed to json.dumps
+    (reaching the dict WITHOUT the name extra is reflection or a module attribute, below).
+    FAIL CLOSED on the carriers: for every name in an allowlisted signature whose origins
+    show a mutable literal (branch_swept and restored in the committed child, plus
+    whatever an edit routes into a signature), EVERY occurrence of that name outside the
+    recognised origin forms is "<name> escape", never skipped: a del, a non-mutator
+    method call (clear, pop), a bound method or attribute taken, an alias made of it, a
+    bare use in a test or anywhere else. Recognised: an origin target, a mutator
+    receiver, a bare call argument (an origin itself) and a traced producer value.
+    FAIL CLOSED on reflection: any use of a _REFLECTIVE_NAMES name anywhere in the child
+    is "unrecognized", and so is getattr, setattr or delattr except called directly on an
+    import-bound module object. Raises LookupError, which the caller records as
+    cannot-evaluate, when the source does not parse. Each "producer-oracle" probe (listed
+    beside the probes in _member_close_controls) names the rule it is built to pin; that
+    is one probe per named rule, not a proof that every rule has one.
+    DISCLOSED BOUNDARIES, each named here exactly because this oracle does NOT read it:
+    state routed through an attribute of an import-bound module object (a store like
+    sys.<attr> = ..., the suite's patched attributes, getattr or setattr on a module) is
+    not traced; control reaching a write or an origin through anything but the enclosing
+    if, while and conditional tests and short-circuits is not read (an early return or
+    raise, a for loop, a try, a with, a match, an assert, a def whose call sites gate
+    it); a name bound inside a def is not expanded (its loads are reported as the bare
+    name); the suite code the child calls is not read (the reads stop at the name suite).
+    Two probes pin boundaries at their empty diff: a module attribute store (moduleattr,
+    which feeds no allowlisted field) and a for gate on member a's arrival in the
+    post-main reads (forloop, which the "failed-stalled" value pin catches, arrival being
+    absent there).
+    THE RESIDUAL, a disclosure and not a guarantee, stated as the literal complement of
+    what the two nets catch, each by its own mechanics. The value pin catches a producer
+    only by a compared field differing from its want (a missing report included) in a run
+    the scenarios make within their bounds (the deterministic "failed-stalled" included).
+    This oracle catches a producer only by a refusal (an "unrecognized" entry) or by a
+    change to a pinned signature: a traced read that adds a name to it, or a name leaving
+    it. So ANY producer that neither net catches passes BOTH nets, whatever the condition
+    under which it changes evidence, lock_free or restored: what a slow positive control
+    alters (member a's arrival or raise, the send list, member b's presence or absence
+    (b_arrived, b_running, late), the exception outcome's text (ValueError in the stalled
+    run, TimeoutExpired in a slow one)), the scenario's name, a stall's length, the Python
+    version, wall clock or environment, timing of any other kind, or anything else; and
+    whatever carries it: a form this oracle neither traces nor refuses (a for, try or
+    assert gate, an early return, a module attribute, a form not listed here), or a form it
+    traces whose reads are all names already in the pinned signature. Two EXAMPLES of the
+    latter, not the class: pinned_version (if sys.version_info >= (3, 99):
+    branch_swept[:] = [] before the evidence read, a traced if whose test loads only sys,
+    already pinned, under a condition no run on a Python before 3.99 reproduces) and a
+    pure-local gate (a traced test loading only pinned names, such as if
+    len(branch_swept) > 1:, wherever no run within the bounds makes it hold). The value pin
+    catches a producer keyed on one of the facts named above only where some run within its
+    bounds reproduces that fact (failed-stalled for arrival, raise and the send list, on
+    the code that run executes, where forloop shows the catch, so it is outside THE
+    RESIDUAL; failed-handshake for a handshake expiry; failed-refused for a stall's
+    presence); the stalled run never executes member b's path or run_member (its one member
+    raises inside observed first; its pinned late=[] shows it), and differs from a slow
+    "failed" run in the other facts named above. The residual probes named here are
+    EXAMPLES, not the class: round 20's R1 (a for gate on member a's raise after
+    run_member's late append, raisegate), R2 (the same gate spelled try/assert, trygate)
+    and R4 (a for gate on the send list there, sendgate), and its gate on the scenario's
+    name (scenariogate: a for gate on scenario == 'failed-stalled' or member a's arrival
+    before the evidence read); round 21's gate on member b's absence (bgate: a for gate on
+    member a's arrival and b_arrived before the evidence read) and on the outcome text
+    (outcomegate: a for gate on outcome.startswith('TimeoutExpired') and member a's arrival
+    before the evidence read); round 22's gate on the outcome text alone (outcomeonlygate:
+    a for gate on outcome.startswith('TimeoutExpired') before the evidence read, tied to no
+    arrival, raise or send list); round 24's gate on a stall's length (stallgate: a for
+    gate on max(stalls) > 0.5 before the evidence read, stalls holding how long
+    "failed-refused" took to release its lock holders, a length no scenario arranges and a
+    slow positive control, which leaves stalls empty, does not produce); round 25's
+    pinned_version, above. The nine residual probes are recorded in "producer-oracle" at
+    their empty diff, so an oracle or scenario change that starts catching one fails that
+    pin and must update this text. Only a run in which the residual producer's condition
+    holds where the producer runs can catch it (a slow positive control is one such run,
+    for a condition it alters: a "failed" run whose member-a positive control reaches its
+    60 s bound can leave the field wrong beside the recorded timeout and, the allowlist
+    staying compared, report a definite mismatch); such a catch is intermittent, depends on
+    the host or the condition, and is never a pin."""
+    source = _CLOSE_PROBE_CHILD if source is None else source
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError) as exc:
+        raise LookupError("the allowlist producer oracle cannot parse the child: {}".format(exc))
+    parents = {}
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+    defs = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+    imports, declared = set(), {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                imports.add((alias.asname or alias.name).partition(".")[0])
+        elif isinstance(node, ast.Global):
+            owner = parents.get(node)
+            while owner is not None and not isinstance(owner, defs):
+                owner = parents.get(owner)
+            if owner is not None:
+                declared.setdefault(owner, set()).update(node.names)
+
+    def module_scope(node):
+        ancestor = parents.get(node)
+        while ancestor is not None:
+            if isinstance(ancestor, defs):
+                return False
+            ancestor = parents.get(ancestor)
+        return True
+
+    def global_store(name, node):
+        # A store that binds the module-level name: at module scope, or under a global
+        # declaration of that name in the enclosing def (its VALUE reads are traced; the
+        # call sites gating such a def are a disclosed control boundary).
+        ancestor = parents.get(node)
+        while ancestor is not None:
+            if isinstance(ancestor, defs):
+                return isinstance(ancestor, defs[:2]) and name in declared.get(ancestor, ())
+            ancestor = parents.get(ancestor)
+        return True
+
+    def loads(node):
+        return {name.id for name in ast.walk(node)
+                if isinstance(name, ast.Name) and isinstance(name.ctx, ast.Load)}
+
+    def tests(node):
+        found, below, ancestor = set(), node, parents.get(node)
+        while ancestor is not None and not isinstance(ancestor, defs):
+            if isinstance(ancestor, (ast.If, ast.While, ast.IfExp)) and below is not ancestor.test:
+                found |= loads(ancestor.test)
+            elif isinstance(ancestor, ast.BoolOp) and below in ancestor.values:
+                for prior in ancestor.values[:ancestor.values.index(below)]:
+                    found |= loads(prior)
+            below, ancestor = ancestor, parents.get(ancestor)
+        return found
+
+    def free(function):
+        bound = {arg.arg for arg in ast.walk(function.args) if isinstance(arg, ast.arg)}
+        for node in ast.walk(function):
+            if isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load):
+                bound.add(node.id)
+            elif isinstance(node, defs[:2]) and node is not function:
+                bound.add(node.name)
+        return {name for statement in function.body for name in loads(statement)} - bound
+
+    def paired(target, value):
+        if isinstance(target, (ast.Tuple, ast.List)):
+            if isinstance(value, (ast.Tuple, ast.List)) and len(value.elts) == len(target.elts):
+                return [pair for part, piece in zip(target.elts, value.elts)
+                        for pair in paired(part, piece)]
+            return [pair for part in target.elts for pair in paired(part, value)]
+        if isinstance(target, ast.Starred):
+            return paired(target.value, value)
+        return [(target, value)]
+
+    # Beside each origin, "sanctioned" collects the exact Name nodes the recognised forms
+    # account for; the carrier sweep below refuses every other occurrence of a carrier.
+    origins, sanctioned = {}, set()
+    unrecognized, bindings = [], []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id in _REFLECTIVE_NAMES:
+            unrecognized.append((node.lineno, node.id + " reference"))
+        elif isinstance(node, ast.Name) and node.id in ("getattr", "setattr", "delattr"):
+            parent = parents.get(node)
+            if not (isinstance(parent, ast.Call) and parent.func is node and parent.args
+                    and isinstance(parent.args[0], ast.Name) and parent.args[0].id in imports):
+                unrecognized.append((node.lineno, node.id + " reference"))
+        if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)) and node.value is not None:
+            for target in getattr(node, "targets", None) or [node.target]:
+                for part, value in paired(target, node.value):
+                    if isinstance(part, ast.Name) and global_store(part.id, node):
+                        origins.setdefault(part.id, []).append((value, node))
+                        sanctioned.add(id(part))
+                    elif isinstance(part, ast.Subscript) and isinstance(part.value, ast.Name):
+                        origins.setdefault(part.value.id, []).extend(
+                            [(value, node), (part.slice, node)])
+                        sanctioned.add(id(part.value))
+        elif (isinstance(node, ast.NamedExpr) and isinstance(node.target, ast.Name)
+                and global_store(node.target.id, node)):
+            origins.setdefault(node.target.id, []).append((node.value, node))
+            sanctioned.add(id(node.target))
+        elif isinstance(node, defs[:2]) and module_scope(node):
+            origins.setdefault(node.name, []).append((node, node))
+        elif isinstance(node, ast.Call):
+            if (isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name)
+                    and node.func.attr in _PRODUCER_MUTATORS):
+                origins.setdefault(node.func.value.id, []).extend(
+                    (value, node) for value in node.args + [key.value for key in node.keywords])
+                sanctioned.add(id(node.func.value))
+            receiver = node.func
+            while isinstance(receiver, (ast.Attribute, ast.Subscript)):
+                receiver = receiver.value
+            if not (isinstance(receiver, ast.Name) and receiver.id == "extra"):
+                # A bare name passed to any call (the extras writers aside, which the scan
+                # below traces) may be bound or mutated by the callee: the whole call is
+                # that name's origin. An import-bound module passed on is the disclosed
+                # module-attribute boundary instead.
+                for value in node.args + [key.value for key in node.keywords]:
+                    part = value.value if isinstance(value, ast.Starred) else value
+                    if isinstance(part, ast.Name) and part.id not in imports:
+                        origins.setdefault(part.id, []).append((node, node))
+                        sanctioned.add(id(part))
+
+    writers = {key: [] for key in _STATE_EVIDENCE}
+    for name in ast.walk(tree):
+        if not (isinstance(name, ast.Name) and name.id == "extra"):
+            continue
+        parent, form = parents.get(name), None
+        grand = parents.get(parent)
+        if isinstance(name.ctx, ast.Store):
+            statement = grand if isinstance(parent, (ast.Tuple, ast.List)) else parent
+            values = [value for target in getattr(statement, "targets", ())
+                      for part, value in paired(target, statement.value) if part is name]
+            if (values and not bindings and module_scope(statement)
+                    and isinstance(values[0], ast.Dict) and not values[0].keys):
+                bindings.append(name.lineno)
+            else:
+                form = "rebinding"
+        elif isinstance(parent, ast.Subscript) and parent.value is name:
+            key = parent.slice.value if isinstance(parent.slice, ast.Constant) else None
+            if not isinstance(key, str):
+                form = "dynamic key"
+            elif key not in _STATE_EVIDENCE:
+                pass
+            elif isinstance(parent.ctx, ast.Store):
+                statement = (parents.get(grand) if isinstance(grand, (ast.Tuple, ast.List))
+                             else grand)
+                values = [value for target in getattr(statement, "targets", ())
+                          for part, value in paired(target, statement.value) if part is parent]
+                if values:
+                    writers[key].extend(values)
+                    sanctioned.update(id(v) for v in values if isinstance(v, ast.Name))
+                else:
+                    form = key + " store"
+            elif (isinstance(parent.ctx, ast.Load) and isinstance(grand, ast.Attribute)
+                    and grand.attr in _PRODUCER_MUTATORS
+                    and isinstance(parents.get(grand), ast.Call)
+                    and parents[grand].func is grand):
+                values = (parents[grand].args
+                          + [keyword.value for keyword in parents[grand].keywords])
+                writers[key].extend(values)
+                sanctioned.update(id(v) for v in values if isinstance(v, ast.Name))
+            else:
+                form = key + " reference"
+        elif isinstance(parent, ast.Attribute) and parent.value is name:
+            call = grand if isinstance(grand, ast.Call) and grand.func is parent else None
+            if call is None or parent.attr not in ("setdefault", "pop", "get", "update"):
+                form = "." + parent.attr
+            elif parent.attr == "update":
+                if call.args or any(keyword.arg is None for keyword in call.keywords):
+                    form = ".update arguments"
+                for keyword in call.keywords:
+                    if keyword.arg in _STATE_EVIDENCE:
+                        writers[keyword.arg].append(keyword.value)
+                        if isinstance(keyword.value, ast.Name):
+                            sanctioned.add(id(keyword.value))
+            elif not (call.args and isinstance(call.args[0], ast.Constant)
+                      and isinstance(call.args[0].value, str)
+                      and call.args[0].value not in _STATE_EVIDENCE):
+                form = "." + parent.attr + " key"
+        elif not (isinstance(parent, ast.List) and isinstance(grand, ast.Call)
+                  and isinstance(grand.func, ast.Attribute) and grand.func.attr == "dumps"
+                  and isinstance(grand.func.value, ast.Name) and grand.func.value.id == "json"):
+            form = "bare"
+        if form is not None:
+            unrecognized.append((name.lineno, form))
+
+    def signature(values):
+        seen, pending = set(), set()
+        for value in values:
+            pending |= loads(value) | tests(value)
+        while pending:
+            read = pending.pop()
+            if read in seen:
+                continue
+            seen.add(read)
+            for value, site in origins.get(read, ()):
+                pending |= (free(value) if isinstance(value, defs[:2])
+                            else loads(value) | tests(site))
+        return sorted(seen)
+
+    found = {key: signature(values) for key, values in writers.items()}
+    # THE CARRIER SWEEP, closed world: a carrier is a signature name whose origins show a
+    # mutable literal (so its OBJECT can carry state into a producer; extra has its own
+    # scan above, and an import-bound module is the disclosed boundary). Every occurrence
+    # of a carrier the recognised forms did not account for is refused, so a deletion, a
+    # clear, a pop, an alias or any new spelling of a touch fails the pin instead of
+    # passing silently.
+    mutable = (ast.List, ast.Dict, ast.Set, ast.ListComp, ast.SetComp, ast.DictComp)
+    closure = {name for key in _STATE_EVIDENCE for name in found[key]}
+    carriers = {name for name in closure
+                if name != "extra" and name not in imports
+                and any(isinstance(value, mutable) for value, _ in origins.get(name, ()))}
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Name) and node.id in carriers
+                and id(node) not in sanctioned):
+            unrecognized.append((node.lineno, node.id + " escape"))
+    found["unrecognized"] = sorted(unrecognized)
+    return found
+
+
+def _slow_control_record(source=None):
+    """The "failed-stalled" slow-control record, read from the _CLOSE_PROBE_CHILD source
+    (source, default _CLOSE_PROBE_CHILD) and never run: the sorted names of the facts that do
+    NOT hold, so the committed child gives []. The record is what keeps a stalled run on a
+    merely slow host cannot-evaluate: its positive control reaching the 60 s bound ends main()
+    in TimeoutExpired, the deliberate empty send list records no budget, and without the
+    reached bound "positive control a observed" in the "missing" extras nothing would stand
+    the run down, so its outcome would be a definite mismatch. No healthy run reaches the
+    record, so this reads it instead. A BINDING of a name below is every node of the child
+    that binds it: a store or del, an import (plain, dotted, which binds its first name,
+    or with as), a def or class name, an except-as name, a match capture and a parameter;
+    a wildcard import is NOT one (its names are not in the source; NOT READ, below).
+    "record": exactly one statement of the child is extra.setdefault('missing',
+    []).append('positive control a observed'). "gate": its
+    enclosing if, with no else, tests exactly scenario == 'failed-stalled' and
+    outcome.startswith('TimeoutExpired') and holds that statement alone, inside the body of
+    the module-level if scenario.startswith('failed'), and scenario has exactly one
+    binding, the statement scenario, folder, fixture = sys.argv[2], sys.argv[3],
+    sys.argv[4]. "kept": every use of the key 'missing' in the child (the constant
+    'missing' anywhere, a keyword missing= on any call) is either the call
+    extra.setdefault('missing', []) inside, through conditional expressions only, the
+    receiver of an append call, or sits in the body of the module-level if scenario ==
+    'lock', which no failed scenario enters (scenario's one binding is part of "gate"), so
+    no statement of the child, after the gate or in a def called after it, pops, deletes,
+    clears or rebinds the record THROUGH THE KEY; removing it without the key (clear,
+    popitem, a rebinding of extra, a dynamic key, __delitem__) is refused by "producer-map"
+    (_allowlist_producers, the extras dict's fail-closed rules), not here, and reaching the
+    dict or the record's list without the name extra (a module attribute such as
+    sys.modules, gc) is read by neither. "outcome": the child has exactly one module-level
+    try calling main(), every binding of outcome is inside it, and that try statement is
+    exactly the committed one: its body, its handler sequence (KeyboardInterrupt,
+    SystemExit, then Exception, each with its committed name and its one committed
+    statement, the last outcome = '{}: {}'.format(type(exc).__name__, exc)), no else and
+    no finally. So a TimeoutExpired that reaches this try out of main() is caught by no
+    earlier handler and no nested try, and yields the prefix the gate tests unless an edit
+    in the NOT READ class below changes what the try or the gate evaluates. NOT READ, each
+    named route an EXAMPLE of that class, a route that can keep the record out of the
+    report while this reader still gives []: whether a TimeoutExpired reaches this try at
+    all (the suite code main() runs, and the child's replacements of suite attributes on
+    that path, such as the sweep wrapper, can swallow or replace it); a binding made by a
+    wildcard import (from <module> import *), which can bind outcome or scenario unseen
+    (sys.outcome = ..., then from sys import *); a rebinding, by ANY binding form (a
+    wildcard import included) or by a module-attribute store (through the builtins module
+    or any other), of ANY name the pinned try loads (contextlib and redirect_stdout,
+    captured, suite, lanes, type, and the handlers' exception names KeyboardInterrupt,
+    SystemExit and Exception), the try itself still parsing to the committed one
+    (KeyboardInterrupt = TimeoutExpired makes the first handler catch the timeout; a
+    contextlib whose redirect_stdout raises on exit replaces it inside the try); a store
+    into the child's own globals through a module attribute (__main__.outcome,
+    __main__.scenario, sys.modules['__main__'].outcome), which binds no name, so neither
+    "gate" nor "outcome" sees it; a store into an attribute of an object the try or the
+    gate evaluates (the exception class's __name__ or __str__:
+    suite.subprocess.TimeoutExpired.__name__ = 'Slow' turns the handler's outcome into
+    'Slow: ...'), which binds no name either; a write to the child's namespace through a
+    function's __globals__ or a frame's globals (handle.__globals__['outcome'] = ...,
+    sys._getframe().f_globals['outcome'] = ...), which binds no name either; an exit or
+    raise between the gate and the report (an assert, raise, sys.exit or os._exit after the
+    record, in the child or a def it calls), so no PROBE-REPORT line is printed and the run
+    reads as a missing report, not a timeout; and any change to how the report is written
+    (a rebinding or replacement of print, sys.stdout or json.dumps). THE NOT READ CLASS,
+    exact by construction: this reader does not read ANY edit, by any route, that changes
+    what the pinned try or the gate evaluates, or whether the record reaches the printed
+    report, without a change it parses as a fact that does not hold (it then still gives
+    []); every route named above is an EXAMPLE of that class, not its bound. The probes
+    exceptbind and ctxclass (the rebinding route), wildcard and mainattr (the wildcard and
+    own-globals routes), exitafter, clsname (the attribute-store route) and funcglobals
+    (the __globals__ route) each hold ONE instance AT [] (disclosed, not read); the class,
+    not those instances, is what this reader does not read.
+    Raises LookupError, which the caller records as cannot-evaluate, when the source does
+    not parse."""
+    source = _CLOSE_PROBE_CHILD if source is None else source
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError) as exc:
+        raise LookupError("the slow-control reader cannot parse the child: {}".format(exc))
+    parents = {}
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+
+    def shape(text):
+        return ast.dump(ast.parse(text).body[0])
+
+    def binds(name):
+        found = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name):
+                bound = None if isinstance(node.ctx, ast.Load) else node.id
+            elif isinstance(node, ast.alias):
+                bound = (node.asname or node.name).partition(".")[0]
+            elif isinstance(node, ast.MatchMapping):
+                bound = node.rest
+            elif isinstance(node, ast.arg):
+                bound = node.arg
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef,
+                                   ast.ExceptHandler, ast.MatchAs, ast.MatchStar)):
+                bound = node.name
+            else:
+                continue
+            if bound == name:
+                found.append(node)
+        return found
+
+    def statement(node):
+        while node is not None and not isinstance(node, ast.stmt):
+            node = parents.get(node)
+        return node
+
+    def appended(use):
+        # The key as extra.setdefault('missing', []) inside, through conditional
+        # expressions only, the receiver of an append call: a use that only adds.
+        call = parents.get(use)
+        if not (isinstance(call, ast.Call) and ast.dump(call) == keyed):
+            return False
+        receiver = parents.get(call)
+        while isinstance(receiver, ast.IfExp):
+            receiver = parents.get(receiver)
+        caller = parents.get(receiver)
+        return (isinstance(receiver, ast.Attribute) and receiver.attr == "append"
+                and isinstance(caller, ast.Call) and caller.func is receiver)
+
+    record = shape("extra.setdefault('missing', []).append('positive control a observed')")
+    gate = shape("if scenario == 'failed-stalled' and outcome.startswith('TimeoutExpired'):"
+                 "\n    extra.setdefault('missing', []).append('positive control a observed')")
+    failed = ast.dump(ast.parse("scenario.startswith('failed')", mode="eval").body)
+    bound = shape("scenario, folder, fixture = sys.argv[2], sys.argv[3], sys.argv[4]")
+    lock = ast.dump(ast.parse("scenario == 'lock'", mode="eval").body)
+    keyed = ast.dump(ast.parse("extra.setdefault('missing', [])", mode="eval").body)
+    run = shape("try:\n    with contextlib.redirect_stdout(captured):\n"
+                "        outcome = 'returned {}'.format(suite.main(None, lanes))\n"
+                "except KeyboardInterrupt:\n    outcome = 'KeyboardInterrupt'\n"
+                "except SystemExit as exc:\n    outcome = 'SystemExit {}'.format(exc.code)\n"
+                "except Exception as exc:\n"
+                "    outcome = '{}: {}'.format(type(exc).__name__, exc)")
+    missing = []
+    records = [node for node in ast.walk(tree)
+               if isinstance(node, ast.stmt) and ast.dump(node) == record]
+    if len(records) != 1:
+        missing.append("record")
+    branch = parents.get(records[0]) if records else None
+    outer = parents.get(branch)
+    scenarios = binds("scenario")
+    if not (branch is not None and ast.dump(branch) == gate
+            and isinstance(outer, ast.If) and outer in tree.body
+            and ast.dump(outer.test) == failed and branch in outer.body
+            and len(scenarios) == 1 and ast.dump(statement(scenarios[0])) == bound):
+        missing.append("gate")
+    locked = {node for test in tree.body
+              if isinstance(test, ast.If) and ast.dump(test.test) == lock
+              for held in test.body for node in ast.walk(held)}
+    uses = [node for node in ast.walk(tree)
+            if (isinstance(node, ast.Constant) and node.value == "missing")
+            or (isinstance(node, ast.keyword) and node.arg == "missing")]
+    if not all(appended(use) or use in locked for use in uses):
+        missing.append("kept")
+    runs = [node for node in tree.body if isinstance(node, ast.Try)
+            and any(isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+                    and call.func.attr == "main" for call in ast.walk(node))]
+    if not (len(runs) == 1
+            and all(any(node is part for part in ast.walk(runs[0]))
+                    for node in binds("outcome"))
+            and ast.dump(runs[0]) == run):
+        missing.append("outcome")
+    return sorted(missing)
+
+
+def _oracle_down_sites(got, oracle_down):
+    """config/member-close-unresolved-verdict's stand-down when the close-lock-site oracle raised
+    LookupError (oracle_down, its recorded timeout message): ONLY the site= entries, the one
+    field the oracle informs, are stood down. The "close-sites" entry becomes the timeout message
+    (attributed, cannot-evaluate). Each refused-site scenario's observation keeps every definite
+    field, and its recorded site entry, which cannot be checked without the oracle, is replaced
+    by the timeout message on the observed side and expected verbatim on the wants side, so the
+    one comparison the oracle informs is neutral while every other mismatch stays definite; a
+    scenario that never recorded a site entry (the refusal never reached its target acquire)
+    keeps that absence, a definite mismatch the child reports without the oracle. Returns the
+    site= expectations for ("close-wait-refused", "close-left-refused"). The synthetic
+    "down-map" entry pins this mapping on a probe got whatever the real oracle's health."""
+    got["close-sites"] = oracle_down
+    for name in ("close-wait-refused", "close-left-refused"):
+        entry = got.get(name)
+        if isinstance(entry, tuple) and len(entry) == 7 and "site" in entry[6]:
+            entry[6]["site"] = oracle_down
+    return [oracle_down, oracle_down]
+
+
+def _closing_refusal_control(fixture, spawn):
+    """The config/member-closing-refuses-start control: _run_bounded with closing set and Popen
+    replaced by spawn (the caller's stand-in, which may record any start); returns _run_bounded's
+    code, the launch-error message when nothing started. It sets ONLY closing and clears only closing, through
+    _reopen_members, never by restoring the whole registry: a SIGINT or SIGTERM received inside the
+    control is deferred (held, as everywhere closing is set) and raised right after it, never
+    erased. Closing already set on entry (never the case inside a run) is left set. The probe
+    scenario "closing-control" pins it with a real SIGINT inside the control, and the "split-..."
+    scenarios a SIGTERM held here outranking a SIGINT held during main()'s later closes."""
+    import io
+    from unittest.mock import patch
+
+    reopen = not _MEMBERS["closing"]
+    _MEMBERS["closing"] = True
+    try:
+        with patch.object(subprocess, "Popen", spawn):
+            return _run_bounded([sys.executable, "-I", "-B", "-c", "pass"], str(fixture),
+                                dict(os.environ), 60, "closing control", "CONTROL ", [],
+                                io.StringIO())[0]
+    finally:
+        if reopen:
+            _reopen_members()
+
+
+def _member_close_controls(fixture):
+    """config/member-off-main-thread: _run_bounded called from the main thread starts the child
+    (Popen) and waits in communicate() on another thread, returns its exit code, and leaves the
+    registry empty. config/member-closing-refuses-start: once closing is set no child starts and
+    the refusal comes back as the launch-error message (_closing_refusal_control).
+    config/member-grandchild-after-normal-exit:
+    a member whose leader exits 0 leaving a grandchild in its group (stdio on /dev/null, so the
+    wait returns), run on BOTH signalling paths whatever the kernel: the pidfd process-group path
+    (where the kernel has it) has the grandchild killed by the cleanup and the group released; the
+    numeric fallback, forced by giving pidfd_send_signal a flag every kernel refuses with EINVAL
+    (and the expectation on a kernel without the pidfd flag), leaves the grandchild alive and the
+    group RETAINED (one group registered, the cleanup diagnostic naming it), and releases it once
+    the recorded survivor is killed here. The _CLOSE_PROBE_CHILD scenarios, each in its own
+    interpreter, with the handlers restored after main() (a real SIGINT raises again), the
+    registry lock free and every recorded process dead unless noted, within 30 s of each signal
+    or injected failure, less the time the harness's own lock-holder releases measurably spent
+    inside that window (the members' bound is 90 s): config/member-close-on-interrupt,
+    "pooled", "communicate",
+    "leader-first" and "setsid" end in KeyboardInterrupt with no group registered (the setsid
+    holder alive, out of reach of the group kill); config/member-close-handlers, "close" ends in
+    KeyboardInterrupt, which _raise_held raises once after the second close, with the handler
+    installed at the entry of BOTH closes and both SIGINTs deferred until then, "sigterm"
+    ends in SystemExit(143), "install" in KeyboardInterrupt with SIGINT restored, and "split-T-I",
+    "split-T-II", "split-TI-I" and "split-IT-I" (a SIGTERM held inside _closing_refusal_control
+    and raised by _reopen_members, SIGINTs held at the entry of main()'s closes) each in
+    SystemExit(143), with the signals each drain held reported, and "late-monitor" a monitor
+    released only into the post-main teardown (its in_communicate observation gated, the member's
+    own 10 s bound ending main() first, so main() returns 2 with the CANNOT EVALUATE line): its
+    SIGINT lands inside the post-main worker joins, is absorbed by the teardown's deferring
+    handler and is reported as the deliberate "late SIGINT" handshake, so the report survives a
+    signal delivered during the join (in every other scenario a non-deliberate absorbed late
+    signal is timing alone, never a definite finding: the run is a harness timeout,
+    cannot-evaluate, with every field outside the _STATE_EVIDENCE allowlist stood down and
+    the allowlist still compared, _scenario_timeout_record);
+    config/member-close-lock, "lock": no KeyboardInterrupt and the lock free after the direct
+    close, no close left blocked in the real-signal loop, with the lock held by another thread a
+    member start and the close each give up within the lock bound (the start a recorded timeout,
+    the close a problem), main() ends in KeyboardInterrupt (the SIGINT at the close's acquire is
+    deferred, and _raise_held raises it once after the second close); the same scenario pins
+    the child's timeout producers on deliberate quick exercises, each consumed in the child so no
+    timeout is recorded: the monitor's never-sent record for both of its early returns
+    ("monitor_pin": the missing and unsent entries, and that nothing was sent), the lock
+    holder's own expiry record ("expiry_pin": its count and the final lock state, both read
+    only AFTER release() joined the holder, so a holder paused between recording and
+    releasing never pins a held lock; a producer that never records within 30 s is itself a
+    recorded harness handshake, fail closed, standing the pin's fields down), and the
+    reached-bound recorder over_bound on an over-budget and an under-budget value against a
+    private sink ("bound_pin"), so removing any of these producers fails its pin;
+    config/member-failed-no-late-launch, "failed" and "failed-signal": member b's late start is
+    refused, and the ValueError propagates ("failed") or the SIGINT deferred at the failed-member
+    branch's acquire is raised by _raise_held once after the second close ("failed-signal"), and
+    with member b never reporting running, member a's expired handshake raises HandshakeTimeout and
+    never the injected failure ("failed-handshake"); "failed-stalled" is the deterministic twin
+    of a merely slow git: its one member fails WITHOUT arriving (nothing is sent, deliberately,
+    _DELIBERATE_EMPTY_SEND), so a_arrived, a_raises and the send list hold the slow-git state in
+    every run while every compared field stays structural, and an edit that ties an
+    allowlisted field to member a's arrival or raise or to the send list, on code that run
+    executes and not also dependent on any other state that differs from a slow "failed"
+    run, is a definite mismatch there in a healthy run (THE RESIDUAL, stated in
+    _allowlist_producers: ANY producer that neither net catches passes both nets (the value
+    pin catches only by a compared field differing from its want, a missing report
+    included, in a run within the scenarios' bounds, and the producer oracle only by a
+    refusal or by a change to a pinned signature, such as a traced read adding a name to
+    it), whatever the condition under which it changes an allowlisted field: what a slow
+    positive control alters (member b's presence, the outcome text, or member a's arrival
+    or raise or the send list on member b's path and run_member, which this run never
+    executes), the scenario's name, a stall's length, the Python version, wall clock or
+    environment, or anything else, and whatever carries it, a form the oracle neither
+    traces nor refuses or a traced test whose names are all pinned already (pinned_version,
+    a pure-local gate); only a run in which that condition holds can catch it, a slow
+    positive control being one such run for a condition it alters);
+    TIMING ALONE IS NEVER A DEFINITE FINDING
+    in these scenarios: member b times the kill sweep in bounded stages (member a's raise, the
+    failed-member branch entering the sweep, the harness lock holders' release, the real
+    sweep's return), and every reached bound, whoever was slow, is recorded by the parent as a
+    cannot-evaluate timeout (_scenario_timeout_record), failing the run closed, never passing
+    it and never reading as a definite finding; the definite evidence is non-timing state the
+    finished run left, read after main() ended: the outcome, the registry and recorded process
+    state, the refusal records, the late-launch records, the "member_a" flags (member a's
+    positive control ran and raised; the positive control's 60 s bound shapes them, and a
+    wrong member_a is never definite: it leaves the send list empty, so the completion
+    budget is recorded beside it and it stands down, and a pool that never ran member a is
+    cannot-evaluate, fail closed, never a pass) and the "evidence"
+    flags (the failed-member branch itself called the kill sweep, witnessed by the sweep
+    wrapper from its caller, never by a deadline, and that caller check discriminates: a
+    sweep the harness calls after main() is not counted), so a branch that never sweeps
+    stays definite while a merely slow run is cannot-evaluate; the same check pins the
+    sweep's ordering statically
+    ("sweep-site", _sweep_call_sites): exactly one kill-sweep call inside the failed-member
+    except handler, with no worker wait in the handler before it, before the finally block
+    that waits for the workers, a source-order fact with no deadline involved, so the sweep
+    moved after the worker wait, or a waiting shutdown placed before it in the handler
+    (only a literal wait=False is exempt: a bare shutdown(), a positional
+    shutdown(True, ...) and shutdown(wait=True, cancel_futures=False), whose literal False
+    names another keyword, count as waits, pinned by the bare, positional and cancel
+    probes), is
+    definite, and the oracle's own discrimination is pinned ("sweep-oracle"); EVERY recorded
+    timeout in any scenario (an expired harness handshake, _handshake_expired, whose own
+    mapping is pinned there too; a reached code-owned bound in the "missing" extras; an owed
+    signal never sent, "unsent"; the completion budget, main() ending within 30 s of every
+    send less the measured harness stalls; the expiry pin) is graded by ONE shared rule,
+    never a per-site choice: a handshake kind naming a thread its bounded join left alive
+    replaces the whole observation, and otherwise every field outside the _STATE_EVIDENCE
+    allowlist (the restored handlers, the free lock, the evidence flags) stands down
+    (_stood_down), so a restoration defect, a held lock or a false evidence flag beside any
+    timeout stays definite while timing alone never is (the "record-map" entry pins the
+    reached-bound, unsent, budget, combined-failure, per-kind, outlive, expiry-pin,
+    stray-bound, late-signal and slow-positive-control mappings, all classifier pins on
+    hand-written observations, the _STATE_EVIDENCE tuple's exact membership verbatim and
+    the stand-down of every extras key the child writes; "producer-map" pins the producers
+    themselves, read from the child's source: the names every write of an allowlisted key
+    reads, closed over their origins, so a child tying evidence, lock_free or restored to
+    timing again through a form that oracle traces, by a read that adds a name to a
+    pinned signature, fails definitively even in a healthy run, and "producer-oracle" that
+    oracle's discrimination on mutated copies of the source, the residual's examples
+    included at their empty diff; "slow-control" pins the stalled run's slow-control
+    record, read from the child's source (_slow_control_record);
+    "down-map" pins the oracle-down stand-down);
+    config/member-close-unresolved-verdict, "unresolved":
+    main() returns 2 with
+    the CANNOT EVALUATE line and no PASS line, the group still registered, then released once the
+    injection is removed; "release-timeout" and "start-timeout": a registry lock refused once and
+    then free, so the closes end cleanly, still makes main() return 2 with the CANNOT EVALUATE
+    line, no PASS line, no group registered and the refusal recorded; "sweep-refused",
+    "close-refused", "close-wait-refused", "close-left-refused" and "failed-refused" the same for
+    a refusal at the first close's kill sweep, at each of its own three acquires (the refused line
+    offset matching _close_lock_sites) and at the failed-member branch, so a refusal is pinned to
+    persist at all five sites; the same check requires _close_lock_sites to see exactly one
+    with-form acquisition per refused-site scenario ("close-sites"), so a fourth acquisition of
+    the registry lock in _close_members, a direct acquire call or a form the oracle refuses fails
+    it definitively, and an oracle that cannot read _close_members at all is cannot-evaluate,
+    with only the site= fields it informs stood down and every other field of the refused-site
+    scenarios still compared (_oracle_down_sites, whose mapping the synthetic "down-map" entry
+    pins on a probe got whatever the real oracle's health); the
+    same check pins the oracle's own discrimination ("close-oracle"): a probe def named
+    _close_members yields its three with-form sites, the same body renamed at the same
+    recorded line raises LookupError, never a fail-open site list, and a probe spelling the lock
+    through globals(), a module attribute or getattr yields "unrecognized" for each such
+    reference, never a silently shorter site list.
+    config/member-closing-refuses-start also requires the "closing-control" scenario:
+    a real SIGINT inside the control is held there and raised right after it (KeyboardInterrupt,
+    nothing after the control runs). config/member-close-signal-sweep: the _CLOSE_SWEEP_CHILD
+    child exited 0 and its sweep reports no failing run in any mode (line, instruction, pair;
+    SIGINT first and SIGTERM first; the plain body and the failed-member branch body), clean
+    baselines and every window function reached, and the report parser accepts a clean synthetic
+    report after exit 0 and refuses the same report after exit 1; the number of runs per mode is
+    printed on a MEMBER CLOSE SWEEP line.
+    Every process recorded here is killed afterwards whatever the code under test did
+    (_kill_recorded)."""
+    import contextlib
+    import io
+    import types
+    from unittest.mock import patch
+
+    this = sys.modules[__name__]
+    member = fixture / "group_member.py"
+    member.write_text(_GROUP_MEMBER_FIXTURE, encoding="utf-8")
+    real_popen = subprocess.Popen
+    threads, waits = [], []
+
+    def spawn(*args, **kwargs):
+        threads.append(threading.current_thread() is threading.main_thread())
+        child = real_popen(*args, **kwargs)
+        real_communicate = child.communicate
+
+        def communicate(*c_args, **c_kwargs):
+            waits.append(threading.current_thread() is threading.main_thread())
+            return real_communicate(*c_args, **c_kwargs)
+
+        child.communicate = communicate
+        return child
+
+    with patch.object(subprocess, "Popen", spawn):
+        rc, _, _ = _run_bounded([sys.executable, "-I", "-B", "-c", "pass"], str(fixture),
+                                dict(os.environ), 60, "off-main control", "CONTROL ", [],
+                                io.StringIO())
+    check("config/member-off-main-thread", (rc, threads, waits[:1], len(_MEMBERS["groups"])),
+          (0, [False], [False], 0), (rc,) if _is_timeout(rc) else None)
+
+    del threads[:]
+    refused_start = (_closing_refusal_control(fixture, spawn), list(threads))
+
+    def normal_exit(path, fallback):
+        """One normal-exit member on one signalling path: (rc, recorded states, groups it left
+        registered, whether the cleanup diagnostic says the group stays registered, whether each
+        retained group was confirmed empty and released after the recorded survivor was killed,
+        groups still registered after that)."""
+        folder = fixture / "normal-exit-{}".format(path)
+        folder.mkdir()
+        forced = (patch.object(this, "PIDFD_SIGNAL_PROCESS_GROUP", 1 << 30) if fallback
+                  else contextlib.nullcontext())
+        before, diagnostic, released = set(_MEMBERS["groups"]), io.StringIO(), []
+        with forced:
+            try:
+                rc, _, _ = _run_bounded([sys.executable, "-I", "-B", str(member), str(folder),
+                                         "n", "exit"], str(folder), dict(os.environ), 120,
+                                        "normal-exit control ({})".format(path), "CONTROL ", [],
+                                        diagnostic)
+                states = _recorded_states(folder)
+                retained = [group for group in _MEMBERS["groups"] if group not in before]
+            finally:
+                _kill_recorded(folder)
+            for group in retained:
+                # On a helper thread, so the main thread never takes the registry lock while closing
+                # is clear (a signal handler raising inside that acquire would leave it held).
+                helper = threading.Thread(target=lambda group=group: released.append(
+                    _member_group_empty(group) is None and _release_member_group(group) is None))
+                helper.start()
+                helper.join()
+        return (rc, states, len(retained), "stays registered" in diagnostic.getvalue(), released,
+                len([group for group in _MEMBERS["groups"] if group not in before]))
+
+    retention = (0, {"n.grandchild": "alive", "n.leader": "dead"}, 1, True, [True], 0)
+    got = [normal_exit("pidfd", False), normal_exit("fallback", True)]
+    want = [(0, {"n.grandchild": "dead", "n.leader": "dead"}, 0, False, [], 0)
+            if _pidfd_group_signal_supported() else retention, retention]
+    timed_out = tuple(entry[0] for entry in got if _is_timeout(entry[0]))
+    check("config/member-grandchild-after-normal-exit", got, want,
+          timed_out if timed_out and all(_is_timeout(entry[0]) or entry == expected
+                                         for entry, expected in zip(got, want)) else None)
+
+    got = {}
+    for scenario in ("pooled", "communicate", "leader-first", "setsid", "close", "sigterm",
+                     "install", "split-T-I", "split-T-II", "split-TI-I", "split-IT-I", "lock",
+                     "failed", "failed-signal", "failed-handshake", "failed-stalled",
+                     "unresolved",
+                     "release-timeout", "start-timeout", "sweep-refused", "close-refused",
+                     "close-wait-refused", "close-left-refused", "failed-refused",
+                     "closing-control", "late-monitor"):
+        folder = fixture / "close-{}".format(scenario)
+        folder.mkdir()
+        try:
+            rc, out, err = _run_bounded(
+                [sys.executable, "-I", "-B", "-c", _CLOSE_PROBE_CHILD, str(ROOT / "tools"),
+                 scenario, str(folder), str(member)], str(folder), dict(os.environ), 300,
+                "member-close child ({})".format(scenario), "CONTROL ")
+        finally:
+            _kill_recorded(folder)
+        if _is_timeout(rc):
+            got[scenario] = rc
+            continue
+        report = out.rpartition("PROBE-REPORT ")[2].partition("\n")[0]
+        try:
+            outcome, registered, states, timely, extra = json.loads(report)
+            got[scenario] = (scenario, outcome, registered, sorted(set(states.values())),
+                             len(states), timely, extra)
+            got[scenario] = _scenario_timeout_record(scenario, got[scenario], extra)
+        except (TypeError, ValueError, AttributeError) as exc:
+            got[scenario] = (scenario, "no report ({}): rc={} err={!r}".format(
+                exc, rc, err[-400:]))
+            continue
+    got["handshake-map"] = ("handshake-map", [
+        _is_timeout(_handshake_expired("failed", dict(handshake=["member b running"]))),
+        _handshake_expired("failed-handshake", dict(handshake=["member b running"])) is None,
+        _is_timeout(_handshake_expired("failed-handshake", dict(handshake=["member b arrived"]))),
+        _handshake_expired("failed", dict()) is None])
+    recorded = []
+    observation = ("record-probe",)
+    kept_state = dict(restored=[True, True, True], lock_free=True)
+    bound_message = ("TIMEOUT: member-close child (failed-refused): code-owned bound reached: "
+                     "kill sweep (cannot evaluate)")
+    bound_extra = dict(missing=["kill sweep"])
+    bound_recorded = []
+    bound_down = _scenario_timeout_record("failed-refused", observation, bound_extra,
+                                          bound_recorded)
+    late_message = ("TIMEOUT: member-close child (communicate): handshake not met: "
+                    "late SIGINT (cannot evaluate)")
+    late_extra = dict(handshake=["late SIGINT"], lines=[False, True])
+    late_want = ("communicate", "KeyboardInterrupt", 0, ["dead"], 2, True,
+                 dict(restored=[True, True, True], lock_free=True, lines=[False, False]))
+    late_recorded = []
+    stood_down = _scenario_timeout_record(
+        "communicate", ("communicate", "returned 2", 0, ["dead"], 2, True, late_extra),
+        late_extra, late_recorded)
+    budget_message = ("TIMEOUT: member-close child (failed): completion budget reached "
+                      "(cannot evaluate)")
+    budget_recorded = []
+    budget_down = _scenario_timeout_record(
+        "failed", ("failed", "returned 2", 0, ["dead"], 2, False, {}), {}, budget_recorded)
+    unsent_message = ("TIMEOUT: member-close child (pooled): owed signal never sent: SIGINT "
+                      "(cannot evaluate)")
+    registered_message = ("TIMEOUT: member-close child (pooled): code-owned bound reached: "
+                          "members registered (cannot evaluate)")
+    unsent_extra = dict(missing=["members registered"], unsent=["SIGINT"],
+                        restored=[True, True, True], lock_free=True, lines=[False, True])
+    unsent_recorded = []
+    unsent_down = _scenario_timeout_record(
+        "pooled", ("pooled", "returned 2", 0, ["dead"], 4, False, unsent_extra),
+        unsent_extra, unsent_recorded)
+    in_comm_message = ("TIMEOUT: member-close child (communicate): owed signal never sent: "
+                       "SIGINT (cannot evaluate)")
+    in_comm_bound = ("TIMEOUT: member-close child (communicate): code-owned bound reached: "
+                     "member in communicate (cannot evaluate)")
+    in_comm_extra = dict(missing=["member in communicate"], unsent=["SIGINT"],
+                         restored=[True, True, True], lock_free=True, lines=[False, True])
+    in_comm_recorded = []
+    in_comm_down = _scenario_timeout_record(
+        "communicate", ("communicate", "returned 2", 0, ["dead"], 2, False, in_comm_extra),
+        in_comm_extra, in_comm_recorded)
+    partial_message = ("TIMEOUT: member-close child (failed-refused): handshake not met: "
+                       "lock hold expired (cannot evaluate)")
+    restoration_extra = dict(handshake=["lock hold expired"], restored=[False, True, False],
+                             lock_free=True, lines=[False, True], refused=1,
+                             caught="injected failed member a", member_a=[True, True],
+                             evidence=[True, True])
+    restoration_recorded = []
+    restoration_down = _scenario_timeout_record(
+        "failed-refused",
+        ("failed-refused", "returned 2", 0, [], 0, True, restoration_extra),
+        restoration_extra, restoration_recorded)
+    flag_extra = dict(handshake=["lock hold expired"], restored=[True, True, True],
+                      lock_free=True, lines=[False, True], refused=1, member_a=[True, True],
+                      evidence=[False, True])
+    flag_recorded = []
+    flag_down = _scenario_timeout_record(
+        "failed-refused", ("failed-refused", "returned 2", 0, [], 0, True, flag_extra),
+        flag_extra, flag_recorded)
+    # The stray-member registration bound of "close" and "lock" (rounds 14 to 16): the
+    # member's very existence at the report is timing, so the recorded states, their count
+    # and the in-run pins stand down with every other field off the allowlist, while an
+    # allowlisted defect beside the reached bound stays definite.
+    stray_message = ("TIMEOUT: member-close child (close): code-owned bound reached: "
+                     "members registered (cannot evaluate)")
+    stray_extra = dict(missing=["members registered"], restored=[True, True, True],
+                       lock_free=True, lines=[False, True], protected=[True])
+    stray_recorded = []
+    stray_down = _scenario_timeout_record(
+        "close", ("close", "KeyboardInterrupt", 0, [], 0, True, stray_extra),
+        stray_extra, stray_recorded)
+    stray_want = ("close", "KeyboardInterrupt", 0, ["dead"], 2, True,
+                  dict(restored=[True, True, True], lock_free=True, lines=[False, False],
+                       protected=[True, True]))
+    stray_defect_extra = dict(missing=["members registered"], restored=[False, True, False],
+                              lock_free=True, lines=[False, True])
+    stray_defect = _scenario_timeout_record(
+        "close", ("close", "KeyboardInterrupt", 0, [], 0, True, stray_defect_extra),
+        stray_defect_extra, [])
+    lock_message = ("TIMEOUT: member-close child (lock): code-owned bound reached: "
+                    "members registered (cannot evaluate)")
+    lock_extra = dict(missing=["members registered"], restored=[True, True, True],
+                      lock_free=True, expiry_pin=[0, False],
+                      monitor_pin=[[["never"], ["SIGINT"], 0]])
+    lock_recorded = []
+    lock_down = _scenario_timeout_record(
+        "lock", ("lock", "KeyboardInterrupt", 0, [], 0, True, lock_extra),
+        lock_extra, lock_recorded)
+    # The expiry-pin deadline exhausted (a holder merely slow, round 16): the "expiry pin"
+    # handshake is a recorded timeout, so the pin's own fields stand down on both sides and
+    # a scheduling delay is never definite.
+    pin_message = ("TIMEOUT: member-close child (lock): handshake not met: expiry pin "
+                   "(cannot evaluate)")
+    pin_extra = dict(handshake=["expiry pin"], expiry_pin=[0, False],
+                     restored=[True, True, True], lock_free=True)
+    pin_recorded = []
+    pin_down = _scenario_timeout_record(
+        "lock", ("lock", "KeyboardInterrupt", 0, ["dead"], 2, True, pin_extra),
+        pin_extra, pin_recorded)
+    pin_want = ("lock", "KeyboardInterrupt", 0, ["dead"], 2, True,
+                dict(restored=[True, True, True], lock_free=True, expiry_pin=[1, True]))
+    # Every handshake kind the child can record, graded by the one rule: a kind naming a
+    # thread its bounded join left alive replaces the whole observation (a live thread can
+    # poison the allowlist too), and every other kind stands down to exactly the allowlist,
+    # so a restoration defect beside any such expiry stays definite. A kind moved between
+    # these tuples fails its vector below.
+    joined_kinds = ("lock held", "lock hold expired", "lock released", "member a raised",
+                    "member b arrived", "member b running", "member records", "expiry pin",
+                    "late SIGINT")
+    alive_kinds = ("lock holder finished", "signal sender finished", "monitor finished",
+                   "stray member finished")
+
+    def kind_down(kind, restored):
+        # Every extras key the child can write rides along, so the per-kind vectors pin
+        # BEHAVIOURALLY that everything off the _STATE_EVIDENCE tuple (member_a, late,
+        # direct and the rest) is dropped: admitting any of them to the allowlist fails
+        # the exact-keys vector over these probes.
+        kind_extra = dict(handshake=[kind], restored=restored, lock_free=True,
+                          lines=[False, True], refused=1, evidence=[True, True],
+                          member_a=[True, True], late=[["b", "closing"]], caught="injected",
+                          direct=[None, True, []], loop=[[], True],
+                          held=[True, True, [True]], run=["0", 0], released=[[], 0],
+                          protected=[True], monitor_pin=[], expiry_pin=[1, True],
+                          bound_pin=[], control=["closing", [], True], closes=[[]], site=2,
+                          rc=0, after=True)
+        return _scenario_timeout_record(
+            "failed-refused", ("failed-refused", "returned 2", 0, [], 0, True, kind_extra),
+            kind_extra, [])
+    # The slow positive control (round 17): member a's git call reaching its 60 s
+    # subprocess bound leaves member_a [False, False] while member b's 120 s wait records
+    # the "member a observed" bound and the empty send list reaches the completion budget;
+    # the TimeoutExpired raised INTO the failed-member handler, which swept, so the
+    # allowlisted evidence matches its want, member_a stands down on both sides and the
+    # verdict is cannot-evaluate, never a definite mismatch (the classifier vector below,
+    # a pin of the mapping on this hand-written observation, not of the child's
+    # producer, which "producer-map" pins), while a false evidence flag beside the same
+    # record stays definite (the flag_down vector above).
+    slow_bound = ("TIMEOUT: member-close child (failed): code-owned bound reached: "
+                  "member a observed (cannot evaluate)")
+    slow_budget = ("TIMEOUT: member-close child (failed): completion budget reached "
+                   "(cannot evaluate)")
+    slow_extra = dict(missing=["member a observed"], restored=[True, True, True],
+                      lock_free=True, lines=[False, True], late=[],
+                      member_a=[False, False], evidence=[True, True])
+    slow_recorded = []
+    slow_down = _scenario_timeout_record(
+        "failed", ("failed", "TimeoutExpired: positive control", 0, [], 0, False,
+                   slow_extra), slow_extra, slow_recorded)
+    slow_want = ("failed", "ValueError: injected failed member a", 0, [], 0, True,
+                 dict(restored=[True, True, True], lock_free=True, lines=[False, False],
+                      late=[["b", "the suite is closing: no new member starts"]],
+                      member_a=[True, True], evidence=[True, True]))
+    stalled_extra = dict(restored=[True, True, True], lock_free=True, lines=[False, False],
+                         late=[], member_a=[False, False], evidence=[True, True])
+    stalled_obs = ("failed-stalled", "ValueError: injected failed member a", 0, [], 0,
+                   False, stalled_extra)
+    stalled_recorded = []
+    stalled_kept = _scenario_timeout_record("failed-stalled", stalled_obs,
+                                            dict(stalled_extra), stalled_recorded)
+    stalled_bound = ("TIMEOUT: member-close child (failed-stalled): code-owned bound "
+                     "reached: positive control a observed (cannot evaluate)")
+    stalled_slow_extra = dict(missing=["positive control a observed"],
+                              restored=[True, True, True], lock_free=True,
+                              lines=[False, False], late=[], member_a=[False, False],
+                              evidence=[True, True])
+    stalled_slow_recorded = []
+    stalled_slow_down = _scenario_timeout_record(
+        "failed-stalled",
+        ("failed-stalled", "TimeoutExpired: positive control", 0, [], 0, False,
+         stalled_slow_extra), stalled_slow_extra, stalled_slow_recorded)
+    got["record-map"] = ("record-map", [
+        # A reached code-owned bound ("missing") is a recorded timeout like any other: the
+        # probe observation (not a report tuple, so nothing to stand down) becomes the
+        # message, the entry is popped and recorded.
+        bound_down == bound_message and bound_extra == {}
+        and bound_recorded == [bound_message],
+        # A reached code-owned bound beside an expired harness handshake: both timeouts are
+        # recorded, in that order.
+        _is_timeout(_scenario_timeout_record("failed-refused", observation,
+                                             dict(missing=["kill sweep"],
+                                                  handshake=["lock held"]), recorded)),
+        recorded == [bound_message,
+                     "TIMEOUT: member-close child (failed-refused): handshake not met: "
+                     "lock held (cannot evaluate)"],
+        _is_timeout(_scenario_timeout_record("failed-refused", observation,
+                                             dict(handshake=["lock held"]), recorded)),
+        # A scenario's own deliberate handshake is no timeout: the observation passes
+        # through untouched.
+        _scenario_timeout_record("failed-handshake", observation,
+                                 dict(handshake=["member b running"]), recorded) is observation,
+        # A non-deliberate signal absorbed after main() is timing alone, whoever was slow:
+        # recorded, and the observation stands down to the allowlist (nothing of it here).
+        stood_down == ("communicate",) + (late_message,) * 5 + (
+            dict(stood_down=late_message),)
+        and late_recorded == [late_message],
+        # A False timeliness field (the completion budget reached) is timing alone:
+        # recorded, and stood down by the same one rule.
+        budget_down == ("failed",) + (budget_message,) * 5 + (
+            dict(stood_down=budget_message),)
+        and budget_recorded == [budget_message],
+        # The wants-side mirror: a stood-down entry reshapes its want with the same
+        # allowlist, and every other observation leaves its want unchanged.
+        _stood_down_wants([stood_down, budget_down, observation],
+                          [late_want, late_want, late_want])
+        == [("communicate",) + (late_message,) * 5 + (
+                dict(kept_state, stood_down=late_message),),
+            ("communicate",) + (budget_message,) * 5 + (
+                dict(kept_state, stood_down=budget_message),),
+            late_want],
+        # One more expired handshake in the same run is recorded too (the probe is not a
+        # report tuple, so the message comes back).
+        _is_timeout(_scenario_timeout_record("communicate", observation,
+                                             dict(handshake=["late SIGINT", "lock held"]),
+                                             recorded)),
+        len(recorded) == 4,
+        # An owed signal the monitor never sent: the reached bound and the unsent signal are
+        # both recorded (never also the completion budget: the empty send list is not a late
+        # finish), and the observation stands down to the allowlist.
+        unsent_down == ("pooled",) + (unsent_message,) * 5 + (
+            dict(kept_state, stood_down=unsent_message),)
+        and unsent_recorded == [registered_message, unsent_message],
+        in_comm_down == ("communicate",) + (in_comm_message,) * 5 + (
+            dict(kept_state, stood_down=in_comm_message),)
+        and in_comm_recorded == [in_comm_bound, in_comm_message],
+        # A lock holder that released at its bound: the allowlist stays compared, so a
+        # restoration defect or a false evidence flag beside the expiry is still definite.
+        restoration_down == ("failed-refused",) + (partial_message,) * 5 + (
+            dict(restored=[False, True, False], lock_free=True,
+                 evidence=[True, True], stood_down=partial_message),)
+        and restoration_recorded == [partial_message],
+        flag_down[6].get("evidence") == [False, True]
+        and flag_recorded == [partial_message],
+        # The wants-side mirrors for the unsent and the holder-expiry stand-down.
+        _stood_down_wants(
+            [unsent_down, restoration_down],
+            [("pooled", "KeyboardInterrupt", 0, ["dead"], 4, True,
+              dict(restored=[True, True, True], lock_free=True, lines=[False, False])),
+             ("failed-refused", "returned 2", 0, [], 0, True,
+              dict(restored=[True, True, True], lock_free=True, lines=[False, True],
+                   refused=1, evidence=[True, True]))])
+        == [("pooled",) + (unsent_message,) * 5 + (
+                dict(kept_state, stood_down=unsent_message),),
+            ("failed-refused",) + (partial_message,) * 5 + (
+                dict(kept_state, evidence=[True, True],
+                     stood_down=partial_message),)],
+        # The stray-member registration bound of "close": the states, their count and every
+        # extras key off the allowlist stand down, the mirror makes the timing-only
+        # difference neutral, and an allowlisted restoration defect beside the same bound
+        # stays definite.
+        stray_down == ("close",) + (stray_message,) * 5 + (
+            dict(kept_state, stood_down=stray_message),)
+        and stray_recorded == [stray_message],
+        _stood_down_wants([stray_down], [stray_want]) == [stray_down],
+        stray_defect[6].get("restored") == [False, True, False]
+        and _stood_down_wants([stray_defect], [stray_want])[0][6].get("restored")
+        == [True, True, True],
+        # The same bound in "lock" stands the in-run pins down too.
+        "expiry_pin" not in lock_down[6] and "monitor_pin" not in lock_down[6]
+        and lock_down[1] == lock_message and lock_recorded == [lock_message],
+        # The expiry-pin deadline exhausted: the pin's fields stand down on both sides, so
+        # a merely slow holder is cannot-evaluate, never definite.
+        "expiry_pin" not in pin_down[6] and pin_recorded == [pin_message]
+        and _stood_down_wants([pin_down], [pin_want]) == [pin_down],
+        # Per kind: a restoration defect beside any joined-thread expiry stays definite,
+        # the kept keys are exactly the allowlist plus the marker, and a kind naming a
+        # thread its join left alive replaces the whole observation even beside that defect.
+        all(kind_down(kind, [False, True, False])[6].get("restored") == [False, True, False]
+            for kind in joined_kinds),
+        all(sorted(kind_down(kind, [True, True, True])[6])
+            == ["evidence", "lock_free", "restored", "stood_down"] for kind in joined_kinds),
+        all(_is_timeout(kind_down(kind, [False, True, False])) for kind in alive_kinds),
+        # The allowlist's exact membership, pinned VERBATIM: adding ANY key (an existing
+        # child field such as "late", "direct" or "member_a" included) or removing one
+        # fails here, beside the behavioural per-kind vector above.
+        _STATE_EVIDENCE == ("evidence", "lock_free", "restored"),
+        # The slow positive control: both bounds recorded, member_a dropped, the
+        # allowlisted evidence kept at its want.
+        slow_down == ("failed",) + (slow_budget,) * 5 + (
+            dict(kept_state, evidence=[True, True], stood_down=slow_budget),)
+        and slow_recorded == [slow_bound, slow_budget],
+        # Classifier pin (the mapping, not the producer): the mirrored want equals the
+        # stood-down observation, so a merely slow positive control whose evidence is at its
+        # want is cannot-evaluate, never a definite mismatch. That the child's evidence IS
+        # at its want under a slow positive control rests on "producer-map" and the
+        # "failed-stalled" value pin, short of THE RESIDUAL (_allowlist_producers).
+        _stood_down_wants([slow_down], [slow_want]) == [slow_down],
+        # The deliberate empty send list (round 20): "failed-stalled" owes no signal by
+        # construction, so its False timeliness field alone records nothing and the whole
+        # observation stays compared; the exemption is scenario-keyed, pinned verbatim,
+        # and the SAME shape under "failed" is the budget stand-down above (budget_down).
+        stalled_kept is stalled_obs and stalled_recorded == [],
+        _DELIBERATE_EMPTY_SEND == ("failed-stalled",),
+        # Any OTHER record in a stalled run (here the slow positive control's reached
+        # bound) still stands it down to the allowlist, the budget never doubling it.
+        stalled_slow_down == ("failed-stalled",) + (stalled_bound,) * 5 + (
+            dict(kept_state, evidence=[True, True], stood_down=stalled_bound),)
+        and stalled_slow_recorded == [stalled_bound],
+        _stood_down_wants([stalled_slow_down],
+                          [("failed-stalled", "ValueError: injected failed member a", 0,
+                            [], 0, False, dict(stalled_extra))]) == [stalled_slow_down]])
+    # The allowlist's PRODUCER pin, beside the classifier pins above: the names every write
+    # of an allowlisted extras key reads in the child source, closed over their origins
+    # (_allowlist_producers), so a child tying a kept field to timing again through a form
+    # the oracle traces, by a read that adds a name to a pinned signature, fails here even
+    # in a healthy run, where no timeout exercises the classifier (the "failed-stalled"
+    # value pin is the second net, and THE RESIDUAL in _allowlist_producers is what
+    # neither net catches). Its own discrimination
+    # ("producer-oracle"): each probe rewrites one statement of the child source and must
+    # change exactly the named entries, so each rule named here has a probe built to fail
+    # when that rule regresses (a rule not named here is not pinned by this list):
+    # evidence tied to member a's arrival
+    # (conj), the round-17 flags re-added (flag), the sweep wrapper's append gated on
+    # member a's arrival (guard), the lock read tied to the measured stalls (lock), a
+    # restoration flag tied to the send list (restored), an allowlisted key written through
+    # an alias (alias) or through ** arguments (star); the gate spelled as a short-circuit
+    # (boolop), a while test (while), a conditional expression (condexp), a walrus
+    # (walrus), a global rebinding inside a def (rebound), a slice-store index (sliceidx);
+    # a carrier erased or escaping: del (removal), clear (clear), pop on restored (popper),
+    # an alias taken (escape), the bare name passed to a helper (callarg); the extras dict
+    # reached reflectively (reflect), by a dynamic key (dynkey), rebound (rebind),
+    # augmented (augstore), an allowlisted key aliased (keyref), a bound method taken
+    # (uncalled), the dict used bare (bare); an origin augmented from the send list
+    # (augorigin); each _PRODUCER_MUTATORS entry traced (extendm, insertm, addm, updatem,
+    # setdefm); getattr aimed at a non-module (getat); a call argument traced when passed
+    # by keyword (kwcallarg) or starred (starcallarg), a mutator's and an allowlisted
+    # writer's keyword arguments traced (kwmutator, kwwriter); each carrier literal type
+    # besides the list (dictlit, setlit, listcomp, setcomp, dictcomp); the two disclosed
+    # boundaries pinned AT their empty diff, a module attribute store (moduleattr) and a
+    # for-loop gate on member a's arrival (forloop, which the "failed-stalled" value pin
+    # catches); and examples of THE RESIDUAL pinned AT their empty diff, which pass the
+    # value pin too (examples, not the class: _allowlist_producers states the class, ANY
+    # producer that neither net catches, the value pin catching only by a compared field
+    # differing from its want (a missing report included) in a run within the scenarios'
+    # bounds and this oracle only by a refusal or by a change to a pinned signature, such
+    # as a traced read adding a name to it, whatever the condition and whatever carries
+    # it): round 20's R1 (raisegate), R2 (trygate) and R4 (sendgate) in run_member, which
+    # the stalled run never calls (its late=[]); four gates on facts that differ between
+    # the stalled run and a slow "failed" run, round 20's on the scenario's name
+    # (scenariogate), round 21's on member b's absence (bgate) and on the outcome text with
+    # member a's arrival (outcomegate), and round 22's on the outcome text alone
+    # (outcomeonlygate); round 24's on a stall's length (stallgate), a condition no
+    # scenario arranges and a slow positive control does not produce; and round 25's traced
+    # if whose reads are all pinned already (pinned_version: a test on sys.version_info
+    # before the evidence read, adding no name to the signature). An anchor no longer in
+    # the source is "anchor missing", never a silently clean probe. ast.parse alone reads
+    # each source; no probe source is executed.
+    witnessed_line = "    witnessed = len(branch_swept)\n"
+    late_line = "        late.append([member_argv[2], rc])\n"
+    evidence_line = "    extra['evidence'] = [bool(branch_swept)]\n"
+    producer_probes = ((
+        ("conj", "extra['evidence'] = [bool(branch_swept)]",
+         "extra['evidence'] = [a_arrived.is_set() and bool(branch_swept)]"),
+        ("flag", "extra['evidence'] = [bool(branch_swept)]",
+         "extra['evidence'] = [a_arrived.is_set(), a_raises.is_set(), bool(branch_swept)]"),
+        ("guard", "        if frame is not None:\n",
+         "        if frame is not None and a_arrived.is_set():\n"),
+        ("lock", "    free = suite._MEMBERS_LOCK.acquire(0)\n",
+         "    free = suite._MEMBERS_LOCK.acquire(0) and not stalls\n"),
+        ("restored", "    restored.append(False)\n", "    restored.append(bool(sent))\n"),
+        ("alias", "extra['evidence'].append(", "extra.get('evidence').append("),
+        ("star", witnessed_line,
+         witnessed_line + "    extra.update(**dict(evidence=[True]))\n"),
+        ("boolop", "            branch_swept.append(True)\n",
+         "            a_arrived.is_set() and branch_swept.append(True)\n"),
+        ("while", "extra['evidence'] = [bool(branch_swept)]",
+         "while not a_arrived.is_set():\n        extra['evidence'] = "
+         "[bool(branch_swept)]\n        break"),
+        ("condexp", "            branch_swept.append(True)\n",
+         "            (branch_swept.append(True) if a_arrived.is_set() else None)\n"),
+        ("walrus", witnessed_line, witnessed_line
+         + "    (branch_swept := [] if a_arrived.is_set() else list(branch_swept))\n"),
+        ("rebound", witnessed_line, witnessed_line
+         + "    def _drop():\n        global branch_swept\n        branch_swept = "
+         "list(branch_swept) if a_arrived.is_set() else []\n"),
+        ("sliceidx", witnessed_line,
+         witnessed_line + "    branch_swept[a_arrived.is_set():] = []\n"),
+        ("removal", witnessed_line, witnessed_line + "    del branch_swept[:]\n"),
+        ("clear", witnessed_line, witnessed_line + "    branch_swept.clear()\n"),
+        ("popper", "    restored.append(False)\n",
+         "    restored.append(False)\n    restored.pop()\n"),
+        ("escape", witnessed_line, witnessed_line + "    sweep_alias = branch_swept\n"),
+        ("callarg", witnessed_line, witnessed_line + "    _inspect(branch_swept)\n"),
+        ("reflect", witnessed_line,
+         witnessed_line + "    globals()['extra']['evidence'] = [True]\n"),
+        ("dynkey", witnessed_line,
+         witnessed_line + "    extra[str('evidence')] = [True]\n"),
+        ("rebind", witnessed_line, witnessed_line + "    extra = {}\n"),
+        ("augstore", witnessed_line,
+         witnessed_line + "    extra['evidence'] += [a_arrived.is_set()]\n"),
+        ("keyref", witnessed_line, witnessed_line + "    _flags = extra['evidence']\n"),
+        ("uncalled", witnessed_line, witnessed_line + "    _writer = extra.update\n"),
+        ("bare", witnessed_line, witnessed_line + "    _record = extra\n"),
+        ("augorigin", witnessed_line, witnessed_line + "    witnessed += len(sent)\n"),
+        ("extendm", witnessed_line,
+         witnessed_line + "    branch_swept.extend([a_arrived.is_set()])\n"),
+        ("insertm", witnessed_line,
+         witnessed_line + "    branch_swept.insert(0, a_arrived.is_set())\n"),
+        ("addm", witnessed_line,
+         witnessed_line + "    branch_swept.add(a_arrived.is_set())\n"),
+        ("updatem", witnessed_line,
+         witnessed_line + "    branch_swept.update(a_arrived.is_set())\n"),
+        ("setdefm", witnessed_line,
+         witnessed_line + "    branch_swept.setdefault(a_arrived.is_set())\n"),
+        ("getat", witnessed_line,
+         witnessed_line + "    getattr(witnessed, 'bit_length')()\n"),
+        ("kwcallarg", witnessed_line, witnessed_line + "    _inspect(into=branch_swept)\n"),
+        ("starcallarg", witnessed_line, witnessed_line + "    _inspect(*branch_swept)\n"),
+        ("kwmutator", witnessed_line,
+         witnessed_line + "    branch_swept.update(flag=a_arrived.is_set())\n"),
+        ("kwwriter", witnessed_line,
+         witnessed_line + "    extra['evidence'].extend(items=[a_arrived.is_set()])\n"))
+        + tuple((kind, witnessed_line, witnessed_line + "    _held = " + literal + "\n"
+                 "    witnessed += len(_held)\n    _held.clear()\n")
+                for kind, literal in (("dictlit", "{}"), ("setlit", "{0}"),
+                                      ("listcomp", "[0 for _ in ()]"),
+                                      ("setcomp", "{0 for _ in ()}"),
+                                      ("dictcomp", "{0: 0 for _ in ()}")))
+        + (("moduleattr", witnessed_line,
+            witnessed_line + "    sys.a_flag = a_arrived.is_set()\n"),
+           ("forloop", witnessed_line, witnessed_line
+            + "    for _ in range(0 if a_arrived.is_set() else 1):\n"
+            "        branch_swept[:] = []\n"),
+           ("raisegate", late_line, late_line
+            + "        for _ in () if a_raises.is_set() else (0,):\n"
+            "            branch_swept[:] = []\n"),
+           ("trygate", late_line, late_line
+            + "        try:\n            assert a_raises.is_set()\n"
+            "        except AssertionError:\n            branch_swept[:] = []\n"),
+           ("sendgate", late_line, late_line
+            + "        for _ in () if sent else (0,):\n            branch_swept[:] = []\n"),
+           ("scenariogate", evidence_line,
+            "    for _ in range(0 if scenario == 'failed-stalled' or a_arrived.is_set()"
+            " else 1):\n        branch_swept[:] = []\n" + evidence_line),
+           ("bgate", evidence_line,
+            "    for _ in () if a_arrived.is_set() or not b_arrived.is_set() else (0,):\n"
+            "        branch_swept[:] = []\n" + evidence_line),
+           ("outcomegate", evidence_line,
+            "    for _ in range(1 if outcome.startswith('TimeoutExpired')"
+            " and not a_arrived.is_set() else 0):\n        branch_swept[:] = []\n"
+            + evidence_line),
+           ("outcomeonlygate", evidence_line,
+            "    for _ in range(1 if outcome.startswith('TimeoutExpired') else 0):\n"
+            "        branch_swept[:] = []\n" + evidence_line),
+           ("stallgate", evidence_line,
+            "    for _ in range(1 if stalls and max(stalls) > 0.5 else 0):\n"
+            "        branch_swept[:] = []\n" + evidence_line),
+           ("pinned_version", evidence_line,
+            "    if sys.version_info >= (3, 99):\n        branch_swept[:] = []\n"
+            + evidence_line)))
+    try:
+        producers = _allowlist_producers()
+        got["producer-map"] = ("producer-map", producers)
+        producer_oracle = []
+        for _, anchor, mutant in producer_probes:
+            if _CLOSE_PROBE_CHILD.count(anchor) != 1:
+                producer_oracle.append("anchor missing")
+                continue
+            probe = _allowlist_producers(_CLOSE_PROBE_CHILD.replace(anchor, mutant))
+            producer_oracle.append(sorted(key for key in probe if probe[key] != producers[key]))
+        got["producer-oracle"] = ("producer-oracle", producer_oracle)
+    except LookupError as exc:
+        producer_down = "TIMEOUT: allowlist producer oracle: {} (cannot evaluate)".format(exc)
+        CANNOT_EVALUATE.append(producer_down)
+        got["producer-map"] = got["producer-oracle"] = producer_down
+    # The slow-control record (_slow_control_record): no healthy run reaches it, so it is
+    # read from the source, and each probe must name the fact it breaks; every condition
+    # of the reader whose removal weakens it has a probe built to fail when that condition
+    # is removed, except the binding forms named after the probes. The probes: the gate
+    # replaced by if False (round 20's NOREC), the record replaced by pass, the
+    # enclosing failed-scenario block disabled, outcome rebound ahead of the gate, the
+    # exception outcome respelled; round 21's earlier
+    # handlers that catch TimeoutExpired ahead of the Exception handler (earlyhandler,
+    # ahead of KeyboardInterrupt; timeouthandler, ahead of Exception), the same through a
+    # try nested in the body (innertry), a second statement rebinding outcome in the
+    # Exception handler (handlerextra), that handler's type changed (handlertype), a
+    # finally rebinding outcome (finallystore), a second module-level try calling main()
+    # (secondrun), outcome bound outside that try by an import alias (importbind), a del
+    # (delbind) or a match capture (matchbind), a second record deeper in the tree
+    # (duprecord), the gate moved into a def that is never called (nested) or into the
+    # failed block's else (elsebranch), that block spelled as a while (whileouter),
+    # scenario rebound ahead of the gate (scenariorebind) or bound by another statement
+    # (scenariosplit); and the record removed through the key: popped after the gate
+    # (popmissing), deleted (delmissing), popped inside the sweep wrapper the failed block
+    # calls after the gate (sweeppop), cleared through setdefault (setdefclear), replaced
+    # by update (updatemissing), popped as an append receiver (popappend), cleared
+    # through the append method taken uncalled (boundappend) and through that method
+    # passed to a call it is not the callee of (lambdaappend: pins that the append is
+    # called); and outcome bound by a plain import (plainimport) and a dotted one
+    # (dottedimport: pins that a dotted import binds its first name). The other binding
+    # forms the reader reads (a def or async def, class or except-as name, a match star
+    # or mapping rest, a parameter) have no probe of their own. Five conditions have no
+    # probe because removing one does not weaken the reader: in appended, isinstance(call,
+    # ast.Call) (the dump comparison beside it implies it) and isinstance(receiver,
+    # ast.Attribute) (without it the reader accepts nothing more: a receiver that is no
+    # attribute crashes it); in the run selector, isinstance(node, ast.Try) (without it
+    # the reader is only stricter) and isinstance(call.func, ast.Attribute) (without it
+    # the reader accepts nothing more: a call of a bare name it reaches crashes it); and
+    # isinstance(test, ast.If) in the lock scope (without it the reader crashes on the
+    # committed child, and keeping only a test check admits just a while on the same
+    # test, whose body also runs only in the lock scenario).
+    # Last, seven instances of routes the reader does NOT read (instances, not the
+    # class, which the NOT READ text of _slow_control_record states by construction),
+    # held AT [] so a reader that starts catching one must update that text: an
+    # exception name the handlers use rebound ahead of the try (exceptbind), contextlib
+    # rebound by a class whose redirect_stdout turns a TimeoutExpired into RuntimeError
+    # on exit (ctxclass), outcome stored through the child's own module attribute
+    # (mainattr) and through sys's, then bound by a wildcard import (wildcard), an
+    # assert after the record that ends the child before its report (exitafter), the
+    # exception class's __name__ stored ahead of the try (clsname), and outcome written
+    # through a function's __globals__ ahead of the gate (funcglobals). No probe source
+    # is executed.
+    stalled_gate = ("    if scenario == 'failed-stalled' and "
+                    "outcome.startswith('TimeoutExpired'):\n")
+    stalled_record = ("        extra.setdefault('missing', [])"
+                      ".append('positive control a observed')\n")
+    failed_block = "registered = len(suite._MEMBERS['groups'])\nif scenario.startswith('failed')"
+    raised_outcome = "    outcome = '{}: {}'.format(type(exc).__name__, exc)\n"
+    raised_handler = "except Exception as exc:\n" + raised_outcome
+    interrupt_handler = "except KeyboardInterrupt:\n    outcome = 'KeyboardInterrupt'\n"
+    returned_line = "        outcome = 'returned {}'.format(suite.main(None, lanes))\n"
+    scenario_line = "scenario, folder, fixture = sys.argv[2], sys.argv[3], sys.argv[4]\n"
+    released_line = "    extra['released'] = [problems, len(suite._MEMBERS['groups'])]\n"
+    # The gate with its record as one span ("" when either is not found, which then
+    # counts as an anchor missing).
+    gate_start = _CLOSE_PROBE_CHILD.find(stalled_gate)
+    gate_end = _CLOSE_PROBE_CHILD.find(stalled_record, max(gate_start, 0))
+    gate_span = (_CLOSE_PROBE_CHILD[gate_start:gate_end + len(stalled_record)]
+                 if gate_start >= 0 and gate_end >= 0 else "")
+    hidden = "outcome = outcome.replace('TimeoutExpired', 'slow')\n"
+    control_probes = (
+        ("norec", stalled_gate, "    if False:\n"),
+        ("passrecord", stalled_record, "        pass\n"),
+        ("failedoff", failed_block, failed_block + " and False"),
+        ("rebound", stalled_gate, "    outcome = 'returned 0'\n" + stalled_gate),
+        ("respelled", raised_outcome, "    outcome = 'raised: {}'.format(exc)\n"),
+        ("earlyhandler", interrupt_handler,
+         "except suite.subprocess.TimeoutExpired as exc:\n    outcome = 'slow: ' + str(exc)\n"
+         + interrupt_handler),
+        ("timeouthandler", raised_handler,
+         "except suite.subprocess.TimeoutExpired:\n    outcome = 'hidden timeout'\n"
+         + raised_handler),
+        ("innertry", returned_line,
+         "        try:\n    " + returned_line
+         + "        except suite.subprocess.TimeoutExpired:\n"
+         "            outcome = 'returned 2'\n"),
+        ("handlerextra", raised_outcome, raised_outcome + "    " + hidden),
+        ("handlertype", raised_handler, "except LookupError as exc:\n" + raised_outcome),
+        ("finallystore", raised_outcome, raised_outcome + "finally:\n    " + hidden),
+        ("secondrun", "ended = time.monotonic()\n",
+         "try:\n    suite.main(None, [])\nexcept Exception:\n    pass\n"
+         "ended = time.monotonic()\n"),
+        ("importbind", stalled_gate, "    import os as outcome\n" + stalled_gate),
+        ("delbind", stalled_gate, "    del outcome\n" + stalled_gate),
+        ("matchbind", stalled_gate,
+         "    match 'returned 0':\n        case outcome:\n            pass\n" + stalled_gate),
+        ("duprecord", released_line, released_line + "    if False:\n" + stalled_record),
+        ("nested", gate_span,
+         "    def _later():\n        if scenario.startswith('failed'):\n        "
+         + gate_span[:-1].replace("\n", "\n        ") + "\n"),
+        ("elsebranch", stalled_gate, "    pass\nelse:\n" + stalled_gate),
+        ("whileouter", failed_block, failed_block.replace("\nif ", "\nwhile ")),
+        ("scenariorebind", stalled_gate, "    scenario = 'failed'\n" + stalled_gate),
+        ("scenariosplit", scenario_line,
+         "scenario = sys.argv[2]\nfolder, fixture = sys.argv[3], sys.argv[4]\n"),
+        ("popmissing", stalled_record, stalled_record + "    extra.pop('missing', None)\n"),
+        ("delmissing", stalled_record, stalled_record + "    del extra['missing']\n"),
+        ("sweeppop", "        released.set()\n",
+         "        released.set()\n        extra.pop('missing', None)\n"),
+        ("setdefclear", stalled_record,
+         stalled_record + "    extra.setdefault('missing', []).clear()\n"),
+        ("updatemissing", stalled_record, stalled_record + "    extra.update(missing=[])\n"),
+        ("popappend", stalled_record,
+         stalled_record + "    extra.pop('missing', []).append(0)\n"),
+        ("boundappend", stalled_record,
+         stalled_record + "    extra.setdefault('missing', []).append.__self__.clear()\n"),
+        ("lambdaappend", stalled_record, stalled_record
+         + "    (lambda f: f.__self__.clear())(extra.setdefault('missing', []).append)\n"),
+        ("plainimport", stalled_gate, "    import outcome\n" + stalled_gate),
+        ("dottedimport", stalled_gate, "    import outcome.path\n" + stalled_gate),
+        ("exceptbind", "captured = io.StringIO()\n",
+         "if scenario == 'failed-stalled':\n"
+         "    KeyboardInterrupt = suite.subprocess.TimeoutExpired\n"
+         "captured = io.StringIO()\n"),
+        ("ctxclass", "captured = io.StringIO()\n",
+         "real_redirect = contextlib.redirect_stdout\n"
+         "class contextlib:\n"
+         "    class redirect_stdout:\n"
+         "        def __init__(self, target):\n"
+         "            self.inner = real_redirect(target)\n"
+         "        def __enter__(self):\n"
+         "            return self.inner.__enter__()\n"
+         "        def __exit__(self, kind, exc, tb):\n"
+         "            self.inner.__exit__(kind, exc, tb)\n"
+         "            if kind is not None and issubclass(\n"
+         "                    kind, suite.subprocess.TimeoutExpired):\n"
+         "                raise RuntimeError('slow')\n"
+         "captured = io.StringIO()\n"),
+        ("mainattr", stalled_gate,
+         "    import __main__\n    __main__." + hidden + stalled_gate),
+        ("wildcard", stalled_gate,
+         "    sys." + hidden + "    from sys import *\n" + stalled_gate),
+        ("exitafter", stalled_record,
+         stalled_record + "    assert not outcome.startswith('TimeoutExpired')\n"),
+        ("clsname", "captured = io.StringIO()\n",
+         "if scenario == 'failed-stalled':\n"
+         "    suite.subprocess.TimeoutExpired.__name__ = 'Slow'\n"
+         "captured = io.StringIO()\n"),
+        ("funcglobals", stalled_gate,
+         "    def namespace_handle():\n        pass\n"
+         "    namespace_handle.__globals__['outcome'] = "
+         "outcome.replace('TimeoutExpired', 'slow')\n" + stalled_gate))
+    try:
+        got["slow-control"] = ("slow-control", [_slow_control_record()] + [
+            _slow_control_record(_CLOSE_PROBE_CHILD.replace(anchor, mutant))
+            if _CLOSE_PROBE_CHILD.count(anchor) == 1 else "anchor missing"
+            for _, anchor, mutant in control_probes])
+    except LookupError as exc:
+        control_down = "TIMEOUT: slow-control reader: {} (cannot evaluate)".format(exc)
+        CANNOT_EVALUATE.append(control_down)
+        got["slow-control"] = control_down
+    # One with-form acquisition per refused-site scenario: a fourth acquisition, a direct acquire
+    # call or a form the oracle refuses fails the "close-sites" pin definitively; an oracle that
+    # cannot read _close_members at all is recorded as cannot-evaluate, never fail-open, and
+    # stands down ONLY the site= comparisons it informs: each refused-site scenario's own
+    # observation keeps every definite field (_oracle_down_sites).
+    refused_site_scenarios = ("close-refused", "close-wait-refused", "close-left-refused")
+    try:
+        close_sites = _close_lock_sites()
+        with_sites = [offset for offset, form in close_sites if form == "with"]
+        got["close-sites"] = ("close-sites", [form for _, form in close_sites])
+        site_wants = [with_sites[1:2] and with_sites[1], with_sites[2:3] and with_sites[2]]
+    except LookupError as exc:
+        oracle_down = "TIMEOUT: member-close lock-site oracle: {} (cannot evaluate)".format(exc)
+        CANNOT_EVALUATE.append(oracle_down)
+        site_wants = _oracle_down_sites(got, oracle_down)
+    # The oracle's own mutants: a probe def NAMED _close_members read from a fixture file yields
+    # its three with-form sites; the same body under another name at the SAME line must raise
+    # LookupError (cannot-evaluate), so the oracle never accepts a renamed def at _close_members'
+    # recorded line; and a probe spelling the lock indirectly (a globals() subscript on the
+    # string constant, a module-attribute access, getattr on the string) must yield
+    # "unrecognized" for every indirect reference, never a silently shorter site list. compile()
+    # alone builds the probe functions; no fixture code is executed.
+    plain = 3 * "    with _MEMBERS_LOCK:\n        pass\n"
+    indirect = ("    with _MEMBERS_LOCK:\n        pass\n"
+                "    with globals()['_MEMBERS_LOCK']:\n        pass\n"
+                "    with sys.modules[__name__]._MEMBERS_LOCK:\n        pass\n"
+                "    getattr(sys, '_MEMBERS_LOCK')._lock.acquire()\n")
+    oracle = []
+    for label, name, body in (("named", "_close_members", plain),
+                              ("renamed", "unrelated", plain),
+                              ("indirect", "_close_members", indirect)):
+        source = "def {}():\n".format(name) + body
+        path = fixture / "close-oracle-{}.py".format(label)
+        path.write_text(source, encoding="utf-8")
+        probe_code = next(const for const in compile(source, str(path), "exec").co_consts
+                          if isinstance(const, types.CodeType))
+        try:
+            oracle.append(_close_lock_sites(types.FunctionType(probe_code, {})))
+        except LookupError:
+            oracle.append("LookupError")
+    got["close-oracle"] = ("close-oracle", oracle)
+
+    # The oracle-down stand-down's own control (_oracle_down_sites on a synthetic got): ONLY the
+    # site= entries and the "close-sites" entry become the oracle's timeout message; a wrong
+    # definite field in the same observation (refused=0 here) is untouched, so its mismatch
+    # stays definite, and a scenario that never recorded a site entry keeps that absence.
+    down_message = "TIMEOUT: member-close lock-site oracle: probe (cannot evaluate)"
+    down_got = dict([
+        ("close-wait-refused", ("close-wait-refused", "returned 2", 0, [], 0, True,
+                                dict(refused=0, site=2))),
+        ("close-left-refused", ("close-left-refused", "returned 2", 0, [], 0, True,
+                                dict(refused=1)))])
+    down_wants = _oracle_down_sites(down_got, down_message)
+    got["down-map"] = ("down-map", [
+        down_wants == [down_message, down_message],
+        down_got["close-sites"] == down_message,
+        down_got["close-wait-refused"][6] == dict(refused=0, site=down_message),
+        down_got["close-left-refused"][6] == dict(refused=1)])
+
+    # The kill-sweep ordering pin, a source-order fact with no deadline involved: exactly one
+    # call of _signal_member_groups in _config_results, inside the failed-member except
+    # handler of the try statement whose finally block waits for the workers, with no worker
+    # wait in the handler before it, so the sweep precedes every wait structurally; the sweep
+    # moved after the wait, a waiting shutdown placed before it in the handler, or the sweep
+    # removed, fails this definitively. An oracle that cannot read _config_results is
+    # cannot-evaluate, never fail-open. Its own mutants: a probe def NAMED _config_results
+    # with the call so placed yields its one "except-before-wait" site, the call moved after
+    # the wait into the finally block is "unrecognized", a waiting shutdown placed in the
+    # handler BEFORE the call is "unrecognized" too, whether it spells wait=True, a bare
+    # shutdown(), a positional shutdown(True, ...) or wait=True beside cancel_futures=False
+    # (only a literal wait=False is exempt, so a detector counting only a literal
+    # wait=True fails the bare and positional probes, and one exempting a literal False
+    # on any keyword fails the cancel probe), a handler whose finally never waits is
+    # "unrecognized" (so a neutralised finally-wait detector is loud), and the same body
+    # under another name at the SAME recorded line raises LookupError. compile() alone
+    # builds the probe functions; no fixture code is executed.
+    ordered = ("    try:\n        pass\n    except BaseException:\n"
+               "        _signal_member_groups()\n        raise\n"
+               "    finally:\n        pool.shutdown(wait=True)\n")
+    moved = ("    try:\n        pass\n    finally:\n"
+             "        pool.shutdown(wait=True)\n        _signal_member_groups()\n")
+    waitfirst = ("    try:\n        pass\n    except BaseException:\n"
+                 "        pool.shutdown(wait=True)\n        _signal_member_groups()\n"
+                 "        raise\n"
+                 "    finally:\n        pool.shutdown(wait=True)\n")
+    nowait = ("    try:\n        pass\n    except BaseException:\n"
+              "        _signal_member_groups()\n        raise\n"
+              "    finally:\n        pool.shutdown(wait=False)\n")
+    bare = ("    try:\n        pass\n    except BaseException:\n"
+            "        pool.shutdown()\n        _signal_member_groups()\n        raise\n"
+            "    finally:\n        pool.shutdown(wait=True)\n")
+    positional = ("    try:\n        pass\n    except BaseException:\n"
+                  "        pool.shutdown(True, cancel_futures=True)\n"
+                  "        _signal_member_groups()\n        raise\n"
+                  "    finally:\n        pool.shutdown(wait=True)\n")
+    cancel = ("    try:\n        pass\n    except BaseException:\n"
+              "        pool.shutdown(wait=True, cancel_futures=False)\n"
+              "        _signal_member_groups()\n        raise\n"
+              "    finally:\n        pool.shutdown(wait=True)\n")
+    sweep_oracle = []
+    for label, name, body in (("ordered", "_config_results", ordered),
+                              ("moved", "_config_results", moved),
+                              ("renamed", "unrelated", ordered),
+                              ("waitfirst", "_config_results", waitfirst),
+                              ("nowait", "_config_results", nowait),
+                              ("bare", "_config_results", bare),
+                              ("positional", "_config_results", positional),
+                              ("cancel", "_config_results", cancel)):
+        source = "def {}():\n".format(name) + body
+        path = fixture / "sweep-oracle-{}.py".format(label)
+        path.write_text(source, encoding="utf-8")
+        probe_code = next(const for const in compile(source, str(path), "exec").co_consts
+                          if isinstance(const, types.CodeType))
+        try:
+            sweep_oracle.append(_sweep_call_sites(types.FunctionType(probe_code, {})))
+        except LookupError:
+            sweep_oracle.append("LookupError")
+    got["sweep-oracle"] = ("sweep-oracle", sweep_oracle)
+    try:
+        got["sweep-site"] = ("sweep-site", [form for _, form in _sweep_call_sites()])
+    except LookupError as exc:
+        sweep_down = "TIMEOUT: config kill-sweep site oracle: {} (cannot evaluate)".format(exc)
+        CANNOT_EVALUATE.append(sweep_down)
+        got["sweep-site"] = sweep_down
+
+    def expect(scenario, outcome, registered, states, records, lines=(False, False),
+               timely=True, **more):
+        return (scenario, outcome, registered, states, records, timely,
+                dict(restored=[True, True, True], lock_free=True, lines=list(lines), **more))
+
+    closing = "the suite is closing: no new member starts"
+    for check_id, wants in (
+            ("config/member-close-on-interrupt", [
+                expect("pooled", "KeyboardInterrupt", 0, ["dead"], 4),
+                expect("communicate", "KeyboardInterrupt", 0, ["dead"], 2),
+                expect("leader-first", "KeyboardInterrupt", 0, ["dead"], 2),
+                expect("setsid", "KeyboardInterrupt", 0, ["alive", "dead"], 2)]),
+            ("config/member-close-handlers", [
+                expect("close", "KeyboardInterrupt", 0, ["dead"], 2, protected=[True, True]),
+                expect("sigterm", "SystemExit 143", 0, ["dead"], 2),
+                expect("install", "KeyboardInterrupt", 0, [], 0),
+                expect("split-T-I", "SystemExit 143", 0, [], 0,
+                       control=[closing, [signal.SIGTERM], True],
+                       closes=[[signal.SIGINT], [signal.SIGINT]]),
+                expect("split-T-II", "SystemExit 143", 0, [], 0,
+                       control=[closing, [signal.SIGTERM], True],
+                       closes=[[signal.SIGINT], [signal.SIGINT, signal.SIGINT]]),
+                expect("split-TI-I", "SystemExit 143", 0, [], 0,
+                       control=[closing, [signal.SIGTERM, signal.SIGINT], True],
+                       closes=[[signal.SIGINT], [signal.SIGINT]]),
+                expect("split-IT-I", "SystemExit 143", 0, [], 0,
+                       control=[closing, [signal.SIGINT, signal.SIGTERM], True],
+                       closes=[[signal.SIGINT], [signal.SIGINT]]),
+                expect("late-monitor", "returned 2", 0, ["dead"], 2, (False, True),
+                       handshake=["late SIGINT"])]),
+            ("config/member-close-lock", [
+                expect("lock", "KeyboardInterrupt", 0, ["dead"], 2,
+                       monitor_pin=[[["members registered"], ["SIGINT"], 0],
+                                    [["member in communicate"], ["SIGINT"], 0]],
+                       expiry_pin=[1, True], bound_pin=[True, ["pin"], False, ["pin"]],
+                       direct=[None, True, []], loop=[[], True],
+                       held=[True, True, [True]])]),
+            ("config/member-failed-no-late-launch", [
+                expect("failed", "ValueError: injected failed member a", 0, [], 0,
+                       late=[["b", closing]], member_a=[True, True],
+                       evidence=[True, True]),
+                expect("failed-signal", "KeyboardInterrupt", 0, [], 0,
+                       late=[["b", closing]], member_a=[True, True],
+                       evidence=[True, True]),
+                expect("failed-handshake", "HandshakeTimeout: member b running not within 1 s",
+                       0, [], 0, late=[["b", closing]], handshake=["member b running"],
+                       member_a=[True, True], evidence=[True, True]),
+                # The deterministic stalled twin (round 20): one member, failing WITHOUT
+                # arriving, so a_arrived, a_raises and the send list hold, in every run,
+                # the state a slow git leaves them in, while every compared field is
+                # structural. An edit that ties evidence, lock_free or restored to member
+                # a's arrival or raise or to the send list on code this run executes, not
+                # also dependent on any other state that differs from a slow "failed" run,
+                # yields a wrong VALUE here, a definite mismatch in a healthy run; a stall's
+                # presence is pinned the same way by "failed-refused" (stalls nonempty)
+                # beside "failed" (stalls empty). late=[] shows run_member never runs
+                # here, which is why the residual probes raisegate, trygate and sendgate
+                # pass this pin: a change that gives this run a member b must revisit
+                # THE RESIDUAL (_allowlist_producers). The empty send list is deliberate
+                # (_DELIBERATE_EMPTY_SEND), so a healthy stalled run stands nothing down.
+                expect("failed-stalled", "ValueError: injected failed member a", 0, [], 0,
+                       timely=False, late=[], member_a=[False, False],
+                       evidence=[True, True]),
+                ("handshake-map", [True, True, True, True]),
+                ("record-map", [True] * 30),
+                # The stalled run's slow-control record, read from the child's source: intact
+                # in the committed child, and each probe, in control_probes order (norec
+                # through dottedimport), names the fact it breaks; the last seven
+                # (exceptbind, ctxclass, mainattr, wildcard, exitafter, clsname,
+                # funcglobals) are instances of disclosed routes the reader does not read,
+                # held at [] so a reader that starts catching one must update the NOT READ
+                # text of _slow_control_record.
+                ("slow-control", [[], ["gate"], ["gate", "record"], ["gate"], ["outcome"],
+                                  ["outcome"], ["outcome"], ["outcome"], ["outcome"],
+                                  ["outcome"], ["outcome"], ["outcome"], ["outcome"],
+                                  ["outcome"], ["outcome"], ["outcome"], ["record"],
+                                  ["gate"], ["gate"], ["gate"], ["gate"], ["gate"],
+                                  ["kept"], ["kept"], ["kept"], ["kept"], ["kept"],
+                                  ["kept"], ["kept"], ["kept"], ["outcome"], ["outcome"],
+                                  [], [], [], [], [], [], []]),
+                # Each allowlisted field's producer reads only its traced bound-free source:
+                # evidence the sweep wrapper's branch_swept appends (guarded only by its pure
+                # frame walk, frame), their count before the direct call (witnessed), the
+                # builtins and the failed-scenario test on argv (scenario, sys); lock_free the
+                # lock_free helper's zero-timeout acquire on the registry lock (suite);
+                # restored the getsignal reads and the appended constants (signal).
+                ("producer-map", dict(
+                    evidence=["bool", "branch_swept", "frame", "len", "scenario", "sys",
+                              "witnessed"],
+                    lock_free=["lock_free", "suite"], restored=["restored", "signal"],
+                    unrecognized=[])),
+                # One expectation per probe, in producer_probes order. The eleven final
+                # empty diffs pass this net by design: moduleattr and forloop are disclosed
+                # boundaries (forloop is caught by the "failed-stalled" value pin);
+                # raisegate, trygate, sendgate, scenariogate, bgate, outcomegate,
+                # outcomeonlygate, stallgate and pinned_version are examples of THE
+                # RESIDUAL (_allowlist_producers), which passes the value pin too, so an
+                # oracle or scenario change that starts catching one of them must update
+                # that text.
+                ("producer-oracle", [["evidence"], ["evidence"], ["evidence"],
+                                     ["lock_free", "unrecognized"],
+                                     ["restored", "unrecognized"],
+                                     ["evidence", "unrecognized"], ["unrecognized"],
+                                     ["evidence"], ["evidence"], ["evidence"],
+                                     ["evidence"], ["evidence"], ["evidence"],
+                                     ["unrecognized"], ["unrecognized"],
+                                     ["unrecognized"], ["unrecognized"], ["evidence"],
+                                     ["unrecognized"], ["unrecognized"],
+                                     ["unrecognized"], ["unrecognized"],
+                                     ["unrecognized"], ["unrecognized"],
+                                     ["unrecognized"], ["evidence", "unrecognized"],
+                                     ["evidence"], ["evidence"], ["evidence"],
+                                     ["evidence"], ["evidence"],
+                                     ["evidence", "unrecognized"],
+                                     ["evidence"], ["evidence"], ["evidence"], ["evidence"],
+                                     ["evidence", "unrecognized"],
+                                     ["evidence", "unrecognized"],
+                                     ["evidence", "unrecognized"],
+                                     ["evidence", "unrecognized"],
+                                     ["evidence", "unrecognized"],
+                                     [], [], [], [], [], [], [], [], [], [], []]),
+                ("sweep-site", ["except-before-wait"]),
+                ("sweep-oracle", [[(4, "except-before-wait")], [(5, "unrecognized")],
+                                  "LookupError", [(5, "unrecognized")],
+                                  [(4, "unrecognized")], [(5, "unrecognized")],
+                                  [(5, "unrecognized")], [(5, "unrecognized")]])]),
+            ("config/member-close-unresolved-verdict", [
+                expect("unresolved", "returned 2", 1, [], 0, (False, True),
+                       released=[[], 0]),
+                expect("release-timeout", "returned 2", 0, [], 0, (False, True),
+                       run=["0", 0], refused=1),
+                expect("start-timeout", "returned 2", 0, [], 0, (False, True),
+                       run=["TIMEOUT: ", 1], refused=1),
+                expect("sweep-refused", "returned 2", 0, [], 0, (False, True), refused=1),
+                expect("close-refused", "returned 2", 0, [], 0, (False, True), refused=1),
+                expect("close-wait-refused", "returned 2", 0, [], 0, (False, True), refused=1,
+                       site=site_wants[0]),
+                expect("close-left-refused", "returned 2", 0, [], 0, (False, True), refused=1,
+                       site=site_wants[1]),
+                expect("failed-refused", "returned 2", 0, [], 0, (False, True),
+                       late=[["b", closing]], caught="injected failed member a", refused=1,
+                       member_a=[True, True], evidence=[True, True]),
+                ("close-sites", ["with"] * len(refused_site_scenarios)),
+                ("close-oracle",
+                 [[(1, "with"), (3, "with"), (5, "with")], "LookupError",
+                  [(1, "with"), (3, "unrecognized"), (5, "unrecognized"),
+                   (7, "unrecognized")]]),
+                ("down-map", [True, True, True, True])])):
+        observed = [got[want[0]] for want in wants]
+        wants = _stood_down_wants(observed, wants)
+        check(check_id, observed, wants, _partial_timeout_cause(observed, wants) or None)
+    observed = [refused_start, got["closing-control"]]
+    wants = _stood_down_wants(observed, [
+        (closing, []), expect("closing-control", "KeyboardInterrupt", 0, [], 0,
+                              control=[closing, [signal.SIGINT], True])])
+    check("config/member-closing-refuses-start", observed, wants,
+          _partial_timeout_cause(observed, wants) or None)
+
+    rc, out, err = _run_bounded([sys.executable, "-I", "-B", "-c", _CLOSE_SWEEP_CHILD,
+                                 str(ROOT / "tools")], str(fixture), dict(os.environ), 300,
+                                "member-close signal sweep child", "CONTROL ")
+    got, sweep = _sweep_observed(rc, out, err)
+    if sweep is not None:
+        print("MEMBER CLOSE SWEEP: {} ({} s)".format(", ".join(
+            "{} {} runs".format(mode, sweep[mode][0]) for mode in _SWEEP_MODES),
+            sweep["seconds"]), flush=True)
+    # The parser's own controls, on a synthetic report every mode of which is clean: accepted
+    # after exit 0, refused after the same report followed by exit 1.
+    synthetic = dict({mode: [1, []] for mode in _SWEEP_MODES}, names=list(_SWEEP_REACHED),
+                     seconds=0, baseline=_SWEEP_WANT[0][0])
+    synthetic["branch baseline"] = _SWEEP_WANT[0][1]
+    synthetic = "SWEEP-REPORT " + json.dumps(synthetic) + "\n"
+    controls = [_sweep_observed(0, synthetic, "")[0] == _SWEEP_WANT,
+                _sweep_observed(1, synthetic, "injected child failure")[0] == _SWEEP_WANT]
+    check("config/member-close-signal-sweep", (got, controls), (_SWEEP_WANT, [True, False]),
+          (rc,) if _is_timeout(rc) else None)
+
+
+# The _CLOSE_SWEEP_CHILD report config/member-close-signal-sweep requires: each body's clean
+# baseline (outcome, expected outcome, both closes clean, no group left, restores SIGTERM then
+# SIGINT), every mode with runs and none failing, and every window function reached.
+_SWEEP_MODES = tuple(body + mode + " " + name for body in ("", "branch ")
+                     for mode in ("line", "instruction", "pair") for name in ("SIGINT", "SIGTERM"))
+_SWEEP_REACHED = ("__enter__", "__exit__", "_close_members", "_config_results", "_finish_members",
+                  "_member_group_empty", "_release_member_group", "_restore_signal_handlers",
+                  "_signal_member_groups", "body", "branch", "main")
+_SWEEP_WANT = (
+    [[True, [outcome, outcome, [[], []], 0, [int(signal.SIGTERM), int(signal.SIGINT)]]]
+     for outcome in ("returned 0", "ValueError: injected failed member")],
+    [[mode, True, []] for mode in _SWEEP_MODES], [])
+
+
+def _sweep_observed(rc, out, err):
+    """config/member-close-signal-sweep's observation of one _CLOSE_SWEEP_CHILD run, and the parsed
+    report (None when not read). The child must have EXITED 0 before its report is read at all: a
+    report followed by any other exit is a failure, returned with the exit code and stderr; a
+    timeout is returned as is (cannot evaluate). The observation is the two baselines, per mode
+    whether it made runs and its failing runs, and the window functions it never reached."""
+    if _is_timeout(rc):
+        return rc, None
+    if rc != 0:
+        return "sweep child exited {}: err={!r}".format(rc, err[-400:]), None
+    try:
+        sweep = json.loads(out.rpartition("SWEEP-REPORT ")[2].partition("\n")[0])
+        return ([sweep["baseline"], sweep["branch baseline"]],
+                [[mode, sweep[mode][0] > 0, sweep[mode][1]] for mode in _SWEEP_MODES],
+                sorted(set(_SWEEP_REACHED) - set(sweep["names"]))), sweep
+    except (TypeError, ValueError, KeyError, IndexError, AttributeError) as exc:
+        return "no report ({}): rc={} err={!r}".format(exc, rc, err[-400:]), None
+
+
+def _member_timeout_timely(elapsed, budget, recorded=None):
+    """True when elapsed stayed under the budget, else the budget-timeout message, recorded
+    (default CANNOT_EVALUATE: fail closed, never a pass, never definite) and used as the
+    stood-down value on BOTH sides of the comparison, because timing alone is never a
+    definite finding. config/member-timeout-cannot-evaluate pins this producer on a synthetic
+    over-budget value against a private record, so a mutant that stops recording or stops
+    reporting the reached budget fails that check definitively whatever the real control's
+    own timing."""
+    if elapsed < budget:
+        return True
+    message = ("TIMEOUT: member-timeout control: finished after {:.1f} s, past its {} s "
+               "budget (cannot evaluate)".format(elapsed, budget))
+    (CANNOT_EVALUATE if recorded is None else recorded).append(message)
+    return message
+
+
+def _member_timeout_controls(base):
+    """Controls for the bounded member runs.
+    config/member-timeout-cannot-evaluate: a fixture member spawns a sleeping grandchild that
+    inherits (holds) its stdout, then sleeps past a short bound; the timeout comes back as the
+    cannot-evaluate marker and is recorded, its diagnostic on the control's own stream and nothing
+    on the suite's stderr. config/member-timeout-kills-group: the grandchild is "dead" afterwards
+    (_pid_state; unreadable /proc evidence is cannot-evaluate and fails the check closed).
+    config/pid-state-fail-closed: _pid_state over a scratch process table.
+    config/member-timeout-cleanup-failure: with the group kill refused (PermissionError injected
+    into both the pidfd and the numeric group signal),
+    the timeout stays recorded and cannot-evaluate, the refusal is reported as a second stdout
+    line, nothing reaches stderr, and the leader is killed alone.
+    config/member-failure-diagnostic-stdout: a member exiting non-zero prints its output on
+    stdout, never stderr. config/timeout-verdict-exit and config/timeout-attribution: _verdict's
+    ordering and the attribution helpers. config/member-timeout-main-verdict: main() in a child,
+    with production defaults, exits 2 for a timeout with only attributed findings and 1 when a
+    definite finding is also present, the diagnostic on stdout and stderr empty; one scenario's
+    timeout never hides the other's definite mismatch (_mixed_timeout_controls). The timeout
+    record and cleanup order, the guarded cleanup diagnostic and the cleanup on an interrupted
+    wait are pinned by _timeout_cleanup_order_controls; the member thread, the registry, the
+    group kill after a normal return and the suite's close under a real SIGINT by
+    _member_close_controls.
+    config/member-bound-table pins the per-member bound table against the registered roster. A
+    fixture that never got going inside its bound is attributed to that timeout, never a red."""
+    import contextlib
+    import io
+    import time
+    from unittest.mock import patch
+
+    fixture = base / "timeout-fixture"
+    fixture.mkdir()
+    pidfile = fixture / "grandchild.pid"
+    member = fixture / "member.py"
+    member.write_text(
+        "import subprocess, sys, time\n"
+        "subprocess.Popen([sys.executable, '-I', '-B', '-c', "
+        "'import os, sys, time; open(sys.argv[1] + \".tmp\", \"w\").write(str(os.getpid())); "
+        "os.replace(sys.argv[1] + \".tmp\", sys.argv[1]); time.sleep(600)', sys.argv[1]])\n"
+        "time.sleep(600)\n", encoding="utf-8")
+    recorded = []
+    diagnostic = io.StringIO()
+    started = time.monotonic()
+    with contextlib.redirect_stderr(io.StringIO()) as leaked:
+        rc = _run_config_member((str(member), str(pidfile)), dict(os.environ), bound=20,
+                                cannot_evaluate=recorded, report=diagnostic)
+    elapsed = time.monotonic() - started
+    budget = 20 + CONFIG_MEMBER_DRAIN_SECONDS + CONFIG_MEMBER_REAP_SECONDS + 30
+    # Timing alone is never a definite finding: a control past this budget is recorded as a
+    # cannot-evaluate timeout (fail closed, never a pass) and the field is stood down on both
+    # sides, so every other field stays compared; the producer itself is pinned below on a
+    # synthetic over-budget value, so removing the recording fails this check definitively.
+    timely = _member_timeout_timely(elapsed, budget)
+    over_recorded, under_recorded = [], []
+    over = _member_timeout_timely(budget + 1.0, budget, over_recorded)
+    producer_pin = [_is_timeout(over), over_recorded == [over],
+                    _member_timeout_timely(0.0, budget, under_recorded) is True,
+                    under_recorded == []]
+    check("config/member-timeout-cannot-evaluate",
+          (isinstance(rc, str) and rc.startswith("TIMEOUT: "), recorded == [rc],
+           diagnostic.getvalue() == "CONFIG-INJECTION {}\n".format(rc), leaked.getvalue(),
+           timely, producer_pin),
+          (True, True, True, "", timely, [True, True, True, True]))
+    cause = None
+    try:
+        grandchild = int(pidfile.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        # The fixture itself never got going inside its bound: host load, no verdict either way.
+        message = ("TIMEOUT: member-timeout control: the grandchild never started within the "
+                   "20 s bound ({})".format(exc))
+        CANNOT_EVALUATE.append(message)
+        got, cause = "not observed: " + message, (message,)
+    else:
+        deadline = time.monotonic() + 10
+        got = _pid_state(grandchild)
+        while got == "alive" and time.monotonic() < deadline:
+            time.sleep(0.2)
+            got = _pid_state(grandchild)
+        if got == "alive":
+            os.kill(grandchild, signal.SIGKILL)
+    check("config/member-timeout-kills-group", got, "dead", cause)
+
+    table = fixture / "proc"
+    for pid, content in (("101", "101 (sleep) S 1 2 3\n"), ("102", "102 (a) b) Z 1\n"),
+                         ("103", "103 no-state\n"), ("104", "104 (x) Q 1\n")):
+        (table / pid).mkdir(parents=True)
+        (table / pid / "stat").write_text(content, encoding="utf-8")
+    (table / "105" / "stat").mkdir(parents=True)
+    states = [_pid_state(pid, str(table)) for pid in (101, 102, 103, 104, 105, 106)]
+    (table / "self").mkdir()
+    states.append(_pid_state(106, str(table)))
+    check("config/pid-state-fail-closed",
+          [state.split(":")[0] for state in states],
+          ["alive", "dead", "cannot-evaluate", "cannot-evaluate", "cannot-evaluate",
+           "cannot-evaluate", "dead"])
+
+    sleeper = fixture / "sleeper.py"
+    sleeper.write_text("import time\ntime.sleep(600)\n", encoding="utf-8")
+    refused, leaders = [], []
+    real_killpg, real_pidfd_signal, real_popen = os.killpg, signal.pidfd_send_signal, \
+        subprocess.Popen
+
+    def refusing(real):
+        def refuse(target, sig, *rest):
+            if sig != signal.SIGKILL:
+                return real(target, sig, *rest)
+            refused.append(sig)
+            raise PermissionError(1, "injected group-kill refusal")
+        return refuse
+
+    def spawn(*args, **kwargs):
+        child = real_popen(*args, **kwargs)
+        leaders.append(child.pid)
+        return child
+
+    recorded = []
+    diagnostic = io.StringIO()
+    with patch.object(os, "killpg", refusing(real_killpg)), \
+            patch.object(signal, "pidfd_send_signal", refusing(real_pidfd_signal)), \
+            patch.object(subprocess, "Popen", spawn), \
+            contextlib.redirect_stderr(io.StringIO()) as leaked:
+        rc = _run_config_member((str(sleeper),), dict(os.environ), bound=3,
+                                cannot_evaluate=recorded, report=diagnostic)
+    lines = diagnostic.getvalue().splitlines()
+    check("config/member-timeout-cleanup-failure",
+          (isinstance(rc, str) and rc.startswith("TIMEOUT: "), recorded == [rc],
+           lines[:1] == ["CONFIG-INJECTION " + str(rc)],
+           len(lines) == 2 and "PermissionError" in lines[1] and "cannot-evaluate" in lines[1],
+           leaked.getvalue(), refused[:1], [_pid_state(pid) for pid in leaders]),
+          (True, True, True, True, "", [signal.SIGKILL], ["dead"]))
+
+    failing = fixture / "failing.py"
+    failing.write_text("import sys\nprint('member-out')\nprint('member-err', file=sys.stderr)\n"
+                       "sys.exit(3)\n", encoding="utf-8")
+    with contextlib.redirect_stdout(io.StringIO()) as out, \
+            contextlib.redirect_stderr(io.StringIO()) as leaked:
+        rc = _run_config_member((str(failing),), dict(os.environ), bound=120)
+    check("config/member-failure-diagnostic-stdout",
+          (rc, "member-out" in out.getvalue(), "member-err" in out.getvalue(), leaked.getvalue()),
+          (3, True, True, ""), (rc,) if _is_timeout(rc) else None)
+
+    codes = []
+    timeout = "TIMEOUT: m reached its 1 s bound (cannot evaluate)"
+    attributed = "config/m/rc: got {!r}, want 0".format(timeout)
+    for failures, timeouts, caused in (
+            ([], [], {}), (["a finding"], [], {}), ([], [timeout], {}),
+            (["a finding"], [timeout], {}),
+            ([attributed], [timeout], {attributed: (timeout,)}),
+            ([attributed, "a finding"], [timeout], {attributed: (timeout,)}),
+            ([attributed], [], {attributed: (timeout,)})):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            code = _verdict(failures, timeouts, caused)
+        codes.append((code, ("CANNOT EVALUATE" in out.getvalue(),
+                             "SELF-TEST FAIL" in out.getvalue(),
+                             "no verdict on that member" in out.getvalue())))
+    check("config/timeout-verdict-exit", codes,
+          [(0, (False, False, False)), (1, (False, True, False)), (2, (True, False, True)),
+           (1, (False, True, True)), (2, (True, False, True)), (1, (False, True, True)),
+           (1, (False, True, False))])
+
+    clean = (0, b"", b"", b"")
+    check("config/timeout-attribution",
+          ([_timeout_cause(got) for got in (timeout, [0, timeout], [1, timeout], [False, timeout],
+                                            "[Errno 2] launch", [0], 0)],
+           [_registered_offenders(results, [timeout]) for results in (
+               {("a",): clean}, {("a",): (timeout, b"", b"", b"")},
+               {("a",): (timeout, b"hook\n", b"", b"")},
+               {("a",): (timeout, b"", b"", b""), ("b",): (1, b"", b"", b"")},
+               {("a",): ("[Errno 2] launch", b"", b"", b"")}, {("a",): None})]),
+          ([(timeout,), (timeout,), (), (), (), (), ()],
+           [([], ()), ([("a",)], (timeout,)), ([("a",)], ()), ([("b",)], ()),
+            ([("a",)], ()), ([("a",)], ())]))
+
+    _main_verdict_control(sleeper, fixture)
+    _mixed_timeout_controls(sleeper)
+    _timeout_cleanup_order_controls(sleeper)
+    _member_close_controls(fixture)
+
+    roster = set(_registered_selftests())
+    record = ("opf/tools/check_opf_record.py", "--self-test", "--red-on-revert")
+    check("config/member-bound-table",
+          (sorted(key for key in CONFIG_MEMBER_BOUNDS if key not in roster),
+           _config_member_bound(record), CONFIG_MEMBER_BOUND_DEFAULT,
+           sorted({_config_member_bound(argv) for argv in roster if argv != record})),
+          ([], 3600, 1200, [1200]))
+
+
+def _verdict(failures, cannot_evaluate, caused):
+    """The suite exit code. A finding is attributed to a timeout when caused maps it to timeout
+    messages that were all recorded in cannot_evaluate (check() derives that from a result that is
+    a timeout message naming the member, _registered_offenders from a lane whose only offenders
+    timed out clean); every other finding is definite. 1 when any definite finding exists (a
+    definite finding outranks cannot-evaluate; the timeouts are listed beside it); 2 when a time
+    bound was reached and every finding is attributed to one; 0 when clean (main prints the PASS
+    line)."""
+    recorded = set(cannot_evaluate)
+    attributed = [finding for finding in failures
+                  if caused.get(finding) and set(caused[finding]) <= recorded]
+    definite = [finding for finding in failures if finding not in attributed]
+    note = "a member reached its time bound, so this run is no verdict on that member"
+    if definite:
+        print("SELF-TEST FAIL:")
+        for failure in definite:
+            print("  - " + failure)
+    if cannot_evaluate:
+        print(("  also cannot evaluate ({}):" if definite else
+               "SELF-TEST CANNOT EVALUATE: {}:").format(note))
+        for entry in cannot_evaluate:
+            print("  - " + entry)
+        if attributed:
+            print("  findings attributed to those timeouts:")
+            for finding in attributed:
+                print("  - " + finding)
+    if definite:
+        return 1
+    return 2 if cannot_evaluate else 0
 
 
 def _manifest_setup_failures(base):
@@ -1437,6 +5797,7 @@ OPF_LIFECYCLE_EXEMPTIONS = {
     "opf/tools/_opf_adopt.py": ("Adoption vocabulary and validator vectors; its observe vector suite runs "
                                 "git only inside _opf_adopt_observe._git_archive_fixture's lifecycle."),
     "opf/tools/_opf_adopt_apply.py": "Apply-shell refusal, evidence and journal vectors over temporary filesystem fixtures.",
+    "opf/tools/_opf_adopt_discover.py": "Read-only source-discovery vectors over temporary filesystem fixtures.",
     "opf/tools/_opf_adopt_hook.py": "Pure enable-hook merge vectors over synthetic registration bytes.",
     "opf/tools/_opf_init.py": "Canonical model bytes, defaults and validator vectors.",
     "opf/tools/_opf_init_contract.py": "KEEP contract validation over synthetic models.",
@@ -1658,10 +6019,9 @@ def _opf_home_lifecycles(config_results):
     roster = [argv for argv in _registered_selftests()
               if _command_identity(argv)[0].startswith("opf/tools/")]
     paths = {_command_identity(argv)[0] for argv in roster}
-    missing = set(OPF_LIFECYCLE_EXEMPTIONS) - paths
-    for argv in roster:
-        if config_results.get(argv) != (0, b"", b"", b""):
-            missing.add(_command_identity(argv)[0])
+    # Paths missing for a reason other than their config run; _lifecycle_finding adds the config
+    # runs and keeps a member whose run only timed out out of a definite finding.
+    definite = set(OPF_LIFECYCLE_EXEMPTIONS) - paths
     problems = []
     try:
         trees = {Path(relative).stem: ast.parse(
@@ -1677,9 +6037,9 @@ def _opf_home_lifecycles(config_results):
         reason = OPF_LIFECYCLE_EXEMPTIONS.get(relative)
         if not delegates:
             if not reason or not reason.strip():
-                missing.add(relative)
+                definite.add(relative)
         elif reason is not None:
-            missing.add(relative)  # A stale exemption must be reviewed and removed.
+            definite.add(relative)  # A stale exemption must be reviewed and removed.
         for entry, delegate in sorted(delegates.items()):
             env = dict(os.environ, HOME="/caller-home", XDG_CONFIG_HOME="/caller-xdg",
                        GIT_CONFIG_NOSYSTEM="0")
@@ -1707,7 +6067,23 @@ def _opf_home_lifecycles(config_results):
         if (module, entry) not in results:
             problems.append("{}.{}: missing lifecycle observation".format(module, entry))
         check(check_id, results.get((module, entry)), (0, [[[True, True, True, True]], True]))
-    check("env/registered-opf-lifecycles", (sorted(missing), problems), ([], []))
+    got, cause = _lifecycle_finding(roster, config_results, definite, problems)
+    check("env/registered-opf-lifecycles", got, ([], []), cause)
+
+
+def _lifecycle_finding(roster, config_results, definite, problems, recorded=None):
+    """(got, cause) for env/registered-opf-lifecycles. definite holds the paths missing for a
+    reason other than their config run; each roster argv whose config run was not clean adds its
+    path to it unless that run only timed out (_split_offenders). With any definite path or
+    problem, got lists ONLY the definite paths and cause is (): a member whose run only timed out
+    is reported by its own timeout message on the cannot-evaluate list, never in this FAIL.
+    Otherwise got lists the timed-out paths and cause their timeout messages."""
+    offenders, timed_out, causes = _split_offenders(
+        {argv: config_results.get(argv) for argv in roster}, recorded)
+    definite = set(definite) | {_command_identity(argv)[0] for argv in offenders}
+    if definite or problems:
+        return (sorted(definite), problems), ()
+    return (sorted({_command_identity(argv)[0] for argv in timed_out}), problems), causes
 
 
 def _build_decoy(base):
@@ -1748,22 +6124,21 @@ def _snapshot_git_dir(repo):
 def _run_corpus(poison_key, poison_value, cwd):
     """Run the corpus self-test isolated with exactly ONE repository-selecting poison on top of an
     otherwise scrubbed environment, so the lane measures that poison alone. Returns the child's
-    return code, or a loud string on a launch failure or timeout."""
+    return code, a loud string on a launch failure, or the timeout message _run_bounded recorded
+    as cannot-evaluate."""
     env = _git_fixture_env.git_fixture_env()
     env[poison_key] = poison_value
-    try:
-        proc = subprocess.run([sys.executable, "-I", "-B", str(CORPUS_SELFTEST)],
-                              cwd=str(cwd), env=env, capture_output=True, text=True, timeout=300)
-        return proc.returncode
-    except (OSError, subprocess.SubprocessError) as exc:
-        return "corpus launch failed: {}".format(exc)
+    rc, _, _ = _run_bounded([sys.executable, "-I", "-B", str(CORPUS_SELFTEST)], str(cwd), env,
+                            CORPUS_BOUND, "corpus self-test under " + poison_key, "CORPUS ")
+    return rc if _is_timeout(rc) or not isinstance(rc, str) else "corpus launch failed: " + rc
 
 
 def _run_corpus_imported(poison_key, poison_value, cwd):
     """Run the corpus suite through its IMPORTED surface (run_self_test(), which bypasses
     __main__ and its entry-point scrub) isolated with exactly ONE repository-selecting poison,
     so the fixture-lifecycle scrub in GitTests.setUp must hold on its own. Returns the child's
-    return code, or a loud string on a launch failure or timeout."""
+    return code, a loud string on a launch failure, or the timeout message _run_bounded recorded
+    as cannot-evaluate."""
     env = _git_fixture_env.git_fixture_env()
     env[poison_key] = poison_value
     code = "\n".join((
@@ -1774,12 +6149,11 @@ def _run_corpus_imported(poison_key, poison_value, cwd):
         "rc = selftest_aiqt_corpus.run_self_test()",
         "sys.exit(rc if dict(os.environ) == saved else 1)",
     ))
-    try:
-        proc = subprocess.run([sys.executable, "-I", "-B", "-c", code, str(ROOT / "tools")],
-                              cwd=str(cwd), env=env, capture_output=True, text=True, timeout=300)
-        return proc.returncode
-    except (OSError, subprocess.SubprocessError) as exc:
-        return "imported corpus launch failed: {}".format(exc)
+    rc, _, _ = _run_bounded([sys.executable, "-I", "-B", "-c", code, str(ROOT / "tools")],
+                            str(cwd), env, CORPUS_BOUND,
+                            "imported corpus self-test under " + poison_key, "CORPUS ")
+    return (rc if _is_timeout(rc) or not isinstance(rc, str)
+            else "imported corpus launch failed: " + rc)
 
 
 def _auto_maintenance_children(workdir, env):
@@ -2063,6 +6437,18 @@ _SCAN_ALLOWED_UNPINNED = (
     ("tools/check_release_delta.py", "_git", ("git",),
      "production gate read funnel (rev-parse/cat-file/ls-tree/show and `worktree list`"
      " reads); read-only by design, and production launches stay unchanged"),
+    ("tools/check_release_delta.py", "_git_raw", ("git",),
+     "production gate read funnel with replace refs and grafts disabled"
+     " (--no-replace-objects plus GIT_GRAFT_FILE pinned to os.devnull; diff-tree and"
+     " merge-base reads for the post-release revision binding, QA round-2); read-only by"
+     " design, and production launches stay unchanged"),
+    ("tools/check_release_delta.py", "_stage1_git", ("git",),
+     "stage-1 re-execution read funnel (QA round 5, D-397-REEXEC-FROM-COMMITTED): rev-parse and"
+     " cat-file --batch reads only, with --no-replace-objects and -c core.commitGraph=false -c"
+     " core.fsmonitor=false in option position plus an INLINE GIT_* scrub (GIT_NO_REPLACE_OBJECTS=1,"
+     " GIT_GRAFT_FILE pinned to os.devnull); the env is built inline rather than through"
+     " _substitution_free_env because stage 1 runs before that function is defined and may import"
+     " nothing from the checkout; read-only by design, never a maintenance-triggering subcommand"),
     ("tools/check_release_delta.py", "_index_materialized_tree", ("git",),
      "throwaway-index staging funnel: the loop variable carries exactly `init -q` and"
      " `add --force -A` over a raw-materialized temp tree under a scrubbed env; neither"
@@ -2099,6 +6485,10 @@ _SCAN_ALLOWED_UNPINNED = (
      "cannot-evaluate head: replays the REGISTERED hook entry's own dispatcher command (a"
      " python3 hook-script argv from the hooks registry), not a git launch; the suite's"
      " lifecycle PATH wrapper pins any git a hook child resolves through PATH"),
+    ("tools/selftest_git_fixture_env.py", "_start_member_group", ("unresolved",),
+     "cannot-evaluate head: the bounded-run funnel (_run_bounded) receives its argv from its"
+     " callers, and every caller passes a sys.executable head (_run_config_member's registered members,"
+     " the corpus leak lanes and the member-timeout controls' fixtures); no git launch"),
     ("opf/tools/_opf_adopt_hook.py", "self_test", ("unresolved",),
      "cannot-evaluate argv: the sandbox-mock seam canary calls subprocess.Popen(None)"
      " to prove the mock net denies the subprocess seam; with the mocks in place the"
@@ -4491,7 +8881,81 @@ def _expected_check_ids():
     return None
 
 
-def main(report_path=None):
+class _SuiteLanesReplaced(Exception):
+    """Raised by main() right after a caller-supplied lanes callable ran, to skip the suite's own
+    lanes and fall through to main()'s own verdict path (config/member-timeout-main-verdict)."""
+
+
+def main(report_path=None, lanes=None):
+    """The suite's entry: _suite_main (the lanes and the verdict) inside ONE top-level try whose
+    finally ends every member group still registered (_finish_members, _close_members), on every
+    exit: a return, a timeout, KeyboardInterrupt, SystemExit or any other exception. While it runs,
+    the first SIGINT or SIGTERM raises and every later one is deferred, never raised
+    (_close_on_signal, first raise then defer). THE FALLBACK CLOSE PROTECTS THE CLOSING STORE: the
+    store closing = True is the first statement of a finally that is itself inside the try whose
+    finally runs the second close, so a signal raising at that store (closing still clear, none
+    raised yet) skips at most the first close, and the handler has then set closing itself; once
+    closing is set or one signal has raised, no signal raises, so neither close can be cut short
+    and the main thread never takes the registry lock while a handler could raise. (A try statement
+    as the finally's first statement would not do under the sweep's line-event model: CPython 3.14
+    leaves that line's NOP outside every protected range, so a raise delivered there escapes main()
+    with both closes skipped.) The close handlers stay installed through BOTH closes and the
+    caller's dispositions are restored ONCE, after the second (_restore_signal_handlers), even when
+    the installation itself was interrupted. THE DEFERRED-SIGNAL PRECEDENCE (_raise_held): every
+    signal received while closing is set or after one has raised is kept, in the order received,
+    and none is dropped; after the restore, when any was deferred, _raise_held raises once the
+    strongest of the run's signals, SIGTERM over SIGINT whatever the order (SystemExit 143 whenever
+    a SIGTERM was received, else KeyboardInterrupt), and records it, so a SIGTERM a control's
+    _reopen_members already raised still outranks a SIGINT held during the closes; when none was
+    deferred, the exception already propagating stands. Only then is the exit code final
+    (_final_verdict): problems the second close still meets, and any registry lock refusal of the
+    run, make a clean run cannot-evaluate (exit 2), and the PASS line is printed only after the
+    close. config/member-close-signal-sweep pins this by a sweep over two suite bodies (one
+    returning 0, one driving the config pool's failed-member branch): a real SIGINT, and separately
+    a SIGTERM, at every line event from the suite body through the restore (sys.settrace), at every
+    bytecode instruction of that range (sys.monitoring), and a second signal at every line after
+    each first (sys.monitoring, since CPython drops a trace function that raised), each run
+    requiring a completed close, an empty registry, a free lock, the handlers restored in reverse
+    order, nothing left deferred and exactly the outcome this precedence gives for the signals
+    sent. config/member-close-handlers pins a SIGINT during the installation, a
+    SIGTERM, the restored handlers and a real member closed under SIGINTs at the entry of each
+    close; config/member-close-lock the lock; config/member-close-unresolved-verdict the verdict.
+    DISCLOSED RESIDUALS: the guarantee holds at the interpreter's signal-delivery points
+    (eval-breaker granularity) on the main thread, where CPython runs Python signal handlers; a
+    signal delivered to the process before the handlers are installed takes the default
+    disposition, and one delivered after the restore takes the restored disposition (a SIGINT
+    after SIGINT's restore raises KeyboardInterrupt there, replacing an exception already
+    propagating when nothing was deferred; one handled at or after the final drain's entry
+    preempts that drain, so the signals still deferred, a SIGTERM among them, are dropped). A
+    signal whose own Python handler is cut off at its entry by a
+    newly arrived one that raises is lost (CPython has already cleared its pending flag;
+    _close_on_signal). SIGKILL, and a SIGINT or SIGTERM whose disposition the caller had already
+    changed (left as it is), are outside this, and so is SIGHUP (like every other signal but SIGINT
+    and SIGTERM, it keeps the caller's disposition, and its default action ends the process with no
+    close); an exception set into the main thread from outside (PyThreadState_SetAsyncExc) is not a
+    signal and is not limited to one."""
+    _MEMBERS.update(closing=False, raised=None, held=[])
+    del _MEMBERS["refused"][:]
+    previous, code, unresolved = {}, None, []
+    try:
+        try:
+            try:
+                _install_signal_handlers(previous)
+                code = _suite_main(report_path, lanes)
+            finally:
+                _MEMBERS["closing"] = True
+                _finish_members()
+        finally:
+            unresolved = _finish_members()
+    finally:
+        try:
+            _restore_signal_handlers(previous)
+        finally:
+            _raise_held()
+    return _final_verdict(code, unresolved, list(_MEMBERS["refused"]))
+
+
+def _suite_main(report_path, lanes):
     if report_path is not None:
         # The execution report is finalized at interpreter exit, after this run's cleanup
         # (tools/_selftest_exit_report.py); nothing writes it in band.
@@ -4507,6 +8971,9 @@ def main(report_path=None):
         return 2
     try:
         base = Path(raw)
+        if lanes is not None:
+            lanes(base)
+            raise _SuiteLanesReplaced
 
         # ---------- layer 1: the scrub itself ----------
         ambient_home = os.environ.get("HOME")
@@ -4785,6 +9252,7 @@ def main(report_path=None):
 
         _roster_checks()
         _opf_lifecycle_graph_checks()
+        _member_timeout_controls(base)
         config_results = _config_injection_lane(base)
         _manifest_setup_failures(base)
         _manifest_extra_setup_failures()
@@ -4818,6 +9286,8 @@ def main(report_path=None):
         check("leak/imported-gitdir-poison-fixture-green", rc, 0)
         check("leak/imported-gitdir-poison-caller-unchanged",
               _snapshot_git_dir(decoy) == snap_before, True)
+    except _SuiteLanesReplaced:
+        pass
     finally:
         shutil.rmtree(raw, ignore_errors=True)
 
@@ -4828,14 +9298,8 @@ def main(report_path=None):
         FAILURES.append("execution-set/missing: {}".format(check_id))
     for check_id in sorted(_EXECUTED_SET - expected):
         FAILURES.append("execution-set/extra: {}".format(check_id))
-    if FAILURES:
-        print("SELF-TEST FAIL:")
-        for failure in FAILURES:
-            print("  - " + failure)
-        return 1
-    print("SELF-TEST PASS: {} unique checks executed; execution set reconciled against "
-          "tools/selftest_checks.toml".format(len(EXECUTED)))
-    return 0
+    # 0 here is not yet a pass: main() prints the PASS line only after its close (_final_verdict).
+    return _verdict(FAILURES, CANNOT_EVALUATE, TIMEOUT_CAUSED)
 
 
 def _parse_argv(argv):

@@ -13,13 +13,19 @@ permissions:
   contents: read
 
 jobs:
-  quality:
-    name: Quality gates
+  # The gates run as parallel jobs, so the run takes about as long as its longest single step
+  # rather than the sum of all of them. Every job repeats the same pinned checkout and setup:
+  # fetch-depth: 0 gives the version-monotonicity gate the changelog.toml history it compares
+  # base-vs-head; fetch-tags: true is explicit (depth-0 already fetches tags) so the tag layer, once
+  # a release records a tag, sees real tag objects rather than an unfetched-but-present ambiguity.
+  # Each gate runs as its own step so a failure names itself in the UI.
+  # No step carries continue-on-error: a gate that cannot fail is decorative.
+  # Within a job the steps keep their original relative order. The Quality gates job at the end
+  # is the one required status and aggregates every job.
+  secrets:
+    name: Secrets and leaks
     runs-on: ubuntu-latest
     steps:
-      # fetch-depth: 0 gives the version-monotonicity gate the changelog.toml history it compares
-      # base-vs-head; fetch-tags: true is explicit (depth-0 already fetches tags) so the tag layer, once
-      # a release records a tag, sees real tag objects rather than an unfetched-but-present ambiguity.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -29,8 +35,6 @@ jobs:
         with:
           python-version: '3.14'
 
-      # Each gate runs as its own step so a failure names itself in the UI.
-      # No step carries continue-on-error: a gate that cannot fail is decorative.
       - name: Secrets (project scanner)
         run: python3 -I -B tools/check_secrets.py
 
@@ -82,8 +86,28 @@ jobs:
       - name: Derived command parameters
         run: python3 -I -B tools/check_derived_command_parameters.py
 
+  site:
+    name: Text and site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
       - name: Dashes
         run: python3 -I -B tools/check_no_dashes.py
+
+      - name: Dashes self-test
+        run: python3 -I -B tools/check_no_dashes.py --self-test
+
+      # This repository only: the gate's built-in default policy equals .aiqt/char-policy.json.
+      - name: Dashes default parity
+        run: python3 -I -B tools/check_no_dashes.py --default-parity
 
       - name: Internal links
         run: python3 -I -B tools/check_links.py
@@ -129,6 +153,19 @@ jobs:
 
       - name: Render driver behaviour self-test
         run: python3 -I -B tools/selftest_opf_render.py
+
+  opf:
+    name: OPF tooling
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
 
       - name: OPF homes contract self-test
         run: python3 -I -B opf/tools/check_opf_homes.py --self-test
@@ -196,11 +233,20 @@ jobs:
       - name: OPF adoption HTTPS observer and quarantine self-test
         run: python3 -I -B opf/tools/_opf_adopt_observe.py --self-test
 
+      - name: OPF adoption source-discovery self-test
+        run: python3 -I -B opf/tools/_opf_adopt_discover.py --self-test
+
       - name: OPF prompt-pack manifest drift gate self-test (PR7 slice 1)
         run: python3 -I -B opf/tools/check_opf_prompt_pack.py --self-test
 
       - name: OPF prompt-pack manifest drift gate
         run: python3 -I -B opf/tools/check_opf_prompt_pack.py
+
+      - name: OPF enforcement-pack platform coverage gate self-test
+        run: python3 -I -B tools/check_opf_enforce_platforms.py --self-test
+
+      - name: OPF enforcement-pack platform coverage gate
+        run: python3 -I -B tools/check_opf_enforce_platforms.py
 
       - name: OPF operation-lock self-test
         run: python3 -I -B opf/tools/_opf_oplock.py --self-test
@@ -220,8 +266,34 @@ jobs:
       - name: OPF init raw-history reader self-test
         run: python3 -I -B opf/tools/check_opf_init_observe.py --self-test --red-on-revert
 
+  opf-closure:
+    name: OPF standalone closure
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
       - name: OPF standalone-closure gate
         run: python3 -I -B tools/check_opf_standalone_closure.py
+
+  release:
+    name: Corpus, release and versioning
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
 
       - name: Corpus-core library self-test
         run: python3 -I -B tools/selftest_aiqt_corpus.py
@@ -330,6 +402,19 @@ jobs:
       - name: Doctor (read-only, NA in this repo)
         run: python3 -I -B tools/doctor.py --root .
 
+  generated:
+    name: Generated surfaces
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
       - name: Rules self-test
         run: python3 -I -B tools/gen_rules.py --self-test
       # Ships DORMANT: no release records a [release.artifacts] table today, so the gate prints NOT
@@ -426,6 +511,12 @@ jobs:
       - name: Hooks behaviour self-test
         run: python3 -I -B tools/selftest_aiqt_hooks.py
 
+      # The char-policy-write preview hook's policy validator is generated from tools/check_no_dashes.py.
+      - name: Char-policy validator generator self-test
+        run: python3 -I -B tools/gen_char_policy.py --self-test
+      - name: Char-policy validator drift
+        run: python3 -I -B tools/gen_char_policy.py --check
+
       # The .preview/ channel: each preview hook's own self-test passes, README.md and SHA256SUMS
       # agree with the files, and each table row links to its own file beside README.md.
       # NOT APPLICABLE when the directory is absent.
@@ -433,6 +524,19 @@ jobs:
         run: python3 -I -B tools/check_hooks_preview.py --self-test
       - name: Hooks preview
         run: python3 -I -B tools/check_hooks_preview.py
+
+  selftest-execution:
+    name: Execution-reconciled self-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
 
       - name: Selftest-execution gate self-test
         run: python3 -I -B tools/check_selftest_execution.py --self-test
@@ -443,9 +547,6 @@ jobs:
       - name: CI-status behaviour self-test (execution-reconciled)
         run: python3 -I -B tools/check_selftest_execution.py --suite ci-status-behaviour-selftest
 
-      - name: Git-fixture-env behaviour self-test (execution-reconciled)
-        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-selftest
-
       - name: Instruction-budget self-test (execution-reconciled)
         run: python3 -I -B tools/check_selftest_execution.py --suite instruction-budget-selftest
 
@@ -455,6 +556,35 @@ jobs:
         run: python3 -I -B tools/check_entry_guard.py
       - name: Verifier delivery self-test (execution-reconciled)
         run: python3 -I -B tools/check_selftest_execution.py --suite verifier-delivery-selftest
+
+  git-fixture-env:
+    name: Git-fixture-env self-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Git-fixture-env behaviour self-test (execution-reconciled)
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-selftest
+
+  registry:
+    name: Records, manifest and parity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
 
       - name: Record-drift self-test
         run: python3 -I -B tools/check_record_drift.py --self-test
@@ -537,6 +667,10 @@ jobs:
 
       - name: Standards mappings
         run: python3 -I -B tools/check_mappings.py
+      - name: Cited standards self-test
+        run: python3 -I -B tools/check_cited_standards.py --self-test
+      - name: Cited standards
+        run: python3 -I -B tools/check_cited_standards.py
 
       - name: Conformance suite self-test
         run: python3 -I -B tools/conformance.py --self-test
@@ -609,3 +743,41 @@ jobs:
         run: python3 -I -B tools/check_byte_canon.py --self-test
       - name: Byte canon (full gate on this platform)
         run: python3 -I -B tools/check_byte_canon.py
+
+  # The one status branch protection requires. GitHub reads a SKIPPED required job as passing, so
+  # a plain needs: dependency is not enough: when a needed job fails or is cancelled, a job without
+  # if: always() is skipped and the required status would read green. if: always() makes this job
+  # run whatever the needed jobs concluded, also when the run is cancelled, and its step passes
+  # only when every needed job concluded success; failure, cancelled, skipped, or any other
+  # result fails it. needs: must list every other job in this workflow;
+  # tools/check_ci_parity.py holds that coverage and the if: always() guard.
+  quality:
+    name: Quality gates
+    if: always()
+    needs:
+      - secrets
+      - site
+      - opf
+      - opf-closure
+      - release
+      - generated
+      - selftest-execution
+      - git-fixture-env
+      - registry
+      - byte-canon-matrix
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every quality job succeeded
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          set -euo pipefail
+          echo "Needed job results: ${RESULTS}"
+          rest="${RESULTS:-none}"
+          rest="${rest//success/}"
+          rest="${rest// /}"
+          if [ -n "$rest" ]; then
+            echo "Quality gates: FAILED, every needed job must conclude success"
+            exit 1
+          fi
+          echo "Quality gates: PASS, every needed job concluded success"
