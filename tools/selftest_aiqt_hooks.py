@@ -1981,7 +1981,11 @@ def _test_destructive_guard(failures, tmp):
         templates = {label: template for label, _cls, template, _want in PRIOR_EFFECT_VECTORS}
         saved_prior_effects = aiqt_hooks._destruct_prior_effects
         saved_sql_exec = aiqt_hooks._DESTRUCT_SQL_EXEC_RE
+        saved_scan = aiqt_hooks._destruct_scan
         never_match = re.compile(r"(?!x)x")
+
+        def honour_optout(command, segments, cwd, optout=True):
+            return saved_scan(command, segments, cwd)
 
         def blank_field(field, empty):
             def patched(segments, _field=field, _empty=empty):
@@ -2013,6 +2017,13 @@ def _test_destructive_guard(failures, tmp):
             ("sql-sqlite3", "pe-sqlite-shell", blank_client("sqlite3")),
             ("sql-mysql", "pe-mysql-shell-escape", blank_client("mysql")),
             ("sql-mariadb", "pe-mariadb-source", blank_client("mariadb")),
+            # round 5: the unparseable-command path ignores the opt-out, a recover-mode stop with a
+            # separator after it denies, and the sqlite3 single-quoted pipe form has its own witness
+            ("optout-policy", "pe-optout-unparseable", ("_destruct_scan", honour_optout)),
+            ("recover-stops", "pe-stop-separator-after-quote", ("_DESTRUCT_RECOVER_STOPS", "")),
+            ("sql-sqlite3-single-quote", "pe-sqlite-output-pipe-single",
+             ("_DESTRUCT_SQL_EXEC_RE", dict(saved_sql_exec, sqlite3=re.compile(
+                 saved_sql_exec["sqlite3"].pattern.replace("\\x27", ""), saved_sql_exec["sqlite3"].flags)))),
         ]
         for branch, label, (attr, replacement) in branch_mutants:
             command = prior_command(templates[label])

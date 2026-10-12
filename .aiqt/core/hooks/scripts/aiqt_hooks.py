@@ -410,7 +410,7 @@ _Segment = collections.namedtuple(
                  "argv_leading_tilde"))
 
 
-def _read_word(command, i, n):
+def _read_word(command, i, n, subst=None):
     """Read exactly ONE shell word starting at index i (which must be at a word character, never a space,
     newline, or metacharacter). Returns (text, opaque, started, all_digits, leading_tilde, new_i): text is
     the quote/escape decoded word, opaque is True if it carried an unquoted
@@ -423,7 +423,10 @@ def _read_word(command, i, n):
     after the tilde stay relative), while a quote or expansion AFTER the prefix-closing '/' (e.g. ~/$VAR) does
     not block it. Stops at an
     unquoted space, tab, newline, or metacharacter. Raises ValueError on an unbalanced quote or an
-    unterminated escape."""
+    unterminated escape. subst is the recover-mode callback of _lex_command (None everywhere else): when it
+    is given, a $( ) or backtick substitution inside double quotes and an unquoted backtick substitution
+    are read whole through it (it lexes the nested command list and returns the index just past the
+    substitution), and the word stays opaque."""
     chars = []
     opaque = False
     started = False
@@ -493,6 +496,12 @@ def _read_word(command, i, n):
                     chars.append("\\")  # a backslash before any other char is literal inside "..."
                     i += 1
                     continue
+                if subst is not None and (d == "`" or command.startswith("$(", i)):
+                    end = subst(d, i + (1 if d == "`" else 2), True)
+                    opaque = True
+                    chars.append(command[i:end])
+                    i = end
+                    continue
                 if d in "$`":
                     opaque = True
                 chars.append(d)
@@ -536,6 +545,16 @@ def _read_word(command, i, n):
             chars.append(command[i + 1])
             all_digits = False
             i += 2
+            continue
+        if subst is not None and c == "`":
+            if tilde_prefix_open:
+                leading_tilde = False
+                tilde_prefix_open = False
+            end = subst(c, i + 1, False)
+            opaque = True
+            all_digits = False
+            chars.append(command[i:end])
+            i = end
             continue
         # an ordinary unquoted character
         if c == "~" and not was_started:
@@ -820,13 +839,55 @@ def _strip_quoted_heredoc_bodies(command):
     return "".join(out)
 
 
-def _lex_command(command, partial=False):
+class _LexUnmodelled(ValueError):
+    """A recover-mode stop of _lex_command on a construct bash still runs, unlike a syntax error after
+    which bash runs nothing more, so what follows the stop cannot be classified."""
+
+
+_LEX_RECOVER_DEPTH = 8  # nested substitution groups a recover-mode read follows before it stops
+
+
+def _backtick_body(text, i, n, dquote):
+    """(inner, end) for a backtick substitution whose body starts at index i (just past the opening
+    backtick): inner is the command text bash runs (a backslash is removed before $, a backtick or a
+    backslash, and before a double quote inside double quotes) and end is the index just past the closing
+    backtick. None when the substitution is unterminated."""
+    keep = "$`\\\"" if dquote else "$`\\"
+    out = []
+    while i < n:
+        c = text[i]
+        if c == "\\" and i + 1 < n:
+            out.append(text[i + 1] if text[i + 1] in keep else text[i:i + 2])
+            i += 2
+            continue
+        if c == "`":
+            return "".join(out), i + 1
+        out.append(c)
+        i += 1
+    return None
+
+
+def _heredoc_body_span(command, i, n, delim, strip_tabs):
+    """(body_end, next_i) for a heredoc body starting at index i: body_end is where its delimiter line
+    begins (n when the body is unterminated) and next_i the index just past that line, the line matched
+    exactly as _skip_heredoc_bodies matches it."""
+    while i < n:
+        nl = command.find("\n", i)
+        line = command[i:(nl if nl != -1 else n)]
+        cand = line.lstrip("\t") if strip_tabs else line
+        if cand == delim:
+            return i, (n if nl == -1 else nl + 1)
+        i = n if nl == -1 else nl + 1
+    return n, n
+
+
+def _lex_command(command, partial=False, recover=False, _start=0, _close=False, _depth=0):
     """Lex the raw Bash command into ordered _Segment records. Raises ValueError on an unbalanced quote or
     escape, a NUL, or an unsupported construct (an UNQUOTED heredoc, a here-string, a process substitution, a
     '{fd}>' redirect, or a malformed redirect), so the caller falls back conservatively rather than acting on
     a partially-cleaned command. A QUOTED heredoc (<<'EOF'/<<"EOF"/<<\\EOF) is NOT unsupported: its literal
     body is EXCLUDED from analysis (round-2 finding 17) so a guard never fires on shell syntax quoted inside
-    heredoc prose. Linear, non-recursive, stdlib-only.
+    heredoc prose. Linear and stdlib-only; non-recursive except in recover mode (below).
 
     When partial is True the raise-on-error contract is replaced by a best-effort one: instead of raising,
     the lexer returns (segments, complete), where segments are the COMPLETE segments recovered before the
@@ -834,7 +895,23 @@ def _lex_command(command, partial=False):
     the whole command parsed). This lets the Bash abspth floor still inspect a resolvable PREFIX (an
     earlier relative cd/redirect) even when a LATER segment is unparseable, rather than discarding every
     parsed segment on the first heredoc/here-string/process-substitution. The default partial=False keeps
-    the list-returning, raise-on-error contract every other caller relies on."""
+    the list-returning, raise-on-error contract every other caller relies on.
+
+    recover=True is the destructive guard's unparseable-command read: instead of raising, the lexer MODELS
+    the constructs the default contract rejects and returns (segments, failure, end). A here-string is an
+    input redirect of its word; a '{fd}>' redirect is an ordinary redirect; an UNQUOTED heredoc body is data
+    up to its delimiter line, like a quoted one. A process substitution, a $( ) or backtick substitution
+    inside double quotes, an unquoted backtick substitution, and a $( ) or backtick substitution in an
+    unquoted heredoc body each add their command list as a nested '(' ... ')' group placed BEFORE the
+    segment that uses it, since bash runs it first; the substitution stays one opaque word of that segment.
+    failure is None when the whole command was read, else (index, unmodelled, reason): where the token that
+    stopped the read began, and whether the stop is on a construct bash still runs (a NUL; a 'case' word
+    inside a nested group, whose pattern ')' would close the group early; nesting beyond
+    _LEX_RECOVER_DEPTH; a heredoc delimiter it cannot read; a process substitution after a descriptor
+    number; any stop inside a nested group) rather than a syntax error after which bash runs nothing more
+    (an unbalanced quote or escape, a malformed redirect, an unclosed group). segments then hold everything
+    read before the stop, open segments included. _start, _close and _depth are internal: a nested read
+    starts at _start and, with _close, ends at the ')' closing its group (end is the index just past it)."""
     n = len(command)
     segments = []
     argv = []
@@ -842,8 +919,11 @@ def _lex_command(command, partial=False):
     argv_leading_tilde = []
     redirects = []
     opaque = [False]
-    seg_start = [0]
+    seg_start = [_start]
     pending_heredocs = []  # queued (delim, strip_tabs) for QUOTED heredocs whose bodies to skip (finding 17)
+    bodies = {}  # recover: pending-heredoc position -> the segment index its body substitutions go before
+    groups = [[0, None]] if _close else []  # recover: open groups as [unclosed '(' count, saved outer state]
+    token = [_start]  # recover: where the token being read began, reported when the read stops
 
     def end_segment(sep, op_start, next_start):
         segments.append(_Segment(list(argv), sep, list(redirects),
@@ -860,29 +940,126 @@ def _lex_command(command, partial=False):
         k = at + oplen
         while k < n and command[k] in " \t":  # inline whitespace before the target (never a newline)
             k += 1
+        if recover and command.startswith(("<(", ">("), k):
+            redirects.append(_classify_redirect(op, src_fd, command[k:k + 2], True))
+            return open_group(k)
         # A redirect target that begins with an unquoted '#' is a comment where a filename must be (bash
         # treats '#' at a word start as a comment, so the redirect has no target): cannot-evaluate, ASK.
         if k >= n or command[k] == "\n" or command[k] in _METACHARS or command[k] == "#":
             raise ValueError("malformed redirect: no target")
-        target, t_opaque, started, _digits, t_ltilde, k2 = _read_word(command, k, n)
+        target, t_opaque, started, _digits, t_ltilde, k2 = _read_word(command, k, n, word_subst)
         if not started:
             raise ValueError("malformed redirect target")
         redirects.append(_classify_redirect(op, src_fd, target, t_opaque, t_ltilde))
         return k2
 
+    # The recover-mode helpers below are reached only when recover is True.
+    def open_group(at):
+        # a process substitution at index at: park the open segment, read the nested list as new segments
+        groups.append([0, (list(argv), list(argv_opaque), list(argv_leading_tilde), list(redirects), opaque[0],
+                           seg_start[0])])
+        segments.append(_Segment([], "(", [], command[at:at + 2], False, [], []))
+        del argv[:]
+        del argv_opaque[:]
+        del argv_leading_tilde[:]
+        del redirects[:]
+        opaque[0] = False
+        seg_start[0] = at + 2
+        return at + 2
+
+    def nested(text, at, close):
+        # the '(' ... ')' group of a nested command list and the index just past it (close: the
+        # ')'-closed list starting at index at of text; otherwise the whole of text)
+        if _depth >= _LEX_RECOVER_DEPTH:
+            raise _LexUnmodelled("substitutions nested too deeply")
+        inner, failure, end = _lex_command(text, recover=True, _start=at, _close=close, _depth=_depth + 1)
+        if failure is not None:
+            raise _LexUnmodelled("a nested command list it cannot read ({})".format(failure[2]))
+        closing = [] if close else [_Segment([], ")", [], "", False, [], [])]
+        return [_Segment([], "(", [], "", False, [], [])] + inner + closing, end
+
+    def subst(kind, at, dquote):
+        # the _read_word callback for a substitution inside a word: queue its group, return its end
+        if kind == "`":
+            found = _backtick_body(command, at, n, dquote)
+            if found is None:
+                raise ValueError("unterminated backtick substitution")
+            group, _end = nested(found[0], 0, False)
+            end = found[1]
+        else:
+            group, end = nested(command, at, True)
+        segments.extend(group)
+        return end
+
+    def body_groups(text):
+        # the groups of the substitutions an UNQUOTED heredoc body runs when it is expanded
+        out = []
+        k = 0
+        while k < len(text):
+            if text[k] == "\\":
+                k += 2
+            elif text[k] == "`":
+                found = _backtick_body(text, k + 1, len(text), False)
+                if found is None:
+                    raise _LexUnmodelled("an unterminated backtick in an unquoted heredoc body")
+                out.extend(nested(found[0], 0, False)[0])
+                k = found[1]
+            elif text.startswith("$(", k):
+                group, k = nested(text, k + 2, True)
+                out.extend(group)
+            else:
+                k += 1
+        return out
+
+    def cannot(op, oplen, at, src_fd):
+        # model a construct the default contract rejects; returns the index just past what it consumed
+        if op == "<<":
+            if command.startswith("<<<", at):
+                return consume_redirect("<", 3, at, src_fd)
+            parsed = _parse_heredoc_delim(command, at + oplen, n)
+            if parsed is None:
+                raise _LexUnmodelled("a heredoc delimiter it cannot read")
+            if not parsed[0]:
+                bodies[len(pending_heredocs)] = len(segments)
+            pending_heredocs.append((parsed[1], parsed[2]))
+            return parsed[3]
+        if src_fd is not None:
+            raise _LexUnmodelled("a process substitution after a descriptor number")
+        argv.append(op)
+        argv_opaque.append(True)
+        argv_leading_tilde.append(False)
+        opaque[0] = True
+        return open_group(at)
+
+    word_subst = subst if recover else None
     try:
         if "\x00" in command:
-            raise ValueError("NUL in command")
-        i = 0
+            raise (_LexUnmodelled if recover else ValueError)("NUL in command")
+        i = _start
         while i < n:
             c = command[i]
             if c in " \t":
                 i += 1
                 continue
+            token[0] = i
             if c == "\n":
                 end_segment("", i, i + 1)
                 i += 1
-                if pending_heredocs:
+                if pending_heredocs and recover:
+                    # each body is data up to its delimiter line; an unquoted body's substitutions run
+                    # when its command starts, so their groups go before that command's segment
+                    placed = []
+                    for k, (delim, strip_tabs) in enumerate(pending_heredocs):
+                        body_end, after = _heredoc_body_span(command, i, n, delim, strip_tabs)
+                        if k in bodies:
+                            placed.append((bodies[k], body_groups(command[i:body_end])))
+                        i = after
+                    for at, group in reversed(placed):
+                        segments[at:at] = group
+                    bodies.clear()
+                    del pending_heredocs[:]
+                    seg_start[0] = i
+                elif pending_heredocs:
                     # the bodies of any QUOTED heredocs opened on this line follow the newline; skip them as
                     # literal data (finding 17), then resume lexing after the closing delimiter line(s).
                     i = _skip_heredoc_bodies(command, i, n, pending_heredocs)
@@ -899,6 +1076,22 @@ def _lex_command(command, partial=False):
                 continue
             if c in _METACHARS:
                 op, kind, oplen = _match_operator(command, i, n)
+                if kind == "sep" and groups and op in ("(", ")"):
+                    if op == "(":
+                        groups[-1][0] += 1
+                    elif groups[-1][0]:
+                        groups[-1][0] -= 1
+                    else:  # the ')' closing the innermost group
+                        saved = groups.pop()[1]
+                        end_segment(")", i, i + 1)
+                        i += 1
+                        if saved is None:
+                            if pending_heredocs:
+                                raise _LexUnmodelled("a heredoc left open inside a substitution")
+                            return segments, None, i
+                        argv[:], argv_opaque[:], argv_leading_tilde[:], redirects[:] = saved[:4]
+                        opaque[0], seg_start[0] = saved[4], saved[5]
+                        continue
                 if kind == "sep":
                     end_segment(op, i, i + oplen)
                     i += oplen
@@ -915,10 +1108,13 @@ def _lex_command(command, partial=False):
                             pending_heredocs.append((_delim, _strip))
                             i = _next_i
                             continue
+                    if recover:
+                        i = cannot(op, oplen, i, None)
+                        continue
                     raise ValueError("unsupported shell construct: {}".format(op))
                 i = consume_redirect(op, oplen, i, None)
                 continue
-            text, w_opaque, started, all_digits, w_leading_tilde, j = _read_word(command, i, n)
+            text, w_opaque, started, all_digits, w_leading_tilde, j = _read_word(command, i, n, word_subst)
             # An IO_NUMBER: an entirely-unquoted-digit word IMMEDIATELY adjacent to a '<'/'>' redirect
             # operator is that redirect's source fd, consumed as fd syntax, never left in argv. '2>file' ->
             # fd 2; but '2 > file' (spaced), "'2'>file"/'\2>file' (quoted/escaped), and 'x2>file' keep it.
@@ -928,10 +1124,19 @@ def _lex_command(command, partial=False):
                     i = consume_redirect(op, oplen, j, int(text))
                     continue
                 if kind == "cannot":
+                    if recover:
+                        i = cannot(op, oplen, j, int(text))
+                        continue
                     raise ValueError("unsupported shell construct: {}".format(op))
             # A '{varname}>' fd-var redirect is not modelled: cannot-evaluate rather than a partial word.
             if text and j < n and command[j] in "<>" and _FD_VAR_RE.match(text):
+                if recover and _match_operator(command, j, n)[1] == "redirect":
+                    op, _kind, oplen = _match_operator(command, j, n)
+                    i = consume_redirect(op, oplen, j, None)
+                    continue
                 raise ValueError("unsupported {fd} redirect")
+            if groups and text == "case":
+                raise _LexUnmodelled("a case statement inside a nested group")
             if started:
                 argv.append(text)
                 argv_opaque.append(w_opaque)
@@ -939,8 +1144,19 @@ def _lex_command(command, partial=False):
                 if w_opaque:
                     opaque[0] = True
             i = j
+        if groups:
+            raise ValueError("an unclosed process or command substitution")
         end_segment("", n, n)
-    except ValueError:
+    except ValueError as exc:
+        if recover:
+            if argv or redirects:
+                segments.append(_Segment(list(argv), "", list(redirects), command[seg_start[0]:], opaque[0],
+                                         list(argv_opaque), list(argv_leading_tilde)))
+            for _count, saved in reversed(groups):
+                if saved is not None:
+                    segments.append(_Segment(saved[0], "", saved[3], command[saved[5]:], True, saved[1],
+                                             saved[2]))
+            return segments, (token[0], isinstance(exc, _LexUnmodelled), str(exc)), n
         # partial mode recovers the COMPLETE segments lexed before the unparseable construct AND the
         # positions of the IN-PROGRESS segment that were fully parsed BEFORE it (an earlier relative
         # cd/redirect in the SAME, still-open segment - e.g. the 'out.txt' of 'cat > out.txt <<EOF' - is
@@ -954,6 +1170,8 @@ def _lex_command(command, partial=False):
                                          list(argv_leading_tilde)))
             return segments, False
         raise
+    if recover:
+        return segments, None, n
     if partial:
         return segments, True
     return segments
@@ -6740,10 +6958,10 @@ _DESTRUCT_COMMAND_ENV = frozenset((
 _DESTRUCT_CONFIG_COMMAND_RE = re.compile(
     r"(?i)^(?:core\.(?:pager|editor|sshcommand)|sequence\.editor|diff\.external|.+\.textconv|alias\..+)$")
 _DESTRUCT_SQL_EXEC_RE = {
-    "psql": re.compile(r"(?is)\\+(?:!|e\b|ir?\b|(?:g|o|copy)\b[^\n]*\|)"
+    "psql": re.compile(r"(?is)\\+(?:!|e[fv]?\b|ir?\b|include(?:_relative)?\b|(?:gx?|o|w|copy)\b[^\n]*\|)"
                        r"|\bcopy\b[^;]*\b(?:to|from)\s+program\b"),
-    "mysql": re.compile(r"(?im)\\+!|(?:^|[;\n])\s*(?:system|source)\b"),
-    "mariadb": re.compile(r"(?im)\\+!|(?:^|[;\n])\s*(?:system|source)\b"),
+    "mysql": re.compile(r"(?im)\\+(?:[!.]|[eP](?![A-Za-z]))|(?:^|[;\n])\s*(?:system|source|edit|pager)\b"),
+    "mariadb": re.compile(r"(?im)\\+(?:[!.]|[eP](?![A-Za-z]))|(?:^|[;\n])\s*(?:system|source|edit|pager)\b"),
     "sqlite3": re.compile(r"(?im)(?:^|\n)\s*\.(?:shell|system|import|load|read)\b"
                           r"|(?:^|\n)\s*\.(?:output|once)\s+[\x22\x27]?\|"),
 }
@@ -7781,12 +7999,18 @@ def _destruct_next_cwd(seg, cwd, prev_sep, depth, scoped, cdpath_risk):
     return moved
 
 
-def _destruct_scan(command, segments, cwd):
+def _destruct_scan(command, segments, cwd, optout=True):
     """The per-segment destructive classification with the prior-effect prefix carried forward, driven
     over an ordered segment list. Returns (verdicts, notes, deadline): the accumulated (kind, detail)
     verdict pairs, any optout notes, and the monotonic deadline the snapshot reduction reuses. Shared by
-    the whole-command path and the unparseable-prefix fallback, which inspects only its deny verdicts so a
-    parseable prefix cannot skip the prior-effect pass just because a later segment does not lex."""
+    the whole-command path and the unparseable-command path, which classifies the segments the
+    recover-mode lexer read (before, inside and after a here-string, a process substitution or an unquoted
+    heredoc) and inspects only their deny verdicts.
+
+    OPT-OUT POLICY: optout=True (the whole-command path) honours a truthy GUARDRAIL_ALLOW_DESTRUCTIVE
+    leading a segment's own command: that segment is skipped with a note. optout=False (the
+    unparseable-command path) ignores the assignment, so the segment is classified like any other and no
+    note is recorded; the opt-out is not honoured on an unparseable command."""
     verdicts = []
     notes = []
     depth = 0
@@ -7813,7 +8037,7 @@ def _destruct_scan(command, segments, cwd):
             m = _DESTRUCT_OPTOUT_RE.fullmatch(tok)
             if m:
                 last = m.group(1)
-        if ("optout" in _DESTRUCT_RULES and last is not None and last.lower() not in _DISCARD_FALSY
+        if (optout and "optout" in _DESTRUCT_RULES and last is not None and last.lower() not in _DISCARD_FALSY
                 and _destruct_segment(seg, cwd, deadline, ctx)):
             notes.append("GUARDRAIL_ALLOW_DESTRUCTIVE is set on '{}', so this guard did not check it; the "
                          "prefix records a claimed human authorization and accepted loss (rules sechau, "
@@ -7857,6 +8081,12 @@ def _destruct_scan(command, segments, cwd):
     return verdicts, notes, deadline
 
 
+# A recover-mode read that stops before the end is still classifiable only when the text from the stop
+# on cannot start another command: none of these characters (a newline, a list or pipeline operator, a
+# group, a redirect or process substitution, a backtick or $( ) substitution) appears in it.
+_DESTRUCT_RECOVER_STOPS = "\n;&|()<>`"
+
+
 def destructive_guard(data):
     """sechau + secrst (security/human-authorization, security/verified-restore-path), PreToolUse/Bash. A destructive
     operation outside git's reach proceeds only when this guard can see a restore path for what it destroys.
@@ -7881,6 +8111,21 @@ def destructive_guard(data):
     here-string, a process substitution, an unquoted heredoc) whose text, read through its quoting context with
     line continuations joined, names one.
 
+    UNPARSEABLE COMMAND: when the default lexer rejects the command (a here-string, a process substitution,
+    an unquoted heredoc, an unbalanced quote, a '{fd}>' redirect, a NUL), the text scan above runs first;
+    then the recover-mode lexer (_lex_command recover=True) reads it again: a here-string is an input
+    redirect of its word, an unquoted heredoc body is data, and the command lists of process substitutions,
+    of $( ) and backtick substitutions inside double quotes or inside an unquoted heredoc body, and of
+    unquoted backticks are nested groups placed ahead of the segment that uses them. Every segment that read
+    reaches, before, inside and after those constructs, gets the classification above, the prior-effect
+    pass included, with the opt-out not honoured, and any deny verdict denies. A read that stops early (an
+    unbalanced quote or escape, a malformed redirect, an unclosed group) is classified up to the stop and
+    then ALLOWS only when the text from the stop holds no newline, ;, &, |, (, ), <, > or backtick, so no
+    further command can start in it; otherwise it DENIES. A stop on a construct bash still runs DENIES
+    WHOLESALE, whatever precedes it: a NUL, a case statement inside a process or command substitution,
+    substitutions nested more than _LEX_RECOVER_DEPTH deep, a heredoc delimiter or a nested command list
+    the read cannot parse, a process substitution after a descriptor number.
+
     A segment also DENIES when an earlier segment of the same command can change the meaning its
     classification would trust: a function or alias definition, or a cd/pushd/popd redefinition, that
     shadows a modelled wrapper, a known non-runner, or the directory-change builtin (class prior-effect-1);
@@ -7895,9 +8140,11 @@ def destructive_guard(data):
     core.editor, core.sshCommand, sequence.editor, diff.external, *.textconv and alias.*. Setting values
     taint only when they name a destructive word; git clone -c/--config settings are checked too. Bounded
     partials for prior-effect-4/5: running the exact literal path an earlier segment wrote, copied or linked
-    denies, directly or as a plain shell-script operand; cp/mv/ln destinations, tee/mkdir/touch operands and
-    file-output redirections are recorded. After an earlier creator, link or unmodelled runner, an allow
-    based only on absence or on symlink resolution denies; an earlier literal link destination also
+    denies, directly or as a plain shell-script operand, and on an unparseable command wherever the
+    recover-mode read places the creator and the run (before, inside or after the construct);
+    cp/mv/ln destinations, tee/mkdir/touch operands and file-output redirections are recorded. After an
+    earlier creator, link or unmodelled runner, an allow based only on absence or on symlink resolution
+    denies; an earlier literal link destination also
     invalidates a later scratch-path allow through that destination. Positive tracked-clean allows are not
     downgraded.
 
@@ -7930,7 +8177,10 @@ def destructive_guard(data):
     option operands can be mistaken for computed command words. SQL meta-command matching is lexical and can
     over-match quoted SQL data. Taints accumulate across conditionals, function bodies and subshells, and
     are not cleared by overwrites or unsets; a setting can deny a command that would not actually consume
-    it. These are conservative false denies, not evidence that those benign commands destroy data.
+    it. An unparseable command also denies wholesale on the recover-mode stops listed above, and when its read
+    stops with a separator, group, redirect or substitution character after the stop (usually a command
+    bash itself rejects). These are conservative false denies, not evidence that those benign commands
+    destroy data.
 
     OPT-OUT: a truthy GUARDRAIL_ALLOW_DESTRUCTIVE leading the segment's own command (bash last-wins; '', 0, false,
     no, off are falsy) skips that segment with a note. It is a CONVENTION the assistant can type, so it records
@@ -7951,7 +8201,10 @@ def destructive_guard(data):
     grammars, downloads and create-then-run across turns remain unseen. Tracked-clean state is intentionally
     not invalidated by the bounded partial. Existing environment/configuration, read/stdin-supplied
     settings, computed commands arriving on stdin, SQL from -f FILE or stdin, and database clients outside
-    psql/mysql/mariadb/sqlite3 remain residuals.
+    psql/mysql/mariadb/sqlite3 remain residuals. On a PARSEABLE command a $( ) or backtick substitution
+    inside double quotes, and an unquoted backtick, stay one opaque word whose text is scanned only for
+    destructive words, so a prior-effect operation inside one (running a path an earlier segment wrote)
+    is not seen there; only the recover-mode read of an unparseable command lexes them.
 
     FAIL POSTURE: a missing tool_name or an unreadable command DENIES (fail closed); a non-Bash tool ALLOWS; a
     failed status probe DENIES; one deadline (_DESTRUCT_BUDGET) covers the whole classification: repository
@@ -7976,7 +8229,7 @@ def destructive_guard(data):
                      "secrst, fail-closed).")
     try:
         segments = _lex_command(command)
-    except ValueError:
+    except ValueError as exc:
         hit = _destruct_text_marker(command) if "raw" in _DESTRUCT_RULES else None
         if hit:
             return _deny("AIQT rules sechau/secrst: the command could not be parsed by the shell lexer (a "
@@ -7988,22 +8241,34 @@ def destructive_guard(data):
                          "AIQT guardrail: denied an unparseable command naming a destructive operation "
                          "(rules sechau, secrst).")
         if "raw" in _DESTRUCT_RULES and "prior-effect" in _DESTRUCT_RULES:
-            prefix, complete = _lex_command(command, partial=True)
-            if not complete and prefix:
-                cwd = data.get("cwd")
-                cwd = cwd if isinstance(cwd, str) and os.path.isabs(cwd) else None
-                verdicts, _notes, _deadline = _destruct_scan(command, prefix, cwd)
-                denies = [detail for kind, detail in verdicts if kind == "deny"]
-                if denies:
-                    return _deny("AIQT rules sechau/secrst: the command could not be fully parsed (a "
-                                 "here-string, a process substitution or an unquoted heredoc), and the "
-                                 "part that does parse carries a destructive operation an earlier segment "
-                                 "effect would reach: {}. This guard classifies only the command shapes it "
-                                 "models exactly, so it denies rather than run (fail closed). Re-issue it "
-                                 "as a parseable command with literal targets. {}".format("; ".join(denies),
-                                                                                           _DESTRUCT_ALTS),
-                                 "AIQT guardrail: denied an unparseable command whose parseable prefix "
-                                 "carries a destructive operation (rules sechau, secrst).")
+            # Read the command again with the constructs the default lexer rejects modelled, and classify
+            # every segment read, before, inside and after them, with the opt-out not honoured.
+            segments, failure, _end = _lex_command(command, recover=True)
+            cwd = data.get("cwd")
+            cwd = cwd if isinstance(cwd, str) and os.path.isabs(cwd) else None
+            verdicts, _notes, _deadline = _destruct_scan(command, segments, cwd, optout=False)
+            denies = [detail for kind, detail in verdicts if kind == "deny"]
+            if denies:
+                return _deny("AIQT rules sechau/secrst: the shell lexer could not read this command in one pass "
+                             "({}). Read again with here-strings, process substitutions, unquoted heredoc "
+                             "bodies and the substitutions inside them modelled, and with any "
+                             "GUARDRAIL_ALLOW_DESTRUCTIVE prefix ignored (it is not honoured on an unparseable "
+                             "command), it carries: {}. This guard classifies only the command shapes it "
+                             "models exactly, so it denies rather than run (fail closed). Re-issue it as a "
+                             "parseable command with literal targets. {}".format(exc, "; ".join(denies),
+                                                                                 _DESTRUCT_ALTS),
+                             "AIQT guardrail: denied an unparseable command that carries a destructive or "
+                             "prior-effect operation (rules sechau, secrst).")
+            if failure is not None and (failure[1] or any(ch in command[failure[0]:]
+                                                          for ch in _DESTRUCT_RECOVER_STOPS)):
+                return _deny("AIQT rules sechau/secrst (fail-closed): the shell lexer stopped at {!r} ({}), and "
+                             "the text from there on can run a command this guard has not classified, so "
+                             "whether a later part reaches what an earlier part created, linked or set cannot "
+                             "be established; it denies rather than run (fail closed). Re-issue it as a "
+                             "parseable command with literal targets. {}".format(
+                                 command[failure[0]:failure[0] + 60], failure[2], _DESTRUCT_ALTS),
+                             "AIQT guardrail: denied an unparseable command whose remainder cannot be "
+                             "classified (rules sechau, secrst, fail-closed).")
         return _allow()
     cwd = data.get("cwd")
     cwd = cwd if isinstance(cwd, str) and os.path.isabs(cwd) else None
