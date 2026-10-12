@@ -340,6 +340,59 @@ def homes_generation(manifest_data):
                  and version == HOMES2_SPEC_VERSION) else 1
 
 
+# The imported-series machine-store leaves (spec 8.2/4.2): a store that declares spec_version
+# IMPORTED_SPEC_VERSION or later keeps imported history beside the clean-series files, one leaf per
+# enabled type except legacy_fragment; worklog, a ledger, uses worklog.imported.toml instead of an
+# imported index. Inert until activation: SUPPORTED_SPEC_VERSION is 1.2.0, so no validated store
+# declares them yet.
+IMPORTED_SPEC_VERSION = "1.3.0"        # the first base spec_version whose stores carry the imported series
+IMPORTED_INDEX_SUFFIX = ".imported.index.toml"
+IMPORTED_WORKLOG_NAME = "worklog.imported.toml"
+# The namespaces the imported series admits: the baseline and module-tier bindings, never the
+# importer-only legacy_fragment (LF), the reserved-excluded transaction (TX), or the unassigned CL
+# (spec 8.1/8.2). _opf_schema.IMPORTED_NAMESPACES is built from these SAME taxonomy maps (that module
+# imports this one, so the set is mirrored here rather than imported); the opf-check self-test
+# reconciles the two rosters so they cannot drift.
+_IMPORTED_SERIES_NAMESPACES = (frozenset(BASELINE_TYPES.values())
+                               | frozenset(ns for ns, _module in MODULE_TYPES.values()))
+
+
+def imported_series_declared(manifest_data):
+    """True when the [opf] base table declares a spec_version of IMPORTED_SPEC_VERSION or later, the
+    activation gate the imported-series registrations read (spec 8.2/4.2). Graded through the house
+    SemVer parser; an absent, non-string, or unparseable spec_version reads False (manifest validation,
+    not this helper, reports it). Inert today: SUPPORTED_SPEC_VERSION is 1.2.0 and validate_manifest
+    fails a newer declaration closed, so no VALID store answers True here before the 1.3.0 activation
+    raises the supported version; raising it is that activation, and this helper needs no edit then."""
+    opf = manifest_data.get("opf") if isinstance(manifest_data, dict) else None
+    version = opf.get("spec_version") if isinstance(opf, dict) else None
+    parsed = _parse(version) if isinstance(version, str) else None
+    return parsed is not None and parsed >= _parse(IMPORTED_SPEC_VERSION)
+
+
+def imported_leaf_names(enabled_types):
+    """The imported-series managed-leaf FILENAMES for `enabled_types` (an iterable of enabled
+    section-8.1 type names, e.g. the C-ROSTER type -> namespace mapping): one
+    `<type>.imported.index.toml` per enabled non-ledger type, and worklog.imported.toml for the worklog
+    ledger, whose imported home is a worklog-shaped ledger file, not an index (spec 4.2; the first
+    imported-series release keeps these leaves inline in either layout). A type whose normative
+    namespace lies outside _IMPORTED_SERIES_NAMESPACES -- the importer-only legacy_fragment (LF) -- and
+    a name outside the section-8.1 roster contribute NO leaf (fail-closed), so the leaf roster derives
+    from the same namespace set as the imported id and counter grammar and the two cannot drift
+    (spec 8.2)."""
+    names = set()
+    for tname in enabled_types:
+        namespace = BASELINE_TYPES.get(tname)
+        if namespace is None and tname in MODULE_TYPES:
+            namespace = MODULE_TYPES[tname][0]
+        if namespace is None and tname in IMPORTER_TYPES:
+            namespace = IMPORTER_TYPES[tname]
+        if namespace not in _IMPORTED_SERIES_NAMESPACES:
+            continue
+        names.add(IMPORTED_WORKLOG_NAME if tname == "worklog" else tname + IMPORTED_INDEX_SUFFIX)
+    return frozenset(names)
+
+
 def store_control_roots(homes):
     """Store-relative control roots for a homes generation. A legacy store reserves only the
     imports staging tree; the homes-2 names are ordinary store paths there."""
@@ -3794,6 +3847,40 @@ def self_test():
                   and "stale" not in hs_seam.views)
         finally:
             os.close(hs_wfd)
+
+        # OPF-IMPORTED-SERIES IS-2: imported_leaf_names derives the imported machine-store leaf names
+        # from an enabled-type roster: one <type>.imported.index.toml per non-ledger type, the worklog
+        # ledger worklog.imported.toml, NO leaf for the importer-only legacy_fragment (its LF
+        # namespace is outside the imported series, spec 8.2), and NO leaf for a name outside the
+        # section-8.1 roster (fail-closed). The agreement with _opf_schema.IMPORTED_NAMESPACES is
+        # reconciled in the opf-check self-test, beside the containment vectors that consume this
+        # roster.
+        _il_base = imported_leaf_names(BASELINE_TYPES)
+        check("imported-leaf-names-baseline",
+              _il_base == frozenset({IMPORTED_WORKLOG_NAME}
+                                    | {t + IMPORTED_INDEX_SUFFIX
+                                       for t in BASELINE_TYPES if t != "worklog"}))
+        check("imported-leaf-names-lf-excluded",
+              imported_leaf_names(dict(BASELINE_TYPES, legacy_fragment="LF")) == _il_base
+              and imported_leaf_names(IMPORTER_TYPES) == frozenset())
+        check("imported-leaf-names-module-tier",
+              imported_leaf_names(("release",)) == frozenset({"release" + IMPORTED_INDEX_SUFFIX}))
+        check("imported-leaf-names-unknown-skipped",
+              imported_leaf_names(("nonsense", "transaction")) == frozenset())
+        # imported_series_declared: the activation gate reads the declared spec_version through the
+        # house SemVer parser. 1.3.0 and later answer True; the current 1.2.0, an older, a non-string,
+        # and an unparseable declaration answer False (inert until the supported version rises;
+        # spec 8.2/4.2).
+        check("imported-series-declared-130-and-later",
+              imported_series_declared({"opf": {"spec_version": "1.3.0"}})
+              and imported_series_declared({"opf": {"spec_version": "2.0.0"}}))
+        check("imported-series-declared-current-and-malformed-false",
+              not imported_series_declared({"opf": {"spec_version": SUPPORTED_SPEC_VERSION}})
+              and not imported_series_declared({"opf": {"spec_version": "1.0.0"}})
+              and not imported_series_declared({"opf": {"spec_version": "one.three"}})
+              and not imported_series_declared({"opf": {"spec_version": 2}})
+              and not imported_series_declared({"opf": {}})
+              and not imported_series_declared(None))
 
     finally:
         shutil.rmtree(base, ignore_errors=True)

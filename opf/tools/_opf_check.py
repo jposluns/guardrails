@@ -86,7 +86,7 @@ from _opf_store import (  # noqa: E402
 from _opf_schema import (  # noqa: E402
     validate_record, validate_counters, check_unique_ids, check_ids_within_counters, check_monotonic,
     validate_transition, parse_status, BASELINE_SPECS, ACTOR_KINDS, LINK_RELS, _valid_id_shape,
-    SUPPORTED_SCHEMA, _valid_timestamp,
+    SUPPORTED_SCHEMA, _valid_timestamp, IMPORTED_NAMESPACES,
 )
 # U3 supplies the ledger validators, the frozen/rotation/partition guards, and the across-time append-only.
 from _opf_release import (  # noqa: E402
@@ -2128,7 +2128,7 @@ ContainmentClassification = collections.namedtuple(
      "worklog_errors"))
 
 
-def classify_containment(manifest_data, machine_rel):
+def classify_containment(manifest_data, machine_rel, imported=False):
     """Pure, side-effect-free derivation of the C-CONTAINMENT managed-set classification from the manifest
     and the machine-store relpath (spec 14.2). It does NO I/O and holds no `rep`: a malformed [unmanaged]
     entry is collected into `malformed` (the checker re-emits it as a CANNOT-EVALUATE) and a colliding
@@ -2136,8 +2136,12 @@ def classify_containment(manifest_data, machine_rel):
     declaration covers NOTHING). This is the SINGLE authority `_check_containment` derives its
     adoption-content managed set from, so a second consumer cannot diverge from it by construction (F10-1).
     `enabled_types` and `layout` are derived internally from `manifest_data` by the SAME pure helpers the
-    caller uses (D2), so the classification cannot drift from the manifest the caller validated. Returns a
-    ContainmentClassification."""
+    caller uses (D2), so the classification cannot drift from the manifest the caller validated.
+    `imported` is the EXPLICIT imported-series activation flag (spec 8.2/4.2): the caller derives it
+    from the manifest's declared spec_version through _opf_store.imported_series_declared. When True,
+    the imported managed leaves join the managed set; the default False keeps every 1.2.0 store's
+    grading unchanged, so the registration ships inert until activation raises
+    SUPPORTED_SPEC_VERSION (OPF-SPEC-130). Returns a ContainmentClassification."""
     mrel = machine_rel
     dp = manifest_data.get("opf") if isinstance(manifest_data, dict) else None
     layout = dp.get("layout") if isinstance(dp, dict) else None
@@ -2190,6 +2194,13 @@ def classify_containment(manifest_data, machine_rel):
     # managed leaf IF PRESENT even without a declaration, mirroring C-COUNTERS' optional_namespaces
     # (accepted-if-present, never required). Ledger importer types (none today) are excluded.
     importer_index_types = frozenset(IMPORTER_TYPES) - _LEDGER_TYPES
+    # The imported-series managed leaves (spec 8.2/4.2): part of the managed set ONLY under the
+    # explicit `imported` activation flag (never true today: C-MANIFEST refuses the spec_version
+    # 1.3.0 manifest that would set it, until activation raises SUPPORTED_SPEC_VERSION), and
+    # admitted ONLY directly in the machine store. The names derive from the enabled-type roster in
+    # _opf_store, so the leaf set cannot drift from the imported id/counter namespace set; the
+    # importer-only legacy_fragment contributes no leaf.
+    imported_leaves = _opf_store.imported_leaf_names(enabled_types) if imported else frozenset()
     archive_root = _rel(mrel, ARCHIVE_DIRNAME)
     # imports is store-scope (`.working/imports`), a SIBLING of the machine subdir (disjoint from mrel), read
     # from IMPORTS_REL, the legacy control root _opf_store reserves (spec 14.1). The walk starts at
@@ -2214,6 +2225,12 @@ def classify_containment(manifest_data, machine_rel):
                 return _opf_worklog.parse_worklog_filename(r.split("/", 1)[1]) is not None
             if "/" not in r:
                 if r in ledger_names:
+                    return True
+                if r in imported_leaves:
+                    # An imported-series leaf (worklog.imported.toml or <type>.imported.index.toml)
+                    # is managed only HERE, directly in the machine store; a deeper path of the same
+                    # name stays a stray, and while `imported` is False the set is empty, so a 1.2.0
+                    # store grades these names exactly as before (spec 8.2/4.2).
                     return True
                 if r.endswith(INDEX_SUFFIX):
                     t = r[:-len(INDEX_SUFFIX)]
@@ -2303,7 +2320,7 @@ def _legacy_import_staging(machine_rel):
     return _rel(machine_rel, _LEGACY_IMPORTS_DIRNAME), review
 
 
-def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep):
+def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep, imported=False):
     """C-CONTAINMENT: recursively walk `.working/`, matching every regular file against the managed set
     (the ledgers, the enabled non-ledger type indexes, per-record bodies, the archive tree, declared
     store-scope view targets, and files under a valid declared [unmanaged] path). A path in neither set is
@@ -2314,8 +2331,10 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep):
     (view targets, the collision-filtered valid_unmanaged, and the malformed / colliding declarations) is
     derived by the pure `classify_containment`, the SINGLE authority for adoption content (F10-1).
     enabled_types / layout are derived inside that helper from the manifest (D2), so they are no longer
-    passed in."""
-    cls = classify_containment(manifest_data, machine_rel)
+    passed in. `imported` is the explicit imported-series activation flag classify_containment
+    documents; the walk itself needs no imported awareness (the imported leaves are plain managed
+    leaves directly in the machine store, spec 8.2/4.2)."""
+    cls = classify_containment(manifest_data, machine_rel, imported=imported)
     # Re-emit the classifier's collected messages in the ORIGINAL order (all malformed CANNOT-EVALUATEs, then
     # all colliding findings), exactly as the inline classification emitted them before the extraction.
     for msg in cls.malformed + cls.worklog_errors:
@@ -3090,7 +3109,12 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
 
     # --- C-CONTAINMENT: whole-tree path / unmanaged-path containment (spec 14.2/11) -------------------
     rep.ran("C-CONTAINMENT")
-    _check_containment(root_fd, machine_rel, manifest_data, import_status, rep)
+    # The explicit imported-series activation flag (spec 8.2/4.2), derived from the manifest's
+    # declared spec_version through the house SemVer parse. False for every store this tooling
+    # validates: C-MANIFEST failed a newer declaration closed above, so a spec_version 1.3.0 store
+    # never reaches this call until activation raises SUPPORTED_SPEC_VERSION (OPF-SPEC-130).
+    _check_containment(root_fd, machine_rel, manifest_data, import_status, rep,
+                       imported=_opf_store.imported_series_declared(manifest_data))
 
     # --- C-VIEW-DRIFT: byte-level drift of every declared deterministic view (spec 5.8/10) ------------
     rep.ran("C-VIEW-DRIFT")
@@ -4082,6 +4106,60 @@ def self_test():
               rlfr.status != VALID
               and any("legacy_fragment" in m and "schema-deferred" in m
                       for m in rlfr.by_check.get("C-RECORDS", [])))
+        # OPF-IMPORTED-SERIES IS-2: the imported-series managed leaves (spec 8.2/4.2), behind the
+        # explicit `imported` activation flag. ACTIVE (imported=True, the spec_version >= 1.3.0 store):
+        # worklog.imported.toml and each enabled non-ledger type <type>.imported.index.toml are managed
+        # leaves DIRECTLY in the machine store; the importer-only legacy_fragment contributes none (its
+        # LF namespace is outside the imported series), and a deeper path of a leaf name stays a stray.
+        # Driven through the pure classify_containment, because C-MANIFEST refuses a 1.3.0 manifest
+        # until activation raises SUPPORTED_SPEC_VERSION, so no full-doctor fixture reaches the active
+        # grading yet.
+        _is2_m = base_manifest()
+        _is2_m["types"]["legacy_fragment"] = {"namespace": "LF"}
+        _is2_on = classify_containment(_is2_m, ".working/toml", imported=True)
+        check("containment-imported-leaf-managed-when-active",
+              _is2_on.managed_file(".working/toml/worklog.imported.toml")
+              and _is2_on.managed_file(".working/toml/backlog_item.imported.index.toml"))
+        check("containment-lf-imported-leaf-never-managed",
+              not _is2_on.managed_file(".working/toml/legacy_fragment.imported.index.toml")
+              and _is2_on.managed_file(".working/toml/legacy_fragment.index.toml"))
+        check("containment-imported-leaf-deep-stray",
+              not _is2_on.managed_file(".working/toml/a/worklog.imported.toml")
+              and not _is2_on.managed_file(".working/toml/archive/backlog_item.imported.index.toml"))
+        # Over-refusal guards: activation must not disturb the clean series (its leaves stay managed)
+        # and must not admit an imported name beyond the exact enabled-type roster.
+        check("containment-active-clean-leaves-unchanged",
+              _is2_on.managed_file(".working/toml/worklog.toml")
+              and _is2_on.managed_file(".working/toml/backlog_item.index.toml")
+              and not _is2_on.managed_file(".working/toml/transaction.imported.index.toml"))
+        # INACTIVE (the explicit flag False, every 1.2.0 store): the same names stay unregistered
+        # strays, pure and full-doctor alike, so an old imported leaf cannot register itself before
+        # activation (red here if the flag or its default ever admits them early).
+        _is2_off = classify_containment(_is2_m, ".working/toml")
+        check("containment-imported-leaf-unmanaged-when-inactive",
+              not _is2_off.managed_file(".working/toml/worklog.imported.toml")
+              and not _is2_off.managed_file(".working/toml/backlog_item.imported.index.toml"))
+        _is2_store = clean_machine()
+        _is2_store["worklog.imported.toml"] = {"schema": 1, "entry": []}
+        _is2_store["backlog_item.imported.index.toml"] = idx([])
+        _is2_run = run(_is2_store)
+        check("containment-imported-leaf-stray-when-inactive",
+              _is2_run is not None and _is2_run.status == INVALID
+              and any("C-CONTAINMENT" in f and "worklog.imported.toml" in f and "unregistered" in f
+                      for f in _is2_run.findings)
+              and any("backlog_item.imported.index.toml" in f and "unregistered" in f
+                      for f in _is2_run.findings))
+        # The leaf roster agrees with the imported id/counter namespace set: over the full section-8.1
+        # roster (every module enabled, legacy_fragment declared), the types granted a leaf are exactly
+        # those whose normative namespace is in _opf_schema.IMPORTED_NAMESPACES, the worklog ledger as
+        # worklog.imported.toml and every other as its <type>.imported.index.toml (spec 8.2: both
+        # rosters derive from the one section-8.1 taxonomy and cannot drift).
+        _is2_roster = _authoritative_types(set(KNOWN_MODULES), {"legacy_fragment": {"namespace": "LF"}})
+        check("imported-leaf-roster-agrees-with-namespaces",
+              _opf_store.imported_leaf_names(_is2_roster)
+              == frozenset({(_opf_store.IMPORTED_WORKLOG_NAME if t in _LEDGER_TYPES
+                             else t + _opf_store.IMPORTED_INDEX_SUFFIX)
+                            for t, ns in _is2_roster.items() if ns in IMPORTED_NAMESPACES}))
         # F2 (per-record): worklog/<WL-n>.toml is never a per-record body -> INVALID; a garbage body control
         # is still caught.
         wlr = copy.deepcopy(pr_machine)
