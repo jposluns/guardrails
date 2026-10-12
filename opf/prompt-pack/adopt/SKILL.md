@@ -108,23 +108,31 @@ It never enters `.git` or `.aiqt`, the detection roots and deliverable destinati
 (investigation reads those itself), a path registered under `[unmanaged]` (section 14.2: ordinary
 tooling must not read it), or generated tool output such as `node_modules`. It compares `.git`,
 `.aiqt`, `.working` and `[unmanaged]` paths ignoring case and Unicode normalization, so a variant
-spelling is ruled out too. Before the walk it resolves the store exactly as investigation does: it
-reads the two pointer files and probes `manifest.toml` in each immediate subdirectory of
-`.working`, control-area names included, reading each one present, and reads nothing else in the
-store tree. The output has one item per line: the status, then each finding, proposal, ruled-out
-entry and searched directory. Every path and reason is escaped to printable ASCII, so a backslash
-sequence such as `\n` stands for a character in a file name; a file name cannot add a line.
+spelling is ruled out too, a variant of an `[unmanaged]` path with its own reason. That
+comparison follows Unicode case folding, not a filesystem's own rule: two names a filesystem treats
+as one but Unicode folding keeps apart are not caught. Before the walk it resolves the store exactly
+as investigation does: it reads the two pointer files and probes `manifest.toml` in each immediate
+subdirectory of `.working`, control-area names included, reading each one present, and reads
+nothing else in the store tree. The output has one item per line: the status, then each finding,
+proposal, ruled-out entry and searched directory. Every path and reason is escaped to printable
+ASCII, so a backslash sequence such as `\n` stands for a character in a file name; a file name
+cannot add a line.
 
 - Status VALID: present the whole result to the adopter in one message: each proposal with its
   reason, the directories searched, and each ruled-out entry with its reason (an excluded area, a
   symlink, a hard-linked or oversized file). Say that the signals are a heuristic: a proposal can
-  be wrong, and an old record under an unusual name or heading is not proposed.
+  be wrong, and an old record under an unusual name or heading is not proposed. A change during
+  discovery that leaves file metadata equal, such as a write through a shared memory mapping, is
+  detected only at the start of a file proposed for its heading; elsewhere the list can miss a file,
+  name one that is gone, or reflect the store as discovery first read it.
 - Status CANNOT-EVALUATE: report the findings. Any of these leaves no list at all, never a
   partial one: a bound reached (a tree or store too large or too deep to walk); a store that does
   not resolve; a `.working` holding a `.git` or `.aiqt` directory; an `[unmanaged]` entry that
   overlaps a reserved store path or equals or contains a pointer file or a store manifest that
-  resolution reads; or a tree or store that changed during discovery, any examined file included.
-  Then ask the adopter which old operational files exist, and say why you are asking.
+  resolution reads; or a change during discovery that its recheck detects: a change to the metadata
+  (identity, type and mode, link count, size, timestamps) of any examined entry or store input, or
+  to the start of a file proposed for its heading. Then ask the adopter which old operational
+  files exist, and say why you are asking.
 
 The adopter confirms or removes each proposal and adds any file discovery did not propose. Only
 that confirmed list becomes `sources`. The confirmation is your rule to follow, not a tooling

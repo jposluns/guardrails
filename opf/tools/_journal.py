@@ -244,12 +244,23 @@ def _open_parent(root_fd, relpath):
     return pfd, parts[-1]
 
 
-def _read_fd(fd, cap=None):
+def _read_fd(fd, cap=None, stop_at_cap=False):
     chunks = []
     total = 0
     while True:
+        if stop_at_cap and total == cap:
+            # stop_at_cap never reads a byte past the cap: at the cap the size of the opened file, not a
+            # further read, shows whether more remains, and a larger file is refused (a metered caller passes
+            # a byte allowance as the cap, so even one probing byte would exceed it).
+            try:
+                size = os.fstat(fd).st_size
+            except OSError as exc:
+                raise JournalError("cannot stat a contained file descriptor ({})".format(exc))
+            if size > cap:
+                raise JournalError("contained file exceeds the {}-byte read cap (fail-closed)".format(cap))
+            break
         try:
-            block = os.read(fd, _READ_CHUNK)
+            block = os.read(fd, min(_READ_CHUNK, cap - total) if stop_at_cap else _READ_CHUNK)
         except OSError as exc:
             # CLASS 1: a read error (EIO, EBADF, ...) mid-read is fail-closed, never a truncated or empty
             # result. Every contained reader (read_frames, read_lock_owner, _read_at, _read_contained)
@@ -332,11 +343,13 @@ def _read_at(pfd, name, relpath, cap=None):
         _close_fd_yielding(fd)
 
 
-def _read_contained(root_fd, relpath, require_single_link=False):
+def _read_contained(root_fd, relpath, require_single_link=False, cap=None):
     """Read a contained regular file's bytes through an O_NOFOLLOW fd, confirming on the opened fd that
     it is a regular file. JournalError on a symlink, a non-regular file, a missing path, or a read
-    error. When require_single_link is set the OPENED-fd stat must show exactly one hard link BEFORE any
-    byte is read: a store CONTROL file (a manifest or `.opf.toml`/`.opf.local.toml` pointer) hardlinked to
+    error. cap=None reads up to the product-file ceiling _MAX_PRODUCT_READ_BYTES; a given cap is a hard
+    limit the read never passes (_read_fd stop_at_cap), a larger file refused. When require_single_link
+    is set the OPENED-fd stat must show exactly one hard link BEFORE any byte is read: a store CONTROL
+    file (a manifest or `.opf.toml`/`.opf.local.toml` pointer) hardlinked to
     an out-of-tree victim passes O_NOFOLLOW and S_ISREG, and its resolved posture would then track the
     victim's inode, so it is refused here class-consistent with the journal's own frames.log nlink==1
     identity guard (SECI-symlink-resolution). The default is OFF, so a generic product read keeps an
@@ -366,6 +379,8 @@ def _read_contained(root_fd, relpath, require_single_link=False):
             raise JournalError("contained control file {!r} has {} hard links; refusing to read a "
                                "multiply-linked control file (a hardlink to an out-of-tree victim, never "
                                "our singly-linked control file)".format(relpath, st.st_nlink))
+        if cap is not None:
+            return _read_fd(fd, cap=cap, stop_at_cap=True), st
         return _read_fd(fd, cap=_MAX_PRODUCT_READ_BYTES), st
     finally:
         # Each close in its own try/finally (round-5 defect 3): a FILE close that reports an error must

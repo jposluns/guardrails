@@ -11,25 +11,34 @@ rule spec 14.2 sets for post-adoption import (no incidental discovery is authori
 renders a result as printable-ASCII lines, so a file name can neither start a line nor fail to encode.
 
 Store resolution runs first and makes exactly the reads investigation makes to resolve the store
-(store.resolve_store_fd; spec 4.2, 4.3, 4.5): the local and committed pointer files at the product
-root; a listing of `.working` with a no-follow lstat of each entry; and, in each immediate real
-subdirectory of `.working`, control-area names included (spec 4.2 requires every one), a no-follow
-probe of `manifest.toml`, read when it is a regular singly-linked file within the resolver read cap
-(store.MAX_STORE_READ_BYTES). It reads nothing deeper in the store tree. A store the resolver cannot
-evaluate adds the planner existence proof (_opf_adopt_plan._require_no_store_manifest): the same
-listing and probes, with no read. Before the resolver runs, discovery makes that listing and those
-probes itself (_store_inputs) and charges resolution to its own budgets: STORE_LISTINGS listings of
-`.working` (its own, the resolver and the proof) to the entry and path-byte budgets, and each pointer
-file twice (the scope check and the resolver each read it) and each present manifest once, at most
-the resolver cap each, to the content-byte budget. It refuses, before the resolver runs, a `.working`
-holding a `.git` or `.aiqt` subdirectory (compared caseless), whose manifest probe would enter it.
-After resolution it refuses an [unmanaged] entry the planner refuses, through the same check
-(_opf_adopt_plan._resolved_unmanaged: not a contained path, or overlapping a reserved store path),
-and, as spec 14.2 requires, one that equals or contains a present candidate manifest; it also refuses
-one that equals a pointer file, which the planner admits (stricter, disclosed). Bound on uncharged
-resolver work: only a writer that changes `.working` between the listing discovery makes and the
-listing the resolver makes can make the resolver list entries or read bytes discovery did not charge,
-each manifest still at most the resolver cap; the recheck below then finds the change.
+(store.resolve_store_fd; spec 4.2, 4.3, 4.5): the local pointer file at the product root, and the
+committed one only when no local one exists (spec 4.3: the local override wins wholesale); a listing of
+`.working` with a no-follow lstat of each entry; and, in each immediate real subdirectory of `.working`,
+control-area names included (spec 4.2 requires every one), a no-follow probe of `manifest.toml`, read
+when it is a regular singly-linked file within the resolver read cap (store.MAX_STORE_READ_BYTES). It
+reads nothing deeper in the store tree. The scope check before it reads each pointer file once. A store
+the resolver cannot evaluate adds the planner existence proof (_opf_adopt_plan._require_no_store_manifest):
+the same listing and probes, with no read. Before the resolver runs, discovery makes that listing and
+those probes itself (_store_inputs) and charges resolution to its own budgets: STORE_LISTINGS listings of
+`.working` (its own, the resolver and the proof) to the entry and path-byte budgets, and each present
+pointer file twice and each present manifest once, at most the resolver cap each, to the content-byte
+budget (an upper bound: with a local pointer present the committed one is read once, not twice). It
+refuses, before the resolver runs, a `.working` holding a `.git` or `.aiqt` subdirectory (compared
+caseless), whose manifest probe would enter it. After resolution it refuses an [unmanaged] entry the
+planner refuses, through the same check (_opf_adopt_plan._resolved_unmanaged: not a contained path, or
+overlapping a reserved store path), and, as spec 14.2 requires, one that equals or contains a present
+candidate manifest; it also refuses one that equals a pointer file, which the planner admits (stricter,
+disclosed).
+
+Bound on resolution work: the content bytes charged for resolution are the read allowance of the scope
+check and the resolver (store.resolve_store_fd `allowance`). Every pointer and manifest read draws on it
+and stops at the smaller of the resolver cap and what is left, never reading a byte past it, and a file
+that does not fit is cannot-evaluate. So, whatever a concurrent writer does, resolution reads at most the
+bytes discovery charged, each pointer or manifest at most store.MAX_STORE_READ_BYTES, and every byte
+discovery reads from the product tree, re-reads included, is within MAX_TOTAL_BYTES. The listings are not
+metered: a writer that adds entries to `.working` between the listing discovery makes and the one the
+resolver makes can make the resolver list and probe entries not charged to the entry and path-byte
+budgets (a manifest it then reads still draws on the allowance); the recheck below then finds the change.
 
 The walk is bounded like the planner (its MAX_ENTRIES, MAX_DEPTH, MAX_PATH_BYTES, MAX_FILE_BYTES and
 MAX_TOTAL_BYTES), never follows a symlink, lists each directory in sorted order and writes nothing. It
@@ -40,16 +49,20 @@ never enters:
   whole store tree, its machine store and its control area) and every deliverable destination (the
   product-root VERSION and each declared deliverable or view target outside `.working`);
 - a path registered under [unmanaged] in the resolved store manifest (spec 14.2: ordinary tooling MUST
-  NOT read it); discovery lists the parent directory, which names it, and makes no other access; and
+  NOT read it); the walk lists the parent directory, which names it, and makes no other access. Store
+  resolution, which runs before the registrations are known, is the one exception: as investigation
+  does, it probes `manifest.toml` in every immediate real subdirectory of `.working`, a registered one
+  included, and reads one present there before the spec 14.2 refusal above rejects it; and
 - generated tool output (GENERATED_NAMES).
 `.git`, `.aiqt`, `.working` and the [unmanaged] paths compare by Unicode canonical caseless matching
 (_fold), so a case or normalization variant that a case-insensitive filesystem would alias to them is
-ruled out too; on a case-sensitive filesystem that over-excludes, the safe direction. Folding follows
-Unicode full case folding, not a filesystem fold table: a pair of names a filesystem equates that
-Unicode folding keeps apart is not caught. The other inventoried paths compare byte-exact, as the
-planner compares them: on a case-insensitive filesystem a variant such as `changelog.md` names the
-inventoried `CHANGELOG.md` and can be read and proposed, a duplicate of what investigation reads, not
-a read the spec forbids. Each excluded entry, each symlink, special file, hard-linked file, file over
+ruled out too; on a case-sensitive filesystem that over-excludes, the safe direction. A variant of an
+[unmanaged] path is ruled out with its own reason, not as registered: investigation compares byte-exact
+and would take it as a source. Folding follows Unicode full case folding, not a filesystem fold table:
+a pair of names a filesystem equates that Unicode folding keeps apart is not caught. The other
+inventoried paths compare byte-exact, as the planner compares them: on a case-insensitive filesystem a
+variant such as `changelog.md` names the inventoried `CHANGELOG.md` and can be read and proposed, a
+duplicate of what investigation reads, not a read the spec forbids. Each excluded entry, each symlink, special file, hard-linked file, file over
 the planner byte bound, and each name outside the contained-path grammar is reported as ruled out,
 with its reason.
 
@@ -61,13 +74,23 @@ bound reached is cannot-evaluate with no proposals, never a partial list present
 Concurrent change: after the walk, discovery reopens the product root by path, no-follow, and compares
 the stamp (device, inode, mode, link count, size, mtime and ctime) of every directory it listed, every
 entry it examined by lstat (each proposed file included) and every store-resolution input with the
-stamp it recorded first. A difference, a vanished or new input, or a root path that no longer names the
-walked directory is cannot-evaluate with no proposals. The remaining limit, exactly: a change is
-missed only when every stamp field matches afterward, which takes a same-size edit within the
-filesystem timestamp granularity of the first stat, or a writer able to set the system clock so ctime
-repeats; and a change after the recheck is not seen, so a VALID list describes the tree as rechecked,
-not as it is when the adopter reads it. An entry ruled out by name is never examined, so its contents
-are not compared; a rename into or out of it changes the stamp of the directory that holds it.
+stamp it recorded first; and it reads again the prefix of each file proposed for its heading, charged to
+the content-byte budget, and compares its SHA-256 with that of the bytes the walk read. A difference, a
+vanished or new input, or a root path that no longer names the walked directory is cannot-evaluate with
+no proposals. The limit: outside those heading prefixes the recheck compares metadata, not contents, so
+a change there that leaves every stamp field equal is missed. Such changes include a write through a
+shared writable mapping whose page is already dirty (it takes no write fault, so mtime and ctime need
+not move), a same-size edit within the filesystem timestamp granularity, a writer able to set the
+system clock, and a stale attribute cache on a network filesystem; that list is not exhaustive. What a
+missed change can do: in a directory, add or remove an entry unseen, so the list can miss a file or name
+one that is gone; in a file read but not proposed, add a heading unseen, so a proposal can be missing,
+never wrongly present; in a file not read or proposed by name, nothing, as no result rests on its
+contents; in a store-resolution input, leave the scope as the resolver read it. Files read but not
+proposed are not read again: that would double the content-byte charge of every scanned file, and a
+missed change there can only withhold a proposal. A change after the recheck
+is not seen, so a VALID list describes the tree as rechecked, not as it is when the adopter reads it. An
+entry ruled out by name is never examined, so its contents are not compared; a rename into or out of it
+changes the stamp of the directory that holds it.
 
 Signals: the file name of a file with a NAME_SUFFIXES suffix (NAME_SIGNALS, on the lowercased name before
 its first dot with everything but letters and digits removed, so todo.py is not proposed), else the first
@@ -90,6 +113,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
         pass
     os._exit(2)
 
+import hashlib
 import os
 import stat
 import tomllib
@@ -181,9 +205,10 @@ def _headings(data):
 def _store_inputs(root_fd, counts, budget):
     """Make the listing and probes store resolution makes, before it runs; charge them to the discovery
     budgets as the module docstring states; refuse a `.working` holding a `.git` or `.aiqt` subdirectory;
-    and return the identity of every resolution input as (pointers, working, subdirs): (name, lstat or
-    None) for each pointer file, the stat of `.working` (None when absent), and (name, stat, lstat of its
-    manifest.toml or None) for each immediate real subdirectory of `.working`."""
+    and return (inputs, charge): the identity of every resolution input as (pointers, working, subdirs),
+    that is (name, lstat or None) for each pointer file, the stat of `.working` (None when absent), and
+    (name, stat, lstat of its manifest.toml or None) for each immediate real subdirectory of `.working`;
+    and the content bytes charged for resolution, which _scope passes the resolver as its read allowance."""
     pointers = []
     charge = 0
     for pointer in (store.LOCAL_POINTER_REL, store.POINTER_REL):
@@ -228,7 +253,7 @@ def _store_inputs(root_fd, counts, budget):
     if budget[0] + charge > MAX_TOTAL_BYTES:
         _bound("content byte")
     budget[0] += charge
-    return tuple(pointers), working, tuple(subdirs)
+    return (tuple(pointers), working, tuple(subdirs)), charge
 
 
 def _same(now, before, what, path):
@@ -265,31 +290,41 @@ def _recheck_store(root_fd, inputs):
         store._journal._close_fd_propagating(wfd)
 
 
-def _recheck_walk(fd, path, examined):
+def _recheck_walk(fd, path, examined, digests, budget):
     """Compare each entry the walk examined in the directory held at `fd` (`path`) with the stamp the
-    walk recorded, reopening each listed directory no-follow and descending into it."""
+    walk recorded, reopening each listed directory no-follow and descending into it; and read again the
+    prefix of each file proposed for its heading, charged to the content-byte budget, refusing unless it
+    hashes to the digest the walk recorded (`digests`: path -> SHA-256 of the prefix the walk read)."""
     for name, before in examined.get(path, ()):
         child_path = name if path == "." else path + "/" + name
         if not stat.S_ISDIR(before.st_mode):
             _same(store._journal._lstat_at(fd, name), before, "entry", child_path)
+            if child_path in digests and hashlib.sha256(
+                    _read_prefix(fd, name, before, budget)).digest() != digests[child_path]:
+                raise planning.PlanError(
+                    "proposed file contents changed during discovery: {!r}".format(child_path))
             continue
         child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
         try:
             _same(os.fstat(child), before, "entry", child_path)
-            _recheck_walk(child, child_path, examined)
+            _recheck_walk(child, child_path, examined, digests, budget)
         finally:
             store._journal._close_fd_propagating(child)
 
 
-def _scope(root_fd, root, inputs):
-    """(inventoried, unmanaged): the paths investigation inventories and the registered [unmanaged]
-    paths, folded (_fold), from the pointers and the store manifest the resolver reads through the held
-    root. `inputs` is what _store_inputs recorded, for the spec 14.2 candidate-manifest refusal."""
+def _scope(root_fd, root, inputs, charge):
+    """(inventoried, unmanaged): the paths investigation inventories, and each registered [unmanaged]
+    path paired with its folded form (_fold), from the pointers and the store manifest the resolver reads
+    through the held root. `inputs` is what _store_inputs recorded, for the spec 14.2 candidate-manifest
+    refusal; `charge` is what it charged for resolution, the read allowance every pointer and manifest
+    read here and in the resolver draws on (store._read_store_bytes_contained), so those reads stop at
+    the charge and at the resolver cap per file, a store grown since _store_inputs included."""
+    allowance = [charge]
     for pointer in (store.POINTER_REL, store.LOCAL_POINTER_REL):
-        target = store._read_pointer_target(root_fd, pointer)
+        target = store._read_pointer_target(root_fd, pointer, allowance)
         if target is not None and store._target_store_root(target, root) != root:
             raise planning.PlanError("companion/remote store requires separately scoped investigation")
-    resolution, raw = store.resolve_store_fd(root_fd, root)
+    resolution, raw = store.resolve_store_fd(root_fd, root, allowance=allowance)
     unmanaged = []
     if resolution.status == store.RESOLVED:
         if len(raw) > MAX_FILE_BYTES:
@@ -315,12 +350,12 @@ def _scope(root_fd, root, inputs):
         import _opf_init
         manifest = tomllib.loads(_opf_init.build_manifest())
     inventoried = set(planning.DETECTION_ROOTS) | set(planning._deliverable_destinations(manifest))
-    return frozenset(inventoried), tuple(sorted(_fold(path) for path in unmanaged))
+    return frozenset(inventoried), tuple(sorted((path, _fold(path)) for path in unmanaged))
 
 
 def _ruled_out(path, name, inventoried, unmanaged):
-    """Why discovery does not enter or read `path`, from its name alone, or None. `unmanaged` holds the
-    folded [unmanaged] paths."""
+    """Why discovery does not enter or read `path`, from its name alone, or None. `unmanaged` holds
+    (path, folded path) for each [unmanaged] path."""
     if _fold(name) in CONTROL_NAMES:
         return "version-control or AIQT control area, never entered"
     if path in inventoried:
@@ -329,8 +364,11 @@ def _ruled_out(path, name, inventoried, unmanaged):
     if folded == _fold(store.WORKING_DIRNAME):
         return ("a case or normalization variant of .working, never entered (a case-insensitive filesystem "
                 "aliases it to the store tree)")
-    if any(planning._under(folded, kept) for kept in unmanaged):
+    if any(planning._under(path, kept) for kept, _folded in unmanaged):
         return "registered [unmanaged]: ordinary tooling must not read it (spec 14.2)"
+    if any(planning._under(folded, kept) for _kept, kept in unmanaged):
+        return ("a case or normalization variant of an [unmanaged] path, never entered (a case-insensitive "
+                "filesystem may alias it to the registered path; investigation compares byte-exact)")
     if name in GENERATED_NAMES:
         return "generated tool output"
     try:
@@ -370,22 +408,24 @@ def _read_prefix(fd, name, before, budget):
 
 
 def _signal(fd, name, before, budget):
-    """(proposal reason, ruled-out reason) for a regular file; both None when it shows no signal."""
+    """(proposal reason, ruled-out reason, content) for a regular file; the reasons both None when it
+    shows no signal, and content the prefix read when the proposal rests on it (a heading), else None."""
     if before.st_nlink != 1:
-        return None, "hard-linked file, not read (investigate refuses a linked file)"
+        return None, "hard-linked file, not read (investigate refuses a linked file)", None
     if before.st_size > MAX_FILE_BYTES:
-        return None, "over the investigation byte bound, not read (investigate refuses it)"
+        return None, "over the investigation byte bound, not read (investigate refuses it)", None
     suffix = os.path.splitext(name)[1].lower()
     kind = NAME_SIGNALS.get(_normal(name.lstrip(".").split(".", 1)[0]))
     if kind and suffix in NAME_SUFFIXES:
-        return "name {!r} looks like {}".format(name, kind), None
+        return "name {!r} looks like {}".format(name, kind), None, None
     if suffix not in CONTENT_SUFFIXES:
-        return None, None
-    for heading in _headings(_read_prefix(fd, name, before, budget)):
+        return None, None, None
+    data = _read_prefix(fd, name, before, budget)
+    for heading in _headings(data):
         kind = HEADING_SIGNALS.get(_normal(heading))
         if kind:
-            return "heading {!r} looks like {}".format(heading[:80], kind), None
-    return None, None
+            return "heading {!r} looks like {}".format(heading[:80], kind), None, data
+    return None, None, None
 
 
 def _discover(root):
@@ -396,10 +436,11 @@ def _discover(root):
         # Budgets start before store resolution, which _store_inputs charges to them.
         counts = {"entries": 0, "path_bytes": 0}
         budget = [0]
-        inputs = _store_inputs(root_fd, counts, budget)
-        inventoried, unmanaged = _scope(root_fd, root, inputs)
+        inputs, charge = _store_inputs(root_fd, counts, budget)
+        inventoried, unmanaged = _scope(root_fd, root, inputs, charge)
         proposals, searched, ruled_out = [], [], []
         examined = {}  # directory path -> [(name, lstat)] for every entry the walk examined there
+        digests = {}  # path -> SHA-256 of the prefix read, for each file proposed for its heading
 
         def visit(fd, path, depth):
             searched.append(path)
@@ -436,9 +477,11 @@ def _discover(root):
                     finally:
                         store._journal._close_fd_propagating(child)
                 elif stat.S_ISREG(before.st_mode):
-                    proposal, refusal = _signal(fd, name, before, budget)
+                    proposal, refusal, content = _signal(fd, name, before, budget)
                     if proposal:
                         proposals.append((child_path, proposal))
+                        if content is not None:
+                            digests[child_path] = hashlib.sha256(content).digest()
                     elif refusal:
                         ruled_out.append((child_path, refusal))
                 else:
@@ -452,7 +495,7 @@ def _discover(root):
         try:
             if planning._stamp(os.fstat(check_fd)) != planning._stamp(root_stat):
                 raise planning.PlanError("product root path no longer names the walked directory")
-            _recheck_walk(check_fd, ".", examined)
+            _recheck_walk(check_fd, ".", examined, digests, budget)
             _recheck_store(check_fd, inputs)
         finally:
             store._journal._close_fd_propagating(check_fd)
@@ -556,9 +599,9 @@ def self_test():
             seen = []
             real = store._read_store_bytes_contained
 
-            def spy(fd, rel):
+            def spy(fd, rel, *metered):
                 seen.append(rel)
-                return real(fd, rel)
+                return real(fd, rel, *metered)
             return seen, mock.patch.object(store, "_read_store_bytes_contained", spy)
 
         def test_discover_by_name(self):
@@ -779,13 +822,17 @@ def self_test():
             # A case variant of another inventoried path compares byte-exact, as the planner compares it.
             self.assertEqual(self.paths(result.proposals), ["changelog.md", "notes/TODO.md"])
             unmanaged = "registered [unmanaged]: ordinary tooling must not read it (spec 14.2)"
+            # A variant is ruled out under its own reason, never reported as the registered path.
+            variant = ("a case or normalization variant of an [unmanaged] path, never entered (a "
+                       "case-insensitive filesystem may alias it to the registered path; investigation "
+                       "compares byte-exact)")
             self.assertEqual(dict(result.ruled_out), {
                 ".Git": "version-control or AIQT control area, never entered",
                 ".WORKING": "a case or normalization variant of .working, never entered (a case-insensitive "
                             "filesystem aliases it to the store tree)",
                 ".working": "inventoried by investigate (a detection root or deliverable destination)",
-                "Notes/Private": unmanaged,
-                "notes/cafe\u0301": unmanaged,
+                "Notes/Private": variant,
+                "notes/cafe\u0301": variant,
                 "notes/private": unmanaged,
             })
             self.assertEqual(result.searched, (".", "Notes", "notes"))
@@ -798,11 +845,19 @@ def self_test():
             seen, spy = self.resolver_reads()
             with spy:
                 result = self.discover()
-            # Exactly the stated reads: each pointer file twice (the scope check and the resolver) and
-            # manifest.toml in each immediate real subdirectory of .working, control-area names included.
-            self.assertEqual(sorted(seen), sorted([".opf.toml", ".opf.local.toml"] * 2 + [
-                "archive/manifest.toml", "journals/manifest.toml", "toml/manifest.toml"]))
+            # Exactly the stated reads: the scope check reads both pointer files, the resolver reads the
+            # local one and, with no local one present, the committed one, and manifest.toml in each immediate
+            # real subdirectory of .working, control-area names included.
+            manifests = ["archive/manifest.toml", "journals/manifest.toml", "toml/manifest.toml"]
+            self.assertEqual(sorted(seen), sorted([".opf.toml", ".opf.local.toml"] * 2 + manifests))
             self.assertEqual(result.searched, (".",))
+            # A local override present: the resolver never reads the committed pointer (spec 4.3).
+            self.write(".opf.local.toml", b"[store]\ntarget = \"dir:.\"\n")
+            seen, spy = self.resolver_reads()
+            with spy:
+                self.discover()
+            self.assertEqual(sorted(seen), sorted([".opf.toml"] + [".opf.local.toml"] * 2 + manifests))
+            (self.root / ".opf.local.toml").unlink()
             # A .git file (a submodule gitfile) is never probed into, so it is admitted.
             self.write(".working/.git", b"gitdir: elsewhere\n")
             self.assertEqual(self.discover().status, store.VALID)
@@ -815,30 +870,178 @@ def self_test():
                     self.assertEqual(seen, [])
                     (self.root / ".working" / name).rmdir()
 
+        def measured(self):
+            """One VALID discovery run measured by watching os.scandir and os.read, never from STORE_LISTINGS
+            or the charging code: (listings of .working, bytes read from store-resolution inputs, all bytes
+            read)."""
+            working = (self.root / ".working").stat()
+            candidates = [self.root / ".opf.toml", self.root / ".opf.local.toml"]
+            candidates += list((self.root / ".working").glob("*/manifest.toml"))
+            inputs = {(path.lstat().st_dev, path.lstat().st_ino) for path in candidates if path.exists()}
+            real_scandir, real_read = os.scandir, os.read
+            listings, input_bytes, all_bytes = [0], [0], [0]
+
+            def scandir(target):
+                if isinstance(target, int):
+                    st = os.fstat(target)
+                    listings[0] += (st.st_dev, st.st_ino) == (working.st_dev, working.st_ino)
+                return real_scandir(target)
+
+            def read(fd, size):
+                block = real_read(fd, size)
+                st = os.fstat(fd)
+                if (st.st_dev, st.st_ino) in inputs:
+                    input_bytes[0] += len(block)
+                all_bytes[0] += len(block)
+                return block
+            with mock.patch.object(os, "scandir", scandir), mock.patch.object(os, "read", read):
+                self.discover()
+            return listings[0], input_bytes[0], all_bytes[0]
+
         def test_resolution_charged_to_budgets(self):
+            def resolved():
+                self.store_manifest()
+                self.write(".opf.toml", b"[store]\ntarget = \"dir:.\"\n")
+
+            def unresolved():
+                (self.root / ".working").mkdir()
+
+            # A store the resolver resolves is listed by discovery and the resolver; one it cannot evaluate is
+            # listed a third time by the planner existence proof. The charge per .working entry is the most
+            # listings any outcome makes, counted here, and each fixture also reads a heading (the walk read
+            # and the recheck read), so a store charge that is not carried into the walk budget is seen.
+            fixtures = {}
+            for label, build in (("resolved", resolved), ("unresolved", unresolved)):
+                self.reset(label)
+                build()
+                (self.root / ".working/a").mkdir()
+                (self.root / ".working/b").mkdir()
+                self.write("TODO.md")
+                self.write("notes.md", b"# TODO\n")
+                fixtures[label] = (self.root, self.measured())
+            self.assertEqual(sorted(found[0] for _root, found in fixtures.values()), [2, 3])
+            most = max(found[0] for _root, found in fixtures.values())
+            for label, (root, (_listings, input_bytes, all_bytes)) in fixtures.items():
+                self.root = root
+                self.assertEqual(all_bytes - input_bytes, 2 * len(b"# TODO\n"))
+                working = os.listdir(root / ".working")
+                top = os.listdir(root)
+                charge = {"MAX_ENTRIES": most * len(working),
+                          "MAX_PATH_BYTES": most * sum(len(".working/" + name) for name in working),
+                          "MAX_TOTAL_BYTES": input_bytes}
+                walk = {"MAX_ENTRIES": len(top), "MAX_PATH_BYTES": sum(len(name) for name in top),
+                        "MAX_TOTAL_BYTES": all_bytes - input_bytes}
+                for name in ("MAX_ENTRIES", "MAX_PATH_BYTES", "MAX_TOTAL_BYTES"):
+                    with self.subTest(store=label, bound=name):
+                        with mock.patch.object(module, name, charge[name] + walk[name]):
+                            self.assertEqual(self.paths(self.discover().proposals), ["TODO.md", "notes.md"])
+                        with mock.patch.object(module, name, charge[name] + walk[name] - 1):
+                            self.refused("bound reached")
+                        # A bound the resolution charge alone exceeds trips before the resolver reads
+                        # anything.
+                        seen, spy = self.resolver_reads()
+                        with spy, mock.patch.object(module, name, charge[name] - 1):
+                            self.refused("bound reached")
+                        self.assertEqual(seen, [])
+
+        def grown_read(self, rel, text, nth=1):
+            """Discover while `rel` grows past the resolver cap just before its `nth` open, after the lstat
+            that charged it; require a refusal naming `text`; return the bytes os.read took from the file
+            from that open on."""
+            path = self.root / rel
+            before = path.stat()
+            real_open, real_read = os.open, os.read
+            opens, taken = [], [0]
+
+            def grow_then_open(target, *args, **kwargs):
+                if target == path.name:
+                    opens.append(target)
+                    if len(opens) == nth:
+                        with open(path, "ab") as handle:
+                            handle.write(b"#" + b"x" * (store.MAX_STORE_READ_BYTES + 64))
+                return real_open(target, *args, **kwargs)
+
+            def counted_read(fd, size):
+                block = real_read(fd, size)
+                st = os.fstat(fd)
+                if len(opens) >= nth and (st.st_dev, st.st_ino) == (before.st_dev, before.st_ino):
+                    taken[0] += len(block)
+                return block
+            with mock.patch.object(os, "open", grow_then_open), mock.patch.object(
+                    os, "supports_dir_fd", os.supports_dir_fd | {grow_then_open}), mock.patch.object(
+                    os, "read", counted_read):
+                self.refused(text)
+            self.assertGreaterEqual(len(opens), nth)
+            return taken[0]
+
+        def test_resolution_reads_stop_at_charge_and_cap(self):
+            pointer = b"[store]\ntarget = \"dir:.\"\n"
+            unresolved = "unresolved store manifest requires repair"
             self.store_manifest()
-            (self.root / ".working/a").mkdir()
-            (self.root / ".working/b").mkdir()
-            self.write(".opf.toml", b"[store]\ntarget = \"dir:.\"\n")
-            self.write("TODO.md")
-            store_bytes = ((self.root / ".working/toml/manifest.toml").stat().st_size
-                           + 2 * (self.root / ".opf.toml").stat().st_size)
-            store_entries = STORE_LISTINGS * 3
-            store_paths = STORE_LISTINGS * len(".working/a.working/b.working/toml")
-            # The walk lists the root: .opf.toml, .working and TODO.md, and reads no content.
-            for name, store_charge, walk in (("MAX_ENTRIES", store_entries, 3),
-                                             ("MAX_PATH_BYTES", store_paths, len(".opf.toml.workingTODO.md")),
-                                             ("MAX_TOTAL_BYTES", store_bytes, 0)):
-                with self.subTest(bound=name):
-                    with mock.patch.object(module, name, store_charge + walk):
-                        self.assertEqual(self.paths(self.discover().proposals), ["TODO.md"])
-                    with mock.patch.object(module, name, store_charge + walk - 1):
-                        self.refused("bound reached")
-                    # A bound the resolution charge alone exceeds trips before the resolver reads anything.
-                    seen, spy = self.resolver_reads()
-                    with spy, mock.patch.object(module, name, store_charge - 1):
-                        self.refused("bound reached")
-                    self.assertEqual(seen, [])
+            manifest = (self.root / ".working/toml/manifest.toml").stat().st_size
+            size = len(pointer)
+            # Each grown store input is read no further than the charge left when its read starts. The
+            # scope check reads .opf.toml, then .opf.local.toml; the resolver reads .opf.local.toml, or
+            # .opf.toml when none is present, then the manifests. Each present pointer is charged twice,
+            # each manifest once.
+            for label, rel, nth, local, left, text in (
+                    ("manifest", ".working/toml/manifest.toml", 1, False, manifest, unresolved),
+                    ("pointer-scope", ".opf.toml", 1, False, 2 * size + manifest, "exceeds the"),
+                    ("pointer-resolver", ".opf.toml", 2, False, size + manifest, unresolved),
+                    ("local-resolver", ".opf.local.toml", 2, True, 2 * size + manifest, unresolved)):
+                with self.subTest(grown=label):
+                    self.reset(label)
+                    self.store_manifest()
+                    self.write(".opf.toml", pointer)
+                    if local:
+                        self.write(".opf.local.toml", pointer)
+                    self.assertLessEqual(self.grown_read(rel, text, nth), left)
+            # With more charge left than the resolver cap, the read stops at the cap.
+            self.reset("cap")
+            self.store_manifest()
+            self.write(".working/zz/manifest.toml", b"[x]\n#" + b"y" * manifest + b"\n")
+            cap = manifest + 16
+            with mock.patch.object(store, "MAX_STORE_READ_BYTES", cap):
+                self.discover()
+                self.assertLessEqual(self.grown_read(".working/toml/manifest.toml", unresolved), cap)
+
+        def test_same_stamp_change_to_heading_proposal(self):
+            import mmap
+            changed = "proposed file contents changed during discovery: " + repr("notes.md")
+            self.write("notes.md", b"# TODO\n")
+            real_signal, real_read = _signal, os.read
+            walked = []
+
+            def after_walk(fd, name, before, budget):
+                found = real_signal(fd, name, before, budget)
+                walked.append(name)
+                return found
+
+            def altered(fd, size):
+                block = real_read(fd, size)
+                return b"# NOPE" + block[6:] if walked and block.startswith(b"# TODO") else block
+            # The recheck reads the prefix of a file proposed for its heading again: bytes that differ from
+            # those the walk read refuse, every stamp field equal.
+            with mock.patch.object(module, "_signal", after_walk), mock.patch.object(os, "read", altered):
+                self.refused(changed)
+            # A write through a shared writable mapping whose page is already dirty takes no write fault, so
+            # mtime and ctime need not move; it refuses whichever recheck sees it.
+            self.reset("mapped")
+            self.write("notes.md", b"# TODO\n")
+            equal = []
+            with open(self.root / "notes.md", "r+b") as handle, mmap.mmap(handle.fileno(), 0) as view:
+                view[0:1] = b"#"
+
+                def mapped(fd, name, before, budget):
+                    found = real_signal(fd, name, before, budget)
+                    view[2:6] = b"NOPE"
+                    equal.append(planning._stamp(os.stat(self.root / "notes.md")) == planning._stamp(before))
+                    return found
+                with mock.patch.object(module, "_signal", mapped):
+                    result = discover_sources(self.root)
+            self.assertEqual((result.status, result.proposals), (store.CANNOT_EVALUATE, ()))
+            if equal == [True]:
+                self.assertEqual(result.findings, (changed,))
 
         def test_unmanaged_refusals(self):
             self.write("TODO.md")
