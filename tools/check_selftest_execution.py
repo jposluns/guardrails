@@ -33,16 +33,33 @@ args, a non-empty array of literal arguments forwarded to the runner's launch ah
 ROW_ARG_RE (printable ASCII from a closed set: a letter or digit first, or one or two dashes and then
 one; no whitespace, quote, shell, glob or expansion character, and no leading '/', '.', '@' or '~'),
 and an argument that names the gate's own --execution-report option, attaches a value to it, or
-abbreviates it (an argparse-style runner resolves a unique prefix to the full option) is refused, so
-no row can redirect or suppress the report this gate reconciles; any other shape (a non-array, an
-empty array, a non-string element) is refused too. Rows whose runners resolve (os.path.realpath) to
-one path form a GROUP: before any launch, every row of the requested suite's group must carry args
-that no other row of the group carries, the rows' expected sets must be pairwise disjoint, and their
-union must equal the runner's static check() set exactly; a gap, an overlap, an extra id, a missing
-or repeated args list, or a runner path that cannot be resolved is cannot-evaluate. A single-row
-group is held, as before, to expected set == static set, with the same diagnostics. The runtime layer
-then reconciles the launched row's executed set against that row's own expected set, so a runner that
+abbreviates it (an argparse-style runner resolves a unique prefix to the full option) is refused; any
+other shape (a non-array, an empty array, a non-string element) is refused too. The filter is
+LEXICAL: no row can redirect the report through the named option, and nothing more is claimed about
+what an accepted argument means to a given runner (one that stops parsing at it, exits early on it,
+or takes the rest of its argv as data can leave the report unwritten); a runner that writes no
+report is a missing report, cannot-evaluate (exit 2), never a pass. Rows whose runners resolve
+(os.path.realpath) to one path form a GROUP: before any launch, every row of the requested suite's
+group must carry args that no other row of the group carries, the rows' expected sets must be
+pairwise disjoint, and their union must equal the runner's static check() set exactly; a gap, an
+overlap, an extra id, or a missing or repeated args list is cannot-evaluate. Membership is decided by
+resolving EVERY row's runner strictly (os.path.realpath(strict=True)), so a missing path, a
+non-directory component, a symlink loop or a permission error in any row's runner leaves membership
+undecidable and is cannot-evaluate before any report directory is allocated, never an assumed
+non-member; a runner path carrying a control character is refused by the schema. A single-row group
+is held, as before, to expected set == static set, with the same diagnostics. The runtime layer then
+reconciles the launched row's executed set against that row's own expected set, so a runner that
 ignores its arguments and runs every check is an extra-id finding (exit 1).
+
+LAUNCH COVERAGE. Before any launch, every registered [[suite]] row, not only the requested one, must
+have its launch line (tools/check_selftest_execution.py --suite <id>) in BOTH launch rosters, the
+local roster tools/run_all_checks.sh and the CI workflow .github/workflows/quality.yml. Each is read
+only, as a regular non-symlink file, through the parity gate's own validated loader
+(check_ci_parity.read_runner_text with extract_local or extract_ci, never a second parser), so a
+commented-out line is no launch line; a roster that is missing, not a regular file, unreadable, or
+drawing a loader diagnostic is cannot-evaluate, and so is a row with no launch line in either. The
+check is LEXICAL: it proves each line is present, not that it runs or passes (a CI job or step
+condition, or a local run stopped early, is outside it).
 The child runs with
 cwd at the repo root and a git-neutral environment built in two layers: HOME and XDG_CONFIG_HOME are
 pinned to a fresh empty directory, so the per-user global config, ignore, and attributes surfaces are
@@ -125,9 +142,12 @@ cannot-evaluate (an unreadable, malformed, or suite-missing expectation manifest
 absent, non-regular, a symlink, or escapes the repo; runner source that does not parse or carries an
 unresolvable, aliased (a non-call check reference), comprehension-bound, or duplicate check id; a
 static source-to-manifest set mismatch (for rows that share a runner, a group whose expected sets do
-not partition the static set, or whose args are missing or repeated); a malformed or
-evidence-redirecting args list; an unresolvable runner path; an unconfirmable repo
-root; unavailable temp storage; a launch failure; a child return code outside {0, 1}; a child error
+not partition the static set, or whose args are missing or repeated); a malformed args list, or one
+naming the report option; a runner path carrying a control character; any row's runner path that
+does not resolve strictly (a missing path, a non-directory component, a symlink loop or a permission
+error); a registered row with no launch line in either launch roster, or a launch roster that is
+missing, not a regular file, unreadable or rejected by its loader; an unconfirmable repo root;
+unavailable temp storage; a launch failure; a child return code outside {0, 1}; a child error
 stream that differs by any byte from the suite's declared bytes; or an invalid, unfinalized, or
 exit-status-mismatched report).
 
@@ -167,10 +187,11 @@ proxy anchored to this gate's own file, not a full git-identity check; and the s
 launch read the runner's source at two moments, so a concurrent same-user writer between them is
 outside this repo's sole-orchestrator threat model (the runtime layer still reconciles what
 actually ran). The group rule proves a PARTITION of the static set for the requested suite's group
-only, once per invocation: it does not prove that every row of a group is ever launched (a row never
-run leaves its ids unexecuted, outside this gate, whose launch roster is the parity gate's surface),
-nor that the runner's handling of its args selects the declared subset other than through the runtime
-reconcile of the row actually launched; and a runner reached through a hard link or a byte copy under
+only, once per invocation, and launches that one row: that every other row is launched rests on the
+launch-coverage check, which proves only that a launch line for each row is present in both rosters
+(a lexical check, not proof that the line runs or passes); nor does the group rule prove that the
+runner's handling of its args selects the declared subset other than through the runtime reconcile
+of the row actually launched; and a runner reached through a hard link or a byte copy under
 another path resolves to another path, so it forms its own group, held alone to the whole static set
 (fail-safe: an undetected group member can only be refused, never pass with a subset). The
 fail-closed child contract has two permitted residuals. First, a destructor fault
@@ -233,6 +254,15 @@ except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships to
         pass
     os._exit(2)
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    import check_ci_parity  # noqa: E402  (the validated launch-roster loaders)
+except ImportError as _parity_import_error:
+    # A plain fallback: the launch-coverage check refuses it before any launch (cannot evaluate), so
+    # an exported copy without its sibling still reaches main's own repo-root refusal.
+    check_ci_parity = None
+    PARITY_IMPORT_ERROR = _parity_import_error
+
 MANIFEST_TOP_KEYS = {"format-version", "suite"}
 SUITE_ROW_KEYS = {"id", "runner", "expected-check-ids"}
 # The one optional row key: literal arguments forwarded to the runner's launch ahead of the gate's own
@@ -246,6 +276,12 @@ ROW_ARG_MAX = 200
 # The gate's own evidence option: no forwarded argument may name it, attach a value to it, or
 # abbreviate it.
 REPORT_OPTION = "--execution-report"
+# The two launch rosters, each read through the parity gate's validated loader for that file: every
+# registered [[suite]] row must have its launch member (SUITE_LAUNCH, as the loader normalizes it) in
+# both before any suite is launched.
+LAUNCH_ROSTERS = (("tools/run_all_checks.sh", "extract_local"),
+                  (".github/workflows/quality.yml", "extract_ci"))
+SUITE_LAUNCH = "tools/check_selftest_execution.py --suite {}"
 REPORT_KEYS = {"format_version", "suite", "check_ids", "exit_code", "finalized"}
 REPORT_FORMAT_VERSION = 2
 # Per suite id, the exact bytes (a bytes value) the child's WHOLE error stream must equal on a run that
@@ -328,9 +364,10 @@ def _manifest_rows(data, manifest_path):
             return None
         seen_ids.add(sid)
         runner = row["runner"]
-        if (not isinstance(runner, str) or not runner or os.path.isabs(runner)
+        if (not isinstance(runner, str) or not runner or _has_ctrl(runner) or os.path.isabs(runner)
                 or ".." in Path(runner).parts):
-            _cannot("{}: runner must be a repo-relative path with no '..'".format(where))
+            _cannot("{}: runner must be a control-character-free repo-relative path with no '..'"
+                    .format(where))
             return None
         ids = row["expected-check-ids"]
         if not isinstance(ids, list) or not ids:
@@ -358,7 +395,9 @@ def _row_args_problem(args):
     """None when args is a forwardable argument list, else the reason it is refused: a non-empty array
     of strings, each at most ROW_ARG_MAX characters and matching ROW_ARG_RE, none naming, carrying a
     value for, or abbreviating the gate's own REPORT_OPTION (a runner resolving a unique prefix, as
-    argparse does, would otherwise read it as that option and redirect or suppress the report)."""
+    argparse does, would otherwise read it as that option). Lexical only: it says nothing about what
+    any other accepted argument means to a given runner; a runner that then writes no report is a
+    missing report, cannot-evaluate."""
     if not isinstance(args, list) or not args:
         return "args must be a non-empty array of strings (omit the key for no arguments)"
     for arg in args:
@@ -401,16 +440,57 @@ def _runner_path(root, runner):
 def _runner_group(root, suites, row):
     """The rows whose runner resolves to the same path as row's (row included, in manifest order), or
     None after printing (the caller exits 2 and NEVER launches). Membership is by resolved path, so
-    two spellings of one runner form one group; a runner path that cannot be resolved is
-    cannot-evaluate, never a guess that it names some other file."""
-    try:
-        key = os.path.realpath(Path(root) / row["runner"], strict=False)
-        return [other for other in suites
-                if os.path.realpath(Path(root) / other["runner"], strict=False) == key]
-    except (OSError, ValueError, RuntimeError) as exc:
-        _cannot("cannot resolve the runner paths that group suite {!r} with the rows sharing its "
-                "runner: {}".format(row["id"], exc))
+    two spellings of one runner form one group. Every row's runner is resolved STRICTLY
+    (os.path.realpath(strict=True)): a missing path, a non-directory component, a symlink loop or a
+    permission error leaves that row's membership undecidable, so it is cannot-evaluate, never an
+    assumed non-member (a non-strict resolution swallows each of them and returns a lexical guess)."""
+    resolved = {}
+    for other in suites:
+        try:
+            resolved[other["id"]] = os.path.realpath(Path(root) / other["runner"], strict=True)
+        except (OSError, ValueError, RuntimeError) as exc:
+            _cannot("suite {}: cannot decide which rows share its runner, because the runner {} of "
+                    "suite {} does not resolve: {}".format(
+                        row["id"], other["runner"], other["id"], exc))
+            return None
+    return [other for other in suites if resolved[other["id"]] == resolved[row["id"]]]
+
+
+def _unlaunched_rows(root, suites):
+    """The diagnostic lines naming each registered row with no launch member in a launch roster (none
+    when every row is launched from both), or None after printing (the caller exits 2 and NEVER
+    launches) when a roster is not a regular non-symlink file, cannot be read, or draws a diagnostic
+    from the parity gate's loader. Read-only and LEXICAL: it proves each row's launch line is present
+    in each roster, not that the line runs or passes."""
+    if check_ci_parity is None:
+        _cannot("the parity gate's roster loaders (check_ci_parity.py beside this gate) cannot be "
+                "imported, so the launch rosters cannot be read: {}".format(PARITY_IMPORT_ERROR))
         return None
+    lines = []
+    for rel, loader in LAUNCH_ROSTERS:
+        path = Path(root) / rel
+        try:
+            st = os.lstat(path)
+        except OSError as exc:
+            _cannot("launch roster {} unreadable: {}".format(path, exc))
+            return None
+        if not stat.S_ISREG(st.st_mode):
+            _cannot("launch roster {} is not a regular file (a symlink or directory is refused)"
+                    .format(path))
+            return None
+        text, diagnostic = check_ci_parity.read_runner_text(path, rel)
+        if diagnostic is None:
+            extraction = getattr(check_ci_parity, loader)(text)
+            diagnostic = extraction.diagnostics[0] if extraction.diagnostics else None
+        if diagnostic is not None:
+            _cannot("launch roster {} cannot be evaluated: line {}: {}".format(
+                rel, diagnostic.line, diagnostic.message))
+            return None
+        for other in suites:
+            if SUITE_LAUNCH.format(other["id"]) not in extraction.members:
+                lines.append("  suite {} has no launch line ({}) in {}".format(
+                    other["id"], SUITE_LAUNCH.format(other["id"]), rel))
+    return lines
 
 
 def _group_problems(group, source_set):
@@ -664,10 +744,11 @@ def _stderr_fault(blob, suite_id):
 def run_suite(root, suite_id):
     """Validate the manifest, statically reconcile the runner's source check() set against it BEFORE
     any launch (the whole set for a single-row runner; for rows that share a runner, the group
-    partition), then launch the registered runner with the row's args and a private report path,
-    forward its full output, require an error stream byte-identical to the suite's declared bytes
-    (empty unless declared), and reconcile the executed set from the report finalized at the child's
-    exit. Returns the gate exit code."""
+    partition), require a launch line for every registered row in both launch rosters, then launch
+    the registered runner with the row's args and a private report path, forward its full output,
+    require an error stream byte-identical to the suite's declared bytes (empty unless declared), and
+    reconcile the executed set from the report finalized at the child's exit. Returns the gate exit
+    code."""
     root = Path(root)
     manifest_path = root / "tools" / "selftest_checks.toml"
     suites = _manifest_suites(manifest_path)
@@ -706,6 +787,16 @@ def run_suite(root, suite_id):
             print("  source check not registered: {}".format(cid), file=sys.stderr)
         for cid in sorted(expected - source_set):
             print("  registered id has no source check(): {}".format(cid), file=sys.stderr)
+        return 2
+    unlaunched = _unlaunched_rows(root, suites)
+    if unlaunched is None:
+        return 2
+    if unlaunched:
+        _cannot("suite {}: not every row of {} has a launch line in both launch rosters; a registered "
+                "row that is never launched leaves its ids unexecuted, so no suite is launched until "
+                "every row is".format(suite_id, manifest_path))
+        for line in unlaunched:
+            print(line, file=sys.stderr)
         return 2
     try:
         private = tempfile.mkdtemp(prefix="aiqt-selftest-exec-")
@@ -839,6 +930,27 @@ def _group_text(rows, runner="tools/fake_runner.py", header="format-version = 1\
         if args is not None:
             text += "args = {}\n".format(args if isinstance(args, str) else json.dumps(args))
     return text
+
+
+# The local roster's dispatcher definition in the one shape the parity gate's loader recognizes, so a
+# synthetic roster reaches its launch lines rather than a dispatcher diagnostic.
+ROSTER_DISPATCHER = ('run_gate() {\n  local name="$1"; shift\n  echo "--- ${name} ---"\n'
+                     '  if "$@"; then :; else\n    local rc=$?\n    failed=1\n'
+                     '    failed_names="${failed_names:+${failed_names}, }${name}"\n'
+                     '    echo "GATE FAILED: ${name} (exit ${rc})"\n  fi\n  echo\n}\n')
+
+
+def _roster_texts(ids):
+    """A synthetic local roster and CI workflow, each launching every suite id in ids through this gate,
+    as {repo-relative path: text}, in the smallest shapes the parity gate's loaders accept."""
+    local = 'failed=0\nfailed_names=""\n' + ROSTER_DISPATCHER
+    ci = ("name: Quality\non:\n  push:\n    branches: [main]\npermissions:\n  contents: read\n"
+          "jobs:\n  quality:\n    runs-on: ubuntu-latest\n    steps:\n")
+    for sid in ids:
+        launch = "python3 -I -B " + SUITE_LAUNCH.format(sid)
+        local += 'run_gate "{}" {}\n'.format(sid, launch)
+        ci += "      - name: {}\n        run: {}\n".format(sid, launch)
+    return {LAUNCH_ROSTERS[0][0]: local, LAUNCH_ROSTERS[1][0]: ci}
 
 
 def _lane_body(lanes):
@@ -988,11 +1100,19 @@ def self_test():
         point."""
         return "if False:\n" + "".join("    check({!r}, 0, 0)\n".format(cid) for cid in ids)
 
-    def build(manifest_text, runner_body=None, source_block=None):
+    def build(manifest_text, runner_body=None, source_block=None, rosters=None):
+        """A synthetic root. Both launch rosters launch every suite id the manifest names unless
+        rosters replaces one: {repo-relative path: text, or None for no file}."""
         counter[0] += 1
         root = base / "case-{:02d}".format(counter[0])
         (root / "tools").mkdir(parents=True)
         (root / "tools" / "selftest_checks.toml").write_text(manifest_text, encoding="utf-8")
+        texts = _roster_texts(re.findall(r'^id = "([A-Za-z0-9._-]+)"$', manifest_text, re.MULTILINE))
+        texts.update(rosters or {})
+        for rel, text in texts.items():
+            if text is not None:
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (root / rel).write_text(text, encoding="ascii")
         if runner_body is not None:
             (root / "tools" / "_selftest_exit_report.py").write_text(
                 finalizer_source, encoding="utf-8")
@@ -1856,9 +1976,9 @@ def self_test():
         # disjoint and union to the runner's static check() set exactly, each row carrying args no
         # other row of the group carries, forwarded ahead of the gate's own --execution-report pair
         # (the child records its argv); a gap, an overlap, an extra id, a missing or repeated args
-        # list, an unresolvable runner path, and a malformed or evidence-redirecting argument are each
-        # refused 2 before any launch; two spellings of one runner form one group; a singleton row
-        # is held to the whole set as before, its behaviour byte-identical beside a split group
+        # list, and a malformed argument or one naming the report option are each refused 2 before any
+        # launch; two spellings of one runner form one group; a singleton row is held to the whole set
+        # as before, its behaviour byte-identical beside a split group
         lanes = {"one": ("demo-one", ["a/one"]), "two": ("demo-two", ["a/two", "a/three"]),
                  None: ("demo", GOOD_IDS)}
         one, two = ["--lane", "one"], ["--lane", "two"]
@@ -1907,22 +2027,147 @@ def self_test():
                 expect("st/group-{}-{}-named".format(label, sid),
                        ("do not partition" in err, named in err), (True, True))
                 expect("st/group-{}-{}-no-launch".format(label, sid), launched(root), False)
-        root = build(_group_text(split[:1] + [("demo-two", ["a/two", "a/three"], two,
-                                                "tools/unresolvable_runner.py")]), _lane_body(lanes))
-        real_realpath = os.path.realpath
+        # group membership is resolved strictly for EVERY row: an unrelated row whose runner is a
+        # missing file, runs through a file used as a directory, sits behind a symlink loop, or (off
+        # root only, where permissions bind) sits in an unsearchable directory leaves membership
+        # undecidable, so the requested singleton is refused 2, naming that row, before any report
+        # directory is allocated or any runner launched; beside a resolvable unrelated row it passes
+        allocated = []
+        real_mkdtemp = tempfile.mkdtemp
 
-        def failing_realpath(path, *args, **kwargs):
-            if "unresolvable_runner" in str(path):
-                raise OSError("realpath refused by the self-test")
-            return real_realpath(path, *args, **kwargs)
-        os.path.realpath = failing_realpath
+        def counting_mkdtemp(*args, **kwargs):
+            allocated.append(kwargs.get("prefix"))
+            return real_mkdtemp(*args, **kwargs)
+
+        def run_counted(root, suite_id="demo"):
+            del allocated[:]
+            tempfile.mkdtemp = counting_mkdtemp
+            try:
+                return run(root, suite_id)
+            finally:
+                tempfile.mkdtemp = real_mkdtemp
+
+        def beside(other_runner):
+            rows = [("demo", GOOD_IDS, None), ("other", ["b/one"], None, other_runner)]
+            return build(_group_text(rows), _report_body(GOOD_IDS, 0))
+
+        root = beside("tools/other_runner.py")
+        (root / "tools" / "other_runner.py").write_text("print('other')\n", encoding="utf-8")
+        code, _out, err = run_counted(root)
+        expect("st/strict-member-resolvable-passes", (code, err, len(allocated)), (0, "", 1))
+        unresolvable = [("missing-file", "tools/no_such_runner.py", None),
+                        ("file-as-directory", "tools/fake_runner.py/runner.py", None),
+                        ("symlink-loop", "tools/loop_a/runner.py", "loop")]
+        probe = base / "permission-probe"
+        (probe / "inner").mkdir(parents=True)
+        (probe / "inner" / "file").write_text("", encoding="utf-8")
+        probe.chmod(0)
         try:
-            code, _out, err = run(root, "demo-one")
+            os.lstat(probe / "inner" / "file")
+        except PermissionError:
+            unresolvable.append(("unsearchable-directory", "tools/denied/runner.py", "denied"))
         finally:
-            os.path.realpath = real_realpath
-        expect("st/group-unresolvable-runner-2", code, 2)
-        expect("st/group-unresolvable-runner-named", "realpath refused by the self-test" in err, True)
-        expect("st/group-unresolvable-runner-no-launch", launched(root), False)
+            probe.chmod(0o700)
+        for label, other_runner, setup in unresolvable:
+            root = beside(other_runner)
+            tools = root / "tools"
+            if setup == "loop":
+                os.symlink("loop_b", tools / "loop_a")
+                os.symlink("loop_a", tools / "loop_b")
+            elif setup == "denied":
+                (tools / "denied").mkdir()
+                (tools / "denied" / "runner.py").write_text("print('denied')\n", encoding="utf-8")
+                (tools / "denied").chmod(0)
+            try:
+                code, _out, err = run_counted(root)
+            finally:
+                if setup == "denied":
+                    (tools / "denied").chmod(0o700)
+            expect("st/strict-member-{}-2".format(label), code, 2)
+            expect("st/strict-member-{}-named".format(label),
+                   ("suite demo: cannot decide which rows share its runner" in err,
+                    "the runner {} of suite other does not resolve".format(other_runner) in err),
+                   (True, True))
+            expect("st/strict-member-{}-no-allocation".format(label), allocated, [])
+            expect("st/strict-member-{}-no-launch".format(label), launched(root), False)
+        # a runner path carrying a control character is refused by the schema, in the requested row or
+        # in an unrelated one, so no cross-row resolution message names a row that shares nothing
+        for label, value, index in (("nul", "\\u0000", 1), ("soh", "\\u0001", 1), ("tab", "\\t", 1),
+                                    ("del", "\\u007f", 1), ("requested-row", "\\u0001", 0)):
+            rows = [("demo", GOOD_IDS, None), ("other", ["b/one"], None, "tools/other_runner.py")]
+            text = _group_text(rows).replace(
+                '"tools/{}"'.format("fake_runner.py" if index == 0 else "other_runner.py"),
+                '"tools/x{}.py"'.format(value))
+            root = build(text, _report_body(GOOD_IDS, 0))
+            (root / "tools" / "other_runner.py").write_text("print('other')\n", encoding="utf-8")
+            code, _out, err = run_counted(root)
+            expect("st/runner-ctrl-{}-2".format(label), code, 2)
+            expect("st/runner-ctrl-{}-named".format(label),
+                   ("suite[{}]: runner must be a control-character-free".format(index) in err,
+                    "cannot decide which rows share" in err), (True, False))
+            expect("st/runner-ctrl-{}-no-launch".format(label), (launched(root), allocated),
+                   (False, []))
+        # launch coverage: every registered row, a split group's included, must have its launch line in
+        # both launch rosters, each read as a regular file through the parity gate's loader; a group row
+        # never launched from either roster (absent, or only commented out), an unrelated row never
+        # launched, and a roster that is missing, a directory, a symlink, rejected by its loader, or
+        # unreadable for want of the loader module are each refused 2 before any allocation or launch
+        local_rel, ci_rel = LAUNCH_ROSTERS[0][0], LAUNCH_ROSTERS[1][0]
+        both = _roster_texts(["demo-one", "demo-two"])
+        unrelated = [("demo-one", GOOD_IDS, None),
+                     ("demo-two", ["b/one"], None, "tools/other_runner.py")]
+        unrelated_body = _lane_body({None: ("demo-one", GOOD_IDS)})
+        root = build(_group_text(unrelated), unrelated_body)
+        (root / "tools" / "other_runner.py").write_text("print('other')\n", encoding="utf-8")
+        code, _out, err = run_counted(root, "demo-one")
+        expect("st/launch-unrelated-row-launched-passes", (code, err, len(allocated)), (0, "", 1))
+        unlaunched_named = ("suite demo-two has no launch line (tools/check_selftest_execution.py "
+                            "--suite demo-two) in {}")
+        for label, rows, rosters, named in (
+                ("group-row-not-in-ci", split, {ci_rel: _roster_texts(["demo-one"])[ci_rel]},
+                 unlaunched_named.format(ci_rel)),
+                ("group-row-not-in-local", split, {local_rel: _roster_texts(["demo-one"])[local_rel]},
+                 unlaunched_named.format(local_rel)),
+                ("group-row-commented-in-local", split,
+                 {local_rel: both[local_rel].replace('run_gate "demo-two"', '# run_gate "demo-two"')},
+                 unlaunched_named.format(local_rel)),
+                ("group-row-commented-in-ci", split,
+                 {ci_rel: both[ci_rel].replace(
+                     "run: python3 -I -B tools/check_selftest_execution.py --suite demo-two",
+                     "# run: (not launched)")},
+                 unlaunched_named.format(ci_rel)),
+                ("unrelated-row-not-in-ci", unrelated, {ci_rel: _roster_texts(["demo-one"])[ci_rel]},
+                 unlaunched_named.format(ci_rel)),
+                ("local-missing", split, {local_rel: None}, "{} unreadable: ".format(local_rel)),
+                ("ci-missing", split, {ci_rel: None}, "{} unreadable: ".format(ci_rel)),
+                ("local-directory", split, {local_rel: None},
+                 "{} is not a regular file".format(local_rel)),
+                ("ci-symlink", split, {ci_rel: None}, "{} is not a regular file".format(ci_rel)),
+                ("local-loader-diagnostic", split,
+                 {local_rel: both[local_rel].replace("failed=0\n", "")},
+                 "launch roster {} cannot be evaluated: line 0: missing initial failed=0".format(
+                     local_rel)),
+                ("loader-unimportable", split, {}, "the parity gate's roster loaders")):
+            root = build(_group_text(rows), unrelated_body if rows is unrelated else _lane_body(lanes),
+                         rosters=rosters)
+            (root / "tools" / "other_runner.py").write_text("print('other')\n", encoding="utf-8")
+            if label == "local-directory":
+                (root / local_rel).mkdir()
+            elif label == "ci-symlink":
+                (root / "elsewhere.yml").write_text(both[ci_rel], encoding="ascii")
+                (root / ci_rel).parent.mkdir(parents=True)
+                os.symlink(root / "elsewhere.yml", root / ci_rel)
+            real_parity = check_ci_parity
+            if label == "loader-unimportable":
+                globals()["check_ci_parity"], globals()["PARITY_IMPORT_ERROR"] = None, "withheld"
+            try:
+                code, _out, err = run_counted(root, "demo-one")
+            finally:
+                globals()["check_ci_parity"] = real_parity
+            expect("st/launch-{}-2".format(label), code, 2)
+            expect("st/launch-{}-named".format(label), ("CANNOT EVALUATE: " in err, named in err),
+                   (True, True))
+            expect("st/launch-{}-no-launch".format(label), (launched(root), allocated), (False, []))
         for label, value in (
                 ("string", '"--lane"'), ("empty", "[]"), ("int", "[1]"), ("bool", "[true]"),
                 ("float", "[1.5]"), ("nested", '[["--lane"]]'), ("table", "[{lane = 1}]"),
@@ -2029,9 +2274,14 @@ def self_test():
           "module global or a class attribute, and, for rows that share a runner, passes each row "
           "of a group that partitions the static set with its own args forwarded ahead of the "
           "report option, while refusing before any launch a gap, an overlap, an extra id, a "
-          "missing or repeated args list, an unresolvable runner path, and a malformed or "
-          "evidence-redirecting argument, a singleton row behaving byte-identically beside a "
-          "split group")
+          "missing or repeated args list, and a malformed argument or one naming the report "
+          "option, a singleton row behaving byte-identically beside a split group, refuses before any "
+          "report directory or launch a row whose runner does not resolve strictly (a missing file, a "
+          "file used as a directory, a symlink loop, and an unsearchable directory where permissions "
+          "bind) and a runner path carrying a control character, and refuses before any launch a "
+          "registered row, of a split group or not, with no launch line in either launch roster (a "
+          "commented-out line included) and a launch roster that is missing, a directory, a symlink, "
+          "rejected by the parity gate's loader, or unreadable for want of that loader")
     return 0
 
 

@@ -467,8 +467,10 @@ OWN_REL = "tools/" + Path(__file__).name
 
 def _guardless_copy(base):
     """A scratch repository holding this checker with its own entry deleted, beside the execution gate, the
-    report finalizer, the roster loader and the real registry, or None when this file does not end in its own
-    entry."""
+    report finalizer, the roster loader, the real registry, every other runner it registers and the real
+    launch rosters (before it launches any suite, the execution gate resolves every registered runner strictly
+    and requires every registered suite to have a launch line in both rosters), or None when this file does
+    not end in its own entry."""
     head, entry, tail = Path(__file__).read_text(encoding="utf-8").rpartition(OWN_ENTRY)
     if not entry or tail:
         return None
@@ -477,7 +479,9 @@ def _guardless_copy(base):
     (root / ".git").write_text("gitdir: absent\n", encoding="ascii")
     (root / OWN_REL).write_text(head + "\n", encoding="utf-8")
     for rel in ("tools/check_selftest_execution.py", "tools/_selftest_exit_report.py", "tools/check_ci_parity.py",
-                REGISTRY_REL):
+                REGISTRY_REL, check_ci_parity.LOCAL_SOURCE, check_ci_parity.CI_SOURCE,
+                *sorted(registry_runners(ROOT) - {OWN_REL})):
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
         (root / rel).write_bytes((ROOT / rel).read_bytes())
     return root
 
