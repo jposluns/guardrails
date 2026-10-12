@@ -3,15 +3,16 @@
 CPython patch release the maintainers' host runs, and the host-patch CI jobs run their suites on exactly
 that release.
 
-Every other job in .github/workflows/quality.yml pins python-version '3.14', which resolves to a 3.14 patch
-release the runner provides (setup-python takes a cached 3.14 without checking for a newer patch release;
-check-latest is off), while the maintainers' host runs one fixed distribution patch release, so a change can
-pass every local suite and fail only in CI on a patch-release difference. The host-patch jobs (HOST_JOBS)
-run the suites a newer patch release most often breaks on the host's own patch release, beside the '3.14'
-jobs of quality.yml, which stay required and unchanged. A passing local suite on the host patch then
-predicts a required CI leg, and a failure only on a '3.14' leg is diagnostic evidence of a patch-release
-difference, not proof that the change is innocent. This gate keeps each host-patch job whole and the
-statements of that patch release in agreement.
+Every other job in .github/workflows/quality.yml that sets up Python pins python-version '3.14' (the
+Quality gates job, which aggregates the others, sets up none). With check-latest off, its default,
+setup-python may resolve that pin to a 3.14 already on the runner rather than the newest patch release,
+while the maintainers' host runs one fixed distribution patch release, so a change can pass every local
+suite and fail only in CI on a patch-release difference. The host-patch jobs (HOST_JOBS) run the suites a
+newer patch release most often breaks on the host's own patch release, beside the '3.14' jobs of
+quality.yml, which stay required and unchanged. A passing local suite on the host patch then predicts a
+required CI leg, and a failure only on a '3.14' leg is diagnostic evidence of a patch-release difference,
+not proof that the change is innocent. This gate keeps the workflow's top level and each host-patch job
+whole and the statements of that patch release in agreement.
 
 Legs, in order:
   source       the single source is a regular UTF-8 file that parses and carries exactly the keys
@@ -19,30 +20,49 @@ Legs, in order:
                leading zero and at most four digits in each component, PATCH_RE); anything else is
                cannot-evaluate, and so is a source that tomllib refuses with a RecursionError (deep nesting)
                or a bare ValueError (an over-long integer), and a component that does not convert.
-  jobs         .github/workflows/quality.yml carries each HOST_JOBS job, and each is whole (JOB_RULES):
-                 job-keys    the job carries no key but name, runs-on and steps (an if:, continue-on-error:,
-                             env:, container: or strategy: can skip, mask or move what it runs);
-                 runner      runs-on is RUNNER, ubuntu-24.04: the setup-python versions manifest offers a
-                             patch release only for named images, so the job names its image;
-                 setup       exactly one step uses setup-python; it carries no key but name, uses and with:,
-                             its with: holds only python-version, and that is the one line in the job that
-                             names python-version (a job-level env: or another key never counts as the pin);
-                 pin         that python-version is the host patch;
-                 gate-step   the step right after the setup-python step is the Python host pin step, an
-                             executable step (no key but name and run) whose run: is GATE_RUN;
-                 suite-step  an executable step after the setup-python step runs the job's suite,
-                             HOST_SUITES (opf-host-patch: the OPF tooling self-test;
-                             git-fixture-env-host-patch: the git-fixture-env behaviour self-test).
-               So removing, moving, renaming or disabling (if:, continue-on-error:) a host-patch job, its
-               setup-python step, its Python host pin step or its suite step is a finding, and so is
-               another runner. Jobs are read by a line model: under the top-level jobs: key, a job is a
-               plain key at indent 2 and its content sits at indent 4 or deeper; any other line there, and a
-               repeated job id, is cannot-evaluate. Inside a HOST_JOBS job, each line is a block mapping
-               entry, or a "- " list item holding one, at indent 10 or less: a plain key, a colon, then
-               nothing, a one-line quoted scalar or a plain scalar that opens no flow, block scalar, anchor,
-               alias or tag (ENTRY_RE). Any other line (a run: | block among them), a repeated key and a line
-               the indentation does not place are cannot-evaluate, and so is a line (a comment included)
-               that names python-version in any case and is not one strict pin line (PIN_LINE_RE).
+  jobs         .github/workflows/quality.yml carries each HOST_JOBS job, and its top level and each such
+               job are whole (JOB_RULES):
+                 workflow-keys  the workflow carries no top-level key but name, on, permissions and jobs
+                                (TOP_KEYS): a top-level defaults: or env: changes how every run step of
+                                every job executes (defaults: run: shell: true {0} makes each step exit 0
+                                without running its command);
+                 job-keys       the job carries no key but name, runs-on and steps (an if:,
+                                continue-on-error:, env:, defaults:, container: or strategy: can skip, mask,
+                                move or change what it runs);
+                 runner         runs-on is RUNNER, ubuntu-24.04: the setup-python versions manifest lists a
+                                patch release's Linux builds by Ubuntu version, so the job names its image;
+                 checkout       the first step is the checkout step as written (uses: CHECKOUT_USES and a
+                                with: of exactly CHECKOUT_INPUTS, no other key), and no other step uses a
+                                checkout action: a ref:, repository: or path: input, or a second checkout,
+                                can put another tree under the gate and the suite;
+                 setup          exactly one step uses setup-python; it carries no key but name, uses and
+                                with:, its with: holds only python-version, and that is the one line in the
+                                job that names python-version (a job-level env: or another key never counts
+                                as the pin);
+                 pin            that python-version is the host patch;
+                 gate-step      the step right after the setup-python step is the Python host pin step, an
+                                executable step (no key but name and run) whose run: is GATE_RUN;
+                 suite-step     an executable step after the setup-python step runs the job's suite,
+                                HOST_SUITES (opf-host-patch: the OPF tooling self-test;
+                                git-fixture-env-host-patch: the git-fixture-env behaviour self-test).
+               So a top-level key outside TOP_KEYS, another runner or checkout, removing or moving a
+               host-patch job, its setup-python step, its Python host pin step or its suite step, changing a
+               job id or the command a held step runs, and disabling a held step (if:, continue-on-error:) are
+               each a finding. A display name (name:) is not held: it changes neither what a step runs nor how
+               the Quality gates job reads a job's result, which is by job id. Jobs are read by a line model.
+               A line that still carries a carriage return once its one trailing CR is removed, or carries
+               U+0085, U+2028 or U+2029 (LINE_BREAKS, the set the python-floor gate refuses), is
+               cannot-evaluate: a YAML reader may break the line there and read a key this model does not see.
+               A top-level line is a plain key, a colon, then nothing or a value (TOP_RE); any other top-level
+               line (a quoted or explicit key, a flow mapping, a document marker) and a repeated top-level key
+               are cannot-evaluate. Under the top-level jobs: key, a job is a plain key at indent 2 and its
+               content sits at indent 4 or deeper; any other line there, and a repeated job id, is
+               cannot-evaluate. Inside a HOST_JOBS job, each line is a block mapping entry, or a "- " list
+               item holding one, at indent 10 or less: a plain key, a colon, then nothing, a one-line quoted
+               scalar or a plain scalar that opens no flow, block scalar, anchor, alias or tag (ENTRY_RE). Any
+               other line (a run: | block among them), a repeated key and a line the indentation does not
+               place are cannot-evaluate, and so is a line (a comment included) that names python-version in
+               any case and is not one strict pin line (PIN_LINE_RE).
   interpreter  the running interpreter (sys.version_info) is the host patch, a final release. A difference
                is a finding (exit 1): run locally, it reports that this interpreter is not the committed
                host patch, so a passing local suite does not predict the host-patch CI jobs, and
@@ -54,30 +74,41 @@ Legs, in order:
                                         for each finding leg, a copy of this gate loaded through importlib
                                         with that leg's call removed passes the fixture the intact gate
                                         refuses; for each job rule, a copy with that rule removed from
-                                        JOB_RULES passes each of that rule's cases; and a copy whose source
-                                        parse maps only TOMLDecodeError lets a parser RecursionError escape
+                                        JOB_RULES passes each of that rule's cases; a copy without the
+                                        line-break refusal reads each line-break case; and a copy whose
+                                        source parse maps only TOMLDecodeError lets a parser RecursionError
+                                        escape
 
 Exit convention: 0 every leg passes; 1 a finding; 2 usage or cannot-evaluate (a missing, unreadable,
-non-regular, symlinked, non-UTF-8 or malformed source or workflow, a line the line model cannot place or
-read, a pin line outside the strict form, unavailable temporary storage).
+non-regular, symlinked, non-UTF-8 or malformed source or workflow, a workflow line carrying a line-break
+character, a top-level line that is not a plain key, a repeated top-level key, a line the line model cannot
+place or read, a pin line outside the strict form, unavailable temporary storage).
 
-DISCLOSED RESIDUAL. The jobs leg reads only quality.yml and only the HOST_JOBS jobs, and judges only their
-keys, runner, setup-python step, Python host pin step and suite step: another step (the checkout, or one
-that starts another interpreter) runs as written, and what the suites test is theirs. The grammar of the
-whole workflow, the setup-python uses: shape and every other pin belong to the python-floor gate
-(tools/check_python_floor.py), which accepts a pin of a patch release only inside the HOST_JOBS jobs of
-quality.yml and only when it equals this source, and holds every other python-version in any workflow to
-the floor exactly. GitHub's runtime is not modelled: when the runner image retires or the host patch has no
-build for it, setup-python fails the job, closed and never on another patch release; ubuntu-26.04 has no
-3.14.4 build, so the move off ubuntu-24.04 is one reviewed change of RUNNER, both runs-on lines and, if
-needed, the host patch. The interpreter leg judges only the interpreter that runs this gate; in CI it runs
-only in the HOST_JOBS jobs. Equal patch releases are not equal builds: a distribution build's downstream
-patches and the system libraries an interpreter links (OpenSSL, SQLite, expat, zlib and others) can differ
-between the host and the runner, and this gate does not compare them. It does not check that the committed
-patch is what the host runs: when the host interpreter changes, the maintainer updates the source and both
-host-patch pins in one reviewed change, and until then every local run fails on the interpreter leg. CI
-cost: the two jobs run the OPF tooling self-test and the git-fixture-env suite a second time in every run
-of the workflow, and an edit to a pull request's title or body starts a run (the workflow runs on edited).
+DISCLOSED RESIDUAL. The jobs leg reads only quality.yml: its top-level keys and, in the HOST_JOBS jobs, their
+keys, runner, checkout step, setup-python step, Python host pin step and suite step. Another step in a
+host-patch job runs as written, and what the suites test is theirs: a step that starts another interpreter,
+appends to GITHUB_PATH, changes the checked-out tree or uses a local or composite action is not judged here.
+tools/check_ci_parity.py is the second holder for those edits: in every job it refuses a uses: of an action
+other than actions/checkout and actions/setup-python and a run: command outside its parity grammar. An edit
+that makes every run step exit 0 without running its command (a top-level defaults: run: shell: true {0}) also
+silences, in CI, this gate's own step, every other gate step and the Quality gates job's step, so CI cannot
+report it; this gate and check_ci_parity refuse it where they run outside that workflow, in
+tools/run_all_checks.sh. The grammar of the whole workflow, the setup-python uses: shape and every other pin
+belong to the python-floor gate (tools/check_python_floor.py), which accepts a pin of a patch release only
+inside the HOST_JOBS jobs of quality.yml and only when it equals this source, and holds every other
+python-version in any workflow to the floor exactly. GitHub's runtime is not modelled: when the runner image
+retires or the host patch has no build for it, setup-python fails the job, closed and never on another patch
+release. On 2026-10-12 the setup-python versions manifest (actions/python-versions) listed Linux x64 builds of
+3.14.4 for Ubuntu 22.04 and 24.04 only, so the move off ubuntu-24.04 is one reviewed change of RUNNER, both
+runs-on lines and, if needed, the host patch. The interpreter leg judges only the interpreter that runs this
+gate; in CI it runs only in the HOST_JOBS jobs. Equal patch releases are not equal builds: a distribution
+build's downstream patches and the system libraries an interpreter links (OpenSSL, SQLite, expat, zlib and
+others) can differ between the host and the runner, and this gate does not compare them. It does not check
+that the committed patch is what the host runs: when the host interpreter changes, the maintainer updates the
+source and both host-patch pins in one reviewed change, and until then every local run fails on the
+interpreter leg. CI cost: the two jobs run the OPF tooling self-test and the git-fixture-env suite a second
+time in every run of the workflow, and an edit to a pull request's title or body starts a run (the workflow
+runs on edited).
 
 Run this gate isolated: python3 -I -B tools/check_python_host_pin.py
 """
@@ -119,16 +150,25 @@ HOST_JOBS = tuple(HOST_SUITES)
 # The step right after a host-patch job's setup-python step: this gate, which fails there when the job does
 # not run the host patch.
 GATE_RUN = "python3 -I -B tools/check_python_host_pin.py"
-# The runner image of each host-patch job. The setup-python versions manifest offers a patch release only
-# for named images (3.14.4 for ubuntu-22.04 and ubuntu-24.04, not ubuntu-26.04), so ubuntu-latest fails the
-# jobs once it moves to an image the host patch has no build for.
+# The runner image of each host-patch job. The setup-python versions manifest lists a patch release's Linux
+# builds by Ubuntu version (on 2026-10-12, x64 builds of 3.14.4 for 22.04 and 24.04 only), so ubuntu-latest
+# would fail the jobs once it moves to an image the host patch has no build for.
 RUNNER = "ubuntu-24.04"
+# The top-level keys the workflow may carry: a defaults: or env: block changes how every run step of every
+# job executes.
+TOP_KEYS = ("name", "on", "permissions", "jobs")
 JOB_KEYS = {"name", "runs-on", "steps"}
+# The first step of each host-patch job, as written: another ref, repository or path can put another tree
+# under the gate and the suite.
+CHECKOUT_USES = "actions/checkout@v4"
+CHECKOUT_KEYS = {"uses", "with"}
+CHECKOUT_INPUTS = {"fetch-depth": "0", "fetch-tags": "true"}
 SETUP_KEYS = {"name", "uses", "with"}
 RUN_KEYS = {"name", "run"}
 # The rules of the jobs leg; the self-test removes each from a copy of this gate to show its cases red on
 # revert.
-JOB_RULES = frozenset({"job-keys", "runner", "setup", "pin", "gate-step", "suite-step"})
+JOB_RULES = frozenset({"workflow-keys", "job-keys", "runner", "checkout", "setup", "pin", "gate-step",
+                       "suite-step"})
 # MAJOR.MINOR.PATCH, no leading zero, at most four digits in each component.
 PATCH_RE = re.compile(r"([1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})")
 PIN_KEY = "python-version"
@@ -140,6 +180,13 @@ PIN_LINE_RE = re.compile(
     r" *(?:- +)?python-version *: +"
     r"(?:(?P<plain>[A-Za-z0-9._+-]+)|'(?P<single>[A-Za-z0-9._+-]+)'|\"(?P<double>[A-Za-z0-9._+-]+)\")"
     r"(?:[ \t]+#.*|[ \t]*)")
+# A top-level line of the workflow: a plain key, a colon, then nothing or a value.
+TOP_RE = re.compile(r"(?P<key>[A-Za-z_][A-Za-z0-9_-]*) *:(?:[ \t].*)?")
+# Characters a YAML reader may read as a line break that the "\n" split does not: a carriage return left
+# inside a line, and the next-line, line-separator and paragraph-separator characters a YAML 1.1 reader also
+# breaks on. The python-floor gate refuses the same set (LINE_BREAKS there), which the self-test holds.
+LINE_BREAKS = {"\r": "a carriage return", "\x85": "U+0085 (next line)",
+               "\u2028": "U+2028 (line separator)", "\u2029": "U+2029 (paragraph separator)"}
 # A job id under jobs:, a plain key at indent 2, then nothing but an optional comment.
 JOB_RE = re.compile(r"  (?P<id>[A-Za-z_][A-Za-z0-9_-]*) *:(?:[ \t]+#.*|[ \t]*)")
 # One line of a host-patch job: a block mapping entry, optionally a "- " list item, whose value is nothing,
@@ -298,15 +345,28 @@ def _host_job_findings(job, tree, want):
     if "job-keys" in JOB_RULES:
         for key in tree:
             if key not in JOB_KEYS:
-                found.append("{} carries {}:, which can skip, mask or move what it runs (a host-patch job "
-                             "carries only name, runs-on and steps)".format(where, key))
+                found.append("{} carries {}:, which can skip, mask, move or change what it runs (a host-patch "
+                             "job carries only name, runs-on and steps)".format(where, key))
     if "runner" in JOB_RULES and tree.get("runs-on") != RUNNER:
-        found.append("{} runs on {!r}, not {!r}: the setup-python versions manifest offers the host patch "
-                     "only for named images, so the job names its image".format(
+        found.append("{} runs on {!r}, not {!r}: the setup-python versions manifest lists the host patch's "
+                     "Linux builds by Ubuntu version, so the job names its image".format(
                          where, tree.get("runs-on"), RUNNER))
     steps = tree.get("steps")
     if not isinstance(steps, list) or not steps:
         return found + ["{} carries no steps list".format(where)]
+    if "checkout" in JOB_RULES:
+        first = steps[0]
+        if not (first.get("uses") == CHECKOUT_USES and set(first) == CHECKOUT_KEYS
+                and first.get("with") == CHECKOUT_INPUTS):
+            found.append("{}: its first step is not the checkout step as written (uses: {} with only {}, no "
+                         "other key): another ref, repository or path can put another tree under the gate "
+                         "and the suite".format(where, CHECKOUT_USES, ", ".join(
+                             "{}: {}".format(key, value) for key, value in CHECKOUT_INPUTS.items())))
+        others = [index for index, step in enumerate(steps) if index
+                  and isinstance(step.get("uses"), str) and "checkout" in step["uses"].lower()]
+        if others:
+            found.append("{} carries another checkout step (step {}), which can put another tree under the "
+                         "gate and the suite".format(where, others[0] + 1))
     setups = [index for index, step in enumerate(steps)
               if isinstance(step.get("uses"), str) and "setup-python" in step["uses"].lower()]
     if "setup" in JOB_RULES:
@@ -346,17 +406,33 @@ def _host_job_findings(job, tree, want):
 
 
 def job_findings(root, patch):
-    """Each HOST_JOBS job of WORKFLOW_REL is whole (JOB_RULES) and pins the host patch."""
+    """The top level of WORKFLOW_REL and each HOST_JOBS job in it are whole (JOB_RULES), and each such job
+    pins the host patch."""
     want = _patch_text(patch)
     entries = {job: [] for job in HOST_JOBS}
-    seen, in_jobs, job = set(), False, None
+    seen, tops, in_jobs, job = set(), {}, False, None
     for number, line in enumerate(_read_text(root / WORKFLOW_REL).split("\n"), 1):
         line = line[:-1] if line.endswith("\r") else line
+        for char, label in LINE_BREAKS.items():
+            if char in line:
+                raise CannotEvaluate("{}:{}: carries {}, which a YAML reader may read as a line break; this "
+                                     "line model splits only on newline and cannot read it".format(
+                                         WORKFLOW_REL, number, label))
         stripped = line.strip(" \t")
         if not stripped:
             continue
         comment = stripped.startswith("#")
         if not comment and not line.startswith((" ", "\t")):
+            top = TOP_RE.fullmatch(line)
+            if top is None:
+                raise CannotEvaluate("{}:{}: a top-level line that is not a plain key (a quoted or explicit "
+                                     "key, a flow mapping or a document marker among them); this line model "
+                                     "cannot read it".format(WORKFLOW_REL, number))
+            key = top.group("key")
+            if key in tops:
+                raise CannotEvaluate("{}:{}: the top-level key {} repeats line {}; this line model cannot "
+                                     "tell which YAML keeps".format(WORKFLOW_REL, number, key, tops[key]))
+            tops[key] = number
             in_jobs, job = line.split("#", 1)[0].rstrip(" \t") == "jobs:", None
             continue
         if in_jobs and not comment:
@@ -381,6 +457,12 @@ def job_findings(root, patch):
         if not comment:
             entries[job].append(_entry(job, number, line))
     findings = []
+    if "workflow-keys" in JOB_RULES:
+        for key, number in tops.items():
+            if key not in TOP_KEYS:
+                findings.append("{}:{}: carries the top-level key {}:, which can change how every run step "
+                                "of every job executes (a defaults: or env: block among them); the workflow "
+                                "carries only {}".format(WORKFLOW_REL, number, key, ", ".join(TOP_KEYS)))
     for name in HOST_JOBS:
         if name not in seen:
             findings.append("{}: carries no job {} (a host-patch job, HOST_JOBS in "
@@ -411,10 +493,11 @@ def evaluate(root, version):
         return 2, ["CANNOT EVALUATE: {}".format(exc)]
     if findings:
         return 1, ["FAIL: " + finding for finding in findings]
-    return 0, ["PASS: python host patch {} ({}): the host-patch jobs {} in {} each run on {}, pin it in "
-               "their one setup-python step, run this gate right after it and run their suite, and this "
-               "interpreter is Python {}".format(_patch_text(patch), SOURCE_REL, ", ".join(HOST_JOBS),
-                                                 WORKFLOW_REL, RUNNER, _patch_text(version[:3]))]
+    return 0, ["PASS: python host patch {} ({}): {} carries only the top-level keys {}, its host-patch jobs "
+               "{} each run on {}, check out as written, pin it in their one setup-python step, run this "
+               "gate right after it and run their suite, and this interpreter is Python {}".format(
+                   _patch_text(patch), SOURCE_REL, WORKFLOW_REL, ", ".join(TOP_KEYS), ", ".join(HOST_JOBS),
+                   RUNNER, _patch_text(version[:3]))]
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -435,6 +518,7 @@ FLOOR_JOB = ("  floor:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ac
              "      - run: python3 -I -B tools/x.py\n")
 SETUP_STEP = "      - uses: actions/setup-python@v5\n        with:\n          " + PIN + "\n\n"
 GATE_STEP = "      - name: Python host pin\n        run: " + GATE_RUN + "\n\n"
+HEAD = "name: Quality\n\non: push\n\npermissions:\n  contents: read\n\njobs:\n"
 
 
 def check(name, got, want):
@@ -468,26 +552,28 @@ def _suite_step(job):
 def _host_job(job):
     """A whole host-patch job, laid out as quality.yml lays it out."""
     return ("  {0}:\n    name: {0}\n    runs-on: {1}\n    steps:\n      - uses: actions/checkout@v4\n"
-            "        with:\n          fetch-depth: 0\n\n".format(job, RUNNER) + SETUP_STEP + GATE_STEP
-            + _suite_step(job))
+            "        with:\n          fetch-depth: 0\n          fetch-tags: true\n\n".format(job, RUNNER)
+            + SETUP_STEP + GATE_STEP + _suite_step(job))
+
+
+def _edited(text, edits, part):
+    """text with each edit (part, old, new) for this part applied in order, each replacing the one
+    occurrence of old."""
+    for name, old, new in edits:
+        if name == part:
+            if text.count(old) != 1:
+                raise CannotEvaluate("self-test edit {!r} occurs {} times in {}".format(
+                    old, text.count(old), part or "the top level"))
+            text = text.replace(old, new)
+    return text
 
 
 def _workflow(edits=(), omit=()):
-    """quality.yml: a floor job, then each host-patch job not in omit with its edits applied in order; an
-    edit (job, old, new) replaces the one occurrence of old in that job."""
-    jobs = [FLOOR_JOB]
-    for job in HOST_JOBS:
-        if job in omit:
-            continue
-        text = _host_job(job)
-        for name, old, new in edits:
-            if name == job:
-                if text.count(old) != 1:
-                    raise CannotEvaluate("self-test edit {!r} occurs {} times in {}".format(
-                        old, text.count(old), job))
-                text = text.replace(old, new)
-        jobs.append(text)
-    return "name: Quality\n\non: push\n\njobs:\n" + "".join(jobs)
+    """quality.yml: HEAD, a floor job, then each host-patch job not in omit, with the edits applied in order;
+    an edit (job, old, new) replaces the one occurrence of old in that job, or in HEAD when job is None."""
+    jobs = [_edited(HEAD, edits, None), FLOOR_JOB]
+    jobs.extend(_edited(_host_job(job), edits, job) for job in HOST_JOBS if job not in omit)
+    return "".join(jobs)
 
 
 def _fixture(base, source=SOURCE_TEXT, workflow=None):
@@ -522,15 +608,22 @@ class _ParserMismatch(Exception):
 def _key_depth_bounded(real, calls):
     """tomllib's key parser, made to raise RecursionError on a key of more than 1000 dotted parts, as a
     release that bounds key depth does. calls records each call; a call or a result that does not fit
-    parse_key(src, pos) -> (pos, key) raises _ParserMismatch."""
+    parse_key(src, pos) -> (pos, key), pos an int within src and key a tuple of str, raises
+    _ParserMismatch."""
     def parse_key(*args, **kwargs):
         calls.append(len(args))
         try:
             result = real(*args, **kwargs)
         except TypeError as exc:
             raise _ParserMismatch("calling it raised TypeError: {}".format(exc))
-        if not (isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], tuple)):
+        src = args[0] if args else kwargs.get("src")
+        if not (isinstance(result, tuple) and len(result) == 2):
             raise _ParserMismatch("it returned {} rather than (pos, key)".format(type(result).__name__))
+        if not (isinstance(src, str) and type(result[0]) is int and 0 <= result[0] <= len(src)):
+            raise _ParserMismatch("it returned the position {!r:.40}, not an int within the source".format(
+                result[0]))
+        if not (isinstance(result[1], tuple) and all(isinstance(part, str) for part in result[1])):
+            raise _ParserMismatch("it returned the key {!r:.60}, not a tuple of str".format(result[1]))
         if len(result[1]) > 1000:
             raise RecursionError("injected: a key of more than 1000 dotted parts")
         return result
@@ -562,6 +655,38 @@ def _parse_refusal(evaluate_tree, root, bound):
     return result
 
 
+# A key parser whose (pos, key) result is malformed, each with the words of the mismatch it must raise: the
+# bounded parser names each as a mismatch, never a traceback, never the expected refusal.
+MALFORMED_RESULTS = {
+    "none-position": (lambda src, pos, key: (None, key), "not an int within the source"),
+    "negative-position": (lambda src, pos, key: (-1, key), "not an int within the source"),
+    "past-end-position": (lambda src, pos, key: (len(src) + 1, key), "not an int within the source"),
+    "bool-position": (lambda src, pos, key: (True, key), "not an int within the source"),
+    "non-str-key-part": (lambda src, pos, key: (pos, key + (1,)), "not a tuple of str"),
+}
+
+
+def _malformed_refusal(refusal, damage, marker):
+    """True when refusal(), run with tomllib's key parser replaced by one whose result damage(src, pos, key)
+    rewrites, returns a text naming the mismatch marker words; otherwise what it returned or raised."""
+    parser = getattr(tomllib, "_parser", None)
+    real = getattr(parser, "parse_key", None)
+    if not callable(real):
+        return "tomllib._parser.parse_key is missing or not callable on this release"
+
+    def parse_key(src, pos):
+        pos, key = real(src, pos)
+        return damage(src, pos, key)
+    parser.parse_key = parse_key
+    try:
+        got = refusal()
+    except Exception as exc:
+        got = "raised " + type(exc).__name__
+    finally:
+        parser.parse_key = real
+    return True if isinstance(got, str) and "does not fit the injection" in got and marker in got else got
+
+
 def _job_cases():
     """Each jobs-leg finding case: (check id, edits, omitted jobs, a marker of its finding, and the one
     JOB_RULES rule whose removal lets it pass, or None for a case more than one rule refuses)."""
@@ -569,6 +694,8 @@ def _job_cases():
     gate_name = "      - name: Python host pin\n"
     suite_name = "      - name: Suite\n"
     setup_uses = "      - uses: actions/setup-python@v5\n"
+    checkout_uses = "      - uses: actions/checkout@v4\n"
+    fetch_tags = "          fetch-tags: true\n"
     runs = "    runs-on: "
     return (
         ("pins/host-job-missing-finding", (), (GFE,), "carries no job " + GFE, None),
@@ -582,9 +709,12 @@ def _job_cases():
          "opf-host-patch carries 2 setup-python steps", "setup"),
         ("jobs/setup-step-removed-finding", ((GFE, SETUP_STEP, ""),), (),
          GFE + " carries 0 setup-python steps", "setup"),
+        # A pin among the checkout inputs: the setup and checkout rules both refuse it.
         ("jobs/second-pin-line-finding",
          ((OPF, "          fetch-depth: 0\n", "          fetch-depth: 0\n          " + PIN + "\n"),), (),
-         "opf-host-patch carries 2 python-version pins", "setup"),
+         "opf-host-patch carries 2 python-version pins", None),
+        ("jobs/setup-step-second-pin-finding", ((GFE, setup_uses, setup_uses + "        " + PIN + "\n"),), (),
+         GFE + " carries 2 python-version pins", "setup"),
         ("jobs/setup-step-if-finding", ((GFE, setup_uses, setup_uses + "        if: false\n"),), (),
          "sets if: on its setup-python step", "setup"),
         ("jobs/setup-step-extra-input-finding",
@@ -636,6 +766,36 @@ def _job_cases():
          "runs on 'ubuntu-latest', not 'ubuntu-24.04'", "runner"),
         ("jobs/runs-on-newer-image-finding", ((GFE, runs + RUNNER, runs + "ubuntu-26.04"),), (),
          "runs on 'ubuntu-26.04', not 'ubuntu-24.04'", "runner"),
+        # A reviewer reproduction: a workflow-level shell default that runs no step's command.
+        ("jobs/workflow-defaults-echo-finding",
+         ((None, "jobs:\n", "defaults:\n  run:\n    shell: echo {0}\n\njobs:\n"),), (),
+         "carries the top-level key defaults:", "workflow-keys"),
+        ("jobs/workflow-defaults-true-finding",
+         ((None, "jobs:\n", "defaults:\n  run:\n    shell: \"true {0}\"\n\njobs:\n"),), (),
+         "carries the top-level key defaults:", "workflow-keys"),
+        ("jobs/workflow-defaults-after-jobs-finding",
+         ((GFE, suite[GFE], suite[GFE] + "\ndefaults:\n  run:\n    shell: echo {0}\n"),), (),
+         "carries the top-level key defaults:", "workflow-keys"),
+        ("jobs/workflow-env-finding", ((None, "jobs:\n", "env:\n  FOO: bar\n\njobs:\n"),), (),
+         "carries the top-level key env:", "workflow-keys"),
+        ("jobs/job-defaults-finding",
+         ((OPF, runs, "    defaults:\n      run:\n        shell: echo {0}\n" + runs),), (),
+         "opf-host-patch carries defaults:", "job-keys"),
+        ("jobs/checkout-ref-finding", ((OPF, fetch_tags, fetch_tags + "          ref: main\n"),), (),
+         "opf-host-patch: its first step is not the checkout step as written", "checkout"),
+        ("jobs/checkout-repository-finding",
+         ((GFE, fetch_tags, fetch_tags + "          repository: other/repo\n"),), (),
+         GFE + ": its first step is not the checkout step as written", "checkout"),
+        ("jobs/checkout-path-finding", ((OPF, fetch_tags, fetch_tags + "          path: other\n"),), (),
+         "opf-host-patch: its first step is not the checkout step as written", "checkout"),
+        ("jobs/checkout-other-ref-of-action-finding",
+         ((GFE, "actions/checkout@v4", "actions/checkout@main"),), (),
+         GFE + ": its first step is not the checkout step as written", "checkout"),
+        ("jobs/checkout-step-if-finding", ((OPF, checkout_uses, checkout_uses + "        if: false\n"),), (),
+         "opf-host-patch: its first step is not the checkout step as written", "checkout"),
+        ("jobs/second-checkout-finding",
+         ((GFE, GATE_STEP, GATE_STEP + checkout_uses + "        with:\n          ref: main\n\n"),), (),
+         GFE + " carries another checkout step (step 4)", "checkout"),
     )
 
 
@@ -678,6 +838,16 @@ def _self_test_cases(base):
             ("source/long-integer-cannot-evaluate", "x = " + "1" * 5000 + "\n", False)):
         check(check_id, _parse_refusal(evaluate, _fixture(base, source=SOURCE_TEXT + extra), bound),
               (2, True))
+    # A key parser whose result breaks the (pos, key) contract: the bounded parser names the mismatch.
+    root = _fixture(base)
+    for check_id, name in (
+            ("source/parser-none-position-named-failure", "none-position"),
+            ("source/parser-negative-position-named-failure", "negative-position"),
+            ("source/parser-past-end-position-named-failure", "past-end-position"),
+            ("source/parser-bool-position-named-failure", "bool-position"),
+            ("source/parser-non-str-key-part-named-failure", "non-str-key-part")):
+        check(check_id, _malformed_refusal(lambda: _parse_refusal(evaluate, root, True),
+                                           *MALFORMED_RESULTS[name]), True)
     # A version component: PATCH_RE bounds it at four digits, and a component that still does not convert
     # is cannot-evaluate. Each case also runs the copy with the bound removed: a five-digit component then
     # loads (a finding, so the bound is what refuses it), and a 5,000-digit quoted component, past the
@@ -770,9 +940,40 @@ def _self_test_cases(base):
             ("pins/quoted-job-id-cannot-evaluate", "jobs:\n  \"opf-host-patch\":\n",
              "this line model cannot place it"),
             ("pins/indent-three-cannot-evaluate", "jobs:\n" + _host_job(OPF) + "   x: 1\n",
-             "this line model cannot place it")):
+             "this line model cannot place it"),
+            ("pins/repeated-top-level-key-cannot-evaluate", _workflow() + "jobs:\n" + FLOOR_JOB,
+             "the top-level key jobs repeats"),
+            ("pins/repeated-permissions-cannot-evaluate", _workflow() + "permissions:\n  contents: write\n",
+             "the top-level key permissions repeats"),
+            ("pins/quoted-top-level-key-cannot-evaluate",
+             _workflow(((None, "jobs:\n", "\"defaults\":\n  run:\n    shell: echo {0}\n\njobs:\n"),)),
+             "a top-level line that is not a plain key"),
+            ("pins/explicit-top-level-key-cannot-evaluate",
+             _workflow(((None, "jobs:\n", "? defaults\n: {run: {shell: echo {0}}}\n\njobs:\n"),)),
+             "a top-level line that is not a plain key")):
         code, lines = evaluate(_fixture(base, workflow=workflow), HOST)
         check(check_id, (code, _has(lines, marker)), (2, True))
+    # A line-break character hides a line from the "\n" split: here an if: false on the suite step, written
+    # with a tab after its colon. Each is cannot-evaluate, and a copy of this gate without the refusal reads
+    # the hidden text as the step's name and passes (red on revert).
+    source = _read_text(Path(__file__).resolve())
+    anchor = "for char, label in " + "LINE_BREAKS.items():"
+    if source.count(anchor) != 1:
+        raise CannotEvaluate("red-on-revert anchor for the line-break refusal occurs {} times".format(
+            source.count(anchor)))
+    breaks = _copy(base, "python_host_pin_without_line_breaks",
+                   source.replace(anchor, "for char, label in ():"))
+    suite_name = "      - name: Suite\n"
+    for check_id, char in (
+            ("jobs/carriage-return-cannot-evaluate", "\r"),
+            ("jobs/next-line-cannot-evaluate", "\x85"),
+            ("jobs/line-separator-cannot-evaluate", "\u2028"),
+            ("jobs/paragraph-separator-cannot-evaluate", "\u2029")):
+        root = _fixture(base, workflow=_workflow(((OPF, suite_name, suite_name[:-1] + char
+                                                   + "        if:\tfalse\n"),)))
+        code, lines = evaluate(root, HOST)
+        check(check_id, (code, _has(lines, "carries " + LINE_BREAKS[char]), breaks.evaluate(root, HOST)[0]),
+              (2, True, 0))
 
     for check_id, version, shown in (
             ("interpreter/newer-patch-finding", (3, 14, 8, "final"), "Python 3.14.8 (final)"),
@@ -790,11 +991,12 @@ def _self_test_cases(base):
     if real is not None:
         check("real/tree-passes-at-its-host-patch", evaluate(ROOT, real)[0], 0)
     # The python-floor gate accepts a host-patch pin only inside these jobs of this workflow, read from this
-    # source in this form: its copies of those names must be these.
+    # source in this form, and refuses these line-break characters: its copies of those names must be these.
     floor = _copy(base, "python_floor_names", _read_text(ROOT / "tools" / "check_python_floor.py"))
     check("real/floor-gate-agrees",
           (tuple(floor.HOST_JOBS), floor.HOST_WORKFLOW_REL, floor.HOST_SOURCE_REL,
-           floor.HOST_PATCH_RE.pattern), (HOST_JOBS, WORKFLOW_REL, SOURCE_REL, PATCH_RE.pattern))
+           floor.HOST_PATCH_RE.pattern, floor.LINE_BREAKS),
+          (HOST_JOBS, WORKFLOW_REL, SOURCE_REL, PATCH_RE.pattern, LINE_BREAKS))
     _red_on_revert(base)
 
 

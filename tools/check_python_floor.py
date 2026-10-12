@@ -1947,15 +1947,22 @@ class _ParserMismatch(Exception):
 def _key_depth_bounded(real, calls):
     """tomllib's key parser, made to raise RecursionError on a key of more than 1000 dotted parts, as a
     release that bounds key depth does. calls records each call; a call or a result that does not fit
-    parse_key(src, pos) -> (pos, key) raises _ParserMismatch."""
+    parse_key(src, pos) -> (pos, key), pos an int within src and key a tuple of str, raises
+    _ParserMismatch."""
     def parse_key(*args, **kwargs):
         calls.append(len(args))
         try:
             result = real(*args, **kwargs)
         except TypeError as exc:
             raise _ParserMismatch("calling it raised TypeError: {}".format(exc))
-        if not (isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], tuple)):
+        src = args[0] if args else kwargs.get("src")
+        if not (isinstance(result, tuple) and len(result) == 2):
             raise _ParserMismatch("it returned {} rather than (pos, key)".format(type(result).__name__))
+        if not (isinstance(src, str) and type(result[0]) is int and 0 <= result[0] <= len(src)):
+            raise _ParserMismatch("it returned the position {!r:.40}, not an int within the source".format(
+                result[0]))
+        if not (isinstance(result[1], tuple) and all(isinstance(part, str) for part in result[1])):
+            raise _ParserMismatch("it returned the key {!r:.60}, not a tuple of str".format(result[1]))
         if len(result[1]) > 1000:
             raise RecursionError("injected: a key of more than 1000 dotted parts")
         return result
@@ -1987,6 +1994,39 @@ def _host_parse_refusal(root, bound):
     if bound and not calls:
         return "tomllib._parser.parse_key was never called, so the injected key-depth case did not run"
     return code, _has(lines, HOST_SOURCE_REL + ": does not parse")
+
+
+# A key parser whose (pos, key) result is malformed, each with the words of the mismatch it must raise: the
+# bounded parser names each as a mismatch, never a traceback, never the expected refusal.
+MALFORMED_RESULTS = {
+    "none-position": (lambda src, pos, key: (None, key), "not an int within the source"),
+    "negative-position": (lambda src, pos, key: (-1, key), "not an int within the source"),
+    "past-end-position": (lambda src, pos, key: (len(src) + 1, key), "not an int within the source"),
+    "bool-position": (lambda src, pos, key: (True, key), "not an int within the source"),
+    "non-str-key-part": (lambda src, pos, key: (pos, key + (1,)), "not a tuple of str"),
+}
+
+
+def _malformed_host_refusal(root, damage, marker):
+    """True when _host_parse_refusal(root, True), run with tomllib's key parser replaced by one whose result
+    damage(src, pos, key) rewrites, returns a text naming the mismatch marker words; otherwise what it
+    returned or raised."""
+    parser = getattr(tomllib, "_parser", None)
+    real = getattr(parser, "parse_key", None)
+    if not callable(real):
+        return "tomllib._parser.parse_key is missing or not callable on this release"
+
+    def parse_key(src, pos):
+        pos, key = real(src, pos)
+        return damage(src, pos, key)
+    parser.parse_key = parse_key
+    try:
+        got = _host_parse_refusal(root, True)
+    except Exception as exc:
+        got = "raised " + type(exc).__name__
+    finally:
+        parser.parse_key = real
+    return True if isinstance(got, str) and "does not fit the injection" in got and marker in got else got
 
 
 def _self_test_cases(base):
@@ -2173,6 +2213,15 @@ def _self_test_cases(base):
         "      - uses: actions/setup-python@v5\n        with:\n          python-version: '3.14'\n")}))
     check("pins/host-patch-outside-jobs-finding",
           (code, _has(lines, "quality.yml:3: python-version '3.14.4' differs")), (1, True))
+    # A job whose id the grammar reads but HOST_JOB_RE does not (digit-led), below a host-patch job: the pin
+    # sits in no known job, so it is a finding, never read as the host-patch job above.
+    code, lines = evaluate(_fixture(base, files={**host, HOST_WORKFLOW_REL: (
+        "jobs:\n  " + opf + ":\n    steps:\n      - uses: actions/setup-python@v5\n        with:\n"
+        "          python-version: '3.14.4'\n  1lint:\n    steps:\n      - uses: actions/setup-python@v5\n"
+        "        with:\n          python-version: '3.14.4'\n")}))
+    check("pins/host-patch-unplain-job-id-finding",
+          (code, _has(lines, "quality.yml:11: python-version '3.14.4' differs"),
+           _has(lines, "quality.yml:6: python-version")), (1, True, False))
     # A reviewer reproduction: the real workflows with every '3.14' pin moved to the host patch. Only the
     # host-patch jobs' pins pass; each pin that was '3.14' is a finding.
     real = {WORKFLOWS_REL + "/" + name: _read_text(ROOT / WORKFLOWS_REL / name)
@@ -2219,6 +2268,15 @@ def _self_test_cases(base):
         root = _fixture(base, workflow_pin="3.14.4", job=opf,
                         files={HOST_SOURCE_REL: host[HOST_SOURCE_REL] + extra})
         check(check_id, _host_parse_refusal(root, bound), (2, True))
+    # A key parser whose result breaks the (pos, key) contract: the bounded parser names the mismatch.
+    root = _fixture(base, workflow_pin="3.14.4", job=opf, files=host)
+    for check_id, name in (
+            ("pins/host-patch-parser-none-position-named-failure", "none-position"),
+            ("pins/host-patch-parser-negative-position-named-failure", "negative-position"),
+            ("pins/host-patch-parser-past-end-position-named-failure", "past-end-position"),
+            ("pins/host-patch-parser-bool-position-named-failure", "bool-position"),
+            ("pins/host-patch-parser-non-str-key-part-named-failure", "non-str-key-part")):
+        check(check_id, _malformed_host_refusal(root, *MALFORMED_RESULTS[name]), True)
     # An explicit-key entry whose value is a quoted scalar over several lines is outside the grammar.
     code, lines = evaluate(_fixture(base, files={WORKFLOWS_REL + "/attack.yml": (
         "name: attack\non: push\njobs:\n  q:\n    runs-on: ubuntu-latest\n    steps:\n"

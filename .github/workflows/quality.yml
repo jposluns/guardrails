@@ -568,18 +568,19 @@ jobs:
       - name: Git-fixture-env behaviour self-test (execution-reconciled)
         run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-selftest
 
-  # The host-patch legs. Every other job of this workflow pins '3.14', which resolves to a 3.14 patch
-  # release the runner provides (the Python setup action takes a cached 3.14 without checking for a newer
-  # patch release; check-latest is off), and those jobs stay required. These two run the suites a newer patch release most
-  # often breaks on the exact patch release the maintainer host runs, which .aiqt/python-host.toml names, so a
-  # passing local suite predicts a required CI leg, and a failure on the '3.14' legs alone is diagnostic
-  # evidence of a patch-release difference, not proof that the change is innocent.
-  # tools/check_python_host_pin.py holds each job whole: runs-on ubuntu-24.04 (the Python versions manifest
-  # builds 3.14.4 for ubuntu-22.04 and ubuntu-24.04 only, so ubuntu-latest would fail these jobs once it
-  # moves to ubuntu-26.04), one Python setup step pinning that release, the gate itself as the next step
-  # (it fails when the job does not run that release) and the job's suite. Both are required through Quality
-  # gates. They run the OPF tooling self-test and the git-fixture-env suite a second time in every run,
-  # including the run that an edit to a pull request's title or body starts.
+  # The host-patch legs. Every other job of this workflow that sets up Python pins '3.14' (Quality gates
+  # sets up none); with check-latest off, the Python setup action may resolve that pin to a 3.14 already on
+  # the runner rather than the newest patch release. Those jobs stay required. These two run the suites a
+  # newer patch release most often breaks on the exact patch release the maintainer host runs, which
+  # .aiqt/python-host.toml names, so a passing local suite predicts a required CI leg, and a failure on the
+  # '3.14' legs alone is diagnostic evidence of a patch-release difference, not proof that the change is
+  # innocent. tools/check_python_host_pin.py holds this workflow's top-level keys (name, on, permissions,
+  # jobs) and each job whole: runs-on ubuntu-24.04 (on 2026-10-12 the Python versions manifest listed Linux
+  # x64 builds of 3.14.4 for Ubuntu 22.04 and 24.04 only, so ubuntu-latest would fail these jobs on an image
+  # without one), this checkout step as written, one Python setup step pinning that release, the gate itself
+  # as the next step (it fails when the job does not run that release) and the job's suite. Both are
+  # required through Quality gates. They run the OPF tooling self-test and the git-fixture-env suite a second
+  # time in every run, including the run that an edit to a pull request's title or body starts.
   opf-host-patch:
     name: OPF tooling (host patch)
     runs-on: ubuntu-24.04

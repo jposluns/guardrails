@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "a451ae5cc9b7ff32d0ac1bd98b62fae2787c66305a845610b1e2d3467b6ef2aa"
+tree-sha256 = "6586e0b068ffc6336dd0a9d55fdbaf0661da8d757f7f65951a057d07bfd8256f"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -61,8 +61,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 281788
-sha256 = "23842eaa39447ef1e60f1fd23c3c398cf7a4308378c849d6d53d36cf923949e5"
+bytes = 283256
+sha256 = "fbd5ca31c3223a534f59ff2543c31785ece29c5d41c09e5d183c27684253bf90"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -2361,8 +2361,8 @@ sha256 = "a3d7459e433056d6884a5fcfc7a282c974a3daa808551c1010f418df2713cb78"
 
 [[sources]]
 path = "RELEASING.md"
-bytes = 15327
-sha256 = "ee85200e8f6bb67b7035f7169a56ade6c493e646953c25a145ff23365b8c6baa"
+bytes = 15324
+sha256 = "7dc54972f5acc9175d57e6968e89b71d2e8e219e8c47030a149df01631802fe5"
 
 [[sources]]
 path = "ROADMAP.md"
@@ -3416,13 +3416,13 @@ sha256 = "2f51eb3b302390e276ac0b2adc002fd2c184a9cc7e0afdbfc903a30976d06d71"
 
 [[sources]]
 path = "tools/check_python_floor.py"
-bytes = 201081
-sha256 = "3f2a988ee05cfced2d66055c45fa5a37ed793539799ebe4e9679993b9ca4298c"
+bytes = 204683
+sha256 = "a9127c88e9ab235919af8b318e393c7e859a5510809e20d5c1145094beb62a33"
 
 [[sources]]
 path = "tools/check_python_host_pin.py"
-bytes = 49240
-sha256 = "51dddb62ab38bb379405577c8414a88f3cbb2da5b7df130e606b11c5d24ae1c5"
+bytes = 63833
+sha256 = "0424a852b9b07a8685d215ca394de19fd2be0c9309ea01c7a8c6056fd4d99102"
 
 [[sources]]
 path = "tools/check_python_launcher_isolation.py"
@@ -3711,8 +3711,8 @@ sha256 = "1e2359aa0c0c6dd2a398c70a9eece680953443191d148664bc61d8e3ff245300"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 60174
-sha256 = "82b16083e1320120bf32250df855533cbc37106fa79513a276876a84b26aee2a"
+bytes = 60509
+sha256 = "ea711d329b77044ba8f9d03632af72deae5ae70ca149253c65bf516ac53f4af9"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
