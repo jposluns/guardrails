@@ -11,10 +11,13 @@ generator alone cannot assert:
   - closed-set parity between _standards.KINDS/STATUSES and their programmatic copies (gen_mappings
     RELATION/RELATION_PROSE/STATUS_PILL/STATUS_DESC and the currency POLICY);
   - the deferred-frameworks negative check (no vendored framework is still listed "Not yet vendored"):
-    every case-insensitive "not yet vendored" occurrence in .aiqt/standards/README.md is read, the phrase
-    also matched across a line wrap; for each it reads the whole table row (the whole table when the phrase
-    is in the header row) or else the whole blank-line-delimited paragraph, before the phrase as well as
-    after it, and matches each manifest name case-insensitively with whitespace runs collapsed;
+    every occurrence of the phrase in .aiqt/standards/README.md is read, matched case-insensitively with
+    its words joined by any mix of whitespace, line wraps, hyphens or blockquote markers; the block read
+    follows the Markdown structure of the line the phrase starts on (a GFM table row with outer pipes
+    optional on any row, the whole table when the phrase is in the header row, an ATX heading's whole
+    section to the next heading of the same or a higher level, the whole surrounding list even when
+    loose or nested, else the whole blank-line-delimited paragraph, before the phrase as well as after
+    it), and each manifest name is matched case-insensitively with whitespace runs collapsed;
   - the subset-denominator invariant, checked structure-aware wherever the coverage of a curated-subset
     manifest is rendered: the registry row (name and coverage in one <tr>), the reverse view (name in a
     <summary>, coverage in a later <p> of the same <details>), AND the machine-readable JSON export (a
@@ -61,8 +64,11 @@ FAMILY_ALIAS = {"OWASP Foundation": "OWASP", "NIST": "NIST", "MITRE": "MITRE ATL
                 "ISO/IEC": "ISO/IEC", "Cloud Security Alliance": "CSA"}
 
 PAREN = re.compile(r"frameworks \(([^)]*)\)")
-DEFERRED = re.compile(r"not\s+yet\s+vendored", re.I)
+DEFERRED = re.compile(r"not[\s-]+yet[\s-]+vendored", re.I)
 TABLE_DELIMITER = re.compile(r"^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?\s*$")
+HEADING = re.compile(r"^ {0,3}(#{1,6})(?:\s|$)")
+LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d{1,9}[.)])\s")
+BLOCKQUOTE = re.compile(r"^ {0,3}> ?")
 N_OF_M = re.compile(r"\b\d+ of \d+\b")
 
 
@@ -144,27 +150,112 @@ def check_parity(findings):
                 name, ", ".join(sorted(got)), ", ".join(sorted(expect))))
 
 
+def _unquoted_lines(text):
+    """The text split into lines with blockquote markers stripped per line (repeatedly, so a nested
+    quote unwraps too). The line count is unchanged, so a match's line number maps one to one; stripping
+    lets the phrase and a name match across a quoted line wrap, which the raw text never can."""
+    out = []
+    for line in text.split("\n"):
+        while BLOCKQUOTE.match(line):
+            line = BLOCKQUOTE.sub("", line, count=1)
+        out.append(line)
+    return out
+
+
+def _table_extent(lines, i):
+    """(first, last, is_table) for the contiguous run of pipe-carrying lines around line i. The run is
+    a GFM table only when its second line is a delimiter row; outer pipes are optional on every row, so
+    the run is keyed on carrying a pipe at all, not on starting with one."""
+    if "|" not in lines[i]:
+        return i, i, False
+    first = i
+    while first > 0 and "|" in lines[first - 1]:
+        first -= 1
+    last = i
+    while last + 1 < len(lines) and "|" in lines[last + 1]:
+        last += 1
+    is_table = first < last and bool(TABLE_DELIMITER.match(lines[first + 1]))
+    return first, last, is_table
+
+
+def _list_extent(lines, i):
+    """(first, last) for the whole list around the list-item line i: list-item lines, their indented
+    continuation lines, and the blank lines INSIDE a loose list, in both directions. The list ends at a
+    blank line followed by a non-list line, at a flush non-list line, or at the text's edge."""
+    def in_list(k):
+        return bool(lines[k].strip()) and (LIST_ITEM.match(lines[k]) is not None
+                                           or lines[k][:1] in (" ", "\t"))
+    first = i
+    while first > 0:
+        k = first - 1
+        if lines[k].strip():
+            if in_list(k):
+                first = k
+                continue
+            break
+        j = k
+        while j > 0 and not lines[j - 1].strip():
+            j -= 1
+        if j > 0 and in_list(j - 1):
+            first = j - 1
+            continue
+        break
+    last = i
+    n = len(lines)
+    while last + 1 < n:
+        k = last + 1
+        if lines[k].strip():
+            if in_list(k):
+                last = k
+                continue
+            break
+        j = k
+        while j + 1 < n and not lines[j + 1].strip():
+            j += 1
+        if j + 1 < n and in_list(j + 1):
+            last = j + 1
+            continue
+        break
+    return first, last
+
+
 def deferred_blocks(text):
-    """Yield (line_number, block) for every case-insensitive "not yet vendored" occurrence: the whole table
-    row it sits in (the whole table when it sits in the header row, since that column then marks every
-    row), or else its whole blank-line-delimited paragraph. Every occurrence is read, not only the first,
-    and the block holds the text before the phrase as well as after it."""
-    lines = text.split("\n")
+    """Yield (line_number, block) for every occurrence of the deferred phrase (case-insensitive, its
+    words joined by any run of whitespace, line wraps, hyphens or blockquote markers; blockquote markers
+    are stripped per line before matching). The block read follows the Markdown structure of the line
+    the phrase starts on:
+      - a GFM table (a contiguous run of pipe-carrying lines whose second line is a delimiter row; outer
+        pipes optional on every row): the phrase's own row, or the WHOLE table when the phrase is in the
+        header row, since that column then marks every row (a header-row phrase is read even when no row
+        is deferred, deliberately erring toward a finding);
+      - an ATX heading: the heading's whole section, to the next heading of the same or a higher level;
+      - a list item: the whole surrounding list, loose or nested, blank lines inside it included;
+      - anything else: the whole blank-line-delimited paragraph.
+    Every occurrence is read, not only the first, and the block holds the text before the phrase as
+    well as after it."""
+    lines = _unquoted_lines(text)
+    text = "\n".join(lines)
     starts, pos = [], 0
     for line in lines:
         starts.append(pos)
         pos += len(line) + 1
     for m in DEFERRED.finditer(text):
         i = max(k for k, start in enumerate(starts) if start <= m.start())
-        if lines[i].lstrip().startswith("|"):
-            first = i
-            while first > 0 and lines[first - 1].lstrip().startswith("|"):
-                first -= 1
+        first, last, is_table = _table_extent(lines, i)
+        if is_table:
+            block = lines[first:last + 1] if i == first else [lines[i]]
+        elif HEADING.match(lines[i]):
+            level = len(HEADING.match(lines[i]).group(1))
             last = i
-            while last + 1 < len(lines) and lines[last + 1].lstrip().startswith("|"):
+            while last + 1 < len(lines):
+                nxt = HEADING.match(lines[last + 1])
+                if nxt and len(nxt.group(1)) <= level:
+                    break
                 last += 1
-            header = i == first and first < last and TABLE_DELIMITER.match(lines[first + 1])
-            block = lines[first:last + 1] if header else [lines[i]]
+            block = lines[i:last + 1]
+        elif LIST_ITEM.match(lines[i]):
+            first, last = _list_extent(lines, i)
+            block = lines[first:last + 1]
         else:
             first = i
             while first > 0 and lines[first - 1].strip():
@@ -304,15 +395,21 @@ def main():
 #   4. a schema `kind` row missing a kind -> finding,
 #   5. a parity break (a POLICY key removed via a patched dict) -> finding,
 #   6. a manifest whose name appears in the "Not yet vendored" paragraph -> finding,
-#  6b-6f, 6h-6j. the same fact in the forms the first-match, after-the-phrase, case-sensitive read missed, each
-#      -> finding: a table row whose name cell precedes the status cell, a second deferred paragraph, a
-#      case variant, a phrase wrapped across a line, and a header row that marks the whole table; 6h. a
-#      name on a paragraph line before the phrase, 6i. a name wrapped across a line and 6j. a name in
-#      another case -> finding; and
-#  6g. a vendored name in a paragraph without the phrase stays clean (the read is scoped to the block),
+#  6b-6f, 6h-6j. the same fact in the forms the first-match, after-the-phrase, case-sensitive read
+#      missed, each -> finding: a table row whose name cell precedes the status cell, a second deferred
+#      paragraph, a case variant, a phrase wrapped across a line, and a header row that marks the whole
+#      table; 6h. a name on a paragraph line before the phrase, 6i. a name wrapped across a line and
+#      6j. a name in another case -> finding;
+#  6k-6p. the Markdown structures the pipe-led row read missed, each -> finding: a table body row
+#      without outer pipes, a table delimiter row without outer pipes, an ATX heading whose section
+#      lists the name, a blockquote-wrapped phrase, a loose list under the phrase item, and a
+#      hyphenated phrase; and
+#  6g. a vendored name in a paragraph without the phrase, and 6q. one after the next same-level
+#      heading, stay clean (the read is scoped to the block),
 #   7. a subset manifest rendered "3 of 3" in the fixture registry row -> finding (the CWE regression),
 #   8. a missing site/mappings.html -> exit 2 (fail-closed, not a skip),
-#   9. an unreadable standards dir (chmod 0) -> exit 2 via load_manifests/ensure_listable,
+#   9. an unreadable standards dir (chmod 0, or an injected permission failure where chmod cannot
+#      bite) -> exit 2; the case runs on every runner,
 #  10. a manifest without `catalogue`, and one with `catalogue = "partial"` -> ManifestError exit 2
 #      (the loader end of the invariant),
 #  11. a publisher with no FAMILY_ALIAS entry -> exit 2,
@@ -430,7 +527,6 @@ def self_test_main():
         print("SELF-TEST ERROR: no writable temporary directory: {}".format(exc), file=sys.stderr)
         return 2
     failures = []
-    skipped = []
     unreadable_std = None
     try:
         # 1. clean fixture passes.
@@ -512,7 +608,19 @@ def self_test_main():
                     "Full\nFramework.\n"))),
                 ("6j name in another case", _README.replace(prose, (
                     "Not yet vendored (their keys stay inert until a manifest lands): Google SAIF and FIXTURE "
-                    "FULL FRAMEWORK.\n")))):
+                    "FULL FRAMEWORK.\n"))),
+                ("6k table body row without outer pipes", _README.replace(prose, (
+                    "| Not yet vendored | Reason |\n| --- | --- |\nFixture Full Framework | none\n"))),
+                ("6l table delimiter row without outer pipes", _README.replace(prose, (
+                    "| Not yet vendored | Reason |\n--- | ---\n| Fixture Full Framework | none |\n"))),
+                ("6m heading whose section lists the name", _README.replace(prose, (
+                    "### Not yet vendored\n\n- Fixture Full Framework\n"))),
+                ("6n blockquote-wrapped phrase", _README.replace(prose, (
+                    "> Not yet\n> vendored: Fixture Full Framework.\n"))),
+                ("6o loose list under the phrase item", _README.replace(prose, (
+                    "- Not yet vendored:\n\n  - Fixture Full Framework\n"))),
+                ("6p hyphenated phrase", _README.replace(prose, (
+                    "Not-yet-vendored: Fixture Full Framework.\n")))):
             case = tmp / ("deferred-" + label.split()[0])
             _write_fixture(case, readme=readme)
             if run_quiet(case) != 1:
@@ -523,6 +631,14 @@ def self_test_main():
         _write_fixture(scoped, readme=_README + "\nFixture Full Framework is vendored and mapped.\n")
         if run_quiet(scoped) != 0:
             failures.append("a vendored name outside any deferred row or paragraph expected exit 0")
+
+        # 6q. a heading's section ends at the next heading of the same or a higher level: a vendored
+        #     name after that boundary stays clean (the heading read is scoped, not greedy to the end).
+        scoped_heading = tmp / "deferred-6q"
+        _write_fixture(scoped_heading, readme=_README.replace(prose,
+            "### Not yet vendored\n\n- Google SAIF\n\n### Vendored\n\nFixture Full Framework is mapped.\n"))
+        if run_quiet(scoped_heading) != 0:
+            failures.append("a vendored name after the next same-level heading expected exit 0")
 
         # 7. a subset manifest rendered "3 of 3" -> finding (the CWE regression case).
         denom = tmp / "denom"
@@ -538,15 +654,25 @@ def self_test_main():
         if run_quiet(nopage) != 2:
             failures.append("a missing site/mappings.html expected exit 2 (fail-closed)")
 
-        # 9. an unreadable standards dir (chmod 0) -> exit 2. Skipped where the runner bypasses DAC
-        #    (root), observed via os.access, as the sibling gates do.
+        # 9. an unreadable standards dir (chmod 0) -> exit 2. Where the runner bypasses DAC (root), the
+        #    permission failure is injected through the module's load_manifests binding instead, so the
+        #    guarded exit-2 observation is made on every runner, never skipped.
         unread = tmp / "unread"
         _write_fixture(unread)
         unreadable_std = unread / ".aiqt" / "standards"
         os.chmod(unreadable_std, 0)
         if os.access(unreadable_std, os.R_OK):
-            skipped.append("9 unreadable-standards-dir")
-        elif run_quiet(unread) != 2:
+            saved_load = module.load_manifests
+            def _deny_load(path, _real=saved_load):
+                raise PermissionError(13, "injected permission denied", str(path))
+            module.load_manifests = _deny_load
+            try:
+                rc = run_quiet(unread)
+            finally:
+                module.load_manifests = saved_load
+        else:
+            rc = run_quiet(unread)
+        if rc != 2:
             failures.append("an unreadable standards dir expected exit 2 (fail-closed)")
         os.chmod(unreadable_std, 0o755)
         unreadable_std = None
@@ -622,17 +748,15 @@ def self_test_main():
         for failure in failures:
             print("  - " + failure)
         return 1
-    note = ("" if not skipped else
-            " NOTE: skipped {} case(s) the runner cannot exercise (chmod-0 still readable): {}"
-            .format(len(skipped), ", ".join(skipped)))
     print("SELF-TEST PASS: a clean fixture and a vendored name outside a deferred block pass; a "
           "meta/disclosure parenthetical mismatch, a schema-enum gap, a closed-set parity break, a vendored "
           "name listed as not yet vendored (in a paragraph, a table row, a second paragraph, a case "
-          "variant, a wrapped phrase, a header-marked table, a paragraph line before the phrase, a wrapped "
+          "variant, a wrapped phrase, a header-marked table, a table without outer pipes, a heading's "
+          "section, a blockquote, a loose list, a hyphenated phrase, a paragraph line before the phrase, a wrapped "
           "name or a name in another case), a subset manifest rendered with an edition denominator in the registry row or the reverse-view <p>, and a subset "
           "framework carrying ids_total in the JSON export each report a finding (exit 1); and a missing "
           "page, a missing JSON export, an unreadable standards dir, a missing/invalid catalogue, and an "
-          "unaliased publisher all fail closed (exit 2)" + note)
+          "unaliased publisher all fail closed (exit 2)")
     return 0
 
 

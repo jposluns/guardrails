@@ -18,7 +18,9 @@ SCANNED SURFACES (the declared set, resolved from the repo root):
   - the generated plugin hook config plugin/aiqt-guardrails-hooks/hooks/hooks.json (required; the scan
     path is taken from gen_hooks so it tracks the generator),
   - tools/run_all_checks.sh (required),
-  - every regular *.yml/*.yaml under .github/workflows/ (required directory),
+  - every *.yml/*.yaml candidate under .github/workflows/ (required directory); only a regular file is
+    scanned, and a candidate that is anything else (a symlink of any kind, never followed; a directory;
+    an unreadable or otherwise non-regular entry) is a named cannot-evaluate (exit 2),
   - .claude/settings.json and .claude/settings.local.json (optional; a truly-absent file is a clean
     skip, but a present-but-unusable one, including a dangling symlink, is a cannot-evaluate),
   - the QA-suite Python sources tools/_qa_adapter.py, tools/audit_reference.py, and
@@ -45,9 +47,13 @@ never credited.
 WORKFLOW run: GRAMMAR. A workflow `run:` value is read line-lexically. A block-scalar header is read under the
 full YAML block-header grammar: the ``|`` or ``>`` indicator, an optional indentation digit (1-9) and an
 optional chomping indicator (``+``/``-``) in either order, and an optional trailing comment (``run: | # x``,
-``run: |2``, ``run: >-2``); every content line of that block is scanned. Any other ``run:`` value that
-starts with ``|`` or ``>``, a value that opens with a node property or alias (``&``, ``!``, ``*``), and a
-plain scalar continued onto a deeper-indented line are cannot-evaluate (exit 2), never skipped.
+``run: |2``, ``run: >-2``); every content line of that block is scanned. An EMPTY same-line value whose
+next non-blank line is deeper than the key is read the same way: that deeper line is either the block
+header (its content lines are scanned) or the plain-scalar command itself; an empty value with no deeper
+line is a null scalar carrying no command text. Any other ``run:`` value that starts with ``|`` or ``>``
+(on the key line or on the deeper line), a value that opens with a node property or alias (``&``, ``!``,
+``*``), and a plain scalar continued onto a further deeper-indented line are cannot-evaluate (exit 2),
+never skipped.
 
 EXIT CONVENTION: 0 every recognized launcher is isolated; 1 at least one recognized launcher is not
 isolated; 2 cannot-evaluate (a required input missing, unreadable, non-regular, or malformed; a JSON
@@ -451,10 +457,14 @@ def _yaml_run_lines(text):
     library). A block header is read under the full block-header grammar (BLOCK_HEADER_RE: indicator,
     optional indentation digit and chomping indicator in either order, optional comment); the block's
     content is the run of lines indented deeper than the `run:` key, ending at the first non-blank line
-    indented no deeper. Unsupported: any other value starting with `|` or `>`, a value opening with a node
-    property or alias, and a plain scalar continued onto a deeper-indented line (YAML folds it into the
-    command, so a launcher there would otherwise go unread). Only `run:` payloads are yielded, so
-    `uses:`/`with:` lines (setup-python and the like) are never scanned."""
+    indented no deeper. An EMPTY same-line value whose next non-blank, non-comment line is deeper than
+    the key is read the same way: that deeper line is either a block header (its content lines, deeper
+    than the header line, are yielded) or the plain-scalar command itself; an empty value with no deeper
+    line is a null scalar carrying no command text, so nothing is yielded for it. Unsupported: any other
+    value starting with `|` or `>` (on the key line or the deeper line), a value opening with a node
+    property or alias, and a plain scalar continued onto a further deeper-indented line (YAML folds it
+    into the command, so a launcher there would otherwise go unread). Only `run:` payloads are yielded,
+    so `uses:`/`with:` lines (setup-python and the like) are never scanned."""
     lines = text.splitlines()
     out, unsupported = [], []
     i, n = 0, len(lines)
@@ -465,6 +475,62 @@ def _yaml_run_lines(text):
             continue
         val = (m.group("val") or "").strip()
         key_indent = len(m.group("indent"))
+        if not val:
+            # An empty same-line value: YAML reads the run: value from the following deeper-indented
+            # line (a plain scalar or a block whose header sits on that line). Read it under the same
+            # grammar as a same-line value; a next line at the key column or shallower is a null scalar
+            # with no command text, so there is nothing to scan and nothing to skip.
+            j = i + 1
+            while j < n and lines[j].strip() == "":
+                j += 1
+            if j >= n:
+                i += 1
+                continue
+            nxt = lines[j]
+            nxt_indent = len(nxt) - len(nxt.lstrip(" "))
+            if nxt_indent <= m.start("key") or nxt.lstrip().startswith("#"):
+                i += 1
+                continue
+            nval = nxt.strip()
+            if BLOCK_HEADER_RE.match(nval):
+                k = j + 1
+                while k < n:
+                    content = lines[k]
+                    if content.strip() == "":
+                        k += 1
+                        continue
+                    if len(content) - len(content.lstrip(" ")) <= nxt_indent:
+                        break
+                    out.append((k + 1, content))
+                    k += 1
+                i = k
+                continue
+            if nval[:1] in ("|", ">"):
+                unsupported.append((j + 1, "run: value {!r} on the line after an empty run: starts like "
+                                          "a YAML block scalar but its header is outside the "
+                                          "block-header grammar".format(nval)))
+                i = j + 1
+                continue
+            if nval[:1] in NODE_PROPERTY_LEADS:
+                unsupported.append((j + 1, "run: value {!r} on the line after an empty run: opens with a "
+                                          "YAML node property or alias, outside the supported line "
+                                          "grammar".format(nval)))
+                i = j + 1
+                continue
+            k = j + 1
+            while k < n and lines[k].strip() == "":
+                k += 1
+            if k < n:
+                follow = lines[k]
+                if (len(follow) - len(follow.lstrip(" ")) > m.start("key")
+                        and not follow.lstrip().startswith("#")):
+                    unsupported.append((k + 1, "run: plain scalar continues on a deeper-indented line, "
+                                              "outside the supported line grammar"))
+            if len(nval) >= 2 and nval[0] == nval[-1] and nval[0] in ("'", '"'):
+                nval = nval[1:-1]
+            out.append((j + 1, nval))
+            i = j + 1
+            continue
         if BLOCK_HEADER_RE.match(val):
             j = i + 1
             while j < n:
@@ -571,6 +637,18 @@ def _check_hooks_json(rel, text, errors, failures):
                     _scan_command_tokens(rel, 0, hloc, tokens, command, errors, failures)
 
 
+def _candidate_mode(path):
+    """No-follow (lstat) mode probe for a workflow candidate. A module-level seam the self-test patches
+    to exercise the non-regular-candidate branch deterministically."""
+    return path.lstat().st_mode
+
+
+def _read_file_text(path):
+    """UTF-8 file read. A module-level seam the self-test patches to exercise the unreadable-input
+    branch (exit 2) deterministically where chmod 0 cannot bite (a DAC-bypassing runner)."""
+    return path.read_text(encoding="utf-8")
+
+
 def _read_required_text(root, rel, errors):
     """Read a required-surface file fail-closed as UTF-8 text; return the text, or None after recording a
     cannot-evaluate. A missing, unreadable, non-regular (S_ISREG must hold; /dev/null and the like are
@@ -587,7 +665,7 @@ def _read_required_text(root, rel, errors):
         errors.append((rel, 0, "", "required input is not a regular file"))
         return None
     try:
-        return path.read_text(encoding="utf-8")
+        return _read_file_text(path)
     except (OSError, UnicodeError) as exc:
         errors.append((rel, 0, "", "cannot read required input: {}".format(exc)))
         return None
@@ -613,8 +691,12 @@ def _scan_shell_file(root, rel, errors, failures):
 
 
 def _scan_workflows(root, errors, failures):
-    """Scan every regular *.yml/*.yaml under .github/workflows/. The directory is required: an
-    unreadable or absent directory is a cannot-evaluate, never an empty clean scan."""
+    """Scan every *.yml/*.yaml candidate under .github/workflows/. The directory is required: an
+    unreadable or absent directory is a cannot-evaluate, never an empty clean scan. Every candidate is
+    classified with an error-preserving, NO-FOLLOW probe (_candidate_mode, lstat): a regular file is read
+    and scanned; anything else -- a symlink whether dangling, looping or resolvable (none is followed), a
+    directory, an unreadable entry, or any other non-regular entry -- is a named cannot-evaluate
+    (exit 2), never a silent skip."""
     wf_dir = root / ".github" / "workflows"
     try:
         names = sorted(os.listdir(wf_dir))
@@ -627,9 +709,19 @@ def _scan_workflows(root, errors, failures):
         rel = WORKFLOWS_REL + "/" + name
         path = wf_dir / name
         try:
-            if not path.is_file():
-                continue  # a directory or special file named *.yml is not a workflow document
-            text = path.read_text(encoding="utf-8")
+            mode = _candidate_mode(path)
+        except OSError as exc:
+            errors.append((rel, 0, "", "cannot probe workflow candidate: {}".format(exc)))
+            continue
+        if stat.S_ISLNK(mode):
+            errors.append((rel, 0, "", "workflow candidate is a symlink (not followed); replace it with "
+                           "a regular file"))
+            continue
+        if not stat.S_ISREG(mode):
+            errors.append((rel, 0, "", "workflow candidate is not a regular file"))
+            continue
+        try:
+            text = _read_file_text(path)
         except (OSError, UnicodeError) as exc:
             errors.append((rel, 0, "", "cannot read workflow: {}".format(exc)))
             continue
@@ -729,7 +821,9 @@ def main():
 #   4. the -I, -PEs, and -P -E -s forms each pass,
 #   5. a partial -P -E triple fails (exit 1),
 #   6. options placed AFTER the script are not credited (exit 1),
-#   7. malformed JSON, a non-list args, and an unreadable required input each fail closed (exit 2),
+#   7. malformed JSON, a non-list args, and an unreadable required input each fail closed (exit 2;
+#      the unreadable case injects the read error through a module seam where chmod 0 cannot bite, so
+#      it runs on every runner),
 #   8. the run_gate shell grammar, an inline `run:` scalar, and a `run: |` block are all recognized
 #      (a bare launcher in each fails, its isolated form passes),
 #   9. an optional settings.json shell-string command is recognized (bare fails, -I passes),
@@ -763,12 +857,20 @@ def main():
 #      token `python3` (the fail-to-pass witness for the decode-then-decide shell-line fix).
 #  33. a QA-suite Python source reintroducing a sys.path index-0 insertion is a finding (exit 1).
 #  34. a `run:` block header in the full block-header grammar (`| # comment`, `|2`, `|2-`, `>+9`,
-#      `>-2 # note`) is read as a block: a bare launcher in its content fails (exit 1), and the isolated
-#      form under `| # comment` passes (exit 0),
+#      `>-2 # note`), each with the content indentation its indicator requires, is read as a block: a
+#      bare launcher in its content fails (exit 1), and the isolated forms under `| # comment` and
+#      `>+9` pass (exit 0),
 #  35. any other `run:` value starting with `|` or `>` (`|0`, `|#x`, `|2x`, `|-+`, `>>`), a value opening
 #      with a node property or alias (`&a |`, `!!str |`, `*a`), and a plain scalar continued onto a
 #      deeper-indented line are cannot-evaluate (exit 2), while a sibling key at the run: key column after
-#      an inline scalar stays clean (exit 0).
+#      an inline scalar stays clean (exit 0),
+#  36. every *.yml workflow candidate is classified with a no-follow, error-preserving probe: a
+#      dangling, looping or resolvable symlink (none followed), a directory, and an injected
+#      non-regular mode are each a named cannot-evaluate (exit 2),
+#  37. an empty run: value followed by a deeper line is read, never skipped: the plain-scalar and
+#      block forms carry a bare launcher (exit 1) or an isolated one (exit 0); an anchored value, a
+#      malformed header and a further continuation on the next line are cannot-evaluate (exit 2); a
+#      null run: (next line not deeper) carries no command text (exit 0).
 
 SCRIPT = "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py"
 
@@ -903,11 +1005,27 @@ def self_test_main():
         unread = _build(tmp / "unread")
         target = unread / RUN_ALL_REL
         os.chmod(target, 0)
-        if os.access(target, os.R_OK):
-            skipped.append("7 unreadable-run-all (chmod-0 still readable)")
-        elif run_quiet(unread) != 2:
+        module = sys.modules[__name__]
+        try:
+            if os.access(target, os.R_OK):
+                # chmod 0 cannot bite (root or CAP_DAC_OVERRIDE): inject the read error through the
+                # module seam instead, so the guarded exit-2 observation is made on every runner.
+                saved_read = module._read_file_text
+                def _deny_read(path, _real=saved_read, _t=target):
+                    if Path(path) == _t:
+                        raise PermissionError(13, "injected permission denied", str(path))
+                    return _real(path)
+                module._read_file_text = _deny_read
+                try:
+                    rc = run_quiet(unread)
+                finally:
+                    module._read_file_text = saved_read
+            else:
+                rc = run_quiet(unread)
+        finally:
+            os.chmod(target, 0o644)
+        if rc != 2:
             failures.append("an unreadable required input expected exit 2 (fail-closed)")
-        os.chmod(target, 0o644)
 
         # 8. The run_gate grammar, an inline run: scalar, and a run: | block are all recognized: a bare
         #    launcher in each surface fails, and the isolated baseline passes (case 2 already proved pass).
@@ -1219,16 +1337,21 @@ def self_test_main():
 
         # 34. A block header in the full block-header grammar is read as a block: a bare launcher in its
         #     content fails (exit 1). The `| # comment` and `|2` forms passed unread before this case.
-        for label, header in (("comment", "| # comment"), ("indent", "|2"), ("indent-chomp", "|2-"),
-                              ("keep-indent", ">+9"), ("strip-indent-comment", ">-2 # note")):
+        for label, header, pad in (("comment", "| # comment", 10), ("indent", "|2", 10),
+                                   ("indent-chomp", "|2-", 10), ("keep-indent", ">+9", 17),
+                                   ("strip-indent-comment", ">-2 # note", 10)):
             wf_text = ("name: Q\njobs:\n  q:\n    steps:\n      - run: " + header +
-                       "\n          set -e\n          python3 tools/alpha.py\n")
+                       "\n" + " " * pad + "set -e\n" + " " * pad + "python3 tools/alpha.py\n")
             if run_quiet(_build(tmp / ("header-" + label), workflow=wf_text)) != 1:
                 failures.append("a bare launcher under the block header {!r} expected exit 1".format(header))
         iso_comment = ("name: Q\njobs:\n  q:\n    steps:\n      - run: | # comment\n"
                        "          python3 -I -B tools/alpha.py\n")
         if run_quiet(_build(tmp / "header-comment-iso", workflow=iso_comment)) != 0:
             failures.append("an isolated launcher under the block header '| # comment' expected exit 0")
+        iso_indent9 = ("name: Q\njobs:\n  q:\n    steps:\n      - run: >+9\n" +
+                       " " * 17 + "python3 -I -B tools/alpha.py\n")
+        if run_quiet(_build(tmp / "header-indent9-iso", workflow=iso_indent9)) != 0:
+            failures.append("an isolated launcher under the block header '>+9' expected exit 0")
 
         # 35. A run: value outside the supported grammar is cannot-evaluate (exit 2), never skipped: a
         #     malformed block header, a node property or alias, and a plain scalar continued onto a deeper
@@ -1258,6 +1381,71 @@ def self_test_main():
                    "        shell: bash\n")
         if run_quiet(_build(tmp / "inline-sibling-key", workflow=sibling)) != 0:
             failures.append("an inline run: scalar followed by a sibling key expected exit 0")
+
+        # 36. Every *.yml workflow candidate is classified with a no-follow, error-preserving probe: a
+        #     dangling symlink, a looping symlink, a symlink to a regular (even unreadable) target, a
+        #     directory, and an injected non-regular mode are each a named cannot-evaluate (exit 2);
+        #     case 2's regular file is the positive control. Before this rule each was a silent pass.
+        wf_extra = Path(".github") / "workflows" / "extra.yml"
+        dangling_wf = _build(tmp / "wf-dangling")
+        os.symlink("no-such-target.yml", str(dangling_wf / wf_extra))
+        if run_quiet(dangling_wf) != 2:
+            failures.append("a dangling workflow symlink expected exit 2 (fail-closed)")
+        loop_wf = _build(tmp / "wf-loop")
+        os.symlink("extra.yml", str(loop_wf / wf_extra))
+        if run_quiet(loop_wf) != 2:
+            failures.append("a looping workflow symlink expected exit 2 (fail-closed)")
+        linked_wf = _build(tmp / "wf-linked")
+        hidden_target = linked_wf / "hidden-target.yml"
+        hidden_target.write_text("name: Q\njobs:\n  q:\n    steps:\n"
+                                 "      - run: python3 tools/alpha.py\n", encoding="utf-8")
+        os.symlink(str(hidden_target), str(linked_wf / wf_extra))
+        os.chmod(hidden_target, 0)
+        try:
+            rc = run_quiet(linked_wf)
+        finally:
+            os.chmod(hidden_target, 0o644)
+        if rc != 2:
+            failures.append("a workflow symlink to a regular target expected exit 2 (no-follow), even "
+                            "when the target is unreadable and holds a bare launcher")
+        dir_wf = _build(tmp / "wf-dir")
+        (dir_wf / ".github" / "workflows" / "sub.yml").mkdir()
+        if run_quiet(dir_wf) != 2:
+            failures.append("a directory named *.yml under workflows expected exit 2 (fail-closed)")
+        nonreg_wf = _build(tmp / "wf-nonreg")
+        (nonreg_wf / ".github" / "workflows" / "pipe.yml").write_text("name: Q\n", encoding="utf-8")
+        saved_mode = module._candidate_mode
+        def _fifo_mode(path, _real=saved_mode):
+            if path.name == "pipe.yml":
+                return stat.S_IFIFO | 0o644
+            return _real(path)
+        module._candidate_mode = _fifo_mode
+        try:
+            rc = run_quiet(nonreg_wf)
+        finally:
+            module._candidate_mode = saved_mode
+        if rc != 2:
+            failures.append("a non-regular workflow candidate (injected FIFO mode) expected exit 2")
+
+        # 37. An empty run: value followed by a deeper line is read, never skipped: a plain scalar on
+        #     the next line (P3) and a block header on the next line (P4) carry a bare launcher (exit 1)
+        #     with their isolated forms passing (exit 0); an anchored next-line value, a malformed
+        #     next-line header, and a further-continued next-line scalar are cannot-evaluate (exit 2);
+        #     an empty run: whose next line is a sibling key is a null value with no command text
+        #     (exit 0). Each bare form passed unread before this rule.
+        head = "name: Q\njobs:\n  q:\n    steps:\n      - run:\n"
+        for label, tail, want in (
+                ("p3-bare", "          python3 tools/alpha.py\n", 1),
+                ("p3-iso", "          python3 -I -B tools/alpha.py\n", 0),
+                ("p4-bare", "          |\n            python3 tools/alpha.py\n", 1),
+                ("p4-iso", "          | # note\n            python3 -I -B tools/alpha.py\n", 0),
+                ("anchored", "          &a python3 tools/alpha.py\n", 2),
+                ("bad-header", "          |0\n            python3 tools/alpha.py\n", 2),
+                ("continued", "          echo a &&\n          python3 tools/alpha.py\n", 2),
+                ("null-value", "        shell: bash\n", 0)):
+            if run_quiet(_build(tmp / ("empty-run-" + label), workflow=head + tail)) != want:
+                failures.append("an empty run: followed by the {} form expected exit {}".format(
+                    label, want))
 
         # 10. The gate REFUSES (exit 2) when its own interpreter is not isolated (a real subprocess: no
         #     -I, so the bootstrap self-guard fires before any scan or sibling import).
@@ -1319,9 +1507,13 @@ def self_test_main():
           "QA-suite Python source that reintroduces a sys.path index-0 insertion is a finding (exit 1) "
           "while the sanctioned sys.path.append form is clean (exit 0) and a missing required QA source "
           "fails closed (exit 2); a run: block header in the full block-header grammar (a trailing "
-          "comment, an indentation digit, a chomping indicator in either order) is read as a block, while "
-          "any other run: value starting with | or >, a node property or alias, and a continued plain "
-          "scalar are cannot-evaluate (exit 2); and "
+          "comment, an indentation digit, a chomping indicator in either order) is read as a block; an "
+          "empty run: whose next line is deeper is read as that block or plain scalar (a bare launcher "
+          "there fails, an isolated one passes) while a null run: stays clean; any other run: value "
+          "starting with | or > on either line, a node property or alias, and a further-continued plain "
+          "scalar are cannot-evaluate (exit 2); every *.yml workflow candidate that is not a regular "
+          "file (a symlink of any kind, a directory, or another non-regular entry) is a named "
+          "cannot-evaluate (exit 2); and "
           "the gate refuses to run non-isolated (exit 2), with stderr on /dev/full and with descriptor "
           "2 closed too" + note)
     return 0
