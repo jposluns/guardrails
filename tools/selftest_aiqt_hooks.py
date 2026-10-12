@@ -1974,6 +1974,61 @@ def _test_destructive_guard(failures, tmp):
         if covered != saved_rules:
             failures.append("(dz-rules-covered) rules without a vector: {}; vectors naming no rule: {}".format(
                 sorted(saved_rules - covered), sorted(covered - saved_rules)))
+        # Per-branch mutants (round-4 finding 3): each prior-effect sub-branch has a witness only it
+        # catches, so disabling just that branch -- not the whole rule -- must flip the witness to allow.
+        # This isolates definition tracking from the computed-runner branch and gives the mysql and
+        # mariadb client matchers a vector each, which the whole-rule mutant alone did not exercise.
+        templates = {label: template for label, _cls, template, _want in PRIOR_EFFECT_VECTORS}
+        saved_prior_effects = aiqt_hooks._destruct_prior_effects
+        saved_sql_exec = aiqt_hooks._DESTRUCT_SQL_EXEC_RE
+        never_match = re.compile(r"(?!x)x")
+
+        def blank_field(field, empty):
+            def patched(segments, _field=field, _empty=empty):
+                records = saved_prior_effects(segments)
+                for record in records:
+                    record[_field] = _empty() if callable(_empty) else _empty
+                return records
+            return patched
+
+        def blank_client(name):
+            return ("_DESTRUCT_SQL_EXEC_RE", dict(saved_sql_exec, **{name: never_match}))
+
+        branch_mutants = [
+            ("names", "pe-func-shadows-known-pure",
+             ("_destruct_prior_effects", blank_field("names", set))),
+            ("env", "pe-export-pager",
+             ("_destruct_prior_effects", blank_field("env", dict))),
+            ("config", "pe-git-config-pager",
+             ("_destruct_prior_effects", blank_field("config", lambda: None))),
+            ("outputs", "pe-copy-then-run",
+             ("_destruct_prior_effects", blank_field("outputs", list))),
+            ("links", "pe-link-then-remove-through",
+             ("_destruct_prior_effects", blank_field("links", list))),
+            ("mutates", "pe-move-then-remove",
+             ("_destruct_prior_effects", blank_field("mutates", lambda: False))),
+            ("computed-runner", "pe-xargs-variable-word",
+             ("_destruct_prior_runner", lambda *a, **k: [])),
+            ("sql-psql", "pe-psql-shell-escape", blank_client("psql")),
+            ("sql-sqlite3", "pe-sqlite-shell", blank_client("sqlite3")),
+            ("sql-mysql", "pe-mysql-shell-escape", blank_client("mysql")),
+            ("sql-mariadb", "pe-mariadb-source", blank_client("mariadb")),
+        ]
+        for branch, label, (attr, replacement) in branch_mutants:
+            command = prior_command(templates[label])
+            if run(command, rp, {}) != "deny":
+                failures.append("(dz-branch-base-{}) the {} witness {!r} must deny"
+                                .format(branch, label, command))
+                continue
+            original = getattr(aiqt_hooks, attr)
+            setattr(aiqt_hooks, attr, replacement)
+            try:
+                mutated = run(command, rp, {})
+            finally:
+                setattr(aiqt_hooks, attr, original)
+            if mutated != "allow":
+                failures.append("(dz-branch-mutant-{}) disabling only the {} branch must allow {!r}, "
+                                "got {}".format(branch, branch, command, mutated))
         # Outcomes that are not rule-attributed: the boundary, the fail posture, and the snapshot evidence.
         before = _recovery_refs(repo)
         for label, command, cwd, want in (

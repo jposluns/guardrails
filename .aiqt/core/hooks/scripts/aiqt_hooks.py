@@ -6740,12 +6740,12 @@ _DESTRUCT_COMMAND_ENV = frozenset((
 _DESTRUCT_CONFIG_COMMAND_RE = re.compile(
     r"(?i)^(?:core\.(?:pager|editor|sshcommand)|sequence\.editor|diff\.external|.+\.textconv|alias\..+)$")
 _DESTRUCT_SQL_EXEC_RE = {
-    "psql": re.compile(r"(?is)\\+(?:!|e\b|ir\b|(?:g|o|copy)\b[^\n]*\|)"
+    "psql": re.compile(r"(?is)\\+(?:!|e\b|ir?\b|(?:g|o|copy)\b[^\n]*\|)"
                        r"|\bcopy\b[^;]*\b(?:to|from)\s+program\b"),
     "mysql": re.compile(r"(?im)\\+!|(?:^|[;\n])\s*(?:system|source)\b"),
     "mariadb": re.compile(r"(?im)\\+!|(?:^|[;\n])\s*(?:system|source)\b"),
-    "sqlite3": re.compile(r"(?im)(?:^|\n)\s*\.(?:shell|system|import|load)\b"
-                          r"|(?:^|\n)\s*\.(?:output|once)\s+\|"),
+    "sqlite3": re.compile(r"(?im)(?:^|\n)\s*\.(?:shell|system|import|load|read)\b"
+                          r"|(?:^|\n)\s*\.(?:output|once)\s+[\x22\x27]?\|"),
 }
 _DESTRUCT_CREATORS = frozenset(("cp", "mv", "ln", "tee", "mkdir", "touch"))
 _DESTRUCT_ASSIGN_BUILTINS = frozenset(("export", "declare", "typeset", "local", "readonly", "set"))
@@ -7781,6 +7781,82 @@ def _destruct_next_cwd(seg, cwd, prev_sep, depth, scoped, cdpath_risk):
     return moved
 
 
+def _destruct_scan(command, segments, cwd):
+    """The per-segment destructive classification with the prior-effect prefix carried forward, driven
+    over an ordered segment list. Returns (verdicts, notes, deadline): the accumulated (kind, detail)
+    verdict pairs, any optout notes, and the monotonic deadline the snapshot reduction reuses. Shared by
+    the whole-command path and the unparseable-prefix fallback, which inspects only its deny verdicts so a
+    parseable prefix cannot skip the prior-effect pass just because a later segment does not lex."""
+    verdicts = []
+    notes = []
+    depth = 0
+    nest = 0
+    broken = False
+    prev_sep = ""
+    upstream = []
+    cwd_boundary = cwd
+    cdpath_risk = bool(os.environ.get("CDPATH")) or "CDPATH" in command or "cdable_vars" in command
+    # the $(cat <<EOF ...) prose idiom holds only while nothing in the command (outside such prose) can shadow cat
+    prose = not ("prose-shadow" in _DESTRUCT_RULES
+                 and _DESTRUCT_SHADOW_RE.search(_destruct_shell_text(command, True)))
+    deadline = time.monotonic() + _DESTRUCT_BUDGET
+    effects = _destruct_prior_effects(segments) if "prior-effect" in _DESTRUCT_RULES else None
+    prior = {"names": set(), "env": {}, "config": None, "outputs": set(), "links": set(), "mutates": False}
+    for seg_no, seg in enumerate(segments):
+        nest, lost = _destruct_nesting(seg.argv, nest)
+        broken = broken or lost
+        ctx = {"command": command, "upstream": upstream if prev_sep in ("|", "|&") else [], "prose": prose,
+               "prior": prior if effects is not None else None}
+        idx = _command_word_index(seg.argv)
+        last = None
+        for tok in seg.argv[:idx]:
+            m = _DESTRUCT_OPTOUT_RE.fullmatch(tok)
+            if m:
+                last = m.group(1)
+        if ("optout" in _DESTRUCT_RULES and last is not None and last.lower() not in _DISCARD_FALSY
+                and _destruct_segment(seg, cwd, deadline, ctx)):
+            notes.append("GUARDRAIL_ALLOW_DESTRUCTIVE is set on '{}', so this guard did not check it; the "
+                         "prefix records a claimed human authorization and accepted loss (rules sechau, "
+                         "secrst) and is not proof of either.".format(" ".join(seg.argv[idx:])[:200]))
+        else:
+            verdicts.extend(_destruct_segment(seg, cwd, deadline, ctx))
+        next_cwd = _destruct_next_cwd(seg, cwd, prev_sep, depth, nest == 0 and not broken, cdpath_risk)
+        if effects is not None:
+            # A shadowed directory builtin or prefix cannot certify the shell's next cwd.
+            if (any(tok in prior["names"] for tok in seg.argv)
+                    and any(tok in ("cd", "pushd", "popd") for tok in seg.argv)):
+                next_cwd = None
+            effect = effects[seg_no]
+            for key in ("outputs", "links"):
+                for token, opaque, tilde in effect[key]:
+                    path = _destruct_resolve(token, opaque, tilde, cwd)
+                    if path is not None:
+                        prior[key].add(path)
+            prior["names"].update(effect["names"])
+            prior["env"].update(effect["env"])
+            prior["config"] = effect["config"] or prior["config"]
+            prior["mutates"] = prior["mutates"] or effect["mutates"]
+        cwd = next_cwd
+        if "cd-flow" in _DESTRUCT_RULES:
+            if seg.sep_after == "&":
+                if cwd != cwd_boundary:
+                    cwd = None  # a cwd moved inside a backgrounded list: its cd ran in a subshell, so the
+                    # parent shell cwd is not what the move computed; fail closed to UNKNOWN
+                cwd_boundary = cwd
+            elif seg.sep_after in ("", ";"):
+                cwd_boundary = cwd  # a list boundary: a later background operator covers only what follows it
+        upstream = ctx["upstream"] + [seg] if seg.sep_after in ("|", "|&") else []
+        prev_sep = seg.sep_after
+        if seg.sep_after == "(":
+            depth += 1
+        elif seg.sep_after == ")":
+            if depth:
+                depth -= 1
+            elif not nest:
+                broken = True  # an unbalanced close outside a case pattern: the scope model is lost
+    return verdicts, notes, deadline
+
+
 def destructive_guard(data):
     """sechau + secrst (security/human-authorization, security/verified-restore-path), PreToolUse/Bash. A destructive
     operation outside git's reach proceeds only when this guard can see a restore path for what it destroys.
@@ -7808,7 +7884,7 @@ def destructive_guard(data):
     A segment also DENIES when an earlier segment of the same command can change the meaning its
     classification would trust: a function or alias definition, or a cd/pushd/popd redefinition, that
     shadows a modelled wrapper, a known non-runner, or the directory-change builtin (class prior-effect-1);
-    a bare or exported environment assignment, or a git-config write, that arms a command-valued setting
+    a bare or exported environment assignment, or a git config command or git clone -c, that arms a command-valued setting
     (pager, editor, diff, external-diff, sequence editor, textconv or alias) a later command runs
     (prior-effect-2); a runner whose executed command word is itself computed or a glob matching a
     destructive name (prior-effect-3); and a database client meta-command that runs a shell or a program, or
@@ -7911,76 +7987,27 @@ def destructive_guard(data):
                          "parseable command with literal targets. {}".format(hit, _DESTRUCT_ALTS),
                          "AIQT guardrail: denied an unparseable command naming a destructive operation "
                          "(rules sechau, secrst).")
+        if "raw" in _DESTRUCT_RULES and "prior-effect" in _DESTRUCT_RULES:
+            prefix, complete = _lex_command(command, partial=True)
+            if not complete and prefix:
+                cwd = data.get("cwd")
+                cwd = cwd if isinstance(cwd, str) and os.path.isabs(cwd) else None
+                verdicts, _notes, _deadline = _destruct_scan(command, prefix, cwd)
+                denies = [detail for kind, detail in verdicts if kind == "deny"]
+                if denies:
+                    return _deny("AIQT rules sechau/secrst: the command could not be fully parsed (a "
+                                 "here-string, a process substitution or an unquoted heredoc), and the "
+                                 "part that does parse carries a destructive operation an earlier segment "
+                                 "effect would reach: {}. This guard classifies only the command shapes it "
+                                 "models exactly, so it denies rather than run (fail closed). Re-issue it "
+                                 "as a parseable command with literal targets. {}".format("; ".join(denies),
+                                                                                           _DESTRUCT_ALTS),
+                                 "AIQT guardrail: denied an unparseable command whose parseable prefix "
+                                 "carries a destructive operation (rules sechau, secrst).")
         return _allow()
     cwd = data.get("cwd")
     cwd = cwd if isinstance(cwd, str) and os.path.isabs(cwd) else None
-    verdicts = []
-    notes = []
-    depth = 0
-    nest = 0
-    broken = False
-    prev_sep = ""
-    upstream = []
-    cwd_boundary = cwd
-    cdpath_risk = bool(os.environ.get("CDPATH")) or "CDPATH" in command or "cdable_vars" in command
-    # the $(cat <<EOF ...) prose idiom holds only while nothing in the command (outside such prose) can shadow cat
-    prose = not ("prose-shadow" in _DESTRUCT_RULES
-                 and _DESTRUCT_SHADOW_RE.search(_destruct_shell_text(command, True)))
-    deadline = time.monotonic() + _DESTRUCT_BUDGET
-    effects = _destruct_prior_effects(segments) if "prior-effect" in _DESTRUCT_RULES else None
-    prior = {"names": set(), "env": {}, "config": None, "outputs": set(), "links": set(), "mutates": False}
-    for seg_no, seg in enumerate(segments):
-        nest, lost = _destruct_nesting(seg.argv, nest)
-        broken = broken or lost
-        ctx = {"command": command, "upstream": upstream if prev_sep in ("|", "|&") else [], "prose": prose,
-               "prior": prior if effects is not None else None}
-        idx = _command_word_index(seg.argv)
-        last = None
-        for tok in seg.argv[:idx]:
-            m = _DESTRUCT_OPTOUT_RE.fullmatch(tok)
-            if m:
-                last = m.group(1)
-        if ("optout" in _DESTRUCT_RULES and last is not None and last.lower() not in _DISCARD_FALSY
-                and _destruct_segment(seg, cwd, deadline, ctx)):
-            notes.append("GUARDRAIL_ALLOW_DESTRUCTIVE is set on '{}', so this guard did not check it; the "
-                         "prefix records a claimed human authorization and accepted loss (rules sechau, "
-                         "secrst) and is not proof of either.".format(" ".join(seg.argv[idx:])[:200]))
-        else:
-            verdicts.extend(_destruct_segment(seg, cwd, deadline, ctx))
-        next_cwd = _destruct_next_cwd(seg, cwd, prev_sep, depth, nest == 0 and not broken, cdpath_risk)
-        if effects is not None:
-            # A shadowed directory builtin or prefix cannot certify the shell's next cwd.
-            if (any(tok in prior["names"] for tok in seg.argv)
-                    and any(tok in ("cd", "pushd", "popd") for tok in seg.argv)):
-                next_cwd = None
-            effect = effects[seg_no]
-            for key in ("outputs", "links"):
-                for token, opaque, tilde in effect[key]:
-                    path = _destruct_resolve(token, opaque, tilde, cwd)
-                    if path is not None:
-                        prior[key].add(path)
-            prior["names"].update(effect["names"])
-            prior["env"].update(effect["env"])
-            prior["config"] = effect["config"] or prior["config"]
-            prior["mutates"] = prior["mutates"] or effect["mutates"]
-        cwd = next_cwd
-        if "cd-flow" in _DESTRUCT_RULES:
-            if seg.sep_after == "&":
-                if cwd != cwd_boundary:
-                    cwd = None  # a cwd moved inside a backgrounded list: its cd ran in a subshell, so the
-                    # parent shell cwd is not what the move computed; fail closed to UNKNOWN
-                cwd_boundary = cwd
-            elif seg.sep_after in ("", ";"):
-                cwd_boundary = cwd  # a list boundary: a later background operator covers only what follows it
-        upstream = ctx["upstream"] + [seg] if seg.sep_after in ("|", "|&") else []
-        prev_sep = seg.sep_after
-        if seg.sep_after == "(":
-            depth += 1
-        elif seg.sep_after == ")":
-            if depth:
-                depth -= 1
-            elif not nest:
-                broken = True  # an unbalanced close outside a case pattern: the scope model is lost
+    verdicts, notes, deadline = _destruct_scan(command, segments, cwd)
     denies = [detail for kind, detail in verdicts if kind == "deny"]
     if denies:
         return _deny("AIQT rules sechau/secrst (human-authorization, verified-restore-path): denied a "

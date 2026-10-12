@@ -38,6 +38,18 @@ PRIOR_EFFECT_VECTORS = [
     ("pe-psql-shell-escape", 6, "psql -c '\\! rm -rf src/pkg'", "deny"),
     ("pe-sqlite-shell", 6, "sqlite3 :memory: '.shell rm -rf src/pkg'", "deny"),
     ("pe-env-option-value-expands", 6, "X='IGNORE rm -rf src/pkg'; env -u $X echo", "deny"),
+    # class 1: a pure name shadow with an inert body, isolating definition tracking from the
+    # computed-runner branch (round-4 finding 3)
+    ("pe-func-shadows-known-pure", 1, 'echo() { true; }; echo rm -rf src/pkg', "deny"),
+    # class 4: an unparseable tail (here-string) must not let the parseable prefix skip the
+    # prior-effect run-path pass (round-4 finding 1)
+    ("pe-herestring-prefix-run", 4, "cp helper {scratch}/zz && {scratch}/zz; cat <<< ok", "deny"),
+    # class 6: each client executable or file-loading meta-command, one vector per form (finding 2)
+    ("pe-sqlite-read-pipe", 6, "sqlite3 :memory: '.read \"|rm -rf src/pkg\"'", "deny"),
+    ("pe-sqlite-output-pipe-quoted", 6, "sqlite3 :memory: '.output \"|rm -rf src/pkg\"' 'select 1;'", "deny"),
+    ("pe-psql-include", 6, "psql -c '\\i /tmp/qa514.sql'", "deny"),
+    ("pe-mysql-shell-escape", 6, "mysql -e '\\! rm -rf src/pkg'", "deny"),
+    ("pe-mariadb-source", 6, "mariadb -e 'source /tmp/qa514.sql'", "deny"),
 ]
 
 # Benign shapes that must keep allowing (false-deny controls; none names a destructive word).
@@ -45,4 +57,6 @@ PRIOR_EFFECT_CONTROLS = [
     ("pe-control-export-pager-benign", "export PAGER=less; git log -1", "allow"),
     ("pe-control-function-benign", "greet() { echo hi; }; greet", "allow"),
     ("pe-control-mkdir-cd", "mkdir -p {scratch}/build && cd {scratch}/build", "allow"),
+    ("pe-control-herestring-benign", "cat <<< ok", "allow"),
+    ("pe-control-procsub-benign", "diff <(echo a) <(echo b)", "allow"),
 ]
