@@ -14,12 +14,13 @@ gate; check_manifest.py recomputes the ARTIFACTS roster from these targets.
 
 Fail-closed (GateError -> exit 2): a tools/*.py that declares RENDERER_DECL but is absent from RENDERERS
 (a --check against a fresh run proves the file current, never the roster complete, since both read the
-same RENDERERS); a tools/*.py binding RENDERER_DECL by any static form other than ONE plain top-level
-assignment or annotated assignment to the bare name (_declaration, the single predicate discovery and the
-reader share), a tools/*.py that declares a source encoding other than UTF-8 or cannot be parsed (any
-parse error class, including a parser stack overflow on deep nesting), or a *.py entry that is not a
-regular file (_declared_renderer_stems, which also discloses the dynamic-binding residual); a
-missing/malformed RENDERER_DECL or GENSRC_OUTPUTS; a pack-local
+same RENDERERS); a tools/*.py that binds, reads or spells RENDERER_DECL anywhere the source names it other
+than in ONE single-target top-level assignment or annotated assignment to the bare name, a comparison
+against the string or a third or later call argument aside (_declaration, the single predicate discovery
+and the reader share), a tools/*.py that cannot be read, declares a source encoding other than UTF-8 or
+cannot be parsed (any parse error class, including a parser stack overflow on deep nesting), or a *.py
+entry that is not a regular file (_declared_renderer_stems, which also discloses the reflective-write
+residual); a missing/malformed RENDERER_DECL or GENSRC_OUTPUTS; a pack-local
 import that cannot be statically resolved (a relative import, or a wildcard `from <pack-local> import *`);
 an unreadable closure member; or any other cannot-evaluate. DISCLOSED RESIDUAL (disclose-guard-residuals):
 the closure is computed from statically-parsed Import/ImportFrom nodes only. A truly-dynamic pack-local
@@ -87,27 +88,35 @@ def _toml_str(value):
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-# Every exception class reading and parsing a hostile *.py can raise: OSError (unreadable), SyntaxError (incl.
-# a bad coding cookie or invalid UTF-8), ValueError (incl. UnicodeDecodeError), and MemoryError or
-# RecursionError (a parser or compiler stack overflow on very deep nesting). Each is a cannot-evaluate
-# (GateError, exit 2), never a traceback.
-_PARSE_ERRORS = (OSError, SyntaxError, ValueError, MemoryError, RecursionError)
+# Every exception class reading a hostile *.py can raise: OSError (unreadable: a permission, a directory, a
+# vanished file) and MemoryError (too large to hold). Each is a cannot-evaluate reported as a READ failure.
+_READ_ERRORS = (OSError, MemoryError)
+# Every exception class parsing it can raise: SyntaxError (incl. a bad coding cookie or invalid UTF-8),
+# ValueError (incl. UnicodeDecodeError), and MemoryError or RecursionError (a parser or compiler stack overflow
+# on very deep nesting). Each is a cannot-evaluate (GateError, exit 2), never a traceback.
+_PARSE_ERRORS = (SyntaxError, ValueError, MemoryError, RecursionError)
 
 
 def _parse_module(path, where, purpose):
     """Parse a tools/*.py to an AST from its raw BYTES, as Python's own import does (a BOM and a PEP 263
     coding cookie are honoured, never bypassed by a UTF-8 text read), after refusing a declared source
     encoding other than UTF-8: a UTF-7 cookie, say, can turn a line that reads as a comment in UTF-8 into a
-    statement. Fail-closed (GateError) on that cookie and on every exception class in _PARSE_ERRORS."""
+    statement. Fail-closed (GateError) on that cookie, on every exception class in _READ_ERRORS (reported as
+    a read failure) and on every exception class in _PARSE_ERRORS (reported as a parse failure)."""
     try:
         data = path.read_bytes()
+    except _READ_ERRORS as exc:
+        raise GateError("{}: cannot read it to scan for {} ({}: {})".format(
+            where, purpose, type(exc).__name__, exc))
+    try:
         encoding = tokenize.detect_encoding(io.BytesIO(data).readline)[0]
         if codecs.lookup(encoding).name not in ("utf-8", "utf-8-sig"):
             raise GateError("{}: declares the source encoding {!r}; only UTF-8 is supported, so it cannot be "
                             "scanned for {} and is refused".format(where, encoding, purpose))
         return ast.parse(data, filename=where)
     except _PARSE_ERRORS as exc:
-        raise GateError("{}: cannot parse for {} ({}: {})".format(where, purpose, type(exc).__name__, exc))
+        raise GateError("{}: cannot parse it to scan for {} ({}: {})".format(
+            where, purpose, type(exc).__name__, exc))
 
 
 def _read_renderer_decl(path, where):
@@ -115,8 +124,8 @@ def _read_renderer_decl(path, where):
     ONLY that literal (ast.literal_eval); the module is never imported. The binding is found by
     _declaration, the same predicate discovery uses, so the two accept exactly the same binding set.
     Fail-closed (GateError) when there is not exactly one top-level assignment or annotated assignment to
-    RENDERER_DECL (or any other binding of it), when that binding has no value or a non-literal value, or
-    when the shape is wrong ({'renderer-id': <slug str>, 'semantics-revision': <non-negative int>})."""
+    RENDERER_DECL (or any other use of it), when that binding has no value or a non-literal value, or when
+    the shape is wrong ({'renderer-id': <slug str>, 'semantics-revision': <non-negative int>})."""
     bindings = _declaration(_parse_module(path, where, "RENDERER_DECL"), where)
     if not bindings:
         raise GateError("{}: expected exactly one top-level RENDERER_DECL assignment or annotated "
@@ -175,14 +184,18 @@ def _top_level_bindings(tree):
 def _declaration(tree, where):
     """THE supported RENDERER_DECL declaration, the single predicate shared by discovery
     (_declared_renderer_stems) and the reader (_read_renderer_decl) so both accept exactly the same binding
-    set: at most ONE top-level Assign or AnnAssign to the bare name, and no other static binding of it.
-    Returns a list of zero or one (target, value) pair. Fail-closed (GateError) on an unsupported binding
-    form (_unsupported_binding) and on more than one top-level binding, since a later rebinding (an
-    annotated one, say) would make the value Python runs differ from the value read."""
+    set: at most ONE single-target top-level Assign or AnnAssign to the bare name, and no other use of it
+    that _unsupported_binding sees. Returns a list of zero or one (target, value) pair. Fail-closed
+    (GateError) on an unsupported use (_unsupported_binding) and on more than one top-level binding, since a
+    later rebinding (an annotated one, say) or an in-place change to the declared dict (a subscript store or
+    an update call, which needs a read or an alias _unsupported_binding refuses) would make the value Python
+    runs differ from the value read. The one exception is the reflective residual _declared_renderer_stems
+    discloses."""
     form = _unsupported_binding(tree)
     if form is not None:
-        raise GateError("{}: RENDERER_DECL is bound by {}; only a single top-level assignment or annotated "
-                        "assignment to the bare name is a supported declaration".format(where, form))
+        raise GateError("{}: unsupported use of RENDERER_DECL: {}; the only supported use is one "
+                        "single-target top-level assignment or annotated assignment to the bare name, never "
+                        "read, rebound or otherwise named".format(where, form))
     bindings = _top_level_bindings(tree)
     if len(bindings) > 1:
         raise GateError("{}: RENDERER_DECL is bound {} times at top level; exactly one top-level assignment "
@@ -190,21 +203,64 @@ def _declaration(tree, where):
     return bindings
 
 
+# A fold longer than this is dropped. Any cap at least as long as the reserved name (13 characters) is exact,
+# since concatenation only lengthens a string; the cap bounds the memory a long + chain can take.
+_FOLD_CAP = 64
+
+
+def _folded_strings(tree):
+    """{id(node): str} for every expression node whose string value a BOUNDED constant fold computes: a str
+    constant (an implicit concatenation is already one), an f-string whose every part is such a value (a
+    replacement field with no conversion other than !s and no format spec), and a + of two such operands.
+    Folded bottom-up over the reversed breadth-first walk, where every child precedes its parent, so a long
+    chain needs no recursion; a value longer than _FOLD_CAP is dropped."""
+    folded = {}
+    for node in reversed(list(ast.walk(tree))):
+        if isinstance(node, ast.Constant):
+            value = node.value if isinstance(node.value, str) else None
+        elif isinstance(node, ast.FormattedValue):
+            value = (folded.get(id(node.value)) if node.conversion in (-1, ord("s")) and node.format_spec is None
+                     else None)
+        elif isinstance(node, ast.JoinedStr):
+            parts = [folded.get(id(part)) for part in node.values]
+            value = None if any(part is None for part in parts) else "".join(parts)
+        elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left, right = folded.get(id(node.left)), folded.get(id(node.right))
+            value = None if left is None or right is None else left + right
+        else:
+            continue
+        if value is not None and len(value) <= _FOLD_CAP:
+            folded[id(node)] = value
+    return folded
+
+
 def _unsupported_binding(tree):
-    """The description of the first binding of RENDERER_DECL in `tree` that is NOT a top-level Assign or
-    AnnAssign to the bare name, or None when there is none. Modelled on gen_gensrc's _read_declaration
-    walk: a Store/Del-context Name covers tuple/list/starred unpacking, a conditional or try/with/loop-nested
-    assignment, an augmented assignment, del, a walrus, a type alias, and a for/with/comprehension target;
-    the string-name binders (import alias incl. a dotted root, a wildcard import, def/class, except-as,
-    match capture, a parameter, a type parameter, global/nonlocal) are matched by their str field; and a
-    store or delete through the module object is matched by its literal name (an attribute such as
-    sys.modules[__name__].RENDERER_DECL, a subscript such as vars()["RENDERER_DECL"] or
-    globals()["RENDERER_DECL"], or a setattr/delattr call naming it)."""
+    """The description of the first use of RENDERER_DECL in `tree` other than ONE single-target top-level
+    Assign or AnnAssign to the bare name, or None when there is none. Modelled on gen_gensrc's
+    _read_declaration walk: a Store/Del-context Name covers tuple/list/starred unpacking, a conditional or
+    try/with/loop-nested assignment, an augmented assignment, del, a walrus, a type alias, and a
+    for/with/comprehension target; the string-name binders (import alias incl. a dotted root, a wildcard
+    import, def/class, except-as, match capture, a parameter, a type parameter, global/nonlocal) are matched
+    by their str field; and a store or delete through the module object is matched by its literal name (an
+    attribute such as sys.modules[__name__].RENDERER_DECL, a subscript such as vars()["RENDERER_DECL"] or
+    globals()["RENDERER_DECL"], or a setattr/delattr call naming it).
+
+    The value Python runs must be the value read, so each way to reach the declared dict that spells its
+    name, and through which it could be changed in place, is refused too: a Load of the bare name
+    (RENDERER_DECL[...] = ... or RENDERER_DECL.update(...)), a chained assignment (its other target is an
+    alias), an attribute read such as sys.modules[__name__].RENDERER_DECL or other_module.RENDERER_DECL, and
+    an import naming it. A literal-name store made through any other call (globals().setdefault,
+    __setitem__, __setattr__, builtins.setattr, an aliased setattr, operator.setitem, dict.__setitem__), a
+    dict key, a keyword argument or a variable holding the name is caught by refusing the spelled name
+    itself: a keyword argument named RENDERER_DECL, and any expression _folded_strings computes to the string
+    'RENDERER_DECL' other than a comparison operand or a third or later positional argument of a call (_inert),
+    so a reader such as this file, which spells it only there, passes."""
     allowed = {id(t) for t, _ in _top_level_bindings(tree)}
     parents = {}
     for node in ast.walk(tree):
         for child in ast.iter_child_nodes(node):
             parents[id(child)] = node
+    folded = _folded_strings(tree)
 
     def _where(node):
         # The innermost enclosing compound statement whose body holds the binder, if any.
@@ -222,13 +278,40 @@ def _unsupported_binding(tree):
         return isinstance(node.ctx, (ast.Store, ast.Del))
 
     def _names_decl(node):
-        return isinstance(node, ast.Constant) and node.value == "RENDERER_DECL"
+        return folded.get(id(node)) == "RENDERER_DECL"
 
+    def _inert(node):
+        # A comparison operand, or a third or later positional argument with no starred argument before it:
+        # every direct namespace write (setattr, operator.setitem, dict.__setitem__, a bound __setitem__ or
+        # setdefault) takes its key first or second, so a later argument (the purpose this file passes to
+        # _parse_module, say) is not that key; a helper that takes it later is in the disclosed residual.
+        parent = parents.get(id(node))
+        if isinstance(parent, ast.Compare):
+            return True
+        if not isinstance(parent, ast.Call):
+            return False
+        for index, arg in enumerate(parent.args):
+            if isinstance(arg, ast.Starred):
+                return False
+            if arg is node:
+                return index >= 2
+        return False
+
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and len(node.targets) > 1
+                and any(id(t) in allowed for t in node.targets)):
+            return "a chained assignment (each other target is an alias of the declared value)"
     for node in ast.walk(tree):
+        if _names_decl(node) and not _inert(node):
+            return ("the string 'RENDERER_DECL' outside a comparison or a later call argument (a first or "
+                    "second call argument such as globals().setdefault('RENDERER_DECL', ...), a dict key, or "
+                    "a value a store can use)" + _where(node))
         if isinstance(node, ast.Name):
-            if (node.id != "RENDERER_DECL" or not isinstance(node.ctx, (ast.Store, ast.Del))
-                    or id(node) in allowed):
+            if node.id != "RENDERER_DECL" or id(node) in allowed:
                 continue
+            if not _stores(node):
+                return ("a read of the bare name (through which RENDERER_DECL[...] = ... or "
+                        "RENDERER_DECL.update(...) changes the value in place)" + _where(node))
             binder, unpack = parents.get(id(node)), False
             while isinstance(binder, (ast.Tuple, ast.List, ast.Starred)):
                 unpack = True
@@ -244,6 +327,8 @@ def _unsupported_binding(tree):
             bound = node.asname if node.asname is not None else node.name.partition(".")[0]
             if bound == "RENDERER_DECL" or (node.asname is None and node.name == "*"):
                 return ("a wildcard import" if node.name == "*" else "an import") + _where(node)
+            if "RENDERER_DECL" in node.name.split("."):
+                return "an import naming RENDERER_DECL (an alias of another module's value)" + _where(node)
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             if node.name == "RENDERER_DECL":
                 return "a def/class" + _where(node)
@@ -266,12 +351,16 @@ def _unsupported_binding(tree):
             if "RENDERER_DECL" in node.names:
                 return "a global/nonlocal declaration" + _where(node)
         elif isinstance(node, ast.Attribute):
-            if node.attr == "RENDERER_DECL" and _stores(node):
-                return ("an attribute store or delete (such as sys.modules[__name__].RENDERER_DECL)"
-                        + _where(node))
+            if node.attr == "RENDERER_DECL":
+                return ("an attribute {} (such as sys.modules[__name__].RENDERER_DECL)".format(
+                    "store or delete" if _stores(node) else "read") + _where(node))
         elif isinstance(node, ast.Subscript):
             if _stores(node) and _names_decl(node.slice):
                 return ("a subscript store or delete keyed 'RENDERER_DECL' (such as vars() or globals())"
+                        + _where(node))
+        elif isinstance(node, ast.keyword):
+            if node.arg == "RENDERER_DECL":
+                return ("a keyword argument named RENDERER_DECL (such as globals().update(RENDERER_DECL=...))"
                         + _where(node))
         elif isinstance(node, ast.Call):
             if (isinstance(node.func, ast.Name) and node.func.id in ("setattr", "delattr")
@@ -290,15 +379,25 @@ def _declared_renderer_stems(tools_dir):
     symlinks are followed (a dangling or looping symlink, a symlink to a directory or other non-file, or a
     directory, FIFO, socket or device named *.py), since a candidate is enumerated by NAME before its type
     is checked and is never skipped; on an unreadable or unparsable *.py file or one declaring a source
-    encoding other than UTF-8 (_parse_module); and on any statically visible binding of RENDERER_DECL other
-    than ONE top-level Assign or AnnAssign to the bare name (_declaration), each of which could hide a
-    declaration. A symlink to a regular file is read through. RENDERER_DECL is a RESERVED name: the walk is
-    conservative and also refuses an unrelated function-local reuse of it, which fails in the safe direction.
+    encoding other than UTF-8 (_parse_module); and on any binding, read or spelling of RENDERER_DECL the
+    walk sees other than ONE single-target top-level Assign or AnnAssign to the bare name (_declaration),
+    each of which could hide a declaration or change it in place. A symlink to a regular file is read
+    through. RENDERER_DECL is a RESERVED name: the walk is conservative and also refuses an unrelated
+    function-local reuse of it, or the string anywhere but a comparison or a third or later call argument,
+    which fails in the safe direction.
 
-    DISCLOSED RESIDUAL (disclose-guard-residuals): a truly dynamic binding (one whose name is computed rather
-    than the literal RENDERER_DECL, such as setattr(module, name, ...) or globals()[key] = ..., a bulk update
-    such as globals().update(...), exec, or an import-time side effect of another module) is beyond static
-    analysis; this function does not detect it and does not claim to."""
+    DISCLOSED RESIDUAL (disclose-guard-residuals): the walk sees the name only where the source spells it, as
+    an identifier, an attribute, an import name, a keyword-argument name, or a string the bounded fold of
+    _folded_strings computes. A REFLECTIVE write or read that never spells it so is beyond static analysis,
+    and this function does not detect it and does not claim to: a name computed any other way (a join,
+    %-formatting, str.format, a case change, bytes.decode, chr, an f-string format spec) and then stored
+    through setattr(module, name, ...), globals()[name] = ..., globals().update({name: ...}) or any other
+    namespace write; the literal name handed to a helper as a third or later positional argument that the
+    helper then stores, such as functools.partial(setattr, module, 'RENDERER_DECL'); a bulk copy that never
+    names it, such as globals().update(vars(other)); exec, eval or compile of source text; an import-time
+    side effect of another module; a module-level __getattr__ that answers the name without binding it; and
+    an in-place change to the declared dict reached without spelling the name (by iterating
+    globals().values(), say), which would make the value Python runs differ from the value read."""
     try:
         with os.scandir(tools_dir) as it:
             names = sorted(e.name for e in it if e.name.endswith(".py"))
@@ -478,14 +577,20 @@ def main():
 #   (h) each of the _UNSUPPORTED_BINDINGS forms of RENDERER_DECL in an unlisted tools/*.py (unpacking,
 #       starred, conditional, try, with, loop, walrus, augmented, del, import-as, wildcard import, global,
 #       nonlocal, except-as, match capture, def, class, parameter, type parameter, comprehension target,
-#       type alias, and a store through the module object by attribute, vars()/globals() subscript or
-#       setattr) fails --check (exit 2) instead of reading as "no declaration".
+#       type alias, a store through the module object by attribute, vars()/globals() subscript or
+#       setattr, a literal-name store through any other call (qualified or aliased setattr, __setattr__,
+#       setdefault, __setitem__, dict.__setitem__, operator.setitem), a dict-display or keyword update, a
+#       variable holding the name, an f-string, split f-string or concatenated key, an import naming it, and
+#       a later argument that a starred argument before it can shift to the key position)
+#       fails --check (exit 2) instead of reading as "no declaration".
 #   (i) a *.py entry that is a dangling symlink, a looping symlink, a symlink to a directory, a directory,
 #       or a FIFO fails --check (exit 2) instead of being skipped.
 #   (j) discovery and the reader share one binding predicate: a listed generator declaring RENDERER_DECL by
 #       an annotated assignment alone renders that declaration, while an ordinary declaration followed by an
 #       annotated (or a second plain) rebinding, or a bare annotation, fails closed (exit 2), and the reader
-#       alone also refuses two bindings.
+#       alone also refuses two bindings; each _MUTATED in-place change to the declared dict (a subscript
+#       store, an update call, a chained-assignment alias, a module attribute read) also fails closed, so
+#       none of these routes can make the value Python runs differ from the value read.
 #   (k) a PEP 263 cookie cannot hide a declaration: a UTF-7 cookie that makes a UTF-8 comment a declaration,
 #       and any other non-UTF-8 cookie, fail --check (exit 2); a UTF-8 BOM is parsed as Python parses it.
 #   (l) a parser or compiler stack overflow (RecursionError or MemoryError) while parsing a tools/*.py, or
@@ -496,6 +601,11 @@ def main():
 #       that overflows on one interpreter parses cleanly on another and the case would flip.
 #   (m) the refusal names where a binder runs: a walrus in a decorator, a default or a class base runs in
 #       the enclosing scope, so it is not reported as inside the def or class; one in a body is.
+#   (n) an unreadable *.py is reported as "cannot read", an unparsable one as "cannot parse".
+#   (o) a comparison against the string RENDERER_DECL, a third positional argument (where no direct namespace
+#       write takes its key), or a longer string mentioning it, stays allowed.
+#   (p) the bounded string fold keeps no value longer than _FOLD_CAP.
+#   (q) this file passes its own scan (a renderer-free tools/*.py that discovery reads like any other).
 
 _HELPER = "VALUE = 1\n"
 
@@ -569,6 +679,28 @@ _UNSUPPORTED_BINDINGS = (
     ("globals() subscript", "globals()['RENDERER_DECL'] = {}\n".format(_DECL_LITERAL)),
     ("setattr call", "import sys\nsetattr(sys.modules[__name__], 'RENDERER_DECL', {})\n"
                      .format(_DECL_LITERAL)),
+    ("qualified setattr call", "import builtins, sys\n"
+                               "builtins.setattr(sys.modules[__name__], 'RENDERER_DECL', {})\n"
+                               .format(_DECL_LITERAL)),
+    ("aliased setattr call", "import sys\nfrom builtins import setattr as put\n"
+                             "put(sys.modules[__name__], 'RENDERER_DECL', {})\n".format(_DECL_LITERAL)),
+    ("__setattr__ call", "import sys\nsys.modules[__name__].__setattr__('RENDERER_DECL', {})\n"
+                         .format(_DECL_LITERAL)),
+    ("setdefault call", "globals().setdefault('RENDERER_DECL', {})\n".format(_DECL_LITERAL)),
+    ("__setitem__ call", "globals().__setitem__('RENDERER_DECL', {})\n".format(_DECL_LITERAL)),
+    ("dict.__setitem__ call", "dict.__setitem__(globals(), 'RENDERER_DECL', {})\n".format(_DECL_LITERAL)),
+    ("operator.setitem call", "import operator\noperator.setitem(globals(), 'RENDERER_DECL', {})\n"
+                              .format(_DECL_LITERAL)),
+    ("keyword update", "globals().update(RENDERER_DECL={})\n".format(_DECL_LITERAL)),
+    ("name held in a variable", "key = 'RENDERER_DECL'\nglobals()[key] = {}\n".format(_DECL_LITERAL)),
+    ("dict-display update", "globals().update({{('RENDERER_DECL'): {}}})\n".format(_DECL_LITERAL)),
+    ("f-string subscript key", "vars()[f'RENDERER_DECL'] = {}\n".format(_DECL_LITERAL)),
+    ("split f-string subscript key", "vars()[f'RENDERER_{{({!r})}}'] = {}\n".format("DECL", _DECL_LITERAL)),
+    ("concatenated subscript key", "globals()['RENDERER_' + 'DECL'] = {}\n".format(_DECL_LITERAL)),
+    ("import naming it", "from gen_alpha import RENDERER_DECL as other\nother['semantics-revision'] = 99\n"),
+    ("later argument after a starred one", "import sys\n"
+                                           "setattr(*[], *[sys.modules[__name__]], 'RENDERER_DECL', {})\n"
+                                           .format(_DECL_LITERAL)),
 )
 
 # (j) listed tools/gen_alpha.py bodies: the shared declaration predicate (one Assign or AnnAssign, no more).
@@ -580,6 +712,16 @@ _REBOUND = (
     ("plain rebinding", _ENTRY_GOOD + 'RENDERER_DECL = {"renderer-id": "rebound", '
                                       '"semantics-revision": 99}\n'),
     ("bare annotation", _ENTRY_GOOD.replace(_ALPHA_DECL, "RENDERER_DECL: dict\n")),
+)
+# (j) listed tools/gen_alpha.py bodies that change the declared dict in place after it is defined, so the value
+# Python runs would differ from the value read; each must fail closed.
+_MUTATED = (
+    ("a subscript store", _ENTRY_GOOD + 'RENDERER_DECL["semantics-revision"] = 99\n'),
+    ("an update call", _ENTRY_GOOD + 'RENDERER_DECL.update([("semantics-revision", 99)])\n'),
+    ("a chained-assignment alias", _ENTRY_GOOD.replace(_ALPHA_DECL, "ALIAS = " + _ALPHA_DECL)
+     + 'ALIAS["semantics-revision"] = 99\n'),
+    ("a module attribute read", _ENTRY_GOOD
+     + 'sys.modules[__name__].RENDERER_DECL["semantics-revision"] = 99\n'),
 )
 
 # (k) unlisted tools/gen_beta.py bodies (bytes) a coding cookie must not hide; '+AAo-' is UTF-7 for a newline.
@@ -607,6 +749,14 @@ _WHERE_MESSAGES = (
     ("class C((RENDERER_DECL := object)):\n    pass\n", _WALRUS),
     ("def f():\n    (RENDERER_DECL := 1)\n", _WALRUS + " inside a def block"),
     ("def g():\n    def f(x=(RENDERER_DECL := 1)):\n        pass\n", _WALRUS + " inside a def block"),
+)
+
+# (o) unlisted tools/gen_beta.py bodies that only compare against or mention the name; each must stay allowed.
+_ALLOWED_USES = (
+    ("comparison", "def is_decl(name):\n    return name == 'RENDERER_DECL' or 'RENDERER_DECL' != name\n"),
+    ("mention in a longer string", "NOTE = 'this module carries no RENDERER_DECL'\n"),
+    ("third positional argument", "def scan(path, where, purpose):\n    return purpose\n"
+                                  "scan(None, None, 'RENDERER_DECL')\n"),
 )
 
 
@@ -759,6 +909,13 @@ def self_test_main():
             failures.append("the reader alone expected GateError on an annotated rebinding of RENDERER_DECL")
         except GateError:
             pass
+        for label, body in _MUTATED:
+            case = tmp / ("mutated-" + label.replace(" ", "-"))
+            _fixture(case, body)
+            if run_quiet(case, check=False) != 2:
+                failures.append("a listed generator changing RENDERER_DECL in place through {} expected "
+                                "generation exit 2 (the value run would differ from the value read)"
+                                .format(label))
 
         # (k) a coding cookie cannot hide a declaration; a UTF-8 BOM parses as Python parses it.
         for label, data in _COOKIES:
@@ -812,6 +969,56 @@ def self_test_main():
             if got != expected:
                 failures.append("binding message for {!r}: expected {!r}, got {!r}"
                                 .format(source, expected, got))
+
+        # (n) a file that cannot be read is reported as a read failure, an unparsable one as a parse failure. A
+        # directory is a read failure on every platform and uid (a mode-0 file is readable by root); the
+        # MemoryError read is injected through an object whose read_bytes raises it.
+        class _Unreadable:
+            def read_bytes(self):
+                raise MemoryError("injected read overflow")
+
+        messages = tmp / "messages"
+        (messages / "unreadable.py").mkdir(parents=True)
+        (messages / "unparsable.py").write_bytes(b"(\n")
+        for name, expected in (("unreadable.py", "cannot read"), ("oversized.py", "cannot read"),
+                               ("unparsable.py", "cannot parse")):
+            path = _Unreadable() if name == "oversized.py" else messages / name
+            try:
+                _parse_module(path, "tools/" + name, "RENDERER_DECL")
+                failures.append("tools/{} expected GateError ({})".format(name, expected))
+            except GateError as exc:
+                if not str(exc).startswith("tools/{}: {} ".format(name, expected)):
+                    failures.append("tools/{} expected a message starting {!r}, got {!r}"
+                                    .format(name, expected, str(exc)))
+
+        # (o) a comparison against the string, a third positional argument, or a longer string mentioning it is
+        # not a use and stays allowed.
+        for label, body in _ALLOWED_USES:
+            case = tmp / ("allowed-" + label.replace(" ", "-"))
+            _fixture(case, _ENTRY_GOOD)
+            if run_quiet(case, check=False) != 0:
+                failures.append("allowed {}: fixture generation expected exit 0".format(label))
+            (case / "tools" / "gen_beta.py").write_text(body, encoding="utf-8")
+            if run_quiet(case, check=True) != 0:
+                failures.append("an unlisted tools/gen_beta.py with a {} of RENDERER_DECL expected --check "
+                                "exit 0 (not a binding, read or store)".format(label))
+
+        # (p) the fold keeps no value longer than _FOLD_CAP, so a long + chain of long strings stays bounded.
+        chain = " + ".join([repr("x" * _FOLD_CAP)] * 4)
+        longest = max(len(value) for value in _folded_strings(ast.parse(chain)).values())
+        if longest > _FOLD_CAP:
+            failures.append("the string fold kept a {}-character value, over _FOLD_CAP {}"
+                            .format(longest, _FOLD_CAP))
+
+        # (q) this file passes its own scan: it spells the reserved name only in comparisons and as a third
+        # positional argument.
+        try:
+            own = _unsupported_binding(_parse_module(Path(__file__), "tools/gen_renderers.py", "its own scan"))
+        except GateError as exc:
+            own = str(exc)
+        if own is not None:
+            failures.append("tools/gen_renderers.py expected to pass its own RENDERER_DECL scan, got {!r}"
+                            .format(own))
     finally:
         RENDERERS = saved
         shutil.rmtree(tmp, ignore_errors=True)
@@ -825,11 +1032,14 @@ def self_test_main():
           "deterministic; a helper edit inside a closure changes the framed code-digest; a mutated "
           "renderers.toml fails --check (exit 1); and a wildcard pack-local import, a missing "
           "RENDERER_DECL, a non-slug renderer-id, an unlisted generator declaring RENDERER_DECL, {} "
-          "unsupported RENDERER_DECL binding forms, 5 non-regular *.py entries, {} rebindings or bare "
-          "annotations, {} non-UTF-8 coding cookies and {} injected parser or literal stack overflows each fail "
-          "closed (exit 2), while an annotated declaration alone renders, a UTF-8 BOM parses, and {} "
-          "refusal messages name where the binder runs".format(
-              len(_UNSUPPORTED_BINDINGS), len(_REBOUND), len(_COOKIES), len(_DEEP), len(_WHERE_MESSAGES)))
+          "unsupported RENDERER_DECL binding or literal-name forms, 5 non-regular *.py entries, {} rebindings "
+          "or bare annotations, {} in-place changes to a listed declaration, {} non-UTF-8 coding cookies and "
+          "{} injected parser or literal stack overflows each fail closed (exit 2), while an annotated "
+          "declaration alone renders, a UTF-8 BOM parses, {} refusal messages name where the binder runs, an "
+          "unreadable file is reported as a read failure, {} uses that only compare against, pass later or "
+          "mention the name pass, the string fold stays bounded, and this file passes its own scan".format(
+              len(_UNSUPPORTED_BINDINGS), len(_REBOUND), len(_MUTATED), len(_COOKIES), len(_DEEP),
+              len(_WHERE_MESSAGES), len(_ALLOWED_USES)))
     return 0
 
 
