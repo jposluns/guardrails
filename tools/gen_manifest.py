@@ -53,6 +53,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 import hashlib
 import json
 import os
+import stat
 import subprocess
 import unicodedata
 from pathlib import Path
@@ -408,19 +409,62 @@ def classify(tracked, exclusions, release, namespace, root, assume_outputs=False
 
 
 def cross_check_exclusions(root, exclusions):
-    """No exclusion may swallow a gensrc-registered target or a check_portability required surface."""
+    """No exclusion may swallow a gensrc-registered target or a check_portability required surface. The one
+    exemption is an EXACT path exclusion naming a kind=file gensrc target on the authoring-only roster
+    (gen_hooks.AUTHORING_ONLY_REL): that file is generated and drift-gated in this repository but never
+    ships, so excluding it is the point (check_authoring_only binds the rest). A pattern exclusion, any
+    other gensrc target, and every portability surface stay refused."""
     import gen_gensrc      # reuse the validated loader, never a second parser (house pattern)
     import check_portability
+    import gen_hooks       # the authoring-only roster, owned by its one consumer
     decls = gen_gensrc.discover_declarations(root / "tools")
     entries = gen_gensrc.collect_entries(decls, root)
     targets = [e["target"].rstrip("/") for e in entries]
+    file_targets = {e["target"] for e in entries if e["kind"] == "file"}
+    portability = set(check_portability.REQUIRED_DIR_ROOTS) | set(check_portability.REQUIRED_FILE_ROOTS)
     surfaces = targets + list(check_portability.REQUIRED_DIR_ROOTS) + list(
         check_portability.REQUIRED_FILE_ROOTS)
     for sel, _ in exclusions:
         for surface in surfaces:
             if sel.matches(surface) or (sel.prefix and (surface + "/").startswith(sel.prefix)):
+                if (sel.exact == surface and surface in gen_hooks.AUTHORING_ONLY_REL
+                        and surface in file_targets and surface not in portability):
+                    continue
                 raise GateError("{}: exclusion {!r} would swallow the gensrc/portability surface {!r}"
                                 .format(sel.where, sel.raw, surface))
+
+
+def check_authoring_only(root, tracked, classes, exclusions):
+    """The authoring-only roster (gen_hooks.AUTHORING_ONLY_REL: the authoring-tree marker and the
+    repository-local .claude/settings.json it gates) is tracked in this repository and NEVER shipped.
+    GateError unless: the roster is tracked together or not at all (a tracked settings file without its
+    marker would make gen_hooks read this tree as an adopter tree and silently stop reconciling it); every
+    tracked roster path is excluded by an EXACT [[exclusion]] literal, never a pattern and never a class
+    row (classify() refuses a class selector that reaches an excluded path, so an excluded roster path is
+    in no SOURCES, ARTIFACTS or .gitattributes line, and no release or pin install can carry it to an
+    adopter); and every tracked roster path is a regular file on disk. A tree tracking none of the roster
+    (a synthetic fixture) obliges nothing. classes is the classify() result, checked again here so a
+    roster path that reached it is named as a would-ship error."""
+    import gen_hooks
+    roster = tuple(gen_hooks.AUTHORING_ONLY_REL)
+    present = [rel for rel in roster if rel in tracked]
+    if present and len(present) != len(roster):
+        raise GateError("the authoring-only roster {} must be tracked together; tracked: {}".format(
+            ", ".join(roster), ", ".join(present)))
+    exact = {sel.exact for sel, _ in exclusions if sel.exact is not None}
+    for rel in present:
+        if rel not in exact:
+            raise GateError("authoring-only path {} {}; it must never ship: exclude it by an exact "
+                            "[[exclusion]] path literal".format(
+                                rel, "carries the release class {!r}".format(classes[rel]) if rel in classes
+                                else "is not excluded by an exact literal"))
+        try:
+            st = os.lstat(root / rel)
+        except OSError as exc:
+            raise GateError("authoring-only path {} is tracked but cannot be read ({}); fail-closed".format(
+                rel, exc))
+        if not stat.S_ISREG(st.st_mode):
+            raise GateError("authoring-only path {} must be a regular file".format(rel))
 
 
 def read_version(root):
@@ -599,6 +643,7 @@ def compute_all(root, write_mode):
     tracked = git_tracked(root)
     classes, _ = classify(tracked, exclusions, release, namespace, root, assume_outputs=write_mode)
     cross_check_exclusions(root, exclusions)
+    check_authoring_only(root, tracked, classes, exclusions)
     import check_manifest  # the verifier-carried minimum-class table (single home, 4.2)
     check_manifest.apply_minimums(classes)
 
@@ -748,6 +793,9 @@ def main():
 #   (f) a git-less root exits 2 (never a filesystem-walk fallback);
 #   (g) raw-byte hashing: a CRLF file's recorded sha256 equals the sha256 of its exact raw bytes;
 #   (h) a missing CLAUDE.md marker pair exits 2;
+#   (m) the authoring-only roster excluded by exact literals passes (a gensrc target, yet never in SOURCES);
+#       a roster path given a class, a pattern exclusion over it, the settings without the marker, an exact
+#       exclusion of a gensrc target off the roster, and a tracked marker missing on disk each exit 2;
 #   F-FROZEN-PARTITION: a vocabulary class in neither FROZEN_CLASSES nor UNFROZEN_CLASSES, a class in both,
 #       and a class outside the vocabulary each fail closed.
 
@@ -876,6 +924,35 @@ def _build_fixture(base, own_extra="", extra_files=None, do_commit=True):
         _git(base, "add", "-A").check_returncode()
         _git(base, "commit", "-q", "-m", "fixture", "--no-verify").check_returncode()
     return base
+
+
+# The authoring-only roster fixture (case m): a second generator declaring the repository-local
+# .claude/settings.json and an ordinary local-out.txt as gensrc kind=file targets, plus those files and the
+# authoring marker. The roster paths are spelled literally (never read from gen_hooks), so a renamed roster
+# path fails here.
+_GEN_LOCAL = ('GENSRC_OUTPUTS = (\n'
+              '    {"target": ".claude/settings.json", "kind": "file",\n'
+              '     "sources": ("src.txt",), "regenerate": "python3 tools/gen_local.py"},\n'
+              '    {"target": "local-out.txt", "kind": "file",\n'
+              '     "sources": ("src.txt",), "regenerate": "python3 tools/gen_local.py"},\n'
+              ')\n')
+_ROSTER_FILES = {"tools/gen_local.py": _GEN_LOCAL, ".claude/settings.json": "{}\n",
+                 ".aiqt/authoring.toml": "format-version = 1\n", "local-out.txt": "local\n"}
+_LOCAL_OUT_CLASS = '\n[[release-class]]\npath = "local-out.txt"\nclass = "pack-immutable"\n'
+_EXCL_SETTINGS = '\n[[exclusion]]\npath = ".claude/settings.json"\nreason = "authoring-only"\n'
+_EXCL_MARKER = '\n[[exclusion]]\npath = ".aiqt/authoring.toml"\nreason = "authoring-only"\n'
+
+
+def _roster_fixture(base, own_extra, files=None):
+    """A committed fixture carrying the authoring-only roster files (or `files`) under the map _OWN_BASE +
+    own_extra + _OWN_TAIL. Returns base, or None when git cannot init."""
+    built = _build_fixture(base, extra_files=_ROSTER_FILES if files is None else files, do_commit=False)
+    (built / OWNERSHIP_REL).write_text(_OWN_BASE + own_extra + _OWN_TAIL, encoding="utf-8")
+    if _git(built, "init", "-q", "--template=").returncode != 0:
+        return None
+    _git(built, "add", "-A").check_returncode()
+    _git(built, "commit", "-q", "-m", "roster", "--no-verify").check_returncode()
+    return built
 
 
 def _frozen_partition_vector():
@@ -1143,6 +1220,40 @@ def _self_test_main_isolated():
             if any((unk / rel).exists() for rel in GENERATED_OUTPUTS_REL):
                 failures.append("F-GENMANIFEST-UNKNOWN-OPT: an unrecognized option must not write any output")
 
+        # (m) The authoring-only roster (gen_hooks.AUTHORING_ONLY_REL) is tracked but never shipped. Both
+        #     roster files tracked and each excluded by an exact literal: exit 0 although the settings file is
+        #     a gensrc target, and neither path reaches the manifest. Each broken shape exits 2: a roster path
+        #     given a release class (it would ship), a pattern exclusion over the settings, the settings
+        #     tracked without the marker, and an exact exclusion of a gensrc target off the roster (the swallow
+        #     guard still holds for every other target).
+        rost = _roster_fixture(tmp / "roster", _LOCAL_OUT_CLASS + _EXCL_SETTINGS + _EXCL_MARKER)
+        if rost is None or run_quiet(rost, check=False) != 0 or run_quiet(rost, check=True) != 0:
+            failures.append("authoring-only roster excluded by exact literals expected exit 0")
+        elif any('path = "{}"'.format(rel) in (rost / MANIFEST_REL).read_text(encoding="utf-8")
+                 for rel in (".claude/settings.json", ".aiqt/authoring.toml")):
+            failures.append("an authoring-only path must never appear in the release manifest")
+        class_row = '\n[[release-class]]\npath = "{}"\nclass = "pack-immutable"\n'
+        no_marker = {k: v for k, v in _ROSTER_FILES.items() if k != ".aiqt/authoring.toml"}
+        for i, (label, extra, files) in enumerate((
+                ("the settings given a release class", class_row.format(".claude/settings.json") + _EXCL_MARKER,
+                 None),
+                ("the marker given a release class", _EXCL_SETTINGS + class_row.format(".aiqt/authoring.toml"),
+                 None),
+                ("a pattern exclusion over the settings",
+                 '\n[[exclusion]]\npattern = ".claude/**"\nreason = "r"\n' + _EXCL_MARKER, None),
+                ("the settings tracked without the marker", _EXCL_SETTINGS, no_marker),
+                ("an exact exclusion of a gensrc target off the roster",
+                 _EXCL_SETTINGS + _EXCL_MARKER + '\n[[exclusion]]\npath = "local-out.txt"\nreason = "r"\n',
+                 None))):
+            fx = _roster_fixture(tmp / "roster-bad{}".format(i), _LOCAL_OUT_CLASS * (i != 4) + extra, files)
+            if fx is None or run_quiet(fx, check=False) != 2:
+                failures.append("authoring-only roster: {} expected exit 2".format(label))
+        gone = _roster_fixture(tmp / "roster-gone", _LOCAL_OUT_CLASS + _EXCL_SETTINGS + _EXCL_MARKER)
+        if gone is not None:
+            (gone / ".aiqt" / "authoring.toml").unlink()
+        if gone is None or run_quiet(gone, check=False) != 2:
+            failures.append("authoring-only roster: a tracked marker missing on disk expected exit 2")
+
         partition_failure = _frozen_partition_vector()
         if partition_failure is not None:
             failures.append(partition_failure)
@@ -1165,7 +1276,11 @@ def _self_test_main_isolated():
           "it silently (F-235); an output at git index mode 100755 fails closed (exit 2) while a clean "
           "100644 set passes (F-236); and a releases row with an unknown key or a missing mandatory field "
           "each fail closed (exit 2) under the minimal Step-2 row guard (F-237); and an unrecognized option "
-          "is a loud exit 2 that writes no output (F-GENMANIFEST-UNKNOWN-OPT); and a vocabulary class "
+          "is a loud exit 2 that writes no output (F-GENMANIFEST-UNKNOWN-OPT); the authoring-only roster "
+          "excluded by exact literals passes and never reaches the manifest, while a roster path given a "
+          "class, a pattern exclusion over it, the settings without the marker, an exact exclusion of a "
+          "gensrc target off the roster, and a tracked marker missing on disk each fail closed (exit 2); "
+          "and a vocabulary class "
           "recorded in neither FROZEN_CLASSES nor UNFROZEN_CLASSES, a class recorded in both, and a frozen "
           "class outside the vocabulary each fail the frozen floor closed (F-FROZEN-PARTITION)")
     return 0

@@ -31,6 +31,12 @@ EXISTENCE is checked (the registry declares paths); a source's READABILITY is th
 concern, not the registry's, so no readability probing is done here. An unreadable input still fails
 closed (exit 2) exactly like the sibling generators, never a silent clean.
 
+An entry whose target is on the authoring-only roster (tools/gen_hooks.py AUTHORING_ONLY_REL, read
+statically like the declarations) gains the optional key "scope": "authoring". gensrc_guard honours such an
+entry only in a tree whose root carries the authoring marker .aiqt/authoring.toml, so an adopter tree holding
+this registry keeps its own .claude/settings.json. The registry stays version 1: a guard that predates the
+key tolerates it as an unknown key and honours the entry in every tree, as before it.
+
   gen_gensrc.py            regenerate .aiqt/gensrc.json
   gen_gensrc.py --check    fail (exit 1) on drift; exit 2 on a bad declaration or a read/write error
   gen_gensrc.py --self-test  build synthetic trees and assert the generator's own fail-closed invariants
@@ -70,6 +76,15 @@ OWN_OUTPUTS = (
 KINDS = {"file", "tree", "block"}
 ENTRY_KEYS = {"target", "kind", "sources", "regenerate"}
 SELF = "gen_gensrc"  # this module's stem, excluded from discovery (it declares its own output above)
+# The authoring-only roster: tools/gen_hooks.py AUTHORING_ONLY_REL names the paths that exist only in the pack
+# authoring tree (the authoring marker and the repository-local .claude/settings.json gated on it). This tool,
+# not the generator, marks every registry entry on that roster "scope": "authoring", so gensrc_guard honours
+# it only where the marker sits and an adopter tree holding the shipped registry keeps its own settings. The
+# roster is read STATICALLY (read_authoring_roster), like every declaration here; a declaration carrying its
+# own "scope" key is refused (ENTRY_KEYS), so the roster is the one source of the scope.
+ROSTER_GEN = "gen_hooks.py"
+ROSTER_NAME = "AUTHORING_ONLY_REL"
+SCOPE_AUTHORING = "authoring"
 
 
 def _read_declaration(path, where):
@@ -292,10 +307,66 @@ def _validate_entry(raw, where, root, seen):
     return {"target": canon, "kind": kind, "sources": list(sources), "regenerate": regenerate}
 
 
+def read_authoring_roster(tools_dir):
+    """The authoring-only roster, tools/gen_hooks.py AUTHORING_ONLY_REL, read STATICALLY (parsed, never
+    imported or run, like every declaration here). Its value must be a tuple or list whose items are
+    non-empty str literals, or names bound once at module level to one (gen_hooks spells it from
+    AUTHORING_MARKER_REL and PROJECT_SETTINGS_REL), each a clean POSIX-relative path. Returns () when
+    tools_dir holds no gen_hooks.py: a tree without that generator has no authoring-only target (the
+    synthetic trees here and in check_gensrc_failclose). Fail-closed: a present gen_hooks.py that cannot be
+    parsed, that binds AUTHORING_ONLY_REL (or a name it uses) other than exactly once by a module-level
+    assignment, or whose items do not resolve to str literals raises ValueError, and a read fault raises
+    OSError; the caller maps both to exit 2, so a renamed or computed roster can never silently drop the
+    scope. Bounded like _read_declaration: only module-level bindings are inspected, and a dynamic
+    rebinding is out of scope."""
+    path = Path(tools_dir) / ROSTER_GEN
+    try:
+        source = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return ()
+    try:
+        tree = ast.parse(source, filename=str(path))
+    except SyntaxError as exc:
+        raise ValueError("{}: cannot parse for its {} roster ({})".format(ROSTER_GEN, ROSTER_NAME, exc))
+    bindings = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)) and isinstance(node.target, ast.Name):
+            names = [node.target.id]
+        else:
+            continue
+        for name in names:
+            bindings.setdefault(name, []).append(node)
+
+    def _bound_once(name):
+        nodes = bindings.get(name, [])
+        if len(nodes) != 1 or not isinstance(nodes[0], ast.Assign) or len(nodes[0].targets) != 1:
+            raise ValueError("{}: {} must be bound exactly once, by a plain module-level assignment "
+                             "(fail-closed)".format(ROSTER_GEN, name))
+        return nodes[0].value
+
+    value = _bound_once(ROSTER_NAME)
+    if not isinstance(value, (ast.Tuple, ast.List)) or not value.elts:
+        raise ValueError("{}: {} must be a non-empty tuple or list".format(ROSTER_GEN, ROSTER_NAME))
+    roster = []
+    for item in value.elts:
+        if isinstance(item, ast.Name):
+            item = _bound_once(item.id)
+        if not (isinstance(item, ast.Constant) and isinstance(item.value, str) and item.value):
+            raise ValueError("{}: every {} item must be a str literal, or a name bound once to one "
+                             "(fail-closed)".format(ROSTER_GEN, ROSTER_NAME))
+        roster.append(_canonical_target(item.value, "file", "{} {}".format(ROSTER_GEN, ROSTER_NAME)))
+    return tuple(roster)
+
+
 def collect_entries(declarations, root):
     """Union and validate the declarations of every discovered generator plus this tool's own output,
     then return the entries sorted by target for a deterministic render. Raises ValueError on any
-    malformed entry or duplicate target."""
+    malformed entry or duplicate target. Every kind=file entry whose target is on the authoring-only
+    roster (read_authoring_roster over root/tools) gains "scope": "authoring"; a roster path declared as a
+    tree or block, or lying under a tree entry, raises ValueError, because an unscoped entry over it would
+    make gensrc_guard deny an adopter's edits to its own copy of that path."""
     entries = []
     seen = set()
     for stem, decl in declarations:
@@ -320,6 +391,17 @@ def collect_entries(declarations, root):
                 raise ValueError("tree-descendant overlap: {!r} and {!r} name the same subtree; a tree "
                                  "and any path beneath it cannot both be declared (fail-closed)"
                                  .format(a_target, b_target))
+    roster = read_authoring_roster(root / "tools")
+    for entry in entries:
+        for rel in roster:
+            if entry["kind"] == "file" and entry["target"] == rel:
+                entry["scope"] = SCOPE_AUTHORING
+            elif entry["target"].rstrip("/") == rel or (
+                    entry["kind"] == "tree" and rel.startswith(entry["target"])):
+                raise ValueError("the authoring-only path {!r} ({} {}) is covered by the {} entry {!r}; it "
+                                 "must be a kind=file entry of its own so it can be scoped to the authoring "
+                                 "tree (fail-closed)".format(rel, ROSTER_GEN, ROSTER_NAME, entry["kind"],
+                                                             entry["target"]))
     entries.sort(key=lambda e: e["target"])
     return entries
 
@@ -384,7 +466,10 @@ def main():
 #       fails closed (exit 2), while a sibling on a component boundary ('X/' vs 'XYZ') does NOT collide,
 #   (m) zero generators (a tools/ dir with no gen_*.py besides this tool) fails closed (exit 2),
 #   (n) an invalid-UTF-8 existing .aiqt/gensrc.json target fails closed (exit 2) on --check, via the
-#       shared _gen_common.reconcile guard rather than a raw traceback.
+#       shared _gen_common.reconcile guard rather than a raw traceback,
+#   (o) the tools/gen_hooks.py AUTHORING_ONLY_REL roster marks exactly its entry "scope": "authoring",
+#   (p) a roster path under a tree or declared as a block, an unbound, computed or doubly bound roster, and a
+#       declaration carrying its own scope each fail closed (exit 2).
 # A raised SystemExit anywhere in a run() call is caught by run_quiet and returned as a non-int sentinel
 # string, so the self-test can never itself exit early (green or otherwise) on a raise: an UNEXPECTED
 # raise mismatches its case's expected exit code and registers as a FAILURE, while case (n) asserts the
@@ -538,6 +623,39 @@ GENSRC_OUTPUTS = (
      "sources": ("src.txt",), "regenerate": "x"},
 )
 '''
+
+
+# The authoring-only roster fixtures (cases o, p): a tools/gen_hooks.py that spells AUTHORING_ONLY_REL
+# through module-level names, as the real generator does. Case (o) spells the expected scope literally, never
+# from SCOPE_AUTHORING, so a renamed value fails there.
+_ROSTER_NAMES = ('AUTHORING_MARKER_REL = ".aiqt/authoring.toml"\n'
+                 'PROJECT_SETTINGS_REL = ".claude/settings.json"\n')
+_ROSTER = "AUTHORING_ONLY_REL = (AUTHORING_MARKER_REL, PROJECT_SETTINGS_REL)\n"
+
+
+def _hooks_decl(*entries):
+    """A GENSRC_OUTPUTS literal over (target, kind, extra) triples; extra is literal dict-item text."""
+    body = "".join('    {{"target": "{}", "kind": "{}", "sources": ("src.txt",), '
+                   '"regenerate": "python3 tools/gen_hooks.py"{}}},\n'.format(t, k, x) for t, k, x in entries)
+    return "GENSRC_OUTPUTS = (\n" + body + ")\n"
+
+
+_FAKE_HOOKS_ROSTER = _ROSTER_NAMES + _ROSTER + _hooks_decl((".claude/settings.json", "file", ""),
+                                                          ("OUT.md", "file", ""))
+_NO_ROSTER_DECL = _hooks_decl(("OUT.md", "file", ""))
+# Each must fail closed (exit 2): an unscoped entry over a roster path would make gensrc_guard deny an
+# adopter's edits to its own copy, and a roster that cannot be read statically must never read as empty.
+_ROSTER_FAULTS = {
+    "a tree entry over a roster path": _ROSTER_NAMES + _ROSTER + _hooks_decl((".claude/", "tree", "")),
+    "a block entry on a roster path": _ROSTER_NAMES + _ROSTER + _hooks_decl(
+        (".claude/settings.json", "block", "")),
+    "a gen_hooks.py with no roster": _NO_ROSTER_DECL,
+    "a computed roster item": (_ROSTER_NAMES + 'AUTHORING_ONLY_REL = (".aiqt/" + "authoring.toml",)\n'
+                               + _NO_ROSTER_DECL),
+    "a roster name bound twice": _ROSTER_NAMES + 'PROJECT_SETTINGS_REL = "x"\n' + _ROSTER + _NO_ROSTER_DECL,
+    "a declaration carrying its own scope": _ROSTER_NAMES + _ROSTER + _hooks_decl(
+        (".claude/settings.json", "file", ', "scope": "authoring"')),
+}
 
 
 def _build_from(base, filename, text):
@@ -710,6 +828,32 @@ def self_test_main():
         (unicode_tree / REGISTRY_REL).write_bytes(b"\xff\xfe not valid utf-8 \x80\x81")
         if run_quiet(unicode_tree, check=True) != "raised SystemExit(2)":
             failures.append("invalid-UTF-8 registry target expected exit 2 (fail-closed)")
+
+        # (o) The authoring-only roster: a tools/gen_hooks.py naming AUTHORING_ONLY_REL through module-level
+        #     names marks exactly its roster entry "scope": "authoring"; the sibling entry and the registry's
+        #     own entry carry no scope key at all.
+        roster = tmp / "roster"
+        _build_from(roster, "gen_hooks.py", _FAKE_HOOKS_ROSTER)
+        if run_quiet(roster, check=False) != 0 or run_quiet(roster, check=True) != 0:
+            failures.append("authoring-only roster: expected a clean generate and a drift-clean check")
+        try:
+            scopes = {e["target"]: e.get("scope", "no scope key") for e in
+                      json.loads((roster / REGISTRY_REL).read_text(encoding="utf-8"))["generated"]}
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            scopes = "unreadable ({})".format(exc)
+        want = {".claude/settings.json": "authoring", "OUT.md": "no scope key",
+                ".aiqt/gensrc.json": "no scope key"}
+        if scopes != want:
+            failures.append("authoring-only roster: expected scopes {!r}, got {!r}".format(want, scopes))
+
+        # (p) Every roster fault fails closed (exit 2): a roster path under a tree entry or declared as a block
+        #     (unscopable), a gen_hooks.py binding no roster, a computed roster item, a roster name bound twice,
+        #     and a declaration that carries its own scope (the roster is the one source of the scope).
+        for idx, (label, text) in enumerate(_ROSTER_FAULTS.items()):
+            rdir = tmp / "rosterfault{}".format(idx)
+            _build_from(rdir, "gen_hooks.py", text)
+            if run_quiet(rdir, check=True) != 2:
+                failures.append("authoring-only roster: {} expected exit 2 (fail-closed)".format(label))
     finally:
         if unread_tools is not None:
             os.chmod(unread_tools, 0o755)  # restore even on an unexpected early exit
@@ -733,7 +877,9 @@ def self_test_main():
           "aliased dotted import binding only y generates cleanly), a non-str kind, a non-str key, each "
           "trailing-'/'-by-kind mismatch, "
           "a tree-descendant overlap (both orders and a nested tree), and an invalid-UTF-8 registry target "
-          "all fail closed (exit 2)" + note)
+          "all fail closed (exit 2); the gen_hooks AUTHORING_ONLY_REL roster scopes exactly its entry "
+          "\"authoring\", and every roster fault (a roster path under a tree or as a block, an unbound, "
+          "computed or doubly bound roster, a self-declared scope) fails closed (exit 2)" + note)
     return 0
 
 

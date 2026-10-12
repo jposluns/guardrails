@@ -130,6 +130,15 @@
     },
     {
       "kind": "file",
+      "regenerate": "python3 tools/gen_hooks.py",
+      "scope": "authoring",
+      "sources": [
+        ".aiqt/core/hooks/manifest.toml"
+      ],
+      "target": ".claude/settings.json"
+    },
+    {
+      "kind": "file",
       "regenerate": "python3 tools/gen_worker_pack.py",
       "sources": [
         ".aiqt/core/profiles/worker-pack.md"
