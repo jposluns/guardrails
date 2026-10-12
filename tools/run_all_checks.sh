@@ -112,6 +112,7 @@ run_gate "opf-adopt-apply-selftest" python3 -I -B opf/tools/_opf_adopt_apply.py 
 run_gate "opf-adopt-hook-selftest" python3 -I -B opf/tools/_opf_adopt_hook.py --self-test
 run_gate "opf-pack-manifest-selftest" python3 -I -B opf/tools/_opf_pack_manifest.py --self-test
 run_gate "opf-adopt-observe-selftest" python3 -I -B opf/tools/_opf_adopt_observe.py --self-test
+run_gate "opf-adopt-discover-selftest" python3 -I -B opf/tools/_opf_adopt_discover.py --self-test
 run_gate "opf-prompt-pack-selftest" python3 -I -B opf/tools/check_opf_prompt_pack.py --self-test
 run_gate "opf-prompt-pack" python3 -I -B opf/tools/check_opf_prompt_pack.py
 run_gate "opf-enforce-platforms-selftest" python3 -I -B tools/check_opf_enforce_platforms.py --self-test
@@ -231,6 +232,8 @@ run_gate "placement"      python3 -I -B tools/check_rule_placement.py
 run_gate "applies-selftest" python3 -I -B tools/check_applies.py --self-test
 run_gate "applies"         python3 -I -B tools/check_applies.py
 run_gate "mappings"       python3 -I -B tools/check_mappings.py
+run_gate "cited-standards-selftest" python3 -I -B tools/check_cited_standards.py --self-test
+run_gate "cited-standards"          python3 -I -B tools/check_cited_standards.py
 run_gate "conformance-selftest" python3 -I -B tools/conformance.py --self-test
 run_gate "conformance"    python3 -I -B tools/conformance.py --root .
 run_gate "commonmark-headings-selftest" python3 -I -B opf/tools/selftest_commonmark_headings.py
