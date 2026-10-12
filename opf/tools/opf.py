@@ -5549,6 +5549,23 @@ def _watchdog_bound_faults(bounds, budgets):
 # reason. Every completion leg the regression runner launches or budgets must
 # have exactly one of a checked derivation block (in the runner's comment) or
 # an entry here; the derived set is read from those blocks, never listed.
+# The 2026-10-12 audit derived every leg listed below from its permitted
+# paths, each polling loop priced at its bound as in the runner's derivation
+# comment, and found each declared budget at or above its derivation
+# (derived/declared s: audit-ignore 16/16, reaper 40/42, nonce, fixture-id and
+# status 32/32 each, early-exit 48/48, cleanup-cancel 16/16, premature-exit
+# 80/80, guardian-error 48/48, empty-children 48/48, bounded-diagnostics
+# 66/66, cleanup-budget 16/21, deadline-flips 34/77, subject-setup 22/22,
+# launch-cancel 33/33, nested-keep 108/108, fd-census 48/48, subject-gc
+# 32/32, guardian-preload 20/20, pdeathsig 32/32, escalate-reaped 397/784,
+# poll-collected 1206/1266, census-verify 602/630; overdue-success keeps its
+# own term-by-term pricing). None is registered as a derivation: the rule
+# sets a derived leg's budget to exactly its derivation plus the 1 s margin,
+# which would lower the budgets above that (their kill bounds also cover
+# waits the ledger does not charge, such as select.poll) or raise the others
+# with no path that fails them. No scan repeats this audit: a wait a later
+# edit adds to one of these legs is caught only by the runtime ledger, on a
+# run that makes it.
 _WATCHDOG_FLAT_BUDGET = (
     "a flat declared budget not derived from the leg's permitted paths: the runtime ledger "
     "charges the registered waits each run actually makes, so a run whose realized charges "
@@ -5564,10 +5581,8 @@ _WATCHDOG_UNDERIVED_LEGS = dict(
         "audit-ignore", "reaper", "nonce", "fixture-id", "status", "early-exit",
         "cleanup-cancel", "premature-exit", "guardian-error", "empty-children",
         "bounded-diagnostics", "cleanup-budget", "deadline-flips", "subject-setup",
-        "launch-ownership", "launch-cancel", "fd-hygiene-total", "nested-keep", "fd-census",
-        "subject-gc", "guardian-preload", "subject-receipt", "subject-ack", "pdeathsig",
-        "escalate-reaped", "poll-collected", "escalate-degraded", "poll-masked",
-        "unpinned-kill", "census-verify")]
+        "launch-cancel", "nested-keep", "fd-census", "subject-gc", "guardian-preload",
+        "pdeathsig", "escalate-reaped", "poll-collected", "census-verify")]
     + [("overdue-success",
         "priced term by term under per-thread accounting in the runner's budget comment "
         "(4 x deadline 30 + join 30 + fixture allowance 11 = 161.0) with its stated 0.01 s "
@@ -19606,6 +19621,7 @@ def _watchdog_regression_self_test():
     import contextlib
     import inspect
     import io
+    import math
     import queue
     import select
     import signal
@@ -19788,17 +19804,21 @@ def _watchdog_regression_self_test():
         ("premature-exit", 80), ("nested-timeout", 71 + 1), ("nested-cancel", 71 + 1),
         ("no-signal-echild", 45 + 1), ("guardian-error", 48), ("empty-children", 48),
         ("bounded-diagnostics", 66), ("cleanup-budget", 21), ("deadline-flips", 77),
-        ("subject-setup", 22), ("overdue-success", 161.0 + 0.01), ("launch-ownership", 60),
-        ("launch-cancel", 33), ("fd-hygiene-total", 92), ("nested-keep", 108),
+        ("subject-setup", 22), ("overdue-success", 161.0 + 0.01), ("launch-ownership", 65 + 1),
+        ("launch-cancel", 33), ("fd-hygiene-total", 107 + 1), ("nested-keep", 108),
         ("fd-census", 48), ("subject-gc", 32), ("guardian-preload", 20),
-        ("subject-receipt", 784), ("subject-ack", 814), ("subject-orphan", 2105 + 1),
+        ("subject-receipt", 792 + 1), ("subject-ack", 824 + 1), ("subject-orphan", 2105 + 1),
         ("pdeathsig", 32), ("escalation-subject", 924 + 1), ("escalate-reaped", 784),
-        ("poll-collected", 1266), ("close-cancel", 1227 + 1), ("escalate-degraded", 784),
-        ("poll-masked", 2954), ("unpinned-kill", 600), ("census-verify", 630),
+        ("poll-collected", 1266), ("close-cancel", 1227 + 1), ("escalate-degraded", 790 + 1),
+        ("poll-masked", 2964 + 1), ("unpinned-kill", 680 + 1), ("census-verify", 630),
         ("census-exception", 1235 + 1), ("receipt-high-fd", 15 + 1)))
     # The ten completion legs train 2 added or re-priced (merged 2026-10-11),
-    # and receipt-high-fd re-priced after them, are priced from their
-    # PERMITTED PATHS, never from a measured run: each
+    # receipt-high-fd re-priced after them, and the seven legs the
+    # 2026-10-12 audit of every other completion leg found priced below a
+    # permitted path (launch-ownership, fd-hygiene-total, subject-receipt,
+    # subject-ack, escalate-degraded, poll-masked and unpinned-kill, each
+    # raised to its derivation; _WATCHDOG_UNDERIVED_LEGS records the rest)
+    # are priced from their PERMITTED PATHS, never from a measured run: each
     # base is the UPPER bound of every wait the leg's own thread or a thread
     # it starts can charge on a path where the leg still passes. A timed
     # wait is charged at its declared timeout (a fixture hold at what
@@ -19815,7 +19835,11 @@ def _watchdog_regression_self_test():
     # 5 g, g the cleanup grace in force: the reap loop's 2 g, its one
     # escalation's two /proc census loops (_fixture_group_pinned and
     # _fixture_verify_group_kill, g each) and the g it reaps for after
-    # that escalation. Every _bounded_wait is priced at its bound even
+    # that escalation; at 3 g where no subject pidfd is held (a guardian
+    # never armed, or a receipt without one), since the escalation reaches
+    # the census only through that pidfd; and at nothing where poll()
+    # already collected the guardian, close() then running no reap loop.
+    # Every _bounded_wait is priced at its bound even
     # where its child is already proven exited. A wait made in a forked
     # child is never counted (the charge is pid-gated: a child charges no
     # ledger); a wait a HELPER makes in the leg process (a census loop, a
@@ -19917,6 +19941,63 @@ def _watchdog_regression_self_test():
     #     child (no ledger), the zero-timeout select.select flip charges 0,
     #     and _recv_subject's select.poll wait is not a registered primitive.
     #     [derived: 15 = 15 s]
+    #   launch-ownership: start() 30 (its deadline 30 s out); the
+    #     interrupted start()'s close(): its launch wait 10 and the
+    #     collection of a guardian never armed at 3 g, g = 5 (15); and the
+    #     flip child's close() launch wait 10 (no fork recorded, so no reap
+    #     loop) = 65. The leaked inline fork is reaped by _kill_proved_child
+    #     through select.poll on its pidfd, not a registered primitive.
+    #     [derived: 30 + 10 + 15 + 10 = 65 s]
+    #   fd-hygiene-total: the started fixture's start() 30; two
+    #     run_bounded(timeout_s=10) allowances 32; its close() launch wait 10
+    #     and one collection at 5 g, g = 5 (25); and the unstarted
+    #     fixture's close() launch wait 10 (never forked, no reap loop) =
+    #     107. [derived: 30 + 32 + 10 + 25 + 10 = 107 s]
+    #   subject-receipt: two wedged launches, each a fixture hold 300, a 30 s
+    #     stop-point deadline and a 30 s await_state (720); two close()
+    #     launch waits at g = 1 (4); leg 1's collection (receipt held) at
+    #     5 g (5) and the flip's (no receipt sent) at 3 g (3); and two 30 s
+    #     await_state for the subject (60) = 792.
+    #     [derived: 720 + 4 + 5 + 3 + 60 = 792 s]
+    #   subject-ack: two wedged launches as in subject-receipt (720); leg
+    #     1's 30 s await_state, and the flip's 30 s marker deadline and
+    #     30 s await_state (90); two close() launch waits at g = 1 (4); and
+    #     two collections (receipt held) at 5 g (10) = 824.
+    #     [derived: 720 + 90 + 4 + 10 = 824 s]
+    #   escalate-degraded: two exercises, each a fixture hold 300, a 30 s
+    #     stop-point deadline and two 30 s await_state (780 in all), a
+    #     close() launch wait at g = 1 (4 in all) and one collection at 3 g
+    #     (6 in all) = 790. _fixture_pidfd is patched to None for the
+    #     launch, so neither the guardian nor the pid-only receipt carries a
+    #     pidfd: the escalation freezes nothing and reaches no census.
+    #     [derived: 780 + 4 + 6 = 790 s]
+    #   poll-masked: seven launches, each a fixture hold 300 and a 30 s
+    #     tree deadline (2310); each leg's 30 s collection deadline (210:
+    #     leg 1's poll loop, poll_cancelled in leg 2 and its flip, the
+    #     guardian-zombie await_state in leg 2b and its flip, and
+    #     poll_failure in leg 3 and its flip); leg 1's 10 s spin deadline
+    #     10; fourteen 30 s await_state for subjects and descendants (420);
+    #     and seven close() launch waits at g = 1 (14) = 2964. No close()
+    #     runs its reap loop: poll() collected the guardian first in every
+    #     leg but 2b, and in 2b poll() reaped it before the injected
+    #     exception, so close()'s first waitpid raises ChildProcessError
+    #     before any sleep; poll()'s receipt kill runs with the guardian
+    #     dead (subject-only, no census).
+    #     [derived: 2310 + 210 + 10 + 420 + 14 = 2964 s]
+    #   unpinned-kill: eighteen 30 s deadlines 540 (legs 1, 3, 4, 5, 6, 7
+    #     and 8 open 2, 3, 1, 4, 1, 5 and 2), nine _bounded_wait at the
+    #     default 15 s bound 135 (one in each of legs 1 to 7, two in leg 8),
+    #     and leg 7's _fixture_verify_group_kill raw loop at its whole bound
+    #     g = 5, the leg requiring its "tree" outcome = 680. Not counted:
+    #     _fixture_group_pinned's loop leaves on its first read in legs 5
+    #     and 7 (the await_state before the call confirmed the guardian
+    #     stopped, and nothing continues it before the call) and in leg 8
+    #     (its zombie reads Z, or the injected read fault raises first);
+    #     leg 5's partial outcome runs no verification; the escalations
+    #     without a guardian run no census; the flip's zero-timeout
+    #     select.select charges 0; and _reap_pidfd and _pidfd_handoff_recv
+    #     wait in select.poll, not a registered primitive.
+    #     [derived: 540 + 135 + 5 = 680 s]
     budgets.update((("completion-drain-adopted", 71.5 + 1),
                     ("completion-reaped-subject-retry", 118 + 1)))
     # The safety leg lost-cleanup runs the completion mode no-signal-echild
@@ -20361,6 +20442,94 @@ def _watchdog_regression_self_test():
             time.sleep(0.05)
         return EXIT_OK
 
+    # The seven completion legs the 2026-10-12 audit raised to their
+    # derivations, each with its pre-audit budget and its derivation path in
+    # order, as steps: "wait" a start() hold or a close() launch wait (a
+    # preset Event.wait, charged at its timeout), "fixture" a run_bounded
+    # call at that timeout (charged at its allowance), "await" a polling
+    # deadline its loop then runs out (so it covers nothing after it),
+    # "reap" a _bounded_wait at its bound (the real helper, its child never
+    # exiting) and "loop" a raw polling loop to its bound (sub-tick sleeps
+    # that no unexpired deadline covers). on_fake_clock replays a path on a
+    # FAKE clock: time.monotonic and time.sleep are replaced before the
+    # install, so the sleep wrapper is built over the fake sleep and each
+    # step charges as on a real run, with no wall-clock wait. Each path must
+    # cost exactly its leg's declared budget less the derivation margin, and
+    # must fail the leg under the pre-audit budget and pass it under the
+    # declared one: every pre-audit budget covered its leg's timed waits and
+    # deadlines and fell short only by the polling loops (and poll-masked
+    # by its spin deadline).
+    wedged_launch = (("wait", 300), ("await", 30), ("await", 30))
+    killed_launch = (("wait", 300), ("await", 30))
+    collected_leg = (("await", 30), ("wait", 2), ("await", 30), ("await", 30))
+    raised_paths = (
+        ("launch-ownership", 60, (("wait", 30), ("wait", 10), ("loop", 15), ("wait", 10))),
+        ("fd-hygiene-total", 92, (("wait", 30), ("fixture", 10), ("fixture", 10),
+                                  ("wait", 10), ("loop", 25), ("wait", 10))),
+        ("subject-receipt", 784, wedged_launch + (("wait", 2), ("loop", 5), ("await", 30))
+         + wedged_launch + (("wait", 2), ("loop", 3), ("await", 30))),
+        ("subject-ack", 814, wedged_launch + (("await", 30), ("wait", 2), ("loop", 5))
+         + wedged_launch + (("await", 30), ("wait", 2), ("loop", 5), ("await", 30))),
+        ("escalate-degraded", 784,
+         2 * (wedged_launch + (("wait", 2), ("loop", 3), ("await", 30)))),
+        ("poll-masked", 2954, killed_launch + (("await", 30), ("await", 10), ("await", 30),
+                                               ("wait", 2), ("await", 30))
+         + 6 * (killed_launch + collected_leg)),
+        # unpinned-kill legs 1 and 2, 3 and 4, 5 and 6, 7, then 8.
+        ("unpinned-kill", 600, (("await", 30), ("reap", 15), ("await", 30), ("reap", 15))
+         + 2 * (("await", 30),) + (("reap", 15), ("await", 30), ("await", 30), ("reap", 15))
+         + 3 * (("await", 30),) + (("reap", 15), ("await", 30), ("reap", 15), ("await", 30))
+         + 3 * (("await", 30),) + (("loop", 5),) + 2 * (("await", 30),) + (("reap", 15),)
+         + 2 * (("await", 30),) + 2 * (("reap", 15),)))
+    for raised_leg, _old, steps in raised_paths:
+        cost = math.fsum(_deadline_case_budget(seconds) if kind == "fixture" else seconds
+                         for kind, seconds in steps)
+        if not math.isclose(cost + _WATCHDOG_DERIVATION_MARGIN,
+                            budgets.get("completion-" + raised_leg, 0), abs_tol=1e-9):
+            flip_missed.append("fake-clock path of completion-%s costs %s s, not its "
+                               "declared budget less the derivation margin" % (raised_leg, cost))
+
+    def on_fake_clock(budget, steps):
+        global _WATCHDOG_REAL_SLEEP
+        from unittest import mock
+        clock = [1000.0]
+        preset = threading.Event()
+        preset.set()
+
+        def fake_sleep(seconds):
+            clock[0] += seconds
+
+        def never_exits(pid, options):
+            return 0, 0
+
+        def leg():
+            for kind, seconds in steps:
+                if kind == "wait":
+                    preset.wait(seconds)
+                elif kind == "fixture":
+                    _opf_emit.run_bounded(lambda: "x", timeout_s=seconds)
+                elif kind == "await":
+                    clock[0] = _watchdog_deadline(seconds)  # its loop ran it out
+                elif kind == "reap":
+                    with mock.patch.object(os, "waitpid", never_exits):
+                        try:
+                            _bounded_wait(0, seconds)
+                        except AssertionError:
+                            pass
+                else:
+                    bound = time.monotonic() + seconds
+                    while bound - time.monotonic() > 0:
+                        time.sleep(min(bound - time.monotonic(), 0.05))
+            return EXIT_OK
+
+        saved = time.monotonic, time.sleep, _opf_emit.run_bounded, _WATCHDOG_REAL_SLEEP
+        time.monotonic, time.sleep = (lambda: clock[0]), fake_sleep
+        _opf_emit.run_bounded = bounded_stub
+        try:
+            return _watchdog_leg_entry(budget, leg)
+        finally:
+            time.monotonic, time.sleep, _opf_emit.run_bounded, _WATCHDOG_REAL_SLEEP = saved
+
     tick = _WATCHDOG_POLL_TICK
     installed = (list(_WATCHDOG_LEDGERS), list(_WATCHDOG_ORIGINALS))
     pristine = (time.sleep, threading.Thread.join, threading.Event.wait,
@@ -20460,6 +20629,12 @@ def _watchdog_regression_self_test():
                  stubbed("run_bounded", bounded_stub, 50, masquerade_leg),
                  EXIT_FINDING),
             ])
+            for raised_leg, old, steps in raised_paths:
+                label = "completion-" + raised_leg
+                ledger_vectors.extend([
+                    (label + " pre-audit budget", on_fake_clock(old, steps), EXIT_FINDING),
+                    (label + " declared budget", on_fake_clock(budgets.get(label), steps),
+                     EXIT_OK)])
     def vector_red(got, want):
         # The verdict comparison: only an EXACT int (never a bool, whose True
         # compares equal to EXIT_FINDING) equal to the expected verdict passes.
