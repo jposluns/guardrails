@@ -102,9 +102,10 @@ WORKING_DIRNAME = ".working"           # fixed store-tree name at the STORE root
 # lives there. Keep this exclusion for those stores and for AIQT-owned material afterwards.
 # _opf_adopt derives its store-root exclusions from this tuple.
 STORE_ROOT_CONTROL_DIRS = (".git", ".aiqt")
-# Homes-2 topology is inert until migration and writer activation (spec 4.2 / 9.2).
-# SUPPORTED_HOMES is the highest homes generation this tooling activates; homes 2 activates with the
-# migration, so until then every store, whatever it declares, keeps its legacy grading (generation 1).
+# Homes-2 topology is inert until writer activation (spec 4.2). Homes 2 has no homes migration: a
+# store is at homes 2 only when created there, and no homes-1 store is migrated (spec 4.2 / 9.2).
+# SUPPORTED_HOMES is the highest homes generation this tooling activates; until homes 2 activates,
+# every store, whatever it declares, keeps its legacy grading (generation 1).
 SUPPORTED_HOMES = 1
 # Worklog 2 remains test-only until schema, doctor, and release support land.
 SUPPORTED_WORKLOG = 1

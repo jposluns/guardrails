@@ -146,6 +146,27 @@ ENFORCEMENT_REQUIRED_RESIDUALS = {
 }
 # The ops that can install an enforcement member: a pack or governance creation, or a hook registration.
 ENFORCEMENT_INSTALL_OPS = ("install-pack", "plant-governance", "enable-hook")
+# The tool-install layout: an adopted project receives the OPF pack by install-pack, mirrored byte-identically
+# at this product-relative root, so every mirrored pack member keeps its pack path beneath it.
+PACK_MIRROR_ROOT = "opf"
+# The enforcement members that launch another file, each read from its own launch line in the pack under
+# opf/enforcement/ (the self-test pins every line to the shipped member). A row is (platform, pack member,
+# destination, launch line, frame, target): the frame says whether the line names its target relative to the
+# member's own directory ("member", a `$here/` launch) or to the product root the platform runs it from
+# ("root": the workflow step runs in the checkout). A mirrored member's destination is its pack path under
+# PACK_MIRROR_ROOT; the workflow template's is the path its own copy instruction names. In a plan, a member of
+# the row's platform whose file name is the destination's is that launcher wherever it is placed, and
+# launch_target resolves what it launches from there.
+ENFORCEMENT_LAUNCHERS = (
+    ("ci", "enforcement/ci/github-actions.yml", ".github/workflows/opf.yml",
+     "        run: sh opf/enforcement/ci/opf-ci.sh .", "root", "opf/enforcement/ci/opf-ci.sh"),
+    ("ci", "enforcement/ci/opf-ci.sh", "opf/enforcement/ci/opf-ci.sh",
+     "opf_tool=${OPF_TOOL:-$here/../../tools/opf.py}", "member", "../../tools/opf.py"),
+    ("pre-commit", "enforcement/precommit/pre-commit", "opf/enforcement/precommit/pre-commit",
+     "opf_tool=${OPF_TOOL:-$here/../../tools/opf.py}", "member", "../../tools/opf.py"),
+    ("pre-commit", "enforcement/precommit/install.sh", "opf/enforcement/precommit/install.sh",
+     '[ -f "$here/pre-commit" ] && [ -r "$here/pre-commit" ] || \\', "member", "pre-commit"),
+)
 # The store control area an adoption plan never selects or writes, in every homes generation: the reserved
 # children archive/, imported/, staging/ and journals/ (spec 14.2, which carries no homes qualifier) and the
 # legacy imports tree homes 1 already reserves. The plan's own preservation copies under this run's adoption
@@ -221,7 +242,34 @@ _REVISION_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?\Z")
 # digests and never fetches the anchor; prompt-pack digests name bytes this module never reads; enforcement
 # members are caller-declared path/digest pairs, each tied to an install-pack, plant-governance or
 # enable-hook row of the same plan that installs exactly those bytes, but never resolved against a real
-# enforcement pack, whose payload and build-time denial verification this module never reads; the residual
+# enforcement pack, whose payload and build-time denial verification this module never reads; a launcher
+# member (ENFORCEMENT_LAUNCHERS) is recognized by its file name, compared case-insensitively (_launcher_of),
+# in any enforcement row, and what it launches, whichever of those three ops places it, is resolved from its
+# planned path against the paths the plan's install-pack and plant-governance rows create, which proves the
+# launch path lands on a planned opf/ mirror member, not that the planted bytes are the launcher or that the
+# mirror holds every module the launched tool imports (the install-pack step's release inventory names the
+# whole opf/tools/** tree); a launcher-bearing row names its launchers, every file they launch and nothing
+# else, each launcher under its exact installed file name (_validate_enforcement: a case variant is resolved
+# as that launcher but does not meet this floor). Every file any op row writes under a launcher's file name
+# (_launcher_writes: each creation, replacement and repointing that row adds to `effects`), a move-file
+# destination beneath the store's Move archive excepted, is a member of some row, so a named decoy cannot
+# leave the file that runs uninspected;
+# a launcher filed in that archive, and a source's preservation copy (no op row's write), go uninspected.
+# A moved file is never a row member (a member is installed by one of the three ops, which would write its
+# path twice), so the planner refuses a declared move destination under a launcher's file name outside that
+# archive before it freezes the plan (_in_move_archive). Like every launch check, that clause runs only when
+# every op row is VALID, and it also waits for well-formed member lists whose every path one of the three
+# ops places (each defect is an INVALID finding of its own); a plan with any other defect as well can report
+# that clause's CANNOT-EVALUATE ahead of its INVALID findings. A launcher in a row of a platform with no
+# launcher of its own must resolve as above, but the file it launches need not be named in any row: only a
+# launcher-bearing row must name its launch targets. No member's bytes are read, so this file-name rule
+# cannot see a renamed launcher outside a launcher-bearing row (in another platform's row, or written in no
+# row), nor a renamed launcher placed at a path one of the row's launchers runs (hook bytes planted as
+# opf/tools/opf.py, say), which that row admits as the launched file; and casefold is not every
+# filesystem's case table (_protected), so a case variant another filesystem folds differently is
+# unseen. Two effect paths, or an effect path and a live source, that fold to one launcher path are an
+# INVALID collision, found only after the launch checks pass, so a written variant no row names is
+# CANNOT-EVALUATE first; the residual
 # tokens are closed and each means' required disclosure is enforced, which proves a disclosure is recorded,
 # not that it is complete for a live platform; a source's `occupying` flag is the planner's classification
 # against the planned managed destinations, which a lone plan cannot re-derive. `effects` enumerates every
@@ -509,30 +557,66 @@ def canonical_op(name):
     return row
 
 
+def launch_target(frame, target, destination):
+    """The product-relative path an ENFORCEMENT_LAUNCHERS member launches when it sits at `destination`:
+    `target` itself for the "root" frame, else `target` composed under the destination's own directory and
+    normalized. None when the composition climbs above the product root."""
+    if frame == "root":
+        return target
+    parts = destination.split("/")[:-1]
+    for part in target.split("/"):
+        if part == "..":
+            if not parts:
+                return None
+            parts.pop()
+        elif part not in ("", "."):
+            parts.append(part)
+    return "/".join(parts) or None
+
+
+def enforcement_launch_members(platform):
+    """The member paths a launcher-bearing platform row binds, derived from ENFORCEMENT_LAUNCHERS alone:
+    each launcher of `platform` at its destination, then each path one of them launches from there that is
+    not already listed (the tool entry point under the opf/ mirror among them), in table order. Empty for a
+    platform with no launcher."""
+    launchers = [row for row in ENFORCEMENT_LAUNCHERS if row[0] == platform]
+    paths = [destination for _platform, _member, destination, _line, _frame, _target in launchers]
+    for _platform, _member, destination, _line, frame, target in launchers:
+        launched = launch_target(frame, target, destination)
+        if launched not in paths:
+            paths.append(launched)
+    return paths
+
+
 def canonical_plan_bindings():
     """The caller-supplied plan-v2 binding inputs (spec 14.1, PLAN_BINDING_INPUTS) in minimal VALID form:
     the observed revision, the tool release with its independent anchor, the prompt pack, one enforcement
     row per platform with its residuals, and the skip policy. The planner derives every other v2 field.
-    Each call returns fresh tables."""
-    def row(platform, means, path, residuals):
+    The CI and pre-commit rows bind the members enforcement_launch_members derives, so each launcher sits
+    where its own launch line resolves under the opf/ mirror, and the file each launches is a member to
+    install (the tool entry point opf/tools/opf.py stands in for the opf/tools/** tree a later install-pack
+    step plants). Each call returns fresh tables."""
+    def row(platform, means, paths, residuals):
         return {"platform": platform, "means": means,
-                "members": [{"path": path, "digest": "sha256:" + "9" * 64}], "residuals": list(residuals)}
+                "members": [{"path": path, "digest": "sha256:" + "9" * 64} for path in paths],
+                "residuals": list(residuals)}
     return {
         "revision": "0123456789abcdef0123456789abcdef01234567",
         "release": {"version": "1.3.0", "manifest_sha256": "sha256:" + "3" * 64,
                     "anchor": "release-tag", "anchor_sha256": "sha256:" + "3" * 64},
         "prompt_pack": {"version": "0.1.0", "digest": "sha256:" + "8" * 64},
         "enforcement": [
-            row("ci", "ci-checks", ".github/workflows/opf.yml", ["server-side-protection-adopter-attested"]),
-            row("pre-commit", "staged-pre-commit", ".opf/hooks/pre-commit",
+            row("ci", "ci-checks", enforcement_launch_members("ci"),
+                ["server-side-protection-adopter-attested"]),
+            row("pre-commit", "staged-pre-commit", enforcement_launch_members("pre-commit"),
                 ["per-clone-installation-and-bypass", "canonical-hand-edits", "same-user-tampering"]),
-            row("claude-code", "deny-hook", ".claude/settings.json",
+            row("claude-code", "deny-hook", [".claude/settings.json"],
                 ["shell-or-interpreter-wrapping", "same-user-tampering"]),
-            row("codex", "instructions", "AGENTS.md",
+            row("codex", "instructions", ["AGENTS.md"],
                 ["unverified-platform-denial", "shell-or-interpreter-wrapping"]),
-            row("gemini-cli", "instructions", "GEMINI.md",
+            row("gemini-cli", "instructions", ["GEMINI.md"],
                 ["unverified-platform-denial", "shell-or-interpreter-wrapping"]),
-            row("cursor", "instructions", ".cursor/rules/opf.mdc",
+            row("cursor", "instructions", [".cursor/rules/opf.mdc"],
                 ["unverified-platform-denial", "shell-or-interpreter-wrapping"]),
         ],
         "skip_policy": "no-skip",
@@ -974,6 +1058,9 @@ def validate_plan(plan, homes=1):
                 findings.extend("plan op[{}]: {}".format(i, f) for f in res.findings)
                 ops_clean = False
         if ops_clean:
+            res = _enforcement_launch_refusal(plan)
+            if res is not None:
+                return res
             _cross_check_plan(plan, missing, sources_clean, findings)
     return _ok() if not findings else _invalid(findings)
 
@@ -1251,6 +1338,16 @@ def _validate_enforcement(rows, findings):
             if lacking:
                 findings.append("{} means {!r} omits its required residual disclosure {}".format(
                     label, means, ", ".join(lacking)))
+        # a launcher-bearing platform's floor runs through each of its launchers, so its row names every one
+        # by the exact file name the pack installs it under: a case variant (INSTALL.SH) is resolved as that
+        # launcher by _launcher_of but does not meet this floor, since the pack ships and documents only the
+        # canonical spelling. _enforcement_launch_refusal resolves what each launches.
+        if "members" in row and _valid_field("members", row["members"]):
+            names = [member["path"].rsplit("/", 1)[-1] for member in row["members"]]
+            for launcher_platform, member, destination, _line, _frame, _target in ENFORCEMENT_LAUNCHERS:
+                if launcher_platform == platform and destination.rsplit("/", 1)[-1] not in names:
+                    findings.append("{} names no member installed as {!r}, the launcher {} its floor "
+                                    "runs".format(label, destination.rsplit("/", 1)[-1], member))
     if platforms != list(ENFORCEMENT_PLATFORMS):
         findings.append("plan enforcement does not cover each supported platform exactly once, in order")
     lacking = [r for r in PACK_RESIDUALS if r not in disclosed]
@@ -1438,22 +1535,167 @@ def _op_creates_at(row, path):
     return False
 
 
+def _enforcement_placements(plan):
+    """The (op, path, digest) placements the plan's ENFORCEMENT_INSTALL_OPS rows make, in program order: each
+    install-pack member composed under its target, each plant-governance creation, and each enable-hook
+    registration with its new digest. The one account of what installs an enforcement member, shared by
+    _enforcement_install_findings and _enforcement_launch_refusal, so no op the first accepts escapes the
+    second."""
+    placements = []
+    for row in plan["ops"]:
+        if row["op"] == "install-pack":
+            placements.extend((row["op"], _compose(row["target"], m["path"]), m["digest"])
+                              for m in row["members"])
+        elif row["op"] == "plant-governance":
+            placements.append((row["op"], row["path"], row["content_digest"]))
+        elif row["op"] == "enable-hook":
+            placements.append((row["op"], row["registration_path"], row["new_digest"]))
+    return placements
+
+
+def _launcher_of(path):
+    """The (frame, target) of the ENFORCEMENT_LAUNCHERS row whose installed file name is `path`'s file name,
+    compared case-insensitively (str.casefold, as _protected compares its names), so on a case-insensitive
+    filesystem `PRE-COMMIT` or `Pre-Commit` is the hook; None for any other file name."""
+    name = path.rsplit("/", 1)[-1].casefold()
+    for _platform, _member, destination, _line, frame, target in ENFORCEMENT_LAUNCHERS:
+        if destination.rsplit("/", 1)[-1].casefold() == name:
+            return frame, target
+    return None
+
+
+def _in_move_archive(path, root):
+    """Whether `path` lies strictly beneath the Move archive of the store at `root`, where a move disposition
+    files an old file away. _launcher_writes leaves a move-file destination there out, and the planner
+    refuses a declared move destination under a launcher's file name anywhere else, since no enforcement row
+    can name a moved file."""
+    return path.startswith(_compose(root, ARCHIVE_REL + "/moved") + "/")
+
+
+def _launcher_writes(plan):
+    """The (op, path) pairs, in program order, of every file an op row writes under a launcher's file name
+    (_launcher_of): each creation, replacement and repointing derive_effects draws from that one row, so an
+    install-pack, init-store or render-views member composed under its root, a create-file or
+    plant-governance path, a move-file destination, a record-adoption receipt, an enable-hook registration
+    and a repoint-consumer path alike. A move-file destination strictly beneath the frozen store's Move
+    archive is left out: a move disposition files an old file away there (the planner's default destination
+    for a legacy .opf/hooks/pre-commit is .working/archive/moved/.opf/hooks/pre-commit), a store archive
+    home the pack's installer and workflow never run a launcher from. A launcher filed there is therefore not
+    inspected, and running it by hand from there is outside this check; a source's preservation copy under
+    the adoption archive is no op row's write, so it is not inspected either. Called only on VALID op
+    rows."""
+    frozen = _frozen_store(plan)
+    manifest = store_manifest(plan.get("store"))
+    writes = []
+    for row in plan["ops"]:
+        effects = derive_effects([row], [], manifest)
+        for kind in ("creations", "replacements", "repointings"):
+            for effect in effects[kind]:
+                path = effect["path"]
+                if _launcher_of(path) is None:
+                    continue
+                if row["op"] == "move-file" and frozen is not None and _in_move_archive(path, frozen[0]):
+                    continue
+                writes.append((row["op"], path))
+    return writes
+
+
+def _enforcement_launch_refusal(plan):
+    """Each launcher an enforcement row names resolves under the opf/ mirror the plan installs. A member of
+    any enforcement row whose file name is a launcher's installed file name (ENFORCEMENT_LAUNCHERS), compared
+    case-insensitively (_launcher_of), is that launcher, wherever it sits and in whichever platform's row; a
+    row of a platform with no launcher of its own need not name what it launches. When any
+    ENFORCEMENT_INSTALL_OPS row places
+    it (_enforcement_placements: an install-pack member, a plant-governance creation and an enable-hook
+    registration alike), it launches launch_target from its planned path, and that path must lie beneath
+    PACK_MIRROR_ROOT and be created by an install-pack or plant-governance row of the same plan (an
+    enable-hook rewrites an observed file in place, so it creates no mirror file). A launcher whose target
+    would not exist in the mirrored tree (a hook placed outside opf/enforcement/, whose
+    `$here/../../tools/opf.py` then names no mirror file, a launch that climbs above the product root, or a
+    mirror that omits the launched file) cannot run its check. A launcher-bearing platform's row names its
+    launchers and the files they launch and nothing else. Every file a placed launcher in that row launches
+    is itself a member of the row, so the file that actually runs (the hook beside install.sh, the recipe the
+    workflow runs) is inspected in turn, never left out while a decoy launcher elsewhere is named; and any
+    other member placed there (a renamed hook, say) runs something this module cannot tell. Last, every file
+    any op row writes under a launcher's file name (_launcher_writes: any op, a move-file destination beneath
+    the store's Move archive excepted) is a member of some enforcement row, so a launcher the plan writes is
+    never left uninspected behind a named decoy chain. validate_plan calls this only when every op row is
+    VALID, so an INVALID op row holds back every clause here. Beyond that, the last clause waits only while
+    some row's member list is malformed or names a path no ENFORCEMENT_INSTALL_OPS row places: the binding
+    check refuses the list, and _enforcement_install_findings the unplaced path, each as INVALID. No other
+    defect defers it, so a plan whose op rows are VALID but which also carries a member digest no op
+    installs, a missing residual or a malformed revision, say, gets this CANNOT-EVALUATE ahead of those
+    INVALID findings, and ahead of a case collision (_effect_collision_findings). Either way the plan cannot
+    be evaluated: it is refused, never planted. Returns CANNOT-EVALUATE for the first such member, else
+    None."""
+    rows = plan.get("enforcement")
+    if not isinstance(rows, list):
+        return None
+    placements = _enforcement_placements(plan)
+    placed = set(path for _op, path, _digest in placements)
+    created = set(path for op, path, _digest in placements if op in ("install-pack", "plant-governance"))
+    bearing = set(row[0] for row in ENFORCEMENT_LAUNCHERS)
+    named, complete = set(), True
+    for i, row in enumerate(rows):
+        if not (isinstance(row, dict) and _valid_field("members", row.get("members"))):
+            complete = False
+            continue
+        paths = set(member["path"] for member in row["members"])
+        named.update(paths)
+        complete = complete and paths <= placed
+        launched_here = set()
+        for member in row["members"]:
+            launcher = _launcher_of(member["path"])
+            if launcher is None:
+                continue
+            frame, target = launcher
+            launched = launch_target(frame, target, member["path"])
+            launched_here.add(launched)
+            if member["path"] not in placed:
+                continue
+            relative = "its own directory" if frame == "member" else "the product root"
+            if launched is None:
+                return _cannot("plan enforcement[{}] member {!r} launches {!r} (relative to {}), which "
+                               "climbs above the product root, so no file this plan installs is what it "
+                               "runs; the launcher cannot run, so it is refused rather than planted".format(
+                                   i, member["path"], target, relative))
+            if not (launched.startswith(PACK_MIRROR_ROOT + "/") and launched in created):
+                return _cannot("plan enforcement[{}] member {!r} launches {!r} (relative to {}), which "
+                               "resolves to {!r}, a path the {}/ mirror this plan installs does not hold; "
+                               "the launcher cannot run, so it is refused rather than planted".format(
+                                   i, member["path"], target, relative, launched, PACK_MIRROR_ROOT))
+            if row.get("platform") in bearing and launched not in paths:
+                return _cannot("plan enforcement[{}] member {!r} launches {!r}, which the row does not name, "
+                               "so the file it runs is never inspected; it is refused rather than "
+                               "planted".format(i, member["path"], launched))
+        if row.get("platform") not in bearing:
+            continue
+        for member in row["members"]:
+            if (member["path"] in placed and _launcher_of(member["path"]) is None
+                    and member["path"] not in launched_here):
+                return _cannot("plan enforcement[{}] member {!r} is neither a launcher, by its installed file "
+                               "name, nor a file one of the row's launchers launches, so what it runs cannot "
+                               "be evaluated; it is refused rather than planted".format(i, member["path"]))
+    if not complete:
+        return None                     # a malformed member list or an unplaced member path: each is INVALID
+    for op, path in _launcher_writes(plan):
+        if path not in named:
+            return _cannot("plan {} row places {!r} under a launcher's file name, but no enforcement row "
+                           "names it, so what it launches is never inspected; it is refused rather than "
+                           "planted".format(op, path))
+    return None
+
+
 def _enforcement_install_findings(plan, findings):
     """Each enforcement member is installed by an op of the same plan with exactly its bytes (spec 14.1):
     an install-pack member or plant-governance creation at its path and digest, or an enable-hook
-    registration whose new digest is its digest. Members are caller-declared path/digest pairs; this ties
-    them to the program, never to a real enforcement pack, which this module never reads."""
+    registration whose new digest is its digest (_enforcement_placements). Members are caller-declared
+    path/digest pairs; this ties them to the program, never to a real enforcement pack, which this module
+    never reads."""
     rows = plan.get("enforcement")
     if not isinstance(rows, list):
         return
-    installed = set()
-    for row in plan["ops"]:
-        if row["op"] == "install-pack":
-            installed.update((_compose(row["target"], m["path"]), m["digest"]) for m in row["members"])
-        elif row["op"] == "plant-governance":
-            installed.add((row["path"], row["content_digest"]))
-        elif row["op"] == "enable-hook":
-            installed.add((row["registration_path"], row["new_digest"]))
+    installed = set((path, digest) for _op, path, digest in _enforcement_placements(plan))
     for i, row in enumerate(rows):
         if not (isinstance(row, dict) and _valid_field("members", row.get("members"))):
             continue                    # the row already carries a finding
@@ -1487,8 +1729,11 @@ def _effect_collision_findings(plan, effects, findings):
     source, and every non-occupying source, stays frozen and byte-identical in place until its recorded
     retirement (spec 14.1, 14.2); an occupying source is archived and removed at apply, so its managed
     destination may then be written. No created file is an ancestor of another claimed or live path, or a
-    descendant of one, and no created file equals or contains a store directory home. Called only on clean
-    source rows and run id."""
+    descendant of one, and no created file equals or contains a store directory home. A claimed path whose
+    file name is a launcher's (_launcher_of, case-insensitive) shares its casefold with no other claimed or
+    live path (a source's preservation copy is a claimed path here): a case-insensitive filesystem holds the
+    two as one file. This runs after _enforcement_launch_refusal, so a written variant no enforcement row
+    names is CANNOT-EVALUATE before this INVALID finding. Called only on clean source rows and run id."""
     manifest = store_manifest(plan.get("store"))
     claimed = set()
     for kind in ("creations", "replacements", "repointings"):
@@ -1501,6 +1746,15 @@ def _effect_collision_findings(plan, effects, findings):
                     row["path"]))
             claimed.add(row["path"])
     live = set(row["path"] for row in plan["sources"] if row["disposition"] == "keep" or not row["occupying"])
+    variants = {}
+    for path in sorted(claimed | live):
+        if _launcher_of(path) is not None:
+            variants.setdefault(path.casefold(), []).append(path)
+    for paths in sorted(variants.values()):
+        if len(paths) > 1 and any(path in claimed for path in paths):
+            findings.append("plan effects name {}, one launcher file on a case-insensitive filesystem, where at "
+                            "least one is claimed (a collision is refused, never frozen)".format(
+                                " and ".join(repr(path) for path in paths)))
     created = set(row["path"] for row in effects["creations"])
     for path in sorted(created & live):
         findings.append("plan creates {!r} where a source stays live at apply".format(path))
@@ -1859,7 +2113,8 @@ def validate_event_chain(events, root_digest):
 def self_test():
     """Fail-closed invariants over synthetic vectors: every validator ACCEPTS its canonical shape and
     REJECTS a malformed case, and an op outside ADOPT_OPS is refused. Judged on the returned status values,
-    never by grepping output (spec 8; the isolate-verifiers rule). No filesystem, no journal, no network."""
+    never by grepping output (spec 8; the isolate-verifiers rule). No journal, no network, and no filesystem
+    beyond reading the shipped enforcement members ENFORCEMENT_LAUNCHERS is pinned to (section 15i)."""
     failures = []
     checked = [0]
 
@@ -2445,7 +2700,8 @@ def self_test():
             # installed by an op with its bytes.
             ("effects-omit-generated", lambda p: p["effects"].update(creations=[
                 r for r in p["effects"]["creations"] if r["path"] not in _generated]), False),
-            ("enforcement-uninstalled", lambda p: p["ops"].pop(3), True),
+            ("enforcement-uninstalled", lambda p: p["ops"][3]["members"].remove(
+                p["enforcement"][5]["members"][0]), True),
             ("enforcement-digest-mismatch", lambda p: p["ops"][3]["members"][0].update(digest=_D5), True),
             ("enforcement-member-elsewhere",
              lambda p: p["enforcement"][0]["members"][0].update(path=".github/workflows/other.yml"), True),
@@ -2500,6 +2756,330 @@ def self_test():
     check("plan-v2-hook-and-governance-installs-valid", _mutated(base_plan, _other_installs, True) == VALID)
     check("plan-v2-hook-new-digest-mismatch-invalid", _mutated(base_plan, lambda p: (
         _other_installs(p), p["ops"][-2].update(new_digest=_D5)), True) == INVALID)
+    # 15h: the tool-install layout. Each launcher is bound where its own launch line resolves under the opf/
+    # mirror, and a launcher whose target the mirror would not hold is refused; each vector fails on revert.
+    _rows = canonical_plan_bindings()["enforcement"]
+    _ci, _hook, _installer = ENFORCEMENT_LAUNCHERS[0], ENFORCEMENT_LAUNCHERS[2], ENFORCEMENT_LAUNCHERS[3]
+    _HOOK, _INSTALLER = "opf/enforcement/precommit/pre-commit", "opf/enforcement/precommit/install.sh"
+    check("launch-pre-commit-row-destinations",
+          [m["path"] for m in _rows[1]["members"]] == [_HOOK, _INSTALLER, "opf/tools/opf.py"])
+    check("launch-pre-commit-hook-resolves", launch_target(_hook[4], _hook[5], _HOOK) == "opf/tools/opf.py")
+    check("launch-installer-beside-hook", launch_target(_installer[4], _installer[5], _INSTALLER) == _HOOK)
+    # the CI row keeps its workflow member unchanged, and its run line resolves to the recipe the row also
+    # names, whose own launch resolves to the mirrored tool entry point
+    check("launch-ci-row-workflow-unchanged",
+          _rows[0]["members"][0] == {"path": ".github/workflows/opf.yml", "digest": "sha256:" + "9" * 64})
+    check("launch-ci-row-resolves",
+          [m["path"] for m in _rows[0]["members"]] == [
+              ".github/workflows/opf.yml", "opf/enforcement/ci/opf-ci.sh", "opf/tools/opf.py"]
+          and launch_target(_ci[4], _ci[5], ".github/workflows/opf.yml") == "opf/enforcement/ci/opf-ci.sh"
+          and launch_target("member", "../../tools/opf.py", "opf/enforcement/ci/opf-ci.sh")
+          == "opf/tools/opf.py")
+    check("launch-climb-above-root-unresolved", launch_target("member", "../../tools/opf.py", ".opf/pre-commit")
+          is None and launch_target("member", "../../tools/opf.py", "pre-commit") is None)
+    check("token-pack-mirror-root", PACK_MIRROR_ROOT == "opf")
+
+    def _relocate(*moves):
+        # rename member paths in every enforcement row and in the canonical pack row alike
+        def mutate(p):
+            for m in [m for r in p["enforcement"] for m in r["members"]] + p["ops"][3]["members"]:
+                m["path"] = dict(moves).get(m["path"], m["path"])
+        return mutate
+
+    def _drop(path, rows=True):
+        # remove a member from the pack row, and from every enforcement row unless rows is False
+        def mutate(p):
+            tables = [r["members"] for r in p["enforcement"]] if rows else []
+            for members in tables + [p["ops"][3]["members"]]:
+                members[:] = [m for m in members if m["path"] != path]
+        return mutate
+    for label, mutate, want in (
+            # the former destination: from .opf/hooks/ the hook's ../../tools/opf.py names tools/opf.py
+            ("old-hook-destination", _relocate((_HOOK, ".opf/hooks/pre-commit")), CANNOT_EVALUATE),
+            # hook and installer moved together inside opf/ but one level too shallow: only the hook's launch
+            # fails, so this isolates the hook's own resolution
+            ("hook-launch-outside-mirror", _relocate((_HOOK, "opf/hooks/pre-commit"),
+                                                     (_INSTALLER, "opf/hooks/install.sh")), CANNOT_EVALUATE),
+            # the same pair at another depth-two mirror directory resolves: the rule is resolution, not a path
+            ("hook-launch-resolves-elsewhere", _relocate((_HOOK, "opf/enforcement/other/pre-commit"), (
+                _INSTALLER, "opf/enforcement/other/install.sh")), VALID),
+            ("installer-target-missing", _relocate((_HOOK, "opf/enforcement/other/pre-commit")),
+             CANNOT_EVALUATE),
+            ("tool-target-missing", _drop("opf/tools/opf.py"), CANNOT_EVALUATE),
+            ("ci-recipe-missing", _drop("opf/enforcement/ci/opf-ci.sh"), CANNOT_EVALUATE),
+            # named by the rows but planted by no op: refused as unresolvable, ahead of the install finding
+            ("tool-target-unplanted", _drop("opf/tools/opf.py", rows=False), CANNOT_EVALUATE),
+            # with no launcher planted nothing launches: the uninstalled members are INVALID instead
+            ("pack-row-dropped", lambda p: p["ops"].pop(3), INVALID),
+            # a launcher-bearing row that omits one of its launchers is INVALID on its own
+            ("installer-omitted", _drop(_INSTALLER), INVALID),
+            # the pre-change binding: the hook alone at .opf/hooks/pre-commit
+            ("old-layout-binding", lambda p: (_drop(_INSTALLER)(p), _relocate(
+                (_HOOK, ".opf/hooks/pre-commit"))(p)), CANNOT_EVALUATE)):
+        check("launch-" + label, _mutated(base_plan, mutate, True) == want)
+    # 15h, continued: every op _enforcement_install_findings accepts places a member the refusal inspects, a
+    # launcher is recognized by its file name in any row, a launcher-bearing row names nothing else, and the
+    # mirror-prefix and climb guards each answer through validate_plan. Each refusal vector fails when the
+    # clause it names is removed, and each counter-vector fails when a rule refuses more than it names.
+    _placed_by = set(op for op, _path, _digest in _enforcement_placements(
+        {"ops": [canonical_op(name) for name in ENFORCEMENT_INSTALL_OPS]}))
+    check("launch-placements-cover-install-ops", _placed_by == set(ENFORCEMENT_INSTALL_OPS))
+    _D9 = "sha256:" + "9" * 64
+
+    def _hooked(*paths):
+        # take each path out of the pack row and place it by an enable-hook registration instead
+        def mutate(p):
+            p["ops"][3]["members"] = [m for m in p["ops"][3]["members"] if m["path"] not in paths]
+            p["ops"][4:4] = [{"op": "enable-hook", "registration_path": path, "plugin_entry": "opf",
+                              "old_digest": _D5, "new_digest": _D9} for path in paths]
+        return mutate
+
+    def _add(index, path, by_hook=False):
+        # name one more member in enforcement row `index`, placed by the pack row or by an enable-hook
+        def mutate(p):
+            p["enforcement"][index]["members"].append({"path": path, "digest": _D9})
+            p["ops"][3]["members"].append({"path": path, "digest": _D9})
+            if by_hook:
+                _hooked(path)(p)
+        return mutate
+
+    def _outside_mirror(p):
+        # the pre-commit pair at x/y/ launches tools/opf.py, which the plan does create, outside opf/
+        _relocate((_HOOK, "x/y/pre-commit"), (_INSTALLER, "x/y/install.sh"))(p)
+        p["enforcement"][1]["members"][2]["path"] = "tools/opf.py"
+        p["ops"][3]["members"].append({"path": "tools/opf.py", "digest": _D9})
+    for label, mutate, want in (
+            ("enable-hook-old-hook-added", _add(1, ".opf/hooks/pre-commit", by_hook=True), CANNOT_EVALUATE),
+            # an enable-hook creates no mirror file, so a hook it places is no launch target
+            ("enable-hook-target-not-created", _hooked(_HOOK), CANNOT_EVALUATE),
+            # counter-vectors: a launcher an enable-hook places where its launch resolves stays VALID
+            ("enable-hook-installer-valid", _hooked(_INSTALLER), VALID),
+            ("enable-hook-workflow-valid", _hooked(".github/workflows/opf.yml"), VALID),
+            # a renamed hook in a launcher-bearing row, and the hook in another platform's row or the CI row
+            ("renamed-hook-in-row", _add(1, ".opf/hooks/opf-pre-commit"), CANNOT_EVALUATE),
+            ("hook-in-other-platform-row", _add(2, ".opf/hooks/pre-commit"), CANNOT_EVALUATE),
+            ("hook-in-ci-row", _add(0, ".opf/hooks/pre-commit"), CANNOT_EVALUATE),
+            # counter-vector: a row with no launcher may name another file under any other name
+            ("other-platform-extra-member-valid", _add(2, ".claude/hooks/deny.sh"), VALID),
+            # the mirror-prefix guard: the launch lands on a file the plan creates, but outside opf/
+            ("target-created-outside-mirror", _outside_mirror, CANNOT_EVALUATE)):
+        check("launch-" + label, _mutated(base_plan, mutate, True) == want)
+    _CI_RECIPE, _TOOL = "opf/enforcement/ci/opf-ci.sh", "opf/tools/opf.py"
+
+    def _validated(mutate):
+        # the base plan under `mutate`, effects refreshed, validated whole so a vector can name its reason
+        p = copy.deepcopy(base_plan)
+        mutate(p)
+        p["effects"] = derive_effects(p["ops"], p["sources"], store_manifest(p.get("store")))
+        return validate_plan(p)
+
+    def _row_set(index, *paths):
+        # set enforcement row `index` to exactly `paths`, and have the pack row plant each one it lacks
+        def mutate(p):
+            p["enforcement"][index]["members"] = [{"path": path, "digest": _D9} for path in paths]
+            planted = [m["path"] for m in p["ops"][3]["members"]]
+            p["ops"][3]["members"].extend({"path": path, "digest": _D9} for path in paths
+                                          if path not in planted)
+        return mutate
+
+    def _decoys(p):
+        # the round-2 reproduction: decoy launchers under opf/q/r/s/ in the ci and pre-commit rows, the real
+        # hook and recipe planted but named in no row, and the tool entry point the real pair runs not planted
+        _row_set(0, ".github/workflows/opf.yml", "opf/q/r/s/opf-ci.sh", "opf/q/tools/opf.py")(p)
+        _row_set(1, _INSTALLER, "opf/q/r/s/pre-commit", "opf/q/tools/opf.py")(p)
+        _drop(_TOOL, rows=False)(p)
+
+    def _governed(path, source):
+        # take `path` out of the pack row and create it by a plant-governance row instead
+        def mutate(p):
+            _drop(path, rows=False)(p)
+            p["ops"][4:4] = [{"op": "plant-governance", "path": path, "content_digest": _D9,
+                              "source_member": source}]
+        return mutate
+    _unrowed = "under a launcher's file name, but no enforcement row names it"
+    for label, mutate, reason in (
+            # the round-1 reproduction: hook and installer at .opf/hooks/, each placed by an enable-hook,
+            # which the install check accepts, so the refusal inspects it as well and names that reason
+            ("enable-hook-outside-mirror", lambda p: (_relocate(
+                (_HOOK, ".opf/hooks/pre-commit"), (_INSTALLER, ".opf/hooks/install.sh"))(p), _hooked(
+                    ".opf/hooks/pre-commit", ".opf/hooks/install.sh")(p)),
+             "member '.opf/hooks/pre-commit' launches '../../tools/opf.py' (relative to its own directory), "
+             "which resolves to 'tools/opf.py'"),
+            # a launcher-bearing row names every file its launchers launch: the decoys resolve, but the real
+            # recipe the workflow runs and the real hook install.sh runs are left out (the ci row refuses
+            # first), and the pre-commit row alone refuses the same way
+            ("decoy-launchers-in-rows", _decoys,
+             "member '.github/workflows/opf.yml' launches '" + _CI_RECIPE + "', which the row does not name"),
+            ("decoy-hook-in-pre-commit-row", _row_set(1, _INSTALLER, "opf/q/r/s/pre-commit",
+                                                      "opf/q/tools/opf.py"),
+             "member '" + _INSTALLER + "' launches '" + _HOOK + "', which the row does not name"),
+            ("tool-unnamed-in-pre-commit-row", _row_set(1, _HOOK, _INSTALLER),
+             "member '" + _HOOK + "' launches '" + _TOOL + "', which the row does not name"),
+            ("tool-unnamed-in-ci-row", _row_set(0, ".github/workflows/opf.yml", _CI_RECIPE),
+             "member '" + _CI_RECIPE + "' launches '" + _TOOL + "', which the row does not name"),
+            # a whole decoy chain named in the pre-commit row while the real pair is planted in no row: every
+            # file an op writes under a launcher's file name is a row member, whichever op writes it (the
+            # row's writes in derive_effects order, so the installer sorts ahead of the hook)
+            ("decoy-chain-real-pair-unnamed", _row_set(1, "opf/q/r/s/install.sh", "opf/q/r/s/pre-commit",
+                                                    "opf/q/tools/opf.py"),
+             "plan install-pack row places '" + _INSTALLER + "' " + _unrowed),
+            ("unnamed-hook-by-enable-hook", lambda p: p["ops"].insert(4, {
+                "op": "enable-hook", "registration_path": ".opf/hooks/pre-commit", "plugin_entry": "opf",
+                "old_digest": _D5, "new_digest": _D9}),
+             "plan enable-hook row places '.opf/hooks/pre-commit' " + _unrowed),
+            ("unnamed-hook-by-governance", _governed("opf/x/y/pre-commit", "enforcement/precommit/pre-commit"),
+             "plan plant-governance row places 'opf/x/y/pre-commit' " + _unrowed)):
+        result = _validated(mutate)
+        check("launch-" + label, result.status == CANNOT_EVALUATE and reason in result.findings[0])
+    for label, mutate in (
+            # counter-vectors: the canonical plan, whose rows name every file their launchers launch, stays
+            # VALID; so does a launch target a plant-governance row creates (an install-pack is not the only
+            # creator), a planted file named in no row whose file name is no launcher's, and a hook named in
+            # another platform's row whose launch resolves (only a launcher-bearing row must name its targets)
+            ("canonical-plan-valid", lambda p: None),
+            ("governance-created-target-valid", _governed(_TOOL, "tools/opf.py")),
+            ("unrowed-support-module-valid", lambda p: p["ops"][3]["members"].append(
+                {"path": "opf/tools/_opf_store.py", "digest": _D9})),
+            ("hook-in-other-platform-row-valid", _add(2, "opf/enforcement/other/pre-commit"))):
+        check("launch-" + label, _validated(mutate).status == VALID)
+    # 15h, continued: the unnamed-launcher clause covers every op that writes a file, not only the three that
+    # install a member. With the decoy chain named in the pre-commit row, the real pair written by each other
+    # op, a hook repoint-consumer rewrites in place, and a launcher an init-store or record-adoption row
+    # writes in the store tree are each refused with that reason. Each of those vectors is VALID without the
+    # clause; a creation in the Move archive is INVALID without it (the reserved control area), so its
+    # assertion discriminates by the CANNOT-EVALUATE status and this clause's reason.
+    _chain = _row_set(1, "opf/q/r/s/install.sh", "opf/q/r/s/pre-commit", "opf/q/tools/opf.py")
+
+    def _real_pair_by(write):
+        # the decoy chain named, and the real hook and installer written by `write` instead of the pack row
+        def mutate(p):
+            _chain(p)
+            _drop(_HOOK, rows=False)(p)
+            _drop(_INSTALLER, rows=False)(p)
+            write(p)
+        return mutate
+
+    def _moved_in(p, pairs):
+        # each (source, destination) as a move-file row and its non-occupying move source
+        p["ops"][4:4] = [{"op": "move-file", "source": source, "destination": destination,
+                          "source_digest": _D5} for source, destination in pairs]
+        p["sources"] = sorted(p["sources"] + [
+            {"path": source, "digest": _D5, "disposition": "move", "occupying": False,
+             "preservation": destination} for source, destination in pairs], key=lambda row: row["path"])
+    _MOVED = ARCHIVE_REL + "/moved/.opf/hooks/pre-commit"
+    _writers = [
+        ("create-file", lambda p: p["ops"].__setitem__(slice(4, 4), [
+            {"op": "create-file", "path": path, "content_digest": _D5} for path in (_HOOK, _INSTALLER)]),
+         _HOOK),
+        ("render-views", lambda p: p["ops"][2]["members"].extend(
+            {"path": path, "digest": _D5} for path in (_HOOK, _INSTALLER)), _INSTALLER),
+        ("move-file", lambda p: _moved_in(p, [("scripts/myhook", _HOOK), ("scripts/myinst", _INSTALLER)]),
+         _HOOK)]
+    for op, write, path in _writers:
+        result = _validated(_real_pair_by(write))
+        check("launch-decoy-chain-real-pair-by-" + op, result.status == CANNOT_EVALUATE
+              and "plan {} row places '{}' ".format(op, path) + _unrowed in result.findings[0])
+    for path in (".opf/hooks/pre-commit", ".git/hooks/pre-commit", ".husky/pre-commit"):
+        result = _validated(_real_pair_by(lambda p, path=path: p["ops"].insert(4, {
+            "op": "repoint-consumer", "path": path, "old_digest": _D5, "new_digest": _D9})))
+        check("launch-repointed-hook-unnamed-" + path.split("/")[0].lstrip("."),
+              result.status == CANNOT_EVALUATE
+              and "plan repoint-consumer row places '{}' ".format(path) + _unrowed in result.findings[0])
+    for op, mutate, path in (
+            ("init-store", lambda p: p["ops"][1]["members"].append(
+                {"path": WORKING_DIRNAME + "/toml/pre-commit", "digest": _D5}),
+             WORKING_DIRNAME + "/toml/pre-commit"),
+            ("record-adoption", lambda p: p["ops"][-1].update(receipt_path=WORKING_DIRNAME + "/install.sh"),
+             WORKING_DIRNAME + "/install.sh"),
+            # the Move archive exception is a move-file destination's alone: a creation there is refused too
+            ("create-file", lambda p: p["ops"].insert(4, {"op": "create-file", "path": _MOVED,
+                                                         "content_digest": _D5}), _MOVED)):
+        result = _validated(mutate)
+        check("launch-unnamed-launcher-by-{}{}".format(op, "-in-move-archive" if path == _MOVED else ""),
+              result.status == CANNOT_EVALUATE
+              and "plan {} row places '{}' ".format(op, path) + _unrowed in result.findings[0])
+    # a move-file destination under a launcher's file name outside the Move archive is refused by this clause
+    # whoever built the plan (the planner refuses such a declared destination before it freezes the plan)
+    result = _validated(lambda p: _moved_in(p, [(".opf/hooks/pre-commit", "legacy/hooks/pre-commit")]))
+    check("launch-unnamed-launcher-by-move-file-outside-archive", result.status == CANNOT_EVALUATE
+          and "plan move-file row places 'legacy/hooks/pre-commit' " + _unrowed in result.findings[0])
+    check("launch-move-archive-predicate", _in_move_archive(ARCHIVE_REL + "/moved/x/pre-commit", ".")
+          and not _in_move_archive(ARCHIVE_REL + "/moved", ".")
+          and not _in_move_archive(ARCHIVE_REL + "/moved2/x/pre-commit", ".")
+          and not _in_move_archive("legacy/hooks/pre-commit", "."))
+    # counter-vectors: a move decision that files the former hook (or its installer) away in the Move archive,
+    # the planner's default destination, stays VALID; the exception is that archive alone
+    for source in (".opf/hooks/pre-commit", ".opf/hooks/install.sh"):
+        check("launch-legacy-launcher-moved-to-archive-valid-" + source.rsplit("/", 1)[-1], _validated(
+            lambda p, source=source: _moved_in(p, [(source, ARCHIVE_REL + "/moved/" + source)])).status == VALID)
+    # 15h, case variants: a launcher's file name is recognized case-insensitively. An unnamed case variant is
+    # refused by the unnamed-launcher clause; one named in another platform's row is resolved as a launcher
+    # (here it climbs out of the mirror); and one named beside the real hook is the same file there, an
+    # INVALID collision.
+    for name in ("PRE-COMMIT", "Pre-Commit"):
+        result = _validated(lambda p, name=name: p["ops"][3]["members"].append(
+            {"path": "opf/enforcement/precommit/" + name, "digest": _D9}))
+        check("launch-case-variant-unnamed-" + name, result.status == CANNOT_EVALUATE
+              and "plan install-pack row places 'opf/enforcement/precommit/{}' ".format(name) + _unrowed
+              in result.findings[0])
+        result = _validated(_add(2, ".opf/hooks/" + name))
+        check("launch-case-variant-in-other-platform-row-" + name, result.status == CANNOT_EVALUATE
+              and "member '.opf/hooks/{}' launches '../../tools/opf.py' (relative to its own directory), which "
+              "resolves to 'tools/opf.py'".format(name) in result.findings[0])
+        result = _validated(_add(2, "opf/enforcement/precommit/" + name))
+        check("launch-case-variant-collision-" + name, result.status == INVALID and any(
+            "'opf/enforcement/precommit/{}' and '{}', one launcher file on a case-insensitive filesystem".format(
+                name, _HOOK) in finding for finding in result.findings))
+
+    # the floor keeps the canonical spelling: an installer or workflow named and installed only under a case
+    # variant is resolved as that launcher (no CANNOT-EVALUATE), but the row names no member under the exact
+    # file name the pack installs, an INVALID finding of its own and the only one
+    for variant, index, canonical, member in (
+            ("opf/enforcement/precommit/INSTALL.SH", 1, _INSTALLER, "enforcement/precommit/install.sh"),
+            (".github/workflows/OPF.YML", 0, ".github/workflows/opf.yml",
+             "enforcement/ci/github-actions.yml")):
+        result = _validated(_relocate((canonical, variant)))
+        check("launch-case-variant-floor-" + variant.rsplit("/", 1)[-1], result.status == INVALID
+              and list(result.findings) == ["plan enforcement[{}] names no member installed as {!r}, the "
+                                            "launcher {} its floor runs".format(
+                                                index, canonical.rsplit("/", 1)[-1], member)])
+
+    def _kept_variant(p):
+        # a kept source at a case variant of the hook path the pack row creates: the creation lands on it
+        p["sources"] = sorted(p["sources"] + [{"path": "opf/enforcement/precommit/Pre-Commit", "digest": _D5,
+                                               "disposition": "keep", "occupying": False}],
+                              key=lambda row: row["path"])
+        p["ops"].insert(2, {"op": "register-unmanaged", "entry": "opf/enforcement/precommit/Pre-Commit",
+                            "old_digest": "sha256:" + "0" * 64, "new_digest": _D5})
+    result = _validated(_kept_variant)
+    check("launch-case-variant-live-source-collision", result.status == INVALID and any(
+        "'opf/enforcement/precommit/Pre-Commit' and '{}', one launcher file".format(_HOOK) in finding
+        for finding in result.findings))
+    # the climb guard: a hook at the product root launches a path above it, refused with that reason
+    _climb = copy.deepcopy(base_plan)
+    _relocate((_HOOK, "pre-commit"), (_INSTALLER, "install.sh"))(_climb)
+    _climb["effects"] = derive_effects(_climb["ops"], _climb["sources"], store_manifest(_climb.get("store")))
+    try:
+        _climb = validate_plan(_climb)
+    except (AttributeError, TypeError):   # the guard removed: the unresolved None reaches str.startswith
+        _climb = None
+    check("launch-climb-above-root-refused", _climb is not None and _climb.status == CANNOT_EVALUATE
+          and "climbs above the product root" in _climb.findings[0] and "None" not in _climb.findings[0])
+    # 15i: each launcher row is read from its shipped member: the launch line is a whole line of the pack file
+    # and names the row's target as its frame launches it, a mirrored member's destination is its pack path
+    # under the mirror root, and the workflow template's own copy instruction names its destination.
+    _pack = Path(__file__).resolve().parent.parent
+    for _platform, member, destination, line, frame, target in ENFORCEMENT_LAUNCHERS:
+        try:
+            lines = (_pack / member).read_text(encoding="utf-8").split("\n")
+        except (OSError, UnicodeDecodeError):
+            lines = []
+        launch = ("$here/" if frame == "member" else "sh ") + target
+        check("launch-line-shipped-" + member, line in lines and launch in line
+              and (frame == "root" or destination == PACK_MIRROR_ROOT + "/" + member))
+        if frame == "root":
+            check("launch-copy-line-" + member,
+                  any(text.startswith("# Copy this file to " + destination + " ") for text in lines))
     # 15f: derive_effects enumerates init, render and receipt outputs as creations at their composed paths.
     check("effects-generated-outputs", derive_effects([
         {"op": "init-store", "store_root": "s", "members": [{"path": "a.toml", "digest": _D5}]},

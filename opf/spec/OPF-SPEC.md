@@ -106,10 +106,12 @@ the section 16.1 admission check and its refusal evidence. Homes 2 is a separate
 The homes-2 contract below is for `spec_version = "2.0.0"` and `[opf].homes = 2`.
 The current reference tooling reserves these names and implements their homes-2 boundary checks. It still
 supports `1.2.0` and initializes legacy homes (generation 1, with no `homes` key); writers retain their
-legacy paths until homes 2 is activated, which requires the homes migration (`opf upgrade`) to be
-available. The section 9 manifest example
-describes the 1.3.0 target on legacy homes. The homes-2 requirements in sections 4.2, 9.2, 12,
-14.1, 14.2, and 15 describe the target contract, not an activated runtime guarantee.
+legacy paths until homes 2 is activated. Homes 2 has no homes migration: a store is at homes 2 only
+when it is created there, no homes-1 store is migrated to homes 2, and once homes 2 is activated
+`opf upgrade` MUST refuse a homes-1 store by name rather than migrate it. The section 9 manifest example
+describes the 1.3.0 target on legacy homes. The homes-2 requirements in sections 4.2, 12, 14.1,
+14.2, and 15, and the section 9.2 refusal of a homes-1 store, describe the target contract, not an
+activated runtime guarantee.
 
 ```
 <product repository root>/
@@ -206,8 +208,9 @@ journal home, `journals/record/`, never a staging or imported home. Here
 validity or filesystem safety. File operands MUST use canonical contained relative paths: no empty,
 dot, or parent components, absolute/drive/backslash forms, control characters, or line separators.
 
-Homes-2 init and upgrade MUST render this managed block into `.working/.gitignore` from the topology
-constants; the reference tooling provides the renderer and drift gate but installs no block:
+Homes-2 init, and any upgrade of a store already at homes 2, MUST render this managed block into
+`.working/.gitignore` from the topology constants; the reference tooling provides the renderer and
+drift gate but installs no block:
 
 ```gitignore
 # >>> opf-managed >>>
@@ -317,8 +320,8 @@ carries a `plan_digest` that does not re-seal its own bytes, so an inventory cop
 run or phase never evaluates as this run's record. C-EVIDENCE-ENUM MUST check that `plan.toml`'s
 inventory row against the same bytes its seal was proven from, so a plan swapped between two
 reads never combines into a clean result.
-The owning writer or migration MUST derive each inventory from the run's transaction record or
-receipt and MUST publish it exclusively with the retained bytes. An inventory MUST NOT be rewritten,
+The owning writer MUST derive each inventory from the run's transaction record or receipt and
+MUST publish it exclusively with the retained bytes. An inventory MUST NOT be rewritten,
 so a bundle stays immutable and an evidence commit changes only its bundle folder. An inventory is
 not a journal projection and remains available in a clone without journals.
 A phase inventory MAY be published in the same transaction as the base inventory to claim the
@@ -351,7 +354,8 @@ a staged plan has a recoverable transaction. In homes 2, ordinary transaction op
 those of an open transaction being recovered, MUST NOT equal, descend from, or contain `journals/`;
 a legacy store's transactions and recovery keep their legacy operand handling, and no shipped writer
 targets that home. Capability-bound journal APIs MUST derive their destinations from kind and run
-identity. Legacy journal transport MUST preserve bytes through the migration's receipt binding.
+identity. Homes 2 has no legacy journal transport: no homes-1 journal is carried into `journals/`,
+and a homes-2 store is never recovered from one (section 15).
 These comparisons are byte-exact: on a case-insensitive or normalizing filesystem, a differently
 cased or composed spelling can alias a reserved home and is not caught. Discovery precedes the
 manifest, so it cannot know the generation: it MUST examine `manifest.toml` in every immediate
@@ -1530,17 +1534,22 @@ implementation's class.
 
 ### 9.2 Store schema upgrades
 
-The homes-generation upgrade targets `spec_version = "2.0.0"` with required integer `[opf].homes = 2`.
-Absent or `1` denotes legacy homes for migration; unknown future generations MUST be refused.
-The homes-generation target does not itself change the runtime supported version or init format.
-The migration MUST refuse a store resolved outside the product root until a multi-root coordinator
-exists. Unproven legacy `.archive/` entries MUST remain in place with a standing finding until
+The homes-2 generation is declared by `spec_version = "2.0.0"` with required integer
+`[opf].homes = 2`, and a store is at homes 2 only when it is created there (section 4.2).
+Absent or `1` denotes legacy homes; unknown future generations MUST be refused.
+The homes-2 declaration does not itself change the runtime supported version or init format.
+This section defines no homes-generation upgrade: no homes-1 store is migrated to homes 2 and no
+OPF control area is relocated for the homes generation, and once homes 2 is activated
+`opf upgrade` MUST refuse a homes-1 store by name rather than migrate it (section 4.2).
+Unproven legacy `.archive/` entries MUST remain in place with a standing finding until
 dispositioned.
 
 A base-schema version bump MUST ship a tested, in-place store-schema upgrade (`opf upgrade`) in at
 least one published upgrade-capable implementation (section 16.1), the reference tooling, so that a
 store below the new version has an upgrade path once that upgrade activates; the path holds only
 within this section's preconditions and refusals and that implementation's disclosed residuals.
+The bump to the homes-2 declaration (`spec_version = "2.0.0"` with `[opf].homes = 2`) is the one
+exception: it ships no upgrade, and a store below it has no upgrade path into homes 2 (section 4.2).
 Every requirement of this section on an upgrade, its deltas, preconditions, report, refusals, and
 remedies binds an upgrade-capable implementation; a fresh-only implementation implements none of
 them and MUST instead refuse under section 16.1. Every implementation class MUST apply the version
@@ -1548,12 +1557,10 @@ ceiling's refusal at the end of this section, a fresh-only implementation at its
 admission check; a fresh-only implementation that supports a version below the reserved homes-2
 declaration (section 4.2) MUST NOT apply the ceiling's homes-2 recognition and MUST refuse that
 declaration under section 16.1. The
-upgrade MUST be idempotent. A purely schema-level bump MUST be additive, using atomic replacement of
-existing files, create-only writes for new index files, and regeneration of declared views through
-exclusively created temporary files followed by atomic rename. These writes are sequential, with
-recovery scope held in memory, not a durable transaction journal. A homes-generation bump
-MUST additionally relocate OPF control areas as a versioned, journaled, fail-closed relocation.
-Every destination MUST be digest-verified before its source is removed. Both kinds of upgrade MUST
+upgrade MUST be idempotent. A schema-level bump MUST be additive, using atomic
+replacement of existing files, create-only writes for new index files, and regeneration of declared
+views through exclusively created temporary files followed by atomic rename. These writes are
+sequential, with recovery scope held in memory, not a durable transaction journal. The upgrade MUST
 run under the store consistency contract and the single-writer lease (section 5.7).
 It MUST fail closed on an unresolvable store, a declared `spec_version` ABOVE the tooling,
 a divergence, a held lease, or any populated state that contradicts its preconditions; it MUST NOT
@@ -1564,8 +1571,7 @@ the working tree is clean, including ignored files, over the planned schema and 
 restore path for that scope; a held lease or a dirty store refuses, and a dirty store is asked to
 commit its own changes, never restored by the tool. After applying the schema delta, it MUST regenerate
 the declared views and MUST require a full doctor VALID before offering the uncommitted change for
-the adopter's own branch-and-merge. It MUST NOT stage or commit the change. Both upgrade kinds, on
-the schema-level path and the homes-generation relocation path, the homes-2 path included, alike,
+the adopter's own branch-and-merge. It MUST NOT stage or commit the change. The upgrade
 MUST NOT write the adoption archive and MUST NOT overwrite, relocate or remove a plan-enumerated
 frozen source (section 14.2); a frozen source sits outside the planned schema and render
 destinations, so the clean-tree precondition does not read it, and the required doctor VALID grades
@@ -2151,8 +2157,9 @@ scope, expiry) with adopter-supplied vocabularies. The location patterns of sect
 described generically; no pattern names a real repository, host account, or internal system. Import
 and adoption provenance, including originals under `imported/` and retired files under `archive/`,
 MUST stay inside the adopter's own repositories. In homes 2, `.aiqt/` is AIQT-owned material, not an
-OPF state home; OPF operates without it. Only homes migration MAY read explicitly inventoried OPF
-artefacts from former `.aiqt/` locations, without touching unrelated AIQT material.
+OPF state home; OPF operates without it. On a homes-2 store, OPF MUST NOT read OPF artefacts from
+former `.aiqt/` locations or touch unrelated AIQT material, since homes 2 has no homes migration
+(section 4.2).
 A no-follow existence probe of a former `.aiqt/` location, used only to refuse an operation, is
 not a read of that material.
 Experimental fields MUST ride registered
@@ -2702,6 +2709,10 @@ The gates in this standard are strong where they are strong and say so where the
   (fail-closed), never to a silent empty store. The token is stable within a base-schema major line;
   a store-breaking rename MUST ship only with the tested `opf upgrade` migration (section 9.2),
   which rewrites the base table and token in place so no existing adopter's manifest is stranded.
+  That in-place rewrite covers only a bump that ships an upgrade. The bump to the homes-2
+  declaration ships none (section 9.2), so no store-breaking rename can ship with it: a homes-2
+  manifest keeps the `[opf]` base table name and the `opf` discovery token, and the bump leaves
+  unchanged the manifest of a homes-1 store, which homes 2 does not migrate (section 4.2).
   The retired 1.0.0 token `devprocess` is recognized by `opf upgrade`, purely to carry a legacy store
   forward, and by a fresh-only implementation (section 16.1), purely to refuse that store by name.
 - A fresh-only implementation (section 16.1) proves tested admission and refusal behaviour, not
