@@ -69,13 +69,18 @@ Rules (each self-test vector is caught by exactly its rule, and passes with that
                      is part of it, so lines added or removed elsewhere in the file leave a row valid. The enclosing
                      scope is one lexical scope instance, <module> at module level, else the defs, classes and lambdas
                      around it joined by dots, each by its own name (a def's name, class and a class's name, or
-                     <lambda>) followed by #K, its ordinal in source order among the scopes of that name its own
-                     enclosing scope holds, when that scope holds more than one (sibling lambdas in f, or two defs of
-                     one name under an if and its else, are f.<lambda>#1 and f.<lambda>#2, or f#1 and f#2), so a
-                     reference moved from one such scope into its sibling is a finding; an identity two scopes share
-                     would tell neither apart, so it exits 2 (cannot evaluate) and is never merged. A definition's
-                     name, decorators, defaults, annotations, bases and keywords belong to the scope that runs the
-                     definition, and only its parameters and body to its own scope. Scope identities and ordinals give
+                     <lambda>) followed by #K/N when its own enclosing scope holds N > 1 scopes of that name, K its
+                     ordinal in source order among them (sibling lambdas in f, or two defs of one name under an if and
+                     its else, are f.<lambda>#1/2 and f.<lambda>#2/2, or f#1/2 and f#2/2). A reference moved from one
+                     such scope into its sibling is a finding, and adding or removing a sibling of that name changes N
+                     and so the identity of every sibling of that name (each row there goes stale); only an edit that
+                     keeps N (siblings reordered, or as many added as removed) can leave a moved reference on the
+                     #K/N it held (DISCLOSED RESIDUAL). A comprehension or generator expression is not a scope here:
+                     what it holds belongs to the scope around it. An identity two scopes share would tell neither
+                     apart, so it exits 2 (cannot evaluate) and is never merged. A definition's name, decorators,
+                     defaults, annotations, bases and keywords belong to the scope that runs the definition (an
+                     annotation too, though the interpreter evaluates it only when it is read), and only its
+                     parameters and body to its own scope. Scope identities and ordinals give
                      each node its own key (file, scope, ordinal and text); a key that more than one node held would
                      allow none of them, listed or not (a backstop against a regression in that numbering: no parsed
                      tree reaches it, and the self-test injects it). Each row is held live: it
@@ -163,7 +168,8 @@ or action line outside the accepted YAML subset (above).
                                        vector exits 2, every site vector finds exactly the sites (scope and
                                        reference) it names, every edit vector (rows the gate writes for one
                                        source) gives exactly its findings on the edited source, every mutant in
-                                       MUTANTS (one check removed) fails
+                                       MUTANTS (one check removed, with the backstop that would refuse first
+                                       where one is named) fails
                                        the vector it names, removing any one watched name, member or importer
                                        fails its vector, and the live tree passes
 
@@ -180,19 +186,29 @@ package g names), so its site is reviewed. A row allows one node, not what becom
 is not called in place (an importer returned, stored, passed or bound by an alias, or a lambda holding a call) lets
 whatever later calls that value import without a site of its own, so such a row is reviewed for where the value goes,
 and a finding says when a reference is not a call. A row names a reference by its scope (one lexical scope instance, a
-same-named sibling told apart by its ordinal among them, above), its unparsed text and its ordinal among the references
-of that text in that scope, not by its line or column. So an edit to its own text, a move into another scope (a sibling
-lambda or a same-named def among them), a rename of a def or class around it or a change of one into the other
-(over-rejections: its text is unchanged), a same-named sibling of a scope around it added, removed or reordered (an
-over-rejection wherever that adds, shifts or drops that scope's #K), and a new reference of that text ahead of it
-in its scope (the ordinals shift, and one is left unlisted) each make a row stale or a reference a finding until the row
-is rewritten (the re-review the binding asks for); but a move within its scope (onto another line, into or out of a
-branch, a loop or a try), an edit elsewhere in its scope (rebinding a name it is passed, say), a change of layout,
-comments or quote style that ast.unparse does not keep, and an exchange among the references of one text in one scope
-(one removed and another of that text added there in one change, or two swapped) leave every row valid, so none of them
-is re-reviewed: a row reviews a node's text in its scope, not its place there. A scope is likewise known by its name and
-its ordinal among same-named siblings, not by its place, so same-named sibling scopes exchanged whole, or one removed
-and its references written into the sibling that takes its ordinal, read as the scopes they replace.
+same-named sibling told apart by #K/N, its ordinal among them and their count, above), its unparsed text and its ordinal
+among the references of that text in that scope, not by its line or column. So an edit to its own text, a move into
+another scope (a sibling lambda or a same-named def among them), a rename of a def or class around it or a change of one
+into the other (over-rejections: its text is unchanged), a same-named sibling of a scope around it added or removed (an
+over-rejection: N changes, so every row under a sibling of that name goes stale until it is re-reviewed) or reordered
+(an over-rejection wherever that shifts that scope's #K), and a new reference of that text ahead of it in its scope (the
+ordinals shift, and one is left unlisted) each make a row stale or a reference a finding until the row is rewritten (the
+re-review the binding asks for); but a move within its scope (onto another line, into or out of a branch, a loop or a
+try, between an annotation and a default of one definition, or into, out of or between comprehensions and generator
+expressions), an edit elsewhere in its scope (rebinding a name it is passed, say), a change of layout, comments or quote
+style that ast.unparse does not keep, and an exchange among the references of one text in one scope (one removed and
+another of that text added there in one change, or two swapped) leave every row valid, so none of them is re-reviewed: a
+row reviews a node's text in its scope, not its place there. A comprehension or generator expression is not a scope
+here, though Python gives each a nested scope of its own (on the floor version a list, set or dict comprehension is
+inlined into the code of its function and a generator expression is not, and both keep their loop variables to
+themselves): what it holds is read in the def, class, lambda or module around it, so a move between two of them in one
+def is a move within that def, which is wider than a move within one of Python's scopes. An annotation, which the floor
+version evaluates only when it is read, is read in the scope that runs its definition, as a default is. A scope is
+known by its name, its ordinal among same-named siblings and their count, not by its place or its contents, so an edit
+that keeps the count of same-named siblings in a scope (siblings reordered or exchanged whole, or as many removed as
+added in one change) reads the sibling now at each #K/N as the one that was there: a reference that ends in the sibling
+now at the #K/N it held is not re-reviewed, whichever sibling it was written in (one sibling removed and another added
+ahead of it, say, with the reference moved into the sibling that takes its ordinal).
 A listed string literal, or one inside an f-string, climbs into the call it is directly an argument of, or the
 subscript it is directly the key of, before the row records it, so turning that call or subscript into a called importer
 is a finding. An expression built from a listed literal ('__import__'.strip(), a tuple holding it) is a value passed on:
@@ -451,10 +467,11 @@ CONDITIONS = ("guarded-optional", "unreached-module")
 # The reviewed dynamic-import sites: (repo-relative file, enclosing scope, the exact references allowed there, each
 # #ORDINAL: TEXT with the reference's unparsed source and its ordinal among the references of that text in that
 # scope, why they are legitimate). A scope is one lexical scope instance: a class reads as class NAME, and a scope
-# whose enclosing scope holds others of its name carries #K, its ordinal among them in source order. Dynamic imports
-# are not resolved; a reference no row lists is a finding, an edited reference or one moved into another scope (a
-# sibling lambda or a same-named def among them) included (a move within its scope is not), and the dynamic-import
-# rule holds every row live (see the docstring).
+# whose enclosing scope holds N > 1 scopes of its name carries #K/N, K its ordinal among them in source order. Dynamic
+# imports are not resolved; a reference no row lists is a finding, an edited reference or one moved into another scope
+# (a sibling lambda or a same-named def among them) included, unless the same edit keeps N and leaves the reference on
+# the #K/N it held (a disclosed residual; a move within its scope is not a finding either), and the dynamic-import rule
+# holds every row live (see the docstring).
 DYNAMIC_IMPORT_SITES = (
     (".aiqt/core/hooks/scripts/aiqt_hooks.py", "_orch_sha256_hex",
      ("#1: __import__('hashlib').sha256(text.encode('utf-8')).hexdigest()",),
@@ -640,13 +657,13 @@ DYNAMIC_IMPORT_SITES = (
       "#3: 'imp'",
       "#4: 'imp'"),
      "the string imp is a run-id prefix in vectors, not the imp module"),
-    ("opf/tools/check_opf_homes.py", "_self_test_vectors.<lambda>#12.<lambda>",
+    ("opf/tools/check_opf_homes.py", "_self_test_vectors.<lambda>#12/109.<lambda>",
      ("#1: 'imp'",),
      "the string imp is a run-id prefix in vectors, not the imp module"),
-    ("opf/tools/check_opf_homes.py", "_self_test_vectors.<lambda>#29.<lambda>",
+    ("opf/tools/check_opf_homes.py", "_self_test_vectors.<lambda>#29/109.<lambda>",
      ("#1: 'imp'",),
      "the string imp is a run-id prefix in vectors, not the imp module"),
-    ("opf/tools/check_opf_homes.py", "_self_test_vectors.<lambda>#42",
+    ("opf/tools/check_opf_homes.py", "_self_test_vectors.<lambda>#42/109",
      ("#1: 'imp'",),
      "the string imp is a run-id prefix in vectors, not the imp module"),
     ("opf/tools/check_opf_init.py", "_suite_isolated",
@@ -1263,11 +1280,12 @@ def _scope_name(node):
 
 def scope_identities(tree):
     """{id(node): scope} for the module (<module>) and for each def, class and lambda in tree, one per lexical
-    scope instance: the scopes around it and its own name (_scope_name) joined by dots, its own name followed by #K,
-    its ordinal in source order among the scopes of that name its enclosing scope holds, when that scope holds more
-    than one (sibling lambdas, two defs of one name under an if and its else). A scope's enclosing scope is the one
-    that runs its definition (_scoped_children). No line or column is part of it; the source order only numbers
-    same-named siblings."""
+    scope instance: the scopes around it and its own name (_scope_name) joined by dots, its own name followed by #K/N
+    when its enclosing scope holds N > 1 scopes of that name (sibling lambdas, two defs of one name under an if and its
+    else), K its ordinal in source order among them, so adding or removing a sibling of that name changes the identity
+    of every sibling of that name. A scope's enclosing scope is the one that runs its definition (_scoped_children); a
+    comprehension or generator expression is not a scope here. No line or column is part of it; the source order only
+    numbers same-named siblings."""
     held = dict()
     stack = [(tree, tree, True)]
     while stack:
@@ -1287,7 +1305,7 @@ def scope_identities(tree):
             name = _scope_name(node)
             seen[name] = seen.get(name, 0) + 1
             if counts[name] > 1:
-                name += "#%d" % seen[name]
+                name += "#%d/%d" % (seen[name], counts[name])
             identities[id(node)] = name if parent is tree else identities[id(parent)] + "." + name
             order.append(node)
     return identities
@@ -2709,28 +2727,34 @@ _SITE_VECTORS = (
      "def f():\n    x = __import__\n    return __import__\ndef g():\n    return __import__\n",
      ("f | #1: __import__", "f | #2: __import__", "g | #1: __import__")),
     # Each lexical scope instance is its own scope: same-named siblings are numbered in source order within the scope
-    # that runs their definitions, and a name alone in its scope is not.
+    # that runs their definitions, each with their count, and a name alone in its scope is not.
     ("sibling lambdas numbered in source order", "a = lambda: __import__('a')\nb = lambda: __import__('b')\n",
-     ("<lambda>#1 | #1: __import__('a')", "<lambda>#2 | #1: __import__('b')")),
+     ("<lambda>#1/2 | #1: __import__('a')", "<lambda>#2/2 | #1: __import__('b')")),
     ("identical references in sibling lambdas, each the first in its own",
      "a = lambda x: __import__(x)\nb = lambda x: __import__(x)\n",
-     ("<lambda>#1 | #1: __import__(x)", "<lambda>#2 | #1: __import__(x)")),
+     ("<lambda>#1/2 | #1: __import__(x)", "<lambda>#2/2 | #1: __import__(x)")),
     ("same-named defs numbered, a def of another name not",
      "if X:\n    def f():\n        return __import__\nelse:\n    def f():\n        return __import__\ndef g():\n"
      "    return __import__\n",
-     ("f#1 | #1: __import__", "f#2 | #1: __import__", "g | #1: __import__")),
+     ("f#1/2 | #1: __import__", "f#2/2 | #1: __import__", "g | #1: __import__")),
     ("lambdas in two defs, each alone in its own",
      "def f():\n    return lambda: __import__\ndef g():\n    return lambda: __import__\n",
      ("f.<lambda> | #1: __import__", "g.<lambda> | #1: __import__")),
     ("a default's lambda numbered in the scope that runs the definition",
      "def f(a=lambda: __import__):\n    return lambda: __import__\ng = lambda: __import__\n",
-     ("<lambda>#1 | #1: __import__", "f.<lambda> | #1: __import__", "<lambda>#2 | #1: __import__")),
+     ("<lambda>#1/2 | #1: __import__", "f.<lambda> | #1: __import__", "<lambda>#2/2 | #1: __import__")),
+    # A comprehension or generator expression is not a scope here: what it holds is read in the scope around it.
+    ("comprehension and generator expression read in the def around them",
+     "def f(a):\n    return [__import__(n) for n in a], (__import__(n) for n in a)\n",
+     ("f | #1: __import__(n)", "f | #2: __import__(n)")),
 )
 
 # (name, source before, source after, the lines of the findings the after source gives as tools/t.py, exactly, 0 for a
 # row's own): the rows are the ones the gate under test writes for the before source, so each vector reads one edit
 # the way that gate reads it, and a vector holds against this gate and fails against one whose scope identity merges
-# distinct lexical scopes (the identity before scope instances were told apart).
+# distinct lexical scopes (the identity before scope instances were told apart), or, where the edit adds or removes a
+# same-named sibling, against one whose identity leaves out the count of same-named siblings; the last two pass on
+# both and fail against a mutant (MUTANTS) that counts siblings of other names or puts a column into the key.
 _MOVE_VECTORS = (
     ("reference moved into a sibling lambda",
      "a = lambda x: __import__(x)\nb = lambda x: None\n", "a = lambda x: None\nb = lambda x: __import__(x)\n", (0, 2)),
@@ -2743,6 +2767,27 @@ _MOVE_VECTORS = (
     ("class around a method turned into a def of its name",
      "class C:\n    def m(self):\n        return __import__(x)\n",
      "def C():\n    def m(self):\n        return __import__(x)\n", (0, 3)),
+    # A same-named sibling added or removed changes the count, so a reference moved into the sibling that takes its
+    # ordinal is a finding (and so is every row under a sibling of that name, an over-rejection).
+    ("sibling lambda inserted ahead, reference moved into the one taking its ordinal",
+     "a = lambda x: None\nb = lambda x: __import__(x)\n",
+     "z = lambda x: None\na = lambda x: __import__(x)\nb = lambda x: None\n", (0, 2)),
+    ("sibling lambda removed ahead, reference moved into the one taking its ordinal",
+     "z = lambda: 0\na = lambda x: __import__(x)\nb = lambda x: None\n",
+     "a = lambda x: None\nb = lambda x: __import__(x)\n", (0, 2)),
+    ("sibling lambda holding the reference inserted ahead, the one listed emptied",
+     "a = lambda x: __import__(x)\nb = lambda x: None\n",
+     "c = lambda x: __import__(x)\na = lambda x: None\nb = lambda x: None\n", (0, 1)),
+    ("same-named def removed ahead, reference moved into the one taking its ordinal",
+     "if X:\n    def f(x):\n        return None\nelif Y:\n    def f(x):\n        return __import__(x)\nelse:\n"
+     "    def f(x):\n        return None\n",
+     "if Y:\n    def f(x):\n        return None\nelse:\n    def f(x):\n        return __import__(x)\n", (0, 6)),
+    ("lambda removed elsewhere in a def, reference moved into the sibling taking its ordinal",
+     "def v():\n    t = [lambda: 0]\n    u = lambda x: __import__(x)\n    w = lambda x: None\n",
+     "def v():\n    u = lambda x: None\n    w = lambda x: __import__(x)\n", (0, 3)),
+    ("same-named sibling added after a listed scope, its row stale (an over-rejection)",
+     "a = lambda x: __import__(x)\nb = lambda x: None\n",
+     "a = lambda x: __import__(x)\nb = lambda x: None\nc = lambda x: None\n", (0, 1)),
     ("def of another name added beside a listed scope", "def f(x):\n    return __import__(x)\n",
      "def g(x):\n    return None\ndef f(x):\n    return __import__(x)\n", ()),
     ("reference moved within its lambda", "a = lambda x: (x, __import__(x))\nb = lambda x: None\n",
@@ -2900,7 +2945,7 @@ def _scan_rc(module, base, rules=None, special=None, **kwargs):
     if special == "twin-sites":
         module.dynamic_sites = lambda tree, *watched: original_sites(tree, *watched) * 2
     if special == "merged-scopes":
-        module.scope_identities = lambda tree: dict((key, re.sub(r"#[0-9]+", "", identity))
+        module.scope_identities = lambda tree: dict((key, re.sub(r"#[0-9]+/[0-9]+", "", identity))
                                                     for key, identity in original_identities(tree).items())
     try:
         findings, _shown, _stats = module.scan(base, rules=module.RULES if rules is None else rules, **kwargs)
@@ -2961,8 +3006,10 @@ def _case_failure(module, case):
 _SELF_TEST_MARKER = "\n# " + "-" * 64 + " self-test\n"
 
 # Each mutant removes one check (or one fail-closed path) from the gate half of this file's source, the part
-# before the self-test: (mutant id, the exact source text, its replacement, the vector that must then fail).
-# The self-test loads every mutant as a scratch module and requires its named vector to fail.
+# before the self-test: (mutant id, the exact source text, its replacement, the vector that must then fail). A tuple
+# of texts and a tuple of replacements remove a check together with the backstop that would refuse first, so the
+# check's own vector catches it, not the backstop. The self-test loads every mutant as a scratch module and requires
+# its named vector to fail.
 MUTANTS = (
     # the walk and the inputs
     ("symlinked-dir-refused", "if os.path.islink(os.path.join(dirpath, d)):", "if False:", "symlinked directory"),
@@ -3051,6 +3098,20 @@ MUTANTS = (
      "return node.name", "class around a method turned into a def of its name"),
     ("scope-identity-refused", "    if shared:\n        raise CannotEvaluate(",
      "    if False:\n        raise CannotEvaluate(", "two lexical scopes given one identity"),
+    # The numbering removed with the refusal that would otherwise catch it first: the move or site logic catches it.
+    ("scope-instances-numbered-unrefused",
+     ("            if counts[name] > 1:\n", "    if shared:\n        raise CannotEvaluate("),
+     ("            if False:\n", "    if False:\n        raise CannotEvaluate("),
+     "reference moved into a sibling lambda"),
+    ("scope-instances-counted-unrefused",
+     ("seen[name] = seen.get(name, 0) + 1", "    if shared:\n        raise CannotEvaluate("),
+     ("seen[name] = 1", "    if False:\n        raise CannotEvaluate("),
+     "identical references in sibling lambdas, each the first in its own"),
+    # A numbered identity carries the count of its same-named siblings, and counts siblings of that name only.
+    ("scope-instances-sibling-count", 'name += "#%d/%d" % (seen[name], counts[name])',
+     'name += "#%d" % seen[name]', "sibling lambda inserted ahead, reference moved into the one taking its ordinal"),
+    ("scope-instances-count-named", "counts[_scope_name(node)] = counts.get(_scope_name(node), 0) + 1",
+     "counts = dict((_scope_name(n), len(inner)) for n in inner)", "def of another name added beside a listed scope"),
     ("row-reference-form", 'REFERENCE_RE = re.compile(r"#[1-9][0-9]*: \\S.*")', 'REFERENCE_RE = re.compile(r".+")',
      "allowlist row in the positional form"),
     ("row-reference-ordinal", 'REFERENCE_RE = re.compile(r"#[1-9][0-9]*: \\S.*")',
@@ -3122,6 +3183,8 @@ MUTANTS = (
     ("site-key-position-free", "sites.append((reference_key(ordinals[key], text),",
      "sites.append((reference_key(ordinals[key], \"%d: %s\" % (span[0], text)),",
      "unrelated lines inserted above every listed site"),
+    ("site-key-column-free", "sites.append((reference_key(ordinals[key], text),",
+     "sites.append((reference_key(ordinals[key], \"%d: %s\" % (span[1], text)),", "reference moved within its lambda"),
     ("site-key-unique", "        if nodes[(rel, function, reference)] > 1:\n", "        if False:\n",
      "two nodes sharing one permission key"),
     ("site-reference-subscript", "                isinstance(parent, ast.Subscript) and parent.value is node):",
@@ -3452,12 +3515,17 @@ def self_test_main():
         mutant_dir = tmp / "mutants"
         os.makedirs(mutant_dir)
         for number, (mutant, old, new, vector) in enumerate(MUTANTS, 1):
-            if gate_source.count(old) != 1 or vector not in by_name:
-                failures.append("mutant %s: anchor found %d times, vector %r %s" % (
-                    mutant, gate_source.count(old), vector, "known" if vector in by_name else "unknown"))
+            pairs = tuple(zip(old, new, strict=True)) if isinstance(old, tuple) else ((old, new),)
+            found = [gate_source.count(text) for text, _replacement in pairs]
+            if found != [1] * len(pairs) or vector not in by_name:
+                failures.append("mutant %s: anchor found %s times, vector %r %s" % (
+                    mutant, "/".join(map(str, found)), vector, "known" if vector in by_name else "unknown"))
                 continue
+            mutated = gate_source
+            for text, replacement in pairs:
+                mutated = mutated.replace(text, replacement)
             try:
-                module = _load_mutant(gate_source.replace(old, new) + marker + rest, mutant_dir, number)
+                module = _load_mutant(mutated + marker + rest, mutant_dir, number)
             except SyntaxError as exc:
                 failures.append("mutant %s: does not compile: %s" % (mutant, exc))
                 continue
@@ -3501,8 +3569,8 @@ def self_test_main():
     print("SELF-TEST PASS: %d rule vectors red with their rule and green without it (%d of them one per watched "
           "name or import-system member, %d one per importer), %d green vectors exit 0, %d cannot-evaluate vectors "
           "exit 2, %d dynamic-import site vectors hold, %d edit vectors (rows written for one source, findings exact "
-          "on the edited one) hold, %d mutants (one check removed each) caught by their vectors, %d watched names, %d "
-          "members and %d importers each removed and caught, the live tree passes"
+          "on the edited one) hold, %d mutants (one check removed each, with its backstop where named) caught by their "
+          "vectors, %d watched names, %d members and %d importers each removed and caught, the live tree passes"
           % (len(_RULE_VECTORS) + len(names | members) + importers, len(names | members), importers,
              len(_GREEN_VECTORS), len(_CANNOT_VECTORS), len(_SITE_VECTORS), len(_MOVE_VECTORS), len(MUTANTS),
              len(names), len(members), importers))
