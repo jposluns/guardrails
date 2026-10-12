@@ -59,6 +59,8 @@ VECTOR ROSTER (U1-U28, P1):
   U17 the above-tooling, non-canonical, NOT-ADOPTED, and partial-1.2.0 triage refusals (with the scoped
       recovery text).
   U17b post-manifest exception: planned restore/rm advice and F2 candidates, with suppression flips.
+  U17c counters tomllib refuses with RecursionError (deep nesting; a 1001-part key under the emulated cap):
+      exit 2 with the does-not-parse refusal, never the backstop's unexpected error; unchanged.
   U18 postcondition unit vectors: call opf._upgrade_postcondition directly with hand-mutated new models; each
       mutation refuses and the genuine planner output passes (the check that fails without the m1 fix). Also
       the R6 porcelain-grammar refusal vectors: _opf_write_guard.parse_porcelain refuses a lone NUL, a non-NUL-
@@ -1483,6 +1485,32 @@ def _suite_isolated():
                   "Never run a whole-tree restore" in out17d)
             drc17d, dout17d = doctor(s1)
             check("U17 partial 1.2.0 store doctor is not VALID (exit 2)", drc17d == EXIT_ERROR)
+
+            # U17c) Counters tomllib refuses with RecursionError (a deeply nested value, and a 1001-part key under
+            # the emulated cap) get the specific does-not-parse refusal, exit 2, never the backstop's
+            # unexpected error, the tree unchanged. The key leg runs in-process so the cap reaches the parse.
+            import contextlib as _ctx17c
+            import io as _io17c
+            s17e = base / "u17c-deep-counters"
+            s17e.mkdir()
+            build_store(s17e, counters=_opf_store._ST_DEEP_TOML)
+            before17e = _snapshot(s17e)
+            rc17e, out17e = upgrade(s17e)
+            check("U17c deep counters refused as unparseable TOML (exit 2), tree unchanged",
+                  rc17e == EXIT_ERROR and "store manifest or counters does not parse as TOML" in out17e
+                  and "unexpected error" not in out17e and _snapshot(s17e) == before17e)
+            s17f = base / "u17c-long-key-counters"
+            s17f.mkdir()
+            build_store(s17f, counters=_opf_store._ST_LONG_KEY_TOML)
+            before17f = _snapshot(s17f)
+            buf17f = _io17c.StringIO()
+            with _opf_store._StKeyPartCap(), _ctx17c.redirect_stdout(buf17f), _ctx17c.redirect_stderr(buf17f):
+                rc17f = opf._cmd_upgrade(["--root", str(s17f)])
+            out17f = buf17f.getvalue()
+            check("U17c 1001-part-key counters refused as unparseable TOML (exit 2), tree unchanged",
+                  rc17f == EXIT_ERROR and "store manifest or counters does not parse as TOML" in out17f
+                  and "more than the allowed 1000 parts" in out17f and "unexpected error" not in out17f
+                  and _snapshot(s17f) == before17f)
 
             # U17b) Exceptions immediately after manifest replacement retain the entire planned scope.
             for suppress_recovery in (False, True):

@@ -724,11 +724,39 @@ def _parse_store_toml(relpath, data):
         # (check-fails-closed-on-unreadable; unreadable includes present-but-unparseable).
         raise StoreError("cannot parse {} ({})".format(relpath, exc))
     except RecursionError as exc:
-        # A deeply-nested TOML value overflows the parser's recursion: a present-but-unparseable input is a
-        # fail-closed StoreError (the caller routes it to CANNOT-EVALUATE), never an uncontrolled crash
+        # tomllib raises RecursionError on a deeply-nested value and, from CPython 3.14.8, on a key of more
+        # than 1000 dotted parts: a present-but-unparseable input is a fail-closed StoreError (the caller
+        # routes it to CANNOT-EVALUATE), never an uncontrolled crash, and its message names both causes
         # (check-fails-closed-on-unreadable; unreadable includes present-but-unparseable).
-        raise StoreError("cannot parse {} (input nesting is too deep; present but unparseable): {}".format(
-            relpath, exc))
+        raise StoreError("cannot parse {} (input nesting is too deep or a dotted key has too many parts; present "
+                         "but unparseable): {}".format(relpath, exc))
+
+
+# Self-test seam for that RecursionError class, shared by the opf self-tests. _ST_DEEP_TOML nests a value past
+# the recursion limit; _ST_LONG_KEY_TOML is a 1001-part key, which raises only where tomllib caps key parts
+# (CPython 3.14.8 on) or under _StKeyPartCap, which emulates that cap on an interpreter without it.
+_ST_DEEP_TOML = "deep = " + "[" * 5000 + "]" * 5000 + "\n"
+_ST_LONG_KEY_TOML = "k" + ".k" * 1000 + " = 1\n"
+
+
+class _StKeyPartCap:
+    """While held, tomllib refuses a key of more than 1000 parts with RecursionError: tomllib._parser.parse_key
+    is rebound on entry and restored on exit. Self-test only."""
+
+    def __enter__(self):
+        real = self._real = tomllib._parser.parse_key
+
+        def capped(src, pos):
+            pos, key = real(src, pos)
+            if len(key) > 1000:
+                raise RecursionError("TOML key has more than the allowed 1000 parts")
+            return pos, key
+        tomllib._parser.parse_key = capped
+        return self
+
+    def __exit__(self, *exc_info):
+        tomllib._parser.parse_key = self._real
+        return False
 
 
 def _immediate_subdirs(store_root_fd, working_rel):
@@ -3705,6 +3733,28 @@ def self_test():
                   and "stale" not in hs_seam.views)
         finally:
             os.close(hs_wfd)
+
+        # tomllib's RecursionError (a deeply-nested value, and a 1001-part key under the emulated cap) is a
+        # StoreError naming both causes, so a long dotted key is never reported as nesting alone.
+        def recursion_refusal(text, capped):
+            try:
+                if capped:
+                    with _StKeyPartCap():
+                        _parse_store_toml("m/manifest.toml", text.encode("utf-8"))
+                else:
+                    _parse_store_toml("m/manifest.toml", text.encode("utf-8"))
+            except StoreError as exc:
+                return str(exc)
+            except Exception as exc:  # noqa: BLE001  an escape is a failed check, never a suite abort
+                return "escaped " + type(exc).__name__
+            return "parsed"
+        rec_head = ("cannot parse m/manifest.toml (input nesting is too deep or a dotted key has too many parts; "
+                    "present but unparseable): ")
+        check("recursion-deep-nesting-names-both-causes",
+              recursion_refusal(_ST_DEEP_TOML, False).startswith(rec_head + "maximum recursion depth"))
+        check("recursion-1001-part-key-names-both-causes",
+              recursion_refusal(_ST_LONG_KEY_TOML, True)
+              == rec_head + "TOML key has more than the allowed 1000 parts")
 
     finally:
         shutil.rmtree(base, ignore_errors=True)

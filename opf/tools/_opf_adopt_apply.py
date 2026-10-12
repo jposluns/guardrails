@@ -439,7 +439,9 @@ def _verify_bundle_at(root_fd, run_id, bundle, home_fd=None):
             try:
                 raw, _fst = read_retained(rel)
                 doc = tomllib.loads(raw.decode("utf-8"))
-            except (_journal.JournalError, OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+            except (_journal.JournalError, OSError, UnicodeDecodeError, tomllib.TOMLDecodeError,
+                    RecursionError) as exc:
+                # RecursionError: tomllib's refusal of deep nesting and (CPython 3.14.8 on) a 1001-part key.
                 return schema._cannot("inventory {!r} is unreadable or unparseable ({})".format(rel, exc))
             checked = validate_inventory(doc, run_id)
             if checked.status != store.VALID:
@@ -2092,6 +2094,28 @@ def _self_test_checks():
         archived.unlink()
         archived.write_bytes(files[".working/TODO.md"])
         check("verify-restored-after-over-cap-valid", verify_bundle(root, rid).status == VALID)
+        # an inventory tomllib refuses with RecursionError (a deeply nested value, and a 1001-part key under the
+        # emulated cap) is CANNOT-EVALUATE naming the unparseable inventory, never an escape to a backstop.
+        inv_path = root / inventory_rel(rid)
+        inv_saved = inv_path.read_bytes()
+        for label, text, capped in (("deep", store._ST_DEEP_TOML, False),
+                                    ("key-1001", store._ST_LONG_KEY_TOML, True)):
+            inv_path.unlink()
+            inv_path.write_bytes(text.encode("utf-8"))
+            try:
+                if capped:
+                    with store._StKeyPartCap():
+                        verdict = verify_bundle(root, rid)
+                else:
+                    verdict = verify_bundle(root, rid)
+            except RecursionError:
+                verdict = None
+            check("verify-recursion-inventory-cannot-eval-" + label,
+                  verdict is not None and verdict.status == CANNOT
+                  and any("is unreadable or unparseable" in f for f in verdict.findings))
+        inv_path.unlink()
+        inv_path.write_bytes(inv_saved)
+        check("verify-restored-after-recursion-valid", verify_bundle(root, rid).status == VALID)
         # one transaction per run and phase: a second base transaction refuses before it opens.
         before = snapshot(root)
         late = refusal(run_adopt_transaction, root, rid,

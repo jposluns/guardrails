@@ -567,7 +567,9 @@ def load_source(root):
     """Parse and schema-check the single source; return its normalized fields."""
     try:
         data = tomllib.loads(_read_text(root / SOURCE_REL))
-    except tomllib.TOMLDecodeError as exc:
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+        # tomllib raises a bare ValueError on an over-long integer literal and RecursionError on deep
+        # nesting or (CPython 3.14.8 on) a key of more than 1000 dotted parts: each is exit 2.
         raise CannotEvaluate("{}: does not parse: {}".format(SOURCE_REL, exc))
     if set(data) != SOURCE_KEYS:
         raise CannotEvaluate("{}: keys {} (want exactly {})".format(
@@ -1820,6 +1822,58 @@ def _has(lines, marker):
     return any(marker in line for line in lines)
 
 
+# Inputs tomllib refuses without a TOMLDecodeError: RecursionError on a value nested past the recursion
+# limit and, from CPython 3.14.8, on a key of more than 1000 dotted parts (emulated by _key_part_capped
+# on an interpreter without that cap), and a bare ValueError on an integer past the 4300-digit limit.
+DEEP_TOML = "deep = " + "[" * 5000 + "]" * 5000 + "\n"
+LONG_KEY_TOML = "k" + ".k" * 1000 + " = 1\n"
+LONG_INT_TOML = "long = 1" + "0" * 5000 + "\n"
+
+
+def _key_part_capped(thunk):
+    """thunk() with tomllib refusing a key of more than 1000 parts by RecursionError, as CPython 3.14.8
+    does. Self-test only: tomllib._parser.parse_key is rebound for the call and then restored."""
+    parser = tomllib._parser
+    real = parser.parse_key
+
+    def capped(src, pos):
+        pos, key = real(src, pos)
+        if len(key) > 1000:
+            raise RecursionError("TOML key has more than the allowed 1000 parts")
+        return pos, key
+    parser.parse_key = capped
+    try:
+        return thunk()
+    finally:
+        parser.parse_key = real
+
+
+def _raises(text, kind, capped=False):
+    """True when tomllib refuses text with exactly the class kind, so the vector is live here."""
+    try:
+        _key_part_capped(lambda: tomllib.loads(text)) if capped else tomllib.loads(text)
+    except Exception as exc:  # noqa: BLE001  the class raised is the observation
+        return type(exc) is kind
+    return False
+
+
+def _manifest_refusal(base, text, capped=False):
+    """(result, stderr) of _expected_check_ids over a manifest holding text; CHECKS_MANIFEST is restored."""
+    import contextlib
+    import io
+    global CHECKS_MANIFEST
+    path = Path(tempfile.mkdtemp(prefix="manifest-", dir=base)) / "selftest_checks.toml"
+    path.write_text(text, encoding="utf-8")
+    saved, CHECKS_MANIFEST = CHECKS_MANIFEST, path
+    err = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(err):
+            got = _key_part_capped(_expected_check_ids) if capped else _expected_check_ids()
+    finally:
+        CHECKS_MANIFEST = saved
+    return got, err.getvalue()
+
+
 def _noflush_guard_text(name, floor, modes=None, code=REFUSAL_EXIT):
     """The retired wrapped-write guard shape, rebuilt from the canonical text by dropping each
     explicit flush and the `import os`, and ending with `raise SystemExit` instead of os._exit:
@@ -1877,6 +1931,25 @@ def _self_test_cases(base):
     check("source/missing-cannot-evaluate", evaluate(root)[0], 2)
     check("source/unparseable-cannot-evaluate",
           evaluate(_fixture(base, source="python-floor = \n"))[0], 2)
+    code, lines = evaluate(_fixture(base, source=_source_text(extra=DEEP_TOML)))
+    check("source/deep-nesting-cannot-evaluate",
+          (_raises(DEEP_TOML, RecursionError), code, _has(lines, "does not parse")), (True, 2, True))
+    code, lines = _key_part_capped(lambda: evaluate(_fixture(base, source=_source_text(extra=LONG_KEY_TOML))))
+    check("source/key-1001-parts-cannot-evaluate",
+          (_raises(LONG_KEY_TOML, RecursionError, capped=True), code, _has(lines, "does not parse")),
+          (True, 2, True))
+    code, lines = evaluate(_fixture(base, source=_source_text(extra=LONG_INT_TOML)))
+    check("source/overlong-integer-cannot-evaluate",
+          (_raises(LONG_INT_TOML, ValueError), code, _has(lines, "does not parse")), (True, 2, True))
+    got, err = _manifest_refusal(base, DEEP_TOML)
+    check("harness/manifest-deep-nesting-harness-error",
+          (got, "SELF-TEST HARNESS ERROR: cannot read" in err), (None, True))
+    got, err = _manifest_refusal(base, LONG_KEY_TOML, capped=True)
+    check("harness/manifest-key-1001-parts-harness-error",
+          (got, "SELF-TEST HARNESS ERROR: cannot read" in err), (None, True))
+    got, err = _manifest_refusal(base, LONG_INT_TOML)
+    check("harness/manifest-overlong-integer-harness-error",
+          (got, "SELF-TEST HARNESS ERROR: cannot read" in err), (None, True))
     check("source/unknown-key-cannot-evaluate",
           evaluate(_fixture(base, source=_source_text(extra="floor-note = \"x\"\n")))[0], 2)
     check("source/bool-format-version-cannot-evaluate", evaluate(_fixture(
@@ -2914,7 +2987,7 @@ def _rule_reverts(base):
 def _expected_check_ids():
     try:
         manifest = tomllib.loads(_read_text(CHECKS_MANIFEST))
-    except (CannotEvaluate, tomllib.TOMLDecodeError) as exc:
+    except (CannotEvaluate, tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
         print("SELF-TEST HARNESS ERROR: cannot read {}: {}".format(CHECKS_MANIFEST, exc),
               file=sys.stderr)
         return None

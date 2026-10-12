@@ -1914,7 +1914,8 @@ def _health_check(root, root_fd, plan, binding):
     baseline, importer, _module = _roster_namespaces()
     try:
         counters = tomllib.loads(raw.decode("utf-8", "strict"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError):
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError):
+        # RecursionError: tomllib's refusal of deep nesting and (CPython 3.14.8 on) a 1001-part key.
         raise InitOperationError("the completed adoption's counters are not TOML")
     _hw, findings = validate_counters(counters, known_namespaces=baseline,
                                       optional_namespaces=importer)
@@ -2431,7 +2432,9 @@ def run_init_operation(product_root, *, ancestral=None, recover=False):
         if "preserved and refused" in str(exc):
             result.conflicts.append(str(exc).split(" ", 1)[0])
     except (_opf_oplock.OpLockError, _opf_init_substrate.InitSubstrateError,
-            _journal.JournalError, OSError, ValueError) as exc:
+            _journal.JournalError, OSError, ValueError, RecursionError) as exc:
+        # RecursionError: a parse tomllib refuses that way (deep nesting, a 1001-part key) at a site with no
+        # local mapping is reported as CANNOT-EVALUATE, never raised out of the public seam.
         primary = {"code": CANNOT_EVALUATE, "detail": "{}: {}".format(type(exc).__name__, exc)}
     finally:
         if primary is not None:
@@ -3104,6 +3107,11 @@ def _expected_views(root):
         os.close(fd)
 
 
+def _result_detail(got):
+    """A failed check detail: the InitResult status and primary failure, or the raised exception."""
+    return "{} {}".format(getattr(got, "status", repr(got)), getattr(got, "primary_failure", ""))
+
+
 def _read_or_none(path):
     try:
         with open(path, "rb") as fh:
@@ -3220,6 +3228,50 @@ def _physical_tests(base, env, ok, signal):
     rc, res, err = _child(root, env)
     ok("R2b-edited-completed-is-healthy", res and res["status"] == ALREADY_INITIALIZED
        and _snapshot_all(root) == before, str(res) + err[-400:])
+
+    # R2c completed-adoption counters that tomllib refuses with RecursionError (a deeply nested value, and a
+    # 1001-part key under the emulated cap) refuse through the public seam as not TOML, the worktree
+    # untouched; a RecursionError no site maps is CANNOT-EVALUATE from run_init_operation, never raised,
+    # and the mutex is released (the restored adoption re-runs ALREADY-INITIALIZED).
+    root = _plain_repo(os.path.join(base, "recursion-counters"), env)
+    rc, res, err = _child(root, env)
+    ok("R2c-fixture-ready", res and res["status"] == VIEWS_READY, str(res) + err[-400:])
+    counters_path = os.path.join(root, COUNTERS_RELPATH)
+    good_counters = _read_or_none(counters_path)
+
+    def seam(capped=False):
+        try:
+            if not capped:
+                return init_operation(root)
+            with _opf_store._StKeyPartCap():
+                return init_operation(root)
+        except Exception as exc:  # noqa: BLE001  an escape from the seam is the failure under test
+            return exc
+    for label, text, capped in (("deep", _opf_store._ST_DEEP_TOML, False),
+                                ("key-1001", _opf_store._ST_LONG_KEY_TOML, True)):
+        _write(counters_path, text.encode("utf-8"))
+        before = _snapshot_all(root)
+        got = seam(capped)
+        ok("R2c-{}-counters-refused-not-toml".format(label), isinstance(got, InitResult)
+           and got.status == REFUSED and _snapshot_all(root) == before
+           and "counters are not TOML" in (got.primary_failure or {}).get("detail", ""), _result_detail(got))
+    _write(counters_path, good_counters)
+    this = sys.modules[__name__]
+    real_select = this._select
+
+    def overflowing_select(*_a):
+        raise RecursionError("injected parser overflow")
+    this._select = overflowing_select
+    try:
+        got = seam()
+    finally:
+        this._select = real_select
+    ok("R2c-unmapped-recursion-cannot-evaluate", isinstance(got, InitResult)
+       and got.status == CANNOT_EVALUATE
+       and "RecursionError" in (got.primary_failure or {}).get("detail", ""), _result_detail(got))
+    got = seam()
+    ok("R2c-mutex-released", isinstance(got, InitResult) and got.status == ALREADY_INITIALIZED,
+       _result_detail(got))
 
     # R3 an existing CHANGELOG.md is preserved byte for byte, recorded in E, never created.
     root = _plain_repo(os.path.join(base, "changelog"), env)

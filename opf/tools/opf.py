@@ -16417,7 +16417,8 @@ def _upgrade_run(root):
         try:
             manifest_model = tomllib.loads(manifest_bytes.decode("utf-8"))
             counters_model = tomllib.loads(counters_bytes.decode("utf-8"))
-        except (UnicodeError, tomllib.TOMLDecodeError) as exc:
+        except (UnicodeError, tomllib.TOMLDecodeError, RecursionError) as exc:
+            # RecursionError: tomllib's refusal of deep nesting and (CPython 3.14.8 on) a 1001-part key.
             raise _UpgradeError("store manifest or counters does not parse as TOML ({})".format(exc))
 
         # spec_version triage: current is an idempotent byte no-op; above-tooling fails closed; only the
