@@ -1,8 +1,8 @@
 """Capability-bound store journal API. Its first writer, the MIG-PR5 ingest promotion coordinator,
 retired with the import engine; other writers keep their legacy homes.
 
-Homes-2 store writers must use this API for journal frames and terminal projections. Paths derive from
-kind and run identity; callers cannot choose a destination. Recovery opens existing state
+Homes-2 store writers must use this API for journal frames, terminal projections and irrevocable ID
+reservations. Paths derive from kind and run identity; callers cannot choose a destination. Recovery opens existing state
 and refuses a missing journal. It never bootstraps a replacement recovery history.
 
 This is an in-process cooperation boundary, not protection from a malicious same-user writer.
@@ -12,6 +12,7 @@ fork while using the capability. Homes 2 has no homes migration and no legacy jo
 """
 import contextlib
 import os
+import re
 import stat
 from pathlib import Path
 
@@ -38,13 +39,16 @@ def _check_ordinary_ops(ops):
 
 
 @contextlib.contextmanager
-def _opened(cap, kind, run_id, create):
-    _opf_store.txn_record(kind, run_id)  # validate both identity components before any I/O
+def _held_root(cap):
+    """Validate the held capability (the shared open discipline of every store-journal entry point:
+    a live, unclaimed OpCapability whose store identity still matches) and yield the trusted
+    store-root fd. Validation and open failures map to the one "cannot open store journal" refusal;
+    a failure the caller raises inside the yield propagates unchanged."""
     if not isinstance(cap, _opf_oplock.OpCapability):
         raise _journal.JournalError("store journal access requires a held OpCapability")
     if not cap._claim.acquire(blocking=False):
         raise _journal.JournalError("operation capability is being released or used")
-    root_fd = jr_fd = None
+    root_fd = None
     try:
         try:
             if cap._claimant is not None:
@@ -61,22 +65,36 @@ def _opened(cap, kind, run_id, create):
                     raise _journal.JournalError("store identity differs from the held capability")
             finally:
                 os.close(machine_fd)
-            rel = _opf_store.journal_root(kind)
-            if create:
-                _journal.ensure_journal_dirs(root_fd, rel)
-            jr_fd = _journal.open_journal_root_fd(root_fd, rel)
         except (OSError, _opf_store.StoreError) as exc:
             raise _journal.JournalError("cannot open store journal: {}".format(exc))
-        # A failure inside the caller's operation is attributed to the operation, not the open.
-        try:
-            yield root_fd, jr_fd, Path(cap.store_root) / rel / run_id
-        except (OSError, _opf_store.StoreError) as exc:
-            raise _journal.JournalError("store journal operation failed: {}".format(exc))
+        yield root_fd
     finally:
-        for fd in (jr_fd, root_fd):
-            if fd is not None:
-                _journal._close_fd_quietly(fd)
+        if root_fd is not None:
+            _journal._close_fd_quietly(root_fd)
         cap._claim.release()
+
+
+@contextlib.contextmanager
+def _opened(cap, kind, run_id, create):
+    _opf_store.txn_record(kind, run_id)  # validate both identity components before any I/O
+    with _held_root(cap) as root_fd:
+        jr_fd = None
+        try:
+            try:
+                rel = _opf_store.journal_root(kind)
+                if create:
+                    _journal.ensure_journal_dirs(root_fd, rel)
+                jr_fd = _journal.open_journal_root_fd(root_fd, rel)
+            except (OSError, _opf_store.StoreError) as exc:
+                raise _journal.JournalError("cannot open store journal: {}".format(exc))
+            # A failure inside the caller's operation is attributed to the operation, not the open.
+            try:
+                yield root_fd, jr_fd, Path(cap.store_root) / rel / run_id
+            except (OSError, _opf_store.StoreError) as exc:
+                raise _journal.JournalError("store journal operation failed: {}".format(exc))
+        finally:
+            if jr_fd is not None:
+                _journal._close_fd_quietly(jr_fd)
 
 
 # --- shared native-journal validation (PR B): pure, kind-generic, non-mutating -------------------------
@@ -225,6 +243,85 @@ def recover_transaction(cap, kind, run_id):
         result = _journal.recover(jr_fd, txn_dir, root_fd)
         _project(root_fd, jr_fd, txn_dir, kind, run_id)
         return result
+
+
+# --- irrevocable ID reservations (homes plan PR-3): the homes-2 allocation seam's durable half ----------
+# One journals/<kind>/allocations/<run-id>.toml per run (spec 4.2/8.2), created BEFORE the reversible
+# journaled publication, never read back, rewritten or removed here, whatever the run's outcome.
+# Inert until the record writer connects to it: no shipped caller reserves yet.
+
+ALLOCATION_FORMAT = "opf.journal.allocation/v1"
+_CLAIM_NAMESPACE_RE = re.compile(r"[A-Z]{2}\Z")
+
+
+def _check_claims(claims):
+    """Validate a reservation's claims purely (spec 8.2): a non-empty map of namespace (two uppercase
+    ASCII letters) to that run's new high-water value (an int >= 1; a bool is not an int here)."""
+    if (not isinstance(claims, dict) or not claims
+            or not all(isinstance(ns, str) and _CLAIM_NAMESPACE_RE.fullmatch(ns) is not None
+                       and type(n) is int and n >= 1 for ns, n in claims.items())):
+        raise _journal.JournalError("id reservation claims must be a non-empty map of namespace "
+                                    "([A-Z]{2}) to the run's new high-water (an integer >= 1)")
+
+
+def reservation_record(kind, run_id, operation_id, claims):
+    """The irrevocable ID reservation's exact model (spec 8.2; the writer's only shape). Pure; raises
+    JournalError on an invalid identity, a malformed operation id, or malformed claims."""
+    _validate_identity(kind, run_id)
+    if not isinstance(operation_id, str) or not operation_id:
+        raise _journal.JournalError("an id reservation requires a non-empty operation id")
+    _check_claims(claims)
+    return dict(format=ALLOCATION_FORMAT, kind=kind, run_id=run_id, operation_id=operation_id,
+                claims=dict(sorted(claims.items())))
+
+
+def reservation_payload(kind, run_id, operation_id, claims):
+    """The canonical reservation bytes the writer publishes; a reader requires exact equality."""
+    return _opf_emit.emit_checked(reservation_record(kind, run_id, operation_id, claims)).encode("utf-8")
+
+
+def reserve_allocation(cap, kind, run_id, claims):
+    """Create THE run's irrevocable ID reservation at _opf_store.allocation_record(kind, run_id) under
+    the held capability (spec 4.2/8.2): exclusive, create-only, durable before return. The destination
+    derives from kind and run identity alone; no caller names a path. Publication is _project's
+    atomic-exclusive idiom (_create_control_file): the full payload is written and fsynced at a
+    staging name, linked exclusively to the final name, the staging name retired and the directory
+    fsynced, so a process killed at ANY point leaves either no reservation or the complete durable
+    one, plus at most a staging leftover the next attempt removes as garbage under the held
+    capability before judging the final name. Any existing entry at the reservation path, the prior
+    complete reservation included, refuses: a reservation is irrevocable, so a refused retry means
+    the run already holds its numbers. Returns the published payload bytes."""
+    _validate_identity(kind, run_id)
+    _check_claims(claims)
+    rel = _opf_store.allocation_record(kind, run_id)
+    with _held_root(cap) as root_fd:
+        payload = reservation_payload(kind, run_id, cap.op_id, claims)
+        pfd = None
+        try:
+            try:
+                _journal.ensure_journal_dirs(root_fd, rel.rsplit("/", 1)[0])
+                pfd, name = _journal._open_parent(root_fd, rel)
+            except (OSError, _opf_store.StoreError) as exc:
+                raise _journal.JournalError("cannot open store journal: {}".format(exc))
+            try:
+                # Garbage first, so a leftover killed after its os.link (link count 2, the complete
+                # record's second name) is retired before the final name is judged; the refusal
+                # below then reads the surviving reservation like any other existing one.
+                _opf_oplock._remove_staging_garbage(pfd, name, "id reservation")
+                if _journal._lstat_at(pfd, name) is not None:
+                    raise _journal.JournalError("the {} id reservation for {} already exists; a "
+                                                "reservation is irrevocable and never rewritten "
+                                                "(spec 8.2)".format(kind, run_id))
+                fd, _ident = _opf_oplock._create_control_file(pfd, name, payload, "id reservation")
+                os.close(fd)
+            except _opf_oplock.OpLockError as exc:
+                raise _journal.JournalError(str(exc))
+            except OSError as exc:
+                raise _journal.JournalError("store journal operation failed: {}".format(exc))
+        finally:
+            if pfd is not None:
+                _journal._close_fd_quietly(pfd)
+    return payload
 
 
 # --- publication attempts (MIG-PR5): one logical run, several journal attempts ---------------------------

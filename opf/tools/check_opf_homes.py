@@ -384,6 +384,7 @@ _CONTRACT = {
         'Doctor MUST NOT consult a journal to decide partial status and makes no claim that a staged plan has a recoverable transaction.',
         "In homes 2, ordinary transaction operands, including those of an open transaction being recovered, MUST NOT equal, descend from, or contain journals/; a legacy store's transactions and recovery keep their legacy operand handling, and no shipped writer targets that home.",
         'Capability-bound journal APIs MUST derive their destinations from kind and run identity.',
+        'An ID reservation under allocations/ MUST be created exclusively and create-only, made durable before it is relied on and never rewritten, so an interrupted publication leaves no reservation or the complete one (section 8.2).',
         _D('Homes 2 has no legacy journal transport: no homes-1 journal is carried into journals/, and a homes-2 store is never recovered from one (section 15).'),
         _D('These comparisons are byte-exact: on a case-insensitive or normalizing filesystem, a differently cased or composed spelling can alias a reserved home and is not caught.'),
         'Discovery precedes the manifest, so it cannot know the generation: it MUST examine manifest.toml in every immediate subdirectory, including journals/, MUST fail closed on a reserved-name match or ambiguity, and MUST NOT read deeper there.',
@@ -508,6 +509,9 @@ _CONTRACT = {
         'Rotation, index rewrites, and store relocation MUST NOT touch counters.toml.',
         'Re-adoption MUST seed both series from a pinned ancestral snapshot and MUST refuse a missing required namespace; it MUST NOT zero-seed prior ancestry.',
         'Only a genuinely first adoption MAY start its counters at zero.',
+        'At homes 2 the claim additionally begins with one irrevocable reservation, journals/<kind>/allocations/<run-id>.toml (sections 4.2 and 8.8), which MUST hold exactly format = "opf.journal.allocation/v1", the run\'s kind, run_id and operation_id, and a non-empty [claims] table mapping each claimed namespace to that run\'s new high-water value.',
+        'A reservation MUST NOT be rewritten, and a second reservation for the same run MUST be refused.',
+        "At homes 2 the next ID in a namespace is one more than the maximum of the counters.toml high-water and every reservation's [claims] value for that namespace, so recovery MUST treat a reserved number as issued even where no published record carries it.",
     ),
     "8.3": (
         _D('Clean records carry the envelope below; the imported envelope follows it.'),
@@ -2078,6 +2082,7 @@ def boundary_self_test():
     import contextlib
     import copy
     import hashlib
+    import inspect
     from types import SimpleNamespace
     from unittest.mock import patch
     import _journal as journal
@@ -2948,6 +2953,67 @@ def boundary_self_test():
                 ("payload", lambda: home_journal.projection_payload(bad_kind, bad_run, "complete", "op"))):
             check("internal-identity-{}-{}".format(label, validator), lambda: journal_refuses(call))
 
+    # PR-3: the irrevocable ID reservation (spec 4.2/8.2). Pure shape, identity and claims here,
+    # then the derived destination and publication order with filesystem writes denied by mocks;
+    # real exclusivity, crash states and the on-disk refusals run in _self_test_vectors.
+    record_run = "record-20260917T120000Z-0123456789abcdef"
+    reservation_rel = ".working/journals/record/allocations/" + record_run + ".toml"
+    check("reservation-path-derived", lambda: store.allocation_record("record", record_run) == reservation_rel)
+    check("reservation-ordinary-target-refused", lambda: refuses(
+        lambda: store.require_ordinary_target(reservation_rel)))
+    with patch.object(home_journal, "_opened", side_effect=AssertionError("opened the store journal")):
+        check("reservation-operand-refused", lambda: "journal home" in (refusal(
+            lambda: home_journal.run_transaction(object(), "record", record_run,
+                                                 [dict(op="create", path=reservation_rel)],
+                                                 lambda _name: b"")) or ""))
+    check("reservation-no-caller-path", lambda: list(inspect.signature(
+        home_journal.reserve_allocation).parameters) == ["cap", "kind", "run_id", "claims"])
+    check("reservation-typed-record", lambda: tomllib.loads(home_journal.reservation_payload(
+        "record", record_run, "held-operation", {"WL": 12, "BI": 7}).decode()) == {
+        "format": "opf.journal.allocation/v1", "kind": "record", "run_id": record_run,
+        "operation_id": "held-operation", "claims": {"BI": 7, "WL": 12}})
+    for bad in (None, {}, [("BI", 1)], {"BI": 0}, {"BI": -1}, {"BI": True}, {"bi": 1}, {"BIX": 1},
+                {7: 1}, {"BI": "7"}):
+        check("reservation-claims-refused-{!r}".format(bad), lambda b=bad: journal_refuses(
+            lambda: home_journal.reservation_payload("record", record_run, "op", b)))
+    check("reservation-operation-id-refused", lambda: journal_refuses(
+        lambda: home_journal.reservation_payload("record", record_run, "", {"BI": 1})))
+    for label, bad_kind, bad_run in (("traversal", "record", "../escape"), ("kind", "bogus", record_run),
+                                     ("foreign-run", "record", run)):
+        check("reservation-identity-" + label, lambda k=bad_kind, r=bad_run: journal_refuses(
+            lambda: home_journal.reserve_allocation(object(), k, r, {"BI": 1})))
+    check("reservation-claims-before-capability", lambda: "claims" in (refusal(
+        lambda: home_journal.reserve_allocation(object(), "record", record_run, {})) or ""))
+    check("reservation-capability-required", lambda: journal_refuses(
+        lambda: home_journal.reserve_allocation(object(), "record", record_run, {"BI": 1})))
+
+    @contextlib.contextmanager
+    def held_root(_cap):
+        yield 100
+
+    held = SimpleNamespace(op_id="held-operation")
+    with patch.object(home_journal, "_held_root", held_root), \
+            patch.object(journal, "ensure_journal_dirs") as mkdirs, \
+            patch.object(journal, "_open_parent", return_value=(106, record_run + ".toml")) as parent, \
+            patch.object(journal, "_lstat_at", return_value=None) as prior, \
+            patch.object(journal, "_close_fd_quietly"), \
+            patch.object(oplock, "_remove_staging_garbage") as garbage, \
+            patch.object(oplock, "_create_control_file", return_value=(107, (1, 107))) as reserved, \
+            patch.object(home_journal.os, "close"):
+        reserved_payload = home_journal.reserve_allocation(held, "record", record_run, {"BI": 7})
+        check("reservation-derived-parent", lambda: mkdirs.call_args.args ==
+              (100, ".working/journals/record/allocations"))
+        check("reservation-derived-destination", lambda: parent.call_args.args == (100, reservation_rel))
+        check("reservation-garbage-removed-first", lambda: garbage.call_args.args ==
+              (106, record_run + ".toml", "id reservation"))
+        check("reservation-published-exact-payload", lambda: reserved.call_args.args ==
+              (106, record_run + ".toml", reserved_payload, "id reservation") and reserved_payload ==
+              home_journal.reservation_payload("record", record_run, "held-operation", {"BI": 7}))
+        prior.return_value = object()
+        check("reservation-existing-refused", lambda: "already exists" in (refusal(
+            lambda: home_journal.reserve_allocation(held, "record", record_run, {"BI": 7})) or "")
+            and reserved.call_count == 1)
+
     check("evidence-homes2-roster", lambda: "C-EVIDENCE-ENUM" not in doctor.REQUIRED_CHECKS
           and doctor.required_checks(2).index("C-EVIDENCE-ENUM") == doctor.REQUIRED_CHECKS.index("C-ARCHIVE-ENUM") + 1
           and "C-EVIDENCE-ENUM" in doctor.source_checks(
@@ -3758,6 +3824,79 @@ def _self_test_vectors():
     with _patch.object(store, "STAGING_KINDS", store.STAGING_KINDS + ("record",)):
         check("staging-record-flip-option-ii", lambda: not refuses(lambda: store.stage_run("record", record_run))
               and not refuses(lambda: store.evidence_run("record", record_run)))
+    # PR-3: the reservation writer on a real store: exclusive, create-only, durable publication; a
+    # process killed at any point leaves a state the next call refuses or completes deterministically
+    # (the four reachable states: nothing, a torn staging leftover, the complete reservation, and the
+    # complete reservation plus its shared-inode staging leftover).
+    import os
+    import threading
+    import _journal as native_journal
+    import _opf_journal as home_journal
+    import _opf_oplock as oplock
+
+    def reservation_refusal(thunk):
+        try:
+            thunk()
+        except native_journal.JournalError as exc:
+            return str(exc)
+        return None
+
+    with tempfile.TemporaryDirectory(prefix="opf-homes-") as tmp:
+        root = Path(tmp) / "store"
+        machine_dir = root / ".working" / "toml"
+        machine_dir.mkdir(parents=True)
+        anchor_file = root / "anchor"
+        anchor_file.write_bytes(b"")
+        cap = oplock.OpCapability.__new__(oplock.OpCapability)
+        cap._claim = threading.Lock()
+        cap._claimant = None
+        cap._released = False
+        cap._acquirer_pid = os.getpid()
+        cap._acquirer_pid_start = native_journal._pid_start(os.getpid())
+        cap._anchor_fd = os.open(str(anchor_file), os.O_RDONLY)
+        anchor_st = os.fstat(cap._anchor_fd)
+        cap._anchor_ident = (anchor_st.st_dev, anchor_st.st_ino)
+        machine_st = os.stat(machine_dir)
+        cap._machine_ident = (machine_st.st_dev, machine_st.st_ino)
+        cap.store_root = root
+        cap.machine_rel = ".working/toml"
+        cap.op_id = "held-operation"
+        cap.holder = "fixture"
+        try:
+            target = root / store.allocation_record("record", record_run)
+            payload = home_journal.reserve_allocation(cap, "record", record_run, {"BI": 7, "WL": 12})
+            check("reservation-on-disk-published", lambda: target.read_bytes() == payload and payload ==
+                  home_journal.reservation_payload("record", record_run, "held-operation", {"WL": 12, "BI": 7}))
+            check("reservation-on-disk-exact-destination",
+                  lambda: sorted(os.listdir(target.parent)) == [record_run + ".toml"])
+            second = reservation_refusal(
+                lambda: home_journal.reserve_allocation(cap, "record", record_run, {"BI": 8}))
+            check("reservation-second-refused", lambda: second is not None and "already exists" in second)
+            check("reservation-second-preserves-bytes", lambda: target.read_bytes() == payload)
+            leftover = target.parent / oplock._staging_name(record_run + ".toml")
+            os.link(target, leftover)
+            third = reservation_refusal(
+                lambda: home_journal.reserve_allocation(cap, "record", record_run, {"BI": 9}))
+            check("reservation-crash-after-link-refused", lambda: third is not None
+                  and "already exists" in third and not leftover.exists()
+                  and os.stat(target).st_nlink == 1 and target.read_bytes() == payload)
+            run2 = "record-20260917T120001Z-0123456789abcdef"
+            torn = target.parent / oplock._staging_name(run2 + ".toml")
+            torn.write_bytes(b"torn")
+            payload2 = home_journal.reserve_allocation(cap, "record", run2, {"BI": 9})
+            check("reservation-crash-before-link-completes", lambda: not torn.exists()
+                  and (target.parent / (run2 + ".toml")).read_bytes() == payload2)
+            run3 = "record-20260917T120002Z-0123456789abcdef"
+            (target.parent / (run3 + ".toml")).mkdir()
+            check("reservation-occupied-refused", lambda: reservation_refusal(
+                lambda: home_journal.reserve_allocation(cap, "record", run3, {"BI": 1})) is not None)
+            cap._released = True
+            check("reservation-released-refused", lambda: reservation_refusal(
+                lambda: home_journal.reserve_allocation(
+                    cap, "record", "record-20260917T120003Z-0123456789abcdef", {"BI": 1})) is not None)
+        finally:
+            os.close(cap._anchor_fd)
+
     run = "adopt" + suffix
     for path in ("notes/a.md", "adoption/a.md", "space name.txt", "\u00e9.txt"):
         check("move-" + path, lambda: store.moved_dest(path) == ".working/archive/moved/" + path)

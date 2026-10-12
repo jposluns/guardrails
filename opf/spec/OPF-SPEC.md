@@ -285,7 +285,9 @@ a staged plan has a recoverable transaction. In homes 2, ordinary transaction op
 those of an open transaction being recovered, MUST NOT equal, descend from, or contain `journals/`;
 a legacy store's transactions and recovery keep their legacy operand handling, and no shipped writer
 targets that home. Capability-bound journal APIs MUST derive their destinations from kind and run
-identity. Homes 2 has no legacy journal transport: no homes-1 journal is carried into `journals/`,
+identity. An ID reservation under `allocations/` MUST be created exclusively and create-only,
+made durable before it is relied on and never rewritten, so an interrupted publication leaves
+no reservation or the complete one (section 8.2). Homes 2 has no legacy journal transport: no homes-1 journal is carried into `journals/`,
 and a homes-2 store is never recovered from one (section 15).
 These comparisons are byte-exact: on a case-insensitive or normalizing filesystem, a differently
 cased or composed spelling can alias a reserved home and is not caught. Discovery precedes the
@@ -866,6 +868,15 @@ MUST NOT be reused, even when a record is superseded, refuted, or its work rever
 rewrites, and store relocation MUST NOT touch `counters.toml`. Re-adoption MUST seed both series
 from a pinned ancestral snapshot and MUST refuse a missing required namespace; it MUST NOT zero-seed
 prior ancestry. Only a genuinely first adoption MAY start its counters at zero.
+
+At homes 2 the claim additionally begins with one irrevocable reservation,
+`journals/<kind>/allocations/<run-id>.toml` (sections 4.2 and 8.8), which MUST hold exactly
+`format = "opf.journal.allocation/v1"`, the run's `kind`, `run_id` and `operation_id`, and a
+non-empty `[claims]` table mapping each claimed namespace to that run's new high-water value.
+A reservation MUST NOT be rewritten, and a second reservation for the same run MUST be
+refused. At homes 2 the next ID in a namespace is one more than the maximum of the
+`counters.toml` high-water and every reservation's `[claims]` value for that namespace, so
+recovery MUST treat a reserved number as issued even where no published record carries it.
 
 ### 8.3 The record envelope
 
