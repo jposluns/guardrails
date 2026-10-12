@@ -31,7 +31,9 @@ in-band override exists: a leading GUARDRAIL_ALLOW_DISCARD, the removed override
 code reads to permit anything - a pristine prefixed command gets the bare command's decision, a value the raw
 scans read routes the command exactly where any other leading assignment of the same value routes it, those
 routes snapshot every not-provably-clean resolved base before an allow of a destructive form, and every
-destructive route DENIES, fail closed, when no session cwd resolves - the rmo and fcl vectors pin this); a pristine bare whole-tree-clobbering verb (reset --hard, checkout -f, switch
+destructive route DENIES, fail closed, when no session cwd resolves AND no concrete -C target was resolved
+(the resolved-target exception: 'git -C <abs repo> reset --hard' with no cwd probes and snapshots that -C
+target and is decided on it) - the rmo and fcl vectors pin this); a pristine bare whole-tree-clobbering verb (reset --hard, checkout -f, switch
 --force) on a confirmed-dirty tree DENIES. This suite proves the EN-6 pristine gate: every shell-grammar and
 wrapper form that hides a real `git reset --hard` while the raw scan still sees a contiguous git+verb keyword
 (an `if`/`for`, a backtick or `$()` substitution, a `|&`, a leading or interspersed redirect, and the
@@ -2162,12 +2164,18 @@ def _main_isolated(monitor):
             if _got_bare != _want_bare or _got != [_want_pref, _want_pref]:
                 failures.append("(rmo-8-{}) expected the unprefixed command {} and the prefix and FOO both {}, "
                                 "got {} and {}".format(_case, _want_bare, _want_pref, _got_bare, _got))
-        # (fcl) ROUND-8 FAIL-CLOSED (the orchestrator-confirmed fail-open): a work-losing git verb is never
-        # MORE permissive with a leading assignment than without one. With NO session cwd every destructive
-        # route DENIES with no snapshot, as the bare pristine command does on an unresolvable worktree: the
-        # non-pristine path (a metacharacter in the assignment value: ; | & $ ( and the compound/stash
-        # shapes), the view-override branch (a quote-only or benign assignment value, a -c global option, an
-        # ambient GIT_* var), and the prefix spellings of both. An unreadable/nonexistent session cwd denies
+        # (fcl) ROUND-8 FAIL-CLOSED (the orchestrator-confirmed fail-open), scoped to NO SESSION CWD: with
+        # no session cwd a work-losing git verb is never MORE permissive with a leading assignment than
+        # without one - every destructive route DENIES with no snapshot, as the bare pristine command does
+        # on an unresolvable worktree: the non-pristine path (a metacharacter in the assignment value:
+        # ; | & $ ( and the compound/stash shapes), the view-override branch (a quote-only or benign
+        # assignment value, a -c global option, an ambient GIT_* var), and the prefix spellings of both.
+        # WITH a session cwd the DECISIONS differ by design (the dirty-tree snapshot-then-allow asymmetry,
+        # disclosed in the enforcement residue): bare 'git reset --hard' on a dirty tree DENIES while
+        # 'FOO=1 git reset --hard' (any leading assignment) snapshot-then-ALLOW-NOTES - both leave the work
+        # recoverable (the deny keeps it in place; the allow takes an inert snapshot first) - and
+        # 'FOO=1 git checkout -b nb' allow-notes WITHOUT the defensive backstop snapshot the bare allow
+        # form takes. An unreadable/nonexistent session cwd denies
         # through the failed probe/snapshot on both paths (fcl-badcwd).
         _fcl_nocwd = (
             ("np-semicolon", "FOO=';' git reset --hard"),
@@ -3722,6 +3730,103 @@ def _main_isolated(monitor):
         expect("(r6-f5-gitdir-staged) 'git --git-dir=T/.git restore --staged' to a DIFFERENT repo DENIES "
                "(finding 5)", "git --git-dir={}/.git restore --staged -- file.txt".format(str(r6stg)),
                "deny", cwd=rp)
+        # === PR #423 ROUND-4 (codex findings 1-3, claude MAJOR-1): wrapped and stash discards preserve
+        # === or deny. Each vector below flips on the pinned base commit.
+        # (r9f1) codex finding 1: a WRAPPED work-losing verb after a top-level cd resolves against the
+        # tracked effective dir and snapshots IT (the session repo is CLEAN, so only the resolved target
+        # ref proves the fix: at the base the walk registered nothing and the handler allow-noted with no
+        # ref in B, and running the command then destroyed B's uncommitted work).
+        r9_sess = _init_repo(tmp / "r9-sess")                       # clean session repo
+        r9_b = _init_repo(tmp / "r9-B")
+        (r9_b / "file.txt").write_text("committed line\nprecious\n", encoding="utf-8")   # dirty B
+        expect("(r9f1a) 'cd B && env git reset --hard' snapshots the cd target B and allows",
+               "cd {} && env git reset --hard".format(str(r9_b)), "allow-note", cwd=str(r9_sess))
+        if not _recovery_refs(r9_b):
+            failures.append("(r9f1a-snap) expected a recovery ref in the cd'd-into repo B for the wrapped "
+                            "'env git reset --hard' (codex round-4 finding 1: the wrapped discard after a "
+                            "cd lost its resolved target)")
+        # a wrapped discard whose cd target cannot be established DENIES (fail closed).
+        expect("(r9f1b) 'cd - && env git reset --hard' (unresolvable cd target) DENIES",
+               "cd - && env git reset --hard", "deny", cwd=str(r9_sess))
+        # (r9f2) codex finding 2 / claude MAJOR-1: every stash-destructive form - wrapped, reserved-word
+        # compound, or the unparseable fallback - preserves the stash exactly as the bare form does, or
+        # denies; each repo below is CLEAN with one stash entry, so worktree cleanliness proves nothing.
+
+        def _r9_stash_repo(name):
+            r = _init_repo(tmp / name)
+            (r / "file.txt").write_text("committed line\nstash me\n", encoding="utf-8")
+            _git(r, "stash", env_identity=True)
+            return r
+
+        r9_env = _r9_stash_repo("r9-env")
+        expect("(r9f2a) 'env git stash clear' allows once the stash is preserved", "env git stash clear",
+               "allow-note", cwd=str(r9_env))
+        if not _stash_refs(r9_env):
+            failures.append("(r9f2a-refs) a WRAPPED 'env git stash clear' must preserve the stash under "
+                            "durable refs before allowing (codex round-4 finding 2)")
+        r9_sudo = _r9_stash_repo("r9-sudo")
+        expect("(r9f2b) 'sudo git stash drop' allows once the stash is preserved", "sudo git stash drop",
+               "allow-note", cwd=str(r9_sudo))
+        if not _stash_refs(r9_sudo):
+            failures.append("(r9f2b-refs) a WRAPPED 'sudo git stash drop' must preserve the stash under "
+                            "durable refs before allowing (claude round-4 MAJOR-1)")
+        r9_if = _r9_stash_repo("r9-if")
+        expect("(r9f2c) 'if true; then git stash clear; fi' allows once the stash is preserved",
+               "if true; then git stash clear; fi", "allow-note", cwd=str(r9_if))
+        if not _stash_refs(r9_if):
+            failures.append("(r9f2c-refs) a reserved-word compound 'git stash clear' must preserve the "
+                            "stash under durable refs before allowing (claude round-4 MAJOR-1)")
+        r9_hd = _r9_stash_repo("r9-hd")
+        expect("(r9f2d) unparseable heredoc 'git stash clear <<EOF' on a CLEAN repo preserves the stash "
+               "then allows with a note (was a silent allow destroying the stash)",
+               "git stash clear <<EOF\n'\nEOF", "allow-note", cwd=str(r9_hd))
+        if not _stash_refs(r9_hd):
+            failures.append("(r9f2d-refs) the unparseable fallback must preserve the stash before allowing "
+                            "a potentially stash-destructive form (codex round-4 finding 2)")
+        # preservation failure DENIES on the wrapped and on the fallback form, as the bare form already did.
+        _r9_orig_rsr = aiqt_hooks._record_stash_recovery
+        aiqt_hooks._record_stash_recovery = lambda repo: ("fail", "forced failure (self-test)")
+        try:
+            expect("(r9f2e) 'env git stash clear' DENIES when the stash cannot be preserved",
+                   "env git stash clear", "deny", cwd=str(r9_env))
+            expect("(r9f2f) heredoc 'git stash clear <<EOF' DENIES when the stash cannot be preserved",
+                   "git stash clear <<EOF\n'\nEOF", "deny", cwd=str(r9_env))
+        finally:
+            aiqt_hooks._record_stash_recovery = _r9_orig_rsr
+        # (r9f3) codex finding 3: a failed or malformed stash-presence probe is a preservation FAILURE,
+        # never 'none'; confirmed absence stays exactly rc 1 + empty output + empty error text.
+        r9_probe = _r9_stash_repo("r9-probe")
+        _r9_orig_rg = aiqt_hooks._recovery_git
+
+        def _r9_probe_rg(rc, out, err):
+            def _patched(repo, args, env_extra=None, timeout=10):
+                if args[:3] == ["rev-parse", "--verify", "-q"]:
+                    return subprocess.CompletedProcess(args, rc, stdout=out, stderr=err)
+                return _r9_orig_rg(repo, args, env_extra=env_extra, timeout=timeout)
+            return _patched
+
+        aiqt_hooks._recovery_git = _r9_probe_rg(128, "", "fatal: I/O error (self-test)")
+        try:
+            _r9_res = aiqt_hooks._record_stash_recovery(str(r9_probe))
+            if _r9_res[0] != "fail":
+                failures.append("(r9f3a) a rc-128 stash presence probe must be a preservation FAILURE, got "
+                                "{!r} (codex round-4 finding 3)".format(_r9_res[0]))
+            expect("(r9f3b) bare 'git stash clear' DENIES on a failed stash presence probe",
+                   "git stash clear", "deny", cwd=str(r9_probe))
+        finally:
+            aiqt_hooks._recovery_git = _r9_orig_rg
+        aiqt_hooks._recovery_git = _r9_probe_rg(0, "", "")
+        try:
+            if aiqt_hooks._record_stash_recovery(str(r9_probe))[0] != "fail":
+                failures.append("(r9f3c) a rc-0 EMPTY-OUTPUT stash probe is malformed and must be a "
+                                "preservation FAILURE, never 'none'")
+        finally:
+            aiqt_hooks._recovery_git = _r9_orig_rg
+        # control: confirmed absence (a stash-less repo probes rc 1, silent) stays 'none', so the finding-3
+        # fix narrows 'none' to confirmed absence without denying the nothing-to-preserve case.
+        if aiqt_hooks._record_stash_recovery(str(r9_sess))[0] != "none":
+            failures.append("(r9f3d) a stash-less repo must stay a confirmed 'none' (nothing to preserve)")
+
         # FINDING 6: a staged-index commit-tree failure while distinct staged content is present must FAIL the
         # snapshot (fail closed), not silently drop the staged payload. Fault-inject the staged commit-tree.
         r6f6 = tmp / "r6-f6-staged"

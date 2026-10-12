@@ -3751,6 +3751,16 @@ _RAW_DISCARD_REDIRECT_RE = re.compile(
     r"|(?:^|[\s'\";&|()])GIT_DIR="
     r"|(?:^|[\s'\";&|()])GIT_WORK_TREE=")
 
+# PR #423 ROUND-4 (codex finding 2): raw indicators, on the UNPARSEABLE fallback path only, that the lossy
+# command may be STASH-DESTRUCTIVE ('git stash drop'/'clear' in any unparseable spelling): the word 'stash'
+# plus the word 'drop' or 'clear' anywhere in the raw string. A stash entry is NOT reflog-recoverable after
+# a drop/clear and a clean worktree does NOT establish stash safety, so the fallback must preserve the
+# session repo's stash first (or deny when it cannot), never allow on worktree cleanliness alone.
+# Conservative and over-matching (a keyword in prose over-preserves - an inert extra recovery ref - never an
+# under-protection); a redirected target was already denied above by _RAW_DISCARD_REDIRECT_RE.
+_RAW_STASH_WORD_RE = re.compile(r"(?i)(?<![\w-])stash(?![\w-])")
+_RAW_STASH_OP_RE = re.compile(r"(?i)(?<![\w-])(?:drop|clear)(?![\w-])")
+
 
 def _git_discard_fallback(command, cwd=None):
     """FAIL-SAFE conservative scan when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct): we cannot
@@ -3770,7 +3780,14 @@ def _git_discard_fallback(command, cwd=None):
     it, `git reset --hard <<'EOF'\\n'\\nEOF` (Bash-valid, a tokenizer ValueError) reached ASK with NO recovery
     ref. The snapshot is decision-INDEPENDENT and best-effort against the session repo only (the verb is
     unparseable, so the ledger label is a generic 'discard'); on snapshot fail the decision stays ASK with
-    the failure surfaced."""
+    the failure surfaced. PR #423 ROUND-4 (codex finding 2): a POTENTIALLY STASH-DESTRUCTIVE unparseable
+    form (the raw words 'stash' plus 'drop'/'clear', e.g. an unquoted-heredoc 'git stash clear') additionally
+    preserves the SESSION repo's stash under durable refs BEFORE any allow, or DENIES when that preservation
+    fails - a provably clean worktree never establishes stash safety, because a worktree snapshot (or a
+    clean tree) does not hold stash entries and drop/clear is not reflog-recoverable afterwards. Order of
+    checks: the redirect deny first (an unresolvable target), then the stash preservation, then the
+    worktree snapshot, then the no-cwd deny, then the clean-tree allow (with a note when stash entries
+    were preserved)."""
     if not _raw_has_lossy_git(command):
         return _allow()  # no git, or no recognized work-losing verb: the true boundary
     if _RAW_DISCARD_REDIRECT_RE.search(command):
@@ -3790,6 +3807,27 @@ def _git_discard_fallback(command, cwd=None):
             "AIQT guardrail: denied an unparseable git discard carrying a target redirect this guard cannot "
             "resolve to snapshot (rule prsunc); run it from the target repo, or commit or stash first.")
     base = cwd if isinstance(cwd, str) and cwd else None
+    # PR #423 ROUND-4 (codex finding 2): a potentially stash-destructive unparseable form preserves the
+    # session repo's stash FIRST (before any allow below), or denies; a clean worktree proves nothing about
+    # the stash. With no session cwd the no-cwd deny below already fails closed for every lossy form.
+    stash_note = ""
+    if base is not None and _RAW_STASH_WORD_RE.search(command) and _RAW_STASH_OP_RE.search(command):
+        st = _record_stash_recovery(base)
+        if st[0] == "fail":
+            return _deny(
+                "AIQT rule prsunc (preserve-uncommitted-work): the command could not be parsed by the shell "
+                "lexer and it names a potentially stash-destructive git form (stash drop/clear is NOT "
+                "reflog-recoverable afterwards), and this guard could not preserve the session repository's "
+                "stash entries first ({}), so the discard would be unrecoverable; denied rather than run. "
+                "Re-issue it as a plain, parseable git command, or apply or commit the stash first. {}"
+                .format(st[1], _DISCARD_ALTS),
+                "AIQT guardrail: denied an unparseable, potentially stash-destructive git command whose "
+                "stash could not be preserved (rule prsunc); apply or commit the stash first, then retry.")
+        if st[0] == "ok":
+            stash_note = (" {} stash entr{} of the session repository were first preserved under durable "
+                          "refs ({}); recover one with 'git stash apply <ref>' from that repository."
+                          .format(st[1]["count"], "y" if st[1]["count"] == 1 else "ies",
+                                  ", ".join(st[1]["refs"])))
     snap = None
     if base is not None and _tree_is_clean(base) is not True:  # dirty or probe-uncertain: snapshot first
         snap = _record_recovery(base, "discard")
@@ -3798,7 +3836,8 @@ def _git_discard_fallback(command, cwd=None):
         return _allow_note(
             "AIQT guardrail (rule prsunc, preserve-uncommitted-work): the command could not be parsed by the "
             "shell lexer and it names a git work-losing verb this guard cannot prove safe. A pre-command "
-            "recovery snapshot was saved, so it is allowed. {}".format(_recovery_pointer(snap[1])))
+            "recovery snapshot was saved, so it is allowed. {}".format(_recovery_pointer(snap[1]))
+            + stash_note)
     if snap is not None and snap[0] == "fail":
         # A warranted recovery point could NOT be created: an unrecoverable discard denies-and-educates.
         return _deny(
@@ -3818,7 +3857,13 @@ def _git_discard_fallback(command, cwd=None):
             "first. {}"
             .format(_DISCARD_ALTS),
             "AIQT guardrail: denied an unparseable git discard with no recoverable snapshot (rule prsunc).")
-    # base is set and the tree is provably clean: nothing to discard.
+    # base is set and the tree is provably clean: nothing the WORKTREE snapshot protects is at risk; a
+    # potentially stash-destructive form had its stash entries preserved above (or denied), so say so.
+    if stash_note:
+        return _allow_note(
+            "AIQT guardrail (rule prsunc, preserve-uncommitted-work): the command could not be parsed by "
+            "the shell lexer and it names a potentially stash-destructive git form (stash drop/clear is "
+            "NOT reflog-recoverable afterwards)." + stash_note + " It is allowed.")
     return _allow()
 
 
@@ -4290,7 +4335,9 @@ def _record_stash_recovery(repo):
     """ROUND-2 FINDING 6. Preserve every stash entry under DURABLE refs/aiqt-recovery/ refs before a
     'git stash drop' / 'git stash clear', which is NOT reflog-recoverable after the fact (drop/clear delete
     the stash reflog entry, leaving the stash commit unreachable and GC-eligible). Returns:
-      - ('none', None)  : the repo has NO stash entries, so a drop/clear loses nothing (allow).
+      - ('none', None)  : CONFIRMED absence (the presence probe exited 1 with no output and no error
+                          text), so a drop/clear loses nothing (allow); a failed or malformed probe is
+                          NEVER read as 'none' - it returns ('fail') instead (round-4 codex finding 3).
       - ('ok', info)    : every stash entry was preserved under a durable ref; info = {refs, count}.
       - ('fail', reason): the repo/entries could not be enumerated, or a durable ref could not be written.
     Reads the stash reflog and writes only private refs (no working state) through the scrubbed _recovery_git
@@ -4301,18 +4348,31 @@ def _record_stash_recovery(repo):
         top = _recovery_toplevel(repo)
         if not top:
             return ("fail", "the repository toplevel could not be resolved (a bare or broken git dir)")
-        # `stash list` over the reflog: one line per entry. An absent refs/stash yields an empty list (no
-        # stashes), a genuine 'none'. A non-zero return is a fault -> fail (never a false 'none').
+        # The presence probe: `rev-parse --verify -q refs/stash`. CONFIRMED ABSENCE is exactly rc 1 with
+        # EMPTY stdout and EMPTY stderr (the -q contract for a missing ref): only that silent miss is a
+        # genuine 'none'. EVERY other outcome - rc 128, an I/O or ownership diagnostic, or rc 0 with no
+        # object id - is a FAILED or MALFORMED observation, not evidence of absence, so it is a
+        # preservation FAILURE (the caller denies) rather than a false 'none' that would let a drop/clear
+        # destroy a real stash unpreserved (PR #423 round-4, codex finding 3).
         verify = _recovery_git(repo, ["rev-parse", "--verify", "-q", "refs/stash"], timeout=5)
-        if verify.returncode != 0 or not verify.stdout.strip():
-            return ("none", None)                     # no stash ref at all: nothing to preserve
+        _vout = (verify.stdout or "").strip()
+        _verr = (verify.stderr or "").strip()
+        if verify.returncode == 1 and not _vout and not _verr:
+            return ("none", None)                     # confirmed: no stash ref at all, nothing to preserve
+        if verify.returncode != 0 or not _vout:
+            return ("fail", "the stash presence probe failed (rc={}{}), so the stash entries could not be "
+                            "confirmed absent or preserved".format(
+                                verify.returncode, ": " + _verr if _verr else ""))
         listing = _recovery_git(repo, ["reflog", "show", "--no-abbrev", "--format=%H", "refs/stash"],
                                 timeout=10)
         if listing.returncode != 0:
             return ("fail", "the stash reflog could not be enumerated (rc={})".format(listing.returncode))
         shas = [ln.strip() for ln in listing.stdout.splitlines() if ln.strip()]
         if not shas:
-            return ("none", None)
+            # refs/stash was just verified to EXIST, so an empty reflog listing is a malformed observation
+            # (at least the top entry exists and would be lost): a preservation failure, never 'none'.
+            return ("fail", "refs/stash exists but its reflog listed no entries, so the stash entries "
+                            "could not be enumerated for preservation")
         stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
         refs = []
         for idx, sha in enumerate(shas):
@@ -4332,7 +4392,8 @@ def _discard_recovery_result(kind, detail, snap, note=""):
     """The SNAPSHOT-THEN-ALLOW outcome for a recoverable-destructive discard (hooks never ask). snap is
     ('ok', info) (a recovery snapshot was saved), ('fail', reason) (a warranted snapshot could NOT be made),
     or None (no snapshot warranted: a ref-level move or a stash/branch asset a working-tree snapshot cannot
-    hold, which is typically reflog-recoverable). On 'ok' or None the discard is ALLOWED with an
+    hold; a ref/branch move is typically reflog-recoverable, while a resolved stash drop/clear is preserved
+    under durable refs by the caller first, or denied). On 'ok' or None the discard is ALLOWED with an
     informational note; on 'fail' the discard would be unrecoverable, so it is DENIED-and-educated (commit or
     stash first). `note` (the removed-prefix migration sentence, or empty) ends the reason or note."""
     if snap is not None and snap[0] == "fail":
@@ -4349,8 +4410,10 @@ def _discard_recovery_result(kind, detail, snap, note=""):
             "was saved, so it is allowed. {}".format(kind, detail, _recovery_pointer(snap[1])) + note)
     return _allow_note(
         "AIQT guardrail (rule prsunc, preserve-uncommitted-work): {} {}. This guard could not auto-snapshot "
-        "it (a ref-level or stash/branch asset a working-tree snapshot cannot capture, typically "
-        "reflog-recoverable), so it is allowed; ensure any work you need is saved.".format(kind, detail)
+        "it (a ref-level or branch asset a working-tree snapshot cannot capture, which is typically "
+        "reflog-recoverable; a resolved stash drop/clear is NOT reflog-recoverable afterwards and instead "
+        "has its entries preserved under durable refs first, stated in this note when it applies), so it "
+        "is allowed; ensure any work you need is saved.".format(kind, detail)
         + note)
 
 
@@ -4526,8 +4589,10 @@ def _segment_carries_target_redirect(tokens):
     --git-dir/--work-tree (bare or '='-attached), or a leading/inline GIT_DIR=/GIT_WORK_TREE= assignment. Used
     only for a WRAPPED git discard the walk cannot resolve as a depth-0 literal-git segment: such a redirect
     moves the discard OFF the session cwd, so the session-cwd best-effort snapshot cannot capture it and the
-    discard fails closed (DENY). A wrapped discard with NO redirect acts on the effective cwd, which that
-    best-effort snapshot covers, so it is not flagged here. Conservative token scan (over-detection only
+    discard fails closed (DENY). A wrapped discard with NO redirect acts on the effective cwd and is NOT
+    flagged here: the walk resolves it against the tracked effective directory and registers its snapshot
+    base or stash-preservation target (see _nonpristine_discard_actions, PR #423 round-4). Conservative
+    token scan (over-detection only
     over-denies)."""
     for tok in tokens:
         if tok == "-C" or tok.startswith("--git-dir") or tok.startswith("--work-tree"):
@@ -4555,14 +4620,19 @@ def _nonpristine_discard_actions(segments, cwd):
                                       #   -C/--git-dir/--work-tree/GIT_DIR=/GIT_WORK_TREE= redirect - so its
                                       #   target cannot be snapshotted with certainty
         'saw_actionable': bool }      # any visible worktree-destructive or stash drop/clear discard
-    A caller with unresolved=True OR hidden=True DENIES (fail closed: it cannot snapshot/preserve the exact
+    A WRAPPED git discard with NO redirect (env/sudo/... git <verb>, a reserved-word segment, 'xargs git
+    <verb>') is resolved against the same tracked effective directory as a direct git segment and registers
+    the same snapshot base or stash target; only a wrapped discard whose target cannot be established is
+    flagged hidden/unresolved (PR #423 round-4). A caller with unresolved=True OR hidden=True DENIES (fail
+    closed: it cannot snapshot/preserve the exact
     target). Where a
     destructive segment acts on the plain session cwd (no cd, no redirect) that cwd is added to
     snapshot_bases so it is snapshotted through the same path; where no actionable discard is visible
     (obfuscated verbs, soft/ref-level forms, or an unknown cwd) saw_actionable is False and the caller keeps
-    its existing best-effort session-cwd snapshot. With an UNKNOWN session cwd the caller DENIES outright
-    before reading these results (ROUND-8 fail-closed), so the eff-is-None branches below only shape the
-    walk, never an allow."""
+    its existing best-effort session-cwd snapshot. ORDER OF CHECKS in the caller with an UNKNOWN session
+    cwd: it reads unresolved first, then hidden (each deny carries its own reason), and only then DENIES on
+    the missing session cwd before acting on snapshot_bases/stash_ops - every route is still a deny, so the
+    eff-is-None branches below only shape the walk and the deny reason, never an allow."""
     depth = 0
     session_cwd = cwd if isinstance(cwd, str) and cwd else None
     eff = session_cwd
@@ -4675,14 +4745,23 @@ def _nonpristine_discard_actions(segments, cwd):
             subshell_cd_seen = True
         else:
             # ROUND-6 FINDING 3: a segment whose command word is neither git nor a cd-family builtin. A
-            # STANDALONE 'git' token here is a WRAPPED git discard (env/sudo/xargs/timeout/... git <verb>).
-            # When it carries a target redirect (-C/--git-dir/--work-tree/GIT_DIR=/GIT_WORK_TREE=), or runs
-            # inside a subshell whose cwd a prior internal cd moved, its target is off the session cwd (or
-            # unmodellable) and the session snapshot would not capture it, so it cannot be resolved+snapshotted
-            # -> fail closed. A wrapped discard with NO redirect and no moved-subshell-cwd acts on the effective
-            # cwd, which the best-effort session snapshot covers, so it is NOT flagged (e.g. 'env git reset
-            # --hard', or '$(echo git checkout -f)' which runs at the foreground cwd). A git verb
-            # fragmented/quoted into a single token (no standalone 'git') stays the disclosed best-effort residual.
+            # STANDALONE 'git' token here is a WRAPPED git discard (env/sudo/xargs/timeout/... git <verb>,
+            # or a reserved-word segment such as 'then git stash clear'). When it carries a target redirect
+            # (-C/--git-dir/--work-tree/GIT_DIR=/GIT_WORK_TREE=), or runs inside a subshell whose cwd a
+            # prior internal cd moved, its target is off the session cwd (or unmodellable) and cannot be
+            # resolved+snapshotted -> fail closed (hidden). ROUND-9 (PR #423 round-4, codex findings 1-2):
+            # a wrapped discard with NO redirect acts on the EFFECTIVE directory, which a prior top-level cd
+            # may have moved OFF the session cwd ('cd B && env git reset --hard' used to discard B with no
+            # snapshot, because only the session cwd was snapshot-backed), so it is now resolved against the
+            # tracked effective dir exactly like a direct git segment: a snapshottable wrapped verb registers
+            # its snapshot base, a wrapped 'stash drop'/'clear' registers its stash-preservation target (a
+            # worktree snapshot, or a clean worktree, never establishes stash safety), and a target that
+            # cannot be established (an uncertain ;/||-gated cd, or a cd to a dir the walk cannot resolve)
+            # is unresolved -> the caller DENIES. With no cd and no session cwd the caller's np_base-None
+            # route denies (fail closed). A non-git segment that merely CARRIES a standalone 'git' token
+            # ('echo git reset --hard') is over-registered: an inert extra snapshot or stash preservation,
+            # never an under-protection. A git verb fragmented/quoted into a single token (no standalone
+            # 'git') stays the disclosed best-effort residual.
             gi = _wrapped_git_index(tokens)
             if gi is not None:
                 wsub, wargs = _git_sub_and_args(tokens[gi:])
@@ -4692,6 +4771,32 @@ def _nonpristine_discard_actions(segments, cwd):
                                              or (depth != 0 and subshell_cd_seen)):
                         hidden = True
                         saw_actionable = True
+                    elif wrole != "allow" and wsub in _SNAPSHOTTABLE_VERBS:
+                        saw_actionable = True
+                        if not eff_certain:
+                            unresolved = True
+                        elif eff is None:
+                            if cd_happened:
+                                unresolved = True     # a cd to an unresolvable dir preceded the discard
+                            # else: no session cwd -> the caller denies on its missing session cwd
+                        elif cd_happened:
+                            _add(snapshot_bases, eff)  # a cd'd-into concrete dir (codex round-4 finding 1)
+                        else:
+                            targets_session = True     # plain session cwd (the existing catch-all base)
+                    elif wrole != "allow" and wsub == "stash":
+                        wstash_op = next((a for a in wargs if not a.startswith("-")), None)
+                        if wstash_op in ("drop", "clear"):
+                            saw_actionable = True
+                            if not eff_certain:
+                                unresolved = True
+                            elif eff is None:
+                                if cd_happened:
+                                    unresolved = True
+                                # else: no session cwd -> the caller denies on its missing session cwd
+                            else:
+                                _add(stash_ops, (eff, wstash_op))  # preserve-or-deny, like the bare form
+                    # a wrapped ref-level form (a force branch delete/move/copy/reset, stash export) is
+                    # reflog-recoverable; the existing allow-note covers it, matching the direct-git walk.
         if sep == "(":
             depth += 1
         elif sep == ")":
@@ -4737,9 +4842,12 @@ def git_discard(data):
     keyword in the value brings a command into scope exactly as FOO=<the same value> does and then gets the
     same allow-or-deny outcome class as that FOO form, with the reason text and note free to differ (the
     prefix is the one leading assignment _segment_dir_simple treats as benign, so it stays on the pristine
-    dir-simple path where FOO takes the view-override branch); the non-pristine path, the view-override
-    branch for a destructive verb, and the unparseable fallback each DENY (fail closed) when no session cwd
-    resolves, as the bare command does on an unresolvable worktree); the guarantee is bounded to
+    dir-simple path where FOO takes the view-override branch); the non-pristine path and the unparseable
+    fallback each DENY (fail closed) when no session cwd resolves, as the bare command does on an
+    unresolvable worktree, and the view-override branch for a destructive verb does the same UNLESS the
+    command's own -C redirect resolves to a concrete repository, which is then probed and snapshotted IN
+    PLACE of the session directory and decided on its own (the resolved-target exception: 'git -C <abs
+    clean repo> reset --hard' with no cwd allow-notes)); the guarantee is bounded to
     working-tree content (ref-level moves such as reset --soft moving HEAD or a merged-branch delete are
     reflog-recoverable) and is best-effort against the disclosed obfuscation/config residuals. Fail-open ALLOW is
     reserved for the TRUE boundary (a non-Bash or absent tool, a malformed or missing command it cannot read as a discard, a non-git command,
@@ -4766,11 +4874,18 @@ def git_discard(data):
     the ALLOW and ASK paths alike (the hook fires once, with no post-approval callback). It NEVER mutates the real index, worktree, HEAD, or any
     branch. If a warranted snapshot cannot be made, a would-be ALLOW is downgraded to ASK ('no recovery point
     could be created'); an already-ASK/DENY decision is left as-is with the failure surfaced. F-D EXPANSION: a
-    NON-PRISTINE in-scope ASK (a compound/wrapped/redirected snapshottable command) is ALSO snapshot-backed
-    BEST-EFFORT against the SESSION CWD repo (the redirected dir of a non-pristine command is not parsed, so a
-    command that changes into a DIFFERENT repo may be snapshotted at the session repo rather than the target;
-    a same-repo cd is still captured by the whole-tree add --all), and with NO session cwd it DENIES (fail
-    closed: no catch-all snapshot is possible). See the recovery block comment above
+    NON-PRISTINE in-scope ASK is snapshot-backed against EACH worktree the walk resolves (the top-level
+    cd/pushd chain and each git segment's own redirect, for direct AND wrapped 'git' segments alike) PLUS
+    the session cwd as a best-effort catch-all (a target hidden from the walk - a quoted/eval-fragmented
+    verb - may still be snapshotted only at the session repo); a resolved stash drop/clear (direct, wrapped,
+    or compound) first preserves its target repo's stash under durable refs or DENIES; a target the walk
+    cannot resolve DENIES; and with NO session cwd EVERY non-pristine in-scope command DENIES (fail closed:
+    no catch-all snapshot is possible). That no-cwd deny is DELIBERATELY CONSERVATIVE and catches legitimate
+    workflows: with no session cwd, a compound or assignment-prefixed command whose visible form is
+    non-destructive or non-snapshottable ('git checkout -b nb && echo ok', 'git log | grep branch',
+    'git branch -D x; true', "FOO=';' git clean -n", "FOO=';' git reset --soft") is DENIED although its
+    bare single-command form allows - an accepted cost, because a raw-flagged verb the walk cannot see could
+    still act on the unknown cwd. See the recovery block comment above
     _SNAPSHOTTABLE_VERBS. The snapshot cannot capture what the probe cannot see (assume-unchanged/skip-worktree
     marks, submodule.<name>.ignore) or ignored files (git add --all excludes them), so a discard of that
     content is not recoverable here."""
@@ -4908,6 +5023,7 @@ def git_discard(data):
         # Preserve the stash of every RESOLVED stash drop/clear target repo first (fail closed on a repo whose
         # stash cannot be preserved), so a `git -C T stash clear` / `git stash clear; :` no longer notes a
         # recovery that omits the cleared stash (round-3 finding 2).
+        _stash_preserved = []
         for _b, _op in actions["stash_ops"]:
             _st = _record_stash_recovery(_b)
             if _st[0] == "fail":
@@ -4919,6 +5035,9 @@ def git_discard(data):
                     .format(_op, _b, _st[1], _DISCARD_ALTS),
                     "AIQT guardrail: denied an unrecoverable compound/redirected git stash drop/clear (rule "
                     "prsunc); apply or commit the stash first, then retry.")
+            if _st[0] == "ok":
+                _stash_preserved.append("{} stash entr{} of {} under {}".format(
+                    _st[1]["count"], "y" if _st[1]["count"] == 1 else "ies", _b, ", ".join(_st[1]["refs"])))
         # Snapshot every worktree the command discards from: each RESOLVED redirect/cd target (round-3 finding
         # 1) PLUS the session cwd itself, which stays a best-effort catch-all because a snappable verb hidden
         # by shell quoting/eval/substitution may still discard the cwd (the rec-c6 residual). Any warranted
@@ -4944,7 +5063,11 @@ def git_discard(data):
             kind, "is not a pristine single bare 'git <verb>' invocation (it carries a shell "
                   "metacharacter, wrapper, redirect, reserved word, a second command, or a command word "
                   "that is not literally 'git'); a recovery snapshot targets the effective worktree(s) it "
-                  "resolved plus the session directory before allowing", np_snap)
+                  "resolved plus the session directory before allowing"
+                  + ("; the stash entries it would discard were first preserved under durable refs "
+                     "(not reflog-recoverable otherwise): {}; recover one with "
+                     "'git -C <repo> stash apply <ref>'".format("; ".join(_stash_preserved))
+                     if _stash_preserved else ""), np_snap)
 
     # A pristine single bare git command. No in-band override exists: below, only _segment_dir_simple (benign)
     # and _removed_prefix_note (text) read a leading GUARDRAIL_ALLOW_DISCARD by name; the raw command string
