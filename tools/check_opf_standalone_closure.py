@@ -65,6 +65,7 @@ _SUBSET = [
     ("opf-adopt-hook-selftest", "_opf_adopt_hook.py", ["--self-test"]),
     ("opf-pack-manifest-selftest", "_opf_pack_manifest.py", ["--self-test"]),
     ("opf-adopt-observe-selftest", "_opf_adopt_observe.py", ["--self-test"]),
+    ("opf-adopt-discover-selftest", "_opf_adopt_discover.py", ["--self-test"]),
     ("opf-prompt-pack-selftest", "check_opf_prompt_pack.py", ["--self-test"]),
     ("opf-prompt-pack", "check_opf_prompt_pack.py", []),
     ("opf-oplock-selftest", "_opf_oplock.py", ["--self-test"]),
