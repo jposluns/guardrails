@@ -82,8 +82,14 @@ Rules (each self-test vector is caught by exactly its rule, and passes with that
                      defaults) belong to the scope that runs the definition, and only its parameters and body to
                      its own scope; a type alias is not a scope here, so its value belongs to the scope that runs
                      the type statement. An annotation, a type parameter's bound, constraints and default, and a
-                     type alias's value belong there although the interpreter evaluates each only when it is
-                     read, in an annotation scope of its own. Scope identities and ordinals give
+                     type alias's value belong there although the floor version evaluates each only when it is
+                     read, in an annotation scope (one __annotate__ scope holds all the annotations of one
+                     definition; under from __future__ import annotations an annotation reads as a string, not
+                     evaluated even then), and a generic class's bases and keywords belong there although the
+                     floor version evaluates them at once in the annotation scope of the class's type parameters
+                     (DISCLOSED RESIDUAL). A function-local annotation, or an annotation on a target that is not
+                     a simple name (C.x: T, d[k]: T, (x): T), is never evaluated, yet a watched name there is a
+                     site like any other, in the scope that holds the statement. Scope identities and ordinals give
                      each node its own key (file, scope, ordinal and text); a key that more than one node held would
                      allow none of them, listed or not (a backstop against a regression in that numbering: no parsed
                      tree reaches it, and the self-test injects it). Each row is held live: it
@@ -174,10 +180,16 @@ or action line outside the accepted YAML subset (above).
                                        unchanged and gives exactly its findings, each in the edited file, on
                                        the edited source, every mutant in MUTANTS (one check removed, with the
                                        backstop that would refuse first where one is named, or a line or a
-                                       column put into the key) fails the vector it names (an edit vector only
-                                       when the unchanged source passes under that mutant and every finding
-                                       lies in the edited file), removing any one watched name, member or importer
-                                       fails its vector, and the live tree passes
+                                       column put into the key) fails the vector it names by that vector's own
+                                       failure (never by an exception the run raises; by a refusal only where
+                                       MUTANTS marks the mutant as caught by its backstop, and then only by that
+                                       backstop's refusal; an edit vector only when the unchanged source passes
+                                       under that mutant and every finding lies in the edited file), each run in
+                                       _UNCREDITED_RUNS (an exception raised writing an edit vector's rows,
+                                       scanning its unchanged source or scanning its edited source, one raised on
+                                       a rule vector, a refusal no backstop is named for, and a backstop named
+                                       for a refusal not its own) credits no mutant, removing any one watched
+                                       name, member or importer fails its vector, and the live tree passes
 
 Exit convention: 0 clean; 1 a finding; 2 usage or cannot-evaluate.
 
@@ -201,7 +213,8 @@ over-rejection: N changes, so every row under a sibling of that name goes stale 
 ordinals shift, and one is left unlisted) each make a row stale or a reference a finding until the row is rewritten (the
 re-review the binding asks for); but a move within its scope (onto another line, into or out of a branch, a loop or a
 try, between an annotation and a default of one definition, from a type alias's value or a type parameter's bound
-into a statement beside it, or into, out of or between comprehensions and generator expressions), an edit elsewhere in
+into a statement beside it, between a generic class's bases or keywords and a statement beside the class, or into,
+out of or between comprehensions and generator expressions), an edit elsewhere in
 its scope (rebinding a name it is passed, say), a change of layout, comments or quote
 style that ast.unparse does not keep, and an exchange among the references of one text in one scope (one removed and
 another of that text added there in one change, or two swapped) leave every row valid, so none of them is re-reviewed: a
@@ -210,10 +223,16 @@ here, though Python gives each a nested scope of its own (on the floor version a
 inlined into the code of the function, class body or module around it and a generator expression is not, and both
 keep their loop variables to themselves): what it holds is read in the def, class, lambda or module around it, so a
 move between two of them in one def is a move within that def, which is wider than a move within one of Python's
-scopes. An annotation, a type parameter's bound, constraints and default, and a type alias's value, each of which the
-floor version evaluates only when it is read, in an annotation scope of its own, are read in the scope that runs the
-definition or the type statement, as a default is: a move between one of them and the code beside it is a move within
-that scope, which is again wider than a move within one of Python's scopes. A scope is
+scopes. An annotation, a type parameter's bound, constraints and default, and a type alias's value, which the floor
+version evaluates only when it is read, in an annotation scope (one __annotate__ scope holds all the annotations of one
+definition; under from __future__ import annotations an annotation reads as a string, not evaluated even then), and a
+generic class's bases and keywords, which it evaluates at once in the annotation scope of the class's type
+parameters, are read in the scope that runs the definition or the type statement, as a default is: a move between one
+of them and the code beside it is a move within that scope, which is again wider than a move within one of Python's
+scopes (a move between an annotation and a default of one definition among them: the annotation runs in __annotate__,
+the default in the scope that runs the definition). A function-local annotation, or an annotation on a target that is
+not a simple name (C.x: T, d[k]: T, (x): T), is never evaluated, yet a watched name there is a site like any other, in
+the scope that holds the statement (an over-rejection). A scope is
 known by its name, its ordinal among same-named siblings and their count, not by its place or its contents, so an edit
 that keeps the count of same-named siblings in a scope (siblings reordered or exchanged whole, or as many removed as
 added in one change) reads the sibling now at each #K/N as the one that was there: a reference that ends in the sibling
@@ -1264,9 +1283,11 @@ def _scoped_children(node, scope, inner=None):
     the enclosing scope, where the definition runs. A parameter is a leaf there: its annotation is pushed apart, in
     the enclosing scope. A type alias is no scope here, so its value is read in the scope that runs the type
     statement. The floor version evaluates an annotation, a type parameter's bound, constraints and default, and a
-    type alias's value only when it is read, in an annotation scope of its own, yet each is read here in the scope
-    around it, so a move between one of them and the code beside it is a move within that scope (DISCLOSED
-    RESIDUAL)."""
+    type alias's value only when it is read, in an annotation scope (all the annotations of one definition share one,
+    its __annotate__), and a generic class's bases and keywords at once in the annotation scope of its type
+    parameters, yet each is read here in the scope around it, so a move between one of them and the code beside it is
+    a move within that scope (DISCLOSED RESIDUAL). A function-local annotation, or one on a target that is not a
+    simple name, is never evaluated, and is read here like any other expression of the scope that holds it."""
     if not isinstance(node, SCOPE_NODES):
         return [(child, scope, True) for child in ast.iter_child_nodes(node)]
     out = []
@@ -2174,6 +2195,8 @@ _RULE_VECTORS = (
      (("tools/t.py", "import _frozen_importlib\n_frozen_importlib._gcd_import('json')\n"),), (), {}, True),
     ("frozen importlib module imported by its frozen name", "dynamic-import", "tools/t.py",
      (("tools/t.py", "import _frozen_importlib_external\n"),), (), {}, True),
+    ("watched name _gcd_import, no inert member subtracted", "dynamic-import", "tools/t.py",
+     (("tools/t.py", "def f(o):\n    return o._gcd_import\n"),), (), dict(inert=()), True),
     ("_frozen_importlib through sys.modules", "dynamic-import", "tools/t.py",
      (("tools/t.py", "import sys\nsys.modules['_frozen_importlib']._gcd_import('json')\n"),), (), {}, True),
     ("_imp imported", "dynamic-import", "tools/t.py", (("tools/t.py", "import _imp\n"),), (), {}, True),
@@ -2183,6 +2206,9 @@ _RULE_VECTORS = (
      dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "f", ("#1: __import__('json')",), "r"),)), True),
     ("allowlist row naming a method by its bare name", "dynamic-import", "tools/t.py",
      (("tools/t.py", "class C:\n    def g(self):\n        return __import__\ndef g():\n    pass\n"),), (),
+     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "g", ("#1: __import__",), "r"),)), True),
+    ("allowlist row naming a method by its bare name, no other scope of that name", "dynamic-import", "tools/t.py",
+     (("tools/t.py", "class C:\n    def g(self):\n        return __import__\n"),), (),
      dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "g", ("#1: __import__",), "r"),)), True),
     ("module-level row for a site inside a function", "dynamic-import", "tools/t.py",
      (("tools/t.py", "def f():\n    return __import__\n"),), (),
@@ -2375,6 +2401,9 @@ _RULE_VECTORS = (
      ((_REC, _GOOD_PROVENANCE.replace('version = "1.0"\n', "")),), (), {}, True),
     ("vendored record with no purl", "vendor-provenance", _REC,
      ((_REC, _GOOD_PROVENANCE.replace('purl = "pkg:pypi/pkg@1.0"\n', "")),), (), {}, True),
+    ("vendored record with an empty version", "vendor-provenance", _REC,
+     ((_REC, _GOOD_PROVENANCE.replace("version = \"1.0\"", "version = \"\"").replace("pkg@1.0", "pkg@")),), (), {},
+     True),
     ("purl naming another package", "vendor-provenance", _REC,
      ((_REC, _PROVENANCE % ("pkg:pypi/other@1.0", "MIT", "lib/_vendor/pkg/")),), (), {}, True),
     ("invalid SPDX identifier", "vendor-provenance", _REC,
@@ -2404,6 +2433,8 @@ _RULE_VECTORS = (
     ("vendored bytes differ from the recorded digest", "vendor-provenance", "lib/_vendor/pkg/mod.py",
      (("lib/_vendor/pkg/mod.py", "import json\nfrom .sub import leaf\nimport os\n"),), (), {}, False),
     ("listed vendored file missing", "vendor-provenance", _MANIFEST, ((_MANIFEST, None),), (), {}, True),
+    ("listed file in a directory the walk does not enter", "vendor-provenance", _MANIFEST,
+     (("node_modules/x.txt", "x\n"), ("+manifest", "node_modules/x.txt")), (), {}, True),
     ("vendored manifest missing", "vendor-provenance", _REC, (), (_MANIFEST,), {}, True),
     ("stale disposition row", "disposition", "lib/_vendor/pkg/mod.py", (), (),
      dict(dispositions=_FIXTURE_DISPOSITIONS + (("lib/_vendor/pkg/mod.py", "gone", "guarded-optional"),)), True),
@@ -2955,6 +2986,8 @@ def _vector_cases(tmp):
 
 
 def _scan_rc(module, base, rules=None, special=None, **kwargs):
+    """(rc, findings) of module's scan of base: rc 2, with the refusal's message as the one entry, when it cannot
+    evaluate."""
     kwargs.setdefault("dispositions", _FIXTURE_DISPOSITIONS)
     kwargs.setdefault("search_roots", _FIXTURE_ROOTS)
     kwargs.setdefault("allowlist", _FIXTURE_SITES)
@@ -2984,8 +3017,8 @@ def _scan_rc(module, base, rules=None, special=None, **kwargs):
                                                     for key, identity in original_identities(tree).items())
     try:
         findings, _shown, _stats = module.scan(base, rules=module.RULES if rules is None else rules, **kwargs)
-    except module.CannotEvaluate:
-        return 2, []
+    except module.CannotEvaluate as exc:
+        return 2, ["cannot evaluate: %s" % exc]
     finally:
         os.scandir = original
         module.dynamic_sites = original_sites
@@ -3001,9 +3034,13 @@ def _scan_rc(module, base, rules=None, special=None, **kwargs):
     return (1 if findings else 0), findings
 
 
-# The prefix of a problem that is not the vector's own failure (an edit vector's control failing, or a finding
-# outside the edited file): the self-test fails it against this gate and credits no mutant with it.
+# The prefix of a problem that is not the vector's own failure (an edit vector's control failing, a finding outside
+# the edited file, or an exception raised in the run): the self-test fails it against this gate and credits no mutant
+# with it.
 _UNCREDITED = "not credited: "
+# The prefix of a refusal (exit 2) where the vector expects none: it credits only a mutant that MUTANTS marks as
+# caught by that refusal, its backstop (_mutant_credit).
+_REFUSED = "refused (exit 2): "
 
 
 def _written_rows(module, rel, source):
@@ -3016,21 +3053,31 @@ def _written_rows(module, rel, source):
 
 def _case_failure(module, case):
     """None if the case holds against module (this gate or a mutant of it), else what went wrong (_UNCREDITED
-    first when that is not the vector's own failure)."""
+    first when that is not the vector's own failure, _REFUSED first when the gate under test refuses where the
+    vector expects no refusal). An exception an edit vector's run raises, writing the rows or scanning either
+    source, is _UNCREDITED; any other vector's run lets it propagate, and _mutant_credit credits no mutant with it."""
     name, expected, rule, at, base, kwargs, special = case
     if expected == "sites":
-        got = tuple("%s | %s" % (site[1], site[0]) for site in module.dynamic_sites(ast.parse(base),
-                                                                                   *module.watched_names()))
+        try:
+            found = module.dynamic_sites(ast.parse(base), *module.watched_names())
+        except module.CannotEvaluate as exc:
+            return _REFUSED + "expected sites %r: %s" % (rule, exc)
+        got = tuple("%s | %s" % (site[1], site[0]) for site in found)
         return None if got == rule else "expected sites %r, got %r" % (rule, got)
     if expected == "move":
+        step = "writing the rows for the unchanged sources"
         try:
             allowlist = _written_rows(module, "tools/a.py", _A_PY) + _written_rows(module, "tools/t.py", at)
+            step = "scanning the unchanged source"
+            rc, findings = _scan_rc(module, kwargs["control"], allowlist=allowlist)
+            if rc != 0:
+                return _UNCREDITED + "the rows written for the unchanged source fail it, rc %d %r" % (rc, findings)
+            step = "scanning the edited source"
+            rc, findings = _scan_rc(module, base, allowlist=allowlist)
         except module.CannotEvaluate as exc:
             return _UNCREDITED + "the gate under test cannot write rows for the unchanged sources: %s" % exc
-        rc, findings = _scan_rc(module, kwargs["control"], allowlist=allowlist)
-        if rc != 0:
-            return _UNCREDITED + "the rows written for the unchanged source fail it, rc %d %r" % (rc, findings)
-        rc, findings = _scan_rc(module, base, allowlist=allowlist)
+        except Exception as exc:
+            return _UNCREDITED + "the gate under test raised %s %s: %s" % (type(exc).__name__, step, exc)
         if rc == 2 or any(f[:2] != ("dynamic-import", "tools/t.py") for f in findings):
             return _UNCREDITED + ("the edited source gives rc %d, or a finding outside the edited file's "
                                   "dynamic-import rows: %r" % (rc, findings))
@@ -3042,28 +3089,32 @@ def _case_failure(module, case):
     rc, findings = _scan_rc(module, base, special=special, **dict(kwargs))
     if expected == 2:
         return None if rc == 2 else "expected cannot-evaluate (2), got %d %r" % (rc, findings)
+    refused = _REFUSED if rc == 2 else ""
     if expected == 0:
-        return None if rc == 0 else "expected a clean scan (0), got %d %r" % (rc, findings)
+        return None if rc == 0 else "%sexpected a clean scan (0), got %d %r" % (refused, rc, findings)
     if rc != 1 or not any(f[0] == rule and f[1] == at for f in findings):
-        return "expected a %s finding at %s, got rc %d %r" % (rule, at, rc, findings)
+        return "%sexpected a %s finding at %s, got rc %d %r" % (refused, rule, at, rc, findings)
     if expect is not None and not any(f[0] == rule and f[1] == at and expect in f[3] for f in findings):
         return "expected a %s finding at %s saying %r, got %r" % (rule, at, expect, findings)
     rc_off, findings_off = _scan_rc(module, base, rules=tuple(r for r in RULES if r != rule), special=special,
                                     **dict(kwargs))
     if rc_off != 0:
-        return "with %s removed the vector must pass (it fails only by that rule), got rc %d %r" % (
-            rule, rc_off, findings_off)
+        return "%swith %s removed the vector must pass (it fails only by that rule), got rc %d %r" % (
+            _REFUSED if rc_off == 2 else "", rule, rc_off, findings_off)
     return None
 
 
 _SELF_TEST_MARKER = "\n# " + "-" * 64 + " self-test\n"
 
-# Each mutant removes one check (or one fail-closed path) from the gate half of this file's source, the part
-# before the self-test: (mutant id, the exact source text, its replacement, the vector that must then fail). A tuple
-# of texts and a tuple of replacements remove a check together with the backstop that would refuse first, so the
-# check's own vector catches it, not the backstop. The self-test loads every mutant as a scratch module and requires
-# its named vector to fail; an edit vector (_MOVE_VECTORS) credits it only when the rows the mutant writes pass the
-# unchanged source and every finding on the edited source is in the edited file (_UNCREDITED otherwise).
+# Each mutant removes one check (or one fail-closed path) from the gate half of this file's source, the part before the
+# self-test: (mutant id, the exact source text, its replacement, the vector that must then fail, and, for a mutant only
+# a refusal can catch, its backstop: that refusal, named, and a text of its message). A tuple of texts and a tuple of
+# replacements remove a check together with the backstop that would refuse first, so the check's own vector catches it,
+# not the backstop. The self-test loads every mutant as a scratch module and requires its named vector to fail by that
+# vector's own failure (_mutant_credit): an exception raised in the run never credits it, a refusal (exit 2) credits it
+# only through the backstop it names, and an edit vector (_MOVE_VECTORS) credits it only when the rows the mutant writes
+# pass the unchanged source and every finding on the edited source is in the edited file (_UNCREDITED otherwise). An
+# entry may repeat another's text and replacement, binding that mutation to a second vector.
 MUTANTS = (
     # the walk and the inputs
     ("symlinked-dir-refused", "if os.path.islink(os.path.join(dirpath, d)):", "if False:", "symlinked directory"),
@@ -3136,16 +3187,21 @@ MUTANTS = (
     ("site-scope-lambda", "SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)",
      "SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)", "lambda body in a scope of its own"),
     ("site-scope-nested", 'identities[id(node)] = name if parent is tree else identities[id(parent)] + "." + name',
-     "identities[id(node)] = name", "allowlist row naming a method by its bare name"),
+     "identities[id(node)] = name", "allowlist row naming a method by its bare name, no other scope of that name"),
     # Round-9: each lexical scope instance is its own scope (same-named siblings numbered in source order in the
     # scope that runs their definitions, a class marked), an identity two scopes share is refused, and a malformed
     # reference is refused as malformed; each removed in turn and caught by its vector.
-    # The numbering alone removed is refused as a shared identity on the unchanged source too, so no edit vector
-    # credits it; its site vector does.
+    # Caught by their backstop, the shared-identity refusal (scope-identity-refused): the numbering, or its ordinal,
+    # removed alone gives same-named siblings one identity, which that refusal refuses before any row is read, and
+    # leaves every other tree as it was, so no vector's own check can see it (an edit vector's unchanged source with
+    # same-named siblings is refused too). The -unrefused pair below removes the refusal with it, and is caught by
+    # the vectors of the numbering itself.
     ("scope-instances-numbered", "            if counts[name] > 1:\n", "            if False:\n",
-     "sibling lambdas numbered in source order"),
+     "sibling lambdas numbered in source order",
+     ("the shared-identity refusal (scope-identity-refused)", "so no row could tell them apart")),
     ("scope-instances-counted", "seen[name] = seen.get(name, 0) + 1", "seen[name] = 1",
-     "identical references in sibling lambdas, each the first in its own"),
+     "identical references in sibling lambdas, each the first in its own",
+     ("the shared-identity refusal (scope-identity-refused)", "so no row could tell them apart")),
     ("scope-instances-source-order", "sorted(held.get(id(parent), ()), key=lambda n: (n.lineno, n.col_offset))",
      "held.get(id(parent), ())", "sibling lambdas numbered in source order"),
     ("scope-instances-enclosing", "held.setdefault(id(scope), []).append(node)",
@@ -3176,6 +3232,8 @@ MUTANTS = (
      "            elif isinstance(child, ast.AST):\n                out.append((child, scope, True))",
      "            elif isinstance(child, ast.AST):\n                out.append((child, inner, True))",
      "decorator evaluated outside its function"),
+    # Not a new mutation: the site-definition-outer mutation again, bound to a second vector (the type-parameter
+    # edit vector).
     ("site-definition-outer-type-parameters",
      "            elif isinstance(child, ast.AST):\n                out.append((child, scope, True))",
      "            elif isinstance(child, ast.AST):\n                out.append((child, inner, True))",
@@ -3198,8 +3256,10 @@ MUTANTS = (
      "member = True", "import-system members as attributes and literals only"),
     ("watched-module-aliases", "aliases = set(k for k, v in list(sys.modules.items()) if any(v is m for m in loaded))",
      "aliases = set(modules)", "frozen importlib module imported by its frozen name"),
+    # With no inert member to subtract, the inert-member refusal (watched-inert-live) cannot refuse first, so the
+    # member's own vector catches the derivation removed.
     ("watched-members-derived", "                members.add(key)\n", "                pass\n",
-     "watched name _gcd_import"),
+     "watched name _gcd_import, no inert member subtracted"),
     ("watched-modules-load",
      'raise CannotEvaluate("import-system module %s does not load (%s): the watched set has no other source"\n'
      '                                 % (name, exc))', "continue", "import-system module that does not load"),
@@ -3345,8 +3405,10 @@ MUTANTS = (
     ("image-local-walked", "(action_file and not value.startswith(\"/\") and local in file_set)",
      "(action_file and not value.startswith(\"/\"))", "action file image naming no walked file"),
     # vendor provenance
+    # An empty version, not an absent one: the record is then read on without a KeyError, so the check's own vector
+    # catches it.
     ("record-fields-required", '("package.name", "package.version", "package.purl", "license.spdx",',
-     '("package.name", "license.spdx",', "vendored record with no version"),
+     '("package.name", "license.spdx",', "vendored record with an empty version"),
     ("vendored-root-named", 'if re.sub(r"[-.]", "_", package["name"]).casefold() != records[rroot].casefold():',
      "if False:", "vendored root not named for its package"),
     ("licence-under-vendor", '            if not licence.startswith(vdir + "/"):\n', "            if False:\n",
@@ -3364,12 +3426,18 @@ MUTANTS = (
     ("licence-markers", "if ident in ids and absent:", "if False:", "empty licence text"),
     ("licence-listed", "            elif licence not in rows:\n", "            elif False:\n",
      "licence text not listed in the manifest"),
+    # Caught by its backstop, the refusal to read a file the walk did not list (_regular_bytes): with the check removed
+    # the gate reads the absent manifest and refuses, and a manifest path the walk does not list is absent or not a
+    # regular file, so the gate refuses to read it whatever the input.
     ("manifest-present", "            if man_rel not in file_set:\n", "            if False:\n",
-     "vendored manifest missing"),
+     "vendored manifest missing",
+     ("the refusal to read a file the walk did not list", "pkg-1.0.manifest.sha256: cannot stat: ")),
     ("manifest-unique-path", 'if match is None or match.group("path") in rows:', "if match is None:",
      "duplicate manifest path"),
+    # A listed file the walk does not enter, not an absent one: the gate then reads it on without refusing, so the
+    # check's own vector catches it.
     ("listed-file-present", "                if path_rel not in file_set:\n", "                if False:\n",
-     "listed vendored file missing"),
+     "listed file in a directory the walk does not enter"),
     ("listed-file-digest", ".hexdigest() != digest:", ".hexdigest() != digest and False:",
      "vendored bytes differ from the recorded digest"),
     ("root-files-listed", "if rel.startswith(rroot) and rel not in rows:", "if False:",
@@ -3521,6 +3589,34 @@ MUTANTS = (
      "doc through getattr dunder call owner at an allowlisted site"),
 )
 
+# Runs the credit rule (_mutant_credit) must refuse, each built like a MUTANTS entry, with a backstop or None and a
+# text of the reason it must give: an exception raised writing an edit vector's rows (1 // 0 in the key), scanning
+# its unchanged source (a raise as check_dynamic_sites starts) or scanning its edited source (a raise at an unlisted
+# site); an exception on a rule vector (an absent version read on with its check removed); a refusal for a mutant
+# that names no backstop; and a backstop named for a refusal that is not its own. Each fails the self-test as a mutant.
+_UNCREDITED_RUNS = (
+    ("raise-writing-rows", "sites.append((reference_key(ordinals[key], text),",
+     "sites.append((reference_key(ordinals[key], \"%d: %s\" % (1 // 0, text)),", "reference moved within its lambda",
+     None, "raised ZeroDivisionError writing the rows"),
+    ("raise-scanning-unchanged",
+     "    malformed one, repeats a reference, or lists a reference that does not occur there.\"\"\"\n",
+     "    malformed one, repeats a reference, or lists a reference that does not occur there.\"\"\"\n"
+     "    raise RuntimeError(\"every input\")\n", "reference moved within its lambda", None,
+     "raised RuntimeError scanning the unchanged source"),
+    ("raise-scanning-edited",
+     "        findings.append((\"dynamic-import\", rel, line,\n                         \"%s in",
+     "        raise RuntimeError(\"an unlisted site\")\n        findings.append((\"dynamic-import\", rel, line,\n"
+     "                         \"%s in", "reference moved into a sibling lambda", None,
+     "raised RuntimeError scanning the edited source"),
+    ("raise-on-rule-vector", "(\"package.name\", \"package.version\", \"package.purl\", \"license.spdx\",",
+     "(\"package.name\", \"license.spdx\",", "vendored record with no version", None, "raised KeyError"),
+    ("refused-no-backstop", "                members.add(key)\n", "                pass\n", "watched name _gcd_import",
+     None, "MUTANTS names no backstop"),
+    ("refused-not-its-backstop", "            if counts[name] > 1:\n", "            if False:\n",
+     "sibling lambdas numbered in source order", ("the unreadable-file refusal (unreadable-refused)", ": unreadable: "),
+     "not the refusal of its backstop"),
+)
+
 
 def _load_mutant(source, directory, number):
     """Write one mutant module to the scratch directory and load it with importlib."""
@@ -3534,6 +3630,42 @@ def _load_mutant(source, directory, number):
     finally:
         sys.path[:] = saved
     return module
+
+
+def _mutant_of(gate_source, rest, old, new, directory, number):
+    """(module, None) for this gate with old replaced by new in its gate half (each text of a tuple by its
+    replacement), loaded as a scratch module, or (None, why not): an anchor not found exactly once, or a mutant that
+    does not compile."""
+    pairs = tuple(zip(old, new, strict=True)) if isinstance(old, tuple) else ((old, new),)
+    found = [gate_source.count(text) for text, _replacement in pairs]
+    if found != [1] * len(pairs):
+        return None, "anchor found %s times" % "/".join(map(str, found))
+    for text, replacement in pairs:
+        gate_source = gate_source.replace(text, replacement)
+    try:
+        return _load_mutant(gate_source + rest, directory, number), None
+    except SyntaxError as exc:
+        return None, "does not compile: %s" % exc
+
+
+def _mutant_credit(module, case, backstop=None):
+    """(credited, what) for a mutant of this gate (or a scratch copy with a check removed) run against the vector it
+    names. Only the vector's own failure credits it: never an exception the run raises, nor a problem _UNCREDITED
+    begins, and a refusal (_REFUSED) only when backstop, the (refusal, a text of its message) MUTANTS marks the
+    mutant with, is that refusal; a mutant so marked is credited by nothing else."""
+    try:
+        problem = _case_failure(module, case)
+    except Exception as exc:
+        return False, _UNCREDITED + "the gate under test raised %s: %s" % (type(exc).__name__, exc)
+    if problem is None:
+        return False, "still holds with the check removed"
+    if problem.startswith(_UNCREDITED):
+        return False, problem
+    if backstop is None and problem.startswith(_REFUSED):
+        return False, _UNCREDITED + "a refusal, and MUTANTS names no backstop for this mutant: " + problem
+    if backstop is not None and not (problem.startswith(_REFUSED) and backstop[1] in problem):
+        return False, _UNCREDITED + "not the refusal of its backstop %s: %s" % (backstop[0], problem)
+    return True, problem
 
 
 def _case_line(case):
@@ -3574,38 +3706,41 @@ def self_test_main():
         gate_source, marker, rest = Path(__file__).read_text(encoding="utf-8").partition(_SELF_TEST_MARKER)
         mutant_dir = tmp / "mutants"
         os.makedirs(mutant_dir)
-        for number, (mutant, old, new, vector) in enumerate(MUTANTS, 1):
-            pairs = tuple(zip(old, new, strict=True)) if isinstance(old, tuple) else ((old, new),)
-            found = [gate_source.count(text) for text, _replacement in pairs]
-            if found != [1] * len(pairs) or vector not in by_name:
-                failures.append("mutant %s: anchor found %s times, vector %r %s" % (
-                    mutant, "/".join(map(str, found)), vector, "known" if vector in by_name else "unknown"))
+        backstops = 0
+        for number, (mutant, old, new, vector, *backstop) in enumerate(MUTANTS, 1):
+            backstop = backstop[0] if backstop else None
+            if vector not in by_name:
+                failures.append("mutant %s: vector %r unknown" % (mutant, vector))
                 continue
-            mutated = gate_source
-            for text, replacement in pairs:
-                mutated = mutated.replace(text, replacement)
-            try:
-                module = _load_mutant(mutated + marker + rest, mutant_dir, number)
-            except SyntaxError as exc:
-                failures.append("mutant %s: does not compile: %s" % (mutant, exc))
+            module, problem = _mutant_of(gate_source, marker + rest, old, new, mutant_dir, number)
+            if module is None:
+                failures.append("mutant %s: %s" % (mutant, problem))
                 continue
-            try:
-                problem = _case_failure(module, by_name[vector])
-            except Exception as exc:
-                problem = "raised %s" % type(exc).__name__
-            if problem is None:
-                failures.append("mutant %s: vector %r still holds with the check removed" % (mutant, vector))
-            elif problem.startswith(_UNCREDITED):
+            credited, problem = _mutant_credit(module, by_name[vector], backstop)
+            if not credited:
                 failures.append("mutant %s: vector %r %s" % (mutant, vector, problem))
             else:
-                print("MUTANT %s caught by %s (%s)" % (mutant, vector, problem.split(",")[0]))
+                backstops += backstop is not None
+                print("MUTANT %s caught by %s%s (%s)" % (mutant, vector, "" if backstop is None else
+                                                         " through its backstop " + backstop[0], problem.split(",")[0]))
+        # Each run the credit rule must refuse is credited by none, for the reason it names.
+        for number, (label, old, new, vector, backstop, reason) in enumerate(_UNCREDITED_RUNS, len(MUTANTS) + 1):
+            module, problem = _mutant_of(gate_source, marker + rest, old, new, mutant_dir, number)
+            if module is not None and vector in by_name:
+                credited, problem = _mutant_credit(module, by_name[vector], backstop)
+                if not credited and reason in problem:
+                    print("UNCREDITED %s on %s (%s)" % (label, vector, problem.split(",")[0]))
+                    continue
+            failures.append("uncredited run %s: expected no credit saying %r on %r, got %s" % (label, reason, vector,
+                                                                                              problem))
         # Each watched name and member removed in turn from a scratch copy: its own vector must then fail.
         copy = _load_mutant(gate_source + marker + rest, mutant_dir, 0)
         names, members = watched_names()
         for name in sorted(names | members):
             copy.watched_names = lambda *_args, _name=name: (names - {_name}, members - {_name})
-            if _case_failure(copy, by_name["watched name " + name]) is None:
-                failures.append("watched name %s: its vector still holds with the name removed" % name)
+            credited, problem = _mutant_credit(copy, by_name["watched name " + name])
+            if not credited:
+                failures.append("watched name %s: its vector, with the name removed, %s" % (name, problem))
             else:
                 print("REMOVED %s caught by its vector" % name)
         copy.watched_names = watched_names
@@ -3613,8 +3748,9 @@ def self_test_main():
         for vector in _importer_vectors():
             callee = vector[0].split(" ", 1)[1]
             copy.IMPORTERS = dict((k, v) for k, v in IMPORTERS.items() if k != callee)
-            if _case_failure(copy, by_name[vector[0]]) is None:
-                failures.append("importer %s: its vector still holds with the row removed" % callee)
+            credited, problem = _mutant_credit(copy, by_name[vector[0]])
+            if not credited:
+                failures.append("importer %s: its vector, with the row removed, %s" % (callee, problem))
             else:
                 print("REMOVED importer %s caught by its vector" % callee)
         copy.IMPORTERS = IMPORTERS
@@ -3633,10 +3769,12 @@ def self_test_main():
           "exit 2, %d dynamic-import site vectors hold, %d edit vectors (rows written for one source pass it "
           "unchanged, findings exact and in the edited file only on the edited one) hold, %d mutants (one check "
           "removed each, with its backstop where named, or a line or a column put into the key) caught by their "
-          "vectors, %d watched names, %d members and %d importers each removed and caught, the live tree passes"
+          "vectors, never through an exception (%d of them, as MUTANTS marks, only through their backstop's "
+          "refusal), %d runs that raise or refuse credited by none, %d watched names, %d members and %d importers "
+          "each removed and caught, the live tree passes"
           % (len(_RULE_VECTORS) + len(names | members) + importers, len(names | members), importers,
              len(_GREEN_VECTORS), len(_CANNOT_VECTORS), len(_SITE_VECTORS), len(_MOVE_VECTORS), len(MUTANTS),
-             len(names), len(members), importers))
+             backstops, len(_UNCREDITED_RUNS), len(names), len(members), importers))
     return 0
 
 
