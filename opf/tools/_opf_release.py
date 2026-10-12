@@ -299,13 +299,14 @@ def _canonical(value, _depth=0):
     (spec 8.7 permits a finite float in a registered extension; M2). An unexpected type fails CLOSED
     (ReleaseError) rather than serializing lossily, so the digest can never be computed over a value the
     canonicalization does not fully cover. `_depth` is the recursion level, bounded by FIX 2 below."""
-    # FIX 2 (defence-in-depth for a currently-unreachable-from-TOML input): a Python structure nested
-    # deeper than _MAX_CANONICAL_DEPTH would recurse until the interpreter raises an uncontrolled
-    # RecursionError. Such depth cannot arrive via tomllib (its own parser recursion guard fires first at
-    # every recursion limit), so this is unreachable from parsed TOML; the bound is here so the
-    # fail-closed posture never rests on tomllib's limit. Over-depth maps to the module's controlled
-    # ReleaseError, never a RecursionError. The bound is far above any real worklog nesting, so it changes
-    # no output for a real (shallow) input.
+    # FIX 2 (a fail-closed bound on an input parsed TOML can produce): a Python structure nested deeper than
+    # _MAX_CANONICAL_DEPTH would recurse until the interpreter raises an uncontrolled RecursionError.
+    # tomllib's recursion guard covers only its recursive productions (inline arrays and inline tables);
+    # it builds a dotted table header or dotted key ([a.b.c ...]) iteratively, so parsed TOML can carry a
+    # table nested far deeper than any recursion limit (100,000 levels from one header), and this bound is
+    # reachable from parsed TOML, not only from a hand-built structure. Over-depth maps to the module's
+    # controlled ReleaseError, never a RecursionError. The bound is far above any real worklog nesting, so it
+    # changes no output for a real (shallow) input.
     if _depth > _MAX_CANONICAL_DEPTH:
         raise ReleaseError("cannot canonicalize a worklog value nested deeper than {} levels (a real "
                            "worklog entry nests only a handful of levels)".format(_MAX_CANONICAL_DEPTH))
@@ -1674,6 +1675,8 @@ def self_test():
     # of a non-int container holding one in tail_ids (site 989), trip CPython's base-10 limit. Pre-fix each
     # raised a RAW ValueError out of the guard (before the intended ReleaseError); post-fix each renders
     # through _safe_str / _safe_display and returns the controlled ReleaseError with the bounded marker.
+    # The marker is per leaf: the int renders as <oversized-int: N bits> in place inside the span or the
+    # container (it was the whole-value <oversized-value> before the deep-render round 2).
     # Reverting any of the three .format wrappers flips its check red. Limit restored in finally.
     _r8_prev_idlimit = sys.get_int_max_str_digits()
     sys.set_int_max_str_digits(4300)
@@ -1692,10 +1695,10 @@ def self_test():
               _r8a.startswith("release:") and "oversized-int" in _r8a)
         _r8b = _outcome(lambda: compute_span_digest({}, (1, 2, 10 ** 5000)))         # site 413: repr(span)
         check("r8-span-digest-malformed-oversized-releaseerror",
-              _r8b.startswith("release:") and "oversized-value" in _r8b)
+              _r8b.startswith("release:") and "oversized-int" in _r8b)
         _r8c = _outcome(lambda: tail_ids([], [[10 ** 5000]]))                        # site 989: repr(n)
         check("r8-tail-ids-oversized-nonint-releaseerror",
-              _r8c.startswith("release:") and "oversized-value" in _r8c)
+              _r8c.startswith("release:") and "oversized-int" in _r8c)
     finally:
         sys.set_int_max_str_digits(_r8_prev_idlimit)
 

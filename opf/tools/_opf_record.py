@@ -3052,6 +3052,33 @@ def _self_test_units(check):
     finally:
         os.close(empty_fd)
         os.rmdir(empty)
+    # FIX-OPF-CLEAN-PATH-DEEP-RENDER R2 (the parsed-manifest route): _probe_homes reads the manifest through
+    # _read_operand, and tomllib builds a dotted [opf.homes.a.a ...] header of 100,000 parts into a
+    # 100,000-level nested table. The refusal naming that declaration renders it bounded; pre-fix its {!r}
+    # render raised RecursionError out of the probe.
+    from types import SimpleNamespace
+    deep_root = tempfile.mkdtemp(prefix="opf-record-self-test-")
+    deep_manifest = Path(deep_root, ".working", "toml", _opf_store.MANIFEST_NAME)
+    deep_manifest.parent.mkdir(parents=True)
+    deep_manifest.write_text("[opf.homes" + ".a" * 100000 + "]\nb = 1\n", encoding="utf-8")
+    deep_fd = os.open(deep_root, os.O_RDONLY | os.O_DIRECTORY)
+    deep_probe = None
+    try:
+        _probe_homes(Context(SimpleNamespace(machine_rel=".working/toml"), ".", deep_fd))
+    except RecordError as exc:
+        deep_probe = str(exc)
+    except RecursionError:
+        pass                 # the pre-fix escape: the check below then fails rather than aborting the suite
+    finally:
+        os.close(deep_fd)
+        deep_manifest.unlink()
+        deep_manifest.parent.rmdir()
+        deep_manifest.parent.parent.rmdir()
+        os.rmdir(deep_root)
+    check("a deeply nested parsed homes declaration refuses the homes probe with a bounded message",
+          deep_probe is not None and "declares homes generation" in deep_probe
+          and "nested deeper than" in deep_probe
+          and len(deep_probe) <= 512 + _opf_store._DISPLAY_MAX_CHARS + _opf_store._DISPLAY_MARKER_MAX)
 
 
 def _self_test_contexts(check, root_fd, now):

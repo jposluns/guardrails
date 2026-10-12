@@ -77,6 +77,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
     os._exit(2)
 
 import collections.abc
+import datetime
 import operator
 import os
 import posixpath
@@ -311,7 +312,11 @@ def allocation_record(kind, run_id):
 
 def evidence_inventory(kind, run_id, phase=None):
     """Store-root-relative inventory of one evidence bundle. A later phase adds its own
-    inventory-<phase>.toml beside the first; an inventory is never rewritten."""
+    inventory-<phase>.toml beside the first; an inventory is never rewritten. The phase type is checked
+    BEFORE the file name is built, so a non-str phase (a deeply nested table, an oversized int) refuses
+    through the bounded renderer and is never formatted raw."""
+    if phase is not None and type(phase) is not str:
+        raise ValueError("invalid evidence inventory phase: {}".format(_safe_display(phase)))
     name = "inventory.toml" if phase is None else "inventory-{}.toml".format(phase)
     if not is_evidence_inventory_name(name):
         raise ValueError("invalid evidence inventory phase: {}".format(_safe_display(phase)))
@@ -363,7 +368,7 @@ def require_ordinary_target(path):
     the held capability. Only homes-2 entry points call this (the capability-bound journal API and
     homes-2 view planning); legacy transactions keep their legacy operand handling."""
     if overlaps_home(path, JOURNALS_REL):
-        raise ValueError("ordinary operation target {!r} overlaps the journal home".format(path))
+        raise ValueError("ordinary operation target {} overlaps the journal home".format(_safe_display(path)))
 
 
 def render_homes_gitignore():
@@ -1317,32 +1322,88 @@ def _sorted_key_names(keys):
 
 
 _DISPLAY_MAX_DEPTH = 32      # container levels a finding-message render descends before a depth marker
-_DISPLAY_MAX_NODES = 512     # values (containers and scalars) a render visits before an elision marker
-_DISPLAY_MAX_CHARS = 1024    # characters a render emits before a truncation marker
-_DISPLAY_CONTAINERS = (dict, list, tuple, set, frozenset)   # exact types; a subclass renders as a leaf
+_DISPLAY_MAX_NODES = 512     # values (containers and scalars) a render visits before it stops
+_DISPLAY_MAX_CHARS = 1024    # characters of rendered content before a cut (on a whole escape) and a marker
+_DISPLAY_MARKER_MAX = 37     # longest marker appended after that cut: "...<str of N chars>", N at sys.maxsize
+_DISPLAY_NAME_MAX = 64       # characters of a type or timezone name a marker or a rendered datetime may carry
+_DISPLAY_CONTAINERS = (dict, list, tuple, set, frozenset)       # exact types; a subclass is unsupported
+_DISPLAY_TIMES = (datetime.datetime, datetime.date, datetime.time)   # exact types, as tomllib builds them
+_DISPLAY_ATOM = re.compile(r"\\(?:x[0-9a-f]{2}|u[0-9a-f]{4}|U[0-9a-f]{8}|.)|.", re.DOTALL)
+_DISPLAY_ATOM_MAX = 10       # the longest _DISPLAY_ATOM: a backslash, U and eight hex digits
+_DISPLAY_END = object()      # the exhausted-iterator sentinel of _bounded_repr
+_TYPE_NAME = type.__dict__["__name__"]   # the getter of type itself, so a metaclass __name__ never runs
+
+
+def _display_kind(kind, kinds):
+    """True when `kind` IS one of `kinds`. An identity test, never `in`: tuple membership falls back to ==, and a
+    metaclass can define __eq__, so `in` could run caller code."""
+    for k in kinds:
+        if kind is k:
+            return True
+    return False
+
+
+def _display_time_ok(value):
+    """True when an exact date, datetime or time renders through the built-in repr() and str() alone: a date
+    always; a datetime or time when its tzinfo is None, or an exact datetime.timezone whose offset is an exact
+    timedelta and whose name is an exact str of at most _DISPLAY_NAME_MAX characters (tomllib builds only
+    these). Any other tzinfo would have its own methods called, so such a value is unsupported."""
+    if type(value) is datetime.date:
+        return True
+    tz = value.tzinfo
+    if tz is None:
+        return True
+    if type(tz) is not datetime.timezone:
+        return False
+    name = tz.tzname(None)
+    return (type(tz.utcoffset(None)) is datetime.timedelta and type(name) is str
+            and len(name) <= _DISPLAY_NAME_MAX)
+
+
+def _display_int_width(value):
+    """An upper bound on len(repr(value)) for an exact int, from its bit length alone, so an int is sized
+    BEFORE any conversion: a magnitude of b bits has at most floor(b * 0.30103) + 1 decimal digits (0.30103
+    exceeds log10(2)), plus one for a sign. The bound can exceed the true width by one, so an int within a
+    digit of a bound may be judged over it."""
+    return value.bit_length() * 30103 // 100000 + 1 + (value < 0)
+
+
+def _display_leaf_cost(value):
+    """The content size _display_within_bounds charges for a non-container value whose built-in repr() is
+    safe to call: the length of a str or bytes, the _display_int_width of an int, and 0 for None, a bool, a
+    float and a supported date or time (each of those repr()s is a fixed few dozen characters at most, or
+    carries a name bounded by _DISPLAY_NAME_MAX). None when the value does not render through plain repr():
+    an unsupported type, or a date or time _display_time_ok refuses."""
+    kind = type(value)
+    if kind is str or kind is bytes:
+        return len(value)
+    if kind is int:
+        return _display_int_width(value)
+    if value is None or kind is bool or kind is float:
+        return 0
+    if _display_kind(kind, _DISPLAY_TIMES) and _display_time_ok(value):
+        return 0
+    return None
 
 
 def _display_within_bounds(value):
-    """True when `value` is within every finding-message render bound: at most _DISPLAY_MAX_NODES values,
-    containers nested at most _DISPLAY_MAX_DEPTH deep, and at most _DISPLAY_MAX_CHARS characters of string
-    content. The walk is iterative and stops at the first exceeded bound, so it never recurses and visits at
-    most _DISPLAY_MAX_NODES values whatever the depth or width of the input; a repr() of a value it admits
-    nests no deeper than _DISPLAY_MAX_DEPTH containers."""
+    """True when the built-in repr() of `value` is safe to call and its work is bounded: every container is
+    one of the exact _DISPLAY_CONTAINERS types and nests at most _DISPLAY_MAX_DEPTH deep, the value holds at
+    most _DISPLAY_MAX_NODES values in all (containers and scalars, counted before any is pushed), every other
+    value is one _display_leaf_cost prices, and the priced content (str and bytes lengths, int widths) totals
+    at most _DISPLAY_MAX_CHARS. The walk is iterative, holds at most _DISPLAY_MAX_NODES pending values and
+    stops at the first exceeded bound, so it never recurses and its work is bounded whatever the depth or
+    width of the input; it reads only exact built-in types, so no method a caller can define runs."""
     nodes = 0
     chars = 0
     stack = [(value, 0)]
     while stack:
         item, depth = stack.pop()
         nodes += 1
-        if nodes > _DISPLAY_MAX_NODES:
-            return False
         kind = type(item)
-        if kind is str:
-            chars += len(item)
-            if chars > _DISPLAY_MAX_CHARS:
-                return False
-        elif kind in _DISPLAY_CONTAINERS:
-            if depth >= _DISPLAY_MAX_DEPTH or len(item) > _DISPLAY_MAX_NODES:
+        if _display_kind(kind, _DISPLAY_CONTAINERS):
+            width = len(item) * 2 if kind is dict else len(item)
+            if depth >= _DISPLAY_MAX_DEPTH or nodes + len(stack) + width > _DISPLAY_MAX_NODES:
                 return False
             if kind is dict:
                 for key, member in item.items():
@@ -1350,24 +1411,82 @@ def _display_within_bounds(value):
                     stack.append((member, depth + 1))
             else:
                 stack.extend((member, depth + 1) for member in item)
+        else:
+            cost = _display_leaf_cost(item)
+            if cost is None:
+                return False
+            chars += cost
+            if chars > _DISPLAY_MAX_CHARS:
+                return False
     return True
 
 
+def _display_take(out, room, text):
+    """Append to `out` the longest prefix of `text` that fits in `room` characters and ends on a whole atom (a
+    backslash escape in the x, u or U hex form, a backslash and the one character it escapes, or any other
+    single character), so a cut never splits an escape repr() or _escape_line_unsafe wrote. Only the first
+    room + _DISPLAY_ATOM_MAX characters are scanned. Returns (characters appended, whether all of `text` fit)."""
+    if len(text) <= room:
+        out.append(text)
+        return len(text), True
+    taken = 0
+    for atom in _DISPLAY_ATOM.findall(text, 0, room + _DISPLAY_ATOM_MAX):
+        if taken + len(atom) > room:
+            break
+        out.append(atom)
+        taken += len(atom)
+    return taken, False
+
+
+def _display_unsupported(value):
+    """The fixed marker for a value whose exact type is not on the allow-list: <unrenderable NAME>, NAME being
+    its type name read through the __name__ getter of type itself (_TYPE_NAME, so a metaclass __name__ never
+    runs), escaped and cut to _DISPLAY_NAME_MAX characters (a trailing ... marks a cut). Nothing else is
+    read: the __repr__, __str__ and __format__ of the value are never called."""
+    name = _TYPE_NAME.__get__(type(value))
+    if type(name) is not str:
+        name = str.__str__(name)       # a str-subclass name: str.__str__ returns its exact-str copy
+    text, count = _escape_bounded(name, _DISPLAY_NAME_MAX)
+    return "<unrenderable {}{}>".format(text, "" if count == len(name) else "...")
+
+
+def _display_int(value):
+    """repr() of an exact int whose _display_int_width is at most _DISPLAY_MAX_CHARS. A wider int, or one whose
+    repr() trips the integer-string-conversion limit (which can be set as low as 640 digits), renders as the
+    type-and-size marker <oversized-int: N bits>, built from the bit length without converting the int."""
+    if _display_int_width(value) <= _DISPLAY_MAX_CHARS:
+        try:
+            return repr(value)
+        except ValueError:
+            pass
+    return "<oversized-int: {} bits>".format(value.bit_length())
+
+
 def _display_leaf(value):
-    """The repr() of one value _bounded_repr does not descend into, never raising: a str longer than
-    _DISPLAY_MAX_CHARS is cut on the VALUE before repr() (so no cut splits an escape) and reports its own
-    length; an int whose repr() trips the integer-string-conversion limit gets the oversized-int marker; any
-    other value whose repr() raises ValueError, RecursionError or MemoryError gets a fixed marker."""
-    if type(value) is str and len(value) > _DISPLAY_MAX_CHARS:
-        return "{}...<str of {} chars>".format(repr(value[:_DISPLAY_MAX_CHARS]), len(value))
-    try:
+    """The rendering of one non-container value, its work bounded by _DISPLAY_MAX_CHARS whatever the value
+    size, because every supported scalar is sized BEFORE it is converted: a str is cut on the value to its
+    first _DISPLAY_MAX_CHARS characters before repr() and, when cut, reports its length (...<str of N chars>);
+    a bytes longer than _DISPLAY_MAX_CHARS renders as <oversized-bytes: N bytes> and an int wider than
+    _DISPLAY_MAX_CHARS characters (_display_int) as <oversized-int: N bits>, neither building its repr();
+    None, a bool, a float and a supported date or time render through their built-in repr(); any other value
+    is unsupported (_display_unsupported). The text can exceed _DISPLAY_MAX_CHARS (a cut str repr() with its
+    escapes); the caller bounds it with _display_take."""
+    kind = type(value)
+    if kind is str:
+        if len(value) > _DISPLAY_MAX_CHARS:
+            return "{}...<str of {} chars>".format(repr(value[:_DISPLAY_MAX_CHARS]), len(value))
         return repr(value)
-    except ValueError:
-        if isinstance(value, int) and not isinstance(value, bool):
-            return "<oversized-int: {} bits>".format(value.bit_length())
-        return "<oversized-value>"
-    except (RecursionError, MemoryError):
-        return "<unrenderable {}>".format(type(value).__name__)
+    if kind is bytes:
+        if len(value) > _DISPLAY_MAX_CHARS:
+            return "<oversized-bytes: {} bytes>".format(len(value))
+        return repr(value)
+    if kind is int:
+        return _display_int(value)
+    if value is None or kind is bool or kind is float:
+        return repr(value)
+    if _display_kind(kind, _DISPLAY_TIMES) and _display_time_ok(value):
+        return repr(value)
+    return _display_unsupported(value)
 
 
 def _display_brackets(value):
@@ -1386,96 +1505,131 @@ def _display_brackets(value):
 
 
 def _bounded_repr(value):
-    """An iterative, bounded rendering of `value` for a finding message whose repr() is unsafe or too long:
-    a container nested deeper than _DISPLAY_MAX_DEPTH renders as a depth marker, at most _DISPLAY_MAX_NODES
-    values render before the rest is elided, and the text stops at _DISPLAY_MAX_CHARS characters with a
-    truncation marker. It keeps its own work stack and never recurses, so a 100,000-level nested table or a
-    million-element array renders in bounded stack, time and memory."""
+    """An iterative, bounded rendering of `value` for a finding message whose plain repr() is unsafe or too
+    long. It spells every supported value as repr() does; a container nested deeper than _DISPLAY_MAX_DEPTH
+    renders as a depth marker, every other value renders through _display_leaf, and rendering stops at
+    _DISPLAY_MAX_CHARS characters, cut on a whole escape (_display_take) and followed by ...<truncated>. It
+    also stops after _DISPLAY_MAX_NODES values, a backstop: every visited value emits at least one character,
+    so the character bound alone already caps the values visited at _DISPLAY_MAX_CHARS. It keeps its own work
+    stack, steps through each container with an iterator instead of copying its members, and never recurses,
+    so its work is bounded by those constants whatever the depth or width of the input (a 100,000-level nested
+    table or a million-element array included)."""
     out = []
     used = 0
     nodes = 0
     truncated = False
-    stack = [(value, 0)]        # (value, depth) to render, or (text, None) to emit verbatim
+    stack = [("value", value, 0)]   # ("value", v, depth), ("text", s), or ("members", frame)
     while stack:
-        item, depth = stack.pop()
-        if depth is None:
-            piece = item
+        entry = stack.pop()
+        if entry[0] == "text":
+            piece = entry[1]
+        elif entry[0] == "members":
+            frame = entry[1]           # [member iterator, kind, depth, members shown, close text]
+            member = next(frame[0], _DISPLAY_END)
+            if member is _DISPLAY_END:
+                piece = frame[4]
+            else:
+                stack.append(entry)
+                if frame[1] is dict:
+                    stack.append(("value", member[1], frame[2] + 1))
+                    stack.append(("text", ": "))
+                    stack.append(("value", member[0], frame[2] + 1))
+                else:
+                    stack.append(("value", member, frame[2] + 1))
+                if frame[3]:
+                    stack.append(("text", ", "))
+                frame[3] += 1
+                continue
         else:
+            item, depth = entry[1], entry[2]
             nodes += 1
             if nodes > _DISPLAY_MAX_NODES:
                 truncated = True
                 break
             kind = type(item)
-            if kind not in _DISPLAY_CONTAINERS:
+            if not _display_kind(kind, _DISPLAY_CONTAINERS):
                 piece = _display_leaf(item)
             elif depth >= _DISPLAY_MAX_DEPTH:
                 piece = "<{} nested deeper than {} levels>".format(kind.__name__, _DISPLAY_MAX_DEPTH)
             else:
                 piece, close = _display_brackets(item)
-                shown = []
-                for member in (item.items() if kind is dict else item):
-                    if len(shown) >= _DISPLAY_MAX_NODES:
-                        break
-                    shown.append(member)
-                stack.append((close, None))
-                if len(item) > len(shown):
-                    stack.append((", ...<{} more>".format(len(item) - len(shown)), None))
-                for i in range(len(shown) - 1, -1, -1):
-                    if kind is dict:
-                        stack.append((shown[i][1], depth + 1))
-                        stack.append((": ", None))
-                        stack.append((shown[i][0], depth + 1))
-                    else:
-                        stack.append((shown[i], depth + 1))
-                    if i:
-                        stack.append((", ", None))
-        out.append(piece)
-        used += len(piece)
-        if used > _DISPLAY_MAX_CHARS:
+                members = iter(item.items() if kind is dict else item)
+                stack.append(("members", [members, kind, depth, 0, close]))
+        taken, whole = _display_take(out, _DISPLAY_MAX_CHARS - used, piece)
+        used += taken
+        if not whole:
             truncated = True
             break
     text = "".join(out)
-    if truncated:
-        text = text[:_DISPLAY_MAX_CHARS] + "...<truncated>"
-    return text
+    return text + "...<truncated>" if truncated else text
 
 
 def _safe_display(value):
-    """Render a value for a FINDING MESSAGE (or a controlled-refusal message), BOUNDED and NEVER RAISING.
-    Two hazards reach a message from a parsed manifest, counters, version, worklog or record file. First,
-    tomllib parses a hexadecimal, octal, or binary integer literal (0x.../0o.../0b...) into an
-    arbitrarily-large Python int with NO digit limit (the integer-string-conversion limit applies to base-10
-    only), so repr() of such an int, or of a container holding one, raises ValueError. Second, tomllib builds
-    a dotted table header iteratively, so a header such as [id.a.a ... .a] with 100,000 parts parses into a
-    100,000-level nested table whose repr() overflows the stack (a RecursionError, "Stack overflow ... while
-    getting the repr of an object", on CPython 3.14), and a wide array or a long string makes repr() run to
-    megabytes. A value within every bound (_display_within_bounds: at most _DISPLAY_MAX_NODES values,
-    _DISPLAY_MAX_DEPTH levels and _DISPLAY_MAX_CHARS string characters) whose repr() is at most
-    _DISPLAY_MAX_CHARS characters renders as repr(value), byte for byte, so a small or normal value renders
-    exactly as it did before, and one whose repr() trips the integer limit keeps the deterministic
-    oversized-int / oversized-value marker. Any other value renders through the iterative _bounded_repr
-    (depth, elision and truncation markers), and a residual RecursionError, MemoryError or ValueError yields
-    a fixed placeholder, so the message is always produced and the caller still records its finding or
-    refusal (fail-closed; guard-input-soundness). It is the shared message-rendering guard for the
-    finding-message idiom across the three OPF pass-A validators (store, schema, release), the doctor and
-    the record verb. Like _sorted_key_names it is for MESSAGE rendering ONLY; it is deliberately NOT used on
-    the byte-stable coverage digest, where an oversized int or a too-deep value fails closed with a
-    ReleaseError instead (a marker in the digest would change the bytes; spec 6.1)."""
+    """Render a value for a FINDING MESSAGE (or a controlled-refusal message), BOUNDED in work and output and
+    NEVER RAISING (the one residual is item 5 below). Three hazards reach a message from a parsed manifest,
+    counters, version, worklog or record file. First, tomllib parses a hexadecimal, octal, or binary integer
+    literal (0x.../0o.../0b...) into an arbitrarily-large Python int with NO digit limit (the
+    integer-string-conversion limit applies to base-10 only, and sys.set_int_max_str_digits(0) lifts it), so
+    repr() of such an int either raises ValueError or runs in time and memory proportional to its size.
+    Second, tomllib builds a dotted table header or dotted key iteratively, so a header such as
+    [id.a.a ... .a] with 100,000 parts parses into a 100,000-level nested table whose repr() overflows the
+    stack (a RecursionError, "Stack overflow ... while getting the repr of an object", on CPython 3.14).
+    Third, a wide array or a long string or bytes value makes repr() run to megabytes. The contract:
+      1. Supported types are an explicit allow-list of EXACT types: None, bool, int, float, str, bytes,
+         datetime.date, datetime.datetime and datetime.time (with a tzinfo _display_time_ok admits), and
+         dict, list, tuple, set and frozenset. Any other value, a subclass of a supported type included,
+         renders as the fixed marker <unrenderable NAME> naming only its type (_display_unsupported): its
+         __repr__, __str__, __format__, __eq__ and __hash__ are never called, and no metaclass method runs.
+      2. Every supported scalar is sized BEFORE it is converted (_display_leaf): a bytes or an int over the
+         bound renders a type-and-size marker without building its repr(), and a str is cut on the value.
+      3. A value _display_within_bounds admits whose repr() is at most _DISPLAY_MAX_CHARS characters renders
+         as repr(value), byte for byte; that is the whole byte-identity guarantee. Any other value renders
+         through _bounded_repr, so a value past a bound differs from repr() even when short (a scalar nested
+         33 levels deep shows a depth marker; a cyclic list shows its expansion up to the bounds). A str
+         renders as repr() when that is at most _DISPLAY_MAX_CHARS characters, and otherwise as the longest
+         whole-escape prefix of at most _DISPLAY_MAX_CHARS characters of the repr() of its first
+         _DISPLAY_MAX_CHARS characters, followed by ...<str of N chars>.
+      4. The result is at most _DISPLAY_MAX_CHARS + _DISPLAY_MARKER_MAX characters: content is cut on a whole
+         escape at _DISPLAY_MAX_CHARS, and the marker after a cut is ...<truncated> (14 characters) or
+         ...<str of N chars> (at most 37, N being a str length and so at most sys.maxsize). The work is
+         bounded by the _DISPLAY_ constants whatever the size, depth or width of the input.
+      5. Residual: a MemoryError, a RuntimeError (another thread resizing a dict or set mid-render) or a
+         ValueError yields the fixed placeholder <unrenderable-value>; an asynchronous exception
+         (KeyboardInterrupt, or one a signal handler raises) is not caught and propagates.
+    So the message is always produced and the caller still records its finding or refusal (fail-closed;
+    guard-input-soundness). It is the shared message-rendering guard for the finding-message idiom across
+    the three OPF pass-A validators (store, schema, release), the doctor and the record verb. Like
+    _sorted_key_names it is for MESSAGE rendering ONLY; it is deliberately NOT used on the byte-stable
+    coverage digest, where an oversized int or a too-deep value fails closed with a ReleaseError instead (a
+    marker in the digest would change the bytes; spec 6.1)."""
     try:
+        if type(value) is str:
+            text = repr(value[:_DISPLAY_MAX_CHARS])
+            if len(value) <= _DISPLAY_MAX_CHARS and len(text) <= _DISPLAY_MAX_CHARS:
+                return text
+            out = []
+            _display_take(out, _DISPLAY_MAX_CHARS, text)
+            return "{}...<str of {} chars>".format("".join(out), len(value))
         if _display_within_bounds(value):
             try:
                 text = repr(value)
-            except ValueError:
-                if isinstance(value, int) and not isinstance(value, bool):
-                    return "<oversized-int: {} bits>".format(value.bit_length())
-                return "<oversized-value>"
-            except (RecursionError, MemoryError):
-                text = None
+            except (ValueError, MemoryError, RecursionError):
+                text = None       # an int under a lowered integer-string limit: _bounded_repr marks it
             if text is not None and len(text) <= _DISPLAY_MAX_CHARS:
                 return text
         return _bounded_repr(value)
-    except (RecursionError, MemoryError, ValueError):
+    except (MemoryError, RuntimeError, ValueError):
         return "<unrenderable-value>"
+
+
+def _escape_char(ch):
+    """One character as _escape_line_unsafe writes it: itself when printable, else its backslash escape."""
+    if ch.isprintable():
+        return ch
+    o = ord(ch)
+    return ("\\x{:02x}".format(o) if o <= 0xff
+            else "\\u{:04x}".format(o) if o <= 0xffff
+            else "\\U{:08x}".format(o))
 
 
 def _escape_line_unsafe(s):
@@ -1485,49 +1639,64 @@ def _escape_line_unsafe(s):
     ordinary space) byte-for-byte. `str.isprintable()` is the authority for what may sit on a single
     diagnostic line. This keeps an untrusted value from forging an extra finding line ('x\\nFORGED') or
     hiding/steering text with format characters (codex round-6; guard-input-soundness / no-concealed-failure
-    applied to a diagnostic renderer)."""
+    applied to a diagnostic renderer). Its output is unbounded (up to ten characters per input character);
+    a finding message bounds it through _escape_bounded or _display_take."""
+    return "".join(_escape_char(ch) for ch in s)
+
+
+def _escape_bounded(s, room):
+    """(text, count): _escape_line_unsafe of the longest prefix of the exact str `s` whose escaped form fits in
+    `room` characters, cut only between whole escapes, and the number of characters of `s` it covers (equal
+    to len(s) when nothing was cut). At most `room` characters of `s` are read, since each escapes to at
+    least one character."""
     out = []
-    for ch in s:
-        if ch.isprintable():
-            out.append(ch)
-        else:
-            o = ord(ch)
-            out.append("\\x{:02x}".format(o) if o <= 0xff
-                       else "\\u{:04x}".format(o) if o <= 0xffff
-                       else "\\U{:08x}".format(o))
-    return "".join(out)
+    used = 0
+    count = 0
+    for ch in s[:room]:
+        piece = _escape_char(ch)
+        used += len(piece)
+        if used > room:
+            break
+        out.append(piece)
+        count += 1
+    return "".join(out), count
 
 
 def _safe_str(value):
     """The str()-style companion of _safe_display, for a finding-message position that renders a value with
     {} (no surrounding repr quotes) rather than {!r}: a version string interpolated into a `release #N
-    (<version>)` label, for instance. Returns str(value) with any NON-PRINTABLE character escaped to a
-    backslash form (_escape_line_unsafe), so a value carrying a control character cannot inject a second
-    diagnostic line; a value whose str is entirely printable and at most _DISPLAY_MAX_CHARS characters (a
-    normal string or int) renders exactly as it did before, byte for byte. It keeps the bounds of
-    _safe_display: a built-in container renders through _safe_display (its str() IS its repr(), which
-    overflows the stack on a deeply nested table), a longer string is cut on the value with its length
-    reported, and a value whose str trips the base-10 integer-string-conversion limit (an oversized
-    non-decimal int parsed from TOML, or a container holding one) returns the same bounded marker
-    _safe_display uses (fail-closed). Unlike _safe_display, which renders through repr() and so already
-    escapes controls, this str()-based renderer must escape them itself (the store/release sibling the
-    schema newline-hardening left exposed; codex round-6). It is for MESSAGE rendering only, never the
-    byte-stable coverage digest."""
-    if type(value) in _DISPLAY_CONTAINERS:
-        return _escape_line_unsafe(_safe_display(value))
-    if type(value) is str and len(value) > _DISPLAY_MAX_CHARS:
-        return "{}...<str of {} chars>".format(_escape_line_unsafe(value[:_DISPLAY_MAX_CHARS]), len(value))
+    (<version>)` label, for instance. It shares the allow-list, the sizing before conversion and the residual
+    of _safe_display, and its result is likewise at most _DISPLAY_MAX_CHARS + _DISPLAY_MARKER_MAX characters.
+    A str renders with every NON-PRINTABLE character escaped to a backslash form (_escape_line_unsafe), so a
+    value carrying a control character cannot inject a second diagnostic line; the ESCAPED text is cut on a
+    whole escape at _DISPLAY_MAX_CHARS characters (_escape_bounded) and a cut appends ...<str of N chars>, so
+    a str whose escaped form is at most _DISPLAY_MAX_CHARS characters renders exactly as before, byte for
+    byte. A supported date or time renders as its built-in str(). A built-in container renders as
+    _safe_display does: its str() IS its repr(), and repr() escapes every character str.isprintable()
+    rejects, so the escape applied here changes nothing and the bound carries over. Every other value
+    renders as _display_leaf does (an exact int, float, bool or None has str() equal to repr(), and so does a
+    bytes), its escaped text cut on a whole escape at _DISPLAY_MAX_CHARS characters and followed by
+    ...<truncated> when cut: an oversized int is the oversized-int marker, an unsupported type
+    <unrenderable NAME>, and no __str__ or __repr__ a caller can define is called. Unlike _safe_display,
+    which renders through repr() and so already escapes controls, this str()-based renderer must escape them
+    itself (the store/release sibling the schema newline-hardening left exposed; codex round-6). It is for
+    MESSAGE rendering only, never the byte-stable coverage digest."""
     try:
-        text = str(value)
-    except ValueError:
-        if isinstance(value, int) and not isinstance(value, bool):
-            return "<oversized-int: {} bits>".format(value.bit_length())
-        return "<oversized-value>"
-    except (RecursionError, MemoryError):
-        return "<unrenderable {}>".format(type(value).__name__)
-    if len(text) > _DISPLAY_MAX_CHARS:
-        return "{}...<truncated>".format(_escape_line_unsafe(text[:_DISPLAY_MAX_CHARS]))
-    return _escape_line_unsafe(text)
+        kind = type(value)
+        if kind is str:
+            text, count = _escape_bounded(value, _DISPLAY_MAX_CHARS)
+            if count == len(value):
+                return text
+            return "{}...<str of {} chars>".format(text, len(value))
+        if _display_kind(kind, _DISPLAY_CONTAINERS):
+            return _escape_line_unsafe(_safe_display(value))
+        if _display_kind(kind, _DISPLAY_TIMES) and _display_time_ok(value):
+            return _escape_line_unsafe(str(value))
+        out = []
+        _, whole = _display_take(out, _DISPLAY_MAX_CHARS, _escape_line_unsafe(_display_leaf(value)))
+        return "".join(out) if whole else "".join(out) + "...<truncated>"
+    except (MemoryError, RuntimeError, ValueError):
+        return "<unrenderable-value>"
 
 
 def _is_item_collection(value):
@@ -3620,28 +3789,36 @@ def self_test():
         # nested 100,000 levels deep (what tomllib builds from a 100,000-part dotted header) overflowed the
         # stack in repr() pre-fix (RecursionError, "Stack overflow ... while getting the repr of an object"),
         # so it runs in a bounded child: a regression is the ERROR:RecursionError sentinel, never a crash of
-        # this suite. A wide array and a long string rendered to megabytes pre-fix. A small plain value still
-        # renders exactly as repr() (and the escaped str()) did, so every existing message is byte-identical.
+        # this suite. A wide array and a long string rendered to megabytes pre-fix. A value within every
+        # render bound whose repr() is at most _DISPLAY_MAX_CHARS characters still renders exactly as repr(),
+        # and a str whose escaped form is at most _DISPLAY_MAX_CHARS characters exactly as the escaped str();
+        # a value past a bound renders differently by design (see _safe_display), so a message is
+        # byte-identical to its earlier form only when every value it renders is within the bounds.
+        _dr_cap = _DISPLAY_MAX_CHARS + _DISPLAY_MARKER_MAX
+
         def _dr_deep_render():
             deep = cur = {}
             for _ in range(100000):
                 cur["a"] = {}
                 cur = cur["a"]
             shown, text = _safe_display(deep), _safe_str(deep)
-            return "{}|{}".format(len(shown) <= 2 * _DISPLAY_MAX_CHARS and "nested deeper than" in shown,
-                                  len(text) <= 2 * _DISPLAY_MAX_CHARS and "nested deeper than" in text)
+            return "{}|{}".format(len(shown) <= _dr_cap and "nested deeper than" in shown,
+                                  len(text) <= _dr_cap and "nested deeper than" in text)
         check("deeprender-deep-table-bounded", run_bounded(_dr_deep_render, timeout_s=60) == "True|True")
         _dr_wide = list(range(1000000))
         check("deeprender-wide-array-bounded",
-              len(_safe_display(_dr_wide)) <= 2 * _DISPLAY_MAX_CHARS
+              len(_safe_display(_dr_wide)) == _DISPLAY_MAX_CHARS + len("...<truncated>")
               and _safe_display(_dr_wide).endswith("...<truncated>")
-              and len(_safe_str(_dr_wide)) <= 2 * _DISPLAY_MAX_CHARS)
+              and _safe_str(_dr_wide) == _safe_display(_dr_wide))
         _dr_long = "x" * 1000000
         check("deeprender-long-str-bounded",
-              len(_safe_display(_dr_long)) <= 2 * _DISPLAY_MAX_CHARS
-              and _safe_str(_dr_long).endswith("...<str of 1000000 chars>"))
+              _safe_display(_dr_long) == chr(39) + "x" * (_DISPLAY_MAX_CHARS - 1) + "...<str of 1000000 chars>"
+              and _safe_str(_dr_long) == "x" * _DISPLAY_MAX_CHARS + "...<str of 1000000 chars>")
+        _dr_hour = datetime.timedelta(hours=5)
         _dr_small = [None, True, 7, 1.5, "BI-1", "x" + chr(10) + "y", [1, "x", {"a": 2}], {"k": (1,)}, (), (1,),
-                     set(), frozenset(), {3}, frozenset({4}), {"a": [[[]]]}, "x" * 1000]
+                     set(), frozenset(), {3}, frozenset({4}), {"a": [[[]]]}, "x" * 1000, b"a" + bytes(2),
+                     datetime.datetime(2026, 1, 2, 3, 4, 5, tzinfo=datetime.timezone.utc), datetime.time(1, 2, 3),
+                     datetime.date(2026, 1, 2), datetime.datetime(2026, 1, 2, tzinfo=datetime.timezone(-_dr_hour))]
         check("deeprender-small-values-byte-identical",
               all(_safe_display(v) == repr(v) for v in _dr_small)
               and all(_safe_str(v) == _escape_line_unsafe(str(v)) for v in _dr_small))
@@ -3650,17 +3827,125 @@ def self_test():
             _dr_cur.append([])
             _dr_cur = _dr_cur[0]
         check("deeprender-depth-at-bound-byte-identical", _safe_display(_dr_nest) == repr(_dr_nest))
-        # The oversized markers depend on the int-to-str limit: pin the default (4300) and restore it, so the
-        # verdict comes from the code under test, not the ambient sys.set_int_max_str_digits (test-hermeticity).
+        check("deeprender-depth-past-bound-marker", _safe_display([_dr_nest]) == "[" * _DISPLAY_MAX_DEPTH
+              + "<list nested deeper than {} levels>".format(_DISPLAY_MAX_DEPTH) + "]" * _DISPLAY_MAX_DEPTH)
+        # Round 2 (each red on the round-1 renderer): the ESCAPED output is bounded exactly. Content is cut on a
+        # whole escape at _DISPLAY_MAX_CHARS characters, never splitting one, and the marker after the cut is
+        # at most _DISPLAY_MARKER_MAX characters (the longest, a str-length marker at sys.maxsize).
+        check("deeprender-marker-max-is-the-longest-marker",
+              _DISPLAY_MARKER_MAX >= len("...<str of {} chars>".format(sys.maxsize)) >= len("...<truncated>"))
+        _dr_nul, _dr_astral = chr(0) * 1024, chr(0x1000C) * 1024
+        check("deeprender-escaped-str-bound-exact",
+              _safe_str(_dr_nul) == "\\x00" * 256 + "...<str of 1024 chars>"
+              and _safe_str(_dr_astral) == "\\U0001000c" * 102 + "...<str of 1024 chars>"
+              and _safe_str(chr(10) * 5000) == "\\x0a" * 256 + "...<str of 5000 chars>"
+              and _safe_display(_dr_nul) == chr(39) + "\\x00" * 255 + "...<str of 1024 chars>"
+              and all(len(f(v)) <= _dr_cap for f in (_safe_display, _safe_str)
+                      for v in (_dr_nul, _dr_astral, chr(0x2028) * 2000, bytes(1024), [_dr_astral] * 4)))
+        check("deeprender-cut-on-whole-escape",
+              _safe_display([chr(0x1000C) * 200]) == "[" + chr(39) + "\\U0001000c" * 102 + "...<truncated>"
+              and _safe_str(bytes(1024)) == "b" + chr(39) + "\\x00" * 255 + "...<truncated>")
+        # Round 2: every supported scalar is sized BEFORE it is converted, so rendering a bytes or an int far
+        # over the bound neither builds its repr() nor allocates in proportion to it (the round-1 renderer
+        # allocated about 2 MB for a 1,000,000-byte value, and about 1.7 MB for a 100,000-digit hexadecimal int
+        # under a lifted integer-string limit). The traced peak covers the renders only.
+        import tracemalloc
+        _dr_bytes = b"x" * 1000000
+        _dr_idlimit = sys.get_int_max_str_digits()
+        sys.set_int_max_str_digits(0)
+        _dr_trace = not tracemalloc.is_tracing()
+        if _dr_trace:
+            tracemalloc.start()
+        try:
+            _dr_hex = int("f" * 100000, 16)
+            tracemalloc.reset_peak()
+            _dr_base = tracemalloc.get_traced_memory()[0]
+            _dr_sized = (_safe_display(_dr_bytes), _safe_str(_dr_bytes), _safe_display(_dr_hex),
+                         _safe_str(_dr_hex), _safe_display([_dr_hex, _dr_bytes]))
+            _dr_peak = tracemalloc.get_traced_memory()[1] - _dr_base
+        finally:
+            if _dr_trace:
+                tracemalloc.stop()
+            sys.set_int_max_str_digits(_dr_idlimit)
+        check("deeprender-scalars-sized-before-repr",
+              _dr_sized == ("<oversized-bytes: 1000000 bytes>",) * 2 + ("<oversized-int: 400000 bits>",) * 2
+              + ("[<oversized-int: 400000 bits>, <oversized-bytes: 1000000 bytes>]",) and _dr_peak < 65536)
+        # The int marker is per leaf: an oversized int inside a container renders its own type-and-size marker
+        # in place (round 1 replaced the whole container with <oversized-value>). The int-to-str limit is
+        # pinned to the default and restored, so the verdict comes from the code under test.
         _dr_idlimit = sys.get_int_max_str_digits()
         sys.set_int_max_str_digits(4300)
         try:
-            check("deeprender-oversized-markers-unchanged",
-                  _safe_display(10 ** 5000).startswith("<oversized-int: ")
-                  and _safe_display([10 ** 5000]) == "<oversized-value>"
-                  and _safe_str([10 ** 5000]) == "<oversized-value>")
+            check("deeprender-oversized-int-marker-per-leaf",
+                  _safe_display(10 ** 5000) == "<oversized-int: 16610 bits>"
+                  and _safe_str(10 ** 5000) == "<oversized-int: 16610 bits>"
+                  and _safe_display([10 ** 5000]) == "[<oversized-int: 16610 bits>]"
+                  and _safe_str([10 ** 5000]) == "[<oversized-int: 16610 bits>]")
         finally:
             sys.set_int_max_str_digits(_dr_idlimit)
+        # Round 2: a type off the allow-list (a container subclass, any other object) never has its __repr__,
+        # __str__, metaclass __name__ or metaclass __eq__ run, so neither renderer can raise on it; it renders
+        # a fixed marker naming only its type. Round 1 raised RuntimeError from the subclass __repr__/__str__.
+
+        class _DrBad(list):
+            def __repr__(self):
+                raise RuntimeError("repr called")
+
+            def __str__(self):
+                raise RuntimeError("str called")
+
+        class _DrMeta(type):
+            @property
+            def __name__(cls):
+                raise RuntimeError("metaclass name called")
+
+            def __eq__(cls, other):
+                raise RuntimeError("metaclass eq called")
+            __hash__ = type.__hash__
+
+        class _DrOdd(metaclass=_DrMeta):
+            pass
+
+        class _DrTZ(datetime.tzinfo):
+            def utcoffset(self, dt):
+                raise RuntimeError("utcoffset called")
+
+            def __repr__(self):
+                raise RuntimeError("tzinfo repr called")
+        _dr_unsupported = []
+        _dr_tzbad = datetime.datetime(2026, 1, 1, tzinfo=_DrTZ())
+        for _dr_v in (_DrBad(), [1, _DrBad()], _DrOdd(), {"k": _DrOdd()}, _dr_tzbad):
+            try:
+                _dr_unsupported.append((_safe_display(_dr_v), _safe_str(_dr_v)))
+            except Exception as exc:  # noqa: BLE001  the round-1 escape: recorded, so the check fails
+                _dr_unsupported.append(type(exc).__name__)
+        check("deeprender-unsupported-types-never-called", _dr_unsupported == [
+            ("<unrenderable _DrBad>",) * 2, ("[1, <unrenderable _DrBad>]",) * 2, ("<unrenderable _DrOdd>",) * 2,
+            ("{" + chr(39) + "k" + chr(39) + ": <unrenderable _DrOdd>}",) * 2, ("<unrenderable datetime>",) * 2])
+        # Round 2 (the store path helpers): a deeply nested value reaching a path helper refuses through the
+        # bounded renderer. evidence_inventory checks the phase type BEFORE it builds the file name (round 1
+        # formatted the phase raw first, so a nested phase raised RecursionError before its guard ran), and
+        # store_control_roots renders its refusal bounded (a {!r} there raises the same). Bounded children.
+
+        def _dr_path_helper(fn, prefix):
+            def thunk():
+                deep = cur = {}
+                for _ in range(100000):
+                    cur["a"] = {}
+                    cur = cur["a"]
+                try:
+                    fn(deep)
+                except ValueError as exc:
+                    return "{}|{}|{}".format(str(exc).startswith(prefix), "nested deeper than" in str(exc),
+                                             len(str(exc)) <= len(prefix) + _dr_cap)
+                return "accepted"
+            return thunk
+        _dr_run = "imp-20260101T000000Z-" + "0" * 16
+        check("deeprender-evidence-inventory-deep-phase-refused", run_bounded(_dr_path_helper(
+            lambda v: evidence_inventory("import", _dr_run, v), "invalid evidence inventory phase: "),
+            timeout_s=60) == "True|True|True")
+        check("deeprender-store-control-roots-deep-homes-refused", run_bounded(_dr_path_helper(
+            store_control_roots, "unknown homes generation: "), timeout_s=60) == "True|True|True")
 
         # NEW-5: the store-read cap is enforced on the bytes ACTUALLY read, not only the pre-open lstat, so a
         # file reporting a small size at lstat but reading over the cap (a raced swap) is refused. The lstat is
