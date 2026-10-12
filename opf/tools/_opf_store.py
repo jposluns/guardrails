@@ -820,6 +820,7 @@ def _list_real_subdirs(wfd, working_rel):
     try:
         names = sorted(_journal._listdir_fresh(wfd, working_rel))
     except (_journal.JournalError, OSError) as exc:
+        _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
         # A listing I/O error (EIO, or a state change after the open) is fail-closed, never read as
         # an empty (no-store) directory (check-fails-closed-on-unreadable).
         raise StoreError("cannot list {} ({})".format(working_rel, exc))

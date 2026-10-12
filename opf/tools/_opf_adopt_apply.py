@@ -10406,7 +10406,9 @@ def _self_test_checks():
     # compose no op; a drifted source, a preservation other than archive_rel(run_id, path), and every row
     # the pass cannot read or classify refuse with nothing composed, each matched on its own rule's reason;
     # a later unreadable, drifted or absent source leaves the caller's ApplyOps exactly as it was on entry
-    # (all or nothing); retire-file stays not yet executable.
+    # (all or nothing); the pass is not an op, and retire-file executes only through the file-op handler.
+    # Every base transaction here stages the run's fixture plan before the pass composes (the self-test
+    # transaction shadow, as apply stages the approved plan), so its create leads each composed op list.
     pres_files = dict([("legacy/OLD.md", b"old notes\n"), (".working/TODO.md", b"hand-kept todo\n"),
                        ("legacy/KEEP.md", b"kept\n"), ("legacy/MOVE.md", b"moved\n"),
                        ("legacy/RETIRE.md", b"retired notes\n")])
@@ -10497,12 +10499,13 @@ def _self_test_checks():
         check("preservation-migrate-non-occupying-source-unchanged",
               all(after.get(rel) == payload for rel, payload in pres_files.items())
               and [(op["op"], op["path"]) for op in composed if op["op"] != "mkdir"]
-              == [("create", archive_rel(rid, "legacy/OLD.md"))])
+              == [("create", plan_rel(rid)), ("create", archive_rel(rid, "legacy/OLD.md"))])
         check("preservation-migrate-bundle-verifies", verify_bundle(root, rid).status == VALID)
 
     # a NON-OCCUPYING retire source takes the same preservation as a non-occupying migrate: its archive copy
-    # byte-equal, the live source unchanged, the archive create the only non-mkdir op, and the bundle valid
-    # with the copy claimed by its inventory (a pass that skipped preservation for retire turns these red).
+    # byte-equal, the live source unchanged, the archive create the only non-mkdir op after the plan the base
+    # transaction stages, and the bundle valid with exactly the copy and that plan claimed by its inventory
+    # (a pass that skipped preservation for retire turns these red).
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
         root = pres_fixture(temp)
         seen = []
@@ -10520,9 +10523,11 @@ def _self_test_checks():
         check("preservation-retire-non-occupying-source-unchanged",
               all(after.get(rel) == payload for rel, payload in pres_files.items()))
         check("preservation-retire-non-occupying-archive-create-only",
-              [(op["op"], op["path"]) for op in composed if op["op"] != "mkdir"] == [("create", retire_copy)])
+              [(op["op"], op["path"]) for op in composed if op["op"] != "mkdir"]
+              == [("create", plan_rel(rid)), ("create", retire_copy)])
         check("preservation-retire-bundle-verifies-claiming-the-copy",
-              verify_bundle(root, rid).status == VALID and claimed == [retire_copy])
+              verify_bundle(root, rid).status == VALID and claimed is not None
+              and sorted(claimed) == sorted([plan_rel(rid), retire_copy]))
 
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
         root = pres_fixture(temp)
@@ -10551,7 +10556,7 @@ def _self_test_checks():
         pin = composed[-1].get("source-poststate") if composed else None
         check("preservation-occupying-create-then-pinned-remove",
               [(op["op"], op["path"]) for op in composed if op["op"] != "mkdir"]
-              == [("create", todo_copy), ("remove", todo)]
+              == [("create", plan_rel(rid)), ("create", todo_copy), ("remove", todo)]
               and isinstance(pin, dict) and pin.get("sha256") == _sha256(pres_files[todo])
               and seen[:1] == [[(todo, "archived-removed")]])
         check("preservation-occupying-archived-then-removed",
@@ -10746,10 +10751,14 @@ def _self_test_checks():
               acct is None and entry[3] is True
               and "the transaction is sealed by its inventory; nothing may follow it" in (why or "")
               and final == entry and snapshot(root) == before)
+    # retire-file has landed with the file-ops slice (handlers-executable-exactly-the-file-ops), so this
+    # vector no longer pins it to the refusing handler: the preservation pass did not enable it and is not
+    # its route; it executes only through _execute_file_op, and a bare row still refuses for want of its
+    # OpContext.
     rf = dispatch(schema.canonical_op("retire-file"))
-    check("preservation-retire-file-stays-not-yet-executable",
-          OP_HANDLERS["retire-file"] is _not_yet_executable and rf.status == CANNOT
-          and any("not yet executable" in f for f in rf.findings))
+    check("preservation-retire-file-executes-only-through-the-file-op-handler",
+          OP_HANDLERS["retire-file"] is _execute_file_op and "retire-file" in EXECUTABLE_OPS
+          and rf.status == CANNOT and any("OpContext" in f for f in rf.findings))
 
     # 10: apply takes only a plan/v2 (spec 14.1): a v1-marked plan is never apply input. The v1 schema no
     # longer ships (the plan-v2 schema replaced it, U8), and apply refuses on the format marker before it

@@ -1183,7 +1183,13 @@ def _listdir_fresh(held_fd, label):
     except OSError as exc:
         raise JournalError("cannot list {} ({}); fail-closed".format(label, exc))
     finally:
-        _close_fd_quietly(lfd)
+        # a close that raises anything but OSError is marked and raised as itself (or noted on an
+        # interrupt in flight), never left for a caller to read as a listing failure
+        inflight = _in_flight_in(sys._getframe())
+        try:
+            _close_fd_quietly(lfd)
+        except BaseException as cexc:   # noqa: BLE001  the first interrupt propagates as itself
+            _yield_close_exceptions(inflight, [cexc])
 
 
 def _journal_txn_dirs(jr_fd, journal_root, strict=False, hold=False):
