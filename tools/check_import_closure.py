@@ -87,8 +87,9 @@ Rules (each self-test vector is caught by exactly its rule, and passes with that
                      definition; under from __future__ import annotations an annotation reads as a string, not
                      evaluated even then), and a generic class's bases and keywords belong there although the
                      floor version evaluates them at once in the annotation scope of the class's type parameters
-                     (DISCLOSED RESIDUAL). A function-local annotation, or an annotation on a target that is not
-                     a simple name (C.x: T, d[k]: T, (x): T), is never evaluated, yet a watched name there is a
+                     (DISCLOSED RESIDUAL). The annotation of an annotated assignment directly in a function body,
+                     or of one whose target is not a simple name (C.x: T, d[k]: T, (x): T), is never evaluated
+                     (one in a class body or a def nested in that function is), yet a watched name there is a
                      site like any other, in the scope that holds the statement. Scope identities and ordinals give
                      each node its own key (file, scope, ordinal and text); a key that more than one node held would
                      allow none of them, listed or not (a backstop against a regression in that numbering: no parsed
@@ -174,22 +175,31 @@ or action line outside the accepted YAML subset (above).
   check_import_closure.py --self-test  fixture trees: every rule vector is red with its rule and green
                                        without it (one per watched name and import-system member, and one per
                                        importer, among them), every green vector exits 0, every cannot-evaluate
-                                       vector exits 2, every site vector finds exactly the sites (scope and
-                                       reference) it names, every edit vector (rows the gate under test writes
-                                       for one source, the fixture's own rows among them) passes that source
-                                       unchanged and gives exactly its findings, each in the edited file, on
-                                       the edited source, every mutant in MUTANTS (one check removed, with the
-                                       backstop that would refuse first where one is named, or a line or a
-                                       column put into the key) fails the vector it names by that vector's own
-                                       failure (never by an exception the run raises; by a refusal only where
-                                       MUTANTS marks the mutant as caught by its backstop, and then only by that
-                                       backstop's refusal; an edit vector only when the unchanged source passes
-                                       under that mutant and every finding lies in the edited file), each run in
-                                       _UNCREDITED_RUNS (an exception raised writing an edit vector's rows,
-                                       scanning its unchanged source or scanning its edited source, one raised on
-                                       a rule vector, a refusal no backstop is named for, and a backstop named
-                                       for a refusal not its own) credits no mutant, removing any one watched
-                                       name, member or importer fails its vector, and the live tree passes
+                                       vector exits 2 by its own refusal (a text of that refusal's message;
+                                       each fails on a refusal not its own), every site vector finds exactly the
+                                       sites (scope and reference) it names, every edit vector (rows the gate
+                                       under test writes for one source, the fixture's own rows among them)
+                                       passes that source unchanged and gives exactly its findings, each in the
+                                       edited file, on the edited source, every mutant in MUTANTS (one check
+                                       removed, with the backstop that would refuse first where one is named, or
+                                       a line or a column put into the key) fails the vector it names by that
+                                       vector's own failure (never by an exception, SystemExit and
+                                       KeyboardInterrupt among them, raised while the mutant loads or runs; by a
+                                       refusal only where MUTANTS marks the mutant as caught by its backstop,
+                                       and then only by that backstop's refusal; an edit vector only when the
+                                       unchanged source passes under that mutant and every finding lies in the
+                                       edited file), each run in _UNCREDITED_RUNS (an exception raised writing
+                                       an edit vector's rows, scanning its unchanged source or scanning its
+                                       edited source, one raised on a rule vector, a SystemExit(0) raised
+                                       loading a mutant, scanning an edit vector's unchanged source or on a rule
+                                       vector, a KeyboardInterrupt a mutant raises, a refusal no backstop is
+                                       named for on a rule vector, a green vector or a rule vector's rerun with
+                                       its rule removed, and a backstop named for a refusal not its own or for a
+                                       failure that is no refusal) credits no mutant, removing any one watched
+                                       name, member or importer fails its vector, and the live tree passes. It
+                                       exits 0 only by returning after its PASS line: a SystemExit that escapes
+                                       it exits 1, and the user's own SIGINT (under Python's default handler) is
+                                       not contained
 
 Exit convention: 0 clean; 1 a finding; 2 usage or cannot-evaluate.
 
@@ -230,9 +240,10 @@ generic class's bases and keywords, which it evaluates at once in the annotation
 parameters, are read in the scope that runs the definition or the type statement, as a default is: a move between one
 of them and the code beside it is a move within that scope, which is again wider than a move within one of Python's
 scopes (a move between an annotation and a default of one definition among them: the annotation runs in __annotate__,
-the default in the scope that runs the definition). A function-local annotation, or an annotation on a target that is
-not a simple name (C.x: T, d[k]: T, (x): T), is never evaluated, yet a watched name there is a site like any other, in
-the scope that holds the statement (an over-rejection). A scope is
+the default in the scope that runs the definition). The annotation of an annotated assignment directly in a function
+body, or of one whose target is not a simple name (C.x: T, d[k]: T, (x): T), is never evaluated (one in a class body or
+a def nested in that function is), yet a watched name there is a site like any other, in the scope that holds the
+statement (an over-rejection). A scope is
 known by its name, its ordinal among same-named siblings and their count, not by its place or its contents, so an edit
 that keeps the count of same-named siblings in a scope (siblings reordered or exchanged whole, or as many removed as
 added in one change) reads the sibling now at each #K/N as the one that was there: a reference that ends in the sibling
@@ -318,11 +329,14 @@ if tuple(sys.version_info[:2]) < (3, 14):
     os._exit(2)
 
 import ast
+import contextlib
 import hashlib
 import importlib.util
+import io
 import os
 import re
 import shutil
+import signal
 import stat
 import tempfile
 import tomllib
@@ -1286,8 +1300,9 @@ def _scoped_children(node, scope, inner=None):
     type alias's value only when it is read, in an annotation scope (all the annotations of one definition share one,
     its __annotate__), and a generic class's bases and keywords at once in the annotation scope of its type
     parameters, yet each is read here in the scope around it, so a move between one of them and the code beside it is
-    a move within that scope (DISCLOSED RESIDUAL). A function-local annotation, or one on a target that is not a
-    simple name, is never evaluated, and is read here like any other expression of the scope that holds it."""
+    a move within that scope (DISCLOSED RESIDUAL). The annotation of an annotated assignment directly in a function
+    body, or of one whose target is not a simple name, is never evaluated (one in a class body or a def nested in that
+    function is), and is read here like any other expression of the scope that holds it."""
     if not isinstance(node, SCOPE_NODES):
         return [(child, scope, True) for child in ast.iter_child_nodes(node)]
     out = []
@@ -2849,13 +2864,18 @@ _MOVE_VECTORS = (
      "def u():\n    return 1\n\n\ndef f(x):\n    return __import__(x)\n", ()),
     # Regression pins of a disclosed boundary, not red on revert (the gate read them this way before the boundary was
     # disclosed): a type alias's value and a type parameter's bound, though the floor version evaluates each only
-    # when it is read, are read in the scope that runs the type statement or the definition, so a move from either
-    # into a statement beside it is a move within that scope. The second also fails against a mutant that reads what
-    # a definition holds in the definition's own scope.
+    # when it is read, and a generic class's bases and keywords, though it evaluates them at once in the annotation
+    # scope of the class's type parameters, are read in the scope that runs the type statement or the definition, so
+    # a move from any of them into a statement beside it is a move within that scope. The second and the third also
+    # fail against a mutant that reads what a definition holds in the definition's own scope (MUTANTS binds that
+    # mutation to the second only).
     ("type alias value moved into a statement beside it", "type T = __import__(x)\n",
      "type T = int\nv = __import__(x)\n", ()),
     ("type-parameter bound moved into a statement beside it", "def f[U: __import__(x)](y):\n    return y\n",
      "def f[U: int](y):\n    return y\nv = __import__(x)\n", ()),
+    ("generic class's base and keyword moved into statements beside the class",
+     "class C[U](__import__(x), metaclass=__import__(y)):\n    pass\n",
+     "class C[U]:\n    pass\nv = __import__(x)\nw = __import__(y)\n", ()),
 )
 
 
@@ -2875,81 +2895,122 @@ class _ListStdlibSys:
     stdlib_module_names = ["os"]
 
 
-# (name, extra rows, dropped rels, scan keyword overrides, special)
+# (name, extra rows, dropped rels, scan keyword overrides, special, a text of the refusal's message: the vector holds
+# only by that refusal, not by any exit 2)
 _CANNOT_VECTORS = (
-    ("standard-library source unavailable", (), (), dict(sys_module=_NoStdlibSys()), None),
-    ("standard-library source empty", (), (), dict(sys_module=_EmptyStdlibSys()), None),
-    ("standard-library source holding an empty name", (), (), dict(sys_module=_BlankStdlibSys()), None),
-    ("standard-library source not a frozenset", (), (), dict(sys_module=_ListStdlibSys()), None),
-    ("interpreter is not the floor version", (), (), dict(version_info=(sys.version_info[0], 99)), None),
-    ("floor source missing", (), (FLOOR_REL,), dict(), None),
-    ("floor not MAJOR.MINOR", ((FLOOR_REL, 'python-floor = "3"\n'),), (), dict(), None),
-    ("unparseable Python file", (("tools/t.py", "def (:\n"),), (), dict(), None),
-    ("Python file that is not UTF-8", (("tools/t.py", b"x = '\xff'\n"),), (), dict(), None),
-    ("Python file with a NUL byte", (("tools/t.py", b"x = 1\x00\n"),), (), dict(), None),
-    ("unreadable Python file", (("tools/t.py", "x = 1\n"),), (), dict(), "unreadable-file"),
-    ("symlinked Python file", (), (), dict(), "symlink"),
-    ("FIFO named like a Python file", (), (), dict(), "fifo"),
-    ("symlinked directory", (), (), dict(), "symlinked-dir"),
-    ("unlistable directory", (("tools/locked/x.txt", "x\n"),), (), dict(), "unlistable"),
-    ("import present in two search roots", (("tools/c.py", "d = 2\n"),), (), dict(), None),
+    ("standard-library source unavailable", (), (), dict(sys_module=_NoStdlibSys()), None,
+     "sys.stdlib_module_names is unavailable or malformed"),
+    ("standard-library source empty", (), (), dict(sys_module=_EmptyStdlibSys()), None,
+     "sys.stdlib_module_names is unavailable or malformed"),
+    ("standard-library source holding an empty name", (), (), dict(sys_module=_BlankStdlibSys()), None,
+     "sys.stdlib_module_names is unavailable or malformed"),
+    ("standard-library source not a frozenset", (), (), dict(sys_module=_ListStdlibSys()), None,
+     "sys.stdlib_module_names is unavailable or malformed"),
+    ("interpreter is not the floor version", (), (), dict(version_info=(sys.version_info[0], 99)), None,
+     "(Python 3.99), which is not the declared floor"),
+    ("floor source missing", (), (FLOOR_REL,), dict(), None, "python-floor.toml: cannot stat: "),
+    ("floor not MAJOR.MINOR", ((FLOOR_REL, 'python-floor = "3"\n'),), (), dict(), None,
+     "python-floor is absent or not MAJOR.MINOR"),
+    ("unparseable Python file", (("tools/t.py", "def (:\n"),), (), dict(), None,
+     "tools/t.py: does not parse: invalid syntax"),
+    ("Python file that is not UTF-8", (("tools/t.py", b"x = '\xff'\n"),), (), dict(), None,
+     "tools/t.py: does not parse: Non-UTF-8 code"),
+    ("Python file with a NUL byte", (("tools/t.py", b"x = 1\x00\n"),), (), dict(), None,
+     "tools/t.py: does not parse: source code string cannot contain null bytes"),
+    ("unreadable Python file", (("tools/t.py", "x = 1\n"),), (), dict(), "unreadable-file", "tools/t.py: unreadable: "),
+    ("symlinked Python file", (), (), dict(), "symlink", "tools/t.py: not a regular file"),
+    ("FIFO named like a Python file", (), (), dict(), "fifo", "tools/t.py: not a regular file"),
+    ("symlinked directory", (), (), dict(), "symlinked-dir", "tools/linked: a symlinked directory is not walked"),
+    ("unlistable directory", (("tools/locked/x.txt", "x\n"),), (), dict(), "unlistable", "cannot list a directory: "),
+    ("import present in two search roots", (("tools/c.py", "d = 2\n"),), (), dict(), None,
+     "import 'c' is ambiguous: present in tools, lib"),
     ("in-repo module named like a standard-library module",
-     (("tools/json.py", "x = 1\n"), ("tools/t.py", "import json\n")), (), dict(), None),
-    ("uses inside a flow mapping", ((_WF, "steps:\n  - {uses: a/b@v1}\n"),), (), dict(), None),
-    ("uses value in a block scalar", ((_WF, "steps:\n  - uses: >\n      a/b@v1\n"),), (), dict(), None),
-    ("uses key with its value on the next line", ((_WF, "steps:\n  - uses:\n      a/b@v1\n"),), (), dict(), None),
+     (("tools/json.py", "x = 1\n"), ("tools/t.py", "import json\n")), (), dict(), None,
+     "import 'json' is ambiguous: present in the standard library"),
+    ("uses inside a flow mapping", ((_WF, "steps:\n  - {uses: a/b@v1}\n"),), (), dict(), None,
+     "p.yml:2: a line outside the accepted YAML subset"),
+    ("uses value in a block scalar", ((_WF, "steps:\n  - uses: >\n      a/b@v1\n"),), (), dict(), None,
+     "p.yml:2: a uses key without an inline scalar value"),
+    ("uses key with its value on the next line", ((_WF, "steps:\n  - uses:\n      a/b@v1\n"),), (), dict(), None,
+     "p.yml:2: a uses key without an inline scalar value"),
     ("escaped key in a workflow",
-     ((_WF, "jobs:\n  x:\n    steps:\n      - \"u" + _BS + "u0073es\": actions/checkout@v4\n"),), (), dict(), None),
+     ((_WF, "jobs:\n  x:\n    steps:\n      - \"u" + _BS + "u0073es\": actions/checkout@v4\n"),), (), dict(), None,
+     "p.yml:4: a line outside the accepted YAML subset"),
     ("escaped key in an action file",
-     (("acts/x/action.yml", "runs:\n  steps:\n    - \"" + _BS + "x75ses\": a/b@v1\n"),), (), dict(), None),
+     (("acts/x/action.yml", "runs:\n  steps:\n    - \"" + _BS + "x75ses\": a/b@v1\n"),), (), dict(), None,
+     "action.yml:3: a line outside the accepted YAML subset"),
     ("alias as a key", ((_WF, "x-k: &k \"" + _BS + "x75ses\"\nsteps:\n  - *k : actions/checkout@v4\n"),), (),
-     dict(), None),
-    ("complex key", ((_WF, "steps:\n  - ? uses\n    : actions/checkout@v4\n"),), (), dict(), None),
+     dict(), None, "p.yml:1: a line outside the accepted YAML subset"),
+    ("complex key", ((_WF, "steps:\n  - ? uses\n    : actions/checkout@v4\n"),), (), dict(), None,
+     "p.yml:2: a line outside the accepted YAML subset"),
     ("bare CR line break after a comment", ((_WF, "steps:\n  # pin\r  - uses: actions/checkout@v4\n"),), (),
-     dict(), None),
-    ("U+2028 after a comment", ((_WF, "steps:\n  # c" + chr(0x2028) + "  - uses: a/b@v1\n"),), (), dict(), None),
-    ("anchored value", ((_WF, "steps:\n  - uses: &a actions/checkout@v4\n"),), (), dict(), None),
-    ("flow sequence holding a mapping", ((_WF, "jobs:\n  t:\n    with: [image: node:18]\n"),), (), dict(), None),
-    ("uses key whose value is a flow sequence", ((_WF, "steps:\n  - uses: [a/b]\n"),), (), dict(), None),
-    ("escaped uses value", ((_WF, "steps:\n  - uses: \"actions/checkout" + _BS + "x40v4\"\n"),), (), dict(), None),
-    ("multi-line plain scalar", ((_WF, "steps:\n  - name: a\n      b\n"),), (), dict(), None),
-    ("bare scalar line", ((_WF, "steps: []\nplain text\n"),), (), dict(), None),
+     dict(), None, "p.yml:2: character '\\r'"),
+    ("U+2028 after a comment", ((_WF, "steps:\n  # c" + chr(0x2028) + "  - uses: a/b@v1\n"),), (), dict(), None,
+     "p.yml:2: character '\\u2028'"),
+    ("anchored value", ((_WF, "steps:\n  - uses: &a actions/checkout@v4\n"),), (), dict(), None,
+     "p.yml:2: a line outside the accepted YAML subset"),
+    ("flow sequence holding a mapping", ((_WF, "jobs:\n  t:\n    with: [image: node:18]\n"),), (), dict(), None,
+     "p.yml:3: a line outside the accepted YAML subset"),
+    ("uses key whose value is a flow sequence", ((_WF, "steps:\n  - uses: [a/b]\n"),), (), dict(), None,
+     "p.yml:2: a uses key without an inline scalar value"),
+    ("escaped uses value", ((_WF, "steps:\n  - uses: \"actions/checkout" + _BS + "x40v4\"\n"),), (), dict(), None,
+     "p.yml:2: a line outside the accepted YAML subset"),
+    ("multi-line plain scalar", ((_WF, "steps:\n  - name: a\n      b\n"),), (), dict(), None,
+     "p.yml:3: a line indented under an inline scalar"),
+    ("bare scalar line", ((_WF, "steps: []\nplain text\n"),), (), dict(), None,
+     "p.yml:2: a line outside the accepted YAML subset"),
     ("plain scalar continued by a dash line",
-     ((_WF, "jobs:\n  t:\n    container: node@sha256:%s\n      - x\n" % ("ab" * 32)),), (), dict(), None),
+     ((_WF, "jobs:\n  t:\n    container: node@sha256:%s\n      - x\n" % ("ab" * 32)),), (), dict(), None,
+     "p.yml:4: a line indented under an inline scalar"),
     ("uses value continued by dash lines", ((_WF, "steps:\n  - uses: a/b@%s\n        -\n       - x\n" % _PIN),), (),
-     dict(), None),
-    ("sequence item continued by a deeper dash line", ((_WF, "steps:\n  - a@v1\n    - x\n"),), (), dict(), None),
-    ("unterminated quoted scalar", ((_WF, "steps:\n  - name: 'a\n      b'\n"),), (), dict(), None),
-    ("document marker", ((_WF, "---\nsteps: []\n"),), (), dict(), None),
-    ("nested sequence dash", ((_WF, "steps:\n  - - uses: actions/checkout@v4\n"),), (), dict(), None),
-    ("block scalar as a sequence item", ((_WF, "steps:\n  - |\n    uses: a/b@v1\n"),), (), dict(), None),
-    ("plain scalar holding a uses key", ((_WF, "steps:\n  - uses:actions/checkout@v4\n"),), (), dict(), None),
-    ("plain value holding a colon and space", ((_WF, "steps:\n  - run: echo a: b\n"),), (), dict(), None),
-    ("plain value starting with an indicator", ((_WF, "steps:\n  - run: @x\n"),), (), dict(), None),
-    ("plain value that is a lone dash", ((_WF, "steps:\n  - run: -\n"),), (), dict(), None),
-    ("tab-indented line", ((_WF, "steps:\n\t- uses: actions/checkout@v4\n"),), (), dict(), None),
+     dict(), None, "p.yml:3: a line indented under an inline scalar"),
+    ("sequence item continued by a deeper dash line", ((_WF, "steps:\n  - a@v1\n    - x\n"),), (), dict(), None,
+     "p.yml:3: a line indented under an inline scalar"),
+    ("unterminated quoted scalar", ((_WF, "steps:\n  - name: 'a\n      b'\n"),), (), dict(), None,
+     "p.yml:2: a line outside the accepted YAML subset"),
+    ("document marker", ((_WF, "---\nsteps: []\n"),), (), dict(), None,
+     "p.yml:1: a line outside the accepted YAML subset"),
+    ("nested sequence dash", ((_WF, "steps:\n  - - uses: actions/checkout@v4\n"),), (), dict(), None,
+     "p.yml:2: a line outside the accepted YAML subset"),
+    ("block scalar as a sequence item", ((_WF, "steps:\n  - |\n    uses: a/b@v1\n"),), (), dict(), None,
+     "p.yml:2: a line outside the accepted YAML subset"),
+    ("plain scalar holding a uses key", ((_WF, "steps:\n  - uses:actions/checkout@v4\n"),), (), dict(), None,
+     "p.yml:2: a scalar holding uses followed by a colon"),
+    ("plain value holding a colon and space", ((_WF, "steps:\n  - run: echo a: b\n"),), (), dict(), None,
+     "p.yml:2: a line outside the accepted YAML subset"),
+    ("plain value starting with an indicator", ((_WF, "steps:\n  - run: @x\n"),), (), dict(), None,
+     "p.yml:2: a line outside the accepted YAML subset"),
+    ("plain value that is a lone dash", ((_WF, "steps:\n  - run: -\n"),), (), dict(), None,
+     "p.yml:2: a line outside the accepted YAML subset"),
+    ("tab-indented line", ((_WF, "steps:\n\t- uses: actions/checkout@v4\n"),), (), dict(), None,
+     "p.yml:2: a line outside the accepted YAML subset"),
     ("image key with a nested value", ((_WF, "jobs:\n  t:\n    container:\n      image: node:18\n"
-                                              "    services:\n      db:\n        image:\n"),), (), dict(), None),
-    ("workflow that is not UTF-8", ((_WF, b"steps: \xff\n"),), (), dict(), None),
-    ("malformed provenance record", ((_REC, "[package\n"),), (), dict(), None),
-    ("malformed manifest row", ((_MANIFEST, "abc lib/_vendor/pkg/mod.py\n"),), (), dict(), None),
-    ("duplicate manifest path", (), (), dict(), "duplicate-row"),
-    ("licence text that is not UTF-8", ((_LICENCE, b"MIT \xff\n"),), (), dict(), None),
-    ("no workflow to evaluate", (), (WORKFLOWS_REL + "/q.yml",), dict(), None),
+                                              "    services:\n      db:\n        image:\n"),), (), dict(), None,
+     "p.yml:7: a image key without an inline scalar value"),
+    ("workflow that is not UTF-8", ((_WF, b"steps: \xff\n"),), (), dict(), None, "p.yml: not UTF-8: "),
+    ("malformed provenance record", ((_REC, "[package\n"),), (), dict(), None,
+     "provenance.toml: does not parse as TOML"),
+    ("malformed manifest row", ((_MANIFEST, "abc lib/_vendor/pkg/mod.py\n"),), (), dict(), None,
+     "manifest.sha256:1: not one sha256sum row"),
+    ("duplicate manifest path", (), (), dict(), "duplicate-row", "manifest.sha256:8: not one sha256sum row"),
+    ("licence text that is not UTF-8", ((_LICENCE, b"MIT \xff\n"),), (), dict(), None, "pkg-MIT.txt: not UTF-8: "),
+    ("no workflow to evaluate", (), (WORKFLOWS_REL + "/q.yml",), dict(), None, "holds no .yml or .yaml workflow"),
     ("two lexical scopes given one identity", (("tools/t.py", "a = lambda: 1\nb = lambda: 2\n"),), (), dict(),
-     "merged-scopes"),
+     "merged-scopes", "scope '<lambda>' names 2 lexical scopes"),
     ("import-system module that does not load", (), (),
-     dict(import_system=IMPORT_SYSTEM_MODULES + ("no_such_import_system_module",)), None),
+     dict(import_system=IMPORT_SYSTEM_MODULES + ("no_such_import_system_module",)), None,
+     "import-system module no_such_import_system_module does not load"),
     ("inert member that is no member", (), (),
-     dict(inert=INERT_IMPORT_SYSTEM_MEMBERS + (("no_such_member", "r"),)), None),
+     dict(inert=INERT_IMPORT_SYSTEM_MEMBERS + (("no_such_member", "r"),)), None,
+     "INERT_IMPORT_SYSTEM_MEMBERS names no_such_member"),
 )
 
 
 def _vector_cases(tmp):
     """Build every vector's fixture tree once. Returns [(name, expected, rule, rel, base, kwargs, special)]:
-    expected is 1 (a finding of rule at rel), 0 (clean), 2 (cannot evaluate), "sites" (base is then the
-    source) or "move" (rule is then the finding lines, rel the before source, base the tree holding the after,
-    kwargs["control"] the tree holding the before)."""
+    expected is 1 (a finding of rule at rel), 0 (clean), 2 (cannot evaluate; rule is then a text of the refusal's
+    message), "sites" (base is then the source) or "move" (rule is then the finding lines, rel the before source,
+    base the tree holding the after, kwargs["control"] the tree holding the before)."""
     cases = []
     for index, (name, rule, at, extra, drop, kwargs, rehash) in enumerate(_RULE_VECTORS + _importer_vectors() +
                                                                           _name_vectors(*watched_names())):
@@ -2964,7 +3025,7 @@ def _vector_cases(tmp):
         cases.append((name, 1, rule, at, base, kwargs, None))
     for index, (name, extra, kwargs) in enumerate(_GREEN_VECTORS):
         cases.append((name, 0, None, None, _fixture(tmp / ("g%d" % index), extra), kwargs, None))
-    for index, (name, extra, drop, kwargs, special) in enumerate(_CANNOT_VECTORS):
+    for index, (name, extra, drop, kwargs, special, refusal) in enumerate(_CANNOT_VECTORS):
         base = _fixture(tmp / ("c%d" % index), extra, drop)
         if special == "symlink":
             os.symlink(base / "tools" / "b.py", base / "tools" / "t.py")
@@ -2975,7 +3036,7 @@ def _vector_cases(tmp):
         elif special == "duplicate-row":
             manifest = base / _MANIFEST
             manifest.write_bytes(manifest.read_bytes() + manifest.read_bytes().split(b"\n", 1)[0] + b"\n")
-        cases.append((name, 2, None, None, base, kwargs, special))
+        cases.append((name, 2, refusal, None, base, kwargs, special))
     for name, source, sites in _SITE_VECTORS:
         cases.append((name, "sites", sites, None, source, dict(), None))
     for index, (name, before, after, lines) in enumerate(_MOVE_VECTORS):
@@ -3035,12 +3096,29 @@ def _scan_rc(module, base, rules=None, special=None, **kwargs):
 
 
 # The prefix of a problem that is not the vector's own failure (an edit vector's control failing, a finding outside
-# the edited file, or an exception raised in the run): the self-test fails it against this gate and credits no mutant
-# with it.
+# the edited file, or an exception, SystemExit and KeyboardInterrupt among them, raised loading the mutant or in the
+# run): the self-test fails it against this gate and credits no mutant with it.
 _UNCREDITED = "not credited: "
 # The prefix of a refusal (exit 2) where the vector expects none: it credits only a mutant that MUTANTS marks as
 # caught by that refusal, its backstop (_mutant_credit).
 _REFUSED = "refused (exit 2): "
+# The user's interrupt: the self-test's SIGINT handler (_interrupted) records it here before it raises
+# KeyboardInterrupt, so _escaped re-raises it; a KeyboardInterrupt a mutant raises itself is recorded by nothing and
+# fails that mutant like any other exception.
+_INTERRUPTS = []
+
+
+def _interrupted(signum, _frame):
+    _INTERRUPTS.append(signum)
+    raise KeyboardInterrupt
+
+
+def _escaped(exc, step):
+    """The _UNCREDITED problem for exc, any exception (SystemExit and KeyboardInterrupt included) the gate under
+    test raised at step; the user's interrupt (_INTERRUPTS) is re-raised instead."""
+    if isinstance(exc, KeyboardInterrupt) and _INTERRUPTS:
+        raise exc
+    return _UNCREDITED + "the gate under test raised %s %s: %s" % (type(exc).__name__, step, exc)
 
 
 def _written_rows(module, rel, source):
@@ -3054,8 +3132,10 @@ def _written_rows(module, rel, source):
 def _case_failure(module, case):
     """None if the case holds against module (this gate or a mutant of it), else what went wrong (_UNCREDITED
     first when that is not the vector's own failure, _REFUSED first when the gate under test refuses where the
-    vector expects no refusal). An exception an edit vector's run raises, writing the rows or scanning either
-    source, is _UNCREDITED; any other vector's run lets it propagate, and _mutant_credit credits no mutant with it."""
+    vector expects no refusal). An exception an edit vector's run raises (SystemExit and KeyboardInterrupt among
+    them), writing the rows or scanning either source, is _UNCREDITED (_escaped); any other vector's run lets it
+    propagate, and _mutant_credit credits no mutant with it. A cannot-evaluate vector holds only by its own refusal,
+    the one whose message holds the text rule gives."""
     name, expected, rule, at, base, kwargs, special = case
     if expected == "sites":
         try:
@@ -3076,8 +3156,8 @@ def _case_failure(module, case):
             rc, findings = _scan_rc(module, base, allowlist=allowlist)
         except module.CannotEvaluate as exc:
             return _UNCREDITED + "the gate under test cannot write rows for the unchanged sources: %s" % exc
-        except Exception as exc:
-            return _UNCREDITED + "the gate under test raised %s %s: %s" % (type(exc).__name__, step, exc)
+        except BaseException as exc:
+            return _escaped(exc, step)
         if rc == 2 or any(f[:2] != ("dynamic-import", "tools/t.py") for f in findings):
             return _UNCREDITED + ("the edited source gives rc %d, or a finding outside the edited file's "
                                   "dynamic-import rows: %r" % (rc, findings))
@@ -3088,7 +3168,10 @@ def _case_failure(module, case):
     expect = kwargs.pop("expect", None)
     rc, findings = _scan_rc(module, base, special=special, **dict(kwargs))
     if expected == 2:
-        return None if rc == 2 else "expected cannot-evaluate (2), got %d %r" % (rc, findings)
+        if rc != 2:
+            return "expected cannot-evaluate (2) saying %r, got %d %r" % (rule, rc, findings)
+        return None if rule in findings[0] else "expected cannot-evaluate (2) saying %r, got another refusal: %s" % (
+            rule, findings[0])
     refused = _REFUSED if rc == 2 else ""
     if expected == 0:
         return None if rc == 0 else "%sexpected a clean scan (0), got %d %r" % (refused, rc, findings)
@@ -3111,10 +3194,11 @@ _SELF_TEST_MARKER = "\n# " + "-" * 64 + " self-test\n"
 # a refusal can catch, its backstop: that refusal, named, and a text of its message). A tuple of texts and a tuple of
 # replacements remove a check together with the backstop that would refuse first, so the check's own vector catches it,
 # not the backstop. The self-test loads every mutant as a scratch module and requires its named vector to fail by that
-# vector's own failure (_mutant_credit): an exception raised in the run never credits it, a refusal (exit 2) credits it
-# only through the backstop it names, and an edit vector (_MOVE_VECTORS) credits it only when the rows the mutant writes
-# pass the unchanged source and every finding on the edited source is in the edited file (_UNCREDITED otherwise). An
-# entry may repeat another's text and replacement, binding that mutation to a second vector.
+# vector's own failure (_mutant_credit): an exception raised while it loads or runs (SystemExit and KeyboardInterrupt
+# among them) never credits it, a refusal (exit 2) credits it only through the backstop it names, and an edit vector
+# (_MOVE_VECTORS) credits it only when the rows the mutant writes pass the unchanged source and every finding on the
+# edited source is in the edited file (_UNCREDITED otherwise). An entry may repeat another's text and replacement,
+# binding that mutation to a second vector.
 MUTANTS = (
     # the walk and the inputs
     ("symlinked-dir-refused", "if os.path.islink(os.path.join(dirpath, d)):", "if False:", "symlinked directory"),
@@ -3592,8 +3676,12 @@ MUTANTS = (
 # Runs the credit rule (_mutant_credit) must refuse, each built like a MUTANTS entry, with a backstop or None and a
 # text of the reason it must give: an exception raised writing an edit vector's rows (1 // 0 in the key), scanning
 # its unchanged source (a raise as check_dynamic_sites starts) or scanning its edited source (a raise at an unlisted
-# site); an exception on a rule vector (an absent version read on with its check removed); a refusal for a mutant
-# that names no backstop; and a backstop named for a refusal that is not its own. Each fails the self-test as a mutant.
+# site); an exception on a rule vector (an absent version read on with its check removed); a SystemExit(0) raised
+# while the mutant loads, scanning an edit vector's unchanged source, or on a rule vector, and a KeyboardInterrupt the
+# mutant raises itself (each would otherwise end the self-test early, exit 0 included); a refusal for a mutant that
+# names no backstop, on a rule vector, on a green vector and on a rule vector's rerun with its rule removed; and a
+# backstop named for a refusal that is not its own, or for a failure that is no refusal. Each fails the self-test as a
+# mutant.
 _UNCREDITED_RUNS = (
     ("raise-writing-rows", "sites.append((reference_key(ordinals[key], text),",
      "sites.append((reference_key(ordinals[key], \"%d: %s\" % (1 // 0, text)),", "reference moved within its lambda",
@@ -3615,6 +3703,33 @@ _UNCREDITED_RUNS = (
     ("refused-not-its-backstop", "            if counts[name] > 1:\n", "            if False:\n",
      "sibling lambdas numbered in source order", ("the unreadable-file refusal (unreadable-refused)", ": unreadable: "),
      "not the refusal of its backstop"),
+    ("exit-zero-loading", "\nSCOPE_NODES = ", "\nraise SystemExit(0)\nSCOPE_NODES = ",
+     "reference moved within its lambda", None, "raised SystemExit loading the mutant: 0"),
+    ("exit-zero-scanning-unchanged",
+     "    malformed one, repeats a reference, or lists a reference that does not occur there.\"\"\"\n",
+     "    malformed one, repeats a reference, or lists a reference that does not occur there.\"\"\"\n"
+     "    raise SystemExit(0)\n", "reference moved within its lambda", None,
+     "raised SystemExit scanning the unchanged source: 0"),
+    ("exit-zero-on-rule-vector",
+     "    malformed one, repeats a reference, or lists a reference that does not occur there.\"\"\"\n",
+     "    malformed one, repeats a reference, or lists a reference that does not occur there.\"\"\"\n"
+     "    raise SystemExit(0)\n", "watched name _gcd_import", None, "raised SystemExit on its vector: 0"),
+    ("interrupt-scanning-unchanged",
+     "    malformed one, repeats a reference, or lists a reference that does not occur there.\"\"\"\n",
+     "    malformed one, repeats a reference, or lists a reference that does not occur there.\"\"\"\n"
+     "    raise KeyboardInterrupt\n", "reference moved within its lambda", None,
+     "raised KeyboardInterrupt scanning the unchanged source"),
+    ("refused-green-vector", "    stdlib = stdlib_names(sys_module)\n",
+     "    raise CannotEvaluate(\"every input\")\n    stdlib = stdlib_names(sys_module)\n",
+     "unrelated lines inserted above every listed site", None,
+     "MUTANTS names no backstop for this mutant: refused (exit 2): expected a clean scan"),
+    ("refused-rule-removed", "    stdlib = stdlib_names(sys_module)\n",
+     "    if \"dynamic-import\" not in rules:\n        raise CannotEvaluate(\"a rule removed\")\n"
+     "    stdlib = stdlib_names(sys_module)\n", "watched name _gcd_import", None,
+     "MUTANTS names no backstop for this mutant: refused (exit 2): with dynamic-import removed"),
+    ("backstop-not-a-refusal", "if os.path.islink(os.path.join(dirpath, d)):", "if False:", "symlinked directory",
+     ("a backstop named for a failure that is no refusal", "expected cannot-evaluate (2)"),
+     "not the refusal of its backstop"),
 )
 
 
@@ -3634,8 +3749,8 @@ def _load_mutant(source, directory, number):
 
 def _mutant_of(gate_source, rest, old, new, directory, number):
     """(module, None) for this gate with old replaced by new in its gate half (each text of a tuple by its
-    replacement), loaded as a scratch module, or (None, why not): an anchor not found exactly once, or a mutant that
-    does not compile."""
+    replacement), loaded as a scratch module, or (None, why not): an anchor not found exactly once, a mutant that
+    does not compile, or one that raises while it loads (SystemExit and KeyboardInterrupt among them, _escaped)."""
     pairs = tuple(zip(old, new, strict=True)) if isinstance(old, tuple) else ((old, new),)
     found = [gate_source.count(text) for text, _replacement in pairs]
     if found != [1] * len(pairs):
@@ -3646,17 +3761,20 @@ def _mutant_of(gate_source, rest, old, new, directory, number):
         return _load_mutant(gate_source + rest, directory, number), None
     except SyntaxError as exc:
         return None, "does not compile: %s" % exc
+    except BaseException as exc:
+        return None, _escaped(exc, "loading the mutant")
 
 
 def _mutant_credit(module, case, backstop=None):
     """(credited, what) for a mutant of this gate (or a scratch copy with a check removed) run against the vector it
-    names. Only the vector's own failure credits it: never an exception the run raises, nor a problem _UNCREDITED
-    begins, and a refusal (_REFUSED) only when backstop, the (refusal, a text of its message) MUTANTS marks the
-    mutant with, is that refusal; a mutant so marked is credited by nothing else."""
+    names. Only the vector's own failure credits it: never an exception the run raises (SystemExit and
+    KeyboardInterrupt among them, _escaped), nor a problem _UNCREDITED begins, and a refusal (_REFUSED) only when
+    backstop, the (refusal, a text of its message) MUTANTS marks the mutant with, is that refusal; a mutant so marked
+    is credited by nothing else."""
     try:
         problem = _case_failure(module, case)
-    except Exception as exc:
-        return False, _UNCREDITED + "the gate under test raised %s: %s" % (type(exc).__name__, exc)
+    except BaseException as exc:
+        return False, _escaped(exc, "on its vector")
     if problem is None:
         return False, "still holds with the check removed"
     if problem.startswith(_UNCREDITED):
@@ -3683,6 +3801,14 @@ def _case_line(case):
 def self_test_main():
     failures = []
     this = sys.modules[__name__]
+    # The user's interrupt is recorded (_interrupted) only where SIGINT has Python's default handler in the main
+    # thread; anywhere else a KeyboardInterrupt in a mutant's run is contained like any other exception.
+    handler = signal.getsignal(signal.SIGINT)
+    if handler is signal.default_int_handler:
+        try:
+            signal.signal(signal.SIGINT, _interrupted)
+        except ValueError:
+            handler = None
     tmp = Path(tempfile.mkdtemp(prefix="import-closure-"))
     try:
         clean = _fixture(tmp / "clean")
@@ -3726,8 +3852,10 @@ def self_test_main():
         # Each run the credit rule must refuse is credited by none, for the reason it names.
         for number, (label, old, new, vector, backstop, reason) in enumerate(_UNCREDITED_RUNS, len(MUTANTS) + 1):
             module, problem = _mutant_of(gate_source, marker + rest, old, new, mutant_dir, number)
-            if module is not None and vector in by_name:
-                credited, problem = _mutant_credit(module, by_name[vector], backstop)
+            if vector in by_name:
+                credited = False
+                if module is not None:
+                    credited, problem = _mutant_credit(module, by_name[vector], backstop)
                 if not credited and reason in problem:
                     print("UNCREDITED %s on %s (%s)" % (label, vector, problem.split(",")[0]))
                     continue
@@ -3735,6 +3863,18 @@ def self_test_main():
                                                                                               problem))
         # Each watched name and member removed in turn from a scratch copy: its own vector must then fail.
         copy = _load_mutant(gate_source + marker + rest, mutant_dir, 0)
+        # Each cannot-evaluate vector holds only by its own refusal: with every scan refused for another reason, it
+        # fails.
+        own_scan = copy.scan
+
+        def _refuse(*_args, **_kwargs):
+            raise copy.CannotEvaluate("a refusal no vector names")
+        copy.scan = _refuse
+        for case in cases:
+            if case[1] == 2 and _case_failure(copy, case) is None:
+                failures.append("cannot-evaluate vector %s: holds on a refusal not its own" % case[0])
+        copy.scan = own_scan
+        print("REFUSAL each cannot-evaluate vector fails on a refusal not its own")
         names, members = watched_names()
         for name in sorted(names | members):
             copy.watched_names = lambda *_args, _name=name: (names - {_name}, members - {_name})
@@ -3754,8 +3894,43 @@ def self_test_main():
             else:
                 print("REMOVED importer %s caught by its vector" % callee)
         copy.IMPORTERS = IMPORTERS
+        # The user's interrupt is not contained: once the SIGINT handler has recorded one, a KeyboardInterrupt in a
+        # mutant's run propagates rather than failing that mutant.
+        own_sites = copy.dynamic_sites
+
+        def _interrupt(*_args):
+            raise KeyboardInterrupt
+        copy.dynamic_sites = _interrupt
+        try:
+            try:
+                _interrupted(signal.SIGINT, None)
+            except KeyboardInterrupt:
+                pass
+            failures.append("a recorded interrupt was failed as a mutant's, not re-raised: %s" % (
+                _mutant_credit(copy, by_name["reference moved within its lambda"])[1],))
+        except KeyboardInterrupt:
+            print("INTERRUPT a recorded SIGINT propagates from a mutant's run")
+        finally:
+            del _INTERRUPTS[:]
+            copy.dynamic_sites = own_sites
+
+        # A SystemExit that escapes the self-test fails it (main), whatever its code, never ends it with that code.
+        def _exit_zero():
+            raise SystemExit(0)
+        copy.self_test_main = _exit_zero
+        with contextlib.redirect_stderr(io.StringIO()) as said:
+            try:
+                rc = copy.main(["--self-test"])
+            except SystemExit as exc:
+                rc = "SystemExit(%r)" % (exc.code,)
+        if rc != 1 or "exited before its verdict" not in said.getvalue():
+            failures.append("a SystemExit(0) escaping the self-test gave %r %r, not 1" % (rc, said.getvalue()))
+        else:
+            print("EXIT a SystemExit(0) escaping the self-test exits 1")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+        if handler is signal.default_int_handler:
+            signal.signal(signal.SIGINT, handler)
     if run(ROOT) != 0:
         failures.append("live: the real tree does not pass")
     if failures:
@@ -3766,12 +3941,12 @@ def self_test_main():
     importers = len(_importer_vectors())
     print("SELF-TEST PASS: %d rule vectors red with their rule and green without it (%d of them one per watched "
           "name or import-system member, %d one per importer), %d green vectors exit 0, %d cannot-evaluate vectors "
-          "exit 2, %d dynamic-import site vectors hold, %d edit vectors (rows written for one source pass it "
-          "unchanged, findings exact and in the edited file only on the edited one) hold, %d mutants (one check "
-          "removed each, with its backstop where named, or a line or a column put into the key) caught by their "
-          "vectors, never through an exception (%d of them, as MUTANTS marks, only through their backstop's "
-          "refusal), %d runs that raise or refuse credited by none, %d watched names, %d members and %d importers "
-          "each removed and caught, the live tree passes"
+          "exit 2 by their own refusal, %d dynamic-import site vectors hold, %d edit vectors (rows written for one "
+          "source pass it unchanged, findings exact and in the edited file only on the edited one) hold, %d mutants "
+          "(one check removed each, with its backstop where named, or a line or a column put into the key) caught "
+          "by their vectors, never through an exception, SystemExit and KeyboardInterrupt included (%d of them, as "
+          "MUTANTS marks, only through their backstop's refusal), %d runs that raise, exit or refuse credited by "
+          "none, %d watched names, %d members and %d importers each removed and caught, the live tree passes"
           % (len(_RULE_VECTORS) + len(names | members) + importers, len(names | members), importers,
              len(_GREEN_VECTORS), len(_CANNOT_VECTORS), len(_SITE_VECTORS), len(_MOVE_VECTORS), len(MUTANTS),
              backstops, len(_UNCREDITED_RUNS), len(names), len(members), importers))
@@ -3780,7 +3955,11 @@ def self_test_main():
 
 def main(argv):
     if argv == ["--self-test"]:
-        return self_test_main()
+        try:
+            return self_test_main()
+        except SystemExit as exc:
+            print("SELF-TEST FAIL: SystemExit(%r) exited before its verdict" % (exc.code,), file=sys.stderr)
+            return 1
     if argv:
         print("usage: check_import_closure.py [--self-test]", file=sys.stderr)
         return 2
