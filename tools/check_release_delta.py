@@ -2889,13 +2889,79 @@ def _edit_clause_consistently(repo):
     return target["clause-id"]
 
 
+_REAL_PACK_CASES = "the real full-pack two-release run() cases (findings 1/2, rounds 3-8)"
+
+
+def _not_run(failures, case, cause):
+    """Record a self-test case that could not run as a NAMED failure (a counted cannot-evaluate that
+    fails the run), never a printed note beside a PASS: coverage that did not run is not coverage."""
+    failures.append("NOT RUN: {}: {}; coverage that did not run FAILS the self-test, never a silent "
+                    "PASS".format(case, cause))
+
+
+def _real_pack_not_run_vectors(tmp, failures):
+    """Red-on-revert vectors for the two early ends of _real_pack_e2e that printed a SKIPPED note and
+    returned False with NO failure, so the self-test still passed: a fixture git repo that cannot be
+    built, and a clause inventory with no sole-coverer clause to edit (corpus content, so reachable in
+    CI). Each drives the real _real_pack_e2e over a tiny stub archive (only the archive read and the
+    version pin are stubbed; the real extract, git add/commit/tag and clause search run) and requires a
+    False return AND a NOT RUN failure naming the cause."""
+    import tarfile
+    env = _selftest_env()
+    # Two clauses that both cover lines 1-2 of one source: no line has a sole coverer, so the real
+    # _edit_clause_consistently finds nothing to edit and returns None.
+    files = {
+        "rules/stub.md": "First stub sentence.\nSecond stub sentence.\n",
+        CLAUSES_REL: ("[[clause]]\nclause-id = \"stub.1\"\nsource-path = \"rules/stub.md\"\n"
+                      "start-line = 1\nend-line = 2\ncanonical-text = \"First stub sentence.\"\n\n"
+                      "[[clause]]\nclause-id = \"stub.2\"\nsource-path = \"rules/stub.md\"\n"
+                      "start-line = 1\nend-line = 2\ncanonical-text = \"Second stub sentence.\"\n"),
+    }
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tf:
+        for rel, text in sorted(files.items()):
+            data = text.encode("utf-8")
+            info = tarfile.TarInfo(rel)
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+    stub_arch = buf.getvalue()
+
+    def _stub_pin(lock_index):
+        def _pin(repo, _failures, version="1.0.0"):
+            for args in (["init", "-q"], ["add", "-A"]):
+                subprocess.run(["git", "-C", str(repo), *args], capture_output=True, env=env)
+            if lock_index:
+                # a stale index lock: the fixture build then fails at its own git add
+                (repo / ".git" / "index.lock").write_text("", encoding="utf-8")
+            return True
+        return _pin
+
+    saved = {name: globals()[name] for name in ("_archive_head", "_pin_fixture_version")}
+    for name, lock_index, want in (("not-run-commit", True, "could not build the fixture git repo"),
+                                   ("not-run-clause", False, "no sole-coverer clause to edit")):
+        got = []
+        globals()["_archive_head"] = lambda _root: stub_arch
+        globals()["_pin_fixture_version"] = _stub_pin(lock_index)
+        try:
+            with redirect_stderr(io.StringIO()):
+                ran = _real_pack_e2e(tmp / name, got)
+        finally:
+            globals().update(saved)
+        if ran is not False or not any(f.startswith("NOT RUN: ") and want in f for f in got):
+            failures.append("(NOT RUN {}) _real_pack_e2e must return False AND record a NOT RUN failure "
+                            "naming {!r}, never print a SKIPPED note beside a PASS (got ran={!r}, "
+                            "failures={})".format(name, want, ran, got))
+
+
 def _real_pack_e2e(tmp, failures):
     """Build REAL full-pack two-release git repos from `git archive HEAD` of THIS repo and drive the real
     run() through the delta path: a clean CONSISTENTLY-edited id-keyed PATCH (finding 2), malformed-loader
     variants (findings 1/3), a wrong-version disposition (round-3 finding 3), and a smudge-filter predecessor
     renderer-closure attack that the raw-blob materialization defeats (round-4 findings 1/4), and genesis
-    full-pack manifest/profiles/invalid-UTF-8 mutations (round-5 findings 1/3/5). Returns True if it ran,
-    False if skipped (archive unavailable). Hermetic: private temp git repos, neutralized identity."""
+    full-pack manifest/profiles/invalid-UTF-8 mutations (round-5 findings 1/3/5). Returns True when the
+    primary cases ran and False when they could not; every path that ends a case early first records a
+    NOT RUN failure naming its cause (_not_run), never a printed note beside a PASS. Hermetic: private
+    temp git repos, neutralized identity."""
     import re
     env = _selftest_env()
     arch = _archive_head(repo_root())
@@ -2922,8 +2988,8 @@ def _real_pack_e2e(tmp, failures):
         return False
     for args in (["add", "-A"], ["commit", "-q", "-m", "release 1.0.0", "--no-verify"]):
         if subprocess.run(["git", "-C", str(repo), *args], capture_output=True, env=env).returncode != 0:
-            print("SELF-TEST NOTE: could not build the fixture git repo; real full-pack case SKIPPED",
-                  file=sys.stderr)
+            _not_run(failures, _REAL_PACK_CASES, "could not build the fixture git repo (git {} "
+                     "failed)".format(args[0]))
             return False
     commit1 = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True,
                              text=True).stdout.strip()
@@ -2935,7 +3001,10 @@ def _real_pack_e2e(tmp, failures):
                           capture_output=True, text=True).stdout.strip()
     cid = _edit_clause_consistently(repo)   # predecessor (commit1) keeps the original text
     if cid is None:
-        print("SELF-TEST NOTE: no sole-coverer clause to edit; real full-pack case SKIPPED", file=sys.stderr)
+        # Corpus content decides this, so it can happen in CI: a NOT RUN failure, never a skip.
+        _not_run(failures, _REAL_PACK_CASES, "no sole-coverer clause to edit (no clause is the only "
+                 "coverer of every line in its span with a once-only canonical-text), so the "
+                 "consistently-edited PATCH fixture cannot be built")
         return False
 
     def _set_head_version(version):
@@ -3136,8 +3205,10 @@ def _real_pack_e2e(tmp, failures):
     repo2 = tmp / "real-pack-smudge"
     try:
         _extract(arch, repo2)
-    except Exception:  # noqa: BLE001
-        return True  # the primary cases already ran
+    except Exception as exc:  # noqa: BLE001
+        _not_run(failures, "the smudge-filter predecessor case and every later real full-pack case",
+                 "could not extract the archive ({})".format(exc))
+        return True  # the primary cases already ran; the cause is recorded in failures
     # Pin to 1.0.0 FIRST, on the CLEAN extracted tree (shared helper: writes VERSION + changelog, inits,
     # stages, and regenerates the manifest), THEN introduce the undeclared closure edit and the smudge
     # filter and re-commit. Pinning before the edit keeps the committed manifest's _gen_common.py digest at
@@ -3155,6 +3226,8 @@ def _real_pack_e2e(tmp, failures):
     for args in (["config", "filter.hide.smudge", "sed '/predecessor-only undeclared edit/d'"],
                  ["add", "-A"], ["commit", "-q", "-m", "release 1.0.0", "--no-verify"]):
         if subprocess.run(["git", "-C", str(repo2), *args], capture_output=True, env=env).returncode != 0:
+            _not_run(failures, "the smudge-filter predecessor case (round-4 findings 1/4)",
+                     "could not build the predecessor commit (git {} failed)".format(args[0]))
             ok = False
             break
     if ok:
@@ -3173,6 +3246,9 @@ def _real_pack_e2e(tmp, failures):
                                 "attack is not set up, so the raw-materialization regression is not proven")
             subprocess.run(["git", "-C", str(repo2), "worktree", "remove", "--force", str(wt)],
                            capture_output=True, env=env)
+        else:
+            _not_run(failures, "the smudge-filter attack set-up proof (round-4 findings 1/4)",
+                     "could not add a checkout worktree to confirm the filter hides the edit")
         (repo2 / gcommon).write_text(orig_gcommon, encoding="utf-8")   # HEAD restores the original closure
         (repo2 / RELEASES_REL).write_text(
             'format-version = 1\n\n[[release]]\nversion = "1.0.0"\ntag = "v1.0.0"\n'
@@ -3197,7 +3273,9 @@ def _real_pack_e2e(tmp, failures):
     repo3 = tmp / "real-pack-omit"
     try:
         _extract(arch, repo3)
-    except Exception:  # noqa: BLE001  the primary cases already ran
+    except Exception as exc:  # noqa: BLE001  the primary cases already ran
+        _not_run(failures, "the under-claimed predecessor manifest case and every later real full-pack "
+                 "case", "could not extract the archive ({})".format(exc))
         return True
     # Pin to 1.0.0 FIRST (the shared helper regenerates a CLEAN, complete manifest at 1.0.0), THEN drop the
     # NOTICE [[sources]] row from that regenerated manifest so the ONLY inconsistency under test is the
@@ -3213,6 +3291,8 @@ def _real_pack_e2e(tmp, failures):
         ok3 = True
         for args in (["add", "-A"], ["commit", "-q", "-m", "release 1.0.0", "--no-verify"]):
             if subprocess.run(["git", "-C", str(repo3), *args], capture_output=True, env=env).returncode != 0:
+                _not_run(failures, "the under-claimed predecessor manifest case (round-8 finding 1)",
+                         "could not build the predecessor commit (git {} failed)".format(args[0]))
                 ok3 = False
                 break
         if ok3:
@@ -3242,6 +3322,10 @@ def _real_pack_e2e(tmp, failures):
                 failures.append("real full-pack run(): a predecessor manifest that under-claims a covered "
                                 "pack path (NOTICE) must be caught by gen_manifest --check/check_manifest on "
                                 "the raw predecessor, exit 2 (round-8 finding 1)")
+    else:
+        _not_run(failures, "the under-claimed predecessor manifest case (round-8 finding 1)",
+                 "the regenerated manifest does not carry exactly one NOTICE [[sources]] row ahead of "
+                 "its [[artifacts]] rows, so the omission cannot be planted")
 
     # (this round's #1) The PREDECESSOR's OWN releases and id-history records are now strict-validated. Each
     # fixture below mutates ONE predecessor record and REGENERATES the predecessor manifest so the mutated
@@ -3253,7 +3337,9 @@ def _real_pack_e2e(tmp, failures):
         rp = tmp / dirname
         try:
             _extract(arch, rp)
-        except Exception:  # noqa: BLE001  the primary cases already ran
+        except Exception as exc:  # noqa: BLE001  the primary cases already ran
+            _not_run(failures, "predecessor-record case ({})".format(dirname),
+                     "could not extract the archive ({})".format(exc))
             return
         mutate(rp)
         # Pin to 1.0.0 AND regenerate the predecessor manifest via the shared helper, AFTER the mutation, so
@@ -3266,6 +3352,8 @@ def _real_pack_e2e(tmp, failures):
             return  # the setup failure is recorded in failures
         for args in (["add", "-A"], ["commit", "-q", "-m", "release 1.0.0", "--no-verify"]):
             if subprocess.run(["git", "-C", str(rp), *args], capture_output=True, env=env).returncode != 0:
+                _not_run(failures, "predecessor-record case ({})".format(dirname),
+                         "could not build the predecessor commit (git {} failed)".format(args[0]))
                 return
         pcommit = subprocess.run(["git", "-C", str(rp), "rev-parse", "HEAD"], capture_output=True,
                                  text=True).stdout.strip()
@@ -3400,7 +3488,9 @@ def _real_pack_e2e(tmp, failures):
         dest = tmp / name
         try:
             _extract(arch, dest)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            _not_run(failures, "real genesis full-pack case ({})".format(name),
+                     "could not extract the archive ({})".format(exc))
             return None
         # git-init + add so the HEAD manifest freshness/integrity checks (this round's #1, now run in the
         # genesis path too) have a tracked path set to read; no commit or identity is needed. A malformation
@@ -3408,6 +3498,8 @@ def _real_pack_e2e(tmp, failures):
         for argv in (["init", "-q"], ["add", "-A"]):
             if subprocess.run(["git", "-C", str(dest), *argv], capture_output=True,
                               env=_selftest_env()).returncode != 0:
+                _not_run(failures, "real genesis full-pack case ({})".format(name),
+                         "could not stage the extracted tree (git {} failed)".format(argv[0]))
                 return None
         return dest
 
@@ -3596,8 +3688,10 @@ def _real_pack_e2e(tmp, failures):
         try:
             os.symlink("profiles.toml", gprof / ".aiqt" / "core" / "profiles.toml")
             made = True
-        except OSError:
+        except OSError as exc:
             made = False
+            _not_run(failures, "the self-referential profiles.toml symlink case (round-5 finding 5)",
+                     "could not create the symlink ({})".format(exc))
         if made and _run_quiet_root(gprof) != 2:
             failures.append("real genesis full-pack run(): a self-referential profiles.toml symlink must "
                             "fail closed exit 2 (round-5 finding 5)")
@@ -3629,6 +3723,9 @@ def _real_pack_e2e(tmp, failures):
             if _genesis_regen(g1) and _run_quiet_root(g1) != 2:
                 failures.append("real genesis full-pack run(): a non-canonical HEAD clause source-path that "
                                 "resolves to the real file must fail closed exit 2 (round-5 finding 1)")
+        else:
+            _not_run(failures, "the non-canonical HEAD clause source-path case (round-5 finding 1)",
+                     "the archived clauses.toml has no source-path with a parent directory to rewrite")
 
     # (round-5 finding 3) a genesis default-correction row that is fully valid EXCEPT a captured-source whose
     # host carries a raw SPACE ('https://exa mple.com/...'): the pre-fix urlparse-only check accepted it (a
@@ -6779,7 +6876,8 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
             # not be: on the pre-fix gate the CLEAN case FAILS exit 1 (finding 2: the id-keyed row was matched
             # by the invented `subject`, left unconsumed, so a PATCH became an undispositioned MAJOR) and the
             # format-version case PASSES exit 0 (finding 1: the loader never validated format-version). Both
-            # now behave (0 and 2). Skipped with a printed note where git or archive is unavailable.
+            # now behave (0 and 2). A case that cannot run (no git, no archive, a fixture that cannot be
+            # built, or corpus content it needs) is a NAMED NOT RUN failure, never a skip beside a PASS.
             # ---- QA round-6 codex blocker 1 / claude 3: a git REFUSAL is never the checkout
             # path. Simulated dubious-ownership refusals (a real safe.directory refusal needs a
             # foreign-OWNED repository, which an unprivileged self-test cannot create and the
@@ -6990,8 +7088,16 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
                                         "started a transport mid-read".format(label6p))
 
             if _git_available():
+                _real_pack_not_run_vectors(tmp, failures)
+                n_real = len(failures)
                 real_ran = _real_pack_e2e(tmp, failures)
+                if not real_ran and len(failures) == n_real:
+                    _not_run(failures, _REAL_PACK_CASES, "the case ended early without recording a cause")
+                n_post = len(failures)
                 post_ran = _post_release_e2e(tmp, failures)
+                if not post_ran and len(failures) == n_post:
+                    _not_run(failures, "the POST-RELEASE head cases", "the case ended early without "
+                             "recording a cause")
             else:
                 real_ran = post_ran = False
                 failures.append("NOT RUN: the real full-pack and POST-RELEASE run() cases: git is "
@@ -7025,7 +7131,7 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
                      "finding 2), a manifest ../escape path and a list-valued artifact kind (finding 1), and "
                      "a renderers.toml integer target (finding 8) each exit 2 hold") \
                     if real_ran else \
-                    "; the REAL FULL-PACK two-release run() case was SKIPPED (git archive unavailable)"
+                    "; the REAL FULL-PACK two-release run() cases did NOT run (a NOT RUN failure, never a skip)"
         full_pack += ("; and the POST-RELEASE head (RELEASING steps 6a/6b, round-2 rewrite over COMMITTED "
                       "revisions: the attestation row alone and plus the correctly placed changelog tag key "
                       "exit 0; another committed path, a smudge-masked committed edit, a quoted-path edit, a "
@@ -7084,7 +7190,7 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
                       "pre-row gate "
                       "(round-2 B1: an undispositioned later release exits 1 after its row lands, with its "
                       "pre-row control; a malformed genesis tree exits 2) holds) hold") if post_ran else \
-                     "; the POST-RELEASE head cases were SKIPPED (git archive unavailable)"
+                     "; the POST-RELEASE head cases did NOT run (a NOT RUN failure, never a skip)"
         print("SELF-TEST PASS: {}; the end-to-end genesis-structural fail-closed (exit 2, #1), "
               "genesis-flag-mismatch (exit 2), unreachable-predecessor (exit 2), and git-plumbing "
               "predecessor-ownership (#11, no worktree materialized) cases hold; the REAL run() "

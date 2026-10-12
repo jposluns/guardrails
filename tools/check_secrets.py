@@ -53,8 +53,10 @@ complete):
      component rule (safe direction). SPECIFICALLY, gitleaks FIRES on public_key and key_path, while this
      detector keeps `public` and `path` in the metadata set and stays silent on those two names; CI still
      catches such a secret. A disclosed divergence, not a silent one.
-  R5 secrets split across lines, concatenated, encoded, or carried in a binary/non-UTF-8 file: unchanged,
-     gitleaks-or-nothing territory.
+  R5 secrets split across lines, concatenated, encoded, or carried in a binary file (a suffix outside
+     TEXT_SUFFIXES is never read; a suffixless file that is not valid UTF-8 is treated as binary and
+     skipped): unchanged, gitleaks-or-nothing territory. A dotenv or TEXT_SUFFIXES file that is not valid
+     UTF-8 is NOT skipped: it is decoded losslessly and scanned (_read_scan_text).
   R6 the F-127 env-reference exclusion residual: unchanged, and it now ALSO governs the entropy path's
      unquoted branch.
   R7 a high-entropy value that is actually a filesystem path, URL fragment, or opaque identifier assigned
@@ -334,27 +336,51 @@ def _validate_entropy_constants():
     return None
 
 
+def _is_declared_text(path):
+    """True when a file is TEXT BY DECLARATION: a dotenv name (`.env`, or starting `.env.`, case-insensitive)
+    or a suffix in TEXT_SUFFIXES. Only the other scan candidates (no suffix at all) can be binary."""
+    lowered = path.name.lower()
+    if lowered == ".env" or lowered.startswith(".env."):
+        return True
+    return path.suffix.lower() in TEXT_SUFFIXES
+
+
+def _read_scan_text(path):
+    """Return (text, note) for a scan candidate; text is None when the file is skipped as binary. Valid
+    UTF-8 decodes as is (note None). A candidate that is text by declaration (_is_declared_text) but is NOT
+    valid UTF-8 is decoded LOSSLESSLY with errors="surrogateescape": every valid character keeps its
+    meaning and each undecodable byte becomes its own lone surrogate, which is neither a word character
+    nor a line break, so every ASCII pattern still matches beside it (a latin-1 view would turn 0xFE into
+    a letter that breaks a word boundary, and 0x85 into a line break). Only a SUFFIXLESS file that is not
+    valid UTF-8 is treated as binary and skipped, as the existing rule (_is_scan_candidate) defines."""
+    data = path.read_bytes()
+    try:
+        return data.decode("utf-8"), None
+    except UnicodeDecodeError:
+        if not _is_declared_text(path):
+            return None, "SKIP (not utf-8, no suffix: treated as binary)"
+        return (data.decode("utf-8", errors="surrogateescape"),
+                "NOTE (not valid utf-8: scanned, each undecodable byte kept as a placeholder)")
+
+
 def _is_scan_candidate(path):
     """A file is scanned when it is a dotenv file (name `.env` or starting `.env.`, case-insensitive, such
     as `.env.local` or `.env.production`, which hold real credentials), has a suffix in TEXT_SUFFIXES, or
     has no suffix at all (an extensionless PEM key like id_rsa). Suffix matching is case-insensitive, so a
     `.PEM` or `.TXT` file scans too. A file whose suffix is NOT in TEXT_SUFFIXES is skipped up front; a
-    suffixless file that is NON-UTF-8 binary is read and skipped later on a UnicodeDecodeError (a
-    UTF-8-decodable suffixless file is scanned). TEXT_SUFFIXES is a curated allow-list, so a text format
+    suffixless file that is NOT valid UTF-8 is binary: it is read and skipped later (a UTF-8-decodable
+    suffixless file is scanned). A dotenv or TEXT_SUFFIXES file is text by declaration and is scanned even
+    when it is not valid UTF-8 (_read_scan_text). TEXT_SUFFIXES is a curated allow-list, so a text format
     not on it is skipped here and left to gitleaks; add it to TEXT_SUFFIXES to cover it."""
-    lowered = path.name.lower()
-    if lowered == ".env" or lowered.startswith(".env."):
-        return True
-    suffix = path.suffix.lower()
-    return not suffix or suffix in TEXT_SUFFIXES
+    return _is_declared_text(path) or not path.suffix
 
 
-def main() -> int:
+def main(root=None) -> int:
     error = _validate_entropy_constants()
     if error is not None:
         print(f"error: invalid entropy control constant ({error}); fail-closed", file=sys.stderr)
         return 2
-    root = Path(__file__).resolve().parents[1]
+    root = Path(__file__).resolve().parents[1] if root is None else Path(root)
     findings = []
     try:
         for path in sorted(walk_files(root, SKIP_DIRS)):
@@ -364,12 +390,14 @@ def main() -> int:
                 continue
             if not _is_scan_candidate(path):
                 continue
-            try:
-                lines = path.read_text(encoding="utf-8").splitlines()
-            except UnicodeDecodeError:
-                # binary / non-utf8: a text secret-scanner skips it (gitleaks scans binaries)
-                print(f"SKIP (not utf-8 text): {path.relative_to(root)}")
+            # A text-by-declaration file with a stray non-UTF-8 byte is scanned (lossless decode); only a
+            # suffixless non-UTF-8 file is binary and skipped (gitleaks scans binaries).
+            text, note = _read_scan_text(path)
+            if note is not None:
+                print(f"{note}: {path.relative_to(root)}")
+            if text is None:
                 continue
+            lines = text.splitlines()
             for number, line in enumerate(lines, 1):
                 rel = path.relative_to(root)
                 before = len(findings)
@@ -610,15 +638,48 @@ def _self_test() -> int:
             failures.append("entropy invariant must reject a boolean {}".format(_name))
         globals()[_name] = _saved
 
+    # Non-UTF-8 scan, driven through main() over a private temp root so a revert of the lossless decode is
+    # red. notes.md carries ONE invalid byte beside a planted token and beside a credential assignment;
+    # creds.txt puts the invalid byte directly ADJACENT to the token (a latin-1 view would turn it into a
+    # letter and break the token word boundary); blob is a TRUE binary (no suffix, NUL bytes, not UTF-8)
+    # carrying the same token, and stays skipped as before. Tokens are assembled from parts (SECP).
+    import io
+    import tempfile
+    from contextlib import redirect_stdout
+    _tok = ("gh" + "p_" + _n(_seed, 30)).encode("ascii")
+    with tempfile.TemporaryDirectory(prefix="check-secrets-selftest-") as tmp:
+        troot = Path(tmp)
+        (troot / "notes.md").write_bytes(b"intro line\n\xff " + _tok + b"\n\xff"
+                                         + ("password = " + real).encode("ascii") + b"\n")
+        (troot / "creds.txt").write_bytes(b"\xfe" + _tok + b"\n")
+        (troot / "blob").write_bytes(b"\x7fELF\x00\x00\xff\xfe " + _tok + b"\n")
+        out = io.StringIO()
+        with redirect_stdout(out):
+            scan_rc = main(troot)
+    scan_out = out.getvalue()
+    non_utf8_cases = [
+        ("  notes.md:2: GitHub token", True),            # one invalid byte BESIDE a planted token: a finding
+        ("  notes.md:3: credential-named variable assigned a literal", True),  # ASSIGN beside the byte
+        ("  creds.txt:1: GitHub token", True),           # the invalid byte directly adjacent: still a finding
+        ("  blob:", False),                              # a true binary: never scanned, so no finding
+        ("SKIP (not utf-8, no suffix: treated as binary): blob", True),  # and it is named as skipped
+    ]
+    if scan_rc != 1:
+        failures.append("non-UTF-8 scan: main() over the fixture root must exit 1, got {}".format(scan_rc))
+    for needle, want in non_utf8_cases:
+        if (needle in scan_out) != want:
+            failures.append("non-UTF-8 scan {!r}: want present={}, output was {!r}".format(
+                needle, want, scan_out))
+
     if failures:
         print("SELF-TEST FAIL:")
         for f in failures:
             print("  " + f)
         return 1
     print("SELF-TEST PASS: {} ASSIGN + {} scan-candidate + {} PREFIXES + {} provider-label + {} "
-          "provider-neg + {} ENTROPY + {} entropy-unit cases".format(
+          "provider-neg + {} ENTROPY + {} entropy-unit + {} non-UTF-8 scan cases".format(
               len(cases), len(names), len(prefix_cases), len(label_cases), len(label_neg),
-              len(entropy_cases), len(entropy_units)))
+              len(entropy_cases), len(entropy_units), len(non_utf8_cases)))
     return 0
 
 
