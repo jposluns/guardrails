@@ -56,7 +56,8 @@ marker of any kind), so every exemption is a reviewed code change and never trav
                                       symlink/type and unreadable-binary cases, and the GD-130 tracked/untracked
                                       stray-artifact pair) run in memory with no
                                       filesystem dependency and ALWAYS run; a real-surface end-to-end layer
-                                      runs too where a writable tempdir exists and is reported PARTIAL where not
+                                      runs too where a writable tempdir exists; a case it cannot run (no
+                                      tempdir, no symlink support, no git) is a NAMED NOT RUN failure
 
 Exit convention (matches the repo's gates):
   0  clean
@@ -762,8 +763,8 @@ def run(root, lister=_list_tracked):
 # matching, pathname scanning, and, through an INJECTED lister/reader, the enumeration, symlink/type
 # classification, and unreadable-binary/git-enumeration fail-closed paths). They ALWAYS run: no
 # writable tempdir, no chmod, no symlink support, no wall clock, no randomness. A real-surface end-to-end
-# layer runs additionally where a writable tempdir exists, and every case it cannot run is tracked so the
-# result is reported PARTIAL (never a full PASS) whenever ANY case skips.
+# layer runs additionally where a writable tempdir exists; every case it cannot run (no tempdir, no
+# symlink support, no git) is a NAMED NOT RUN failure (nonzero exit), never a skip beside a PASS.
 
 _CLEAN_MD = "# Heading\n\nPortable governance content with no operator identity and no operating vocabulary.\n"
 
@@ -821,6 +822,45 @@ def _build_surface(base, name, email):
     return base, entries
 
 
+def _not_run(failures, case, cause):
+    """Record a self-test case that could not run as a NAMED failure (a counted cannot-evaluate that
+    fails the run), never a printed note beside a PASS: coverage that did not run is not coverage."""
+    failures.append("NOT RUN: {}: {}; coverage that did not run FAILS the self-test, never a silent "
+                    "PASS".format(case, cause))
+
+
+_E2E_SURFACE_CASES = "every end-to-end surface case over a real synthetic shippable tree"
+_DISK_KIND_CASES = "the _disk_kind ancestor-symlink and root-boundary real-filesystem cases"
+_REAL_GIT_CASE = "the real-git tracked/untracked GD-130 pair"
+
+
+def _not_run_vectors(failures):
+    """Red-on-revert vectors for the skips that printed SELF-TEST PASS (PARTIAL) and exited 0: a nested
+    self-test run with an unavailable temp directory (mkdtemp raises OSError), one with no symlink
+    support (symlink creation raises OSError), and one with git absent (the lookup returns None), must
+    each exit nonzero AND name the unrun cases on a NOT RUN line."""
+    import io
+    from contextlib import redirect_stderr, redirect_stdout
+    from _git_fixture_env import fixture_git_lifecycle
+
+    def _unavailable(*_args, **_kwargs):
+        raise OSError("injected: unavailable")
+
+    for label, kwargs, want in (
+            ("no-tempdir", {"_mkdtemp": _unavailable},
+             "NOT RUN: {}: no writable temp directory".format(_E2E_SURFACE_CASES)),
+            ("no-symlink", {"_symlink": _unavailable},
+             "NOT RUN: {}: no symlink support".format(_DISK_KIND_CASES)),
+            ("git-absent", {"_which": lambda _name: None},
+             "NOT RUN: {}: git is unavailable".format(_REAL_GIT_CASE))):
+        out = io.StringIO()
+        with fixture_git_lifecycle(), redirect_stdout(out), redirect_stderr(io.StringIO()):
+            rc = _self_test_main_isolated(_vectors=False, **kwargs)
+        if rc == 0 or want not in out.getvalue():
+            failures.append("(NOT RUN vector {}) must exit nonzero AND record {!r}, never a PASS "
+                            "(PARTIAL) exit 0 (got exit {})".format(label, want, rc))
+
+
 def self_test_main():
     from _git_fixture_env import fixture_git_lifecycle, scrub_git_environment
     scrub_git_environment()
@@ -828,7 +868,7 @@ def self_test_main():
         return _self_test_main_isolated()
 
 
-def _self_test_main_isolated():
+def _self_test_main_isolated(_mkdtemp=None, _symlink=None, _which=None, _vectors=True):
     from _git_fixture_env import scrub_git_environment
     scrub_git_environment()
     name, email = "Jeff Posluns", "jeff@posluns.ca"
@@ -1186,9 +1226,9 @@ def _self_test_main_isolated():
                      ident_maxn, term_grams, maxn):
         failures.append("a shipped leak-allow marker (C5) was not flagged")
 
-    # --- real-surface end-to-end layer (runs where a writable tempdir exists) ----------------------
+    # --- real-surface end-to-end layer (a NOT RUN failure where no writable tempdir exists) --------
     # Cases (a)-(n) use an injected tracked-entry roster over real files. Case (o) uses a real git index
-    # when git is available; its absence is tracked as PARTIAL, never reported as a full PASS.
+    # when git is available; git's absence is a NAMED NOT RUN failure, never a skip beside a PASS.
     import io
     import shutil
     import tempfile
@@ -1315,8 +1355,6 @@ def _self_test_main_isolated():
     finally:
         sys.argv = _orig_argv2
 
-    skipped = []
-
     def _run_quiet(sroot, entries=None):
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             if entries is None:
@@ -1325,34 +1363,33 @@ def _self_test_main_isolated():
 
     e2e_name, e2e_email = "Test Operator", "operator@example.invalid"
     try:
-        base_tmp = Path(tempfile.mkdtemp(prefix="aiqt-portability-selftest-"))
-    except OSError:
+        base_tmp = Path((_mkdtemp or tempfile.mkdtemp)(prefix="aiqt-portability-selftest-"))
+    except OSError as exc:
         base_tmp = None
+        _not_run(failures, _E2E_SURFACE_CASES, "no writable temp directory ({})".format(exc))
 
-    if base_tmp is None:
-        skipped.append("all end-to-end surface cases (no writable temp directory)")
-    else:
+    if base_tmp is not None:
         def _fresh(tag):
             return _build_surface(base_tmp / tag, e2e_name, e2e_email)
 
         try:
             # GD-130: the REAL _disk_kind rejects a symlinked ANCESTOR (never follows it) and a terminal
             # symlink; run() canonicalizes a symlinked ROOT anchor. ALL symlink/fs setup is inside the guard
-            # so a symlink-less host reports PARTIAL (never a raise); the root-boundary check DISCRIMINATES
-            # (it fails if root.resolve() is absent, because the injected lister would then receive the
-            # symlink rather than the canonical root).
+            # so a symlink-less host records a NAMED NOT RUN failure (never a raise); the root-boundary
+            # check DISCRIMINATES (it fails if root.resolve() is absent, because the injected lister would
+            # then receive the symlink rather than the canonical root).
             _dk = base_tmp / "disk-kind"
+            _symlink_fn = _symlink or os.symlink
             try:
                 (_dk / "ext").mkdir(parents=True); (_dk / "ext" / "f.md").write_text("decoy")
                 (_dk / "sub" / "real").mkdir(parents=True); (_dk / "sub" / "real" / "g.md").write_text("ok")
-                os.symlink(_dk / "ext", _dk / "sub" / "mid")
-                os.symlink(_dk / "ext" / "f.md", _dk / "sub" / "real" / "term.md")
+                _symlink_fn(_dk / "ext", _dk / "sub" / "mid")
+                _symlink_fn(_dk / "ext" / "f.md", _dk / "sub" / "real" / "term.md")
                 _rsroot, _rentries = _fresh("rootlink-real")
                 _rlink = base_tmp / "rootlink-link"
-                os.symlink(_rsroot, _rlink)
-            except OSError:
-                skipped.append("_disk_kind ancestor-symlink and root-boundary real-fs tests "
-                               "(no symlink support)")
+                _symlink_fn(_rsroot, _rlink)
+            except OSError as exc:
+                _not_run(failures, _DISK_KIND_CASES, "no symlink support ({})".format(exc))
             else:
                 if _disk_kind(_dk, "sub/mid/f.md") != "symlink":
                     failures.append("GD-130: _disk_kind followed an intermediate symlinked ancestor")
@@ -1499,8 +1536,8 @@ def _self_test_main_isolated():
                 failures.append("GD-130: a tracked-empty site/downloads expected fail-closed exit 2")
 
             # (o) Canonical real-git witness: untracked stray passes, then the same path tracked fails C3.
-            if shutil.which("git") is None:
-                skipped.append("real-git tracked/untracked GD-130 pair (git is unavailable)")
+            if (_which or shutil.which)("git") is None:
+                _not_run(failures, _REAL_GIT_CASE, "git is unavailable (not found on PATH)")
             else:
                 sroot, _entries = _fresh("real-git")
                 from _git_fixture_env import git_fixture_env
@@ -1530,6 +1567,9 @@ def _self_test_main_isolated():
         finally:
             shutil.rmtree(base_tmp, ignore_errors=True)
 
+    if _vectors:
+        _not_run_vectors(failures)
+
     if failures:
         print("SELF-TEST FAIL:")
         for f in failures:
@@ -1540,13 +1580,11 @@ def _self_test_main_isolated():
             "fail-closed, case-folded and operator-scoped matching, pathname scanning, and the injected "
             "lister/reader enumeration, symlink/gitlink/type, git-enumeration and unreadable-binary "
             "fail-closed paths, plus the exemption marker)")
-    if skipped:
-        print("SELF-TEST PASS (PARTIAL): {}; the following were SKIPPED, so those invariants are UNVERIFIED "
-              "this run: {}".format(core, "; ".join(skipped)))
-    else:
-        print("SELF-TEST PASS: {}; the end-to-end surface cases hold (clean pass, planted identity/email/"
-              "vocabulary/pathname/marker/unknown-file findings, tracked no-skip enumeration, GD-130 "
-              "tracked/untracked stray-artifact pairs, and missing/untracked roots fail-closed)".format(core))
+    print("SELF-TEST PASS: {}; the end-to-end surface cases hold (clean pass, planted identity/email/"
+          "vocabulary/pathname/marker/unknown-file findings, tracked no-skip enumeration, GD-130 "
+          "tracked/untracked stray-artifact pairs, and missing/untracked roots fail-closed); an "
+          "unavailable temp directory, symlink support or git is a NOT RUN failure (nonzero exit), "
+          "never a PASS (PARTIAL)".format(core))
     return 0
 
 

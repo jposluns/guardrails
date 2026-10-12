@@ -542,8 +542,9 @@ def run(root, base):
 
 # --- self-test --------------------------------------------------------------------------------------
 # Pure-function cases (prefix/no-decrease/tag logic) always run and are deterministic. The git-level cases
-# build throwaway repositories in a private tempdir and are skipped with a printed note (never a false
-# pass) where git or a writable tempdir is unavailable; CI always has both. No wall clock, no randomness.
+# build throwaway repositories in a private tempdir; where git or a writable tempdir is unavailable they
+# are a NAMED NOT RUN failure (never a skip beside a PASS); CI always has both. No wall clock, no
+# randomness.
 
 def _changelog_text(versions, tag_on=None):
     tag_on = tag_on or {}
@@ -561,7 +562,39 @@ def _run_quiet(root, base):
         return run(root, base)
 
 
-def self_test_main():
+def _not_run(failures, case, cause):
+    """Record a self-test case that could not run as a NAMED failure (a counted cannot-evaluate that
+    fails the run), never a printed note beside a PASS: coverage that did not run is not coverage."""
+    failures.append("NOT RUN: {}: {}; coverage that did not run FAILS the self-test, never a silent "
+                    "PASS".format(case, cause))
+
+
+_GIT_CASES = ("the git-level history, tag, release-order/id-history append-only, genesis-exemption, and "
+              "tag-preservation cases over real repositories")
+
+
+def _not_run_vectors(failures):
+    """Red-on-revert vectors for the skips that printed SELF-TEST PASS (PARTIAL) and exited 0: a nested
+    self-test run with git unavailable (the git probe raises OSError), and one with an unavailable temp
+    directory (mkdtemp raises OSError), must each exit nonzero AND name the git-level cases on a NOT RUN
+    line."""
+    def _unavailable(*_args, **_kwargs):
+        raise OSError("injected: unavailable")
+
+    for label, kwargs, want in (
+            ("git-absent", {"_git_probe": _unavailable},
+             "NOT RUN: {}: git is unavailable".format(_GIT_CASES)),
+            ("no-tempdir", {"_mkdtemp": _unavailable},
+             "NOT RUN: {}: no writable temp directory".format(_GIT_CASES))):
+        out = io.StringIO()
+        with redirect_stdout(out), redirect_stderr(io.StringIO()):
+            rc = self_test_main(_vectors=False, **kwargs)
+        if rc == 0 or want not in out.getvalue():
+            failures.append("(NOT RUN vector {}) must exit nonzero AND record {!r}, never a PASS "
+                            "(PARTIAL) exit 0 (got exit {})".format(label, want, rc))
+
+
+def self_test_main(_git_probe=None, _mkdtemp=None, _vectors=True):
     # Hermetic git fixtures (test-hermeticity): every fixture git call below inherits
     # os.environ, where an inherited GIT_INDEX_FILE / GIT_DIR (git exports these to hook
     # children) would redirect the fixture's init/add/commit into the CALLER's repository.
@@ -686,28 +719,31 @@ def self_test_main():
     if check_tag_preservation([{"version": "1.0.0", "tag": "v1.0.0"}], [{"version": "1.0.5"}]):
         failures.append("check_tag_preservation: a changed version is check_prefix's finding, not this one")
 
-    # Git-level cases: real repositories in a private tempdir. Skipped (with a note) where unavailable.
+    # Git-level cases: real repositories in a private tempdir. A NAMED NOT RUN failure where unavailable.
     import shutil
     import tempfile
 
-    git_ran = False
     git_ok = True
+    git_why = "the git probe exited nonzero"
     try:
-        if subprocess.run(["git", "--version"], capture_output=True, text=True).returncode != 0:
+        probe_rc = _git_probe() if _git_probe is not None else subprocess.run(
+            ["git", "--version"], capture_output=True, text=True).returncode
+        if probe_rc != 0:
             git_ok = False
-    except OSError:
+    except OSError as exc:
         git_ok = False
-    try:
-        base_tmp = Path(tempfile.mkdtemp(prefix="aiqt-monotonicity-selftest-")) if git_ok else None
-    except OSError:
-        base_tmp = None
+        git_why = str(exc)
 
-    if not git_ok or base_tmp is None:
-        print("SELF-TEST NOTE: git or a writable temp directory is unavailable; git-level cases SKIPPED "
-              "(the pure prefix/no-decrease/tag coverage above still ran)", file=sys.stderr)
+    base_tmp = None
+    if not git_ok:
+        _not_run(failures, _GIT_CASES, "git is unavailable ({})".format(git_why))
     else:
-        git_ran = True
+        try:
+            base_tmp = Path((_mkdtemp or tempfile.mkdtemp)(prefix="aiqt-monotonicity-selftest-"))
+        except OSError as exc:
+            _not_run(failures, _GIT_CASES, "no writable temp directory ({})".format(exc))
 
+    if base_tmp is not None:
         def _init(path):
             path.mkdir(parents=True, exist_ok=True)
             for args in (["init", "-q"], ["config", "user.name", "AIQT Self-Test"],
@@ -992,22 +1028,20 @@ def self_test_main():
         finally:
             shutil.rmtree(base_tmp, ignore_errors=True)
 
+    if _vectors:
+        _not_run_vectors(failures)
+
     if failures:
         print("SELF-TEST FAIL:")
         for f in failures:
             print("  - " + f)
         return 1
-    if git_ran:
-        print("SELF-TEST PASS: prefix identity (M1), no-decrease (M2), tag name/ceiling logic, the "
-              "genesis predicate and tag-preservation logic, the _parse fullmatch regression (4e), the "
-              "full-row register prefix logic (append/edit/delete/empty/identical), and the git-level "
-              "history, tag, release-order/id-history append-only, genesis-exemption, and "
-              "tag-preservation cases all hold")
-    else:
-        print("SELF-TEST PASS (PARTIAL): prefix identity (M1), no-decrease (M2), tag name/ceiling "
-              "logic, and the genesis predicate and tag-preservation logic hold; the git-level history, "
-              "tag, and genesis-exemption cases were SKIPPED (git or a writable temp directory was "
-              "unavailable), so those invariants are UNVERIFIED this run")
+    print("SELF-TEST PASS: prefix identity (M1), no-decrease (M2), tag name/ceiling logic, the "
+          "genesis predicate and tag-preservation logic, the _parse fullmatch regression (4e), the "
+          "full-row register prefix logic (append/edit/delete/empty/identical), and the git-level "
+          "history, tag, release-order/id-history append-only, genesis-exemption, and "
+          "tag-preservation cases all hold; an unavailable git or temp directory is a NOT RUN failure "
+          "(nonzero exit), never a PASS (PARTIAL)")
     return 0
 
 

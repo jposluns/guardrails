@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "a9aef16e42650910295c0dfc7b4d53547d56da1cae59a9ce52bae997c42edebd"
+tree-sha256 = "0f869e290aecd4ea2e8df6627140e523e9f70ced2a755b36ce2f33ee8400616a"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3301,8 +3301,8 @@ sha256 = "0bea1bc6f0cc17886531edfdd39b3fa6fc4f9319f5b3a545c72c6bc98a8213f9"
 
 [[sources]]
 path = "tools/check_clauses.py"
-bytes = 162808
-sha256 = "e7a1ac60ef340bdc56147ed5e0a0ee539d731ce21cba4b3dc2a7f1fef49eaed0"
+bytes = 163794
+sha256 = "3a7a78aeca90f19952de4929c2b51e4dd84a9ec38264d1cca2885ba101283499"
 
 [[sources]]
 path = "tools/check_crosswalk.py"
@@ -3416,8 +3416,8 @@ sha256 = "263bbd21620fc34d3dc0388ab6c8f4be33037e3f22e66152e56364ad2ea45f58"
 
 [[sources]]
 path = "tools/check_portability.py"
-bytes = 93621
-sha256 = "2f51eb3b302390e276ac0b2adc002fd2c184a9cc7e0afdbfc903a30976d06d71"
+bytes = 95935
+sha256 = "aca2eeba4b60265b5edc6109653b43f0c4dc96b97f80c4ed892e4e578aeebb56"
 
 [[sources]]
 path = "tools/check_python_floor.py"
@@ -3491,8 +3491,8 @@ sha256 = "df2a9de523bf1ea7c1ba1bdd4aa53050d5a67bffae362df6b52573f437b648cd"
 
 [[sources]]
 path = "tools/check_standards_currency.py"
-bytes = 20273
-sha256 = "3540bb617d9100fbe12b421cd86fa35fdabd44a4808ba6c325ed36368c219136"
+bytes = 21994
+sha256 = "9c964625d7d678010f457232787aed875a2ae73116622c2754049827e29ba9b6"
 
 [[sources]]
 path = "tools/check_standards_urls_live.py"
@@ -3501,8 +3501,8 @@ sha256 = "8f498d860e52d5519cd1102364544f373e5e1984ac0e484c963065859c0b4733"
 
 [[sources]]
 path = "tools/check_version_monotonicity.py"
-bytes = 58570
-sha256 = "62d8badd5bfca7db92327616aef0479109bafffed0205b9ffa33bc81bb012e1b"
+bytes = 60163
+sha256 = "c7b912fcd5b1d1447746258bb39c917e8eab7153a925bd02076e44ff72391e54"
 
 [[sources]]
 path = "tools/check_versions.py"
