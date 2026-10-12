@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "16944ea787da70503bfb356d5bf4b354e93d189cf331c9e09bbe2f92c8ae81e8"
+tree-sha256 = "41a5e148c3968bb06694ae0ec58c3277de38348b258650f4034dcb571db6bc77"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -61,8 +61,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 280450
-sha256 = "0aa955d96603cfb5bd6357c620a5e5029697b5ce270082303ebb68d79d22e318"
+bytes = 282624
+sha256 = "90c06513432789ad58752c7912cf9774ea0375590524a09084d43b2c3792c7bb"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -2496,8 +2496,8 @@ sha256 = "02f97b775948be98897e6ffb2b28999a37c387ad4170104dc72ea38f5cd8bc64"
 
 [[sources]]
 path = "opf/prompt-pack/adopt/SKILL.md"
-bytes = 26334
-sha256 = "e2b88e0a5380788aca1b878d50e10594cf9af44f201afc7080d954dd1a256338"
+bytes = 27401
+sha256 = "7365b2a9739a46b25471800c67b6fd11e464bb007cd6f2e87497363e7d6f96a9"
 
 [[sources]]
 path = "opf/prompt-pack/adopt/clean-start.md"
@@ -2512,7 +2512,7 @@ sha256 = "deb4c717bba3cefb3f42f83ec454702a7890894426d38f7eed1506f4ae6d1b07"
 [[sources]]
 path = "opf/prompt-pack/pack.toml"
 bytes = 1816
-sha256 = "06e3852f24af65ef68256169204f04ddfe8ac3309202d7b1b7496a8fd73f19ba"
+sha256 = "07f5bf0852694c2fa5605685bd0fb5c54987573c9fbee62d1ca32166ba94f1fa"
 
 [[sources]]
 path = "opf/site/_redirects"
@@ -2666,8 +2666,8 @@ sha256 = "58c9f728290f3643a6044eea633e045bab89d4afce92db685be930f592c42fd3"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_discover.py"
-bytes = 26694
-sha256 = "bb43153249888982382226c1535701b748b7d2f39c9c7868e5154d917b846873"
+bytes = 55365
+sha256 = "03b3bd38f087ccd53f8c68a81e4450bc8c9a6fa506446396c5450567ccc52f17"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_hook.py"
@@ -2681,8 +2681,8 @@ sha256 = "66f6d3b5faf3d6b5b9d0904305d30acd5fed43088bb2f73104dcf0893e6ac8b1"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_plan.py"
-bytes = 106209
-sha256 = "c6c15c6db25d82cb7cf3cbb9a3d3f35ec138fe9346edb217447b0abea3edec08"
+bytes = 106832
+sha256 = "48dd83ef3793c040d904fae52d7fe73a4f7843b61353111e2d892081b1107871"
 
 [[sources]]
 path = "opf/tools/_opf_changelog.py"

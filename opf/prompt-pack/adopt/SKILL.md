@@ -61,10 +61,12 @@ The reference tooling requires Python 3.14 or newer. Its exit convention is 0 cl
    tooling's artifact digest and compare it with the published hashes at posluns.dev/hashes.txt.
    Proceed only on a match. If the digests differ or the reference evidence is unavailable,
    stop and report.
-2. Tell the adopter what you will read: source discovery walks the product tree outside the
-   areas section 3 excludes, reading file names and the start of Markdown and plain-text files;
-   investigation reads the scope in section 3 plus the sources the adopter confirms. Both are
-   read-only, but the adopter should know their scope before they run.
+2. Tell the adopter what you will read: source discovery resolves the store as investigation
+   does (the pointer files and `manifest.toml` in each immediate `.working` subdirectory), then
+   walks the product tree outside the areas section 3 excludes, reading file names and the start
+   of Markdown and plain-text files; investigation reads the scope in section 3 plus the sources
+   the adopter confirms. Both are read-only, but the adopter should know their scope before they
+   run.
 3. Run `opf adopt status --root <product root>`. Exit 0 with "no adoption run exists" is the
    expected first-adoption result. Exit 0 listing an adoption run, exit 1 (a held journal lock,
    an interrupted transaction, an evidence bundle that does not verify, or a directory at the
@@ -96,7 +98,7 @@ read-only discovery entry, with an absolute product root and the tooling directo
 `opf.py`:
 
 ```
-python3 -I -B -c "import sys; sys.path.insert(0, '<opf tools directory>'); import _opf_adopt_discover as d; r = d.discover_sources('<absolute product root>'); print(r.status, list(r.findings)); print(*['propose ' + p + ': ' + why for p, why in r.proposals], sep='\n'); print(*['ruled out ' + p + ': ' + why for p, why in r.ruled_out], sep='\n'); print('searched:', *r.searched)"
+python3 -I -B -c "import sys; sys.path.insert(0, '<opf tools directory>'); import _opf_adopt_discover as d; print(d.report(d.discover_sources('<absolute product root>')))"
 ```
 
 `discover_sources` opens nothing for writing. It walks the product root without following a
@@ -104,19 +106,30 @@ symlink and proposes each file whose name, or a Markdown heading near its start,
 old operational record: a TODO list or backlog, a decisions log, release notes, an issue export.
 It never enters `.git` or `.aiqt`, the detection roots and deliverable destinations above
 (investigation reads those itself), a path registered under `[unmanaged]` (section 14.2: ordinary
-tooling must not read it), or generated tool output such as `node_modules`.
+tooling must not read it), or generated tool output such as `node_modules`. It compares `.git`,
+`.aiqt`, `.working` and `[unmanaged]` paths ignoring case and Unicode normalization, so a variant
+spelling is ruled out too. Before the walk it resolves the store exactly as investigation does: it
+reads the two pointer files and probes `manifest.toml` in each immediate subdirectory of
+`.working`, control-area names included, reading each one present, and reads nothing else in the
+store tree. The output has one item per line: the status, then each finding, proposal, ruled-out
+entry and searched directory. Every path and reason is escaped to printable ASCII, so a backslash
+sequence such as `\n` stands for a character in a file name; a file name cannot add a line.
 
 - Status VALID: present the whole result to the adopter in one message: each proposal with its
   reason, the directories searched, and each ruled-out entry with its reason (an excluded area, a
   symlink, a hard-linked or oversized file). Say that the signals are a heuristic: a proposal can
   be wrong, and an old record under an unusual name or heading is not proposed.
-- Status CANNOT-EVALUATE: report the findings. A bound reached (a tree too large or too deep to
-  walk), a store that does not resolve, or a tree that changed during the walk leaves no list at
-  all, never a partial one. Then ask the adopter which old operational files exist, and say why
-  you are asking.
+- Status CANNOT-EVALUATE: report the findings. Any of these leaves no list at all, never a
+  partial one: a bound reached (a tree or store too large or too deep to walk); a store that does
+  not resolve; a `.working` holding a `.git` or `.aiqt` directory; an `[unmanaged]` entry that
+  overlaps a reserved store path or equals or contains a pointer file or a store manifest that
+  resolution reads; or a tree or store that changed during discovery, any examined file included.
+  Then ask the adopter which old operational files exist, and say why you are asking.
 
 The adopter confirms or removes each proposal and adds any file discovery did not propose. Only
-that confirmed list becomes `sources` (section 14.2: an incidental discovery authorizes nothing).
+that confirmed list becomes `sources`. The confirmation is your rule to follow, not a tooling
+check: `investigate` takes whatever list you pass and records no confirmation. Section 14.2 forbids
+post-adoption import from authorizing an incidental discovery; apply the same rule to proposals.
 Never pass a proposal the adopter has not confirmed, and never treat a ruled-out entry as a
 source.
 

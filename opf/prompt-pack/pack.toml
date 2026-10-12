@@ -14,11 +14,11 @@
 # against this manifest yet.
 format = "opf.prompt-pack/v1"
 version = "0.5.0"
-digest = "sha256:f654fbdb7d1bbac4ec3eda892422308a90f348f29faf4926855983b90d1d410d"
+digest = "sha256:5f8edc4200ff237cf6f7b9693ce0ae6b7d76a2201b20cff9d5537d695c11ade7"
 
 [[members]]
 path = "adopt/SKILL.md"
-sha256 = "e2b88e0a5380788aca1b878d50e10594cf9af44f201afc7080d954dd1a256338"
+sha256 = "7365b2a9739a46b25471800c67b6fd11e464bb007cd6f2e87497363e7d6f96a9"
 
 [[members]]
 path = "adopt/clean-start.md"
