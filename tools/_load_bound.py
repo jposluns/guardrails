@@ -26,32 +26,53 @@ caller reports a Hung that carries no failure evidence as the bound firing, CANN
 as a proven hang; and each call site sizes stall_s above the longest silent wait its callee legitimately
 makes, and states that wait at the call site. A Hung is not a licence to drop failure evidence: when the
 child had already exited on its own before the stop (a descendant still held its output open),
-Hung.returncode carries that exit status, and a nonzero status, like any other failure evidence the caller
-captured beside the stop (stderr, a wrong result, a leak marker), is a FAILURE (exit 1) whatever bound
-fired. Where tree CPU time cannot be read (no /proc, or a process-table scan cut short at SCAN_S), or once
+Hung.returncode carries that exit status, and the caller judges it exactly as it judges the exit status
+of a completed run, whatever bound fired, never filing it as cannot-evaluate: a nonzero status where the
+caller wanted success is a FAILURE (exit 1), and in the tools/check_gensrc_failclose.py probes, where a
+nonzero --check exit is the wanted rejection of a corrupt target, that status stands as the rejection.
+The other evidence a caller captured beside the stop is judged by the contract of that caller, never
+filed as cannot-evaluate where that contract calls it a failure: tools/selftest_git_fixture_env.py and
+the pl239 cases of tools/selftest_aiqt_hooks.py treat captured stderr, a wrong result or a leak marker
+beside a stop as a FAILURE (exit 1), while tools/check_gensrc_failclose.py and
+tools/check_hooks_preview.py judge the exit status of a member alone (a generator prints its rejection
+to stderr, a hook self-test its progress), so captured stderr beside a stop is not failure evidence in
+those two and a stop with no exit status stays cannot-evaluate there. A fault in the monitoring itself
+keeps the stdout and stderr captured before it: the Hung of kind monitor carries them, so that evidence
+is judged the same way. Where tree CPU time cannot be read (no /proc, or a process-table scan cut short at SCAN_S), or once
 it becomes unreadable during a run, the stall test is off for the rest of that run and only the
 load-adjusted budget applies.
 
 Cleanup. Once the watch has begun (Popen has returned), any exception that leaves the watch (a bound
 firing, a fault in the monitoring itself, an interrupt) runs the stop before run() leaves: read whether
 the child already exited on its own, kill the process tree, kill the child directly, then reap it waiting
-at most REAP_S. Each stage runs in its own guard, so a fault in one stage is noted in the report and the
+at most REAP_S. No stage signals a reaped or reused pid: the direct child is signalled only through its
+own Popen, which polls first and skips a child it has already reaped (while the parent holds a child
+unreaped, that pid cannot be reused), and each descendant the kill scan finds is bound to a pidfd as it
+is found, its start time re-read under that pidfd, and signalled only through the pidfd, so a pid whose
+process was replaced after the scan is never signalled; a descendant that cannot be bound (pidfd_open
+unavailable or failing, or the identity no longer matching) is not signalled, and the stop reports it in
+the Hung reason. Once Popen has reaped the child, its pid is reusable and its descendants were already
+reparented away at its exit, so no kill scan is rooted at that pid at all. Each stage runs in its own guard, so a fault in one stage is noted in the report and the
 next stage still runs, and an interrupt (KeyboardInterrupt, SystemExit) that arrives during a stage is held
 until every stage has been attempted and is then re-raised. A fault in the monitoring is raised as Hung
 (kind "monitor"), cannot-evaluate, never a crash that looks like a failure. What this does not cover: an
 interrupt that lands outside a stage guard (inside Popen itself, between Popen returning and the watch,
 or between two stage guards), a child killed but left unreaped because the interrupt landed in the reap
 stage, a child that survives both kills because every kill stage failed, a child
-in uninterruptible sleep (left unreaped after REAP_S, not waited on without bound), and a single /proc
-read that blocks in the kernel (the scan is bounded between entries, not inside one read).
+in uninterruptible sleep (left unreaped after REAP_S, not waited on without bound), a single /proc
+read that blocks in the kernel (the scan is bounded between entries, not inside one read), and the part
+of the tree a kill scan cut short at SCAN_S never reached: those descendants are left unkilled (the
+stall test already reads such a scan as unreadable CPU, but the kill stage runs no second scan).
 
 git. run() does not knowingly launch git (ValueError before any launch). It resolves the program the
 exec in the child would run, the way that exec looks it up: a head with a directory part relative to cwd,
 a bare head through each PATH entry of env in order, a relative or empty entry taken relative to cwd. It
 refuses a program whose given or real (symlink-resolved) name is git, or that is the same file as the git
 the parent or the child would find (a hard link), and refuses a head whose name is one of _LAUNCHERS. It
-then launches that resolved real path itself (Popen executable=), so the lookup and the exec cannot
-disagree: a candidate the exec would skip is not passed over to a later PATH entry. _LAUNCHERS is a list
+then launches that resolved real path itself (Popen executable=), resolved once: the same real-path
+string the refusal checked is the one handed to the exec, so the lookup and the exec cannot disagree (a
+candidate the exec would skip is not passed over to a later PATH entry, and a symlink retargeted after
+the check does not redirect the exec). _LAUNCHERS is a list
 of known spellings of shells and program launchers, not a proof that nothing can reach git: an interpreter
 head (python -c, perl, awk, make) or a launcher missing from the list can still run git, and so can a
 copy of the git binary under another name. git launches stay on a direct subprocess call, where the
@@ -68,7 +89,8 @@ descendant that re-parents away from the child (a daemon) leaves the CPU sum and
 the child waits on such a descendant the child looks silent; without /proc (macOS, Windows) only the
 direct child is killed and the stall test is off; without os.waitid the exit status a child reached
 before the stop is not read (Hung.returncode stays None); the program lookup mirrors POSIX exec and is
-unverified on Windows; a file swapped between the lookup and the exec runs as swapped.
+unverified on Windows; the file at the resolved real path swapped between the lookup and the exec runs
+as swapped (the path itself is resolved once, so only that one path can be run).
 """
 import errno
 import io
@@ -102,18 +124,27 @@ def _real(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
-def load_factor(read=None):
-    """max(1, 1-minute load average / usable CPUs), capped at MAX_LOAD_FACTOR; 1.0 when unknown, which
-    includes a reading that is not a finite, non-negative number. read stands in for os.getloadavg."""
+def measured_load_factor(read=None):
+    """max(1, 1-minute load average / usable CPUs), capped at MAX_LOAD_FACTOR, or None when the reading
+    is unavailable or is not a finite, non-negative number: an unknown load is never handed back as a
+    measured one. The load average is host-wide and smoothed, and a CPU quota, CPU pinning or niceness
+    that starves one callee does not show in it at all, so even a low measured factor is no proof the
+    callee had CPU. read stands in for os.getloadavg."""
     try:
         load = (read or os.getloadavg)()[0]
     except Exception:  # noqa: BLE001  an unreadable load is unknown, never an error in the bound
-        return 1.0
+        return None
     if not _real(load) or load < 0:
-        return 1.0
+        return None
     cpus = getattr(os, "process_cpu_count", os.cpu_count)()
     cpus = cpus if isinstance(cpus, int) and not isinstance(cpus, bool) and cpus >= 1 else 1
     return min(MAX_LOAD_FACTOR, max(1.0, load / cpus))
+
+
+def load_factor(read=None):
+    """measured_load_factor, with an unknown reading (unavailable or malformed) counted as 1.0."""
+    measured = measured_load_factor(read)
+    return 1.0 if measured is None else measured
 
 
 class LoadClock:
@@ -139,30 +170,36 @@ class LoadClock:
         return self._value
 
 
-def _proc_table(limit_s=None):
-    """(table, complete): table is {pid: (ppid, utime+stime+cutime+cstime ticks)} for every readable
-    /proc/<pid>/stat, or None when none was read. The scan stops between entries once it has taken
-    limit_s (SCAN_S) wall seconds; a scan cut short, or a /proc that cannot be listed, is not complete."""
+def _proc_table(limit_s=None, names=None, clock=None, opener=None):
+    """(table, complete): table is {pid: (ppid, utime+stime+cutime+cstime ticks, start ticks)} for
+    every readable /proc/<pid>/stat, or None when none was read. The scan stops between entries once it
+    has taken limit_s (SCAN_S) wall seconds; a scan cut short, or a /proc that cannot be listed, is not
+    complete. names, clock and opener stand in for the /proc listing, time.monotonic and open, so the
+    cut-short vector drives a table and a clock that must cross the limit on any host."""
     limit_s = SCAN_S if limit_s is None else limit_s
-    try:
-        names = os.listdir("/proc")
-    except OSError:
-        return None, False
-    began = time.monotonic()
+    clock = time.monotonic if clock is None else clock
+    opener = open if opener is None else opener
+    if names is None:
+        try:
+            names = os.listdir("/proc")
+        except OSError:
+            return None, False
+    began = clock()
     table = {}
     for name in names:
-        if time.monotonic() - began >= limit_s:
+        if clock() - began >= limit_s:
             return table or None, False
         if not name.isdigit():
             continue
         try:
-            with open("/proc/" + name + "/stat", "rb") as handle:
+            with opener("/proc/" + name + "/stat", "rb") as handle:
                 raw = handle.read()
         except OSError:
             continue
         fields = raw[raw.rfind(b")") + 2:].split()
         try:
-            table[int(name)] = (int(fields[1]), sum(int(value) for value in fields[11:15]))
+            table[int(name)] = (int(fields[1]), sum(int(value) for value in fields[11:15]),
+                                int(fields[19]))
         except (IndexError, ValueError):
             continue
     return table or None, True
@@ -170,8 +207,8 @@ def _proc_table(limit_s=None):
 
 def _descendants(table, pid):
     children = {}
-    for child, (parent, _ticks) in table.items():
-        children.setdefault(parent, []).append(child)
+    for child, entry in table.items():
+        children.setdefault(entry[0], []).append(child)
     found, todo = [], [pid]
     while todo:
         current = todo.pop()
@@ -199,9 +236,11 @@ class Hung(subprocess.TimeoutExpired):
     a correct silent wait also trips), "budget" (the load-adjusted budget was spent) or "monitor" (the
     monitoring itself failed). The stop is attributed to the bound, never proven a hang. returncode is the
     exit status the child had already reached on its own before the stop (a descendant still held its
-    output open), or None when the stop ended it or the status could not be read: a nonzero returncode is
-    the child failing, which callers report as a failure, not as cannot-evaluate. output and stderr hold
-    what was captured before the stop, as str when run() was given text=True or errors."""
+    output open), or None when the stop ended it or the status could not be read: the caller judges the
+    returncode exactly as it judges the exit status of a completed run, never filing it as
+    cannot-evaluate. output and stderr hold what was captured before the stop, also when the monitoring
+    itself failed (a Hung of kind monitor keeps them), as str when run() was given text=True or
+    errors."""
 
     def __init__(self, cmd, timeout, kind, reason, output=None, stderr=None, returncode=None):
         super().__init__(cmd, timeout, output=output, stderr=stderr)
@@ -213,14 +252,65 @@ class Hung(subprocess.TimeoutExpired):
         return "Command {!r} was stopped by its load-tolerant bound: {}".format(self.cmd, self.reason)
 
 
-def _kill_tree(proc):
-    table, _complete = _proc_table()
-    members = _descendants(table, proc.pid) if table and proc.pid in table else [proc.pid]
-    for member in members:
+def _signal_descendant(pid, start_ticks):
+    """Signal one scanned descendant, only ever through a pidfd bound here: the pidfd pins whatever
+    process holds pid at the bind, and the start time re-read under that pin must equal the scanned one
+    (a pid is only reusable after its holder was reaped, and a later holder starts later), so a pid
+    reused after the scan is never signalled. Returns "" when the signal was delivered or the
+    process was already gone, else why the descendant was not signalled."""
+    opener = getattr(os, "pidfd_open", None)
+    sender = getattr(signal, "pidfd_send_signal", None)
+    if opener is None or sender is None:
+        return "pidfd_open or pidfd_send_signal is unavailable on this platform"
+    try:
+        fd = opener(pid)
+    except OSError as exc:
+        return "pidfd_open failed ({}: {})".format(type(exc).__name__, exc)
+    try:
         try:
-            os.kill(member, _KILL)
-        except OSError:
-            pass
+            with open("/proc/{}/stat".format(pid), "rb") as handle:
+                raw = handle.read()
+            held_start = int(raw[raw.rfind(b")") + 2:].split()[19])
+        except (OSError, IndexError, ValueError) as exc:
+            return "its identity could not be re-read under the pidfd ({}: {})".format(
+                type(exc).__name__, exc)
+        if held_start != start_ticks:
+            return ("the pid was reused after the scan (start ticks {} where the scan read {})"
+                    .format(held_start, start_ticks))
+        try:
+            sender(fd, _KILL)
+        except ProcessLookupError:
+            pass  # it exited after the bind; the pidfd names that process alone, so nothing else is hit
+        except OSError as exc:
+            return "pidfd_send_signal failed ({}: {})".format(type(exc).__name__, exc)
+        return ""
+    finally:
+        os.close(fd)
+
+
+def _kill_tree(proc):
+    """Kill the scanned descendants of proc, each only through _signal_descendant (a pidfd bound at
+    the scan), and proc itself only through its own Popen: send_signal polls first and skips a child it
+    has already reaped, and the pid of a child the parent holds unreaped cannot be reused, so no stage
+    here signals a reaped or reused pid numerically. Once Popen has reaped proc, its descendants were
+    already reparented away at its exit, so no scan is rooted at its (reusable) pid. Returns "" or a
+    note naming each descendant that was not signalled; the part of the tree a scan cut short at SCAN_S
+    never reached is left unkilled (module docstring)."""
+    notes = []
+    if proc.returncode is None:
+        table, _complete = _proc_table()
+        if table and proc.pid in table:
+            for member in _descendants(table, proc.pid):
+                if member == proc.pid:
+                    continue
+                why = _signal_descendant(member, table[member][2])
+                if why:
+                    notes.append("descendant {} was not signalled: {}".format(member, why))
+    try:
+        proc.send_signal(_KILL)
+    except OSError:
+        pass
+    return "; ".join(notes)
 
 
 def _own_exit(proc):
@@ -249,7 +339,9 @@ def _stop(proc):
             if stage == "status read":
                 own_exit = _own_exit(proc)
             elif stage == "tree kill":
-                _kill_tree(proc)
+                skipped = _kill_tree(proc)
+                if skipped:
+                    notes.append(skipped)
             elif stage == "direct kill":
                 proc.kill()
             else:
@@ -313,11 +405,13 @@ def _same_file_as_git(program, env, cwd):
     return False
 
 
-def _refused_head(argv, env, cwd, program=None):
-    """A reason run() must not launch argv, or None. program is argv[0] as _program resolves it."""
+def _refused_head(argv, env, cwd, program=None, real=None):
+    """A reason run() must not launch argv, or None. program is argv[0] as _program resolves it, and
+    real its real path, resolved ONCE by run() and handed both here and to the exec, so the path this
+    refusal checks is the path that runs."""
     names = {os.path.basename(os.fsdecode(os.fspath(argv[0])))}
     if program is not None:
-        names.add(os.path.basename(os.path.realpath(program)))
+        names.add(os.path.basename(os.path.realpath(program) if real is None else real))
     for name in sorted({name.lower().removesuffix(".exe") for name in names}):
         if name.startswith("git"):
             return "its program resolves to git ({})".format(name)
@@ -361,6 +455,19 @@ def _watch(proc, argv, pending, budget_s, stall_s, clock, start, wall_start, pol
                            exc.output, exc.stderr) from None
 
 
+def _captured_streams(exc):
+    """The (output, stderr) a subprocess.TimeoutExpired in the exception chain of exc captured before
+    a monitoring fault, so a Hung of kind monitor keeps that evidence; (None, None) when the chain holds
+    none."""
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if isinstance(exc, subprocess.TimeoutExpired):
+            return exc.output, exc.stderr
+        exc = exc.__cause__ if exc.__cause__ is not None else exc.__context__
+    return None, None
+
+
 def run(argv, *, budget_s, stall_s, input=None, cwd=None, env=None, text=False, errors=None, clock=None,
         poll_s=POLL_S, cpu_seconds=None):
     """subprocess.run(argv, capture_output=True, input=, cwd=, env=, text=, errors=) bounded by progress.
@@ -376,7 +483,8 @@ def run(argv, *, budget_s, stall_s, input=None, cwd=None, env=None, text=False, 
     stdin is os.devnull, so a child that reads stdin sees EOF instead of blocking. cpu_seconds stands in
     for tree_cpu_seconds."""
     program = _program(argv, env, cwd)
-    refused = _refused_head(argv, env, cwd, program)
+    real = None if program is None else os.path.realpath(program)
+    refused = _refused_head(argv, env, cwd, program, real)
     if refused is not None:
         # git launches stay on a direct subprocess call, where the maintenance-pin scan in
         # tools/selftest_git_fixture_env.py can read and enforce their pins.
@@ -387,8 +495,9 @@ def run(argv, *, budget_s, stall_s, input=None, cwd=None, env=None, text=False, 
     cpu_seconds = tree_cpu_seconds if cpu_seconds is None else cpu_seconds
     clock = LoadClock() if clock is None else clock
     start, wall_start = clock(), time.monotonic()
-    # executable= is the resolved real path, so the exec runs the program checked above and no other.
-    proc = subprocess.Popen(argv, executable=os.path.realpath(program),
+    # executable= is the real path the refusal above checked, resolved once, so the exec runs that path
+    # and no other; only the file at it swapped afterwards runs as swapped (module docstring).
+    proc = subprocess.Popen(argv, executable=real,
                             stdin=subprocess.DEVNULL if input is None else subprocess.PIPE,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd, env=env, text=text,
                             errors=errors)
@@ -401,9 +510,13 @@ def run(argv, *, budget_s, stall_s, input=None, cwd=None, env=None, text=False, 
             raise interrupt from exc  # an interrupt during the stop leaves once every stage was attempted
         if not isinstance(exc, Exception):
             raise  # an interrupt or exit leaves as itself, after every stop stage was attempted
-        hung = exc if isinstance(exc, Hung) else Hung(
-            argv, budget_s, "monitor", "the bound's own monitoring failed ({}: {}); the child stop was run"
-            .format(type(exc).__name__, exc))
+        if isinstance(exc, Hung):
+            hung = exc
+        else:
+            captured_out, captured_err = _captured_streams(exc)
+            hung = Hung(argv, budget_s, "monitor",
+                        "the bound's own monitoring failed ({}: {}); the child stop was run"
+                        .format(type(exc).__name__, exc), captured_out, captured_err)
         hung.reason += notes
         hung.output, hung.stderr = _as_text(hung.output, proc.stdout), _as_text(hung.stderr, proc.stderr)
         if own_exit is not None:
@@ -455,11 +568,16 @@ def vector_failures(python):
     strings. A child that outlives its bound while making CPU or output progress must pass; a silent child
     must be stopped by the stall bound and a spinning one by the load-adjusted budget, each as Hung; a load
     reading that is malformed, or a CPU reading that turns unreadable, must not break either bound; any
-    fault after the launch must still stop and reap the child, a fault or an interrupt in any one stop
-    stage must not skip the stages after it, and a process-table scan is cut short at its limit; a child
-    that exited nonzero while a leaked descendant held its pipe keeps its exit status (as text where text
-    was asked for); git must not launch through a launcher, a relative or empty PATH entry (taken from the
-    child cwd), or a PATH candidate the exec cannot run (the exec must not fall through to a later git).
+    fault after the launch must still stop and reap the child, a monitoring fault keeps the streams
+    captured before it, a fault or an interrupt in any one stop stage (the status read included) must
+    not skip the stages after it, and a process-table scan is cut short at its limit, driven by an
+    injected table and clock so a small real process table cannot pass it vacuously; a child Popen has
+    already reaped is never signalled numerically, a pid reused after the kill scan is never signalled
+    (an unbindable descendant is skipped and reported), and a live descendant is killed through its
+    pidfd; a child that exited nonzero while a leaked descendant held its pipe keeps its exit status (as
+    text where text was asked for); git must not launch through a launcher, a relative or empty PATH
+    entry (taken from the child cwd), a PATH candidate the exec cannot run (the exec must not fall
+    through to a later git), or a hard link to git under another name.
 
     They do not need an unloaded host, but they are not independent of load: the progress vectors set the
     budget out of reach and pass whenever the child gets some CPU or prints within each stall window; the
@@ -577,9 +695,10 @@ def vector_failures(python):
             return value
         return clock
 
-    for stage, want in (("tree kill", "interrupt"), ("direct kill", "hung: monitor"), ("reap", "interrupt")):
+    for stage, want in (("status read", "interrupt"), ("tree kill", "interrupt"),
+                        ("direct kill", "hung: monitor"), ("reap", "interrupt")):
         injected = KeyboardInterrupt("injected during the {}".format(stage))
-        made, saved_popen, saved_tree = [], subprocess.Popen, _kill_tree
+        made, saved_popen, saved_tree, saved_own = [], subprocess.Popen, _kill_tree, _own_exit
 
         class Faulty(saved_popen):
             def __init__(self, *args, **kwargs):
@@ -598,9 +717,14 @@ def vector_failures(python):
 
         def interrupted_tree(proc, injected=injected):
             raise injected
+
+        def interrupted_own_exit(proc, injected=injected):
+            raise injected
         subprocess.Popen = Faulty
         if stage == "tree kill":
             globals()["_kill_tree"] = interrupted_tree
+        elif stage == "status read":
+            globals()["_own_exit"] = interrupted_own_exit
         try:
             run([python, "-I", "-B", "-c", "import time\ntime.sleep(3600)\n", token], budget_s=3600,
                 stall_s=3600, poll_s=0.05, clock=fault_after_two_ticks())
@@ -616,6 +740,7 @@ def vector_failures(python):
         finally:
             subprocess.Popen = saved_popen
             globals()["_kill_tree"] = saved_tree
+            globals()["_own_exit"] = saved_own
         left = _alive_with(token)
         for _ in range(50):  # a SIGKILLed child can take a moment to leave the process table
             if not left:
@@ -633,23 +758,121 @@ def vector_failures(python):
             failures.append("_load_bound vector (a fault in the {} stop stage): expected {!r} and no child left, "
                             "got {!r}, left alive {!r}".format(stage, want, got, left))
 
-    # A process-table scan is cut short at its limit, and a scan cut short reads as unreadable CPU.
-    if tree_cpu_seconds(os.getpid()) is not None:
-        import builtins
+    # A process-table scan is cut short at its limit, driven by an injected table and clock that must
+    # cross SCAN_S, so a small real process table cannot complete early and pass this vacuously; a zero
+    # real limit still reads as unreadable CPU where /proc exists.
+    def fixture_stat(path, *args, **kwargs):
+        return io.BytesIO(b"99 (probe) S 1 0 0 0 0 0 0 0 0 0 4 4 0 0 20 0 1 0 7")
+    crossing = iter((0.0, 1.0, 2.0, 3.0, 4.0, 5.0))
+    table, complete = _proc_table(names=["11", "12", "13", "14", "15"],
+                                  clock=lambda: next(crossing, 6.0), opener=fixture_stat)
+    held = iter((0.0,) * 8)
+    full, full_complete = _proc_table(names=["11", "12", "13", "14", "15"],
+                                      clock=lambda: next(held, 0.0), opener=fixture_stat)
+    got = (complete, sorted(table or {}), full_complete, sorted(full or {}))
+    if got != (False, [11, 12, 13, 14], True, [11, 12, 13, 14, 15]):
+        failures.append("_load_bound vector (a process-table scan is cut short at its limit, on an "
+                        "injected table and clock): got {!r}".format(got))
+    if tree_cpu_seconds(os.getpid()) is not None and tree_cpu_seconds(os.getpid(), limit_s=0.0) is not None:
+        failures.append("_load_bound vector (a scan cut short reads as unreadable CPU): got a reading")
 
-        def slow_open(path, *args, **kwargs):
-            time.sleep(0.05)
-            return builtins.open(path, *args, **kwargs)
-        globals()["open"] = slow_open
-        began = time.monotonic()
+    # A monitoring fault keeps the streams captured before it: the monitor Hung carries them, so the
+    # caller can judge that evidence; the stop still kills and reaps the real child.
+    class SeededTimeout(subprocess.Popen):
+        def communicate(self, input=None, timeout=None):
+            raise subprocess.TimeoutExpired(self.args, timeout, output=b"OUT\n",
+                                            stderr=b"FAIL: seeded diagnostic\n")
+
+    fault_ticks = iter((0.0, 0.0))
+
+    def seeded_fault_clock():
+        value = next(fault_ticks, None)
+        if value is None:
+            raise RuntimeError("injected monitoring fault")
+        return value
+    saved_popen_cls = subprocess.Popen
+    subprocess.Popen = SeededTimeout
+    try:
         try:
-            table, complete = _proc_table(limit_s=0.5)
+            run([python, "-I", "-B", "-c", "import time\ntime.sleep(3600)\n", token], budget_s=3600,
+                stall_s=3600, poll_s=0.05, clock=seeded_fault_clock)
+            got = "returned"
+        except Hung as exc:
+            got = (exc.kind, exc.output, exc.stderr)
+        except Exception as exc:  # noqa: BLE001  any escape is this vector failing
+            got = "{}: {}".format(type(exc).__name__, exc)
+    finally:
+        subprocess.Popen = saved_popen_cls
+    for pid in _alive_with(token):
+        _kill_pid(pid)
+    if got != ("monitor", b"OUT\n", b"FAIL: seeded diagnostic\n"):
+        failures.append("_load_bound vector (a monitoring fault keeps the captured streams): got {!r}"
+                        .format(got))
+
+    # A child Popen has already reaped (here a text decode that fails after a clean exit) is never
+    # signalled numerically: its pid may already be reused. The monitor Hung keeps the exit status.
+    numeric_kills = []
+    saved_os_kill = os.kill
+
+    def recording_kill(pid, sig):
+        numeric_kills.append(pid)
+        return saved_os_kill(pid, sig)
+    os.kill = recording_kill
+    try:
+        try:
+            run([python, "-I", "-B", "-c", "import sys\nsys.stdout.buffer.write(bytes([255]))\n", token],
+                budget_s=60, stall_s=60, text=True)
+            got = "returned"
+        except Hung as exc:
+            got = (exc.kind, exc.returncode, numeric_kills)
+        except Exception as exc:  # noqa: BLE001  any escape is this vector failing
+            got = "{}: {}".format(type(exc).__name__, exc)
+    finally:
+        os.kill = saved_os_kill
+    if got != ("monitor", 0, []):
+        failures.append("_load_bound vector (a reaped child is never signalled numerically): expected "
+                        "(monitor, 0, []), got {!r}".format(got))
+    if hasattr(os, "pidfd_open") and tree_cpu_seconds(os.getpid()) is not None:
+        # A live descendant of a stopped child is killed through its pidfd (the delivery control for
+        # the reuse refusal below).
+        bounded("a live descendant is killed with the tree, through its pidfd",
+                "import subprocess, sys, time\n"
+                "subprocess.Popen([sys.executable, \"-I\", \"-c\","
+                " \"import time; time.sleep(3600)\", sys.argv[1]])\ntime.sleep(3600)\n",
+                "hung: stall", 25, budget_s=3600, stall_s=1.5, poll_s=0.2)
+        # A pid reused after the scan is never signalled: the start time read under the pidfd no longer
+        # matches the scanned one, so that descendant is skipped and reported; a pid that cannot be
+        # bound at all is skipped and reported too. The bystander (the reuser) must survive.
+        def scanned_start(pid):
+            with open("/proc/{}/stat".format(pid), "rb") as handle:
+                raw = handle.read()
+            return int(raw[raw.rfind(b")") + 2:].split()[19])
+        bystander = subprocess.Popen(["sleep", "3600"])
+        child = subprocess.Popen(["sleep", "3600"])
+        gone = subprocess.Popen(["sleep", "0"])
+        gone.wait()
+        saved_table = _proc_table
+        try:
+            crafted = {child.pid: (os.getpid(), 0, scanned_start(child.pid)),
+                       bystander.pid: (child.pid, 0, scanned_start(bystander.pid) + 1),
+                       gone.pid: (child.pid, 0, 1)}
+            globals()["_proc_table"] = lambda *args, **kwargs: (crafted, True)
+            note = _kill_tree(child)
+            time.sleep(0.2)
+            got = (bystander.poll(),
+                   "descendant {} was not signalled".format(bystander.pid) in note and "reused" in note,
+                   "descendant {} was not signalled".format(gone.pid) in note)
         finally:
-            del globals()["open"]
-        took = time.monotonic() - began
-        if complete or took > 5.0 or tree_cpu_seconds(os.getpid(), limit_s=0.0) is not None:
-            failures.append("_load_bound vector (a slow process-table scan is cut short at its limit): got "
-                            "complete={!r} after {:.1f} s".format(complete, took))
+            globals()["_proc_table"] = saved_table
+            for stopped in (bystander, child):
+                stopped.kill()
+                try:
+                    stopped.wait(timeout=REAP_S)
+                except subprocess.TimeoutExpired:
+                    pass
+        if got != (None, True, True):
+            failures.append("_load_bound vector (a reused or unbindable pid is never signalled, and "
+                            "the stop reports it): got {!r}".format(got))
 
     # A child that exits nonzero while a leaked descendant still holds its output keeps its exit status.
     if hasattr(os, "waitid") and tree_cpu_seconds(os.getpid()) is not None:
@@ -719,6 +942,34 @@ def vector_failures(python):
                                 "to git): it launched {!r}".format(done.stdout[:40]))
             except (OSError, ValueError):
                 pass
+        # A hard link to the git the CHILD would find is refused by file identity (_same_file_as_git),
+        # driven with files this vector owns; the same bytes under a different inode are the disclosed
+        # copy residual and must still launch, so the refusal is the identity of the link, not its name.
+        fake = os.path.join(scratch, "fakegit")
+        os.makedirs(fake)
+        with open(os.path.join(fake, "git"), "w", encoding="utf-8") as handle:
+            handle.write("{}!{}\nprint(\"fake-git ran\")\n".format(chr(35), python))
+        os.chmod(os.path.join(fake, "git"), 0o755)
+        os.link(os.path.join(fake, "git"), os.path.join(fake, "linked"))
+        shutil.copy2(os.path.join(fake, "git"), os.path.join(fake, "copied"))
+        try:
+            run(["linked"], budget_s=10, stall_s=10, cwd=fake, env={"PATH": fake})
+            failures.append("_load_bound vector (a hard link to the git the child would find is "
+                            "refused by identity): it launched")
+        except ValueError:
+            pass
+        except Exception as exc:  # noqa: BLE001  not refused by identity: this vector failing
+            failures.append("_load_bound vector (a hard link to the git the child would find is "
+                            "refused by identity): not refused ({}: {})"
+                            .format(type(exc).__name__, exc))
+        try:
+            done = run(["copied"], budget_s=60, stall_s=60, cwd=fake, env={"PATH": fake}, text=True)
+            got = (done.returncode, done.stdout)
+        except Exception as exc:  # noqa: BLE001  an escape is this vector failing
+            got = "{}: {}".format(type(exc).__name__, exc)
+        if got != (0, "fake-git ran\n"):
+            failures.append("_load_bound vector (a copy of that file under a different inode still "
+                            "launches, the disclosed residual): got {!r}".format(got))
         own = os.path.join(scratch, "own", "bin")
         os.makedirs(own)
         with open(os.path.join(own, "probe"), "w", encoding="utf-8") as handle:

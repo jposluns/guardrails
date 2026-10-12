@@ -182,6 +182,13 @@ def _stop_or(argv, value):
     return argv
 
 
+def _failing_members(results):
+    """The failing members of a registered-results mapping, exactly as the registered checks list
+    them: every result that is not the clean (0, b"", b"", b""), as _stop_or files it. The lane drives
+    this very expression, so a regression here turns bound/stop-keeps-failure-evidence red."""
+    return [_stop_or(argv, value) for argv, value in results.items() if value != (0, b"", b"", b"")]
+
+
 def _only_stops(got, want):
     """True when got equals want except where a BoundStop stands: a stopped child's result in place of a
     wanted value, a tuple position by position (every other field must equal its wanted value), or stopped
@@ -1290,8 +1297,7 @@ def _config_injection_lane(base):
     _wrapper_bypass_control(base, env, marker, monitor_marker)
     _prepared_before_pool_control(env, marker, monitor_marker)
     combined = _config_results(roster, env, marker, monitor_marker)
-    check("config/registered-combined", [_stop_or(argv, value) for argv, value in combined.items()
-                                       if value != (0, b"", b"", b"")], [])
+    check("config/registered-combined", _failing_members(combined), [])
     for rc_id, hooks_id, member in (
             ("config/selftest_aiqt_corpus/rc", "config/selftest_aiqt_corpus/hooks",
              "tools/selftest_aiqt_corpus.py"),
@@ -1389,8 +1395,7 @@ def _config_injection_lane(base):
     malformed_results = _config_results(
         [argv for argv in roster if _command_identity(argv) not in CONFIG_EXCLUSIONS["malformed"]],
         env, marker, monitor_marker)
-    check("config/registered-malformed", [_stop_or(argv, value) for argv, value in malformed_results.items()
-                                        if value != (0, b"", b"", b"")], [])
+    check("config/registered-malformed", _failing_members(malformed_results), [])
     for malformed_id, member in (
             ("config/selftest_aiqt_corpus/malformed", "tools/selftest_aiqt_corpus.py"),
             ("config/selftest_orch_hooks/malformed", "tools/selftest_orch_hooks.py"),
@@ -1443,26 +1448,36 @@ def _config_injection_lane(base):
     check("config/system-control", (probe.returncode, bool(monitor_marker.read_bytes())),
           (0, True))
     system_results = _config_results(roster, system_env, marker, monitor_marker, system=True)
-    check("config/registered-system", [_stop_or(argv, value) for argv, value in system_results.items()
-                                     if value != (0, b"", b"", b"")], [])
+    check("config/registered-system", _failing_members(system_results), [])
     return system_results
 
 
 def _run_config_member(member, env):
+    """The exit code of the member; a clean bound stop as a BoundStop; failure evidence beside a stop
+    (a nonzero own exit, or captured stderr) as a plain failing value, never a BoundStop. Every member
+    diagnostic prints to STDOUT: the execution reconciler forwards stdout and treats any byte on the
+    suite error stream as a fault, so a real member failure reaches CI as exit 1 (FAIL), never as
+    CANNOT EVALUATE from a stderr diagnostic."""
     try:
         proc = _load_bound.run([sys.executable, "-I", "-B", str(ROOT / member[0]), *member[1:]],
                                budget_s=MEMBER_BUDGET_S, stall_s=MEMBER_STALL_S,
                                clock=_load_bound.LoadClock(factor=_LOAD_FACTOR),
                                cwd=ROOT, env=env, text=True, errors="replace")
         if proc.returncode:
-            print("CONFIG-INJECTION {}:\n{}".format(member, proc.stdout + proc.stderr),
-                  file=sys.stderr)
+            print("CONFIG-INJECTION {}:\n{}".format(member, proc.stdout + proc.stderr))
         return proc.returncode
     except _load_bound.Hung as exc:
         if exc.returncode:  # it exited nonzero before the stop: its own failure, whatever bound fired
             print("CONFIG-INJECTION {} (exited {} before its bound fired: {}):\n{}".format(
-                member, exc.returncode, exc.reason, (exc.output or "") + (exc.stderr or "")), file=sys.stderr)
+                member, exc.returncode, exc.reason, (exc.output or "") + (exc.stderr or "")))
             return exc.returncode
+        if exc.stderr:
+            # Captured stderr is failure evidence beside the stop (the _load_bound contract): a plain
+            # failing value, never a BoundStop, and the evidence prints with the verdict.
+            print("CONFIG-INJECTION {} (stopped by its bound beside captured stderr: {}):\n{}".format(
+                member, exc.reason, (exc.output or "") + (exc.stderr or "")))
+            return "member {} was stopped by its load-tolerant bound beside captured stderr".format(
+                " ".join(member))
         return _bound_stop("member {}".format(" ".join(member)), exc)
     except (OSError, subprocess.SubprocessError) as exc:
         return str(exc)
@@ -1864,6 +1879,9 @@ def _run_corpus(poison_key, poison_value, cwd):
     except _load_bound.Hung as exc:
         if exc.returncode:  # it exited nonzero before the stop: its own failure, whatever bound fired
             return exc.returncode
+        if exc.stderr:  # captured stderr beside the stop is failure evidence (the _load_bound contract)
+            return ("corpus self-test ({} poison) was stopped by its load-tolerant bound beside "
+                    "captured stderr: {!r}".format(poison_key, exc.stderr))
         return _bound_stop("corpus self-test ({} poison)".format(poison_key), exc)
     except (OSError, subprocess.SubprocessError) as exc:
         return "corpus launch failed: {}".format(exc)
@@ -1893,6 +1911,9 @@ def _run_corpus_imported(poison_key, poison_value, cwd):
     except _load_bound.Hung as exc:
         if exc.returncode:  # it exited nonzero before the stop: its own failure, whatever bound fired
             return exc.returncode
+        if exc.stderr:  # captured stderr beside the stop is failure evidence (the _load_bound contract)
+            return ("imported corpus self-test ({} poison) was stopped by its load-tolerant bound "
+                    "beside captured stderr: {!r}".format(poison_key, exc.stderr))
         return _bound_stop("imported corpus self-test ({} poison)".format(poison_key), exc)
     except (OSError, subprocess.SubprocessError) as exc:
         return "imported corpus launch failed: {}".format(exc)
@@ -4639,16 +4660,20 @@ def _bound_stop_lane(base):
     as a failure; a real difference beside a stop stays a failure; the suite exits 1 for any failure, else
     2 for a stop. bound/stop-keeps-failure-evidence: a stopped member whose hook, monitor or exposure log
     recorded a marker is a failure in the registered lists and the OPF lifecycle roster, a wrong value in
-    a tuple beside a stop is a failure, and a member that exited nonzero while a leaked descendant held its
-    output keeps that exit code. The lane's own stops are expected, so they leave BOUND_STOPS as they
-    found it. Each element of that check is a plain value (the exit code as its repr), so a regression that
-    hands back a BoundStop reads as a failure there, not as cannot-evaluate. What each vector call writes
-    to the stdout and stderr of this process is captured per call and judged in that check (the leaky
-    member CONFIG-INJECTION diagnostic must name its exit, every other call must write nothing), so no
-    vector writes to the suite streams: the execution reconciler requires an empty error stream."""
+    a tuple beside a stop is a failure, a member stopped beside captured stderr is a failure (a plain
+    failing value, never a BoundStop), and a member that exited nonzero while a leaked descendant held
+    its output keeps that exit code. The stops the lane itself makes are expected, so they leave
+    BOUND_STOPS as they found it. Each element of that check is a plain value (the exit code as its
+    repr), so a regression that hands back a BoundStop reads as a failure there, not as cannot-evaluate.
+    What each vector call writes to the stdout and stderr of this process is captured per call and
+    judged in that check: the leaky member CONFIG-INJECTION diagnostic must land on STDOUT (the
+    execution reconciler forwards stdout and faults on any suite stderr byte) and must match its full
+    expected text with only the stall idle seconds free, the noisy member diagnostic must land on
+    stdout too, and every other call must write nothing, so no vector writes to the suite streams."""
     global MEMBER_BUDGET_S, MEMBER_STALL_S, CORPUS_BUDGET_S, CORPUS_STALL_S, CORPUS_SELFTEST, _LOAD_FACTOR
     import contextlib
     import io
+    import re
     slowed = base / "bound-slowed.py"
     slowed.write_text("import time\nfor _ in range(8):\n    print(1, flush=True)\n    time.sleep(0.25)\n",
                       encoding="utf-8")
@@ -4658,6 +4683,9 @@ def _bound_stop_lane(base):
     leaky = base / "bound-leaky.py"
     leaky.write_text("import subprocess, sys\nsubprocess.Popen([sys.executable, \"-I\", \"-c\", \"import time; "
                      "time.sleep(60)\", {!r}])\nsys.exit(3)\n".format(leaked), encoding="utf-8")
+    noisy = base / "bound-noisy.py"
+    noisy.write_text("import sys, time\nprint(\"Traceback: real failure\", file=sys.stderr, flush=True)\n"
+                     "time.sleep(3600)\n", encoding="utf-8")
     saved = (MEMBER_BUDGET_S, MEMBER_STALL_S, CORPUS_BUDGET_S, CORPUS_STALL_S, CORPUS_SELFTEST, _LOAD_FACTOR)
     kept = len(BOUND_STOPS)
     env = _git_fixture_env.git_fixture_env()
@@ -4687,6 +4715,9 @@ def _bound_stop_lane(base):
         # Exits 3 at once while a descendant holds its output: the stall bound stops the wait, and the
         # exit code it reached first stands as the member result. Its diagnostic is captured, not printed.
         leaky_rc = quiet("leaky", _run_config_member, (str(leaky),), env)
+        # Prints real stderr then sleeps: the stall stop carries that captured stderr, failure evidence
+        # (a plain failing value, never a BoundStop), and its diagnostic lands on stdout.
+        noisy_rc = quiet("noisy", _run_config_member, (str(noisy),), env)
         CORPUS_BUDGET_S, CORPUS_STALL_S, CORPUS_SELFTEST = 20, 1.5, silent
         corpus_stop = quiet("corpus", _run_corpus, "GIT_DIR", "/decoy/.git", base)
     finally:
@@ -4707,21 +4738,35 @@ def _bound_stop_lane(base):
     member = ("tools/x.py", "--self-test")
 
     def registered(value):
-        # The registered-combined, -malformed and -system lists, and the OPF lifecycle roster, as built.
-        listed = [_stop_or(argv, result) for argv, result in {member: value}.items()
-                  if result != (0, b"", b"", b"")]
-        return _judge(listed, []), _judge((sorted({_stop_or(member[0], value)}), []), ([], []))
+        # The registered-combined, -malformed and -system lists drive the production _failing_members
+        # itself; the second leg mirrors the set shape of the OPF lifecycle roster.
+        return (_judge(_failing_members({member: value}), []),
+                _judge((sorted({_stop_or(member[0], value)}), []), ([], [])))
     leaky_out, leaky_err = written.pop("leaky", ("", ""))
+    noisy_out, noisy_err = written.pop("noisy", ("", ""))
+    # The full expected leaky diagnostic, on stdout: only the stall idle seconds are free.
+    frame = "CONFIG-INJECTION {} (exited 3 before its bound fired: \x00):\n\n".format((str(leaky),))
+    head, tail = frame.split("\x00")
+    reason_re = (r"heuristic stall bound fired: no CPU or output progress for \d+\.\d s \(stall bound "
+                 r"1\.5 s\); silence is not proof of a hang; the child itself had already exited with "
+                 r"status 3 before the stop \(a descendant still held its output open\), and that "
+                 r"status stands")
+    leaky_full = re.search(r"\A" + re.escape(head) + reason_re + re.escape(tail) + r"\Z",
+                           leaky_out) is not None
     check("bound/stop-keeps-failure-evidence",
           (registered((member_stop, b"", b"", b"home\n")), registered((member_stop, b"hook\n", b"", b"")),
            registered((member_stop, b"", b"monitor\n", b"")), registered((member_stop, b"", b"", b"")),
            _judge((member_stop, 1), (0, 0)), _judge((member_stop, 0), (0, 0)),
            _judge([member_stop, 1], 0), _judge([member_stop, 0], 0), repr(leaky_rc),
-           (leaky_out, leaky_err.startswith("CONFIG-INJECTION {} (exited 3 before its bound fired: "
-                                            .format((str(leaky),)))),
+           (leaky_full, leaky_err),
+           (isinstance(noisy_rc, BoundStop), _judge(noisy_rc, 0),
+            noisy_out.startswith("CONFIG-INJECTION {} (stopped by its bound beside captured stderr: "
+                                 .format((str(noisy),))),
+            "Traceback: real failure" in noisy_out, noisy_err),
            sorted(item for item in written.items() if item[1] != ("", ""))),
           (("fail", "fail"), ("fail", "fail"), ("fail", "fail"), ("cannot-evaluate", "cannot-evaluate"),
-           "fail", "cannot-evaluate", "fail", "cannot-evaluate", "3", ("", True), []))
+           "fail", "cannot-evaluate", "fail", "cannot-evaluate", "3", (True, ""),
+           (False, "fail", True, True, ""), []))
 
 
 def main(report_path=None):

@@ -26,7 +26,10 @@ an absent or unreadable one is exit 2), and every other entry must be a hook fil
       load-adjusted seconds, or the heuristic SELFTEST_STALL_S stall bound) delivered no verdict and is a
       cannot-evaluate (exit 2), attributed to the bound, never reported as a hook failure or a proven hang,
       unless the self-test had already exited nonzero on its own before the stop (a descendant still held
-      its output): that exit is a finding, whatever bound fired.
+      its output): that exit is a finding, whatever bound fired. A stop that carries captured stderr but
+      no exit status stays a cannot-evaluate: a hook self-test legitimately writes its progress to stderr,
+      so this gate judges the exit status alone and captured stderr beside a stop is not failure evidence
+      here (a tolerance named in the tools/_load_bound.py module docstring).
   (b) INTEGRITY. The README.md integrity table (the one table whose header row is exactly
       `| File | SHA-256 | Link |`; every line from its separator row to the first blank line
       or the end of the file must be a `| a | b | c |` row, since GitHub renders a row written without a
@@ -320,7 +323,9 @@ def _tail(data, n=15):
 
 def leg_selftest(pdir, hooks, findings, unverifiable):
     """(a) Run each hook's own --self-test isolated; nonzero is a finding (also when it exited nonzero
-    before a bound stopped the wait), a stop with no exit status is unverifiable. The
+    before a bound stopped the wait), a stop with no exit status is unverifiable, also when stderr was
+    captured beside it: this gate judges the exit status alone (a hook self-test legitimately writes its
+    progress to stderr, a tolerance named in the _load_bound module docstring). The
     environment is scrubbed of AIQT_, ORCH_ and CLAUDE_ variables and then carries AIQT_HOOKS_REQUIRE_SIBLINGS=1
     (set after the scrub), so a hook's sibling-parity tests run rather than skip silently in CI."""
     for name in hooks:

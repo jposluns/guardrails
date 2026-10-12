@@ -1753,8 +1753,11 @@ def _fixture_tmpdir(prefix):
 
 
 _PL239_DEADLINE_NOTE = "commit evaluation deadline exhausted"
-# A deadline denial on every launch while the load factor read at each launch stayed at or below this
-# (the host ran about as much work as it has CPUs) is the latency regression it is: a failure, not load.
+# A deadline denial on every launch while a MEASURED load factor read at each launch stayed at or below
+# this (the host ran about as much work as it has CPUs) is reported as a latency regression: a failure,
+# not load. An unavailable reading is never read as an unloaded host (cannot-evaluate), and the reading
+# is the smoothed host-wide load average: a CPU quota, CPU pinning or niceness that starves the hook
+# does not show in it at all, so a hook starved that way can still be reported as this failure.
 _PL239_UNLOADED_FACTOR = 1.25
 
 
@@ -1775,14 +1778,22 @@ def _pl239_launch_verdict(launch, detail, attempts=3, factor=None):
     for failure evidence that has no result to judge, or ("cannot-evaluate", note).
     Failure evidence comes first, before any retry: a launch that exits nonzero or writes stderr is handed
     back to be judged (a failure) at once, whatever its stdout says, and a bound stop that carries an exit
-    status the hook reached on its own (nonzero) or captured stderr is a failure. Only the hook's whole
-    production-deadline response (_pl239_deadline_denial), where the case does not expect it, is retried,
-    since load can cause it; every other result is judged at once. When every launch ends in that response
-    and the load factor (factor, default _load_bound.load_factor) read at every launch was at most
-    _PL239_UNLOADED_FACTOR, it is a failure: the latency regression it is. Otherwise a persistent deadline
-    or clean bound stop (no exit status, no stderr) is cannot-evaluate, with the factor of each launch."""
-    read_factor = factor or _load_bound.load_factor
+    status the hook reached on its own (nonzero) or captured stderr is a failure. Only the two results
+    host load can cause are retried: the whole production-deadline response of the hook
+    (_pl239_deadline_denial), where the case does not expect it, and a clean bound stop (no exit status,
+    no stderr); every other result is judged at once. When every launch ends in that deadline response
+    and the load factor (factor, default _load_bound.measured_load_factor) read at every launch was a
+    MEASURED reading at most _PL239_UNLOADED_FACTOR, it is a failure: the latency regression it is. An
+    unavailable reading (None) is never read as an unloaded host, so with one among them the persistent
+    deadline is cannot-evaluate, exactly like a persistent deadline on a loaded host or a persistent
+    clean stop, with the factor of each launch in the note. A CPU quota, CPU pinning or niceness that
+    starves the hook does not show in the load average at all (disclosed in _load_bound), so a hook
+    starved that way can still be reported as the unloaded-host failure."""
+    read_factor = factor or _load_bound.measured_load_factor
     expects_deadline = _PL239_DEADLINE_NOTE in (detail or "")
+
+    def level_text(level):
+        return "unavailable" if level is None else "{:.1f}".format(level)
     seen, deadline_factors = [], []
     for _attempt in range(attempts):
         level = read_factor()
@@ -1792,13 +1803,14 @@ def _pl239_launch_verdict(launch, detail, attempts=3, factor=None):
             if exc.returncode or exc.stderr:
                 return "fail", ("stopped by its load-tolerant bound beside failure evidence (exit status {!r}, "
                                 "stderr {!r}): {}".format(exc.returncode, exc.stderr, exc))
-            seen.append("{} (load factor {:.1f})".format(exc, level))
+            seen.append("{} (load factor {})".format(exc, level_text(level)))
             continue
         if result.returncode != 0 or result.stderr or expects_deadline or not _pl239_deadline_denial(result):
             return "judge", result
         deadline_factors.append(level)
-        seen.append("the hook production commit deadline expired (load factor {:.1f})".format(level))
-    if len(deadline_factors) == attempts and max(deadline_factors) <= _PL239_UNLOADED_FACTOR:
+        seen.append("the hook production commit deadline expired (load factor {})".format(level_text(level)))
+    if (len(deadline_factors) == attempts and None not in deadline_factors
+            and max(deadline_factors) <= _PL239_UNLOADED_FACTOR):
         return "fail", ("the hook production commit deadline expired on all {} launches on an unloaded host "
                         "(load factor at most {}), a latency regression: {}"
                         .format(attempts, _PL239_UNLOADED_FACTOR, "; ".join(seen)))
@@ -1809,8 +1821,9 @@ def _pl239_launch_failures():
     """Vectors for _pl239_launch_verdict and _selftest_exit_code: failure evidence judged before any retry
     (a nonzero exit or stderr beside the deadline text, a bound stop carrying an exit status or stderr),
     the whole-shape deadline test, the retry-then-cannot-evaluate path on a loaded host, the deadline on an
-    unloaded host as a failure, the retries that recover, the cases judged at once, and the exit each
-    outcome maps to."""
+    unloaded host as a failure, an unavailable load reading (alone and among measured low ones) as
+    cannot-evaluate and never as the unloaded-host failure, the retries that recover, the cases judged at
+    once, and the exit each outcome maps to."""
     failures = []
     note = _PL239_DEADLINE_NOTE
     deadline = subprocess.CompletedProcess(
@@ -1831,6 +1844,8 @@ def _pl239_launch_failures():
     for label, script, detail, level, kind, launches in (
             ("deadline on every launch, loaded host", [deadline] * 3, None, 4.0, "cannot-evaluate", 3),
             ("deadline on every launch, unloaded host", [deadline] * 3, None, 1.0, "fail", 3),
+            ("deadline on every launch, unavailable load reading", [deadline] * 3, None, None,
+             "cannot-evaluate", 3),
             ("deadline, then a clean launch", [deadline, clean], None, 4.0, "judge", 2),
             ("deadline and stall stops mixed, unloaded host", [deadline, stalled, deadline], None, 1.0,
              "cannot-evaluate", 3),
@@ -1854,6 +1869,30 @@ def _pl239_launch_failures():
         if got != (kind, launches, True):
             failures.append("(pl239-launch-retry) {}: expected (outcome, launches, judged the last launch) = {!r}, "
                             "got {!r}: {!r}".format(label, (kind, launches, True), got, value))
+    # The DEFAULT reading function: with os.getloadavg unavailable it must read as unknown, so the
+    # persistent deadline is cannot-evaluate, never the unloaded-host failure (red when the default
+    # reverts to load_factor, whose unknown collapses to 1.0).
+    saved_getloadavg = getattr(_load_bound.os, "getloadavg", None)
+
+    def unavailable_loadavg():
+        raise OSError("injected unavailable load average")
+    _load_bound.os.getloadavg = unavailable_loadavg
+    try:
+        got_kind, value = _pl239_launch_verdict(lambda: deadline, None)
+    finally:
+        if saved_getloadavg is None:
+            del _load_bound.os.getloadavg
+        else:
+            _load_bound.os.getloadavg = saved_getloadavg
+    if got_kind != "cannot-evaluate":
+        failures.append("(pl239-launch-default-read) the default load reading made unavailable must "
+                        "read as unknown (cannot-evaluate), never as the unloaded-host failure, "
+                        "got {!r}: {!r}".format(got_kind, value))
+    mixed = iter((None, 1.0, 1.0))
+    got_kind, value = _pl239_launch_verdict(lambda: deadline, None, factor=lambda: next(mixed, 1.0))
+    if got_kind != "cannot-evaluate":
+        failures.append("(pl239-launch-unknown-load) one unavailable load reading among measured low ones "
+                        "must be cannot-evaluate, got {!r}: {!r}".format(got_kind, value))
     if (_pl239_deadline_denial(deadline), _pl239_deadline_denial(loose), _pl239_deadline_denial(crashed)) != (
             True, False, False):
         failures.append("(pl239-launch-shape) the whole deadline response is recognised and nothing else")
@@ -10290,16 +10329,20 @@ def _main_isolated(monitor):
             _f2link.unlink(); _f2oklink.unlink()
             (cs_sess / ".aiqt" / "frozen.json").unlink()
 
+        # Read the limits at the END of the battery, inside the try: the finally below re-assigns the
+        # production values, so a read taken after it could never fail. This read makes a lost restore or
+        # a later case that widened the limits again a failure in the check below.
+        _pl_limits_after_battery = (aiqt_hooks._COMMIT_SECONDS, aiqt_hooks._COMMIT_PROBE_SECONDS)
     finally:
         aiqt_hooks._COMMIT_SECONDS, aiqt_hooks._COMMIT_PROBE_SECONDS = _pl_production_limits
         shutil.rmtree(tmp, ignore_errors=True)
-    # No caller of this self-test is left on widened limits: read once more after the whole battery, so a
-    # lost restore or a later case that widens them again is a failure. The finally above covers a run
-    # that raises, which never reaches this check.
-    if (aiqt_hooks._COMMIT_SECONDS, aiqt_hooks._COMMIT_PROBE_SECONDS) != _pl_production_limits:
+    # No caller of this self-test is left on widened limits: the limits read at the end of the battery,
+    # before the restore in the finally, must already be the production ones. The finally above covers a
+    # run that raises, which never reaches this check.
+    if _pl_limits_after_battery != _pl_production_limits:
         failures.append("(pl239-limits-restored-final) after the case battery the hook commit limits are "
                         "{!r}, not the production {!r}".format(
-                            (aiqt_hooks._COMMIT_SECONDS, aiqt_hooks._COMMIT_PROBE_SECONDS), _pl_production_limits))
+                            _pl_limits_after_battery, _pl_production_limits))
 
     # === GLOBAL NO-ASK INVARIANT (maintainer directive) =========================================
     # These enforcement hooks must NEVER return permissionDecision "ask": an unattended orchestrator must
