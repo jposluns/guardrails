@@ -1455,6 +1455,8 @@ def _suite_isolated():
             check("U17 above-tooling store refused (exit 2)", rc17a == EXIT_ERROR)
             check("U17 above-tooling refusal names the reason", "ABOVE the {}".format(
                 _opf_store.SUPPORTED_SPEC_VERSION) in out17a)
+            check("U17 above-tooling refusal states that no homes migration exists",
+                  "performs no homes migration" in out17a)
 
             s17b = base / "u17-noncanonical"
             s17b.mkdir()
