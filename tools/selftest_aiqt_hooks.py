@@ -33,7 +33,7 @@ scans read routes the command exactly where any other leading assignment of the 
 routes snapshot every not-provably-clean resolved base before an allow of a destructive form, and every
 destructive route DENIES, fail closed, when no session cwd resolves AND no concrete -C target was resolved
 (the resolved-target exception: 'git -C <abs repo> reset --hard' with no cwd probes and snapshots that -C
-target and is decided on it) - the rmo and fcl vectors pin this); a pristine bare whole-tree-clobbering verb (reset --hard, checkout -f, switch
+target and is decided on it) - this no-cwd resolved-target form is not separately pinned here); a pristine bare whole-tree-clobbering verb (reset --hard, checkout -f, switch
 --force) on a confirmed-dirty tree DENIES. This suite proves the EN-6 pristine gate: every shell-grammar and
 wrapper form that hides a real `git reset --hard` while the raw scan still sees a contiguous git+verb keyword
 (an `if`/`for`, a backtick or `$()` substitution, a `|&`, a leading or interspersed redirect, and the
@@ -2471,16 +2471,18 @@ def _main_isolated(monitor):
             ("wrap-nice", "nice git reset --hard"),                       # a scheduling wrapper
             ("wrap-timeout", "timeout 5 git reset --hard"),               # a timeout wrapper
             ("wrap-nohup", "nohup git reset --hard"),                     # a nohup wrapper
-            ("wrap-sh-c", 'sh -c "git reset --hard"'),                    # an interpreter -c wrapper
-            ("wrap-bash-c", 'bash -c "git reset --hard"'),                # an interpreter -c wrapper
-            ("wrap-stdbuf", "stdbuf -oL git reset --hard"),              # a wrapper NOT in any enumerated list
             ("wrap-doas", "doas git reset --hard"),                      # a privilege wrapper not in any list
             ("wrap-setsid", "setsid git reset --hard"),                 # a session wrapper not in any list
-            ("wrap-eval", "eval 'git reset --hard'"),                   # eval runs its quoted argument
         ]
         for label, cmd in pristine_asks:
             expect("(pristine-{}) shell structure hides a reset --hard -> snapshot-then-allows".format(label),
                    cmd, "allow-note", cwd=rp)
+        for _flbl, _fcmd in (
+                ("wrap-sh-c", "sh -c " + chr(34) + "git reset --hard" + chr(34)),
+                ("wrap-bash-c", "bash -c " + chr(34) + "git reset --hard" + chr(34)),
+                ("wrap-eval", "eval " + chr(39) + "git reset --hard" + chr(39)),
+                ("wrap-stdbuf", "stdbuf -oL git reset --hard")):
+            expect("(pristine-{}) closed grammar denies this wrapped form".format(_flbl), _fcmd, "deny", cwd=rp)
         # A pathed git ('/usr/bin/git') is not the literal command word 'git', so it is not pristine -> ASK.
         expect("(pristine-pathed) a pathed git is not literally 'git' -> allows with a note", "/usr/bin/git reset --hard",
                "allow-note", cwd=rp)
@@ -3827,6 +3829,75 @@ def _main_isolated(monitor):
         if aiqt_hooks._record_stash_recovery(str(r9_sess))[0] != "none":
             failures.append("(r9f3d) a stash-less repo must stay a confirmed 'none' (nothing to preserve)")
 
+        # === PR #423 round-6 (R10): closed-grammar denials and M1/M2/M3/M5/M6 killers; each flips on base.
+        r10_b = _init_repo(tmp / "r10-b")
+        (r10_b / "file.txt").write_text("committed line" + chr(10) + "precious" + chr(10), encoding="utf-8")
+        r10_bc = str(r10_b)
+        _DOLLAR = chr(36)
+        _BT = chr(96)
+        _NL = chr(10)
+        _DQ = chr(34)
+        _SQ = chr(39)
+        expect("(r10-env-chdir-eq)", "env --chdir=" + r10_bc + " git reset --hard", "deny", cwd=rp)
+        expect("(r10-env-chdir-C)", "env -C" + r10_bc + " git reset --hard", "deny", cwd=rp)
+        expect("(r10-sudo-D)", "sudo -D " + r10_bc + " git reset --hard", "deny", cwd=rp)
+        expect("(r10-builtin-cd)", "builtin cd " + r10_bc + " && git reset --hard", "deny", cwd=rp)
+        expect("(r10-command-cd)", "command cd " + r10_bc + " && git stash clear", "deny", cwd=rp)
+        expect("(r10-env-u-git)", "env -u git git stash clear", "deny", cwd=rp)
+        expect("(r10-sudo-u-git)", "sudo -u git git stash clear", "deny", cwd=rp)
+        expect("(r10-cd-env-u)", "cd " + r10_bc + " && env -u git git reset --hard", "deny", cwd=rp)
+        expect("(r10-stash-cmdsub)", "git stash " + _DOLLAR + "(echo clear)", "deny", cwd=rp)
+        expect("(r10-stash-var)", "op=clear; git stash " + _DOLLAR + "op", "deny", cwd=rp)
+        expect("(r10-stash-xargs)", "echo clear | xargs git stash", "deny", cwd=rp)
+        expect("(r10-stash-backtick)", "git stash " + _BT + "echo clear" + _BT, "deny", cwd=rp)
+        expect("(r10-sh-c-stash)", "sh -c " + _DQ + "git stash clear" + _DQ, "deny", cwd=rp)
+        r10_fb = _r9_stash_repo("r10-fb")
+        _fbcmd = "git stash cl" + _SQ + _SQ + "ear <<EOF" + _NL + _SQ + _NL + "EOF"
+        expect("(r10-fallback-heredoc)", _fbcmd, "allow-note", cwd=str(r10_fb))
+        if not _stash_refs(r10_fb):
+            failures.append("(r10-fallback-heredoc-refs) the unparseable fallback must preserve the stash")
+        expect("(r10-m3-semicd)", "cd " + r10_bc + "; env git reset --hard", "deny", cwd=rp)
+        expect("(r10-m5-semicd)", "cd " + r10_bc + "; env git stash clear", "deny", cwd=rp)
+        expect("(r10-m6-cddash)", "cd - && env git stash clear", "deny", cwd=rp)
+        r10_m1 = _r9_stash_repo("r10-m1")
+        _m1_orig = aiqt_hooks._recovery_git
+
+        def _m1_rg(repo, args, env_extra=None, timeout=10):
+            if args[:3] == ["rev-parse", "--verify", "-q"]:
+                return subprocess.CompletedProcess(args, 0, stdout="deadbeef" + _NL, stderr="")
+            if args[:1] == ["reflog"]:
+                return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+            return _m1_orig(repo, args, env_extra=env_extra, timeout=timeout)
+
+        aiqt_hooks._recovery_git = _m1_rg
+        try:
+            if aiqt_hooks._record_stash_recovery(str(r10_m1))[0] != "fail":
+                failures.append("(r10-m1) a present ref with an empty reflog must be a preservation FAILURE")
+        finally:
+            aiqt_hooks._recovery_git = _m1_orig
+        r10_m2 = _r9_stash_repo("r10-m2")
+        _m2_orig = aiqt_hooks._recovery_git
+
+        def _probe_rg(rc, out, err):
+            def _f(repo, args, env_extra=None, timeout=10):
+                if args[:3] == ["rev-parse", "--verify", "-q"]:
+                    return subprocess.CompletedProcess(args, rc, stdout=out, stderr=err)
+                return _m2_orig(repo, args, env_extra=env_extra, timeout=timeout)
+            return _f
+
+        aiqt_hooks._recovery_git = _probe_rg(1, "", "warning: something" + _NL)
+        try:
+            if aiqt_hooks._record_stash_recovery(str(r10_m2))[0] != "fail":
+                failures.append("(r10-m2) rc 1 with stderr text must be a preservation FAILURE, never none")
+        finally:
+            aiqt_hooks._recovery_git = _m2_orig
+        for _rc, _o, _e, _tag in ((1, " " + _NL, "", "ws-out"), (1, "", chr(9), "ws-err"), (1, None, None, "nn")):
+            aiqt_hooks._recovery_git = _probe_rg(_rc, _o, _e)
+            try:
+                if aiqt_hooks._record_stash_recovery(str(r10_m2))[0] == "none":
+                    failures.append("(r10-probe-" + _tag + ") a malformed probe must not be read as none")
+            finally:
+                aiqt_hooks._recovery_git = _m2_orig
         # FINDING 6: a staged-index commit-tree failure while distinct staged content is present must FAIL the
         # snapshot (fail closed), not silently drop the staged payload. Fault-inject the staged commit-tree.
         r6f6 = tmp / "r6-f6-staged"

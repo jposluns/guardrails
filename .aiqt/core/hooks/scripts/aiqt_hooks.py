@@ -3751,15 +3751,7 @@ _RAW_DISCARD_REDIRECT_RE = re.compile(
     r"|(?:^|[\s'\";&|()])GIT_DIR="
     r"|(?:^|[\s'\";&|()])GIT_WORK_TREE=")
 
-# PR #423 ROUND-4 (codex finding 2): raw indicators, on the UNPARSEABLE fallback path only, that the lossy
-# command may be STASH-DESTRUCTIVE ('git stash drop'/'clear' in any unparseable spelling): the word 'stash'
-# plus the word 'drop' or 'clear' anywhere in the raw string. A stash entry is NOT reflog-recoverable after
-# a drop/clear and a clean worktree does NOT establish stash safety, so the fallback must preserve the
-# session repo's stash first (or deny when it cannot), never allow on worktree cleanliness alone.
-# Conservative and over-matching (a keyword in prose over-preserves - an inert extra recovery ref - never an
-# under-protection); a redirected target was already denied above by _RAW_DISCARD_REDIRECT_RE.
 _RAW_STASH_WORD_RE = re.compile(r"(?i)(?<![\w-])stash(?![\w-])")
-_RAW_STASH_OP_RE = re.compile(r"(?i)(?<![\w-])(?:drop|clear)(?![\w-])")
 
 
 def _git_discard_fallback(command, cwd=None):
@@ -3811,7 +3803,7 @@ def _git_discard_fallback(command, cwd=None):
     # session repo's stash FIRST (before any allow below), or denies; a clean worktree proves nothing about
     # the stash. With no session cwd the no-cwd deny below already fails closed for every lossy form.
     stash_note = ""
-    if base is not None and _RAW_STASH_WORD_RE.search(command) and _RAW_STASH_OP_RE.search(command):
+    if base is not None and _RAW_STASH_WORD_RE.search(command):
         st = _record_stash_recovery(base)
         if st[0] == "fail":
             return _deny(
@@ -4355,14 +4347,16 @@ def _record_stash_recovery(repo):
         # preservation FAILURE (the caller denies) rather than a false 'none' that would let a drop/clear
         # destroy a real stash unpreserved (PR #423 round-4, codex finding 3).
         verify = _recovery_git(repo, ["rev-parse", "--verify", "-q", "refs/stash"], timeout=5)
-        _vout = (verify.stdout or "").strip()
-        _verr = (verify.stderr or "").strip()
-        if verify.returncode == 1 and not _vout and not _verr:
-            return ("none", None)                     # confirmed: no stash ref at all, nothing to preserve
-        if verify.returncode != 0 or not _vout:
+        # codex round-5 MEDIUM: compare the ORIGINAL streams, TYPED, with the empty string.
+        _vout = verify.stdout
+        _verr = verify.stderr
+        if verify.returncode == 1 and _vout == "" and _verr == "":
+            return ("none", None)
+        if verify.returncode != 0 or not isinstance(_vout, str) or not _vout.strip():
             return ("fail", "the stash presence probe failed (rc={}{}), so the stash entries could not be "
                             "confirmed absent or preserved".format(
-                                verify.returncode, ": " + _verr if _verr else ""))
+                                verify.returncode,
+                                ": " + _verr.strip() if isinstance(_verr, str) and _verr.strip() else ""))
         listing = _recovery_git(repo, ["reflog", "show", "--no-abbrev", "--format=%H", "refs/stash"],
                                 timeout=10)
         if listing.returncode != 0:
@@ -4602,37 +4596,52 @@ def _segment_carries_target_redirect(tokens):
     return False
 
 
+# PR #423 round-6 closed grammar for a discard-capable git segment; see the manifest residue.
+_SHELL_INTERP_WORDS = frozenset(("sh", "bash", "dash", "zsh", "ksh", "eval"))
+_SAFE_STASH_OPS = frozenset(("list", "show", "apply", "pop", "push", "save", "branch", "create", "store"))
+_NICE_N_RE = re.compile(r"-n\d+")
+
+
+def _stash_op_role(op):
+    if op is None:
+        return "safe"
+    if op in ("drop", "clear"):
+        return "preserve"
+    if op == "export":
+        return "export"
+    if op in _SAFE_STASH_OPS:
+        return "safe"
+    return "deny"
+
+
+def _wrapper_prefix_inert(tokens, gi):
+    i = 0
+    while i < gi:
+        tok = tokens[i]
+        if _ENV_ASSIGN_RE.match(tok):
+            i += 1
+            continue
+        if not tok.startswith("-"):
+            i += 1
+            continue
+        if _NICE_N_RE.fullmatch(tok):
+            i += 1
+            continue
+        if tok == "-n" and i + 1 < gi and tokens[i + 1].isdigit():
+            i += 2
+            continue
+        return False
+    return True
+
+
+def _segment_is_builtin_cd(tokens):
+    cw = _command_word_index(tokens)
+    if cw >= len(tokens) or tokens[cw].rsplit("/", 1)[-1] not in ("builtin", "command"):
+        return False
+    return any(t.rsplit("/", 1)[-1] in ("cd", "pushd", "popd") for t in tokens[cw + 1:])
+
+
 def _nonpristine_discard_actions(segments, cwd):
-    """ROUND-3 FINDINGS 1 and 2. Walk a NON-PRISTINE in-scope command's segments and resolve, for each
-    VISIBLE git discard segment, the effective worktree/repository the discard ACTUALLY acts on, so the
-    recovery snapshot (a worktree discard) or the stash preservation (a `git stash drop`/`clear`) lands on
-    that target rather than blindly on the session cwd. The shell cwd is tracked across TOP-LEVEL `cd`/`pushd`
-    (a `&&`-gated cd applies to the next command with certainty; a `;`/`||`-sequenced one does NOT gate
-    success so the cwd becomes uncertain; a backgrounded `cd &` and a cd inside a subshell `( )` do NOT change
-    the foreground cwd), and each git segment's own -C/--work-tree/GIT_WORK_TREE= redirect is resolved against
-    that cwd. Returns a dict:
-      { 'snapshot_bases': [dir, ...]  # distinct worktree dirs a snappable destructive discard acts on
-        'stash_ops':      [(dir, op)] # each stash drop/clear paired with the repo dir it acts on
-        'unresolved':     bool        # a visible depth-0 discard whose target could NOT be resolved
-        'hidden':         bool        # ROUND-6 FINDING 3: a lossy discard the walk cannot resolve to a
-                                      #   snapshottable target - a git inside a subshell whose cwd a prior
-                                      #   internal cd moved, or a WRAPPED git (env/sudo/... git) carrying a
-                                      #   -C/--git-dir/--work-tree/GIT_DIR=/GIT_WORK_TREE= redirect - so its
-                                      #   target cannot be snapshotted with certainty
-        'saw_actionable': bool }      # any visible worktree-destructive or stash drop/clear discard
-    A WRAPPED git discard with NO redirect (env/sudo/... git <verb>, a reserved-word segment, 'xargs git
-    <verb>') is resolved against the same tracked effective directory as a direct git segment and registers
-    the same snapshot base or stash target; only a wrapped discard whose target cannot be established is
-    flagged hidden/unresolved (PR #423 round-4). A caller with unresolved=True OR hidden=True DENIES (fail
-    closed: it cannot snapshot/preserve the exact
-    target). Where a
-    destructive segment acts on the plain session cwd (no cd, no redirect) that cwd is added to
-    snapshot_bases so it is snapshotted through the same path; where no actionable discard is visible
-    (obfuscated verbs, soft/ref-level forms, or an unknown cwd) saw_actionable is False and the caller keeps
-    its existing best-effort session-cwd snapshot. ORDER OF CHECKS in the caller with an UNKNOWN session
-    cwd: it reads unresolved first, then hidden (each deny carries its own reason), and only then DENIES on
-    the missing session cwd before acting on snapshot_bases/stash_ops - every route is still a deny, so the
-    eff-is-None branches below only shape the walk and the deny reason, never an allow."""
     depth = 0
     session_cwd = cwd if isinstance(cwd, str) and cwd else None
     eff = session_cwd
@@ -4643,10 +4652,9 @@ def _nonpristine_discard_actions(segments, cwd):
     unresolved = False
     saw_actionable = False
     targets_session = False
-    hidden = False   # ROUND-6 FINDING 3: a lossy discard the walk cannot resolve as a depth-0 literal-git
-    # segment (a subshell-internal cd moved its target, or a WRAPPED git carries a target redirect) -> DENY.
-    subshell_cd_seen = False  # a cd/pushd occurred at depth>0 in the current subshell nesting: a git discard
-    # then running inside that subshell acts on a moved, un-modelled cwd. Reset when depth returns to 0.
+    hidden = False
+    bad_stash = False
+    subshell_cd_seen = False
 
     def _add(seq, item):
         if item not in seq:
@@ -4658,14 +4666,30 @@ def _nonpristine_discard_actions(segments, cwd):
             sub, args = _git_sub_and_args(tokens)
             if sub is not None:
                 role, _kind = _discard_role(sub, args)
-                if role != "allow":
+                if sub == "stash":
+                    stash_op = next((a for a in args if not a.startswith("-")), None)
+                    srole = _stash_op_role(stash_op)
+                    if srole in ("preserve", "deny"):
+                        saw_actionable = True
+                        if depth != 0 and subshell_cd_seen:
+                            hidden = True
+                        elif srole == "deny":
+                            bad_stash = True
+                        elif not eff_certain or _segment_has_gitdir_redirect(tokens):
+                            unresolved = True
+                        else:
+                            rd = _segment_repo_dir(tokens, eff)
+                            if rd == "opaque":
+                                unresolved = True
+                            elif isinstance(rd, str):
+                                _add(stash_ops, (rd, stash_op))
+                            elif eff is None:
+                                if cd_happened:
+                                    unresolved = True
+                            else:
+                                _add(stash_ops, (eff, stash_op))
+                elif role != "allow":
                     if depth != 0 and subshell_cd_seen:
-                        # ROUND-6 FINDING 3: a lossy git discard inside a subshell '( ... )' where a cd/pushd
-                        # earlier in that subshell moved the cwd the walk does not model (e.g.
-                        # '(cd T && git restore -- f)'), so its target cannot be resolved and the session
-                        # snapshot would not capture it -> fail closed (the caller denies). A subshell/command
-                        # substitution with NO internal cd runs at the foreground cwd, so it falls through to
-                        # the normal resolution below and is snapshot-backed there (the C6 design).
                         hidden = True
                         saw_actionable = True
                     elif sub in _SNAPSHOTTABLE_VERBS:
@@ -4673,12 +4697,6 @@ def _nonpristine_discard_actions(segments, cwd):
                         if not eff_certain:
                             unresolved = True
                         elif _segment_has_worktree_redirect(tokens):
-                            # ROUND-7 (codex finding 1): --work-tree relocates ONLY the worktree, not the repo.
-                            # An INDEX/REF-only discard (restore --staged, mixed reset, rm --cached) acts on the
-                            # ambient (or -C) repo, so snapshot THAT via _segment_repo_dir (--work-tree ignored).
-                            # A WORKTREE-CONTENT discard destroys content in the --work-tree dir while the index/
-                            # refs stay in the ambient repo: the split cannot be captured by one snapshot, so it
-                            # is unresolved (the caller DENIES) rather than snapshotting the wrong --work-tree.
                             if _discard_index_only(sub, args):
                                 rd = _segment_repo_dir(tokens, eff)
                                 if rd == "opaque":
@@ -4700,114 +4718,89 @@ def _nonpristine_discard_actions(segments, cwd):
                                 _add(snapshot_bases, wt)
                             elif eff is None:
                                 if cd_happened:
-                                    unresolved = True     # a cd to an unresolvable dir preceded the discard
-                                # else: cwd unknown -> keep the best-effort session path (not unresolved)
-                            elif cd_happened:
-                                _add(snapshot_bases, eff)  # a cd'd-into concrete dir
-                            else:
-                                targets_session = True     # plain session cwd
-                    elif sub == "stash":
-                        stash_op = next((a for a in args if not a.startswith("-")), None)
-                        if stash_op in ("drop", "clear"):
-                            saw_actionable = True
-                            if not eff_certain or _segment_has_gitdir_redirect(tokens):
-                                unresolved = True
-                            else:
-                                # ROUND-7 (codex finding 1): stash is a REPO/ref op; its target repo is the
-                                # ambient (or -C) repo, NOT the --work-tree value, so resolve via
-                                # _segment_repo_dir (--work-tree ignored) and preserve THAT repo's stash.
-                                rd = _segment_repo_dir(tokens, eff)
-                                if rd == "opaque":
                                     unresolved = True
-                                elif isinstance(rd, str):
-                                    _add(stash_ops, (rd, stash_op))
+                            elif cd_happened:
+                                _add(snapshot_bases, eff)
+                            else:
+                                targets_session = True
+        elif depth == 0 and cw in ("cd", "pushd", "popd"):
+            if sep == "&":
+                pass
+            elif sep in ("&&", ""):
+                nd = _cd_target_dir(tokens, cw, eff)
+                eff = nd
+                cd_happened = True
+            else:
+                eff_certain = False
+        elif cw in ("cd", "pushd", "popd"):
+            subshell_cd_seen = True
+        elif depth == 0 and _segment_is_builtin_cd(tokens):
+            if sep == "&":
+                pass
+            elif sep in ("&&", ""):
+                eff = None
+                cd_happened = True
+            else:
+                eff_certain = False
+        elif _segment_is_builtin_cd(tokens):
+            subshell_cd_seen = True
+        else:
+            if cw in _SHELL_INTERP_WORDS and _wrapped_git_index(tokens) is None:
+                if any(_raw_has_lossy_git(t) for t in tokens):
+                    hidden = True
+                    saw_actionable = True
+            gi = _wrapped_git_index(tokens)
+            if gi is not None:
+                prefix_inert = _wrapper_prefix_inert(tokens, gi)
+                if not prefix_inert and _raw_has_lossy_git(" ".join(tokens)):
+                    hidden = True
+                    saw_actionable = True
+                else:
+                    wsub, wargs = _git_sub_and_args(tokens[gi:])
+                    if wsub is not None:
+                        wrole, _wk = _discard_role(wsub, wargs)
+                        has_xargs = any(t.rsplit("/", 1)[-1] == "xargs" for t in tokens[:gi])
+                        if wsub == "stash":
+                            wstash_op = next((a for a in wargs if not a.startswith("-")), None)
+                            wsrole = _stash_op_role(wstash_op)
+                            if has_xargs or wsrole == "deny":
+                                saw_actionable = True
+                                bad_stash = True
+                            elif wsrole == "preserve":
+                                saw_actionable = True
+                                if _segment_carries_target_redirect(tokens) or (depth != 0 and subshell_cd_seen):
+                                    hidden = True
+                                elif not eff_certain:
+                                    unresolved = True
                                 elif eff is None:
                                     if cd_happened:
                                         unresolved = True
-                                    # else: cwd unknown -> best-effort session path
                                 else:
-                                    _add(stash_ops, (eff, stash_op))
-                    # a force branch delete/move/copy/reset or stash export is ref-level/reflog-recoverable:
-                    # a worktree snapshot cannot capture it, so no target is resolved here (the existing
-                    # allow-note covers it).
-        elif depth == 0 and cw in ("cd", "pushd", "popd"):
-            if sep == "&":
-                pass                                   # backgrounded: no foreground cwd change
-            elif sep in ("&&", ""):
-                nd = _cd_target_dir(tokens, cw, eff)
-                eff = nd                               # a resolvable dir, or None (subsequent target opaque)
-                cd_happened = True
-            else:                                      # ';' or '||': cd success does not gate the next
-                eff_certain = False
-        elif cw in ("cd", "pushd", "popd"):
-            # a cd/pushd at depth>0 (a subshell-internal cd, e.g. '(cd T && ...)'): the walk does not model
-            # the subshell's cwd, so note it, and a later same-subshell git discard fails closed (finding 3).
-            subshell_cd_seen = True
-        else:
-            # ROUND-6 FINDING 3: a segment whose command word is neither git nor a cd-family builtin. A
-            # STANDALONE 'git' token here is a WRAPPED git discard (env/sudo/xargs/timeout/... git <verb>,
-            # or a reserved-word segment such as 'then git stash clear'). When it carries a target redirect
-            # (-C/--git-dir/--work-tree/GIT_DIR=/GIT_WORK_TREE=), or runs inside a subshell whose cwd a
-            # prior internal cd moved, its target is off the session cwd (or unmodellable) and cannot be
-            # resolved+snapshotted -> fail closed (hidden). ROUND-9 (PR #423 round-4, codex findings 1-2):
-            # a wrapped discard with NO redirect acts on the EFFECTIVE directory, which a prior top-level cd
-            # may have moved OFF the session cwd ('cd B && env git reset --hard' used to discard B with no
-            # snapshot, because only the session cwd was snapshot-backed), so it is now resolved against the
-            # tracked effective dir exactly like a direct git segment: a snapshottable wrapped verb registers
-            # its snapshot base, a wrapped 'stash drop'/'clear' registers its stash-preservation target (a
-            # worktree snapshot, or a clean worktree, never establishes stash safety), and a target that
-            # cannot be established (an uncertain ;/||-gated cd, or a cd to a dir the walk cannot resolve)
-            # is unresolved -> the caller DENIES. With no cd and no session cwd the caller's np_base-None
-            # route denies (fail closed). A non-git segment that merely CARRIES a standalone 'git' token
-            # ('echo git reset --hard') is over-registered: an inert extra snapshot or stash preservation,
-            # never an under-protection. A git verb fragmented/quoted into a single token (no standalone
-            # 'git') stays the disclosed best-effort residual.
-            gi = _wrapped_git_index(tokens)
-            if gi is not None:
-                wsub, wargs = _git_sub_and_args(tokens[gi:])
-                if wsub is not None:
-                    wrole, _wk = _discard_role(wsub, wargs)
-                    if wrole != "allow" and (_segment_carries_target_redirect(tokens)
-                                             or (depth != 0 and subshell_cd_seen)):
-                        hidden = True
-                        saw_actionable = True
-                    elif wrole != "allow" and wsub in _SNAPSHOTTABLE_VERBS:
-                        saw_actionable = True
-                        if not eff_certain:
-                            unresolved = True
-                        elif eff is None:
-                            if cd_happened:
-                                unresolved = True     # a cd to an unresolvable dir preceded the discard
-                            # else: no session cwd -> the caller denies on its missing session cwd
-                        elif cd_happened:
-                            _add(snapshot_bases, eff)  # a cd'd-into concrete dir (codex round-4 finding 1)
-                        else:
-                            targets_session = True     # plain session cwd (the existing catch-all base)
-                    elif wrole != "allow" and wsub == "stash":
-                        wstash_op = next((a for a in wargs if not a.startswith("-")), None)
-                        if wstash_op in ("drop", "clear"):
+                                    _add(stash_ops, (eff, wstash_op))
+                        elif wrole != "allow" and wsub in _SNAPSHOTTABLE_VERBS:
                             saw_actionable = True
-                            if not eff_certain:
+                            if _segment_carries_target_redirect(tokens) or (depth != 0 and subshell_cd_seen):
+                                hidden = True
+                            elif not eff_certain:
                                 unresolved = True
                             elif eff is None:
                                 if cd_happened:
                                     unresolved = True
-                                # else: no session cwd -> the caller denies on its missing session cwd
+                            elif cd_happened:
+                                _add(snapshot_bases, eff)
                             else:
-                                _add(stash_ops, (eff, wstash_op))  # preserve-or-deny, like the bare form
-                    # a wrapped ref-level form (a force branch delete/move/copy/reset, stash export) is
-                    # reflog-recoverable; the existing allow-note covers it, matching the direct-git walk.
+                                targets_session = True
         if sep == "(":
             depth += 1
         elif sep == ")":
             depth = max(0, depth - 1)
             if depth == 0:
-                subshell_cd_seen = False   # left the subshell nesting: its internal cd no longer applies
+                subshell_cd_seen = False
 
     if targets_session and session_cwd is not None:
-        _add(snapshot_bases, session_cwd)              # a plain session-cwd discard: snapshot the cwd too
+        _add(snapshot_bases, session_cwd)
     return {"snapshot_bases": snapshot_bases, "stash_ops": stash_ops, "hidden": hidden,
-            "unresolved": unresolved, "saw_actionable": saw_actionable}
+            "unresolved": unresolved, "saw_actionable": saw_actionable, "bad_stash": bad_stash}
 
 
 def git_discard(data):
@@ -5004,6 +4997,16 @@ def git_discard(data):
                 "AIQT guardrail: denied a subshell/wrapped-and-redirected git discard whose target this guard "
                 "cannot resolve to snapshot (rule prsunc); run it unwrapped from the target repo, or commit or "
                 "stash first.")
+        if actions["bad_stash"]:
+            return _deny(
+                "AIQT rule prsunc (preserve-uncommitted-work): a git stash discard is in scope but its "
+                "operation word is not a plain literal drop or clear this guard can resolve (it is quoted, "
+                "escaped, built by an expansion or substitution, or fed from xargs stdin), so this guard "
+                "cannot establish or preserve the stash entries it would discard; denied rather than run. "
+                "Re-issue it as a plain git stash drop or git stash clear from the target repository, or "
+                "apply or commit the stash first. {}".format(_DISCARD_ALTS),
+                "AIQT guardrail: denied a git stash discard whose operation this guard cannot resolve to a "
+                "literal drop or clear (rule prsunc); re-issue it plainly, or apply or commit the stash first.")
         # ROUND-8 (orchestrator-confirmed fail-open): with NO session cwd the catch-all snapshot below is
         # impossible, and a raw-scan-flagged verb the walk cannot see may still act on that unknown cwd, so
         # a non-pristine in-scope discard with no resolvable session directory DENIES (fail closed). The old
@@ -5065,8 +5068,8 @@ def git_discard(data):
                   "that is not literally 'git'); a recovery snapshot targets the effective worktree(s) it "
                   "resolved plus the session directory before allowing"
                   + ("; the stash entries it would discard were first preserved under durable refs "
-                     "(not reflog-recoverable otherwise): {}; recover one with "
-                     "'git -C <repo> stash apply <ref>'".format("; ".join(_stash_preserved))
+                     "(not reflog-recoverable otherwise): {}; recover an entry with git stash apply using "
+                     "one of the refs named above, run from its repository".format("; ".join(_stash_preserved))
                      if _stash_preserved else ""), np_snap)
 
     # A pristine single bare git command. No in-band override exists: below, only _segment_dir_simple (benign)
