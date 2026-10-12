@@ -42,7 +42,7 @@ Three rules govern everything else:
 | Approve | `opf adopt approve` | not yet executable: refuses with exit 2 |
 | Apply | `opf adopt apply` | not yet executable: refuses with exit 2 |
 | Complete | `opf adopt complete` | not yet executable: refuses with exit 2 |
-| Reconcile | `opf adopt reconcile` | not yet executable: refuses with exit 2 |
+| Reconcile | `opf adopt reconcile [--root DIR]` | runs; recovers an interrupted adoption transaction from the adoption journal (section 2) |
 | Import | `opf record import --batch`; `opf import --prompt`, `--status`, `--verify` | not yet executable: `opf record` has no `import` subcommand, and `opf import` refuses every argument with exit 2 |
 
 Inside the apply engine, three of the eleven plan operations have executors (`plant-governance`,
@@ -66,7 +66,17 @@ The reference tooling requires Python 3.14 or newer. Its exit convention is 0 cl
    expected first-adoption result. Exit 0 listing an adoption run, exit 1 (a held journal lock,
    an interrupted transaction, an evidence bundle that does not verify, or a directory at the
    adoption evidence home whose name is not a run id) or exit 2 means stop and report what it
-   printed; this build cannot resume or reconcile a run.
+   printed. No command resumes a run. A held journal lock or an interrupted transaction is
+   recovered only by `opf adopt reconcile --root <product root>`, and only after the adopter
+   confirms that no adoption run is live. It works from the adoption journal alone: it rolls each
+   interrupted transaction back, or forward when every change had already landed, prints each
+   outcome, and names a lock it released from a run that is no longer running. Exit 0 with
+   "nothing to reconcile" means it wrote nothing. Exit 2 is a refusal that names its finding
+   (`journal-lock-held`, `journal-unclassifiable`, `store-lease-held`,
+   `init-store-reversal-unproven` or `recovery-failed`): stop and report it. This build does not
+   release a leftover store lease (`.working/toml/lease.toml`): reconcile refuses while one sits
+   beside an interrupted transaction, and releasing it is the adopter's own step. After
+   reconcile, run `opf adopt status` again.
 4. Keep every working file of this procedure (the worksheet, saved observations and plans)
    outside the product repository. A new file inside an investigated root changes the
    inventory, and the plan then refuses as "inventory changed".
