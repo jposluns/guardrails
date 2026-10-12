@@ -66,12 +66,19 @@ Rules (each self-test vector is caught by exactly its rule, and passes with that
                      unparsed text and its ordinal among the nodes of that text in that scope (1 for the first in
                      source order), as #ORDINAL: TEXT (ast.unparse's text, so layout, comments and quote style aside;
                      a def, class or except clause reads as def, class or except as and its name). No line or column
-                     is part of it, so lines added or removed elsewhere in the file leave a row valid. A key (file,
-                     scope, ordinal and text) that more than one node holds allows none of them, listed or not, so a
-                     row names one node. The enclosing scope is
-                     the classes, defs and lambdas (<lambda>) around it joined by dots, <module> at module level; a
-                     definition's name, decorators, defaults, annotations, bases and keywords belong to the scope that
-                     runs the definition, and only its parameters and body to its own scope. Each row is held live: it
+                     is part of it, so lines added or removed elsewhere in the file leave a row valid. The enclosing
+                     scope is one lexical scope instance, <module> at module level, else the defs, classes and lambdas
+                     around it joined by dots, each by its own name (a def's name, class and a class's name, or
+                     <lambda>) followed by #K, its ordinal in source order among the scopes of that name its own
+                     enclosing scope holds, when that scope holds more than one (sibling lambdas in f, or two defs of
+                     one name under an if and its else, are f.<lambda>#1 and f.<lambda>#2, or f#1 and f#2), so a
+                     reference moved from one such scope into its sibling is a finding; an identity two scopes share
+                     would tell neither apart, so it exits 2 (cannot evaluate) and is never merged. A definition's
+                     name, decorators, defaults, annotations, bases and keywords belong to the scope that runs the
+                     definition, and only its parameters and body to its own scope. Scope identities and ordinals give
+                     each node its own key (file, scope, ordinal and text); a key that more than one node held would
+                     allow none of them, listed or not (a backstop against a regression in that numbering: no parsed
+                     tree reaches it, and the self-test injects it). Each row is held live: it
                      gives a reason, lists at least one reference of that form, repeats none, and every reference it
                      lists occurs there; a row that fails any of these is a finding. An importer call is a call that
                      reaches a LITERAL_IMPORTERS callee (__import__, import_module, _gcd_import, find_spec,
@@ -154,7 +161,9 @@ or action line outside the accepted YAML subset (above).
                                        without it (one per watched name and import-system member, and one per
                                        importer, among them), every green vector exits 0, every cannot-evaluate
                                        vector exits 2, every site vector finds exactly the sites (scope and
-                                       reference) it names, every mutant in MUTANTS (one check removed) fails
+                                       reference) it names, every edit vector (rows the gate writes for one
+                                       source) gives exactly its findings on the edited source, every mutant in
+                                       MUTANTS (one check removed) fails
                                        the vector it names, removing any one watched name, member or importer
                                        fails its vector, and the live tree passes
 
@@ -170,15 +179,20 @@ resolved either: what it imports depends on its package argument or the caller's
 package g names), so its site is reviewed. A row allows one node, not what becomes of its value: a listed reference that
 is not called in place (an importer returned, stored, passed or bound by an alias, or a lambda holding a call) lets
 whatever later calls that value import without a site of its own, so such a row is reviewed for where the value goes,
-and a finding says when a reference is not a call. A row names a reference by its scope, its unparsed text and its
-ordinal among the references of that text in that scope, not by its line or column. So an edit to its own text, a move
-into another scope, a rename of a def or class around it (an over-rejection: its text is unchanged), and a new
-reference of that text ahead of it in its scope (the ordinals shift, and one is left unlisted) each make a row stale or
-a reference a finding until the row is rewritten (the re-review the binding asks for); but a move within its scope
-(onto another line, into or out of a branch, a loop or a try), an edit elsewhere in its scope (rebinding a name it is
-passed, say), a change of layout, comments or quote style that ast.unparse does not keep, and an exchange among the
-references of one text in one scope (one removed and another of that text added there in one change, or two swapped)
-leave every row valid, so none of them is re-reviewed: a row reviews a node's text in its scope, not its place there.
+and a finding says when a reference is not a call. A row names a reference by its scope (one lexical scope instance, a
+same-named sibling told apart by its ordinal among them, above), its unparsed text and its ordinal among the references
+of that text in that scope, not by its line or column. So an edit to its own text, a move into another scope (a sibling
+lambda or a same-named def among them), a rename of a def or class around it or a change of one into the other
+(over-rejections: its text is unchanged), a same-named sibling of a scope around it added, removed or reordered (an
+over-rejection wherever that adds, shifts or drops that scope's #K), and a new reference of that text ahead of it
+in its scope (the ordinals shift, and one is left unlisted) each make a row stale or a reference a finding until the row
+is rewritten (the re-review the binding asks for); but a move within its scope (onto another line, into or out of a
+branch, a loop or a try), an edit elsewhere in its scope (rebinding a name it is passed, say), a change of layout,
+comments or quote style that ast.unparse does not keep, and an exchange among the references of one text in one scope
+(one removed and another of that text added there in one change, or two swapped) leave every row valid, so none of them
+is re-reviewed: a row reviews a node's text in its scope, not its place there. A scope is likewise known by its name and
+its ordinal among same-named siblings, not by its place, so same-named sibling scopes exchanged whole, or one removed
+and its references written into the sibling that takes its ordinal, read as the scopes they replace.
 A listed string literal, or one inside an f-string, climbs into the call it is directly an argument of, or the
 subscript it is directly the key of, before the row records it, so turning that call or subscript into a called importer
 is a finding. An expression built from a listed literal ('__import__'.strip(), a tuple holding it) is a value passed on:
@@ -436,9 +450,11 @@ CONDITIONS = ("guarded-optional", "unreached-module")
 
 # The reviewed dynamic-import sites: (repo-relative file, enclosing scope, the exact references allowed there, each
 # #ORDINAL: TEXT with the reference's unparsed source and its ordinal among the references of that text in that
-# scope, why they are legitimate). Dynamic imports are not resolved; a reference no row lists is a finding, an edited
-# reference or one moved into another scope included (a move within its scope is not), and the dynamic-import rule
-# holds every row live (see the docstring).
+# scope, why they are legitimate). A scope is one lexical scope instance: a class reads as class NAME, and a scope
+# whose enclosing scope holds others of its name carries #K, its ordinal among them in source order. Dynamic imports
+# are not resolved; a reference no row lists is a finding, an edited reference or one moved into another scope (a
+# sibling lambda or a same-named def among them) included (a move within its scope is not), and the dynamic-import
+# rule holds every row live (see the docstring).
 DYNAMIC_IMPORT_SITES = (
     (".aiqt/core/hooks/scripts/aiqt_hooks.py", "_orch_sha256_hex",
      ("#1: __import__('hashlib').sha256(text.encode('utf-8')).hexdigest()",),
@@ -502,7 +518,7 @@ DYNAMIC_IMPORT_SITES = (
     (".preview/char-policy-write.py", "_self_test.rebound",
      ("#1: '__builtins__'",),
      "the rebinding analysis watches stores to __builtins__; data, not an import"),
-    (".preview/clock-inject.py", "_self_test.T.test_r13_shared_lease_code_identical_to_stop_hook",
+    (".preview/clock-inject.py", "_self_test.class T.test_r13_shared_lease_code_identical_to_stop_hook",
      ("#1: import importlib.util",
       "#1: importlib.util.spec_from_file_location('sts_sibling', sib)",
       "#1: importlib.util.module_from_spec(spec)",
@@ -512,13 +528,13 @@ DYNAMIC_IMPORT_SITES = (
     (".preview/future-stamp-write.py", "_self_test",
      ("#1: import importlib.util",),
      "imports importlib.util for this file's loads by path, each reviewed in its own row"),
-    (".preview/future-stamp-write.py", "_self_test.T.test_shared_grammar_identical_to_sibling",
+    (".preview/future-stamp-write.py", "_self_test.class T.test_shared_grammar_identical_to_sibling",
      ("#1: importlib.util.spec_from_file_location('sts_sibling', sib)",
       "#1: importlib.util.module_from_spec(spec)",
       "#1: spec.loader.exec_module(mod)"),
      "self-test loads a file of this tree by its path (spec_from_file_location, module_from_spec, exec_module): the "
      "sibling hook it compares"),
-    (".preview/future-stamp-write.py", "_self_test.T.test_r13_code_quote_helpers_identical_to_sibling",
+    (".preview/future-stamp-write.py", "_self_test.class T.test_r13_code_quote_helpers_identical_to_sibling",
      ("#1: importlib.util.spec_from_file_location('sts_sibling13', sib)",
       "#1: importlib.util.module_from_spec(spec)",
       "#1: spec.loader.exec_module(mod)"),
@@ -533,13 +549,13 @@ DYNAMIC_IMPORT_SITES = (
     (".preview/stamp-truth-stop.py", "_self_test",
      ("#1: import importlib.util",),
      "imports importlib.util for this file's loads by path, each reviewed in its own row"),
-    (".preview/stamp-truth-stop.py", "_self_test.T.test_r13_shared_lease_code_identical_to_clock_inject",
+    (".preview/stamp-truth-stop.py", "_self_test.class T.test_r13_shared_lease_code_identical_to_clock_inject",
      ("#1: importlib.util.spec_from_file_location('ci_sibling', sib)",
       "#1: importlib.util.module_from_spec(spec)",
       "#1: spec.loader.exec_module(mod)"),
      "self-test loads a file of this tree by its path (spec_from_file_location, module_from_spec, exec_module): the "
      "sibling hook it compares"),
-    (".preview/stamp-truth-stop.py", "_self_test.T.test_shared_grammar_identical_to_sibling",
+    (".preview/stamp-truth-stop.py", "_self_test.class T.test_shared_grammar_identical_to_sibling",
      ("#1: importlib.util.spec_from_file_location('fsw_sibling', sib)",
       "#1: importlib.util.module_from_spec(spec)",
       "#1: spec.loader.exec_module(mod)"),
@@ -624,11 +640,13 @@ DYNAMIC_IMPORT_SITES = (
       "#3: 'imp'",
       "#4: 'imp'"),
      "the string imp is a run-id prefix in vectors, not the imp module"),
-    ("opf/tools/check_opf_homes.py", "_self_test_vectors.<lambda>.<lambda>",
-     ("#1: 'imp'",
-      "#2: 'imp'"),
+    ("opf/tools/check_opf_homes.py", "_self_test_vectors.<lambda>#12.<lambda>",
+     ("#1: 'imp'",),
      "the string imp is a run-id prefix in vectors, not the imp module"),
-    ("opf/tools/check_opf_homes.py", "_self_test_vectors.<lambda>",
+    ("opf/tools/check_opf_homes.py", "_self_test_vectors.<lambda>#29.<lambda>",
+     ("#1: 'imp'",),
+     "the string imp is a run-id prefix in vectors, not the imp module"),
+    ("opf/tools/check_opf_homes.py", "_self_test_vectors.<lambda>#42",
      ("#1: 'imp'",),
      "the string imp is a run-id prefix in vectors, not the imp module"),
     ("opf/tools/check_opf_init.py", "_suite_isolated",
@@ -773,10 +791,8 @@ DYNAMIC_IMPORT_SITES = (
       "#1: spec.loader.exec_module(module)"),
      "self-test loads a scratch copy or mutant of this file, written from its own source, by its path"),
     ("tools/check_import_closure.py", "<module>",
-     ("#1: import importlib.util",
-      "#1: 'self_test._NestedMissingFinder.find_spec'",
-      "#2: 'self_test._NestedMissingFinder.find_spec'",),
-     "this gate's tables and self-test data name watched names as strings; it imports importlib.util for _load_mutant"),
+     ("#1: import importlib.util",),
+     "it imports importlib.util for _load_mutant"),
     ("tools/check_import_closure.py", "_literal_import_name",
      ("#1: 'help'",
       "#1: 'resolve_name'",
@@ -856,13 +872,13 @@ DYNAMIC_IMPORT_SITES = (
       "#1: sys.meta_path.remove(nd_finder)"),
      "self-test reloads this file by its path, once under a meta_path finder that fails tomllib, to prove the "
      "missing-dependency path"),
-    ("tools/migrate.py", "self_test._NestedMissingFinder",
+    ("tools/migrate.py", "self_test.class _NestedMissingFinder",
      ("#1: def find_spec",),
      "the self-test finder answers for tomllib only, with spec_from_loader"),
-    ("tools/migrate.py", "self_test._NestedMissingFinder.find_spec",
+    ("tools/migrate.py", "self_test.class _NestedMissingFinder.find_spec",
      ("#1: importlib.util.spec_from_loader(name, self)",),
      "the self-test finder answers for tomllib only, with spec_from_loader"),
-    ("tools/migrate.py", "self_test._NestedMissingFinder",
+    ("tools/migrate.py", "self_test.class _NestedMissingFinder",
      ("#1: def exec_module",),
      "the self-test finder's loader method, which raises to simulate a missing dependency"),
     ("tools/pin.py", "self_test",
@@ -874,13 +890,13 @@ DYNAMIC_IMPORT_SITES = (
       "#1: sys.meta_path.remove(nd_finder)"),
      "self-test reloads this file by its path, once under a meta_path finder that fails tomllib, to prove the "
      "missing-dependency path"),
-    ("tools/pin.py", "self_test._NestedMissingFinder",
+    ("tools/pin.py", "self_test.class _NestedMissingFinder",
      ("#1: def find_spec",),
      "the self-test finder answers for tomllib only, with spec_from_loader"),
-    ("tools/pin.py", "self_test._NestedMissingFinder.find_spec",
+    ("tools/pin.py", "self_test.class _NestedMissingFinder.find_spec",
      ("#1: importlib.util.spec_from_loader(name, self)",),
      "the self-test finder answers for tomllib only, with spec_from_loader"),
-    ("tools/pin.py", "self_test._NestedMissingFinder",
+    ("tools/pin.py", "self_test.class _NestedMissingFinder",
      ("#1: def exec_module",),
      "the self-test finder's loader method, which raises to simulate a missing dependency"),
     ("tools/selftest_orch_hooks.py", "_main_isolated",
@@ -1214,15 +1230,13 @@ def watched_names(modules=IMPORT_SYSTEM_MODULES, inert=INERT_IMPORT_SYSTEM_MEMBE
     return names, frozenset(members) - names - frozenset(n for n, _reason in inert)
 
 
-def _scoped_children(node, scope):
+def _scoped_children(node, scope, inner=None):
     """(child, scope, descend) for each child of node. A def, class or lambda runs its body, and binds its
-    parameters, in a scope of its own (a lambda's is <lambda>); everything else it holds (decorators, defaults,
-    annotations, bases, keywords, type parameters) runs where the definition runs, in the enclosing scope. A
-    parameter is a leaf there: its annotation is pushed apart, in the enclosing scope."""
+    parameters, in a scope of its own, inner (its identity, scope_identities); everything else it holds (decorators,
+    defaults, annotations, bases, keywords, type parameters) runs where the definition runs, in the enclosing scope.
+    A parameter is a leaf there: its annotation is pushed apart, in the enclosing scope."""
     if not isinstance(node, SCOPE_NODES):
         return [(child, scope, True) for child in ast.iter_child_nodes(node)]
-    inner = "<lambda>" if isinstance(node, ast.Lambda) else node.name
-    inner = inner if scope == MODULE_SCOPE else scope + "." + inner
     out = []
     for field, value in ast.iter_fields(node):
         for child in value if isinstance(value, list) else (value,):
@@ -1238,6 +1252,45 @@ def _scoped_children(node, scope):
             elif isinstance(child, ast.AST):
                 out.append((child, scope, True))
     return out
+
+
+def _scope_name(node):
+    """A scope's own name: a def's name, class and a class's name, or <lambda>."""
+    if isinstance(node, ast.Lambda):
+        return "<lambda>"
+    return ("class " if isinstance(node, ast.ClassDef) else "") + node.name
+
+
+def scope_identities(tree):
+    """{id(node): scope} for the module (<module>) and for each def, class and lambda in tree, one per lexical
+    scope instance: the scopes around it and its own name (_scope_name) joined by dots, its own name followed by #K,
+    its ordinal in source order among the scopes of that name its enclosing scope holds, when that scope holds more
+    than one (sibling lambdas, two defs of one name under an if and its else). A scope's enclosing scope is the one
+    that runs its definition (_scoped_children). No line or column is part of it; the source order only numbers
+    same-named siblings."""
+    held = dict()
+    stack = [(tree, tree, True)]
+    while stack:
+        node, scope, descend = stack.pop()
+        if isinstance(node, SCOPE_NODES):
+            held.setdefault(id(scope), []).append(node)
+        if descend:
+            stack.extend(_scoped_children(node, scope, node))
+    identities = {id(tree): MODULE_SCOPE}
+    order = [tree]
+    for parent in order:
+        inner = sorted(held.get(id(parent), ()), key=lambda n: (n.lineno, n.col_offset))
+        counts, seen = dict(), dict()
+        for node in inner:
+            counts[_scope_name(node)] = counts.get(_scope_name(node), 0) + 1
+        for node in inner:
+            name = _scope_name(node)
+            seen[name] = seen.get(name, 0) + 1
+            if counts[name] > 1:
+                name += "#%d" % seen[name]
+            identities[id(node)] = name if parent is tree else identities[id(parent)] + "." + name
+            order.append(node)
+    return identities
 
 
 def _site_reference(node, parents):
@@ -1293,11 +1346,19 @@ def dynamic_sites(tree, names, members):
     component of a string or bytes literal that is a dotted identifier chain; a member counts as an attribute
     name or a literal component only. called is true when the reference is a call. No alias is resolved: an
     alias is itself a site, and whatever later uses the name it binds is not. line is the reference's first line,
-    reported with a finding and no part of its key."""
+    reported with a finding and no part of its key. The enclosing scope is its lexical scope instance
+    (scope_identities); an identity two scopes share cannot tell them apart, so it is refused, never merged."""
     parents = dict()
     for node in ast.walk(tree):
         for child in ast.iter_child_nodes(node):
             parents[id(child)] = node
+    identities, holders = scope_identities(tree), dict()
+    for identity in identities.values():
+        holders[identity] = holders.get(identity, 0) + 1
+    shared = sorted(identity for identity, count in holders.items() if count > 1)
+    if shared:
+        raise CannotEvaluate("scope %r names %d lexical scopes, so no row could tell them apart; the gate refuses "
+                             "rather than merge them" % (shared[0], holders[shared[0]]))
     found = dict()
     stack = [(tree, MODULE_SCOPE, True)]
     while stack:
@@ -1316,7 +1377,7 @@ def dynamic_sites(tree, names, members):
                     reference = _site_reference(node, parents)
                     found.setdefault(id(reference), (reference, scope, set()))[2].update(hits)
         if descend:
-            stack.extend(_scoped_children(node, scope))
+            stack.extend(_scoped_children(node, scope, identities.get(id(node))))
     out = []
     for reference, scope, hits in found.values():
         span = reference_text(reference)
@@ -1332,8 +1393,9 @@ def dynamic_sites(tree, names, members):
 def check_dynamic_sites(sites, allowlist):
     """dynamic-import findings: every site (rel, reference, scope, names, called, line) no allowlist row lists
     exactly (its file, its enclosing scope and its reference: ordinal and text), every site whose permission key
-    (file, scope, ordinal and text) another site shares, listed or not, and every row that gives no reason, lists no
-    reference or a malformed one, repeats a reference, or lists a reference that does not occur there."""
+    (file, scope, ordinal and text) another site shares, listed or not (a backstop: scope identities and ordinals
+    make every key dynamic_sites gives unique), and every row that gives no reason, lists no reference or a
+    malformed one, repeats a reference, or lists a reference that does not occur there."""
     findings = []
     listed = dict()
     for rel, function, references, reason in allowlist:
@@ -1947,6 +2009,7 @@ _WF = WORKFLOWS_REL + "/p.yml"
 _REC = "lib/_vendor/pkg-1.0.provenance.toml"
 _MANIFEST = "lib/_vendor/pkg-1.0.manifest.sha256"
 _LICENCE = "lib/_vendor/licenses/pkg-MIT.txt"
+_MALFORMED = "not of the form #ORDINAL: TEXT"
 
 # (name, rule, rel the finding must name, extra rows, dropped rels, scan keyword overrides, rehash). An extra
 # row (_MANIFEST, None) appends a manifest row for a file that does not exist.
@@ -2059,7 +2122,8 @@ _RULE_VECTORS = (
      dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "f", ("#1: __import__('json').loads",), "r"),)), True),
     ("class base evaluated outside its class", "dynamic-import", "tools/t.py",
      (("tools/t.py", "class C(__import__('json').JSONDecoder):\n    pass\n"),), (),
-     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "C", ("#1: __import__('json').JSONDecoder",), "r"),)), True),
+     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "class C", ("#1: __import__('json').JSONDecoder",), "r"),)),
+     True),
     ("importer returned from a function with a reviewed call", "dynamic-import", "tools/t.py",
      (("tools/t.py", "def f():\n    __import__('json')\n    return __import__\n\ndef g():\n    return f()('json')\n\n"
        "result = g().__name__\n"),), (),
@@ -2092,7 +2156,8 @@ _RULE_VECTORS = (
      dict(allowlist=_FIXTURE_SITES + (("tools/t.py", MODULE_SCOPE, ("#1: __import__",), "r"),)), True),
     # A reference is named by its text and its ordinal among the references of that text in its scope, never by its
     # line or column: an edit to its text, its scope, or the count of its text there is a finding, and a row still in
-    # the old positional form is malformed.
+    # the old positional form is refused as malformed (expect: a finding must carry that refusal, not only the stale
+    # row and unlisted site any unmatched reference gives).
     ("allowlisted reference's own text edited", "dynamic-import", "tools/t.py",
      (("tools/t.py", "def f():\n    return __import__('csv')\n"),), (),
      dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "f", ("#1: __import__('json')",), "r"),)), True),
@@ -2111,7 +2176,16 @@ _RULE_VECTORS = (
                                        "r"),)), True),
     ("allowlist row in the positional form", "dynamic-import", "tools/t.py",
      (("tools/t.py", "def f():\n    return __import__('json')\n"),), (),
-     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "f", ("2:11-2:29: __import__('json')",), "r"),)), True),
+     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "f", ("2:11-2:29: __import__('json')",), "r"),),
+          expect=_MALFORMED), True),
+    ("allowlist row naming sibling lambdas by their shared name", "dynamic-import", "tools/t.py",
+     (("tools/t.py", "a = lambda x: __import__(x)\nb = lambda x: __import__(x)\n"),), (),
+     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "<lambda>", ("#1: __import__(x)", "#2: __import__(x)"), "r"),)),
+     True),
+    ("allowlist row naming same-named defs by their shared name", "dynamic-import", "tools/t.py",
+     (("tools/t.py", "if X:\n    def f(x):\n        return __import__(x)\nelse:\n    def f(x):\n"
+                     "        return None\n"),),
+     (), dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "f", ("#1: __import__(x)",), "r"),)), True),
     ("allowlisted line holding another expression", "dynamic-import", "tools/t.py",
      (("tools/t.py", "def f():\n    return __import__('json').dumps\n"),), (),
      dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "f", ("#1: __import__('json')",), "r"),)), True),
@@ -2127,7 +2201,7 @@ _RULE_VECTORS = (
     ("allowlist row listing no reference", "dynamic-import", "tools/t.py", (("tools/t.py", "x = 1\n"),), (),
      dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "f", (), "r"),)), True),
     ("allowlist row with a malformed reference", "dynamic-import", "tools/t.py", (("tools/t.py", "x = 1\n"),), (),
-     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "f", ("two: x",), "r"),)), True),
+     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "f", ("two: x",), "r"),), expect=_MALFORMED), True),
     ("allowlist row repeated", "dynamic-import", "tools/t.py",
      (("tools/t.py", "def f():\n    return __import__\n"),), (),
      dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "f", ("#1: __import__",), "r"),
@@ -2606,7 +2680,7 @@ _SITE_VECTORS = (
      ("<module> | #1: import importlib.util as u", "<module> | #1: from importlib import machinery")),
     ("parameter and attribute in a nested class method",
      "class A:\n    class B:\n        def m(self, run_path=None):\n            return self.find_spec\n",
-     ("A.B.m | #1: run_path", "A.B.m | #1: self.find_spec")),
+     ("class A.class B.m | #1: run_path", "class A.class B.m | #1: self.find_spec")),
     ("whole dotted string and bytes literals only", "x = 'importlib.util'\ny = 'use importlib'\nz = b'__import__'\n",
      ("<module> | #1: 'importlib.util'", "<module> | #1: b'__import__'")),
     ("global and keyword names", "def f():\n    global imp\n    g(run_module=1)\n",
@@ -2616,10 +2690,10 @@ _SITE_VECTORS = (
     ("definition-time expressions in the enclosing scope",
      "class C(__import__('json').JSONDecoder):\n    @x.find_spec\n    def m(self, a: importlib = __import__):\n"
      "        return 1\n",
-     ("<module> | #1: __import__('json').JSONDecoder", "C | #1: x.find_spec", "C | #1: importlib",
-      "C | #1: __import__")),
+     ("<module> | #1: __import__('json').JSONDecoder", "class C | #1: x.find_spec", "class C | #1: importlib",
+      "class C | #1: __import__")),
     ("a def's name in the enclosing scope", "class C:\n    def find_spec(self):\n        pass\n",
-     ("C | #1: def find_spec",)),
+     ("class C | #1: def find_spec",)),
     ("lambda body in a scope of its own", "f = lambda: __import__('json')\n",
      ("<lambda> | #1: __import__('json')",)),
     ("one reference per attribute chain and call",
@@ -2634,6 +2708,45 @@ _SITE_VECTORS = (
     ("identical references numbered in source order within each scope",
      "def f():\n    x = __import__\n    return __import__\ndef g():\n    return __import__\n",
      ("f | #1: __import__", "f | #2: __import__", "g | #1: __import__")),
+    # Each lexical scope instance is its own scope: same-named siblings are numbered in source order within the scope
+    # that runs their definitions, and a name alone in its scope is not.
+    ("sibling lambdas numbered in source order", "a = lambda: __import__('a')\nb = lambda: __import__('b')\n",
+     ("<lambda>#1 | #1: __import__('a')", "<lambda>#2 | #1: __import__('b')")),
+    ("identical references in sibling lambdas, each the first in its own",
+     "a = lambda x: __import__(x)\nb = lambda x: __import__(x)\n",
+     ("<lambda>#1 | #1: __import__(x)", "<lambda>#2 | #1: __import__(x)")),
+    ("same-named defs numbered, a def of another name not",
+     "if X:\n    def f():\n        return __import__\nelse:\n    def f():\n        return __import__\ndef g():\n"
+     "    return __import__\n",
+     ("f#1 | #1: __import__", "f#2 | #1: __import__", "g | #1: __import__")),
+    ("lambdas in two defs, each alone in its own",
+     "def f():\n    return lambda: __import__\ndef g():\n    return lambda: __import__\n",
+     ("f.<lambda> | #1: __import__", "g.<lambda> | #1: __import__")),
+    ("a default's lambda numbered in the scope that runs the definition",
+     "def f(a=lambda: __import__):\n    return lambda: __import__\ng = lambda: __import__\n",
+     ("<lambda>#1 | #1: __import__", "f.<lambda> | #1: __import__", "<lambda>#2 | #1: __import__")),
+)
+
+# (name, source before, source after, the lines of the findings the after source gives as tools/t.py, exactly, 0 for a
+# row's own): the rows are the ones the gate under test writes for the before source, so each vector reads one edit
+# the way that gate reads it, and a vector holds against this gate and fails against one whose scope identity merges
+# distinct lexical scopes (the identity before scope instances were told apart).
+_MOVE_VECTORS = (
+    ("reference moved into a sibling lambda",
+     "a = lambda x: __import__(x)\nb = lambda x: None\n", "a = lambda x: None\nb = lambda x: __import__(x)\n", (0, 2)),
+    ("reference moved into a same-named def",
+     "if X:\n    def f(x):\n        return __import__(x)\nelse:\n    def f(x):\n        return None\n",
+     "if X:\n    def f(x):\n        return None\nelse:\n    def f(x):\n        return __import__(x)\n", (0, 6)),
+    ("identical reference added to an earlier sibling lambda, the later one still listed",
+     "a = lambda x: None\nb = lambda x: __import__(x)\n", "a = lambda x: __import__(x)\nb = lambda x: __import__(x)\n",
+     (1,)),
+    ("class around a method turned into a def of its name",
+     "class C:\n    def m(self):\n        return __import__(x)\n",
+     "def C():\n    def m(self):\n        return __import__(x)\n", (0, 3)),
+    ("def of another name added beside a listed scope", "def f(x):\n    return __import__(x)\n",
+     "def g(x):\n    return None\ndef f(x):\n    return __import__(x)\n", ()),
+    ("reference moved within its lambda", "a = lambda x: (x, __import__(x))\nb = lambda x: None\n",
+     "a = lambda x: (__import__(x), x)\nb = lambda x: None\n", ()),
 )
 
 
@@ -2714,6 +2827,8 @@ _CANNOT_VECTORS = (
     ("duplicate manifest path", (), (), dict(), "duplicate-row"),
     ("licence text that is not UTF-8", ((_LICENCE, b"MIT \xff\n"),), (), dict(), None),
     ("no workflow to evaluate", (), (WORKFLOWS_REL + "/q.yml",), dict(), None),
+    ("two lexical scopes given one identity", (("tools/t.py", "a = lambda: 1\nb = lambda: 2\n"),), (), dict(),
+     "merged-scopes"),
     ("import-system module that does not load", (), (),
      dict(import_system=IMPORT_SYSTEM_MODULES + ("no_such_import_system_module",)), None),
     ("inert member that is no member", (), (),
@@ -2723,8 +2838,8 @@ _CANNOT_VECTORS = (
 
 def _vector_cases(tmp):
     """Build every vector's fixture tree once. Returns [(name, expected, rule, rel, base, kwargs, special)]:
-    expected is 1 (a finding of rule at rel), 0 (clean), 2 (cannot evaluate) or "sites" (base is then the
-    source)."""
+    expected is 1 (a finding of rule at rel), 0 (clean), 2 (cannot evaluate), "sites" (base is then the
+    source) or "move" (rule is then the finding lines, rel the before source, base the tree holding the after)."""
     cases = []
     for index, (name, rule, at, extra, drop, kwargs, rehash) in enumerate(_RULE_VECTORS + _importer_vectors() +
                                                                           _name_vectors(*watched_names())):
@@ -2753,6 +2868,9 @@ def _vector_cases(tmp):
         cases.append((name, 2, None, None, base, kwargs, special))
     for name, source, sites in _SITE_VECTORS:
         cases.append((name, "sites", sites, None, source, dict(), None))
+    for index, (name, before, after, lines) in enumerate(_MOVE_VECTORS):
+        cases.append((name, "move", lines, before, _fixture(tmp / ("m%d" % index), (("tools/t.py", after),)), dict(),
+                      None))
     return cases
 
 
@@ -2762,6 +2880,7 @@ def _scan_rc(module, base, rules=None, special=None, **kwargs):
     kwargs.setdefault("allowlist", _FIXTURE_SITES)
     original = os.scandir
     original_sites = module.dynamic_sites
+    original_identities = module.__dict__.get("scope_identities")
     original_read = Path.__dict__.get("read_bytes")
     inherited_read = Path.read_bytes
 
@@ -2780,6 +2899,9 @@ def _scan_rc(module, base, rules=None, special=None, **kwargs):
         Path.read_bytes = _unreadable
     if special == "twin-sites":
         module.dynamic_sites = lambda tree, *watched: original_sites(tree, *watched) * 2
+    if special == "merged-scopes":
+        module.scope_identities = lambda tree: dict((key, re.sub(r"#[0-9]+", "", identity))
+                                                    for key, identity in original_identities(tree).items())
     try:
         findings, _shown, _stats = module.scan(base, rules=module.RULES if rules is None else rules, **kwargs)
     except module.CannotEvaluate:
@@ -2787,6 +2909,10 @@ def _scan_rc(module, base, rules=None, special=None, **kwargs):
     finally:
         os.scandir = original
         module.dynamic_sites = original_sites
+        if original_identities is not None:
+            module.scope_identities = original_identities
+        elif "scope_identities" in module.__dict__:
+            del module.scope_identities
         if original_read is None:
             if "read_bytes" in Path.__dict__:
                 del Path.read_bytes
@@ -2802,8 +2928,19 @@ def _case_failure(module, case):
         got = tuple("%s | %s" % (site[1], site[0]) for site in module.dynamic_sites(ast.parse(base),
                                                                                    *module.watched_names()))
         return None if got == rule else "expected sites %r, got %r" % (rule, got)
+    if expected == "move":
+        rows = dict()
+        for key, scope, _names, _called, _line in module.dynamic_sites(ast.parse(at), *module.watched_names()):
+            rows.setdefault(scope, []).append(key)
+        rc, findings = _scan_rc(module, base, allowlist=_FIXTURE_SITES + tuple(
+            ("tools/t.py", scope, tuple(keys), "r") for scope, keys in rows.items()))
+        got = tuple(sorted(f[2] for f in findings if f[0] == "dynamic-import" and f[1] == "tools/t.py"))
+        if rc == 2 or got != rule or len(got) != len(findings):
+            return "expected findings at lines %r of tools/t.py, got rc %d %r" % (rule, rc, findings)
+        return None
     kwargs = dict(kwargs)
     special = kwargs.pop("special", special)
+    expect = kwargs.pop("expect", None)
     rc, findings = _scan_rc(module, base, special=special, **dict(kwargs))
     if expected == 2:
         return None if rc == 2 else "expected cannot-evaluate (2), got %d %r" % (rc, findings)
@@ -2811,6 +2948,8 @@ def _case_failure(module, case):
         return None if rc == 0 else "expected a clean scan (0), got %d %r" % (rc, findings)
     if rc != 1 or not any(f[0] == rule and f[1] == at for f in findings):
         return "expected a %s finding at %s, got rc %d %r" % (rule, at, rc, findings)
+    if expect is not None and not any(f[0] == rule and f[1] == at and expect in f[3] for f in findings):
+        return "expected a %s finding at %s saying %r, got %r" % (rule, at, expect, findings)
     rc_off, findings_off = _scan_rc(module, base, rules=tuple(r for r in RULES if r != rule), special=special,
                                     **dict(kwargs))
     if rc_off != 0:
@@ -2895,8 +3034,27 @@ MUTANTS = (
      "SCOPE_NODES = (ast.FunctionDef, ast.ClassDef, ast.Lambda)", "async def scope"),
     ("site-scope-lambda", "SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)",
      "SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)", "lambda body in a scope of its own"),
-    ("site-scope-nested", 'inner = inner if scope == MODULE_SCOPE else scope + "." + inner', "inner = inner",
-     "allowlist row naming a method by its bare name"),
+    ("site-scope-nested", 'identities[id(node)] = name if parent is tree else identities[id(parent)] + "." + name',
+     "identities[id(node)] = name", "allowlist row naming a method by its bare name"),
+    # Round-9: each lexical scope instance is its own scope (same-named siblings numbered in source order in the
+    # scope that runs their definitions, a class marked), an identity two scopes share is refused, and a malformed
+    # reference is refused as malformed; each removed in turn and caught by its vector.
+    ("scope-instances-numbered", "            if counts[name] > 1:\n", "            if False:\n",
+     "reference moved into a sibling lambda"),
+    ("scope-instances-counted", "seen[name] = seen.get(name, 0) + 1", "seen[name] = 1",
+     "identical references in sibling lambdas, each the first in its own"),
+    ("scope-instances-source-order", "sorted(held.get(id(parent), ()), key=lambda n: (n.lineno, n.col_offset))",
+     "held.get(id(parent), ())", "sibling lambdas numbered in source order"),
+    ("scope-instances-enclosing", "held.setdefault(id(scope), []).append(node)",
+     "held.setdefault(id(tree), []).append(node)", "lambdas in two defs, each alone in its own"),
+    ("scope-class-marked", 'return ("class " if isinstance(node, ast.ClassDef) else "") + node.name',
+     "return node.name", "class around a method turned into a def of its name"),
+    ("scope-identity-refused", "    if shared:\n        raise CannotEvaluate(",
+     "    if False:\n        raise CannotEvaluate(", "two lexical scopes given one identity"),
+    ("row-reference-form", 'REFERENCE_RE = re.compile(r"#[1-9][0-9]*: \\S.*")', 'REFERENCE_RE = re.compile(r".+")',
+     "allowlist row in the positional form"),
+    ("row-reference-ordinal", 'REFERENCE_RE = re.compile(r"#[1-9][0-9]*: \\S.*")',
+     'REFERENCE_RE = re.compile(r"\\S+: \\S.*")', "allowlist row with a malformed reference"),
     ("site-definition-outer",
      "            elif isinstance(child, ast.AST):\n                out.append((child, scope, True))",
      "            elif isinstance(child, ast.AST):\n                out.append((child, inner, True))",
@@ -3262,6 +3420,8 @@ def _case_line(case):
         return "CANNOT-EVALUATE %s -> exit 2" % case[0]
     if case[1] == 0:
         return "GREEN %s -> exit 0" % case[0]
+    if case[1] == "move":
+        return "MOVE %s -> findings at lines %r" % (case[0], case[2])
     return "SITES %s -> %d found" % (case[0], len(case[2]))
 
 
@@ -3340,11 +3500,12 @@ def self_test_main():
     importers = len(_importer_vectors())
     print("SELF-TEST PASS: %d rule vectors red with their rule and green without it (%d of them one per watched "
           "name or import-system member, %d one per importer), %d green vectors exit 0, %d cannot-evaluate vectors "
-          "exit 2, %d dynamic-import site vectors hold, %d mutants (one check removed each) caught by their vectors, "
-          "%d watched names, %d members and %d importers each removed and caught, the live tree passes"
+          "exit 2, %d dynamic-import site vectors hold, %d edit vectors (rows written for one source, findings exact "
+          "on the edited one) hold, %d mutants (one check removed each) caught by their vectors, %d watched names, %d "
+          "members and %d importers each removed and caught, the live tree passes"
           % (len(_RULE_VECTORS) + len(names | members) + importers, len(names | members), importers,
-             len(_GREEN_VECTORS), len(_CANNOT_VECTORS), len(_SITE_VECTORS), len(MUTANTS), len(names), len(members),
-             importers))
+             len(_GREEN_VECTORS), len(_CANNOT_VECTORS), len(_SITE_VECTORS), len(_MOVE_VECTORS), len(MUTANTS),
+             len(names), len(members), importers))
     return 0
 
 
