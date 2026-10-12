@@ -106,7 +106,10 @@ SUITE_ID = "git-fixture-env-selftest"
 # output progress for the stall bound (a heuristic: silence is not proof of a hang), or spends the budget
 # in load-adjusted seconds (a spin); the budgets are the former wall-clock bounds, which these children
 # finish within on an idle host. A stop is the bound firing: its result is a BoundStop, which check()
-# files as cannot-evaluate (the suite exits 2), never as the child's failure.
+# files as cannot-evaluate (the suite exits 2) only when nothing else is wrong. Failure evidence beside a
+# stop is a failure (exit 1): a nonzero exit the child reached before the stop (Hung.returncode), a
+# hook, monitor or exposure marker recorded for a stopped member (_stop_or), a wrong value in the same
+# result (_judge).
 # Longest silent wait a member legitimately makes: a bounded hold of a worker thread or a child while
 # the member works on (at most 120 s, the Event hold in opf/tools/_opf_adopt_observe.py, released at once
 # in a passing run); a child a member waits on counts its CPU as the member's progress. 300 s exceeds it.
@@ -171,16 +174,26 @@ def _bound_stop(what, exc):
 
 
 def _stop_or(argv, value):
-    """For a list of failing members: the BoundStop of a stopped member, else the member argv."""
-    return value[0] if value and isinstance(value[0], BoundStop) else argv
+    """For a list of failing members: the BoundStop of a stopped member whose result is otherwise clean (no
+    hook, monitor or exposure bytes), else the member argv, so a leak marker recorded beside a stop is
+    judged a failure, never hidden behind the stop."""
+    if value and isinstance(value[0], BoundStop) and all(field == b"" for field in value[1:]):
+        return value[0]
+    return argv
 
 
-def _without_stops(value):
-    if isinstance(value, list):
-        return [_without_stops(item) for item in value if not isinstance(item, BoundStop)]
-    if isinstance(value, tuple):
-        return tuple(_without_stops(item) for item in value)
-    return value
+def _only_stops(got, want):
+    """True when got equals want except where a BoundStop stands: a stopped child's result in place of a
+    wanted value, a tuple position by position (every other field must equal its wanted value), or stopped
+    entries in a list (a list of failing members, or one member's results against a single wanted value)."""
+    if got == want or isinstance(got, BoundStop):
+        return True
+    if isinstance(got, tuple) and isinstance(want, tuple):
+        return len(got) == len(want) and all(_only_stops(item, wanted) for item, wanted in zip(got, want))
+    if isinstance(got, list):
+        rest = [item for item in got if not isinstance(item, BoundStop)]
+        return rest == want if isinstance(want, list) else all(item == want for item in rest)
+    return False
 
 
 def _carries_stop(value):
@@ -190,15 +203,13 @@ def _carries_stop(value):
 
 
 def _judge(got, want):
-    """"pass", "fail", or "cannot-evaluate" when got differs from want only by BoundStops (a stopped
-    child's result, or stopped entries in a list of failing members); a real difference stays "fail"."""
+    """"pass", "fail", or "cannot-evaluate" when got differs from want only where a BoundStop stands (see
+    _only_stops). Any other difference beside a stop (a wrong value in a tuple, a member that failed, a
+    leak marker) is independent failure evidence: "fail"."""
     if got == want:
         return "pass"
-    if _carries_stop(got):
-        rest = _without_stops(got)
-        if isinstance(got, BoundStop) or rest == want or (
-                isinstance(rest, list) and all(item == want for item in rest)):
-            return "cannot-evaluate"
+    if _carries_stop(got) and _only_stops(got, want):
+        return "cannot-evaluate"
     return "fail"
 
 
@@ -1448,6 +1459,10 @@ def _run_config_member(member, env):
                   file=sys.stderr)
         return proc.returncode
     except _load_bound.Hung as exc:
+        if exc.returncode:  # it exited nonzero before the stop: its own failure, whatever bound fired
+            print("CONFIG-INJECTION {} (exited {} before its bound fired: {}):\n{}".format(
+                member, exc.returncode, exc.reason, (exc.output or "") + (exc.stderr or "")), file=sys.stderr)
+            return exc.returncode
         return _bound_stop("member {}".format(" ".join(member)), exc)
     except (OSError, subprocess.SubprocessError) as exc:
         return str(exc)
@@ -1847,6 +1862,8 @@ def _run_corpus(poison_key, poison_value, cwd):
                                cwd=str(cwd), env=env, text=True)
         return proc.returncode
     except _load_bound.Hung as exc:
+        if exc.returncode:  # it exited nonzero before the stop: its own failure, whatever bound fired
+            return exc.returncode
         return _bound_stop("corpus self-test ({} poison)".format(poison_key), exc)
     except (OSError, subprocess.SubprocessError) as exc:
         return "corpus launch failed: {}".format(exc)
@@ -1874,6 +1891,8 @@ def _run_corpus_imported(poison_key, poison_value, cwd):
                                cwd=str(cwd), env=env, text=True)
         return proc.returncode
     except _load_bound.Hung as exc:
+        if exc.returncode:  # it exited nonzero before the stop: its own failure, whatever bound fired
+            return exc.returncode
         return _bound_stop("imported corpus self-test ({} poison)".format(poison_key), exc)
     except (OSError, subprocess.SubprocessError) as exc:
         return "imported corpus launch failed: {}".format(exc)
@@ -2190,11 +2209,20 @@ _SCAN_ALLOWED_UNPINNED = (
     # Cannot-evaluate launches (argv or head outside the resolver's bounds), each audited:
     ("tools/_load_bound.py", "run", ("unresolved",),
      "cannot-evaluate head: the shared load-tolerant runner launches its caller argv, which"
-     " this scan does not follow to the call site; run() itself refuses (ValueError), before"
-     " any launch, an argv whose program resolves (PATH from env, then symlinks) to git, or"
-     " is a shell or program launcher (env, nice, timeout and the rest of _LAUNCHERS) that"
-     " could run git, so no git launch passes through it (git stays on a pinned subprocess"
-     " call this scan enforces); its vectors include /usr/bin/env git and a symlink alias"),
+     " this scan does not follow to the call site, and its executable= is the program it"
+     " resolved from that argv head; run() refuses (ValueError), before any launch, an argv"
+     " whose program (resolved as the exec in the child resolves it: PATH from env, a relative"
+     " or empty entry taken from the child cwd, then symlinks) is git or the same file as git,"
+     " or whose head is one of the known shell and launcher spellings in _LAUNCHERS (env, nice,"
+     " timeout and the rest), and it launches the resolved path so lookup and exec agree. That"
+     " is a deny list, not proof that no git runs below it: an interpreter head (python -c,"
+     " perl, awk, make), an unlisted launcher or a copy of the git binary under another name"
+     " can still run git. Every adopting call site (the module's own vectors launch scratch"
+     " fixtures) passes sys.executable or the registered hook command (python3) as the head,"
+     " and git launched by the code those interpreters run"
+     " (generators, self-tests) sits on those files' own subprocess calls, which this scan"
+     " reads where they stand; its vectors include /usr/bin/env git, a symlink alias and"
+     " relative PATH entries"),
     ("tools/check_git_option_table.py", "_git", ("unresolved",),
      "cannot-evaluate funnel: the argv tail is the caller's *args; every caller passes"
      " option-table introspection forms (init -q --template= of a scratch probe repo,"
@@ -4609,31 +4637,63 @@ def _bound_stop_lane(base):
     under none (the pass is owed to the load adjustment). bound/hang-is-cannot-evaluate: a silent member and
     a silent corpus run are each stopped by the heuristic stall bound and filed as cannot-evaluate, never
     as a failure; a real difference beside a stop stays a failure; the suite exits 1 for any failure, else
-    2 for a stop. The lane's own stops are expected, so they leave BOUND_STOPS as they found it."""
+    2 for a stop. bound/stop-keeps-failure-evidence: a stopped member whose hook, monitor or exposure log
+    recorded a marker is a failure in the registered lists and the OPF lifecycle roster, a wrong value in
+    a tuple beside a stop is a failure, and a member that exited nonzero while a leaked descendant held its
+    output keeps that exit code. The lane's own stops are expected, so they leave BOUND_STOPS as they
+    found it. Each element of that check is a plain value (the exit code as its repr), so a regression that
+    hands back a BoundStop reads as a failure there, not as cannot-evaluate. What each vector call writes
+    to the stdout and stderr of this process is captured per call and judged in that check (the leaky
+    member CONFIG-INJECTION diagnostic must name its exit, every other call must write nothing), so no
+    vector writes to the suite streams: the execution reconciler requires an empty error stream."""
     global MEMBER_BUDGET_S, MEMBER_STALL_S, CORPUS_BUDGET_S, CORPUS_STALL_S, CORPUS_SELFTEST, _LOAD_FACTOR
+    import contextlib
+    import io
     slowed = base / "bound-slowed.py"
     slowed.write_text("import time\nfor _ in range(8):\n    print(1, flush=True)\n    time.sleep(0.25)\n",
                       encoding="utf-8")
     silent = base / "bound-silent.py"
     silent.write_text("import time\ntime.sleep(3600)\n", encoding="utf-8")
+    leaked = "bound-leaked-descendant-{}".format(os.getpid())
+    leaky = base / "bound-leaky.py"
+    leaky.write_text("import subprocess, sys\nsubprocess.Popen([sys.executable, \"-I\", \"-c\", \"import time; "
+                     "time.sleep(60)\", {!r}])\nsys.exit(3)\n".format(leaked), encoding="utf-8")
     saved = (MEMBER_BUDGET_S, MEMBER_STALL_S, CORPUS_BUDGET_S, CORPUS_STALL_S, CORPUS_SELFTEST, _LOAD_FACTOR)
     kept = len(BOUND_STOPS)
     env = _git_fixture_env.git_fixture_env()
+    # Each call below is a deliberate vector: what it writes to the stdout or stderr of this process is
+    # captured per call and judged below, never left on the suite streams. The leaky member makes
+    # _run_config_member print its CONFIG-INJECTION diagnostic (right for a real member), and the execution
+    # reconciler requires an empty error stream, so a diagnostic left there turns a pass into cannot-evaluate.
+    written = {}
+
+    def quiet(label, call, *args):
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                return call(*args)
+        finally:
+            written[label] = (out.getvalue(), err.getvalue())
     try:
         MEMBER_BUDGET_S, MEMBER_STALL_S = 1, 1.5
         _LOAD_FACTOR = lambda: _load_bound.MAX_LOAD_FACTOR  # noqa: E731
-        slowed_loaded = _run_config_member((str(slowed),), env)
+        slowed_loaded = quiet("slowed-loaded", _run_config_member, (str(slowed),), env)
         _LOAD_FACTOR = lambda: 1.0  # noqa: E731
-        slowed_idle = _run_config_member((str(slowed),), env)
+        slowed_idle = quiet("slowed-idle", _run_config_member, (str(slowed),), env)
         # A 20 s budget: the 1.5 s stall bound must stop the silent child first (the stop text says which
         # bound fired), and a regression to a plain timeout still ends this lane in 20 s, not an hour.
         MEMBER_BUDGET_S, MEMBER_STALL_S = 20, 1.5
-        member_stop = _run_config_member((str(silent),), env)
+        member_stop = quiet("silent", _run_config_member, (str(silent),), env)
+        # Exits 3 at once while a descendant holds its output: the stall bound stops the wait, and the
+        # exit code it reached first stands as the member result. Its diagnostic is captured, not printed.
+        leaky_rc = quiet("leaky", _run_config_member, (str(leaky),), env)
         CORPUS_BUDGET_S, CORPUS_STALL_S, CORPUS_SELFTEST = 20, 1.5, silent
-        corpus_stop = _run_corpus("GIT_DIR", "/decoy/.git", base)
+        corpus_stop = quiet("corpus", _run_corpus, "GIT_DIR", "/decoy/.git", base)
     finally:
         MEMBER_BUDGET_S, MEMBER_STALL_S, CORPUS_BUDGET_S, CORPUS_STALL_S, CORPUS_SELFTEST, _LOAD_FACTOR = saved
         del BOUND_STOPS[kept:]
+        for pid in _load_bound._alive_with(leaked):
+            _load_bound._kill_pid(pid)
     check("bound/slowed-run-passes", (slowed_loaded, isinstance(slowed_idle, BoundStop)), (0, True))
     check("bound/hang-is-cannot-evaluate",
           (isinstance(member_stop, BoundStop),
@@ -4644,6 +4704,24 @@ def _bound_stop_lane(base):
            (_verdict_code([], ["x"], []), _verdict_code([], [], ["x"]), _verdict_code(["f"], ["x"], ["x"]),
             _verdict_code([], [], []))),
           (True, True, True, "cannot-evaluate", "cannot-evaluate", "fail", "cannot-evaluate", (2, 2, 1, 0)))
+    member = ("tools/x.py", "--self-test")
+
+    def registered(value):
+        # The registered-combined, -malformed and -system lists, and the OPF lifecycle roster, as built.
+        listed = [_stop_or(argv, result) for argv, result in {member: value}.items()
+                  if result != (0, b"", b"", b"")]
+        return _judge(listed, []), _judge((sorted({_stop_or(member[0], value)}), []), ([], []))
+    leaky_out, leaky_err = written.pop("leaky", ("", ""))
+    check("bound/stop-keeps-failure-evidence",
+          (registered((member_stop, b"", b"", b"home\n")), registered((member_stop, b"hook\n", b"", b"")),
+           registered((member_stop, b"", b"monitor\n", b"")), registered((member_stop, b"", b"", b"")),
+           _judge((member_stop, 1), (0, 0)), _judge((member_stop, 0), (0, 0)),
+           _judge([member_stop, 1], 0), _judge([member_stop, 0], 0), repr(leaky_rc),
+           (leaky_out, leaky_err.startswith("CONFIG-INJECTION {} (exited 3 before its bound fired: "
+                                            .format((str(leaky),)))),
+           sorted(item for item in written.items() if item[1] != ("", ""))),
+          (("fail", "fail"), ("fail", "fail"), ("fail", "fail"), ("cannot-evaluate", "cannot-evaluate"),
+           "fail", "cannot-evaluate", "fail", "cannot-evaluate", "3", ("", True), []))
 
 
 def main(report_path=None):

@@ -1753,58 +1753,110 @@ def _fixture_tmpdir(prefix):
 
 
 _PL239_DEADLINE_NOTE = "commit evaluation deadline exhausted"
+# A deadline denial on every launch while the load factor read at each launch stayed at or below this
+# (the host ran about as much work as it has CPUs) is the latency regression it is: a failure, not load.
+_PL239_UNLOADED_FACTOR = 1.25
 
 
-def _pl239_launch_verdict(launch, detail, attempts=3):
+def _pl239_deadline_denial(result):
+    """True only for the hook's whole production-deadline response: exit 0, no stderr, and stdout exactly
+    the artbr1 denial aiqt_hooks renders for the deadline note (a parsed comparison, never a substring)."""
+    if result.returncode != 0 or result.stderr:
+        return False
+    try:
+        return json.loads(result.stdout) == aiqt_hooks._commit_denial(_PL239_DEADLINE_NOTE)[1]
+    except (TypeError, ValueError):
+        return False
+
+
+def _pl239_launch_verdict(launch, detail, attempts=3, factor=None):
     """Launch the generated protected_line hook through launch() (a CompletedProcess, or _load_bound.Hung
-    raised) up to attempts times. Returns (result, None) once an outcome can be judged, or (None, note)
-    when it cannot: each launch was stopped by its load-tolerant bound or, where the case does not expect
-    it, ended in the hook production commit deadline, which host load can cause. The note names the load
-    factor read at each launch, so a deadline on an unloaded host reads as the latency regression it is."""
+    raised) up to attempts times. Returns ("judge", result) for a result the caller judges, ("fail", note)
+    for failure evidence that has no result to judge, or ("cannot-evaluate", note).
+    Failure evidence comes first, before any retry: a launch that exits nonzero or writes stderr is handed
+    back to be judged (a failure) at once, whatever its stdout says, and a bound stop that carries an exit
+    status the hook reached on its own (nonzero) or captured stderr is a failure. Only the hook's whole
+    production-deadline response (_pl239_deadline_denial), where the case does not expect it, is retried,
+    since load can cause it; every other result is judged at once. When every launch ends in that response
+    and the load factor (factor, default _load_bound.load_factor) read at every launch was at most
+    _PL239_UNLOADED_FACTOR, it is a failure: the latency regression it is. Otherwise a persistent deadline
+    or clean bound stop (no exit status, no stderr) is cannot-evaluate, with the factor of each launch."""
+    read_factor = factor or _load_bound.load_factor
     expects_deadline = _PL239_DEADLINE_NOTE in (detail or "")
-    seen = []
+    seen, deadline_factors = [], []
     for _attempt in range(attempts):
-        factor = _load_bound.load_factor()
+        level = read_factor()
         try:
             result = launch()
         except _load_bound.Hung as exc:
-            seen.append("{} (load factor {:.1f})".format(exc, factor))
+            if exc.returncode or exc.stderr:
+                return "fail", ("stopped by its load-tolerant bound beside failure evidence (exit status {!r}, "
+                                "stderr {!r}): {}".format(exc.returncode, exc.stderr, exc))
+            seen.append("{} (load factor {:.1f})".format(exc, level))
             continue
-        if expects_deadline or _PL239_DEADLINE_NOTE not in result.stdout:
-            return result, None
-        seen.append("the hook production commit deadline expired (load factor {:.1f})".format(factor))
-    return None, "not judged after {} launches: {}".format(attempts, "; ".join(seen))
+        if result.returncode != 0 or result.stderr or expects_deadline or not _pl239_deadline_denial(result):
+            return "judge", result
+        deadline_factors.append(level)
+        seen.append("the hook production commit deadline expired (load factor {:.1f})".format(level))
+    if len(deadline_factors) == attempts and max(deadline_factors) <= _PL239_UNLOADED_FACTOR:
+        return "fail", ("the hook production commit deadline expired on all {} launches on an unloaded host "
+                        "(load factor at most {}), a latency regression: {}"
+                        .format(attempts, _PL239_UNLOADED_FACTOR, "; ".join(seen)))
+    return "cannot-evaluate", "not judged after {} launches: {}".format(attempts, "; ".join(seen))
 
 
 def _pl239_launch_failures():
-    """Vectors for _pl239_launch_verdict and _selftest_exit_code: the retry-then-cannot-evaluate path, the
-    retries that recover, the cases judged at once, and the exit each outcome maps to."""
+    """Vectors for _pl239_launch_verdict and _selftest_exit_code: failure evidence judged before any retry
+    (a nonzero exit or stderr beside the deadline text, a bound stop carrying an exit status or stderr),
+    the whole-shape deadline test, the retry-then-cannot-evaluate path on a loaded host, the deadline on an
+    unloaded host as a failure, the retries that recover, the cases judged at once, and the exit each
+    outcome maps to."""
     failures = []
-    deadline = subprocess.CompletedProcess(["hook"], 0, "deny: " + _PL239_DEADLINE_NOTE, "")
+    note = _PL239_DEADLINE_NOTE
+    deadline = subprocess.CompletedProcess(
+        ["hook"], 0, json.dumps(aiqt_hooks._commit_denial(note)[1]) + "\n", "")
     clean = subprocess.CompletedProcess(["hook"], 0, "", "")
+    crashed = subprocess.CompletedProcess(["hook"], 1, note, "Traceback: real failure")
+    loose = subprocess.CompletedProcess(["hook"], 0, "deny: " + note, "")
 
     def stalled():
         raise _load_bound.Hung(["hook"], 15, "stall", "injected stall")
 
-    for label, script, detail, judged, launches in (
-            ("deadline on every launch", [deadline] * 3, None, False, 3),
-            ("deadline, then a clean launch", [deadline, clean], None, True, 2),
-            ("a stall stop on every launch", [stalled] * 3, None, False, 3),
-            ("a stall stop, then a clean launch", [stalled, clean], None, True, 2),
-            ("an expected deadline denial is judged at once", [deadline], _PL239_DEADLINE_NOTE, True, 1),
-            ("a clean launch is judged at once", [clean], None, True, 1)):
+    def stalled_after_exit():
+        raise _load_bound.Hung(["hook"], 15, "stall", "injected stall", returncode=1)
+
+    def stalled_with_stderr():
+        raise _load_bound.Hung(["hook"], 15, "stall", "injected stall", stderr="Traceback: real failure")
+
+    for label, script, detail, level, kind, launches in (
+            ("deadline on every launch, loaded host", [deadline] * 3, None, 4.0, "cannot-evaluate", 3),
+            ("deadline on every launch, unloaded host", [deadline] * 3, None, 1.0, "fail", 3),
+            ("deadline, then a clean launch", [deadline, clean], None, 4.0, "judge", 2),
+            ("deadline and stall stops mixed, unloaded host", [deadline, stalled, deadline], None, 1.0,
+             "cannot-evaluate", 3),
+            ("a stall stop on every launch", [stalled] * 3, None, 1.0, "cannot-evaluate", 3),
+            ("a stall stop, then a clean launch", [stalled, clean], None, 1.0, "judge", 2),
+            ("an expected deadline denial is judged at once", [deadline], note, 1.0, "judge", 1),
+            ("a clean launch is judged at once", [clean], None, 1.0, "judge", 1),
+            ("deadline text beside a nonzero exit and stderr is judged at once", [crashed], None, 4.0, "judge", 1),
+            ("deadline text without the whole denial shape is judged at once", [loose], None, 4.0, "judge", 1),
+            ("a stop after the hook exited nonzero is a failure", [stalled_after_exit], None, 4.0, "fail", 1),
+            ("a stop with stderr captured is a failure", [stalled_with_stderr], None, 4.0, "fail", 1)):
         queue, calls = list(script), []
 
-        def launch(queue=queue, calls=calls):
+        def launch(queue=queue, calls=calls, last=script[-1]):
             calls.append(1)
-            step = queue.pop(0)
+            step = queue.pop(0) if queue else last  # a retry beyond the script repeats its last step
             return step() if callable(step) else step
 
-        result, note = _pl239_launch_verdict(launch, detail)
-        got = (result is not None, note is None, len(calls), note is None or note.startswith("not judged"))
-        if got != (judged, judged, launches, True):
-            failures.append("(pl239-launch-retry) {}: expected (judged, no note, launches, note shape) = {!r}, "
-                            "got {!r}".format(label, (judged, judged, launches, True), got))
+        got_kind, value = _pl239_launch_verdict(launch, detail, factor=lambda level=level: level)
+        got = (got_kind, len(calls), got_kind != "judge" or value is script[min(len(calls), len(script)) - 1])
+        if got != (kind, launches, True):
+            failures.append("(pl239-launch-retry) {}: expected (outcome, launches, judged the last launch) = {!r}, "
+                            "got {!r}: {!r}".format(label, (kind, launches, True), got, value))
+    if (_pl239_deadline_denial(deadline), _pl239_deadline_denial(loose), _pl239_deadline_denial(crashed)) != (
+            True, False, False):
+        failures.append("(pl239-launch-shape) the whole deadline response is recognised and nothing else")
     exits = (_selftest_exit_code([], ["x"]), _selftest_exit_code(["f"], ["x"]), _selftest_exit_code([], []))
     if exits != (2, 1, 0):
         failures.append("(pl239-launch-exit) exit mapping (cannot-evaluate only, failure plus cannot-evaluate, "
@@ -4683,8 +4735,10 @@ def _main_isolated(monitor):
                     _payload["cwd"] = _cwd
                 # The generated hook process enforces its production commit limits itself, so a loaded
                 # host can turn a correct verdict into the attributed "commit evaluation deadline
-                # exhausted" denial; _pl239_launch_verdict retries it and reports a persistent one as
-                # cannot-evaluate (vectors: _pl239_launch_failures). The launch itself is bounded by
+                # exhausted" denial; _pl239_launch_verdict judges failure evidence (a nonzero exit, stderr)
+                # first, retries only the whole deadline response, and reports a persistent one as
+                # cannot-evaluate on a loaded host and as a failure on an unloaded one (vectors:
+                # _pl239_launch_failures). The launch itself is bounded by
                 # progress: the registered hook timeout plus 5 s of load-adjusted time, or the heuristic
                 # 30 s stall bound. Longest silent wait the hook legitimately makes: none beyond its own
                 # production commit deadline (_COMMIT_SECONDS, 7 s), and its probes are git and filesystem
@@ -4694,9 +4748,12 @@ def _main_isolated(monitor):
                         _pl239_argv, input=json.dumps(_payload), text=True, env=_pl239_dispatch_env,
                         budget_s=_pl239_entry["timeout"] + 5, stall_s=30)
 
-                _result, _note = _pl239_launch_verdict(_pl239_launch, _detail)
-                if _note is not None:
-                    cannot_evaluate.append("(pl239-generated-{}) {}".format(_case, _note))
+                _outcome, _result = _pl239_launch_verdict(_pl239_launch, _detail)
+                if _outcome == "cannot-evaluate":
+                    cannot_evaluate.append("(pl239-generated-{}) {}".format(_case, _result))
+                    continue
+                if _outcome == "fail":
+                    failures.append("(pl239-generated-{}) {}".format(_case, _result))
                     continue
                 if _result.returncode != 0 or _result.stderr:
                     failures.append("(pl239-generated-{}) expected clean exit 0, got {!r}"
@@ -6139,6 +6196,10 @@ def _main_isolated(monitor):
                 "git \\\n push --force origin main", "deny", cwd=plr)
         # The protected_line cases end here: every later case runs on the hook production commit limits.
         aiqt_hooks._COMMIT_SECONDS, aiqt_hooks._COMMIT_PROBE_SECONDS = _pl_production_limits
+        _pl_limits_now = (aiqt_hooks._COMMIT_SECONDS, aiqt_hooks._COMMIT_PROBE_SECONDS)
+        if _pl_limits_now != _pl_production_limits or _pl_limits_now == _pl_widened_limits:
+            failures.append("(pl239-limits-restored) after the protected_line cases the hook commit limits are "
+                            "{!r}, not the production {!r}".format(_pl_limits_now, _pl_production_limits))
 
         # gatdis (EN-5 PR-B): decision-signal battery for the gate-weakening guard.
         # === gate_weakening (gatdis): a git hook bypass + a swallowed or truncated checker ============
@@ -10232,6 +10293,13 @@ def _main_isolated(monitor):
     finally:
         aiqt_hooks._COMMIT_SECONDS, aiqt_hooks._COMMIT_PROBE_SECONDS = _pl_production_limits
         shutil.rmtree(tmp, ignore_errors=True)
+    # No caller of this self-test is left on widened limits: read once more after the whole battery, so a
+    # lost restore or a later case that widens them again is a failure. The finally above covers a run
+    # that raises, which never reaches this check.
+    if (aiqt_hooks._COMMIT_SECONDS, aiqt_hooks._COMMIT_PROBE_SECONDS) != _pl_production_limits:
+        failures.append("(pl239-limits-restored-final) after the case battery the hook commit limits are "
+                        "{!r}, not the production {!r}".format(
+                            (aiqt_hooks._COMMIT_SECONDS, aiqt_hooks._COMMIT_PROBE_SECONDS), _pl_production_limits))
 
     # === GLOBAL NO-ASK INVARIANT (maintainer directive) =========================================
     # These enforcement hooks must NEVER return permissionDecision "ask": an unattended orchestrator must

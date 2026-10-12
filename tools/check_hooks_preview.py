@@ -24,7 +24,9 @@ an absent or unreadable one is exit 2), and every other entry must be a hook fil
       siblings are present, so a parity test can never skip silently under this gate.
       A nonzero exit is a finding. A run stopped by this gate's load-tolerant bound (SELFTEST_TIMEOUT
       load-adjusted seconds, or the heuristic SELFTEST_STALL_S stall bound) delivered no verdict and is a
-      cannot-evaluate (exit 2), attributed to the bound, never reported as a hook failure or a proven hang.
+      cannot-evaluate (exit 2), attributed to the bound, never reported as a hook failure or a proven hang,
+      unless the self-test had already exited nonzero on its own before the stop (a descendant still held
+      its output): that exit is a finding, whatever bound fired.
   (b) INTEGRITY. The README.md integrity table (the one table whose header row is exactly
       `| File | SHA-256 | Link |`; every line from its separator row to the first blank line
       or the end of the file must be a `| a | b | c |` row, since GitHub renders a row written without a
@@ -65,9 +67,10 @@ DISCLOSED RESIDUALS (what this gate does not catch):
 
 Exit convention (matches the repo's gates):
   0  clean, or a printed NOT APPLICABLE
-  1  a real finding (a failing hook self-test, a hash or listing disagreement, a wrong or missing link)
-  2  cannot-evaluate: a missing or unreadable required input, an unparseable table or SHA256SUMS line, a
-     self-test that timed out or had no scratch directory, or an unrecognized argument
+  1  a real finding (a failing hook self-test, a hash or listing disagreement, a wrong or missing link),
+     also when other inputs could not be evaluated: a finding is never filed as cannot-evaluate
+  2  cannot-evaluate with no finding: a missing or unreadable required input, an unparseable table or
+     SHA256SUMS line, a self-test that timed out or had no scratch directory, or an unrecognized argument
 """
 import sys
 
@@ -126,7 +129,8 @@ SELFTEST_TIMEOUT = 600
 # The bound is load-tolerant (tools/_load_bound.py): SELFTEST_TIMEOUT counts load-adjusted seconds, which
 # stretch while the host runs more work than it has CPUs, and a self-test whose process tree makes no CPU
 # or output progress for SELFTEST_STALL_S wall seconds is stopped by a heuristic stall bound (silence is
-# not proof of a hang). Either stop is the bound firing: unverifiable, never a hook failure.
+# not proof of a hang). Either stop is the bound firing: unverifiable, never a hook failure, unless the
+# self-test had already exited nonzero on its own before the stop, which is a finding.
 # Longest silent wait a shipped hook self-test legitimately makes: a few seconds (a deliberately timed-out
 # sleeping child, a thread held on an Event that the test releases); a hook self-test's own hang guards
 # (HANG_TIMEOUT = 120 s, Event holds of 60 s) are reached only by a hang. 300 s exceeds them all, so the
@@ -315,7 +319,8 @@ def _tail(data, n=15):
 
 
 def leg_selftest(pdir, hooks, findings, unverifiable):
-    """(a) Run each hook's own --self-test isolated; nonzero is a finding, a timeout is unverifiable. The
+    """(a) Run each hook's own --self-test isolated; nonzero is a finding (also when it exited nonzero
+    before a bound stopped the wait), a stop with no exit status is unverifiable. The
     environment is scrubbed of AIQT_, ORCH_ and CLAUDE_ variables and then carries AIQT_HOOKS_REQUIRE_SIBLINGS=1
     (set after the scrub), so a hook's sibling-parity tests run rather than skip silently in CI."""
     for name in hooks:
@@ -332,6 +337,13 @@ def leg_selftest(pdir, hooks, findings, unverifiable):
                                       env=_selftest_env(), budget_s=SELFTEST_TIMEOUT, stall_s=SELFTEST_STALL_S,
                                       clock=_load_bound.LoadClock(factor=_load_factor))
             except subprocess.TimeoutExpired as exc:
+                if getattr(exc, "returncode", None):
+                    # The self-test exited nonzero on its own before the bound stopped the wait (a descendant
+                    # held its output): a finding, whatever bound fired.
+                    findings.append("{}/{}: --self-test exited {} before this gate's load-tolerant bound "
+                                    "stopped the wait on a descendant still holding its output ({}) (a)".format(
+                                        PREVIEW_DIR, name, exc.returncode, exc.reason))
+                    continue
                 unverifiable.append("{}/{}: --self-test was stopped by this gate's load-tolerant bound ({} "
                                     "load-adjusted s, stall bound {} s: {}); no verdict was delivered"
                                     .format(PREVIEW_DIR, name, SELFTEST_TIMEOUT, SELFTEST_STALL_S,
@@ -434,7 +446,9 @@ def run(root):
         leg_link(rows, findings)
     except GateError as exc:
         print("error: {}; fail-closed".format(exc), file=sys.stderr)
-        return 2
+        if not findings:
+            return 2
+        unverifiable.append("the run stopped early: {}".format(exc))  # a finding made before it still stands
     if findings:
         print("FAIL: {} hooks-preview finding(s)".format(len(findings)))
         for finding in findings:
@@ -444,9 +458,10 @@ def run(root):
               file=sys.stderr)
         for item in unverifiable:
             print("  " + item, file=sys.stderr)
-        return 2
     if findings:
-        return 1
+        return 1  # a finding stands beside any input that delivered no verdict: the gate fails
+    if unverifiable:
+        return 2
     print("PASS: hooks-preview holds (every hook self-test passes, README and SHA256SUMS agree with the "
           "files, and every row links to its own file)")
     return 0
@@ -637,8 +652,9 @@ def self_test_main():
              needle="has no link")
 
         # 9. (a) no scratch directory can be created for a hook self-test -> exit 2 with a bounded
-        #    diagnostic, never a raw OSError traceback.
-        r = _build(base / "no-scratch", ok, rows=[], sums=[])
+        #    diagnostic, never a raw OSError traceback. The listing is consistent, so no finding stands beside
+        #    it (a finding would make the gate exit 1, case 12c).
+        r = _build(base / "no-scratch", ok)
         saved_mkdtemp = tempfile.mkdtemp
         tempfile.mkdtemp = _no_scratch
         try:
@@ -677,6 +693,39 @@ def self_test_main():
             case("hook self-test past the deadline", 2, r)
         finally:
             SELFTEST_TIMEOUT = saved
+
+        # 12c. a finding beside cannot-evaluate is exit 1, never 2: a stopped self-test (unverifiable) next
+        #      to a corrupted hash; a self-test that exits 1 while a leaked descendant holds its output (the
+        #      exit it reached before the stop is a finding); a finding, then an input that cannot be read.
+        bad = "0" * 64
+        r = _build(base / "finding-beside-stop", {"clock-inject.py": _STUB_SLOW},
+                   rows=[("clock-inject.py", bad, link_ok)], sums=[("clock-inject.py", bad)])
+        leaked = "aiqt-hooks-preview-leaked-{}".format(os.getpid())
+        leaky = ("import subprocess, sys\nsubprocess.Popen([sys.executable, \"-c\", \"import time; time.sleep(30)\", "
+                 "{!r}])\nsys.exit(1)\n".format(leaked)).encode("utf-8")
+        r_leaky = _build(base / "selftest-leaky", {"clock-inject.py": leaky})
+        saved = (SELFTEST_TIMEOUT, _load_factor)
+        SELFTEST_TIMEOUT = 1
+        _load_factor = lambda: 1.0  # noqa: E731
+        try:
+            case("a finding beside a stopped self-test", 1, r, needle="was stopped by this gate")
+            case("a self-test that exits 1 beside a leaked descendant", 1, r_leaky, needle="exited 1 before")
+        finally:
+            SELFTEST_TIMEOUT, _load_factor = saved
+            for pid in _load_bound._alive_with(leaked):
+                _load_bound._kill_pid(pid)
+
+        def _unreadable_leg(rows, findings):
+            raise GateError("an input became unreadable (seeded by the self-test)")
+        global leg_link
+        saved_leg = leg_link
+        leg_link = _unreadable_leg
+        try:
+            case("a finding, then an input that cannot be read", 1,
+                 _build(base / "finding-then-gate-error", {"clock-inject.py": _STUB_FAIL}),
+                 needle="seeded by the self-test")
+        finally:
+            leg_link = saved_leg
 
         # 13. (b) a corrupted hash, README and SHA256SUMS agreeing with each other -> exit 1.
         bad = "0" * 64
@@ -746,7 +795,8 @@ def self_test_main():
             print("  - " + f)
         return 1
     print("SELF-TEST PASS: {} case(s): the NOT APPLICABLE path, the zero-hook channel, a clean one-hook tree, "
-          "and each leg's seeded fault (a: failing and timed-out self-tests, no scratch directory, the "
+          "and each leg's seeded fault (a: failing and timed-out self-tests, a self-test exiting 1 beside a leaked "
+          "descendant, a finding beside a stop or an unreadable input (exit 1), no scratch directory, the "
           "scrubbed environment with {}=1; b: corrupted hash, disagreement, empty listing, unlisted, absent, "
           "alien and extra entries, path entries in SHA256SUMS, malformed inputs, a table row without a "
           "leading pipe, line separators the reader does not honour, a CRLF README; c: a link to another "

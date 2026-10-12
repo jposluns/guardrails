@@ -160,8 +160,9 @@ REGEN_RE = re.compile(r"^tools/gen_([A-Za-z0-9_]+)\.py$")
 # work than it has CPUs, so a loaded host slows the sweep without turning it into cannot-evaluate, and a
 # probe is also stopped early once its process tree makes no CPU or output progress for PROBE_STALL_S
 # wall seconds. That stall test is a heuristic bound (silence is not proof of a hang). Either stop is the
-# bound firing, cannot-evaluate (exit 2), never a verdict on the generator.
-PROBE_TIMEOUT = 120  # per subprocess --check; a generator stopped by it is cannot-evaluate
+# bound firing, cannot-evaluate (exit 2), never a verdict on the generator, unless the generator had
+# already exited 0 on a corrupt target before the stop: that wrong result is a violation (exit 1).
+PROBE_TIMEOUT = 120  # per --check; a stop is cannot-evaluate, unless the generator had exited 0 first
 # Longest silent wait a generator --check legitimately makes: none deliberate. It reads files and runs git
 # and interpreter children, whose CPU counts as its own progress, so only blocked disk I/O leaves it
 # silent; 60 s is far above that on a working host.
@@ -685,6 +686,13 @@ def _process_entry(entry, template, baselines, deadline, violations, cannot, cle
                               "fail-closed".format(target_rel, rel_path, shape, exc))
                 continue
             except (subprocess.TimeoutExpired, OSError) as exc:
+                if getattr(exc, "returncode", None) == 0:
+                    # The generator exited 0 on the corrupt target before the bound stopped the wait on a
+                    # descendant still holding its output: a wrong result beside a stop is a violation.
+                    violations.append("{}: gen_{} --check exited 0 on {} corrupted with {} before its load-tolerant "
+                                      "bound stopped the wait on a leaked descendant (F-154: the generator does "
+                                      "not consult its target)".format(target_rel, stem, rel_path, shape))
+                    continue
                 cannot.append("{}: probe 'gen_{} --check' on {} corrupted with {} failed to complete ({})"
                               .format(target_rel, stem, rel_path, shape, exc))
                 continue
@@ -843,8 +851,9 @@ def main() -> int:
 #       generator rejects it, exercising the is_block probe path no other fixture covers.
 #   (n) load tolerance: under an injected host load a generator slower than a 1 s per-probe bound passes
 #       while printing progress, a silent sleeper is still stopped by the stall bound (exit 2), and the
-#       same slow generator on an idle host overruns the bound (exit 2); the shared _load_bound vectors
-#       also run here.
+#       same slow generator on an idle host overruns the bound (exit 2), a generator that exits 0 on a
+#       corrupt target while a leaked descendant holds its output is a violation (exit 1), not a stop;
+#       the shared _load_bound vectors also run here.
 # Every fixture is synthetic; any invalid-UTF-8 corruption bytes are assembled from non-secret parts so
 # this file never trips the repo secret scan.
 
@@ -1460,13 +1469,22 @@ def _self_test_main_isolated():
         #     bound would have made it cannot-evaluate); a generator that sleeps silently is still stopped
         #     by the stall bound (exit 2; a spy on _run_check requires the stop to be the stall bound's,
         #     not the 16 s budget's); and on an idle host the same slow generator overruns the 1 s budget
-        #     (exit 2), so the pass is owed to the load adjustment. The shared vectors follow.
+        #     (exit 2), so the pass is owed to the load adjustment; a generator exiting 0 on a corrupt target
+        #     beside a leaked descendant is a violation (exit 1). The shared vectors follow.
         slow_main = ("def main():\n    import time\n    for _ in range(8):\n"
                      "        print(\"working\", flush=True)\n        time.sleep(0.25)\n")
         slow = _build_repo(tmp / "slow", {"goodfile": _GOODFILE.replace("def main():\n", slow_main)})
         hang = _build_repo(tmp / "hang", {"goodfile": _GOODFILE.replace(
             "def main():\n", "def main():\n    import time\n    if \"--check\" in sys.argv[1:]:\n"
             "        time.sleep(3600)\n")})  # hangs on --check only, so the fixture build still writes
+        # Exits 0 on a corrupt target (it does not reject it) while leaving a descendant on its output:
+        # the wrong result stands beside the stop, so the sweep is a violation (exit 1), not exit 2.
+        leaked = "gensrc-leaked-descendant-{}".format(os.getpid())
+        leaky = _build_repo(tmp / "leaky", {"goodfile": _GOODFILE.replace(
+            "def main():\n    return run(repo_root(), \"--check\" in sys.argv[1:])\n",
+            ("def main():\n    import subprocess\n    if \"--check\" in sys.argv[1:] and run(repo_root(), True):\n"
+             "        subprocess.Popen([sys.executable, \"-c\", \"import time; time.sleep(30)\", {!r}])\n"
+             "        return 0\n    return run(repo_root(), \"--check\" in sys.argv[1:])\n").format(leaked))})
         stops = []
 
         def _spy_run_check(script_path, cwd, timeout=PROBE_TIMEOUT, env_overrides=None):
@@ -1487,14 +1505,18 @@ def _self_test_main_isolated():
             _load_factor = lambda: 1.0  # noqa: E731
             _now = _load_bound.LoadClock(factor=lambda: _load_factor())
             rc_idle = sweep_quiet(slow)
+            rc_leaky = sweep_quiet(leaky)
         finally:
             _load_factor, PROBE_TIMEOUT, PROBE_STALL_S = saved_bounds
             _now = saved_now
             _run_check = saved_run_check
-        if (rc_slow, rc_hang, rc_idle, sorted(set(stops))) != (0, 2, 2, ["stall"]):
+            for pid in _load_bound._alive_with(leaked):
+                _load_bound._kill_pid(pid)
+        if (rc_slow, rc_hang, rc_idle, sorted(set(stops)), rc_leaky) != (0, 2, 2, ["stall"], 1):
             failures.append("load tolerance: expected (slow under load, silent hang, slow on an idle host, "
-                            "the bound that stopped the hang) = (0, 2, 2, ['stall']), got {!r}"
-                            .format((rc_slow, rc_hang, rc_idle, sorted(set(stops)))))
+                            "the bound that stopped the hang, exit 0 on a corrupt target beside a leaked "
+                            "descendant) = (0, 2, 2, ['stall'], 1), got {!r}"
+                            .format((rc_slow, rc_hang, rc_idle, sorted(set(stops)), rc_leaky)))
         failures.extend(_load_bound.vector_failures(sys.executable))
 
         # (l) A sandbox-setup mkdtemp failure (injected OSError) returns cannot-evaluate (exit 2), not an
@@ -1668,7 +1690,9 @@ def _self_test_main_isolated():
           "valid-but-different / same-length content probe; a total-runtime deadline overrun returns exit "
           "2; a generator slower than the per-probe bound passes under host load while a silently sleeping "
           "generator (stopped by the heuristic stall bound, not the budget) and the same slow generator on an "
-          "idle host each return exit 2 (load-tolerant bounds, shared vectors included); a sandbox-setup mkdtemp failure returns exit 2; a block-kind generator that fail-closes "
+          "idle host each return exit 2, while one exiting 0 on a corrupt target beside a leaked descendant "
+          "returns exit 1 (load-tolerant bounds, shared vectors included); a sandbox-setup mkdtemp failure "
+          "returns exit 2; a block-kind generator that fail-closes "
           "on invalid UTF-8 passes (exit 0), exercising the invalid-UTF-8-only block probe path; a "
           "git-reading generator passes (exit 0) because the D6 template materializes a real git "
           "repository so its baseline git ls-files succeeds; a repo-local core.fsmonitor hook is NEVER "
