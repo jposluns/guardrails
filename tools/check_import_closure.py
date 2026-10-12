@@ -175,16 +175,20 @@ or action line outside the accepted YAML subset (above).
   check_import_closure.py --self-test  fixture trees: every rule vector is red with its rule and green
                                        without it (one per watched name and import-system member, and one per
                                        importer, among them), every green vector exits 0, every cannot-evaluate
-                                       vector exits 2 by its own refusal (a text of that refusal's message;
-                                       each fails on a refusal not its own), every site vector finds exactly the
+                                       vector exits 2 by its own refusal (a text of that refusal's message; each
+                                       fails on a refusal not its own, and where the gate words one refusal
+                                       alike for a class of inputs that text pins the class and the line, not
+                                       the check that refused), every site vector finds exactly the
                                        sites (scope and reference) it names, every edit vector (rows the gate
                                        under test writes for one source, the fixture's own rows among them)
                                        passes that source unchanged and gives exactly its findings, each in the
                                        edited file, on the edited source, every mutant in MUTANTS (one check
                                        removed, with the backstop that would refuse first where one is named, or
                                        a line or a column put into the key) fails the vector it names by that
-                                       vector's own failure (never by an exception, SystemExit and
-                                       KeyboardInterrupt among them, raised while the mutant loads or runs; by a
+                                       vector's own failure (never by an exception that propagates from the
+                                       mutant's load or run, SystemExit and KeyboardInterrupt among them; one
+                                       raised in another thread or a destructor goes to its hook, outside this
+                                       guarantee, as are os._exit, a fatal signal and a hang; by a
                                        refusal only where MUTANTS marks the mutant as caught by its backstop,
                                        and then only by that backstop's refusal; an edit vector only when the
                                        unchanged source passes under that mutant and every finding lies in the
@@ -193,13 +197,17 @@ or action line outside the accepted YAML subset (above).
                                        edited source, one raised on a rule vector, a SystemExit(0) raised
                                        loading a mutant, scanning an edit vector's unchanged source or on a rule
                                        vector, a KeyboardInterrupt a mutant raises, a refusal no backstop is
-                                       named for on a rule vector, a green vector or a rule vector's rerun with
-                                       its rule removed, and a backstop named for a refusal not its own or for a
-                                       failure that is no refusal) credits no mutant, removing any one watched
+                                       named for on a rule vector, a green vector, a cannot-evaluate vector (a
+                                       refusal not its own) or a rule vector's rerun with its rule removed, and
+                                       a backstop named for a refusal not its own or for a failure that is no
+                                       refusal) credits no mutant, removing any one watched
                                        name, member or importer fails its vector, and the live tree passes. It
                                        exits 0 only by returning after its PASS line: a SystemExit that escapes
-                                       it exits 1, and the user's own SIGINT (under Python's default handler) is
-                                       not contained
+                                       it exits 1 (though a mutant that ends the process itself is not
+                                       contained: os._exit(0) would end it with exit 0 and no PASS line, and a
+                                       fatal signal or a hang stops or stalls it), and the user's own SIGINT
+                                       (under Python's default handler) is not contained: one delivered in a
+                                       mutant's run propagates, and the handler is restored on every path
 
 Exit convention: 0 clean; 1 a finding; 2 usage or cannot-evaluate.
 
@@ -3096,8 +3104,8 @@ def _scan_rc(module, base, rules=None, special=None, **kwargs):
 
 
 # The prefix of a problem that is not the vector's own failure (an edit vector's control failing, a finding outside
-# the edited file, or an exception, SystemExit and KeyboardInterrupt among them, raised loading the mutant or in the
-# run): the self-test fails it against this gate and credits no mutant with it.
+# the edited file, or an exception, SystemExit and KeyboardInterrupt among them, that propagates from the mutant's
+# load or run): the self-test fails it against this gate and credits no mutant with it.
 _UNCREDITED = "not credited: "
 # The prefix of a refusal (exit 2) where the vector expects none: it credits only a mutant that MUTANTS marks as
 # caught by that refusal, its backstop (_mutant_credit).
@@ -3115,7 +3123,8 @@ def _interrupted(signum, _frame):
 
 def _escaped(exc, step):
     """The _UNCREDITED problem for exc, any exception (SystemExit and KeyboardInterrupt included) the gate under
-    test raised at step; the user's interrupt (_INTERRUPTS) is re-raised instead."""
+    test raised at step and let propagate (one routed to a hook, from another thread or a destructor, never
+    reaches this); the user's interrupt (_INTERRUPTS) is re-raised instead."""
     if isinstance(exc, KeyboardInterrupt) and _INTERRUPTS:
         raise exc
     return _UNCREDITED + "the gate under test raised %s %s: %s" % (type(exc).__name__, step, exc)
@@ -3135,7 +3144,8 @@ def _case_failure(module, case):
     vector expects no refusal). An exception an edit vector's run raises (SystemExit and KeyboardInterrupt among
     them), writing the rows or scanning either source, is _UNCREDITED (_escaped); any other vector's run lets it
     propagate, and _mutant_credit credits no mutant with it. A cannot-evaluate vector holds only by its own refusal,
-    the one whose message holds the text rule gives."""
+    the one whose message holds the text rule gives; another refusal is _REFUSED, so with no backstop named in
+    MUTANTS it credits no mutant (_mutant_credit)."""
     name, expected, rule, at, base, kwargs, special = case
     if expected == "sites":
         try:
@@ -3170,8 +3180,9 @@ def _case_failure(module, case):
     if expected == 2:
         if rc != 2:
             return "expected cannot-evaluate (2) saying %r, got %d %r" % (rule, rc, findings)
-        return None if rule in findings[0] else "expected cannot-evaluate (2) saying %r, got another refusal: %s" % (
-            rule, findings[0])
+        if rule in findings[0]:
+            return None
+        return _REFUSED + "expected cannot-evaluate (2) saying %r, got another refusal: %s" % (rule, findings[0])
     refused = _REFUSED if rc == 2 else ""
     if expected == 0:
         return None if rc == 0 else "%sexpected a clean scan (0), got %d %r" % (refused, rc, findings)
@@ -3194,8 +3205,10 @@ _SELF_TEST_MARKER = "\n# " + "-" * 64 + " self-test\n"
 # a refusal can catch, its backstop: that refusal, named, and a text of its message). A tuple of texts and a tuple of
 # replacements remove a check together with the backstop that would refuse first, so the check's own vector catches it,
 # not the backstop. The self-test loads every mutant as a scratch module and requires its named vector to fail by that
-# vector's own failure (_mutant_credit): an exception raised while it loads or runs (SystemExit and KeyboardInterrupt
-# among them) never credits it, a refusal (exit 2) credits it only through the backstop it names, and an edit vector
+# vector's own failure (_mutant_credit): an exception that propagates from its load or run (SystemExit and
+# KeyboardInterrupt among them) never credits it (one routed to a hook, from another thread or a destructor, and a
+# mutant that ends the process itself or hangs, are outside the harness), a refusal (exit 2) credits it only
+# through the backstop it names, and an edit vector
 # (_MOVE_VECTORS) credits it only when the rows the mutant writes pass the unchanged source and every finding on the
 # edited source is in the edited file (_UNCREDITED otherwise). An entry may repeat another's text and replacement,
 # binding that mutation to a second vector.
@@ -3727,6 +3740,10 @@ _UNCREDITED_RUNS = (
      "    if \"dynamic-import\" not in rules:\n        raise CannotEvaluate(\"a rule removed\")\n"
      "    stdlib = stdlib_names(sys_module)\n", "watched name _gcd_import", None,
      "MUTANTS names no backstop for this mutant: refused (exit 2): with dynamic-import removed"),
+    ("refused-cannot-evaluate-vector", "    stdlib = stdlib_names(sys_module)\n",
+     "    raise CannotEvaluate(\"every input\")\n    stdlib = stdlib_names(sys_module)\n",
+     "symlinked directory", None,
+     "MUTANTS names no backstop for this mutant: refused (exit 2): expected cannot-evaluate (2)"),
     ("backstop-not-a-refusal", "if os.path.islink(os.path.join(dirpath, d)):", "if False:", "symlinked directory",
      ("a backstop named for a failure that is no refusal", "expected cannot-evaluate (2)"),
      "not the refusal of its backstop"),
@@ -3750,7 +3767,8 @@ def _load_mutant(source, directory, number):
 def _mutant_of(gate_source, rest, old, new, directory, number):
     """(module, None) for this gate with old replaced by new in its gate half (each text of a tuple by its
     replacement), loaded as a scratch module, or (None, why not): an anchor not found exactly once, a mutant that
-    does not compile, or one that raises while it loads (SystemExit and KeyboardInterrupt among them, _escaped)."""
+    does not compile, or one whose load raises an exception that propagates (SystemExit and KeyboardInterrupt
+    among them, _escaped)."""
     pairs = tuple(zip(old, new, strict=True)) if isinstance(old, tuple) else ((old, new),)
     found = [gate_source.count(text) for text, _replacement in pairs]
     if found != [1] * len(pairs):
@@ -3767,8 +3785,8 @@ def _mutant_of(gate_source, rest, old, new, directory, number):
 
 def _mutant_credit(module, case, backstop=None):
     """(credited, what) for a mutant of this gate (or a scratch copy with a check removed) run against the vector it
-    names. Only the vector's own failure credits it: never an exception the run raises (SystemExit and
-    KeyboardInterrupt among them, _escaped), nor a problem _UNCREDITED begins, and a refusal (_REFUSED) only when
+    names. Only the vector's own failure credits it: never an exception that propagates from the run (SystemExit
+    and KeyboardInterrupt among them, _escaped), nor a problem _UNCREDITED begins, and a refusal (_REFUSED) only when
     backstop, the (refusal, a text of its message) MUTANTS marks the mutant with, is that refusal; a mutant so marked
     is credited by nothing else."""
     try:
@@ -3804,13 +3822,17 @@ def self_test_main():
     # The user's interrupt is recorded (_interrupted) only where SIGINT has Python's default handler in the main
     # thread; anywhere else a KeyboardInterrupt in a mutant's run is contained like any other exception.
     handler = signal.getsignal(signal.SIGINT)
-    if handler is signal.default_int_handler:
+    installed = handler is signal.default_int_handler
+    if installed:
         try:
             signal.signal(signal.SIGINT, _interrupted)
         except ValueError:
-            handler = None
-    tmp = Path(tempfile.mkdtemp(prefix="import-closure-"))
+            installed = False
+    # One try/finally from here puts the handler back whether the temporary-directory setup, the run or the
+    # cleanup fails (and main checks that it was put back): a failing mkdtemp or rmtree never skips the restore.
+    tmp = None
     try:
+        tmp = Path(tempfile.mkdtemp(prefix="import-closure-"))
         clean = _fixture(tmp / "clean")
         rc, findings = _scan_rc(this, clean)
         if rc != 0:
@@ -3863,18 +3885,29 @@ def self_test_main():
                                                                                               problem))
         # Each watched name and member removed in turn from a scratch copy: its own vector must then fail.
         copy = _load_mutant(gate_source + marker + rest, mutant_dir, 0)
-        # Each cannot-evaluate vector holds only by its own refusal: with every scan refused for another reason, it
-        # fails.
+        # Each cannot-evaluate vector holds only by its own refusal: with every scan refused for another reason,
+        # it fails, and that refusal, with no backstop named, credits no mutant. The REFUSAL line prints only when
+        # every vector held.
         own_scan = copy.scan
 
         def _refuse(*_args, **_kwargs):
             raise copy.CannotEvaluate("a refusal no vector names")
         copy.scan = _refuse
+        refused_wrongly = 0
         for case in cases:
-            if case[1] == 2 and _case_failure(copy, case) is None:
+            if case[1] != 2:
+                continue
+            credited, problem = _mutant_credit(copy, case)
+            if problem == "still holds with the check removed":
+                refused_wrongly += 1
                 failures.append("cannot-evaluate vector %s: holds on a refusal not its own" % case[0])
+            elif credited or "MUTANTS names no backstop" not in problem:
+                refused_wrongly += 1
+                failures.append("cannot-evaluate vector %s: a refusal not its own was credited or misread: %s"
+                                % (case[0], problem))
         copy.scan = own_scan
-        print("REFUSAL each cannot-evaluate vector fails on a refusal not its own")
+        if not refused_wrongly:
+            print("REFUSAL each cannot-evaluate vector fails on a refusal not its own, crediting nothing")
         names, members = watched_names()
         for name in sorted(names | members):
             copy.watched_names = lambda *_args, _name=name: (names - {_name}, members - {_name})
@@ -3894,25 +3927,60 @@ def self_test_main():
             else:
                 print("REMOVED importer %s caught by its vector" % callee)
         copy.IMPORTERS = IMPORTERS
-        # The user's interrupt is not contained: once the SIGINT handler has recorded one, a KeyboardInterrupt in a
-        # mutant's run propagates rather than failing that mutant.
-        own_sites = copy.dynamic_sites
+        # The user's interrupt is not contained: a SIGINT delivered (os.kill: real delivery, not a direct call of
+        # _interrupted) in a mutant's run is recorded by the installed handler and propagates rather than failing
+        # that mutant. A KeyboardInterrupt the check did not provoke (none sent, or more interrupts recorded than
+        # the one it sent) propagates on: the check cannot swallow the user's own interrupt. Where SIGINT did not
+        # have Python's default handler nothing was installed, so there is nothing to exercise.
+        if installed:
+            own_sites = copy.dynamic_sites
+            sent = []
 
-        def _interrupt(*_args):
-            raise KeyboardInterrupt
-        copy.dynamic_sites = _interrupt
-        try:
+            def _deliver(*_args):
+                sent.append(len(_INTERRUPTS))
+                os.kill(os.getpid(), signal.SIGINT)
+                raise AssertionError("the SIGINT this check delivered to itself was not handled")
+            copy.dynamic_sites = _deliver
             try:
-                _interrupted(signal.SIGINT, None)
+                credited, problem = _mutant_credit(copy, by_name["reference moved within its lambda"])
+                failures.append("a SIGINT delivered in a mutant's run did not propagate: credited %r, %s"
+                                % (credited, problem))
             except KeyboardInterrupt:
-                pass
-            failures.append("a recorded interrupt was failed as a mutant's, not re-raised: %s" % (
-                _mutant_credit(copy, by_name["reference moved within its lambda"])[1],))
-        except KeyboardInterrupt:
-            print("INTERRUPT a recorded SIGINT propagates from a mutant's run")
-        finally:
-            del _INTERRUPTS[:]
-            copy.dynamic_sites = own_sites
+                if sent and len(_INTERRUPTS) == sent[0] + 1:
+                    del _INTERRUPTS[sent[0]:]
+                    print("INTERRUPT a SIGINT delivered in a mutant's run is recorded and propagates")
+                else:
+                    raise
+            finally:
+                copy.dynamic_sites = own_sites
+            # The restore runs even when setup fails: with mkdtemp raising, the copy's self-test propagates the
+            # OSError and puts Python's default SIGINT handler back.
+            own_mkdtemp = tempfile.mkdtemp
+
+            def _no_tmp(*_args, **_kwargs):
+                raise OSError("no scratch directory")
+            sys.modules[copy.__name__] = copy
+            signal.signal(signal.SIGINT, signal.default_int_handler)
+            tempfile.mkdtemp = _no_tmp
+            try:
+                raised = False
+                try:
+                    copy.self_test_main()
+                except OSError:
+                    raised = True
+            finally:
+                tempfile.mkdtemp = own_mkdtemp
+                del sys.modules[copy.__name__]
+                left = signal.getsignal(signal.SIGINT)
+                signal.signal(signal.SIGINT, _interrupted)
+            if not raised:
+                failures.append("setup: a failing mkdtemp did not propagate from the copy's self-test")
+            elif left is not signal.default_int_handler:
+                failures.append("setup: a failing mkdtemp left the copy's SIGINT handler installed, not restored")
+            else:
+                print("SETUP a failing mkdtemp propagates and the SIGINT handler is still restored")
+        else:
+            print("INTERRUPT and SETUP skipped: SIGINT did not have Python's default handler, none was installed")
 
         # A SystemExit that escapes the self-test fails it (main), whatever its code, never ends it with that code.
         def _exit_zero():
@@ -3928,9 +3996,12 @@ def self_test_main():
         else:
             print("EXIT a SystemExit(0) escaping the self-test exits 1")
     finally:
-        shutil.rmtree(tmp, ignore_errors=True)
-        if handler is signal.default_int_handler:
-            signal.signal(signal.SIGINT, handler)
+        try:
+            if tmp is not None:
+                shutil.rmtree(tmp, ignore_errors=True)
+        finally:
+            if installed:
+                signal.signal(signal.SIGINT, handler)
     if run(ROOT) != 0:
         failures.append("live: the real tree does not pass")
     if failures:
@@ -3944,7 +4015,8 @@ def self_test_main():
           "exit 2 by their own refusal, %d dynamic-import site vectors hold, %d edit vectors (rows written for one "
           "source pass it unchanged, findings exact and in the edited file only on the edited one) hold, %d mutants "
           "(one check removed each, with its backstop where named, or a line or a column put into the key) caught "
-          "by their vectors, never through an exception, SystemExit and KeyboardInterrupt included (%d of them, as "
+          "by their vectors, never through an exception that propagates from the load or the run, SystemExit and "
+          "KeyboardInterrupt included (%d of them, as "
           "MUTANTS marks, only through their backstop's refusal), %d runs that raise, exit or refuse credited by "
           "none, %d watched names, %d members and %d importers each removed and caught, the live tree passes"
           % (len(_RULE_VECTORS) + len(names | members) + importers, len(names | members), importers,
@@ -3955,11 +4027,19 @@ def self_test_main():
 
 def main(argv):
     if argv == ["--self-test"]:
+        # The self-test puts the SIGINT handler back on every path (its restore is in a finally no setup or
+        # cleanup failure skips); this checks that it did, so removing the restore turns the self-test red.
+        before = signal.getsignal(signal.SIGINT)
         try:
-            return self_test_main()
+            code = self_test_main()
         except SystemExit as exc:
             print("SELF-TEST FAIL: SystemExit(%r) exited before its verdict" % (exc.code,), file=sys.stderr)
+            code = 1
+        if signal.getsignal(signal.SIGINT) is not before:
+            signal.signal(signal.SIGINT, before)
+            print("SELF-TEST FAIL: the SIGINT handler was not restored after the self-test", file=sys.stderr)
             return 1
+        return code
     if argv:
         print("usage: check_import_closure.py [--self-test]", file=sys.stderr)
         return 2
