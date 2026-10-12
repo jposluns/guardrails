@@ -6571,7 +6571,7 @@ _DESTRUCT_RULES = frozenset((
     "pipe-feed", "heredoc-feed", "cd", "cd-flow", "scope", "cd-dotdot", "cd-exists", "cd-cdpath", "subst",
     "unresolvable", "no-preserve-root", "home", "scratch", "repo-root", "regenerable", "ignored", "embedded",
     "gitlink", "git-admin", "dotdot", "snapshot", "clean", "optout", "raw", "shell-context", "raw-join",
-    "assign", "prose-shadow"))
+    "assign", "prose-shadow", "prior-effect"))
 # The leading opt-out, matching GUARDRAIL_ALLOW_DISCARD's convention (bash last-wins, falsy values below).
 _DESTRUCT_OPTOUT_RE = re.compile(r"^GUARDRAIL_ALLOW_DESTRUCTIVE=(.*)$")
 # ONE table of the command words that run another command: privilege, scheduling, tracing, sandbox,
@@ -6729,6 +6729,159 @@ _DESTRUCT_ALTS = (
     "a pipeline or a heredoc. If the human has explicitly authorized this exact operation and accepted the "
     "loss, re-issue it with a leading GUARDRAIL_ALLOW_DESTRUCTIVE=1 assignment; that prefix is a convention "
     "the assistant can type, so it records a claimed authorization and is not proof of one.")
+
+
+# prior-effect is a bounded prefix model, not a shell interpreter. Definitions and settings accumulate
+# even across conditional/subshell boundaries (accepted over-denial); earlier-turn state is unseen.
+_DESTRUCT_COMMAND_ENV = frozenset((
+    "PAGER", "EDITOR", "VISUAL", "SHELL", "GIT_PAGER", "GIT_EDITOR", "GIT_SEQUENCE_EDITOR",
+    "GIT_EXTERNAL_DIFF", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_ASKPASS", "SSH_ASKPASS", "BASH_ENV", "ENV",
+    "LESSOPEN", "LESSCLOSE"))
+_DESTRUCT_CONFIG_COMMAND_RE = re.compile(
+    r"(?i)^(?:core\.(?:pager|editor|sshcommand)|sequence\.editor|diff\.external|.+\.textconv|alias\..+)$")
+_DESTRUCT_SQL_EXEC_RE = {
+    "psql": re.compile(r"(?is)\\+(?:!|e\b|ir\b|(?:g|o|copy)\b[^\n]*\|)"
+                       r"|\bcopy\b[^;]*\b(?:to|from)\s+program\b"),
+    "mysql": re.compile(r"(?im)\\+!|(?:^|[;\n])\s*(?:system|source)\b"),
+    "mariadb": re.compile(r"(?im)\\+!|(?:^|[;\n])\s*(?:system|source)\b"),
+    "sqlite3": re.compile(r"(?im)(?:^|\n)\s*\.(?:shell|system|import|load)\b"
+                          r"|(?:^|\n)\s*\.(?:output|once)\s+\|"),
+}
+_DESTRUCT_CREATORS = frozenset(("cp", "mv", "ln", "tee", "mkdir", "touch"))
+_DESTRUCT_ASSIGN_BUILTINS = frozenset(("export", "declare", "typeset", "local", "readonly", "set"))
+
+
+def _destruct_prior_config(args):
+    """A destructive marker in a literal command-valued git setting, or None. This recognizes key=value
+    and key value pairs; it deliberately retains taint after later overwrites/unsets."""
+    for k, arg in enumerate(args):
+        key, eq, value = arg.partition("=")
+        if _DESTRUCT_CONFIG_COMMAND_RE.fullmatch(key):
+            if not eq and k + 1 < len(args):
+                value = args[k + 1]
+            hit = _destruct_text_marker(value)
+            if hit:
+                return hit
+    return None
+
+
+def _destruct_prior_effects(segments):
+    """Pre-pass recording each segment's definitions, settings, literal output operands and mutation risk.
+    The decision loop folds only EARLIER records into its context, resolving outputs at their segment cwd.
+    Output tracking covers redirect targets, tee operands and literal cp/mv/ln destinations (including
+    -t/--target-directory); it cannot read a produced payload or model every creator's option grammar."""
+    effects = []
+    trusted = set(_DESTRUCT_WRAPPER_SPECS) | _DESTRUCT_KNOWN
+    for n, seg in enumerate(segments):
+        argv = seg.argv
+        idx, detail = _destruct_effective(seg)
+        word = _destruct_word(argv[idx]) if idx < len(argv) else ""
+        args = argv[idx + 1:]
+        names = set()
+        start = _command_word_index(argv)
+        while start < len(argv) and argv[start] in _DESTRUCT_KEYWORDS:
+            start += 1
+        if start < len(argv) and argv[start] == "function" and start + 1 < len(argv):
+            names.add(argv[start + 1])
+        if (seg.sep_after == "(" and n + 1 < len(segments) and not segments[n + 1].argv
+                and segments[n + 1].sep_after == ")" and start < len(argv)):
+            names.add(argv[start])
+        if word == "alias":
+            names.update(arg.split("=", 1)[0] for arg in args if "=" in arg)
+        env = {}
+        if start == len(argv) or word in _DESTRUCT_ASSIGN_BUILTINS:
+            for tok in argv:
+                if _ENV_ASSIGN_RE.match(tok):
+                    key, value = tok.split("=", 1)
+                    if key in _DESTRUCT_COMMAND_ENV:
+                        hit = _destruct_text_marker(value)
+                        if hit:
+                            env[key] = hit
+        sub, git_args = _git_sub_and_args(argv[idx:]) if word == "git" else (None, [])
+        config = _destruct_prior_config(git_args) if sub == "config" else None
+        outputs = []
+        links = []
+        # Records carry opacity and tilde provenance so expansions never turn into invented literal paths.
+        if word in _DESTRUCT_CREATORS:
+            operands = []
+            target_dir = None
+            options = True
+            k = idx + 1
+            while k < len(argv):
+                tok = argv[k]
+                if options and tok == "--":
+                    options = False
+                elif options and tok in ("-t", "--target-directory") and k + 1 < len(argv):
+                    k += 1
+                    target_dir = (argv[k], seg.argv_opaque[k], seg.argv_leading_tilde[k])
+                elif options and tok.startswith("--target-directory="):
+                    target_dir = (tok.split("=", 1)[1], seg.argv_opaque[k], seg.argv_leading_tilde[k])
+                elif options and tok.startswith("-t") and len(tok) > 2:
+                    target_dir = (tok[2:], seg.argv_opaque[k], seg.argv_leading_tilde[k])
+                elif not options or not tok.startswith("-"):
+                    operands.append((tok, seg.argv_opaque[k], seg.argv_leading_tilde[k]))
+                k += 1
+            if word in ("cp", "mv", "ln"):
+                destinations = [target_dir] if target_dir else operands[-1:]
+                outputs.extend(destinations)
+                # A literal directory destination may receive a source basename. Keep both spellings:
+                # we cannot know before execution whether the destination will be a file or directory.
+                for dest in destinations:
+                    for source in (operands if target_dir else operands[:-1]):
+                        outputs.append((os.path.join(dest[0], os.path.basename(source[0])),
+                                        dest[1] or source[1], dest[2]))
+                if word == "ln":
+                    links.extend(outputs)
+            else:
+                outputs.extend(operands)
+        writes = [r for r in seg.redirects if r.op in (">", ">>", ">|", "&>", "&>>", "<>", ">&")
+                  and r.target_class != "descriptor"]
+        outputs.extend((r.target, r.target_class == "opaque", r.target_leading_tilde) for r in writes)
+        runner = (bool(word) and word not in _DESTRUCT_KNOWN and word not in _DESTRUCT_CLASSIFIED
+                  and not word.startswith("mkfs"))
+        runner = runner or bool(detail) or bool(_destruct_runner_form(word, args))
+        effects.append({"names": names & trusted, "env": env, "config": config, "outputs": outputs,
+                        "links": links, "mutates": bool(writes) or word in _DESTRUCT_CREATORS or runner})
+    return effects
+
+
+def _destruct_prior_runner(seg, start, ctx):
+    """Computed arguments of a runner, reusing the effective-command predicate. Argument roles of
+    unmodelled runners are unknown, so an opaque data/option operand can also cause a false denial."""
+    for k in range(start, len(seg.argv)):
+        if seg.argv_opaque[k] and seg.argv[k] not in _DESTRUCT_LITERAL_WORDS | {"{}"}:
+            why = _destruct_computed(seg.argv[k], ctx["command"])
+            if why:
+                return [("deny", "prior-effect: a runner argument {!r} may be a command because {}"
+                         .format(seg.argv[k][:60], why))]
+    return []
+
+
+def _destruct_prior_run_path(seg, idx, cwd, prior):
+    """Exact written-path invocation, directly or as a literal shell script operand. Other interpreters,
+    PATH lookup, downloads and computed destinations remain outside this bounded partial."""
+    candidates = [idx]
+    word = _destruct_word(seg.argv[idx])
+    if word in ("sh", "bash", "dash", "zsh", "ksh", "mksh", "ash", "fish", "csh", "tcsh", "source", "."):
+        # Only plain script operands, never shell command text or option values.
+        k = idx + 1
+        while k < len(seg.argv) and seg.argv[k].startswith("-"):
+            if seg.argv[k] == "--":
+                k += 1
+                break
+            if any(c in seg.argv[k][1:] for c in "co"):
+                return []
+            k += 1
+        if k < len(seg.argv):
+            candidates.append(k)
+    for k in candidates:
+        if k == idx and "/" not in seg.argv[k]:
+            continue
+        path = _destruct_resolve(seg.argv[k], seg.argv_opaque[k], seg.argv_leading_tilde[k], cwd)
+        if path is not None and path in prior["outputs"]:
+            return [("deny", "prior-effect: {!r} runs a path an earlier segment may have written, copied "
+                     "or linked; its payload is not understood".format(seg.argv[k][:100]))]
+    return []
 
 
 def _destruct_word(token):
@@ -7015,7 +7168,8 @@ def _destruct_peel_one(seg, i):
     """Walk ONE modelled wrapper's options, assignments and positional operand to the wrapped command, exactly
     as its _DESTRUCT_WRAPPER_SPECS entry models them. Returns (index_of_the_wrapped_command,
     unmodelled_detail_or_None): an option or operand the entry does not model stops the walk there with a
-    detail (the caller denies when a destructive word follows); command -v/-V runs nothing."""
+    detail (the caller denies when a destructive word follows). Under prior-effect, an opaque consumed
+    option value is itself unmodelled and denies; command -v/-V runs nothing."""
     argv, opaque = seg.argv, seg.argv_opaque
     word = _destruct_word(argv[i])
     flags, values, longs, long_values, long_attached, positional = _DESTRUCT_WRAPPER_SPECS[word]
@@ -7050,6 +7204,11 @@ def _destruct_peel_one(seg, i):
             if step and word == "command" and ("v" in tok or "V" in tok):
                 return len(argv), None  # command -v/-V describes the names and runs nothing
         if step:
+            if "prior-effect" in _DESTRUCT_RULES:
+                consumed = range(j, min(j + step, len(argv)))
+                dynamic = next((k for k in consumed if opaque[k]), None)
+                if dynamic is not None:
+                    return dynamic, "prior-effect: the {} option consumes an opaque value".format(word)
             j += step
             continue
         if strict:
@@ -7067,11 +7226,12 @@ def _destruct_peel_one(seg, i):
     return j, None
 
 
-def _destruct_effective(seg):
+def _destruct_effective(seg, shadowed=()):
     """(index, unmodelled_detail): the index of the segment's effective command word after leading
     assignments, shell keywords (_DESTRUCT_KEYWORDS), a function NAME prefix and the wrappers this guard models exactly
     (_destruct_peel_one), or len(argv) when nothing runs; unmodelled_detail names a wrapper option or operand
-    outside the model (the walk stops at it, and the caller denies when a destructive word follows)."""
+    outside the model (the walk stops at it, and the caller denies when a destructive word follows).
+    A name in shadowed stops before its normal wrapper/data treatment and denies under prior-effect."""
     argv = seg.argv
     i = _command_word_index(argv)
     while i < len(argv) and "wrappers" in _DESTRUCT_RULES:
@@ -7081,6 +7241,8 @@ def _destruct_effective(seg):
         if argv[i] == "function":
             i += 2  # a function NAME definition: its body (behind the brace keyword) is classified
             continue
+        if argv[i] in shadowed:
+            return i, "prior-effect: {!r} was defined by an earlier segment".format(argv[i])
         if seg.argv_opaque[i] or _destruct_word(argv[i]) not in _DESTRUCT_WRAPPER_SPECS:
             break
         i, detail = _destruct_peel_one(seg, i)
@@ -7275,7 +7437,7 @@ def _destruct_probe(top, rel, deadline=None):
     return facts
 
 
-def _destruct_classify_path(path, recursive, deadline=None):
+def _destruct_classify_path(path, recursive, deadline=None, prior=None):
     """Classify one resolved operand path. Returns ('allow', None), ('note', detail) for content git has
     POSITIVE evidence it can restore (the path is listed as tracked), ('snap', top) for uncommitted content
     a recovery snapshot of the repository top can hold, or ('deny', detail). The rules run in this order,
@@ -7283,8 +7445,13 @@ def _destruct_classify_path(path, recursive, deadline=None):
     (nothing to destroy) and allows without a note; a path that exists while git lists nothing tracked under
     it (a linked worktree's .git file, an assume-unchanged mark) DENIES, and a .git component anywhere under
     the toplevel DENIES outright (an administrative entry, never restorable content). Every slow step
-    (repository discovery, the status and ls-files probes) runs under the remaining guard deadline."""
+    (repository discovery, the status and ls-files probes) runs under the remaining guard deadline.
+    prior invalidates absence/symlink-only allows after earlier effects, not positive tracked-clean evidence."""
     real = os.path.realpath(path)
+    changed_resolution = bool(prior and (
+        (prior["mutates"] and real != path) or any(_path_is_within(path, link) for link in prior["links"])))
+    prior_denial = ("deny", "prior-effect: an earlier segment may change the absence or symlink resolution "
+                           "used to allow {}".format(path))
     home = os.environ.get("HOME")
     if "home" in _DESTRUCT_RULES and home and os.path.isabs(home):
         home_real = os.path.realpath(home)
@@ -7292,7 +7459,7 @@ def _destruct_classify_path(path, recursive, deadline=None):
             return ("deny", "{} is the home directory or one of its ancestors".format(path))
     if "scratch" in _DESTRUCT_RULES and any(
             real != root and _path_is_within(real, root) for root in _destruct_scratch_roots()):
-        return ("allow", None)
+        return prior_denial if changed_resolution else ("allow", None)
     anchor = real
     while not os.path.isdir(anchor) and anchor != "/":
         anchor = os.path.dirname(anchor)
@@ -7314,7 +7481,7 @@ def _destruct_classify_path(path, recursive, deadline=None):
                         "losing it severs the worktree from its history".format(path))
     if ("regenerable" in _DESTRUCT_RULES and os.path.basename(real) in _DESTRUCT_REGENERABLE
             and os.path.isdir(real) and not os.path.islink(real)):
-        return ("allow", None)
+        return prior_denial if changed_resolution else ("allow", None)
     facts = _destruct_probe(top, rel, deadline)
     if facts is None:
         return ("deny", "the status probe of {} in {} failed, so its content cannot be classified"
@@ -7334,6 +7501,8 @@ def _destruct_classify_path(path, recursive, deadline=None):
         return ("deny", "{} holds uncommitted content".format(path))
     if "clean" in _DESTRUCT_RULES:
         if not os.path.lexists(real):
+            if prior and (prior["mutates"] or changed_resolution):
+                return prior_denial
             return ("allow", None)
         if ("git-admin" in _DESTRUCT_RULES and not facts["tracked"] and not facts["ignored"]
                 and not facts["embedded"] and not facts["gitlink"]):
@@ -7413,8 +7582,11 @@ def _destruct_segment(seg, cwd, deadline, ctx):
             if hit:
                 return _destruct_unmodelled("the segment uses an ANSI-C quoted word with an escape, whose "
                                             "decoded text this guard does not model", hit)
-    idx, unmodelled = _destruct_effective(seg)
+    prior = ctx.get("prior")
+    idx, unmodelled = _destruct_effective(seg, prior["names"] if prior else ())
     if unmodelled:
+        if prior and unmodelled.startswith("prior-effect:"):
+            return [("deny", unmodelled)]
         tok = argv[idx] if idx < len(argv) else ""
         hit = _destruct_marker(argv[idx:], (tok[2:], tok.partition("=")[2]))
         return _destruct_unmodelled(unmodelled, hit) if hit else []
@@ -7429,6 +7601,25 @@ def _destruct_segment(seg, cwd, deadline, ctx):
                                             argv[idx][:60]), hit)
     word = _destruct_word(argv[idx])
     args = argv[idx + 1:]
+    if prior:
+        path_verdict = _destruct_prior_run_path(seg, idx, cwd, prior)
+        if path_verdict:
+            return path_verdict
+        if word not in _DESTRUCT_ASSIGN_BUILTINS and word not in ("unset", "alias", "function", "}"):
+            env_hit = next((hit for key, hit in prior["env"].items()
+                            if not key.startswith("GIT_") or word == "git"), None)
+            hit = env_hit or (prior["config"] if word == "git" else None)
+            if hit:
+                return _destruct_unmodelled("prior-effect: an earlier segment armed a command-valued setting",
+                                            hit)
+        if word == "git":
+            sub, git_args = _git_sub_and_args(argv[idx:])
+            if sub == "clone" and any(arg == "-c" or arg.startswith(("-c", "--config")) for arg in git_args):
+                hit = _destruct_prior_config([arg[2:] if arg.startswith("-c") and arg != "-c"
+                                             else arg.removeprefix("--config=") for arg in git_args])
+                if hit:
+                    return _destruct_unmodelled("prior-effect: git clone sets a command-valued configuration",
+                                                hit)
     if "computed" in _DESTRUCT_RULES and seg.argv_opaque[idx] and argv[idx] not in _DESTRUCT_LITERAL_WORDS:
         why = _destruct_computed(argv[idx], ctx["command"])
         if why:
@@ -7436,11 +7627,17 @@ def _destruct_segment(seg, cwd, deadline, ctx):
                              "which command runs".format(argv[idx][:60], why))]
         return []
     if word in _DESTRUCT_CLASSIFIED or word.startswith("mkfs"):
-        return _destruct_classified(seg, idx, word, cwd, deadline)
+        return _destruct_classified(seg, idx, word, cwd, deadline, ctx)
     if "known" in _DESTRUCT_RULES and word in _DESTRUCT_KNOWN:
         form = _destruct_runner_form(word, args) if "known-forms" in _DESTRUCT_RULES else None
         hit = _destruct_marker(args) if form else None
-        return _destruct_unmodelled(form, hit) if hit else []
+        if hit:
+            return _destruct_unmodelled(form, hit)
+        return _destruct_prior_runner(seg, idx + 1, ctx) if prior and form else []
+    if prior:
+        computed = _destruct_prior_runner(seg, idx + 1, ctx)
+        if computed:
+            return computed
     if "runner" not in _DESTRUCT_RULES:
         return []
     what = ("{!r} is a command runner this guard does not model".format(word) if word in _COMMAND_RUNNERS
@@ -7459,7 +7656,7 @@ def _destruct_segment(seg, cwd, deadline, ctx):
     return []
 
 
-def _destruct_classified(seg, idx, word, cwd, deadline):
+def _destruct_classified(seg, idx, word, cwd, deadline, ctx):
     """The verdicts for a command word this guard classifies itself (_DESTRUCT_CLASSIFIED): find -delete,
     the format words, shred, dropdb, a SQL client beside DROP or TRUNCATE, terraform/tofu destroy and kubectl
     delete DENY; find -exec and kubectl exec/run/debug/attach/plugin run another command and DENY when a
@@ -7474,13 +7671,19 @@ def _destruct_classified(seg, idx, word, cwd, deadline):
                              "enumerate")]
         k = next((k for k, arg in enumerate(args) if arg in _DESTRUCT_FIND_EXEC), None)
         hit = _destruct_marker(args[k:]) if k is not None and "runner" in _DESTRUCT_RULES else None
-        return _destruct_unmodelled("find {} runs another command".format(args[k]), hit) if hit else []
+        if hit:
+            return _destruct_unmodelled("find {} runs another command".format(args[k]), hit)
+        return (_destruct_prior_runner(seg, idx + 2 + k, ctx)
+                if ctx.get("prior") and k is not None else [])
     if (word.startswith("mkfs") or word in _DESTRUCT_FORMAT_WORDS) and "format" in _DESTRUCT_RULES:
         return [("deny", "{} formats or wipes a device or file system".format(word))]
     if word == "shred" and "shred" in _DESTRUCT_RULES:
         return [("deny", "shred overwrites file content so that nothing can restore it")]
     if word == "dropdb" and "dropdb" in _DESTRUCT_RULES:
         return [("deny", "dropdb destroys a database")]
+    if (ctx.get("prior") and word in _DESTRUCT_SQL_CLIENTS
+            and any(_DESTRUCT_SQL_EXEC_RE[word].search(arg) for arg in args)):
+        return [("deny", "prior-effect: {} carries a shell/program or file-loading meta-command".format(word))]
     if word in _DESTRUCT_SQL_CLIENTS and "sql" in _DESTRUCT_RULES and any(
             _DESTRUCT_SQL_RE.search(arg) for arg in args):
         return [("deny", "{} runs a DROP or TRUNCATE statement against a database".format(word))]
@@ -7492,7 +7695,9 @@ def _destruct_classified(seg, idx, word, cwd, deadline):
             return [("deny", "kubectl delete removes cluster resources")]
         run = next((arg for arg in args if arg in _DESTRUCT_KUBECTL_RUNS), None)
         hit = _destruct_marker(args) if run and "runner" in _DESTRUCT_RULES else None
-        return _destruct_unmodelled("kubectl {} runs another command".format(run), hit) if hit else []
+        if hit:
+            return _destruct_unmodelled("kubectl {} runs another command".format(run), hit)
+        return _destruct_prior_runner(seg, idx + 1, ctx) if ctx.get("prior") and run else []
     if word in ("rm", "unlink") and "rm" in _DESTRUCT_RULES:
         recursive, no_preserve, operands = _rm_operands(args)
         if no_preserve and "no-preserve-root" in _DESTRUCT_RULES:
@@ -7520,7 +7725,7 @@ def _destruct_classified(seg, idx, word, cwd, deadline):
                                      "with no known working directory, or a '..' path whose kernel "
                                      "resolution this guard cannot prove".format(word, args[k])))
         else:
-            verdict = _destruct_classify_path(path, recursive, deadline)
+            verdict = _destruct_classify_path(path, recursive, deadline, ctx.get("prior"))
             if verdict[0] != "deny" and time.monotonic() > deadline:
                 # the work itself crossed the deadline: a result completed after it is not trusted (the
                 # platform would be deciding the call by then, not this guard), so it DENIES (fail closed)
@@ -7600,6 +7805,26 @@ def destructive_guard(data):
     here-string, a process substitution, an unquoted heredoc) whose text, read through its quoting context with
     line continuations joined, names one.
 
+    A segment also DENIES when an earlier segment of the same command can change the meaning its
+    classification would trust: a function or alias definition, or a cd/pushd/popd redefinition, that
+    shadows a modelled wrapper, a known non-runner, or the directory-change builtin (class prior-effect-1);
+    a bare or exported environment assignment, or a git-config write, that arms a command-valued setting
+    (pager, editor, diff, external-diff, sequence editor, textconv or alias) a later command runs
+    (prior-effect-2); a runner whose executed command word is itself computed or a glob matching a
+    destructive name (prior-effect-3); and a database client meta-command that runs a shell or a program, or
+    a modelled wrapper option whose value is an unquoted expansion (prior-effect-6).
+
+    The single prior-effect rule records segment effects in a pre-pass and carries their prefix forward.
+    Command-valued environment names are the closed _DESTRUCT_COMMAND_ENV set; git keys are core.pager,
+    core.editor, core.sshCommand, sequence.editor, diff.external, *.textconv and alias.*. Setting values
+    taint only when they name a destructive word; git clone -c/--config settings are checked too. Bounded
+    partials for prior-effect-4/5: running the exact literal path an earlier segment wrote, copied or linked
+    denies, directly or as a plain shell-script operand; cp/mv/ln destinations, tee/mkdir/touch operands and
+    file-output redirections are recorded. After an earlier creator, link or unmodelled runner, an allow
+    based only on absence or on symlink resolution denies; an earlier literal link destination also
+    invalidates a later scratch-path allow through that destination. Positive tracked-clean allows are not
+    downgraded.
+
     In a modelled shape, rm and unlink, truncate, and dd's of= target are PATH words: each operand is resolved to
     a literal absolute path and classified. A relative operand resolves against the payload cwd, moved only by a
     literal, UNCONDITIONALLY-REACHED 'cd DIR &&' in the parent shell (bare or behind command/builtin), outside
@@ -7623,6 +7848,14 @@ def destructive_guard(data):
     a cd inside a case statement), as is every glob or variable operand and every path word outside a repository
     and outside scratch.
 
+    The prior-effect rule can also deny benign commands naming no destructive word: a trusted-name helper
+    defined then invoked, a literal copy/write-then-run build step, client file-loading meta-commands, and
+    wrapper values built from expansions. Runner argument roles are not fully modelled: opaque data and
+    option operands can be mistaken for computed command words. SQL meta-command matching is lexical and can
+    over-match quoted SQL data. Taints accumulate across conditionals, function bodies and subshells, and
+    are not cleared by overwrites or unsets; a setting can deny a command that would not actually consume
+    it. These are conservative false denies, not evidence that those benign commands destroy data.
+
     OPT-OUT: a truthy GUARDRAIL_ALLOW_DESTRUCTIVE leading the segment's own command (bash last-wins; '', 0, false,
     no, off are falsy) skips that segment with a note. It is a CONVENTION the assistant can type, so it records
     a claimed human authorization and accepted loss; it is not proof of either. It is not honoured on an
@@ -7633,6 +7866,16 @@ def destructive_guard(data):
     (an alias, a function, a git alias, a CDPATH, a changed cwd the payload does not report), mv or cp over an
     existing file and a shell redirect, docker or podman rm and other container state, an API call, and content
     git cannot see as changed (assume-unchanged or skip-worktree marks).
+
+    Beyond these bounded partials, the contents of an executable created, copied, linked or written by one
+    segment and run by a later one, and a filesystem fact (a path's absence, its tracked-clean state, or a
+    symlink target) that an earlier segment changes between this hook's probe and the command's execution,
+    are not seen: a PreToolUse hook probes only pre-command state (classes prior-effect-4 and
+    prior-effect-5). PATH lookup, non-shell interpreters, computed destinations, unmodelled creator option
+    grammars, downloads and create-then-run across turns remain unseen. Tracked-clean state is intentionally
+    not invalidated by the bounded partial. Existing environment/configuration, read/stdin-supplied
+    settings, computed commands arriving on stdin, SQL from -f FILE or stdin, and database clients outside
+    psql/mysql/mariadb/sqlite3 remain residuals.
 
     FAIL POSTURE: a missing tool_name or an unreadable command DENIES (fail closed); a non-Bash tool ALLOWS; a
     failed status probe DENIES; one deadline (_DESTRUCT_BUDGET) covers the whole classification: repository
@@ -7684,10 +7927,13 @@ def destructive_guard(data):
     prose = not ("prose-shadow" in _DESTRUCT_RULES
                  and _DESTRUCT_SHADOW_RE.search(_destruct_shell_text(command, True)))
     deadline = time.monotonic() + _DESTRUCT_BUDGET
-    for seg in segments:
+    effects = _destruct_prior_effects(segments) if "prior-effect" in _DESTRUCT_RULES else None
+    prior = {"names": set(), "env": {}, "config": None, "outputs": set(), "links": set(), "mutates": False}
+    for seg_no, seg in enumerate(segments):
         nest, lost = _destruct_nesting(seg.argv, nest)
         broken = broken or lost
-        ctx = {"command": command, "upstream": upstream if prev_sep in ("|", "|&") else [], "prose": prose}
+        ctx = {"command": command, "upstream": upstream if prev_sep in ("|", "|&") else [], "prose": prose,
+               "prior": prior if effects is not None else None}
         idx = _command_word_index(seg.argv)
         last = None
         for tok in seg.argv[:idx]:
@@ -7701,7 +7947,23 @@ def destructive_guard(data):
                          "secrst) and is not proof of either.".format(" ".join(seg.argv[idx:])[:200]))
         else:
             verdicts.extend(_destruct_segment(seg, cwd, deadline, ctx))
-        cwd = _destruct_next_cwd(seg, cwd, prev_sep, depth, nest == 0 and not broken, cdpath_risk)
+        next_cwd = _destruct_next_cwd(seg, cwd, prev_sep, depth, nest == 0 and not broken, cdpath_risk)
+        if effects is not None:
+            # A shadowed directory builtin or prefix cannot certify the shell's next cwd.
+            if (any(tok in prior["names"] for tok in seg.argv)
+                    and any(tok in ("cd", "pushd", "popd") for tok in seg.argv)):
+                next_cwd = None
+            effect = effects[seg_no]
+            for key in ("outputs", "links"):
+                for token, opaque, tilde in effect[key]:
+                    path = _destruct_resolve(token, opaque, tilde, cwd)
+                    if path is not None:
+                        prior[key].add(path)
+            prior["names"].update(effect["names"])
+            prior["env"].update(effect["env"])
+            prior["config"] = effect["config"] or prior["config"]
+            prior["mutates"] = prior["mutates"] or effect["mutates"]
+        cwd = next_cwd
         if "cd-flow" in _DESTRUCT_RULES:
             if seg.sep_after == "&":
                 if cwd != cwd_boundary:

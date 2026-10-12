@@ -744,6 +744,7 @@ tools/selftest_aiqt_corpus.py text eol=lf
 tools/selftest_aiqt_hooks.py text eol=lf
 tools/selftest_checks.toml text eol=lf
 tools/selftest_ci_status.py text eol=lf
+tools/selftest_destruct_prior_effect_vectors.py text eol=lf
 tools/selftest_git_fixture_env.py text eol=lf
 tools/selftest_opf_render.py text eol=lf
 tools/selftest_orch_hooks.py text eol=lf

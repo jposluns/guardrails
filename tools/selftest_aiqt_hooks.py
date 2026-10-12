@@ -1938,7 +1938,18 @@ def _test_destructive_guard(failures, tmp):
         # allows (data is absent inside the repository); the runner mutant allows each one unexamined
         ("deny-runner-" + name, "runner", "{} rm -rf data".format(name), rp, "deny", {})
         for name in sorted(aiqt_hooks._COMMAND_RUNNERS - set(aiqt_hooks._DESTRUCT_WRAPPER_SPECS))]
+    from selftest_destruct_prior_effect_vectors import PRIOR_EFFECT_VECTORS, PRIOR_EFFECT_CONTROLS
+
+    def prior_command(template):
+        return template.replace("{rp}", rp).replace("{scratch}", str(scratch)).replace("{absent}", absent)
+
+    vectors.extend((label, "prior-effect", prior_command(template), rp, want, {})
+                   for label, _class, template, want in PRIOR_EFFECT_VECTORS)
     try:
+        for label, template, want in PRIOR_EFFECT_CONTROLS:
+            got = run(prior_command(template), rp, {})
+            if got != want:
+                failures.append("(dz-{}) expected {}, got {}".format(label, want, got))
         for label, rule, command, cwd, want, opts in vectors:
             got = run(command, cwd, opts)
             if got != want:
@@ -1953,6 +1964,9 @@ def _test_destructive_guard(failures, tmp):
                 mutant = run(command, cwd, opts)
             finally:
                 aiqt_hooks._DESTRUCT_RULES = saved_rules
+            if rule == "prior-effect" and mutant != "allow":
+                failures.append("(dz-prior-mutant-{}) removing prior-effect must allow, got {}"
+                                .format(label, mutant))
             if mutant == want:
                 failures.append("(dz-mutant-{}) removing rule {!r} left {!r} at {}; the vector does not depend "
                                 "on its rule".format(label, rule, command, want))
