@@ -20,8 +20,9 @@ persisted anchor file (<register>.anchor: the last verified seq and line digest)
 --update-anchor moves forward on a green run (and establishes the first anchor). Fail-closed: a
 DECLARED register that is absent or unreadable, a broken chain or sequence, a reused id, an illegal
 status transition, or a landed row whose commit or repo-relative check_ref does not exist is a
-violation (exit 1); and an append-only AUTHORITY that cannot be read (no computable merge-base, or a
-declared untracked register with no anchor) is a distinct cannot-evaluate failure (exit 2), never a
+violation (exit 1); and an append-only AUTHORITY that cannot be read (no computable merge-base, a git
+failure deciding whether the register is tracked, a malformed or unreadable anchor, or a declared
+untracked register with no anchor) is a distinct cannot-evaluate failure (exit 2), never a
 silent skip nor a HEAD-against-itself self-comparison (chkfcl/grdinp). With no registry, or no declared
 register path, the live leg is NOT APPLICABLE and the self-test carries the assurance in CI.
   check_mistakes_register.py                   run the live leg
@@ -65,6 +66,20 @@ class CannotEvaluate(RuntimeError):
     an authority it could not compute (chkfcl/grdinp)."""
 
 
+class _DuplicateKey(ValueError):
+    """A register row carried the same key twice: json.loads would silently keep the last value, so
+    a reader and this gate could disagree on the row (for example two status fields)."""
+
+
+def _pairs_without_duplicates(pairs):
+    seen = set()
+    for key, _ in pairs:
+        if key in seen:
+            raise _DuplicateKey(key)
+        seen.add(key)
+    return dict(pairs)
+
+
 def verify_lines(lines, root=None, prefix="MR-"):
     """Return a list of violation strings for the raw register lines (empty = clean). prefix is the
     register's id family (MR- for the mistakes register, AT- for an attestations register)."""
@@ -74,16 +89,24 @@ def verify_lines(lines, root=None, prefix="MR-"):
             problems.append("line {}: blank line inside the register".format(n))
             continue
         try:
-            row = json.loads(line)
+            row = json.loads(line, object_pairs_hook=_pairs_without_duplicates)
+        except _DuplicateKey as exc:
+            problems.append("line {}: duplicated key {!r} in the row (the parser would silently "
+                            "keep the last value)".format(n, exc.args[0]))
+            continue
         except ValueError:
+            problems.append("line {}: not a JSON object".format(n))
+            continue
+        if not isinstance(row, dict):
             problems.append("line {}: not a JSON object".format(n))
             continue
         want_prev = ZERO if prev_line is None else hashlib.sha256(
             prev_line.encode("utf-8")).hexdigest()
         if row.get("prev") != want_prev:
             problems.append("line {}: digest chain broken".format(n))
-        if row.get("seq") != n:
-            problems.append("line {}: seq {} is not the line number".format(n, row.get("seq")))
+        seq = row.get("seq")
+        if not isinstance(seq, int) or isinstance(seq, bool) or seq != n:
+            problems.append("line {}: seq {} is not the line number".format(n, seq))
         rid = row.get("id")
         status = row.get("status")
         if status not in STATUSES:
@@ -131,27 +154,52 @@ def verify_lines(lines, root=None, prefix="MR-"):
 def verify_append_only(root, path, lines, allow_missing_anchor=False):
     """Tracked register: exact full-line prefix of the merge-base state. Untracked: the anchor file.
     Returns a list of violations. Raises CannotEvaluate when the append-only AUTHORITY itself cannot be
-    read (tracked: no computable merge-base with origin/HEAD, or its historical file unreadable;
-    untracked: a declared register present with no anchor and allow_missing_anchor False), so the guard
-    never falls back to comparing a possibly-tampered HEAD against itself. allow_missing_anchor is set
-    only by the --update-anchor bootstrap that establishes the first anchor."""
+    read: a git failure deciding whether the register is tracked (any outcome other than git's
+    confirmed tracked exit 0 or not-tracked exit 1); tracked: no computable merge-base with
+    origin/HEAD, or its historical file unreadable; untracked: a malformed or unreadable anchor, or a
+    declared register present with no anchor and allow_missing_anchor False. So the guard never falls
+    back to comparing a possibly-tampered HEAD against itself, and a broken git never routes a tracked
+    register into the anchor leg. allow_missing_anchor is set only by the --update-anchor bootstrap
+    that establishes the first anchor (it covers any unanchored untracked register, not only an empty
+    one, because a second append must still land before the first anchor is set)."""
     rel = None
     try:
         rel = str(path.resolve().relative_to(Path(root).resolve()))
     except ValueError:
         pass
     if rel:
-        tracked = subprocess.run(["git", "-C", str(root), "ls-files", "--error-unmatch", rel],
-                                 capture_output=True, timeout=10).returncode == 0
-        if tracked:
-            base = subprocess.run(["git", "-C", str(root), "merge-base", "HEAD",
-                                   "origin/HEAD"], capture_output=True, text=True, timeout=10)
+        # The tracked/untracked DECISION is itself an authority read: git confirms "not tracked"
+        # only with exit 1; any other failure (a corrupt index: exit 128, an unrunnable git, a
+        # timeout) leaves the question open and is cannot-evaluate, never a fall-through into the
+        # untracked anchor leg and its missing-anchor allowance (chkfcl).
+        try:
+            probe = subprocess.run(["git", "-C", str(root), "ls-files", "--error-unmatch", rel],
+                                   capture_output=True, timeout=10)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise CannotEvaluate("cannot decide whether the register is tracked ({})".format(exc))
+        if probe.returncode not in (0, 1):
+            raise CannotEvaluate("cannot decide whether the register is tracked (git ls-files "
+                                 "exited {}: {})".format(
+                                     probe.returncode,
+                                     probe.stderr.decode("utf-8", "replace").strip()))
+        if probe.returncode == 0:
+            try:
+                base = subprocess.run(["git", "-C", str(root), "merge-base", "HEAD",
+                                       "origin/HEAD"], capture_output=True, text=True,
+                                      timeout=10)
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise CannotEvaluate("cannot compute the register authority from origin/HEAD: "
+                                     "{}".format(exc))
             if base.returncode != 0 or not base.stdout.strip():
                 raise CannotEvaluate("cannot compute the register authority from origin/HEAD: {}"
                                      .format(base.stderr.strip() or "no merge-base"))
             ref = base.stdout.strip()
-            old = subprocess.run(["git", "-C", str(root), "show", "{}:{}".format(ref, rel)],
-                                 capture_output=True, text=True, timeout=10)
+            try:
+                old = subprocess.run(["git", "-C", str(root), "show", "{}:{}".format(ref, rel)],
+                                     capture_output=True, text=True, timeout=10)
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise CannotEvaluate("cannot read the register at its merge-base authority: "
+                                     "{}".format(exc))
             if old.returncode != 0:
                 raise CannotEvaluate("cannot read the register at its merge-base authority: {}"
                                      .format(old.stderr.strip() or "git show failed"))
@@ -164,14 +212,24 @@ def verify_append_only(root, path, lines, allow_missing_anchor=False):
         raise CannotEvaluate("the declared untracked register has no anchor; run --update-anchor to "
                              "establish the baseline (an absent authority is not a clean result)")
     if anchor.exists():
+        # The anchor is the append-only AUTHORITY: one that cannot be read, or that does not hold
+        # the declared shape (an object with an integer seq >= 1, bools excluded, and a 64-hex
+        # digest), is cannot-evaluate, never a violation list and never a silently skipped digest
+        # comparison (a negative or boolean seq used to bypass the anchored-row check).
         try:
             a = json.loads(anchor.read_text(encoding="utf-8"))
-            n, digest = int(a["seq"]), str(a["digest"])
-        except (OSError, ValueError, KeyError, TypeError):
-            return ["the anchor file is unreadable or malformed (fail-closed)"]
+        except (OSError, ValueError) as exc:
+            raise CannotEvaluate("the anchor file cannot be read as JSON ({})".format(exc))
+        n = a.get("seq") if isinstance(a, dict) else None
+        digest = a.get("digest") if isinstance(a, dict) else None
+        if (not isinstance(n, int) or isinstance(n, bool) or n < 1
+                or not isinstance(digest, str) or len(digest) != 64
+                or set(digest) - set("0123456789abcdef")):
+            raise CannotEvaluate("the anchor file is malformed (an anchor is an object with an "
+                                 "integer seq >= 1 and a 64-hex digest)")
         if len(lines) < n:
             return ["the register is shorter than its verified anchor (rows removed)"]
-        if n > 0 and hashlib.sha256(lines[n - 1].encode("utf-8")).hexdigest() != digest:
+        if hashlib.sha256(lines[n - 1].encode("utf-8")).hexdigest() != digest:
             return ["the anchored row was rewritten (tamper or reorder before seq {})".format(n)]
     return []
 
@@ -289,17 +347,53 @@ def self_test():
                                             lambda p: row(3, "MR-1", "landed", p)), False)
         _case("bad-seq-fails", chain(lambda p: row(1, "MR-1", "proposed", p),
                                      lambda p: row(9, "MR-2", "proposed", p)), False)
+        # a non-object line, a bool or float seq, and a duplicated key are named findings,
+        # never a crash or a silent pass
+        _case("non-object-line-fails", ["17"], False)
+        _case("bool-seq-fails", chain(lambda p: row(True, "MR-1", "proposed", p)), False)
+        _case("float-seq-fails", chain(lambda p: row(1.0, "MR-1", "proposed", p)), False)
+        dup_fields = (("seq", 1), ("id", "MR-1"), ("ts", "t"), ("mistake", "m"),
+                      ("evidence", "e"), ("rule", "r"), ("guardrail", "g"),
+                      ("status", "landed"), ("status", "proposed"), ("prev", ZERO))
+        dup_row = "{" + ", ".join(
+            json.dumps(k) + ": " + json.dumps(v) for k, v in dup_fields) + "}"
+        _case("duplicate-key-fails", [dup_row], False)
         # edit/delete/reorder of an anchored row fails via the anchor
         reg_dir = tmp / "r"
         reg_dir.mkdir()
+        # the anchor leg needs a DECIDABLE tracked question (the fail-closed tracked decision
+        # refuses a non-repository root), so the untracked fixture lives in its own repository
+        subprocess.run(["git", "init", "-q", str(reg_dir)], check=True,
+                       capture_output=True, timeout=30)
         rp = reg_dir / "register.jsonl"
         rp.write_text("\n".join(good) + "\n", encoding="utf-8")
         update_anchor(rp, good)
         tampered = [good[0], good[2], good[1]]
-        if not verify_append_only(tmp, rp, tampered):
+        if not verify_append_only(reg_dir, rp, tampered):
             failures.append("anchored reorder should fail")
-        if verify_append_only(tmp, rp, good + [row(4, "MR-3", "proposed", "x")]):
+        if verify_append_only(reg_dir, rp, good + [row(4, "MR-3", "proposed", "x")]):
             failures.append("anchored append should pass the append-only leg")
+        # malformed anchor CONTROLS are cannot-evaluate, never a violation list or a silently
+        # bypassed digest comparison
+        anchor_path = Path(str(rp) + ".anchor")
+        good_anchor = anchor_path.read_text(encoding="utf-8")
+        for tag, seq_val, digest_val in (("seq -1", -1, "0" * 64),
+                                         ("seq true", True, "0" * 64),
+                                         ("bad digest", 1, "Z" * 64)):
+            anchor_path.write_text(json.dumps({"seq": seq_val, "digest": digest_val}),
+                                   encoding="utf-8")
+            try:
+                verify_append_only(reg_dir, rp, good)
+                failures.append("a {} anchor should be cannot-evaluate".format(tag))
+            except CannotEvaluate:
+                pass
+        anchor_path.write_text("not json", encoding="utf-8")
+        try:
+            verify_append_only(reg_dir, rp, good)
+            failures.append("a not-json anchor should be cannot-evaluate")
+        except CannotEvaluate:
+            pass
+        anchor_path.write_text(good_anchor, encoding="utf-8")
         # a landed row citing a missing commit or check fails
         repo = tmp / "repo"
         repo.mkdir()
@@ -345,6 +439,23 @@ def self_test():
         _git_ci(repo, "mistakes.jsonl", msg="rewrite register")
         if run(repo) != 2:
             failures.append("tracked rewrite without origin/HEAD should exit 2")
+        # a git failure deciding WHETHER the register is tracked (a corrupt index: exit 128,
+        # not git's confirmed not-tracked exit 1) is cannot-evaluate and names that decision,
+        # never a fall-through into the untracked anchor leg
+        junk_index = tmp / "junk-index"
+        junk_index.write_text("broken-index", encoding="utf-8")
+        os.environ["GIT_INDEX_FILE"] = str(junk_index)
+        try:
+            try:
+                verify_append_only(repo, tracked, rewritten)
+                failures.append("a git failure deciding tracked status should be "
+                                "cannot-evaluate")
+            except CannotEvaluate as exc:
+                if "cannot decide whether the register is tracked" not in str(exc):
+                    failures.append("the tracked-decision failure should name itself, got: "
+                                    "{}".format(exc))
+        finally:
+            os.environ.pop("GIT_INDEX_FILE", None)
         # P2: a declared UNTRACKED register present with no anchor is cannot-evaluate -> exit 2.
         untracked = repo / "untracked-register.jsonl"
         untracked.write_text("\n".join(tracked_good) + "\n", encoding="utf-8")
@@ -374,6 +485,16 @@ def self_test():
             failures.append("--update-anchor should bootstrap the attestations anchor and pass")
         if run(repo) != 0:
             failures.append("gate should pass the attestations register once anchored")
+        # end to end: a malformed anchor is exit 2 in the gate, then green once restored
+        at_anchor_path = Path(str(at_reg_path) + ".anchor")
+        saved_anchor = at_anchor_path.read_text(encoding="utf-8")
+        at_anchor_path.write_text(json.dumps({"seq": True, "digest": "beef"}),
+                                  encoding="utf-8")
+        if run(repo) != 2:
+            failures.append("a malformed anchor should be cannot-evaluate (exit 2) in the gate")
+        at_anchor_path.write_text(saved_anchor, encoding="utf-8")
+        if run(repo) != 0:
+            failures.append("gate should pass again once the anchor is restored")
         at_wrong = chain(lambda p: row(1, "MR-1", "proposed", p))
         at_reg_path.write_text("\n".join(at_wrong) + "\n", encoding="utf-8")
         if run(repo) != 1:
@@ -386,11 +507,13 @@ def self_test():
             print("  - " + f)
         return 1
     print("SELF-TEST PASS: pure appends pass; a broken chain or sequence, a reused id, an illegal "
-          "transition, an anchored rewrite or reorder, an unverifiable or absolute-path landed "
-          "check_ref, a tracked rewrite with no computable merge-base, and a declared untracked "
-          "register with no anchor all fail; the --update-anchor bootstrap establishes the baseline; "
-          "and a declared attestations register is verified under the AT- prefix with the optional "
-          "class and ref fields accepted")
+          "transition, a non-object line, a bool or float seq, a duplicated key, an anchored "
+          "rewrite or reorder, an unverifiable or absolute-path landed check_ref, a tracked "
+          "rewrite with no computable merge-base, and a declared untracked register with no "
+          "anchor all fail; a malformed or unreadable anchor and a git failure deciding whether "
+          "the register is tracked are cannot-evaluate (exit 2); the --update-anchor bootstrap "
+          "establishes the baseline; and a declared attestations register is verified under the "
+          "AT- prefix with the optional class and ref fields accepted")
     return 0
 
 
