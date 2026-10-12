@@ -2816,6 +2816,49 @@ def self_test():
           "imported_namespaces" in str(_alloc_error(
               lambda: next_id(dict(BI=3), "imported:BI", imported_series=True))))
 
+    # ----- FIX-OPF-CLEAN-PATH-DEEP-RENDER: a finding message renders a parsed value through the bounded
+    # _safe_display. tomllib builds a dotted table header iteratively, so a 100,000-part header parses into a
+    # 100,000-level nested table whose plain repr() overflowed the stack pre-fix (RecursionError, "Stack
+    # overflow ... while getting the repr of an object", escaping validate_record). The deep vectors run in
+    # a bounded child (run_bounded), so a regression is the ERROR:RecursionError sentinel rather than a
+    # crash of this suite. Each refusal still stands: the record is INVALID with its finding. The wide vector
+    # rendered a megabyte-scale finding pre-fix; the small vector pins the byte-identical render. -----
+    import tomllib
+    from _opf_emit import run_bounded
+    _dr_header = ".a" * 100000 + "]\nb = 1\n"
+
+    def _dr_outcome(rec, prefix):
+        res = validate_record(rec)
+        hit = [f for f in res.findings if f.startswith(prefix) and "is not a well-formed" in f]
+        return "{}|{}|{}".format(res.status, len(hit) == 1 and "nested deeper than" in hit[0],
+                                 all(len(f) <= 2048 for f in res.findings))
+
+    def _dr_deep_id():
+        rec = envelope("backlog_item", 90, "open")
+        rec["id"] = tomllib.loads("[id" + _dr_header)["id"]
+        return _dr_outcome(rec, "id ")
+
+    def _dr_deep_link():
+        rec = envelope("backlog_item", 91, "open")
+        rec["links"] = tomllib.loads("[[links]]\nrel = 'relates'\n[links.id" + _dr_header)["links"]
+        return _dr_outcome(rec, "links[0].id ")
+
+    check("deeprender-deep-id-refused-as-finding",
+          run_bounded(_dr_deep_id, timeout_s=60) == "INVALID|True|True")
+    check("deeprender-deep-link-id-refused-as-finding",
+          run_bounded(_dr_deep_link, timeout_s=60) == "INVALID|True|True")
+    _dr_wide = envelope("backlog_item", 92, "open")
+    _dr_wide["id"] = tomllib.loads("id = [" + "1, " * 200000 + "]\n")["id"]
+    _dr_wide_res = validate_record(_dr_wide)
+    check("deeprender-wide-id-finding-bounded",
+          _dr_wide_res.status == INVALID and all(len(f) <= 2048 for f in _dr_wide_res.findings)
+          and any(f.startswith("id [1, 1, ") and "...<truncated>" in f for f in _dr_wide_res.findings))
+    _dr_small = envelope("backlog_item", 93, "open")
+    _dr_small["id"] = tomllib.loads("id = [1, 'x', {a = 2}]\n")["id"]
+    check("deeprender-small-id-byte-identical",
+          "id {!r} is not a well-formed <NS>-<n> id (spec 8.2)".format([1, "x", {"a": 2}])
+          in validate_record(_dr_small).findings)
+
     if failures:
         print("OPF-SCHEMA SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked))
         for f in failures:
