@@ -25,7 +25,9 @@ planting of a pack member that passed the b.5 trust gate, verify_pack_member), r
 publication of the render engine's planned bytes, composed into the journaled transaction) and record-adoption (the immutable receipt core and its genesis outcome event in the
 run's own evidence bundle, adoption_record). The apply-time preservation pass (compose_preservation)
 composes the spec 14.2 preservation of the approved plan's sources into a transaction; it is a composition
-pass, not a dispatch entry, and the stage driver does not call it yet. PR3 slice 2 makes `enable-hook`
+pass, not a dispatch entry, which the stage driver composes ahead of the plan rows; it archives only the
+sources no plan file-op row archives (a migrate source takes no op), so the driver archives each source
+exactly once in the base transaction. PR3 slice 2 makes `enable-hook`
 executable, in the run's
 base (apply-stage) transaction only, as does slice 4 with the two structured-edit ops (_REGISTRATION_OPS:
 register-unmanaged, repoint-consumer). The stage driver
@@ -1193,12 +1195,35 @@ def _classify_source(run_id, label, row):
     return path, digest, ("archived-removed" if occupying else "preserved")
 
 
+def _file_op_archived(plan):
+    """The (disposition, path, digest) of every plan source a plan file-op row archives in the apply stage: a
+    retire-file row its retire source and a move-file row its occupying move source (_compose_retire_file,
+    _compose_move_file), so the preservation pass leaves each of them to that row. A plan with no `ops`
+    names none; `ops` that is not a list refuses. A row that is not a table, or whose path or digest is not
+    a string, names nothing: dispatch refuses it, and leaving its source to this pass can only compose a
+    second archive copy, which refuses, never a source that nothing archives."""
+    rows = plan.get("ops", [])
+    if not isinstance(rows, list):
+        raise AdoptApplyError("cannot evaluate the preservation pass: the plan's ops is not a list; nothing "
+                              "composed (fail-closed)")
+    owned = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = row.get("op")
+        bound = ((row.get("path"), row.get("preimage_digest")) if name == "retire-file"
+                 else (row.get("source"), row.get("source_digest")) if name == "move-file" else None)
+        if bound is not None and all(isinstance(value, str) for value in bound):
+            owned.add(("retire" if name == "retire-file" else "move",) + bound)
+    return owned
+
+
 def compose_preservation(ops, plan):
     """The apply-time preservation pass (spec 14.1, 14.2), driven by the approved plan's `sources` rows and
     composed into ONE adoption transaction's ApplyOps. ALL OR NOTHING: first every row is classified from
     the plan alone, with no live read, so a plan or row the pass cannot read or classify (a non-table plan
-    or row, a plan naming another run, sources that are not a list, a closed-keyset violation, a malformed
-    path or digest, a disposition outside DISPOSITIONS, a non-boolean occupying flag, a duplicate path, a
+    or row, a plan naming another run, sources or ops that are not a list, a closed-keyset violation, a
+    malformed path or digest, a disposition outside DISPOSITIONS, a non-boolean occupying flag, a duplicate path, a
     kept source that occupies a destination or records a preservation, a missing preservation) refuses the
     whole pass as cannot-evaluate, never a silent skip. Then, in plan order, every live read and every op is
     composed into an ISOLATED copy of the caller's ops, staged bytes and directory bookkeeping
@@ -1207,6 +1232,11 @@ def compose_preservation(ops, plan):
     preserved (its byte-identical archive copy created) and left frozen in place (ApplyOps.preserve), its
     removal waiting for the green completion check; a kept source and a non-occupying move source take no
     op here (a non-occupying move is preserved at its move destination by move-file, not by this pass).
+    Nor does a retire source, or an occupying move source, that a retire-file or move-file row of the
+    plan's `ops` binds at its path and digest (_file_op_archived): that file op composes its archive copy in
+    the apply stage, so the stage driver, which composes this pass and then every plan row into ONE
+    ApplyOps, archives each source exactly once; a migrate source takes no op row, so its archive copy is
+    this pass's alone.
     Every source the pass archives must record exactly archive_rel(run_id, path) as its preservation, or
     the plan is refused. A drifted, absent or unreadable source, or an occupied archive destination,
     refuses through ApplyOps.preserve. Only after the whole pass succeeds, and its accounting is built, is
@@ -1218,7 +1248,8 @@ def compose_preservation(ops, plan):
     a fault inside a composing method lands on the fork, never on the caller). A sealed caller's fork
     stays sealed, so a pass that would compose any op over it refuses with the seal reason. Returns the
     (path, action) accounting of every row in plan order, the action one of "preserved",
-    "archived-removed" or "none"; raises AdoptApplyError on every refusal. DISCLOSED-RESIDUAL: the pass
+    "archived-removed", "file-op" (its plan file-op row archives it) or "none"; raises AdoptApplyError on
+    every refusal. DISCLOSED-RESIDUAL: the pass
     holds only the rows it reads. It does not re-run validate_plan or check the approval binding
     (apply_plan's later slice), and it takes the `occupying` flag as the planner recorded it, never
     re-deriving the plan's managed destinations."""
@@ -1236,6 +1267,7 @@ def compose_preservation(ops, plan):
     if not isinstance(rows, list):
         raise AdoptApplyError("cannot evaluate the preservation pass: the plan's sources is not a list; "
                               "nothing composed (fail-closed)")
+    owned = _file_op_archived(plan)
     classified = []
     seen = set()
     for i, row in enumerate(rows):
@@ -1245,6 +1277,8 @@ def compose_preservation(ops, plan):
             raise AdoptApplyError("cannot evaluate {}: its path {!r} is a duplicate of an earlier row; the "
                                   "preservation pass composes nothing (fail-closed)".format(label, path))
         seen.add(path)
+        if action != "none" and (row["disposition"], path, digest) in owned:
+            action = "file-op"
         classified.append((path, digest, action))
     work = ops._fork()
     for path, digest, action in classified:
@@ -5076,8 +5110,10 @@ def _compose_retire_file(op_row, context):
     non-occupying one takes its retirement preimage and stays frozen in place. Retirement stage: a frozen
     source is removed once its committed preimage re-verifies; an occupying source, already out of the
     live tree, only has its archived bytes re-verified (recording its retirement is the receipt's, a later
-    slice). Drift refuses in both stages. Reversal before commit is the journal's rollback, which restores
-    a removed source from its digest-checked preimage."""
+    slice). Drift refuses in both stages. The apply-stage archive copy is this op's own: the preservation
+    pass leaves a source this row binds to it (compose_preservation), so the driver archives it once.
+    Reversal before commit is the journal's rollback, which restores a removed source from its digest-checked
+    preimage."""
     ops, path, digest = context.ops, op_row["path"], op_row["preimage_digest"]
     occupying = _bound_occupying(context, path, "retire", digest)
     if _stage(ops) == "apply":
@@ -5096,7 +5132,10 @@ def _compose_move_file(op_row, context):
     beneath the Move root (the planner's rule, spec 14.2; protected_destination alone exempts this run's
     own archive and bundle, where a move would plant a forged preimage or evidence payload). Apply stage:
     the destination must be absent; an occupying source is archived and removed preserve-first, a
-    non-occupying one is only drift-checked and stays frozen. Retirement stage (spec 14.2: the relocation
+    non-occupying one is only drift-checked and stays frozen; an occupied destination is a collision
+    finding, never an overwrite, and the occupying source's archive copy is this op's own, never the
+    preservation pass's (compose_preservation), so the driver archives it once. Retirement stage (spec
+    14.2: the relocation
     runs only after the green check): ApplyOps.relocate. The default destination
     `.working/archive/moved/<source-path>` is the planner's (store.moved_dest). Reversal before commit is
     the journal's rollback: the destination create is undone and a removed source restored."""
@@ -5363,6 +5402,54 @@ def _receipt_not_yet_composable(context=None):
 # any other row; the receipt slice reconciles that row with this stage.
 DRIVER_STAGES = {RECEIPT_STAGE: _receipt_not_yet_composable}
 
+# What a landed handler composes from that neither the sealed plan nor its captured approval carries, so the
+# driver cannot supply it: run_apply refuses a plan with such a row before anything is written, naming the
+# missing value, and never composes the row over a default. Keyed by (handler, op), or (handler, None) for
+# every op of that handler; the slice that supplies the value from a bound source removes its entry.
+_DRIVER_UNSUPPLIED = {
+    (_execute_file_op, "create-file"): ("the created file's planned bytes (the plan binds only its "
+                                        "content_digest, and no bound source supplies the bytes)"),
+    (_execute_registration_op, "repoint-consumer"): ("the consumer's planned postimage model (the plan binds "
+                                                     "only its new_digest)"),
+    (_plant_governance, None): ("context pack (the release manifest, root.txt and member bytes, which only "
+                                "the trust-anchor gather can supply)"),
+    (_render_views, None): ("context observations (the inert git observations the store checks read, which "
+                            "this driver does not gather)"),
+    (_record_adoption, None): ("context receipt and now (the receipt core and its instant, which only the "
+                               "receipt stage assembles)"),
+}
+
+
+def _unsupplied(rows):
+    """Each plan row whose handler needs a value this driver cannot supply (_DRIVER_UNSUPPLIED), named with
+    that value; empty when the driver supplies every row."""
+    found = []
+    for i, row in enumerate(rows):
+        handler = OP_HANDLERS.get(row["op"])
+        need = _DRIVER_UNSUPPLIED.get((handler, row["op"]), _DRIVER_UNSUPPLIED.get((handler, None)))
+        if need is not None:
+            found.append("plan op[{}] ({!r}) needs {}".format(i, row["op"], need))
+    return found
+
+
+def _driver_contexts(ops, plan_doc, approval, product_root):
+    """The contexts the plan op handlers of ONE apply-stage composition take, built from the sealed plan and
+    the captured approval alone, never from ambient state (spec 14.1). Returns (table, typed). `typed` maps
+    each handler that composes through a typed context to it: the file-op handler to ONE OpContext over the
+    plan's source rows (so its claims span every file-op row), the registration handler to ONE
+    RegistrationContext over the plan's frozen store identity and each keep source's approved digest (so a
+    registration chain extends link by link), and the enable-hook handler to a HookContext. Every other
+    handler, and the receipt stage, takes `table` (`ops`, `plan`, `approval`, `product_root`, `stage`).
+    Neither typed context carries a value the plan does not bind: the OpContext holds no planned bytes and
+    the RegistrationContext no consumer model, and run_apply refuses a row that needs either
+    (_DRIVER_UNSUPPLIED) before anything is composed."""
+    table = dict(ops=ops, plan=plan_doc, approval=approval, product_root=product_root, stage=APPLY_STAGE)
+    kept = dict((row["path"], row["digest"]) for row in plan_doc["sources"] if row["disposition"] == "keep")
+    typed = {_execute_file_op: OpContext(ops, plan_doc["sources"]),
+             _execute_registration_op: RegistrationContext(ops, plan_doc["store"], kept=kept),
+             _execute_enable_hook: HookContext(ops)}
+    return table, typed
+
 
 def _canonical_toml(data, label):
     """Parse `data` as TOML that is byte-identical to its own emit_checked rendering, or refuse: a frozen
@@ -5547,13 +5634,17 @@ def run_apply(product_root, plan_bytes, approval_bytes, worksheet):
     apply_plan (the approval binds this plan's plan_digest and inventory_digest and follows its plan);
     refuse over a non-clean adoption journal; refuse a run already applied (_require_unapplied, replay
     admission ahead of freshness); re-derive the plan over the live tree and its observed revision
-    (rederive_or_refuse); and refuse while any plan op's slice, or the driver's mandatory receipt stage
+    (rederive_or_refuse); refuse while any plan op's slice, or the driver's mandatory receipt stage
     (DRIVER_STAGES), has not landed, so an unlanded step refuses the whole apply fail-closed by
-    construction, never half of it.
+    construction, never half of it; and refuse a row whose handler needs a value neither the sealed plan
+    nor its approval carries (_DRIVER_UNSUPPLIED), naming that value, never composing it over a default.
 
     Composition is the driver's, and so are its rules. One compose function stages the plan and approval
-    bytes in the run's evidence bundle, dispatches EVERY plan op in plan order in the apply stage, each with
-    one context table (`ops`, the transaction's ApplyOps; `plan`; `approval`; `product_root`; `stage`), then
+    bytes in the run's evidence bundle, composes the preservation pass (compose_preservation: the archive
+    copy of each source no plan file-op row archives, a migrate source's), dispatches EVERY plan op in plan
+    order in the apply stage, each with the context its handler requires, built from the sealed plan and
+    approval alone (_driver_contexts: an OpContext, a RegistrationContext or a HookContext, else the context
+    table of `ops`, the transaction's ApplyOps; `plan`; `approval`; `product_root`; `stage`), then
     composes the mandatory receipt stage whatever rows the plan carries; the first refusing verdict refuses
     the whole composition. Handlers run under the composition guard (_composing): a handler only stages into
     `ops`, so a direct filesystem or process effect, or a transaction of its own, refuses the composition (a
@@ -5591,26 +5682,21 @@ def run_apply(product_root, plan_bytes, approval_bytes, worksheet):
     if unlanded:
         raise AdoptApplyError("{} not yet executable in this build; a later adoption slice lands each, and apply "
                               "refuses before anything is written (fail-closed)".format(" and ".join(unlanded)))
+    unsupplied = _unsupplied(rows)
+    if unsupplied:
+        raise AdoptApplyError("{}; neither the sealed plan nor its approval carries that, and apply never "
+                              "composes a row over a default, so it refuses before anything is written "
+                              "(fail-closed)".format("; ".join(unsupplied)))
     frozen = set(row["path"] for row in plan_doc["sources"] if not row["occupying"])
 
     def compose(ops):
         with _composing():
             ops.create(plan_rel(run_id), plan_bytes)
             ops.create(approval_rel(run_id), approval_bytes)
-            # KNOWN GAP, unreachable in this build: the finish ops read context keys this driver does not
-            # supply yet: plant-governance reads `pack` (the release manifest, root.txt and members it
-            # verifies), render-views reads `observations` (the inert git observations it renders from),
-            # and record-adoption reads `receipt` and `now`. The receipt-stage gate above refuses every plan
-            # before this compose runs, so none of them is reached. The slice that lands the receipt stage
-            # must also gather and pass those four keys here; until then (read from the code, not run) an
-            # absent pack or receipt refuses, and absent observations leave the store checks that need them
-            # cannot-evaluate. Likewise the file-op handlers compose only through an OpContext (the plan's
-            # source rows and each create-file path's planned bytes), which this table is not, so a file-op
-            # row dispatched here refuses (fail-closed) until that slice binds the two.
-            context = dict(ops=ops, plan=plan_doc, approval=approval, product_root=product_root,
-                           stage=APPLY_STAGE)
+            compose_preservation(ops, plan_doc)
+            context, typed = _driver_contexts(ops, plan_doc, approval, product_root)
             for i, row in enumerate(rows):
-                verdict = dispatch(row, context)
+                verdict = dispatch(row, typed.get(OP_HANDLERS.get(row["op"]), context))
                 if verdict.status != store.VALID:
                     raise AdoptApplyError("plan op[{}] ({!r}) refused: {}".format(
                         i, row["op"], "; ".join(verdict.findings)))
@@ -10593,6 +10679,32 @@ def _self_test_checks():
                        ("legacy/KEEP.md", "none"), ("legacy/MOVE.md", "none")]
               and [(op["op"], op["path"]) for op in composed if op["op"] != "mkdir"]
               == [("create", archive_rel(rid, "legacy/OLD.md")), ("create", todo_copy), ("remove", todo)])
+        # a retire source and an occupying move source that a plan file-op row binds at their path and
+        # digest are that row's to archive (B3: one archive copy per source), so the pass composes nothing for
+        # them and accounts them "file-op", while a migrate source beside them stays the pass's; a row at
+        # another digest binds nothing, so the pass keeps that source (each red against a pass that archives
+        # a file-op row's source too, or defers to a row that does not bind it).
+        moving = pres_row("legacy/MOVE.md", "move", True)
+        owner_rows = [dict(op="retire-file", path=todo, preimage_digest=occupying["digest"]),
+                      dict(op="retire-file", path="legacy/RETIRE.md", preimage_digest=retire["digest"]),
+                      dict(op="move-file", source="legacy/MOVE.md", destination="adopter/MOVE.md",
+                           source_digest=moving["digest"])]
+        acct, why, composed, _staged = bare_compose(root, dict(pres_plan(migrate, occupying, retire, moving),
+                                                               ops=owner_rows))
+        check("preservation-file-op-sources-left-to-their-rows",
+              why is None and acct == [("legacy/OLD.md", "preserved"), (todo, "file-op"),
+                                       ("legacy/RETIRE.md", "file-op"), ("legacy/MOVE.md", "file-op")]
+              and [(op["op"], op["path"]) for op in composed if op["op"] != "mkdir"]
+              == [("create", archive_rel(rid, "legacy/OLD.md"))], observed=why)
+        stale_row = [dict(owner_rows[1], preimage_digest=plan_digest(b"another preimage\n"))]
+        acct, why, composed, _staged = bare_compose(root, dict(pres_plan(retire), ops=stale_row))
+        check("preservation-row-at-another-digest-binds-nothing",
+              why is None and acct == [("legacy/RETIRE.md", "preserved")]
+              and [(op["op"], op["path"]) for op in composed if op["op"] != "mkdir"] == [("create", retire_copy)])
+        acct, why, composed, staged = bare_compose(root, dict(pres_plan(migrate), ops=nothing))
+        check("preservation-ops-not-list-refused-by-its-own-rule",
+              acct is None and "the plan's ops is not a list" in (why or "") and composed == []
+              and staged == nothing)
         for label, row in (("foreign", pres_row("legacy/OLD.md", "migrate", False,
                                                   preservation="legacy/elsewhere.md")),
                            ("other-run", pres_row("legacy/OLD.md", "retire", False,
@@ -11316,6 +11428,127 @@ def _self_test_checks():
         check("driver-approve-after-apply-refused", "already has its transaction" in
               (refusal(capture_approval, root, plan_bytes, sheet, "adopter", now) or "")
               and _snapshot(root) == applied)
+
+    # 11b: the driver's typed contexts and its one preservation pass (B2, B3), over a planner-frozen fixture
+    # with a kept file (register-unmanaged), a non-occupying retire source (retire-file) and a non-occupying
+    # migrate source (no op row). The rows whose handlers this build cannot run under the driver (init-store,
+    # whose sequencing is a later unit; render-views and install-pack) and the receipt stage are stand-ins; the
+    # retire-file and register-unmanaged rows run their REAL handlers, each spied at its per-op composer, which
+    # the handler reaches only through its typed context. Each check is red against the plain context table
+    # (the handler refuses), against a driver that skips the preservation pass (the migrate source has no
+    # archive copy), and against one that archives a retire source twice (the second create refuses).
+    def _sheet_with(root, revision, decisions):
+        sheet = _sheet(root, revision)
+        sheet["sources"] = sorted(d["path"] for d in decisions)
+        sheet["decisions"] = decisions
+        obs = planner.investigate(root, sources=sheet["sources"], targets=sheet["targets"])
+        sheet["expected_observation_digest"] = (
+            tomllib.loads(obs.observation.decode("utf-8"))["observation_digest"] if obs.observation else "")
+        return sheet
+
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root = Path(temp).resolve()
+        typed_files = {"keep.md": b"kept\n", "legacy.md": b"legacy rules\n", "old.md": b"old notes\n"}
+        for rel, payload in typed_files.items():
+            (root / rel).write_bytes(payload)
+        head = _selftest_git_commit(root)
+        sheet = _sheet_with(root, head, [dict(path="keep.md", disposition="keep", actor="fixture"),
+                                         dict(path="legacy.md", disposition="retire", actor="fixture"),
+                                         dict(path="old.md", disposition="migrate", actor="fixture")])
+        typed_plan = _freeze(root, sheet) or b""
+        typed_doc = tomllib.loads(typed_plan.decode("utf-8")) if typed_plan else dict(
+            run_id=rid, ops=[], sources=[], store=dict(store_root=".", machine_rel=".working/toml"))
+        trid = typed_doc["run_id"]
+        typed_approval = attempt(capture_approval, root, typed_plan, sheet, "adopter", now)[0] or b""
+        typed_ops = [row["op"] for row in typed_doc["ops"]]
+        check("driver-typed-fixture-frozen-and-approved", bool(typed_plan) and bool(typed_approval)
+              and {"retire-file", "register-unmanaged"} <= set(typed_ops) and "move-file" not in typed_ops)
+        manifest_rel = schema.store_manifest(typed_doc["store"])
+        manifest_bytes = _opf_init.build_manifest().encode("utf-8")
+        reached = []
+        composed_creates = []
+
+        def scaffold(op_row, context):
+            # init-store's stand-in: the scaffolded manifest the registration chain starts from, staged
+            # through the context table.
+            reached.append((op_row["op"], type(context).__name__))
+            context["ops"].create(manifest_rel, manifest_bytes)
+            return schema._ok()
+
+        def benign(op_row, context):
+            reached.append((op_row["op"], type(context).__name__))
+            return schema._ok()
+
+        def spy(name, real):
+            def spying(op_row, context):
+                reached.append((name, type(context).__name__))
+                return real(op_row, context)
+            return spying
+
+        def receipt_stage(context):
+            composed_creates.append([op["path"] for op in context["ops"].ops if op.get("op") == "create"])
+            return schema._ok()
+
+        def typed_driver(stand_ins):
+            stack = contextlib.ExitStack()
+            stack.enter_context(mock.patch.dict(OP_HANDLERS, stand_ins))
+            stack.enter_context(mock.patch.dict(DRIVER_STAGES, {RECEIPT_STAGE: receipt_stage}))
+            stack.enter_context(mock.patch.dict(_FILE_OPS, {"retire-file": spy(
+                "retire-file", _FILE_OPS["retire-file"])}))
+            stack.enter_context(mock.patch.dict(_REGISTRATION_OPS, {"register-unmanaged": spy(
+                "register-unmanaged", _REGISTRATION_OPS["register-unmanaged"])}))
+            return stack
+
+        before = _snapshot(root)
+        # each refusal still refuses before anything is written: render-views keeps its REAL handler, which
+        # reads observations this driver does not gather, so apply names that value and writes nothing (red
+        # against a driver that composes the row over an absent value).
+        with typed_driver({"init-store": scaffold, "install-pack": benign}):
+            err = refusal(run_apply, root, typed_plan, typed_approval, sheet)
+        check("driver-apply-unsupplied-observations-refused", "render-views" in (err or "")
+              and "needs context observations" in (err or "") and "before anything is written" in (err or "")
+              and not reached and _snapshot(root) == before, observed=err)
+        with typed_driver({"init-store": scaffold, "render-views": benign, "install-pack": benign}):
+            ttxn, terr = attempt(run_apply, root, typed_plan, typed_approval, sheet)
+        after = _snapshot(root)
+        check("driver-apply-typed-contexts-commit", ttxn == trid and terr is None, observed=terr)
+        check("driver-file-op-row-reaches-handler-with-opcontext", ("retire-file", "OpContext") in reached
+              and ("retire-file", "dict") not in reached)
+        try:
+            registered = tomllib.loads(after.get(manifest_rel, b"").decode("utf-8"))
+        except (UnicodeDecodeError, tomllib.TOMLDecodeError):
+            registered = dict()
+        check("driver-registration-row-reaches-handler-with-registrationcontext",
+              ("register-unmanaged", "RegistrationContext") in reached
+              and registered.get("unmanaged", dict()).get("paths") == ["keep.md"])
+        check("driver-other-rows-take-the-context-table",
+              all(kind == "dict" for name, kind in reached if name in ("init-store", "render-views", "install-pack")))
+        retire_copy_rel, migrate_copy_rel = archive_rel(trid, "legacy.md"), archive_rel(trid, "old.md")
+        check("driver-retire-and-migrate-each-archived-once-per-pass", len(composed_creates) == 2 and all(
+            creates.count(retire_copy_rel) == 1 and creates.count(migrate_copy_rel) == 1
+            for creates in composed_creates), observed=composed_creates)
+        typed_rows = tomllib.loads((after.get(inventory_rel(trid)) or b"").decode("utf-8")).get("file", [])
+        check("driver-retire-and-migrate-preserved-sources-frozen",
+              after.get(retire_copy_rel) == typed_files["legacy.md"]
+              and after.get(migrate_copy_rel) == typed_files["old.md"]
+              and all(after.get(rel) == payload for rel, payload in typed_files.items())
+              and verify_bundle(root, trid).status == VALID
+              and sorted(r["path"] for r in typed_rows)
+              == sorted([plan_rel(trid), approval_rel(trid), retire_copy_rel, migrate_copy_rel]))
+
+    # the unsupplied values are keyed by the handler that needs them, each named: a stand-in handler for the
+    # same op needs none of them, and the ops the driver supplies in full name nothing.
+    named = _unsupplied([schema.canonical_op(name) for name in (
+        "create-file", "repoint-consumer", "plant-governance", "record-adoption", "render-views",
+        "retire-file", "move-file", "register-unmanaged", "enable-hook")])
+    check("driver-unsupplied-names-each-missing-value", len(named) == 5 and all(
+        any(needle in finding for finding in named) for needle in (
+            "('create-file') needs the created file's planned bytes",
+            "('repoint-consumer') needs the consumer's planned postimage model",
+            "('plant-governance') needs context pack", "('record-adoption') needs context receipt and now",
+            "('render-views') needs context observations")), observed=named)
+    with mock.patch.dict(OP_HANDLERS, dict.fromkeys(OP_HANDLERS, lambda op_row, context=None: schema._ok())):
+        check("driver-unsupplied-keyed-by-handler", _unsupplied([schema.canonical_op("create-file")]) == [])
 
     # 12: the finish ops (slice 5), see _finish_ops_self_test.
     _finish_ops_self_test(check)
@@ -12211,6 +12444,51 @@ def _self_test_checks():
         _txn, why = retirement_stage(root, rows=fx_disposed[:1])
         check("retirement-without-committed-preimage-refused-untouched-save-journal-dirs",
               why is not None and "committed base" in why and untouched_save_journal_dirs(before, root))
+
+    # 16c2 (B3): the driver's order, the preservation pass and then every file-op row composed into ONE
+    # ApplyOps, archives each source exactly once: the retire and occupying move sources by their rows, the
+    # migrate source (no op row) by the pass; and an occupied move destination stays a collision finding
+    # (spec 14.2) with the tree untouched. Red against a pass that also archives a file-op row's source
+    # (the second archive create refuses the whole transaction).
+    mig_rel, mig_bytes = "legacy/OLD.md", b"old notes\n"
+    mig_row = dict(path=mig_rel, disposition="migrate", occupying=False, digest=plan_digest(mig_bytes),
+                   preservation=archive_rel(rid, mig_rel))
+    b3_plan = dict(run_id=rid, sources=fx_sources + [mig_row], ops=[fx_create] + fx_disposed)
+    b3_creates = []
+
+    def preserve_then_rows(plan):
+        def compose(ops):
+            compose_preservation(ops, plan)
+            compose_rows(plan["ops"], plan["sources"], {fx_new: fx_new_bytes})(ops)
+            b3_creates.append([op["path"] for op in ops.ops if op.get("op") == "create"])
+        return compose
+
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root = file_fixture(temp)
+        (root / mig_rel).write_bytes(mig_bytes)
+        txn, why = attempt(run_adopt_transaction, root, rid, preserve_then_rows(b3_plan))
+        after = snapshot(root)
+        copies = [archive_rel(rid, p) for p in ("legacy/RULES.md", ".working/TODO.md", "docs/VIEW.md", mig_rel)]
+        check("preservation-then-file-ops-commit", txn == rid and why is None and lock_free(root), observed=why)
+        check("preservation-then-file-ops-each-source-archived-once", b3_creates != [] and all(
+            creates.count(rel) == 1 for creates in b3_creates for rel in copies), observed=b3_creates)
+        check("preservation-then-file-ops-copies-byte-equal",
+              after.get(copies[0]) == fx_files["legacy/RULES.md"]
+              and after.get(copies[1]) == fx_files[".working/TODO.md"]
+              and after.get(copies[2]) == fx_files["docs/VIEW.md"] and after.get(copies[3]) == mig_bytes
+              and after.get(mig_rel) == mig_bytes and after.get("legacy/RULES.md") == fx_files["legacy/RULES.md"]
+              and ".working/TODO.md" not in after and "docs/VIEW.md" not in after
+              and verify_bundle(root, rid).status == VALID)
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root = file_fixture(temp)
+        (root / mig_rel).write_bytes(mig_bytes)
+        (root / fx_moved).parent.mkdir(parents=True)
+        (root / fx_moved).write_bytes(b"already here\n")
+        before = tree_state(root)
+        _txn, why = attempt(run_adopt_transaction, root, rid, preserve_then_rows(b3_plan))
+        check("preservation-then-move-occupied-destination-collision-untouched-save-journal-dirs",
+              why is not None and "occupied" in why and "never an overwrite" in why
+              and untouched_save_journal_dirs(before, root) and lock_free(root), observed=why)
 
     # 16d: create-file's own preconditions and the plan bindings the handlers require, each refused with
     # the tree untouched: an occupied path, bytes that do not match content_digest, a path in the store
