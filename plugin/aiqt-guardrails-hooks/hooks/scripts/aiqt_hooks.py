@@ -1205,8 +1205,9 @@ def detect_diff_wall(text):
 def diff_wall_stop(data):
     """cnsdif (trust/no-console-diff-dumps), Stop: SURFACE (non-blocking WARN) a final response that is
     a raw diff wall. This layer never blocks; see the module docstring's design note (the wall has
-    already rendered, and a hard Stop block could wedge the session with no documented loop bound). It
-    surfaces via systemMessage on exit 0; the PreToolUse diff_source layer is the hard prevention."""
+    already rendered, and because this layer keeps no loop bound of its own and does not read the
+    documented stop_hook_active field of the Stop input, a hard Stop block could wedge the session).
+    It surfaces via systemMessage on exit 0; the PreToolUse diff_source layer is the hard prevention."""
     if data.get("hook_event_name") not in STOP_EVENTS:
         # Even a mis-wired event only WARNS here: the diff-wall Stop layer is warn-only end to end (the
         # orchestration stop guard, a separate Stop handler, is the one that deliberately denies via exit
@@ -15915,11 +15916,11 @@ HANDLERS = {
 # Handler -> event class, so the dispatcher can decide its ERROR posture from the argv MODE alone,
 # without reading the (possibly unreadable) payload. This is the load-bearing half of the fail-closed
 # design: a Stop/SubagentStop handler must NEVER exit 2 ON AN ERROR PATH, because a hard Stop block could
-# re-fire on the forced continuation and wedge the session (an error path keeps no loop bound and reads no
-# stop_hook_active field), so on ANY error (unreadable stdin, JSON parse failure, non-dict payload, or a
-# handler crash) it emits a non-blocking systemMessage warning and exits 0. A DELIBERATE backlog-deny is
-# the intended exception (the documented Stop block mechanism, bounded by the loop cap); only a PreToolUse
-# handler fails closed via exit 2 on error.
+# re-fire on the forced continuation and wedge the session (an error path keeps no loop bound and never
+# consults the stop_hook_active field of the payload), so on ANY error (unreadable stdin, JSON parse
+# failure, non-dict payload, or a handler crash) it emits a non-blocking systemMessage warning and exits 0.
+# A DELIBERATE backlog-deny is the intended exception (the documented Stop block mechanism, bounded by the
+# loop cap); only a PreToolUse handler fails closed via exit 2 on error.
 HANDLER_EVENT = {
     "diff_wall_stop": "Stop",
     "diff_source_pretool": PRETOOL,
@@ -15986,9 +15987,9 @@ def main(argv):
     # A genuinely unknown mode is not identifiable as Stop and is a broken install, so it fails closed
     # via exit 2. But a KNOWN handler invoked with the wrong argv count must NOT reach exit 2 when it is
     # a Stop/SubagentStop handler: a hard exit-2 Stop path could re-fire on the forced continuation and
-    # wedge the session (an error path keeps no loop bound and reads no stop_hook_active field), so a
-    # bad-argv Stop invocation WARNS on exit 0 like every other Stop error path (FIX 2). A bad-argv
-    # PreToolUse handler still fails closed (exit 2).
+    # wedge the session (an error path keeps no loop bound and never consults the stop_hook_active
+    # field of the payload), so a bad-argv Stop invocation WARNS on exit 0 like every other Stop error
+    # path (FIX 2). A bad-argv PreToolUse handler still fails closed (exit 2).
     mode = argv[0] if argv else None
     if mode not in HANDLERS:
         _stderr_note("aiqt_hooks: usage: aiqt_hooks.py <{}>".format("|".join(sorted(HANDLERS))))
