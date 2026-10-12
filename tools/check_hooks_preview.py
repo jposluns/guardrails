@@ -93,6 +93,9 @@ import tempfile
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _load_bound  # noqa: E402  hang-versus-slowness bounds shared by the self-tests and gates
+
 PREVIEW_DIR = ".preview"
 README_NAME = "README.md"
 SUMS_NAME = "SHA256SUMS"
@@ -119,6 +122,11 @@ GFM_SPACE = " \t"
 # Seconds one hook self-test may run. Set well above the slowest shipped self-test (a few seconds today),
 # so a correctly running self-test is never cut short; exceeding it is reported as this gate's deadline.
 SELFTEST_TIMEOUT = 600
+# The bound is load-tolerant (tools/_load_bound.py): SELFTEST_TIMEOUT counts load-adjusted seconds, which
+# stretch while the host runs more work than it has CPUs, and a self-test whose process tree makes no CPU
+# or output progress for SELFTEST_STALL_S wall seconds is stopped as hung. Either stop is unverifiable.
+SELFTEST_STALL_S = 300
+_load_factor = None  # None reads the host load; the self-test injects a factor to simulate a loaded host
 # Characters of an OS error kept in a diagnostic, so a failure is reported, never dumped.
 DIAG_LIMIT = 300
 
@@ -314,12 +322,13 @@ def leg_selftest(pdir, hooks, findings, unverifiable):
             continue
         try:
             try:
-                res = subprocess.run([sys.executable, "-I", "-S", "-B", path, "--self-test"], cwd=work,
-                                     capture_output=True, timeout=SELFTEST_TIMEOUT, env=_selftest_env(),
-                                     stdin=subprocess.DEVNULL)
-            except subprocess.TimeoutExpired:
-                unverifiable.append("{}/{}: --self-test did not finish within this gate's {}s deadline; no "
-                                    "verdict was delivered".format(PREVIEW_DIR, name, SELFTEST_TIMEOUT))
+                res = _load_bound.run([sys.executable, "-I", "-S", "-B", path, "--self-test"], cwd=work,
+                                      env=_selftest_env(), budget_s=SELFTEST_TIMEOUT, stall_s=SELFTEST_STALL_S,
+                                      clock=_load_bound.LoadClock(factor=_load_factor))
+            except subprocess.TimeoutExpired as exc:
+                unverifiable.append("{}/{}: --self-test did not finish within this gate's {}s deadline ({}); "
+                                    "no verdict was delivered".format(PREVIEW_DIR, name, SELFTEST_TIMEOUT,
+                                                                      getattr(exc, "reason", "timeout")))
                 continue
             except (OSError, subprocess.SubprocessError) as exc:
                 unverifiable.append("{}/{}: --self-test could not be launched: {}".format(PREVIEW_DIR, name, exc))
@@ -443,6 +452,8 @@ def run(root):
 _STUB_OK = b"import sys\nsys.exit(0 if '--self-test' in sys.argv else 3)\n"
 _STUB_FAIL = b"import sys\nprint('stub self-test failure')\nsys.exit(1)\n"
 _STUB_SLOW = b"import time\ntime.sleep(30)\n"
+# Takes about 2 s but prints progress throughout, then passes: slow, not hung.
+_STUB_PROGRESS = b"import time\nfor _ in range(8):\n    print(1, flush=True)\n    time.sleep(0.25)\n"
 # Passes only when its environment carries REQUIRE_SIBLINGS_VAR=1 and no other scrubbed-family variable, and it
 # was launched the way the README tells users to launch a hook (-I -S -B: isolated, no site, no bytecode).
 _STUB_ENV = (b"import os, sys\nkeys = sorted(k for k in os.environ if k.startswith(('AIQT_', 'ORCH_', 'CLAUDE_')))\n"
@@ -636,6 +647,20 @@ def self_test_main():
 
         # 11. (a) a failing hook self-test -> exit 1.
         case("failing hook self-test", 1, _build(base / "selftest-fail", {"clock-inject.py": _STUB_FAIL}))
+
+        # 12b. (a) load tolerance: a self-test that runs past a 1 s bound while printing progress passes on a
+        #      host loaded to the cap (exit 0), and the same self-test on an idle host overruns it (exit 2).
+        global _load_factor
+        r = _build(base / "selftest-loaded", {"clock-inject.py": _STUB_PROGRESS})
+        saved = (SELFTEST_TIMEOUT, _load_factor)
+        SELFTEST_TIMEOUT = 1
+        try:
+            _load_factor = lambda: _load_bound.MAX_LOAD_FACTOR  # noqa: E731
+            case("slow self-test making progress on a loaded host", 0, r)
+            _load_factor = lambda: 1.0  # noqa: E731
+            case("the same slow self-test on an idle host", 2, r)
+        finally:
+            SELFTEST_TIMEOUT, _load_factor = saved
 
         # 12. (a) a self-test that outlives the deadline -> exit 2 (no verdict delivered).
         r = _build(base / "selftest-slow", {"clock-inject.py": _STUB_SLOW})

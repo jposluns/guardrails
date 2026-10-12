@@ -141,6 +141,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root  # noqa: E402
 from _git_fixture_env import _MAINTENANCE_PIN_VARS, git_fixture_env, scrub_git_environment  # noqa: E402
 import gen_secret_patterns  # noqa: E402  (same tools dir, for the drift-gate F-129 self-test)
+import _load_bound  # noqa: E402  hang-versus-slowness bounds shared by the self-tests and gates
 
 sys.path.insert(0, str(repo_root() / ".aiqt" / "core" / "hooks" / "scripts"))
 import aiqt_hooks  # noqa: E402
@@ -1797,6 +1798,9 @@ def _main_isolated(monitor):
     for _idk in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"):
         os.environ.pop(_idk, None)
     failures = []
+    # A bound that fired under host load is reported here, attributed to the bound, never as a failure of
+    # the hook under test; any entry makes the run cannot-evaluate (exit 2) unless a real failure exists.
+    cannot_evaluate = []
 
     def expect(label, command, want, cwd=None):
         got = _decision(handler, command, cwd=cwd)
@@ -3823,6 +3827,16 @@ def _main_isolated(monitor):
 
         # === protected_line (prtbrn/artbr1): force-push to a protected ref + direct protected commit ===
         plg = aiqt_hooks.protected_line
+        # The commit surface runs real Git and filesystem probe children under the hook production latency
+        # limits (_COMMIT_SECONDS for one evaluation, _COMMIT_PROBE_SECONDS per probe). Those limits are
+        # not what these cases test (the classification is), and a host loaded past its CPU count
+        # stretches the probes past them, turning a correct allow into a deadline denial. So the
+        # in-process cases run with both limits widened by the load-tolerance cap
+        # (_load_bound.MAX_LOAD_FACTOR); (pl239-probe-timeout), where the deadline IS the property,
+        # restores the production limits against a probe that sleeps far past them.
+        _pl_production_limits = (aiqt_hooks._COMMIT_SECONDS, aiqt_hooks._COMMIT_PROBE_SECONDS)
+        _pl_widened_limits = tuple(limit * _load_bound.MAX_LOAD_FACTOR for limit in _pl_production_limits)
+        aiqt_hooks._COMMIT_SECONDS, aiqt_hooks._COMMIT_PROBE_SECONDS = _pl_widened_limits
 
         def pexpect(label, command, want, cwd=None, detail=None, certificate=None):
             """Inspect a synthetic hook payload; never execute its submitted Bash command."""
@@ -4534,6 +4548,8 @@ def _main_isolated(monitor):
                 return _pl239_original_git(repo, deadline, *args)
 
             aiqt_hooks._commit_git = _pl239_bounded_git
+            if _case == "timeout":
+                aiqt_hooks._COMMIT_SECONDS, aiqt_hooks._COMMIT_PROBE_SECONDS = _pl_production_limits
             try:
                 pexpect("(pl239-probe-{})".format(_case), "git commit", "deny", cwd=plf,
                         detail=_detail)
@@ -4542,6 +4558,7 @@ def _main_isolated(monitor):
                                     .format(_case))
             finally:
                 aiqt_hooks._commit_git = _pl239_original_git
+                aiqt_hooks._COMMIT_SECONDS, aiqt_hooks._COMMIT_PROBE_SECONDS = _pl_widened_limits
         pexpect("(pl239-probe-restored)", "git commit", "allow", cwd=plf,
                 certificate=("A", "refs/heads/other"))
 
@@ -4593,9 +4610,29 @@ def _main_isolated(monitor):
                             "tool_input": {"command": _command}}
                 if _cwd is not None:
                     _payload["cwd"] = _cwd
-                _result = subprocess.run(
-                    _pl239_argv, input=json.dumps(_payload), capture_output=True, text=True,
-                    env=_pl239_dispatch_env, timeout=_pl239_entry["timeout"] + 5)
+                # The generated hook process enforces its production commit limits itself, so a loaded
+                # host can turn a correct verdict into the attributed "commit evaluation deadline
+                # exhausted" denial. That denial is retried (up to three launches) and, if it persists,
+                # recorded as cannot-evaluate, never as a case failure; any other outcome is judged. The
+                # launch itself is bounded by progress: the registered hook timeout plus 5 s of
+                # load-adjusted time, or 30 s without CPU or output progress.
+                _deadline_note = "commit evaluation deadline exhausted"
+                for _attempt in range(3):
+                    try:
+                        _result = _load_bound.run(
+                            _pl239_argv, input=json.dumps(_payload), text=True, env=_pl239_dispatch_env,
+                            budget_s=_pl239_entry["timeout"] + 5, stall_s=30)
+                    except _load_bound.Hung as _hung:
+                        _result = _hung
+                        continue
+                    if _deadline_note in (_detail or "") or _deadline_note not in _result.stdout:
+                        break
+                if isinstance(_result, _load_bound.Hung) or (
+                        _deadline_note not in (_detail or "") and _deadline_note in _result.stdout):
+                    cannot_evaluate.append("(pl239-generated-{}) not judged: {}".format(
+                        _case, _result if isinstance(_result, _load_bound.Hung)
+                        else "the hook production commit deadline expired on all three launches"))
+                    continue
                 if _result.returncode != 0 or _result.stderr:
                     failures.append("(pl239-generated-{}) expected clean exit 0, got {!r}"
                                     .format(_case, _result))
@@ -10338,7 +10375,14 @@ def _main_isolated(monitor):
         print("SELF-TEST FAIL:")
         for failure in failures:
             print("  - " + failure)
+        for line in cannot_evaluate:
+            print("  (also could not evaluate) " + line)
         return 1
+    if cannot_evaluate:
+        print("SELF-TEST CANNOT-EVALUATE: a load-tolerant bound fired, so these cases were not judged:")
+        for line in cannot_evaluate:
+            print("  - " + line)
+        return 2
     print("SELF-TEST PASS. NO-ASK POSTURE HELD: the global invariant confirms no PreToolUse guard "
           "returns permissionDecision 'ask' over the exercised vectors, and the _ask constructor is "
           "removed; every decision is allow / allow-with-note / snapshot-then-allow / deny-and-educate. "

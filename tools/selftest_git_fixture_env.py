@@ -91,6 +91,7 @@ except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships to
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _git_fixture_env  # noqa: E402
 import _selftest_exit_report  # noqa: E402
+import _load_bound  # noqa: E402  hang-versus-slowness bounds shared by the self-tests and gates
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "opf" / "tools"))
 import _optlevel  # noqa: E402  level-0 parses for the mutants, shared with opf/tools
 
@@ -98,6 +99,15 @@ ROOT = Path(__file__).resolve().parents[1]
 CHECKS_MANIFEST = ROOT / "tools" / "selftest_checks.toml"
 CORPUS_SELFTEST = ROOT / "tools" / "selftest_aiqt_corpus.py"
 SUITE_ID = "git-fixture-env-selftest"
+# Bounds for the child self-tests this suite launches (every registered member, the corpus lanes). A
+# member runs as long as its own work takes (opf.py --self-test alone needs minutes unloaded), and a host
+# loaded to several times its CPU count stretches that past any fixed wall-clock bound. So the bound is
+# load-tolerant (tools/_load_bound.py): a child is stopped only when its process tree makes no CPU or
+# output progress for the stall bound (a hang), or spends the budget in load-adjusted seconds (a spin);
+# the budgets are the former wall-clock bounds, which these children finish within on an idle host.
+# A stop is reported as the bound firing, never as the child exit code.
+MEMBER_BUDGET_S, MEMBER_STALL_S = 1200, 300
+CORPUS_BUDGET_S, CORPUS_STALL_S = 300, 120
 FAILURES = []
 EXECUTED = []
 _EXECUTED_SET = set()
@@ -1365,8 +1375,9 @@ def _config_injection_lane(base):
 
 def _run_config_member(member, env):
     try:
-        proc = subprocess.run([sys.executable, "-I", "-B", str(ROOT / member[0]), *member[1:]],
-                              cwd=ROOT, env=env, capture_output=True, text=True, errors="replace", timeout=1200)
+        proc = _load_bound.run([sys.executable, "-I", "-B", str(ROOT / member[0]), *member[1:]],
+                               budget_s=MEMBER_BUDGET_S, stall_s=MEMBER_STALL_S,
+                               cwd=ROOT, env=env, text=True, errors="replace")
         if proc.returncode:
             print("CONFIG-INJECTION {}:\n{}".format(member, proc.stdout + proc.stderr),
                   file=sys.stderr)
@@ -1762,8 +1773,9 @@ def _run_corpus(poison_key, poison_value, cwd):
     env = _git_fixture_env.git_fixture_env()
     env[poison_key] = poison_value
     try:
-        proc = subprocess.run([sys.executable, "-I", "-B", str(CORPUS_SELFTEST)],
-                              cwd=str(cwd), env=env, capture_output=True, text=True, timeout=300)
+        proc = _load_bound.run([sys.executable, "-I", "-B", str(CORPUS_SELFTEST)],
+                               budget_s=CORPUS_BUDGET_S, stall_s=CORPUS_STALL_S,
+                               cwd=str(cwd), env=env, text=True)
         return proc.returncode
     except (OSError, subprocess.SubprocessError) as exc:
         return "corpus launch failed: {}".format(exc)
@@ -1785,8 +1797,9 @@ def _run_corpus_imported(poison_key, poison_value, cwd):
         "sys.exit(rc if dict(os.environ) == saved else 1)",
     ))
     try:
-        proc = subprocess.run([sys.executable, "-I", "-B", "-c", code, str(ROOT / "tools")],
-                              cwd=str(cwd), env=env, capture_output=True, text=True, timeout=300)
+        proc = _load_bound.run([sys.executable, "-I", "-B", "-c", code, str(ROOT / "tools")],
+                               budget_s=CORPUS_BUDGET_S, stall_s=CORPUS_STALL_S,
+                               cwd=str(cwd), env=env, text=True)
         return proc.returncode
     except (OSError, subprocess.SubprocessError) as exc:
         return "imported corpus launch failed: {}".format(exc)
@@ -2101,6 +2114,11 @@ _SCAN_ALLOWED_UNPINNED = (
      " _opf_observe._scrubbed_env; its callers pass plumbing subcommands only, never a"
      " maintenance-triggering one"),
     # Cannot-evaluate launches (argv or head outside the resolver's bounds), each audited:
+    ("tools/_load_bound.py", "run", ("unresolved",),
+     "cannot-evaluate head: the shared load-tolerant runner launches its caller argv, which"
+     " this scan does not follow to the call site; run() itself refuses (ValueError) any argv"
+     " whose head is git, so no git launch passes through it (git stays on a pinned"
+     " subprocess call this scan enforces)"),
     ("tools/check_git_option_table.py", "_git", ("unresolved",),
      "cannot-evaluate funnel: the argv tail is the caller's *args; every caller passes"
      " option-table introspection forms (init -q --template= of a scratch probe repo,"
@@ -2117,10 +2135,6 @@ _SCAN_ALLOWED_UNPINNED = (
      " never absorbed here: the maintenance-capable add and commit argvs carry the three"
      " F-367 pins as literal `-c` pairs in option position, and the bare `git init -q`"
      " carries none (init is not maintenance-triggering)"),
-    ("tools/selftest_aiqt_hooks.py", "_main_isolated", ("unresolved",),
-     "cannot-evaluate head: replays the REGISTERED hook entry's own dispatcher command (a"
-     " python3 hook-script argv from the hooks registry), not a git launch; the suite's"
-     " lifecycle PATH wrapper pins any git a hook child resolves through PATH"),
     ("opf/tools/_opf_adopt_hook.py", "self_test", ("unresolved",),
      "cannot-evaluate argv: the sandbox-mock seam canary calls subprocess.Popen(None)"
      " to prove the mock net denies the subprocess seam; with the mocks in place the"
