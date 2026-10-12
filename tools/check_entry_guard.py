@@ -49,7 +49,13 @@ reports a diagnostic, the roster launches no Python script, or a listed script i
 unreadable, or does not parse). An unparsable script is never read as passing. There is no warning tier.
 The self-test exits 0 when every check passes, 1 when any fails, and 2 (cannot evaluate) when none fails but a
 gate-runner vector was not exercised in any of its ATTEMPTS runs (host scheduling let the bound overtake each run,
-or widened a timer read's bracket past TIMER_BRACKET); such a run is never read as a pass or as a failure.
+widened a timer read's bracket past TIMER_BRACKET, or made a run whose cleanup is proven overrun its elapsed
+bound); such a run is never read as a pass or as a failure. Host scheduling can still fail a clean run where a
+bound has no such reading: a stall of GATE_TIMEOUT (3 s) in the gate run of a fixture vector (under a mutant, such
+a stall reads that mutant as caught); one of HANG_SECONDS (60 s) between a witnessed run's deadline and its kill,
+after which the run reports WOKE; a holder of a witness that takes WITNESS_WAIT (5 s) after its run to die; a
+stall of WITNESS_WAIT in the stand-in of the parent-death vector; and the CHILD_TIMEOUT (60 s) bounds of the timer
+vector, the unarmed and audited descendant legs, the window sweeps and the live legs.
 
 The self-test requires Linux: its gate runner and witnesses use os.waitid with WNOWAIT, fcntl.F_SETSIG,
 os.pidfd_open and /proc. Elsewhere it never passes (the parent-death check fails without F_SETSIG, and a missing
@@ -508,12 +514,16 @@ def _in_child(thunk, timeout, forked=None):
     Bounds and limits: a descendant that leaves the child's process group (setpgid, setsid) escapes both the
     group kill and the lifeline (the child itself, if it leaves, is still killed by its pid). Without F_SETSIG,
     or once the child and every descendant have closed the lifeline read end, a parent killed before its cleanup
-    leaves the group running. A process that another thread of the caller forks while the child runs holds a copy
-    of the lifeline write end (the pipes are close-on-exec, not close-on-fork) until it execs or exits; until
-    then neither the parent's death nor the cleanup's close fires the lifeline, so a parent killed before its
-    cleanup leaves the group running, and in the cleanup only os.killpg reaches the group. A child in
-    uninterruptible sleep holds up the reap until it wakes. A fork copies only the calling thread: a lock another
-    thread of the caller holds at the fork stays held in the child, which then reads as hung.
+    leaves the group running. A process that another thread of the caller forks at any point from the making of
+    the pipes until the cleanup closes them holds copies of their ends (the pipes are close-on-exec, not
+    close-on-fork) until it execs or exits. Until then neither the parent's death nor the cleanup's close fires
+    the lifeline, so a parent killed before its cleanup leaves the group running, and in the cleanup only
+    os.killpg reaches the group; and if that fork came before this process closed its report write end, the
+    report reads no EOF, so even a run that passed reads hung (never a pass). A child that left its group, under
+    an audit hook that refuses os.kill, is reached by neither kill nor the lifeline, so the reap waits until it
+    exits. A child in uninterruptible sleep holds up the reap until it wakes. A fork copies only the calling
+    thread: a lock another thread of the caller holds at the fork stays held in the child, which then reads as
+    hung.
 
     Nothing here reads, arms or restores a process timer, a signal handler or the signal mask, so the
     ITIMER_REAL of a caller, its interval, its SIGALRM handler and its mask are untouched (the rule
@@ -600,24 +610,35 @@ def _gate(module, root, timeout=GATE_TIMEOUT, forked=None):
 
 # The caller timer the timer vector arms in its own child: (countdown, interval) in seconds, far beyond the run.
 CALLER_TIMER = (600.0, 300.0)
-# How far apart the two expiry instants the timer vector reads may lie for one timer (the timer reads round down
-# to microseconds), and the widest the monotonic bracket of either read may be for the vector to judge it: a wider
-# bracket could hide a reset early in the run, so that observation cannot evaluate.
+# How far apart the two expiry instants the timer vector reads may lie for one timer (a margin over the
+# microsecond truncation of the timer reads), and the widest the monotonic bracket of either read may be for the
+# vector to judge it. A change to the timer during the run moves its expiry instant, and the predicate sees only
+# a move larger than TIMER_FLOOR plus the parts of the two brackets no stamp observes, so a move of up to
+# TIMER_FLOOR + 2 * TIMER_BRACKET (0.101 s) can read as kept; a wider bracket hides more, so that observation
+# cannot evaluate.
 TIMER_FLOOR = 0.001
 TIMER_BRACKET = 0.05
-# How long the gate run of the timer vector lasts at least, so a caller timer reset to its starting value reads
-# as a countdown far short of the run.
+# How long the timer vector waits between arming its timer and reading it first, so a reset to the starting
+# countdown moves the expiry instant by more than TIMER_FLOOR and two brackets can hide.
+TIMER_SETTLE = 0.2
+# How long the gate run of the timer vector lasts at least, so a timer restored at the end of the run to the
+# countdown it held at the start (a borrow that drops its elapsed time) moves its expiry instant that much later.
 TIMER_RUN_SECONDS = 0.3
-# The bound of the overrun vector, and how long its gate run sleeps with SIGALRM ignored before printing a pass.
-OVERRUN_TIMEOUT = 0.5
-OVERRUN_SECONDS = 2.0
 # The witness vectors: the bound of their gate runs, how long a run (or a descendant it forks) sleeps when
 # nothing kills it, and how long they wait after the gate returns for every holder of the witness pipe to die.
 WITNESS_TIMEOUT = 0.5
 HANG_SECONDS = 60
 WITNESS_WAIT = 5.0
+# The role a witnessed run (or a descendant it forks) reports once its sleep is over: no kill reached it in time.
+WOKE = "woke"
+# The bound of the overrun vector, how long its gate run sleeps with SIGALRM ignored before reporting WOKE and
+# printing a pass, and the elapsed time past which its run cannot evaluate.
+OVERRUN_TIMEOUT = 0.5
+OVERRUN_SECONDS = HANG_SECONDS
+OVERRUN_BOUND = 2.0
 # How many runs a witness or timer vector makes while every run shows no failure but cannot be evaluated (host
-# scheduling let its bound overtake the run, or widened a timer read's bracket), before it reports cannot-evaluate.
+# scheduling let its bound overtake the run, widened a timer read's bracket, or made a run whose cleanup is proven
+# overrun its elapsed bound), before it reports cannot-evaluate.
 ATTEMPTS = 3
 # The window sweeps: the bound of each gate run, the most injection points a sweep may take, and the fewest it
 # must take (so a sweep that never reached the window cannot pass).
@@ -643,11 +664,12 @@ def _paced_run(module):
 def _caller_timer_probe(module, root):
     """Arm a caller timer with an interval and a handler, run root through the _gate of module (paced), and
     report the timer, handler and mask after it, with stamps: the monotonic time before and after the timer read
-    before the run, and before and after the read after it. Run only inside _in_child, so the timer it arms is its
-    own."""
+    before the run, and before and after the read after it. The first read comes TIMER_SETTLE after the timer is
+    armed. Run only inside _in_child, so the timer it arms is its own."""
     signal.signal(signal.SIGALRM, _caller_alarm)
     signal.setitimer(signal.ITIMER_REAL, *CALLER_TIMER)
     mask = signal.pthread_sigmask(signal.SIG_BLOCK, ())
+    time.sleep(TIMER_SETTLE)
     stamps = [time.monotonic()]
     before = signal.getitimer(signal.ITIMER_REAL)
     stamps.append(time.monotonic())
@@ -661,31 +683,28 @@ def _caller_timer_probe(module, root):
 
 
 def _timer_kept(probe):
-    """Whether the caller timer of the probe survived its gate run. False when the run neither passed nor was
-    overtaken by its bound (hung), lasted less than TIMER_RUN_SECONDS between the reads, the timer lost its
-    interval, its handler or its mask, or it came due at another instant after the run than before it; None
-    (cannot evaluate) when none of that shows but the run read hung or a read's bracket is wider than
-    TIMER_BRACKET; else True. A read made between stamps s and t that finds the timer due in r places its expiry
-    instant in [s + r, t + r] (ITIMER_REAL and time.monotonic both count CLOCK_MONOTONIC). An untouched timer has
-    one expiry instant, so the two intervals meet, within TIMER_FLOOR, however long a delay falls anywhere between
-    the stamps. A timer reset during the run comes due later and one rewound comes due earlier, so the intervals
-    part on one side or the other: refused both ways."""
+    """Whether the caller timer of the probe survived its gate run, to the precision its stamps give. False when
+    the run neither passed nor was overtaken by its bound (hung), lasted less than TIMER_RUN_SECONDS between the
+    reads, the timer lost its interval, its handler or its mask, the first read shows it counted down less than
+    TIMER_SETTLE - TIMER_FLOOR since it was armed (so it was reset or rewound before that read), or it came due at
+    another instant after the run than before it; None (cannot evaluate) when none of that shows but the run read
+    hung or a read's bracket is wider than TIMER_BRACKET; else True. A read made between stamps s and t that finds
+    the timer due in r places its expiry instant in [s + r, t + r] (ITIMER_REAL and time.monotonic both count
+    CLOCK_MONOTONIC). An untouched timer has one expiry instant, so the two intervals meet, within TIMER_FLOOR,
+    however long a delay falls anywhere between the stamps. A change to the timer during the run moves that
+    instant, later (a reset) or earlier (a rewind), and the intervals part, so the change is refused, only when the
+    move is larger than TIMER_FLOOR plus how far each read lies from its bracket's edge on the side of the move,
+    which no stamp observes. A move of up to TIMER_FLOOR + 2 * TIMER_BRACKET (0.101 s) can therefore read as kept,
+    and a larger one never does. A reset to the starting countdown moves the instant by more than TIMER_SETTLE -
+    TIMER_FLOOR (the probe waits TIMER_SETTLE between arming the timer and reading it), so it never reads as
+    kept."""
     (before, _interval), (after, interval) = probe["before"], probe["after"]
     first, ran, done, last = probe["stamps"]
     if not (probe["code"] in (0, "hung") and interval == CALLER_TIMER[1] and probe["handler"] and probe["mask"]
-            and done - ran >= TIMER_RUN_SECONDS
+            and done - ran >= TIMER_RUN_SECONDS and CALLER_TIMER[0] - before >= TIMER_SETTLE - TIMER_FLOOR
             and done + after - TIMER_FLOOR <= ran + before and first + before - TIMER_FLOOR <= last + after):
         return False
     return True if probe["code"] == 0 and max(ran - first, last - done) <= TIMER_BRACKET else None
-
-
-def _overrunning_run(root):
-    """A gate run that ignores SIGALRM and overruns its bound, then prints a pass: a hang no in-process alarm
-    can interrupt."""
-    signal.signal(signal.SIGALRM, signal.SIG_IGN)
-    time.sleep(OVERRUN_SECONDS)
-    print("PASS: entry-guard checked 2 launched scripts")
-    return 0
 
 
 def _witness_line(witness, role):
@@ -693,11 +712,25 @@ def _witness_line(witness, role):
     os.write(witness, "{} {}\n".format(role, os.getpid()).encode("ascii"))
 
 
+def _overrunning_run(witness):
+    """A gate run that ignores SIGALRM, reports its pid on the witness pipe and overruns its bound, then reports
+    WOKE and prints a pass: a hang no in-process alarm can interrupt."""
+    def run(root):
+        signal.signal(signal.SIGALRM, signal.SIG_IGN)
+        _witness_line(witness, "child")
+        time.sleep(OVERRUN_SECONDS)
+        _witness_line(witness, WOKE)
+        print("PASS: entry-guard checked 2 launched scripts")
+        return 0
+    return run
+
+
 def _hanging_run(witness):
-    """A gate run that reports its pid on the witness pipe and sleeps past any bound."""
+    """A gate run that reports its pid on the witness pipe and sleeps past any bound, then reports WOKE."""
     def run(root):
         _witness_line(witness, "child")
         time.sleep(HANG_SECONDS)
+        _witness_line(witness, WOKE)
         return 0
     return run
 
@@ -705,7 +738,8 @@ def _hanging_run(witness):
 def _forking_run(witness, hang):
     """A gate run that forks a descendant, which reports its pid on the witness pipe, closes every inherited
     descriptor but stdio and the witness (the report pipe included) and sleeps past any bound; once it has
-    closed them, the run reports its own pid and then sleeps too (hang) or returns 0 at once."""
+    closed them, the run reports its own pid and then sleeps too (hang) or returns 0 at once. Each that sleeps
+    reports WOKE once its sleep is over."""
     def run(root):
         ready_r, ready_w = os.pipe()
         if os.fork() == 0:
@@ -714,6 +748,7 @@ def _forking_run(witness, hang):
                 os.closerange(3, witness)
                 os.closerange(witness + 1, os.sysconf("SC_OPEN_MAX"))
                 time.sleep(HANG_SECONDS)
+                _witness_line(witness, WOKE)
             finally:
                 os._exit(0)
         os.close(ready_w)
@@ -722,17 +757,19 @@ def _forking_run(witness, hang):
         _witness_line(witness, "child")
         if hang:
             time.sleep(HANG_SECONDS)
+            _witness_line(witness, WOKE)
         return 0
     return run
 
 
 def _stand_in_killing_run(witness, stand_in):
     """A gate run that reports its pid on the witness pipe, sends SIGKILL to stand_in (the process whose gate
-    runs it), and sleeps past any bound."""
+    runs it), and sleeps past any bound, then reports WOKE."""
     def run(root):
         _witness_line(witness, "child")
         os.kill(stand_in, signal.SIGKILL)
         time.sleep(HANG_SECONDS)
+        _witness_line(witness, WOKE)
         return 0
     return run
 
@@ -745,13 +782,17 @@ def _stand_in(witness):
 
 
 def _read_to_eof(fd, wait):
-    """(bytes read, True) once fd reads EOF within wait seconds, else (bytes read, False)."""
+    """(bytes read, True) once fd reads EOF within wait seconds, else (bytes read, False). Past the deadline it
+    still takes what the pipe already holds, without waiting, for two reads (one empties the pipe of a writer that
+    is gone, the next reads its EOF), so a reader that was itself slow (host scheduling) reads writers that closed
+    in time as closed, and a writer still alive as alive."""
     deadline = time.monotonic() + wait
-    chunks, poller = [], select.poll()
+    chunks, poller, late = [], select.poll(), 0
     poller.register(fd, select.POLLIN)
     while True:
         remaining = deadline - time.monotonic()
-        if remaining <= 0 or not poller.poll(int(remaining * 1000) + 1):
+        late += remaining <= 0
+        if late > 2 or not poller.poll(int(remaining * 1000) + 1 if remaining > 0 else 0):
             return b"".join(chunks), False
         chunk = os.read(fd, READ_CHUNK)
         if not chunk:
@@ -759,28 +800,63 @@ def _read_to_eof(fd, wait):
         chunks.append(chunk)
 
 
-def _fd_links(pid):
-    """The targets of the descriptors of process pid (from /proc), as many as can be read."""
-    links = set()
+def _late_read(closed):
+    """_read_to_eof with no time left over a pipe that holds one line, its write end closed first (closed) or
+    still open: what a reader that was itself slow reads."""
+    read_end, write_end = os.pipe()
+    try:
+        try:
+            os.write(write_end, b"child 1\n")
+            late = None if closed else _read_to_eof(read_end, 0)
+        finally:
+            os.close(write_end)
+        return _read_to_eof(read_end, 0) if closed else late
+    finally:
+        os.close(read_end)
+
+
+def _pipe_writer(pid, inode):
+    """Whether process pid holds the write end of the pipe with inode inode: a descriptor of it (read from /proc)
+    that links to that pipe and was opened write-only, as its fdinfo flags show. False when /proc cannot be
+    read."""
+    target = "pipe:[{}]".format(inode)
     with contextlib.suppress(OSError):
         for fd in os.listdir("/proc/{}/fd".format(pid)):
-            with contextlib.suppress(OSError):
-                links.add(os.readlink("/proc/{}/fd/{}".format(pid, fd)))
-    return links
+            with contextlib.suppress(OSError, ValueError):
+                if os.readlink("/proc/{}/fd/{}".format(pid, fd)) == target:
+                    with open("/proc/{}/fdinfo/{}".format(pid, fd), encoding="ascii") as info:
+                        flags = next((line.split()[1] for line in info if line.startswith("flags:")), "0")
+                    if int(flags, 8) & os.O_ACCMODE == os.O_WRONLY:
+                        return True
+    return False
+
+
+def _pipe_writers(inode):
+    """Every process that holds the write end of the pipe with inode inode (_pipe_writer), from a scan of /proc:
+    found from the kernel's descriptor tables, never from what any process reported."""
+    try:
+        names = os.listdir("/proc")
+    except OSError:
+        return []
+    return [int(name) for name in names if name.isdigit() and _pipe_writer(int(name), inode)]
 
 
 def _kill_holder(pid, pipe):
-    """Send SIGKILL to pid only once it is confirmed alive and holding a copy of pipe (an end of a pipe this
-    process made, so held only by a process it started): the kill goes through a pidfd opened first, which names
-    one process and never a pid reused since, and that process held the pipe when /proc was read, as it had not
-    exited when the pidfd was polled after the read."""
+    """Send SIGKILL to pid only when it is not this process and is confirmed alive and holding the write end of
+    pipe (_pipe_writer): the kill goes through a pidfd opened first, which names one process and never a pid reused
+    since, and that process held the write end when /proc was read, as it had not exited when the pidfd was polled
+    after the read. This process is never signalled, whatever pid names, nor is a process that holds only the read
+    end. A process holds the write end by inheriting it from this process or by taking a copy (a fork by another
+    thread of this process, an open of /proc/<pid>/fd by a process of the same user, a descriptor passed over a
+    socket); such a process is killed as well."""
+    if pid == os.getpid():
+        return
     try:
         pidfd = os.pidfd_open(pid)
     except ProcessLookupError:
         return
     try:
-        if ("pipe:[{}]".format(os.fstat(pipe).st_ino) in _fd_links(pid)
-                and not select.select([pidfd], [], [], 0)[0]):
+        if _pipe_writer(pid, os.fstat(pipe).st_ino) and not select.select([pidfd], [], [], 0)[0]:
             with contextlib.suppress(ProcessLookupError):
                 signal.pidfd_send_signal(pidfd, signal.SIGKILL)
     finally:
@@ -788,49 +864,129 @@ def _kill_holder(pid, pipe):
 
 
 def _kill_confirmed():
-    """Whether _kill_holder sends no kill to a live process that does not hold a pipe and kills a live one that
-    does: (verdict, detail)."""
+    """Whether _kill_holder sends no kill to this process (while it still holds the write end of the pipe), to a
+    live process that holds only the read end, or to one that holds neither end, and kills a live one that holds
+    the write end through the pidfd it opened before it read /proc, with no kill by pid: (verdict, detail)."""
     read_end, write_end = os.pipe()
     sleeper = [sys.executable, "-I", "-c", "import time; time.sleep({})".format(HANG_SECONDS)]
-    sent = []
+    sent, trace, this = [], [], sys.modules[__name__]
+    calls = ((os, "pidfd_open", os.pidfd_open), (this, "_pipe_writer", _pipe_writer),
+             (signal, "pidfd_send_signal", signal.pidfd_send_signal))
+
+    def traced(name, call):
+        def step(*args):
+            result = call(*args)
+            trace.append((name, args[0], result))
+            return result
+        return step
     try:
-        with subprocess.Popen(sleeper) as other, subprocess.Popen(sleeper, pass_fds=(write_end,)) as holder:
+        with (subprocess.Popen(sleeper) as other, subprocess.Popen(sleeper, pass_fds=(read_end,)) as reading,
+              subprocess.Popen(sleeper, pass_fds=(write_end,)) as holder):
             try:
                 with _patched(signal, "pidfd_send_signal", lambda pidfd, signum: sent.append(signum)):
-                    _kill_holder(other.pid, read_end)
-                _kill_holder(holder.pid, read_end)
-                status = holder.wait(WITNESS_WAIT)
+                    for pid in (os.getpid(), reading.pid, other.pid):
+                        _kill_holder(pid, read_end)
+                with contextlib.ExitStack() as stack:
+                    for owner, name, call in calls:
+                        stack.enter_context(_patched(owner, name, traced(name, call)))
+                    stack.enter_context(_patched(os, "kill", lambda *args: trace.append(("kill",) + args)))
+                    _kill_holder(holder.pid, read_end)
+                status = holder.wait()
             finally:
                 other.kill()
+                reading.kill()
                 holder.kill()
-        return not sent and status == -signal.SIGKILL, dict(sent=sent, holder=status)
+        pidfd = next((result for name, _arg, result in trace if name == "pidfd_open"), None)
+        through = trace == [("pidfd_open", holder.pid, pidfd), ("_pipe_writer", holder.pid, True),
+                            ("pidfd_send_signal", pidfd, None)]
+        return not sent and through and status == -signal.SIGKILL, dict(sent=sent, trace=trace, holder=status)
     finally:
         os.close(read_end)
         os.close(write_end)
 
 
-def _witnessed(launch, known=()):
+def _witnessed(launch, known=(), wait=None):
     """Call launch(witness write end) while this process holds a witness pipe, then close the write end; returns
     (what launch returned, {role: pid} the processes reported, whether every holder of the witness died within
-    WITNESS_WAIT). If one did not, each reported process and each pid in known (a list launch fills, as with the
-    pid of a child it forked) is killed once confirmed alive and holding the witness (_kill_holder), so a failing
-    vector leaves nothing behind and no kill reaches a pid reused since."""
+    wait seconds, WITNESS_WAIT by default). If one did not, every process then holding the witness write end is
+    killed once confirmed alive and holding it (_kill_holder): each pid in known first (a list launch fills, as
+    with the pid of a child it forked), then each holder a scan of /proc finds (_pipe_writers), so a failing vector
+    leaves behind nothing that held the witness at the scan (a holder that forks after it can leave its child).
+    What a process reports on the witness never chooses a target: a report can name any pid, this process's own
+    included, and this process, which by then holds only the read end, is never signalled (_kill_holder)."""
     read_end, write_end = os.pipe()
-    pids, ended = {}, False
+    ended = False
     try:
         try:
             returned = launch(write_end)
         finally:
             os.close(write_end)
-        data, ended = _read_to_eof(read_end, WITNESS_WAIT)
+        data, ended = _read_to_eof(read_end, WITNESS_WAIT if wait is None else wait)
         pids = dict((role, int(pid)) for role, pid in (line.split() for line in data.decode("ascii").splitlines()))
         return returned, pids, ended
     finally:
         try:
-            for pid in () if ended else set(itertools.chain(known, pids.values())):
-                _kill_holder(pid, read_end)
+            if not ended:
+                for pid in dict.fromkeys(itertools.chain(known, _pipe_writers(os.fstat(read_end).st_ino))):
+                    _kill_holder(pid, read_end)
         finally:
             os.close(read_end)
+
+
+def _reap_within(pid, wait):
+    """The wait status of the child pid of this process once it ends within wait seconds (checked once more past
+    the deadline, so a slow check is not read as a live child); else None, and the child is killed and reaped."""
+    deadline = time.monotonic() + wait
+    while True:
+        late = time.monotonic() >= deadline
+        reaped, status = os.waitpid(pid, os.WNOHANG)
+        if reaped:
+            return status
+        if late:
+            break
+        time.sleep(0.01)
+    os.kill(pid, signal.SIGKILL)
+    os.waitpid(pid, 0)
+    return None
+
+
+def _owner_spared():
+    """Whether the cleanup of _witnessed, given no known pid, kills a child that holds the witness write end and
+    reported this process's pid as its own, and aims no kill at this process, which then holds only the read end:
+    (verdict, detail). The child has written its report before launch returns, so the verdict does not depend on
+    when it was scheduled. Every pidfd kill is recorded by the pid its pidfd names (from /proc), and one aimed at
+    this process is recorded and never sent."""
+    owner, aimed, sender, forked = os.getpid(), [], signal.pidfd_send_signal, []
+
+    def send(pidfd, signum):
+        with open("/proc/self/fdinfo/{}".format(pidfd), encoding="ascii") as info:
+            aimed.append(int(next((line.split()[1] for line in info if line.startswith("Pid:")), "0")))
+        return None if aimed[-1] == owner else sender(pidfd, signum)
+
+    def launch(witness):
+        ready_r, ready_w = os.pipe()
+        forked.append(os.fork())
+        if forked == [0]:
+            try:
+                os.write(witness, "child {}\n".format(owner).encode("ascii"))
+                os.write(ready_w, b"1")
+                time.sleep(HANG_SECONDS)
+            finally:
+                os._exit(0)
+        os.close(ready_w)
+        os.read(ready_r, 1)
+        os.close(ready_r)
+        return forked[0]
+    returned = pids = ended = status = None
+    try:
+        with _patched(signal, "pidfd_send_signal", send):
+            returned, pids, ended = _witnessed(launch, wait=WITNESS_TIMEOUT)
+    finally:
+        if forked:
+            status = _reap_within(forked[0], WITNESS_WAIT)
+    killed = status is not None and os.WIFSIGNALED(status) and os.WTERMSIG(status) == signal.SIGKILL
+    return (pids == {"child": owner} and ended is False and owner not in aimed and returned in aimed and killed,
+            dict(owner=owner, child=returned, pids=pids, ended=ended, aimed=aimed, status=status))
 
 
 def _reaped(pid):
@@ -860,6 +1016,16 @@ def _witnessed_child(start_child):
                 reaped=pid is not None and _reaped(pid))
 
 
+def _stalled(start_child):
+    """A start_child for _witnessed_child: start_child, then a stall of this process for WITNESS_TIMEOUT after the
+    gate has returned from its cleanup, as host scheduling can stall it."""
+    def start(witness, forked):
+        result = start_child(witness, forked)
+        time.sleep(WITNESS_TIMEOUT)
+        return result
+    return start
+
+
 def _gate_start(make_run):
     """A start_child for _witnessed_child: a gate run of make_run(witness), bounded by WITNESS_TIMEOUT."""
     return lambda witness, forked: _gate(types.SimpleNamespace(run=make_run(witness)), ROOT,
@@ -869,17 +1035,21 @@ def _gate_start(make_run):
 def _witness_verdict(run, expected, late, roles, own="child", bound=WITNESS_WAIT):
     """The verdict on one witnessed run (_witnessed_child). False when it shows a failure, whether or not the run
     was exercised: no child forked, the child not reaped, a holder of the witness alive WITNESS_WAIT after the run,
-    a run that took bound or longer, a role reported outside roles, the role own reporting another pid than the
-    forked one, or a result that is neither expected nor late. None (cannot evaluate) when it shows none but was
-    not exercised: a role in roles never reported, or the result is late (the bound overtook the run before it did
-    its part), as when the child starts late. Else True."""
+    a role reported outside roles (WOKE among them: a run or a descendant that outlived its sleep, so no kill
+    reached it in time), the role own reporting another pid than the forked one, or a result that is neither
+    expected nor late. None (cannot evaluate) when it shows none of these but was not exercised (a role in roles
+    never reported, or the result is late: the bound overtook the run before it did its part, as when the child
+    starts late), or took bound or longer: its cleanup is proven (every holder ended, the child reaped, own
+    reporting the forked pid, nothing outlived its sleep), so the overrun shows only that this process was slow, as
+    under host scheduling. An elapsed time cannot tell that from a cleanup that kills late but before any run
+    outlives its sleep, so such a cleanup also reads as cannot-evaluate, never as a pass. Else True."""
     pids = run["pids"]
-    if (run["pid"] is None or not run["ended"] or not run["reaped"]
-            or (bound is not None and run["elapsed"] >= bound) or not set(pids) <= roles
+    if (run["pid"] is None or not run["ended"] or not run["reaped"] or not set(pids) <= roles
             or (own is not None and pids.get(own, run["pid"]) != run["pid"])
             or run["result"] not in (expected, late)):
         return False
-    return True if run["result"] == expected and set(pids) == roles else None
+    overran = bound is not None and run["elapsed"] >= bound
+    return True if run["result"] == expected and set(pids) == roles and not overran else None
 
 
 def _witness_attempt(start_child, *verdict_args):
@@ -908,12 +1078,13 @@ def _combined(verdicts):
 
 def _escaping_run(witness):
     """A gate run that moves the gate child out of its own process group into its caller's, out of reach of the
-    group kill and the lifeline, reports its pid on the witness pipe and sleeps past any bound: only the kill of
-    the child by its pid ends it."""
+    group kill and the lifeline, reports its pid on the witness pipe and sleeps past any bound, then reports WOKE:
+    only the kill of the child by its pid ends it."""
     def run(root):
         os.setpgid(0, os.getpgid(os.getppid()))
         _witness_line(witness, "child")
         time.sleep(HANG_SECONDS)
+        _witness_line(witness, WOKE)
         return 0
     return run
 
@@ -1384,39 +1555,61 @@ def self_test(report_path=None):
         check("mutant/every-vector-discriminates", not never, never)
 
         # 5. the gate runner borrows no process timer: an armed caller ITIMER_REAL keeps its interval, its SIGALRM
-        # handler, its signal mask and its expiry instant through a paced gate run (probed in a child, so this
-        # self-test never arms its own process timer); the timer predicate refuses a timer reset or rewound during
-        # the run, and reads a timer read delayed past its bracket as cannot-evaluate, never as a failure; a
-        # gate run that ignores SIGALRM and overruns its bound is still bounded and reported hung, never as its
-        # late pass
+        # handler, its signal mask and its expiry instant through a paced gate run, to the precision of its stamps
+        # (probed in a child, so this self-test never arms its own process timer); the timer predicate refuses a
+        # timer reset or rewound during the run by more than that precision, and a reset to the starting countdown
+        # however early, reads a smaller move as kept, and reads a timer read delayed past its bracket as
+        # cannot-evaluate, never as a failure; a gate run that ignores SIGALRM and overruns its bound is still
+        # bounded and reported hung, never as its late pass
+        hangs = (("hung", ""), None)
+
         def timer_attempt():
             done, probe = _in_child(lambda: _caller_timer_probe(this, roots["intact/passes"]), CHILD_TIMEOUT)
             return (_timer_kept(probe) if done else False), probe
         check("gate/caller-timer-survives", *_attempted(timer_attempt))
+        settled = (CALLER_TIMER[0] - TIMER_SETTLE, CALLER_TIMER[1])
         stamps = [0.0, 0.0, TIMER_RUN_SECONDS, TIMER_RUN_SECONDS]
-        counted = dict(code=0, before=CALLER_TIMER, after=(CALLER_TIMER[0] - TIMER_RUN_SECONDS, CALLER_TIMER[1]),
+        counted = dict(code=0, before=settled, after=(settled[0] - TIMER_RUN_SECONDS, CALLER_TIMER[1]),
                        stamps=stamps, handler=True, mask=True)
         reset = dict(counted, after=CALLER_TIMER)
-        rewound = dict(counted, after=(CALLER_TIMER[0] - 2 * TIMER_RUN_SECONDS, CALLER_TIMER[1]))
+        rewound = dict(counted, after=(settled[0] - 2 * TIMER_RUN_SECONDS, CALLER_TIMER[1]))
         check("gate/timer-reset-refused",
               [_timer_kept(reset), _timer_kept(rewound), _timer_kept(counted)] == [False, False, True],
               (reset, rewound, counted))
         # a timer read TIMER_RUN_SECONDS late after the run, or a run overtaken by its bound: with the timer
         # untouched it cannot evaluate; with the timer reset it is refused
         gapped = dict(counted, stamps=stamps[:3] + [2 * TIMER_RUN_SECONDS],
-                      after=(CALLER_TIMER[0] - 2 * TIMER_RUN_SECONDS, CALLER_TIMER[1]))
+                      after=(settled[0] - 2 * TIMER_RUN_SECONDS, CALLER_TIMER[1]))
         gapped_reset = dict(gapped, after=CALLER_TIMER)
         overtaken = dict(counted, code="hung")
         gap_cases = [_timer_kept(gapped), _timer_kept(gapped_reset), _timer_kept(overtaken),
                      _timer_kept(dict(overtaken, after=CALLER_TIMER))]
         check("gate/timer-gap-cannot-fail", gap_cases == [None, False, None, False],
               (gap_cases, gapped, gapped_reset, overtaken))
-        start = time.monotonic()
-        overrun = _gate(types.SimpleNamespace(run=_overrunning_run), roots["intact/passes"],
-                        timeout=OVERRUN_TIMEOUT)
-        elapsed = time.monotonic() - start
-        check("gate/overrun-bounded-as-hung", overrun == ("hung", "") and elapsed < OVERRUN_SECONDS,
-              (overrun, elapsed))
+        # the precision claimed: the counterexample (a first read 40 ms inside its bracket, then a reset to the
+        # starting countdown at the gate's entry) is refused, as its first read shows a timer not armed
+        # TIMER_SETTLE before it, and so is the same reset after a settled first read; with both brackets
+        # TIMER_BRACKET - TIMER_FLOOR wide, a move later or earlier by TIMER_FLOOR plus both widths, less a
+        # margin, reads as kept (a move of that size is not seen), and one a margin more is refused
+        counterexample = dict(code=0, before=CALLER_TIMER, after=(CALLER_TIMER[0] - 0.3, CALLER_TIMER[1]),
+                              stamps=[0.0, 0.04, 0.34, 0.34], handler=True, mask=True)
+        width, margin = TIMER_BRACKET - TIMER_FLOOR, TIMER_FLOOR / 2
+        wide = [0.0, width, width + TIMER_RUN_SECONDS + TIMER_FLOOR, 2 * width + TIMER_RUN_SECONDS + TIMER_FLOOR]
+
+        def moved(move):
+            # a later move read at the far edge of each bracket (first, last), an earlier one at the near edge
+            _first, ran, done, last = wide
+            after = settled[0] + move - last if move > 0 else settled[0] + move + ran - done
+            return dict(counted, stamps=wide, after=(after, CALLER_TIMER[1]))
+        unseen = TIMER_FLOOR + 2 * width
+        precision = [_timer_kept(counterexample), _timer_kept(dict(counterexample, before=settled))] + [
+            _timer_kept(moved(sign * (unseen + step))) for sign in (1, -1) for step in (-margin, margin)]
+        check("gate/timer-precision-stated", precision == [False, False, True, False, True, False],
+              (precision, counterexample, wide))
+        check("gate/overrun-bounded-as-hung", *_attempted(lambda: _witness_attempt(
+            lambda witness, forked: _gate(types.SimpleNamespace(run=_overrunning_run(witness)),
+                                          roots["intact/passes"], timeout=OVERRUN_TIMEOUT, forked=forked),
+            *hangs, {"child"}, "child", OVERRUN_BOUND)))
 
         # 6. the gate child cannot outlive its bound or run its caller's cleanup: on expiry it is killed and
         # reaped, and so is one that left its process group; a descendant it forked dies with it, whether the run
@@ -1427,21 +1620,54 @@ def self_test(report_path=None):
         # child never unwinds into its caller (each sweep runs in a child, as it installs a trace function). Each
         # witnessed run knows its child from the fork; one that shows no failure but was not exercised (its bound
         # overtook it before it did its part, as when the child starts late) is retried, and is cannot-evaluate,
-        # never a failure, if no run is exercised. A witness kills only a process confirmed alive and holding its
-        # pipe (_kill_holder), so no kill reaches a reused pid
-        hangs = (("hung", ""), None)
+        # never a failure, if no run is exercised; one that overran its elapsed bound with its cleanup proven is
+        # cannot-evaluate too, while one that also shows a failure still fails; a witness read that was itself slow
+        # still reads holders that died in time as dead; and a failure is never retried or masked. Witness cleanup
+        # signals only a process, never this one, that /proc shows holding the witness write end and that is alive
+        # after that read, through a pidfd opened before it, so no kill reaches this process or a reused pid,
+        # whatever a run reports (_kill_holder, _witnessed)
         exercised = dict(result=("hung", ""), elapsed=WITNESS_TIMEOUT, pid=1, pids={"child": 1}, ended=True,
                          reaped=True)
         unexercised = dict(exercised, pids={})
         cases = ((exercised, True), (unexercised, None), (dict(unexercised, reaped=False), False),
-                 (dict(unexercised, ended=False), False), (dict(unexercised, elapsed=WITNESS_WAIT), False),
-                 (dict(unexercised, result=(0, "")), False), (dict(exercised, pids={"child": 2}), False))
+                 (dict(unexercised, ended=False), False), (dict(unexercised, result=(0, "")), False),
+                 (dict(exercised, pids={"child": 2}), False))
         verdicts = [_witness_verdict(run, *hangs, {"child"}) for run, _want in cases]
         returned = dict(exercised, result=("hung", ""), pids={"child": 1, "descendant": 3})
         late = _witness_verdict(returned, (0, ""), ("hung", ""), {"child", "descendant"})
         check("gate/unexercised-witness-cannot-evaluate",
               verdicts == [want for _run, want in cases] and late is None, (verdicts, late))
+        proven = dict(exercised, elapsed=WITNESS_WAIT)
+        overruns = [_witness_verdict(run, *hangs, {"child"}) for run in (
+            proven, dict(proven, pids={}), dict(proven, pids={"child": 1, WOKE: 1}), dict(proven, ended=False),
+            dict(proven, reaped=False), dict(proven, pids={"child": 2}), dict(proven, result=(0, "")))]
+        unbounded = _witness_verdict(proven, *hangs, {"child"}, "child", None)
+        drained = [_late_read(True), _late_read(False)]
+
+        def stalled_attempt():
+            verdict, run = _witness_attempt(_stalled(_gate_start(_hanging_run)), *hangs, {"child"}, "child",
+                                            WITNESS_TIMEOUT)
+            return (False if verdict is False else (verdict is None) if run["pids"] == {"child": run["pid"]}
+                    else None), run
+        stalled = _attempted(stalled_attempt)
+        check("gate/overrun-proven-cleanup-cannot-fail",
+              _combined([overruns == [None, None, False, False, False, False, False] and unbounded is True
+                         and drained == [(b"child 1\n", True), (b"child 1\n", False)], stalled[0]]),
+              (overruns, unbounded, drained, stalled))
         check("gate/witness-kill-confirmed", *_kill_confirmed())
+        check("gate/witness-cleanup-spares-owner", *_owner_spared())
+
+        def sequence(*verdicts):
+            queue = list(verdicts)
+            return lambda: (queue.pop(0), len(queue))
+        retried = [_attempted(sequence(*verdicts)) for verdicts in (
+            (False, True, True), (None, False, True), (None, None, None), (None, True, False))]
+        masked = [_combined(verdicts) for verdicts in (
+            (True, None, False), (None, False), (False, True), (None, True), (True, True))]
+        check("gate/failure-never-retried-or-masked",
+              [(verdict, len(details)) for verdict, details in retried] == [(False, 1), (False, 2), (None, 3),
+                                                                            (True, 2)]
+              and masked == [False, False, False, None, True], (retried, masked))
         check("gate/expiry-kills-and-reaps",
               *_attempted(lambda: _witness_attempt(_gate_start(_hanging_run), *hangs, {"child"})))
         check("gate/escaped-child-killed",
@@ -1490,8 +1716,9 @@ def self_test(report_path=None):
     if failed or unevaluated:
         print("SELF-TEST FAIL: entry-guard {} of {} check(s) failed".format(len(failed), len(results)) if failed
               else "SELF-TEST CANNOT EVALUATE: entry-guard {} of {} check(s) not exercised in {} runs each "
-              "(every run was overtaken by its bound before it did its part, or bracketed its timer reads too "
-              "widely; none showed a failure)".format(len(unevaluated), len(results), ATTEMPTS))
+              "(every run was overtaken by its bound before it did its part, bracketed its timer reads too "
+              "widely, or overran its elapsed bound with its cleanup proven; none showed a failure)".format(
+                  len(unevaluated), len(results), ATTEMPTS))
         for check_id, detail in failed:
             print("  {}: {!r}".format(check_id, detail))
         for check_id, detail in unevaluated:
@@ -1501,13 +1728,16 @@ def self_test(report_path=None):
           "duplicated, else-bearing, misnamed, callless, dormant-call, unreachable, nested and unlaunched-runner "
           "entries are findings; non-regular, unreadable, malformed and schema-invalid inputs fail closed; {} "
           "mutants each caught, every vector discriminating; this gate's own lost guard caught by the execution "
-          "gate; a caller timer survives the gate runner and keeps its expiry instant, a reset or rewound one is "
-          "refused and a delayed timer read is no failure; an overrun is bounded as hung; an expired gate child, "
+          "gate; a caller timer survives the gate runner and keeps its expiry instant to within {:g} s (a move "
+          "beyond that either way, and a reset to the starting countdown, are refused; a smaller move is not "
+          "seen) and a delayed timer read is no failure; an overrun is bounded as hung; an expired gate child, "
           "one that left its group, its descendants (an audit hook refusing the kills included) and an orphaned "
-          "one are killed, and a run its bound overtook is no failure; an exception at any point of the fork "
-          "window leaves no child or descriptor and never unwinds a child into its caller; live surface {} "
+          "one are killed, and a run its bound overtook, or that overran its elapsed bound with its cleanup "
+          "proven, is no failure, and a failure is never retried or masked; witness cleanup never signals this "
+          "process or a pid it has not confirmed holding the witness write end; an exception at any point of the "
+          "fork window leaves no child or descriptor and never unwinds a child into its caller; live surface {} "
           "scripts)".format(
-              len(results), len(vectors), len(MUTANTS), count))
+              len(results), len(vectors), len(MUTANTS), TIMER_FLOOR + 2 * TIMER_BRACKET, count))
     return 0
 
 
