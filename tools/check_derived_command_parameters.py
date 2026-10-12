@@ -526,30 +526,53 @@ _SYMLINK_CASE = "e2e (m) the symlink declared-surface fail-closed case"
 _DANGLING_CASE = "e2e (n) the dangling-symlink configuration fail-closed case"
 
 
+def _recorded(output, entry):
+    """True when entry heads a bullet on the SELF-TEST FAIL list in output: a recorded failure prints as
+    "  - <entry>" after that header, so a NOT RUN line that was only printed (never recorded) does not
+    count."""
+    _head, header, listed = output.partition("SELF-TEST FAIL:\n")
+    return bool(header) and "\n  - " + entry in "\n" + listed
+
+
 def _not_run_vectors(failures):
-    """Red-on-revert vectors for the skips that printed SELF-TEST PASS (PARTIAL) and exited 0: a nested
-    self-test run with an unavailable temp directory (mkdtemp raises OSError), and one with no symlink
-    support (symlink creation raises OSError), must each exit nonzero AND name every unrun case on a
-    NOT RUN line."""
+    """Red-on-revert vectors for the skips that printed SELF-TEST PASS (PARTIAL) and exited 0. Nested
+    self-test runs inject an unavailable temp directory (mkdtemp raises OSError), a failing symlink for case
+    (m) alone, for case (n) alone (the other case's symlink made for real), and for both; each run must exit
+    nonzero AND carry every unrun case's NOT RUN bullet on its failure list. The single-case runs matter: in
+    the both-cases run the sibling's recorded failure alone makes the exit nonzero, so a call site that only
+    printed its NOT RUN line would pass there."""
     import io
     from contextlib import redirect_stderr, redirect_stdout
 
     def _unavailable(*_args, **_kwargs):
         raise OSError("injected: unavailable")
 
+    def _unavailable_for(link_name):
+        # Fail only the symlink whose link is named link_name ("resume.md" is case (m)'s declared surface,
+        # "derived-command-parameters.toml" case (n)'s configuration); any other symlink is made for real.
+        def _symlink(link, target):
+            if link.name == link_name:
+                raise OSError("injected: unavailable")
+            return Path.symlink_to(link, target)
+        return _symlink
+
+    want_m = "NOT RUN: {}: no symlink support".format(_SYMLINK_CASE)
+    want_n = "NOT RUN: {}: no symlink support".format(_DANGLING_CASE)
     for label, kwargs, wants in (
             ("no-tempdir", {"_mkdtemp": _unavailable},
              ("NOT RUN: {}: no writable temp directory".format(_E2E_CASES),)),
-            ("no-symlink", {"_symlink": _unavailable},
-             ("NOT RUN: {}: no symlink support".format(_SYMLINK_CASE),
-              "NOT RUN: {}: no symlink support".format(_DANGLING_CASE)))):
+            ("no-symlink (m) only", {"_symlink": _unavailable_for("resume.md")}, (want_m,)),
+            ("no-symlink (n) only", {"_symlink": _unavailable_for("derived-command-parameters.toml")},
+             (want_n,)),
+            ("no-symlink", {"_symlink": _unavailable}, (want_m, want_n))):
         out = io.StringIO()
         with redirect_stdout(out), redirect_stderr(io.StringIO()):
             rc = self_test_main(_vectors=False, **kwargs)
-        missing = [want for want in wants if want not in out.getvalue()]
+        missing = [want for want in wants if not _recorded(out.getvalue(), want)]
         if rc == 0 or missing:
-            failures.append("(NOT RUN vector {}) must exit nonzero AND record {!r}, never a PASS (PARTIAL) "
-                            "exit 0 (got exit {})".format(label, missing or wants, rc))
+            failures.append("(NOT RUN vector {}) must exit nonzero AND record {!r} on the failure list, never "
+                            "a PASS (PARTIAL) exit 0 or a bare printed line (got exit {})"
+                            .format(label, missing or wants, rc))
 
 
 def self_test_main(_mkdtemp=None, _symlink=None, _vectors=True):  # noqa: C901  a flat sequence of cases

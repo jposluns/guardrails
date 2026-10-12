@@ -336,30 +336,54 @@ _V10_CASE = "V10 non-UTF-8-git-output"
 _V11_CASE = "V11 shallow-clone"
 
 
+def _recorded(output, entry):
+    """True when entry heads a bullet on the SELF-TEST FAIL list in output: a recorded failure prints as
+    "  - <entry>" after that header, so a NOT RUN line that was only printed (never recorded) does not
+    count."""
+    _head, header, listed = output.partition("SELF-TEST FAIL:\n")
+    return bool(header) and "\n  - " + entry in "\n" + listed
+
+
 def _not_run_vector(failures):
-    """Red-on-revert vector for the V10/V11 skips that printed SELF-TEST PASS (PARTIAL) and exited 0: a
-    nested self-test run whose V10 fixture directory is rejected and whose V11 shallow clone cannot be built
-    (the two fixture builders replaced, everything else real) must exit nonzero AND name both cases on
-    NOT RUN lines."""
+    """Red-on-revert vector for the V10/V11 skips that printed SELF-TEST PASS (PARTIAL) and exited 0. Nested
+    self-test runs replace the V10 builder alone, the V11 builder alone (the other fixture left real), and
+    then both, with builders that raise; two more runs replace each builder alone with one that returns None
+    instead of a fixture. Each run must exit nonzero AND carry every replaced case's NOT RUN bullet on its
+    failure list. The single-case runs matter: in the combined run the sibling's recorded failure alone makes
+    the exit nonzero, so a call site that only printed its NOT RUN line would pass there."""
     def _rejects_name(_parent):
         raise OSError("injected: a non-UTF-8 directory name is rejected")
 
     def _no_shallow(_parent, _source, _dest):
         raise CannotEvaluate("injected: a shallow file:// clone cannot be built")
 
-    saved = {name: globals()[name] for name in ("_non_utf8_dir", "_shallow_clone")}
-    globals().update(_non_utf8_dir=_rejects_name, _shallow_clone=_no_shallow)
-    out = io.StringIO()
-    try:
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
-            rc = self_test(_vectors=False)
-    finally:
-        globals().update(saved)
-    for label in (_V10_CASE, _V11_CASE):
-        if rc == 0 or "NOT RUN: {}: ".format(label) not in out.getvalue():
-            failures.append("(NOT RUN vector) an unbuildable {} fixture must exit nonzero AND record a NOT "
-                            "RUN failure naming it, never a PASS (PARTIAL) exit 0 (got exit {})"
-                            .format(label, rc))
+    def _no_dir(_parent):
+        return None
+
+    def _no_clone(_parent, _source, _dest):
+        return None
+
+    for run_label, injected, labels in (
+            ("V10 only unbuildable", {"_non_utf8_dir": _rejects_name}, (_V10_CASE,)),
+            ("V11 only unbuildable", {"_shallow_clone": _no_shallow}, (_V11_CASE,)),
+            ("V10 and V11 unbuildable",
+             {"_non_utf8_dir": _rejects_name, "_shallow_clone": _no_shallow}, (_V10_CASE, _V11_CASE)),
+            ("V10 builder returns None", {"_non_utf8_dir": _no_dir}, (_V10_CASE,)),
+            ("V11 builder returns None", {"_shallow_clone": _no_clone}, (_V11_CASE,))):
+        saved = {name: globals()[name] for name in injected}
+        globals().update(injected)
+        out = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                rc = self_test(_vectors=False)
+        finally:
+            globals().update(saved)
+        for label in labels:
+            if rc == 0 or not _recorded(out.getvalue(), "NOT RUN: {}: ".format(label)):
+                failures.append("(NOT RUN vector, {}) an unavailable {} fixture must exit nonzero AND record "
+                                "a NOT RUN failure naming it on the failure list, never a PASS (PARTIAL) "
+                                "exit 0, a silent skip or a bare printed line (got exit {})"
+                                .format(run_label, label, rc))
 
 
 def self_test(_vectors=True):
@@ -476,6 +500,9 @@ def self_test(_vectors=True):
             v10 = None
             _not_run(failures, _V10_CASE, "this filesystem rejects a non-UTF-8 directory name, so the "
                      "fixture cannot be built ({})".format(exc))
+        else:
+            if v10 is None:
+                _not_run(failures, _V10_CASE, "the fixture builder returned no directory")
         if v10 is not None:
             _fixture_git(v10, "init", "-q", "-b", "protected")
             case("V10 non-utf8 git output is cannot-evaluate", 2, v10,
@@ -493,6 +520,9 @@ def self_test(_vectors=True):
         except (OSError, subprocess.SubprocessError, CannotEvaluate) as exc:
             shallow_ready = False
             _not_run(failures, _V11_CASE, "a shallow file:// clone could not be built ({})".format(exc))
+        else:
+            if not shallow_ready:
+                _not_run(failures, _V11_CASE, "the shallow-clone builder returned no clone")
         if shallow_ready:
             v11_tree = _fixture_git(v11, "rev-parse", "HEAD^{tree}")
             v11_orphan = _commit_tree(v11, v11_tree, (), "orphan in shallow")

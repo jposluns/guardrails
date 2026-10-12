@@ -328,10 +328,18 @@ _TEMP_ROOT_CASES = ("the dormant and armed temp-root cases (dormant clean, D1, A
                     "invalid-UTF-8 evidence)")
 
 
+def _recorded(output, entry):
+    """True when entry heads a bullet on the SELF-TEST FAIL list in output: a recorded failure prints as
+    "  - <entry>" after that header, so a NOT RUN line that was only printed (never recorded) does not
+    count."""
+    _head, header, listed = output.partition("SELF-TEST FAIL:\n")
+    return bool(header) and "\n  - " + entry in "\n" + listed
+
+
 def _not_run_vector(failures):
     """Red-on-revert vector for the temp-root skip that printed SELF-TEST PASS (PARTIAL) and exited 0:
     a nested self-test run with an unavailable temp directory (mkdtemp raises OSError) must exit nonzero
-    AND name the temp-root cases on a NOT RUN line."""
+    AND carry the temp-root cases' NOT RUN bullet on its failure list (a bare printed line does not count)."""
     def _unavailable(*_args, **_kwargs):
         raise OSError("injected: no writable temp directory")
 
@@ -339,9 +347,10 @@ def _not_run_vector(failures):
     with redirect_stdout(out), redirect_stderr(io.StringIO()):
         rc = self_test_main(_mkdtemp=_unavailable, _vectors=False)
     want = "NOT RUN: {}: no writable temp directory".format(_TEMP_ROOT_CASES)
-    if rc == 0 or want not in out.getvalue():
-        failures.append("(NOT RUN vector) an unavailable temp directory must exit nonzero AND record {!r}, "
-                        "never a PASS (PARTIAL) exit 0 (got exit {})".format(want, rc))
+    if rc == 0 or not _recorded(out.getvalue(), want):
+        failures.append("(NOT RUN vector) an unavailable temp directory must exit nonzero AND record {!r} on "
+                        "the failure list, never a PASS (PARTIAL) exit 0 or a bare printed line (got exit {})"
+                        .format(want, rc))
 
 
 def self_test_main(_mkdtemp=None, _vectors=True):
