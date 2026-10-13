@@ -136,9 +136,13 @@ def main():
 #       and leaves no temporary file; a failed rename is exit 2 with the target unchanged and the
 #       temporary file left in place and named in the refusal. A fixture that cannot set the sticky
 #       bit (chmod 0o5751 refused, or the bit not held afterwards) is a named NOT RUN failure, never
-#       a silent fallback to 0o4751: a write clears set-user-ID in any engine, so without the sticky
-#       bit an engine keeping special permission bits would pass unseen, and a vector pins that the
-#       refused chmod stays red with such an engine.
+#       a silent fallback to 0o4751: this engine's fchmod sets the temporary file's mode before the
+#       write, and the write then clears set-user-ID on a runner without CAP_FSETID, so without the
+#       sticky bit an engine keeping special permission bits could pass unseen there. Vectors drive
+#       this same T21 leg with the sticky chmod refused and with the bit silently stripped (each must
+#       record the named NOT RUN failure, whatever a faulty engine would then return), and a third
+#       asserts the faulty engine's own outcome: a special-bit-keeping engine succeeds and leaves the
+#       sticky bit standing, which the leg's whole-mode assertion refuses.
 #   T22 a parent directory swapped for a symlink after the write-side walk: the write lands through the
 #       held descriptor in the original directory and nothing outside the tree changes.
 #   T23 the same swap after the read-side walk: the bytes read are the real target's, never the planted
@@ -170,13 +174,15 @@ def main():
 #   T34 descriptor accounting: the descriptors open after every other vector (T1-T33, then T35 to T38,
 #       which run before it) are the ones open before them, so a close dropped on any ordinary success or
 #       error path fails. Each enumeration must contain a sentinel descriptor opened for it: a listing
-#       that cannot be made (neither /proc/self/fd nor /dev/fd) or that omits the sentinel is None, and
-#       a None on either side of the matrix is a named NOT RUN failure, never a pass. Residual: a
-#       partial listing that still holds the sentinel and matches its counterpart can hide a leak.
-#       Vectors pin that a held-open descriptor is reported as a leak, that a sentinel-omitting listing
-#       is None, and, end to end, that a whole matrix run whose writer leaks a descriptor under
-#       unavailable enumeration at both boundaries exits nonzero with the named NOT RUN failure and no
-#       PASS text.
+#       that cannot be made (neither /proc/self/fd nor /dev/fd), one that omits the sentinel, and a
+#       sentinel that cannot be opened (an unopenable /dev/null) are each None, and a None on either
+#       side of the matrix is a named NOT RUN failure, never a pass. Residual: a partial listing that
+#       still holds the sentinel and matches its counterpart can hide a leak. Vectors pin that a
+#       held-open descriptor is reported as a leak, that an unopenable sentinel and a sentinel-omitting
+#       listing (the sentinel's own number derived and dropped from the real listing, whatever
+#       standard descriptors are open or closed) are None, and, end to end, that a whole matrix run
+#       whose writer leaks a descriptor under unavailable enumeration at both boundaries exits nonzero
+#       with the named NOT RUN failure and no PASS text.
 #   T35 on a nested target, an exception other than OSError raised at the rename (a stand-in for an
 #       interrupt) propagates with a note naming the temporary file it left by its path from the root;
 #       the target unchanged and the file left there.
@@ -186,9 +192,12 @@ def main():
 #       before any file object, refuses it (exit 2 in both modes) in the engine's wording naming the path
 #       from the root; nothing replaced.
 #   T38 a nested target swapped for a UNIX socket after the read-side walk: the read leg's open fails
-#       with ENXIO, refused (exit 2 in both modes) in the engine's wording naming the path from the root
-#       (ENXIO is injected, its message naming the errno it replaces, where this environment cannot
-#       bind the socket or refuses its open otherwise).
+#       with ENXIO, refused (exit 2 in both modes) in the engine's wording naming the path from the
+#       root. Where this environment cannot create or bind the socket, or answers the open with an
+#       errno other than ENXIO, ENXIO is injected in its place so the engine's mapping is judged
+#       either way, and the environmental cause (socket creation, bind, or the open's real errno) is
+#       recorded in a printed SELF-TEST NOTE outside the engine's refusal, which never carries it.
+#       Vectors force each of the three cases and assert the recorded cause by its errno.
 
 _APEX = ("---\ncorpus-id: prjint1\norigin: pack\nfamily: aiqt\napex: true\nslug: project-integrity\n---\n"
          "\n# Project integrity\n\nApex text.\n")
@@ -267,20 +276,24 @@ def self_test_main(nested_run=False):
             code = run(root, check, targets or agents_only, "tools/gen_agents.py", corpus_bodies)
         return code, buf.getvalue()
 
-    def expect(label, root, check, want, targets=None, unchanged=True):
+    def expect(label, root, check, want, targets=None, unchanged=True, fail_list=None):
+        # fail_list: where a failure lands; the matrix's own list by default. The T21 and T38 legs
+        # take a caller-supplied list so their vectors can rerun the same leg and judge its verdict
+        # on its own.
+        sink = failures if fail_list is None else fail_list
         rels = [rel for rel, _h in (targets or agents_only)]
         before = [read(root / rel) for rel in rels] if unchanged else None
         try:
             code, out = drive(root, check, targets)
         except Exception as exc:  # the engine must map every input error to an exit code, never raise
-            failures.append("{}: {} raised {}: {}".format(
+            sink.append("{}: {} raised {}: {}".format(
                 label, "--check" if check else "write", type(exc).__name__, exc))
             return ""
         if code != want:
-            failures.append("{}: {} expected exit {}, got {}: {}".format(
+            sink.append("{}: {} expected exit {}, got {}: {}".format(
                 label, "--check" if check else "write", want, code, out.strip()))
         if unchanged and [read(root / rel) for rel in rels] != before:
-            failures.append("{}: {} changed a target it must leave alone".format(
+            sink.append("{}: {} changed a target it must leave alone".format(
                 label, "--check" if check else "write"))
         return out
 
@@ -303,10 +316,15 @@ def self_test_main(nested_run=False):
         """The open descriptors (the sentinel left out), or None when no trustworthy enumeration is
         available. A sentinel descriptor opened for this call must appear in the listing: one that
         omits it is incomplete and fails closed as None, exactly like an unlistable directory, so
-        the accounting never trusts a listing shown to drop descriptors. Residual: a partial listing
-        that still holds the sentinel and happens to match its counterpart can hide a leak; the
-        sentinel refutes a listing that drops it, it does not prove completeness."""
-        sentinel = os.open(os.devnull, os.O_RDONLY)
+        the accounting never trusts a listing shown to drop descriptors. A sentinel that cannot be
+        opened (an unopenable /dev/null) is None too, inside this guarded call, so the matrix still
+        reaches its named NOT RUN failure and its cleanup rather than crashing past them. Residual:
+        a partial listing that still holds the sentinel and happens to match its counterpart can
+        hide a leak; the sentinel refutes a listing that drops it, it does not prove completeness."""
+        try:
+            sentinel = os.open(os.devnull, os.O_RDONLY)
+        except OSError:
+            return None  # no sentinel could be opened: fail closed, like an unlistable directory
         try:
             for fd_dir in ("/proc/self/fd", "/dev/fd"):
                 try:
@@ -337,9 +355,10 @@ def self_test_main(nested_run=False):
         return None
 
     # The T21 fixture: mode 0o5751 with the sticky bit verified held. A platform refusing the sticky
-    # bit (or quietly dropping it) is a named NOT RUN failure, never a fallback to 0o4751: a write
-    # clears set-user-ID in any engine, so set-user-ID alone cannot discriminate, and under such a
-    # fallback an engine keeping special permission bits would pass unseen.
+    # bit (or quietly dropping it) is a named NOT RUN failure, never a fallback to 0o4751: this
+    # engine's fchmod sets the temporary file's mode before the write, and the write then clears
+    # set-user-ID on a runner without CAP_FSETID, so set-user-ID alone cannot discriminate there,
+    # and under such a fallback an engine keeping special permission bits would pass unseen.
     def sticky_fixture_failure(path):
         try:
             os.chmod(path, 0o5751)
@@ -677,29 +696,34 @@ def self_test_main(nested_run=False):
         # T21. A write keeps the mode and leaves no temporary file; a failed rename leaves the target as it was.
         #      The umask is pinned (and restored) and the asserted mode holds execute bits, which the
         #      temporary file's creation mode (0o666 before the umask) can never supply, so a dropped
-        #      fchmod cannot pass under ANY ambient umask.
-        saved_umask = os.umask(0o022)
-        try:
-            root = tree(ac.registry_text(), blocks=(), agents=legacy_golden)
-            real_replace = ac.os.replace  # T33 restores to this, so it is bound whether or not T21 runs
-            # Set-user-ID and sticky bits beyond the ordinary 0o751: the write drops both, and the sticky
-            # bit (which no write clears) makes a kept one visible even to an unprivileged runner. A
-            # fixture without the sticky bit cannot be evaluated (sticky_fixture_failure, a named NOT
-            # RUN failure): the rest of T21 is then skipped, the failure already keeping the run red.
-            t21_fixture = sticky_fixture_failure(root / AGENTS_REL)
-            if t21_fixture is not None:
-                failures.append(t21_fixture)
-            else:
+        #      fchmod cannot pass under ANY ambient umask. The whole leg is one function the vectors
+        #      below rerun, so a fallback restored anywhere in it (sticky_fixture_failure or this body)
+        #      is theirs to catch, never only one inside the helper.
+        real_replace = ac.os.replace  # T33 restores to this, so it is bound whether or not T21 runs
+
+        def t21_leg(fail_list):
+            saved_umask = os.umask(0o022)
+            try:
+                root = tree(ac.registry_text(), blocks=(), agents=legacy_golden)
+                # Set-user-ID and sticky bits beyond the ordinary 0o751: the write drops both, and the
+                # sticky bit (which no write clears) makes a kept one visible even to an unprivileged
+                # runner. A fixture without the sticky bit cannot be evaluated (sticky_fixture_failure,
+                # a named NOT RUN failure): the rest of the leg is then skipped, the failure already
+                # keeping the run red.
+                t21_fixture = sticky_fixture_failure(root / AGENTS_REL)
+                if t21_fixture is not None:
+                    fail_list.append(t21_fixture)
+                    return
                 (root / ".aiqt" / "core" / "rules" / "r1.md").write_text(new_rule, encoding="utf-8")
-                expect("T21 rewrite", root, False, 0, unchanged=False)
+                expect("T21 rewrite", root, False, 0, unchanged=False, fail_list=fail_list)
                 if read(root / AGENTS_REL) == legacy_golden:
-                    failures.append("T21: the rewrite did not change AGENTS.md")
+                    fail_list.append("T21: the rewrite did not change AGENTS.md")
                 kept = stat.S_IMODE(os.stat(root / AGENTS_REL).st_mode)
                 if kept != 0o751:
-                    failures.append("T21: the rewrite left mode {:o}, not the target's ordinary permission "
-                                    "bits 751".format(kept))
+                    fail_list.append("T21: the rewrite left mode {:o}, not the target's ordinary "
+                                     "permission bits 751".format(kept))
                 if sorted(p.name for p in root.iterdir()) != [".aiqt", AGENTS_REL]:
-                    failures.append("T21: the write left a stray file: {}".format(
+                    fail_list.append("T21: the write left a stray file: {}".format(
                         sorted(p.name for p in root.iterdir())))
                 (root / ".aiqt" / "core" / "rules" / "r1.md").write_text(_RULE, encoding="utf-8")
 
@@ -708,45 +732,68 @@ def self_test_main(nested_run=False):
 
                 ac.os.replace = failing_replace
                 try:
-                    out = expect("T21 failed rename", root, False, 2)
+                    out = expect("T21 failed rename", root, False, 2, fail_list=fail_list)
                 finally:
                     ac.os.replace = real_replace
                 left = [p.name for p in root.iterdir() if p.name not in (".aiqt", AGENTS_REL)]
                 if (len(left) != 1 or not left[0].startswith("." + AGENTS_REL + ".")
                         or not left[0].endswith(".tmp")):
-                    failures.append("T21: a failed rename did not leave exactly its temporary file: "
-                                    "{}".format(left))
+                    fail_list.append("T21: a failed rename did not leave exactly its temporary file: "
+                                     "{}".format(left))
                 elif left[0] not in out:
-                    failures.append("T21: the refusal does not name the temporary file left: "
-                                    "{}".format(out.strip()))
-        finally:
-            os.umask(saved_umask)
+                    fail_list.append("T21: the refusal does not name the temporary file left: "
+                                     "{}".format(out.strip()))
+            finally:
+                os.umask(saved_umask)
 
-        # T21 vector: with the 0o5751 chmod refused and an engine that keeps special permission bits,
-        # the run must go red. Under the new fixture the refusal itself is the named NOT RUN failure;
-        # this vector pins that no silent fallback returns instead (the old fallback to 0o4751 passed
-        # such an engine: a write clears set-user-ID anyway, so nothing surviving the write
-        # discriminated a kept special bit without the sticky bit).
-        vec_root = tree(ac.registry_text(), blocks=(), agents=legacy_golden)
-        (vec_root / ".aiqt" / "core" / "rules" / "r1.md").write_text(new_rule, encoding="utf-8")
+        t21_leg(failures)
+
+        # T21 vectors. (a) With every sticky-bit chmod refused, the T21 leg itself must record its
+        # named NOT RUN failure, unconditionally: a leg that records nothing fell back silently (the
+        # reverted behaviour, whether the fallback is restored inside sticky_fixture_failure or inline
+        # in the leg body), and that is red here whatever a faulty engine would then return.
         real_chmod = os.chmod
 
         def sticky_refusing_chmod(path, mode, *a, **k):
-            if mode == 0o5751:
+            if mode & stat.S_ISVTX:
                 raise OSError(errno.EPERM, "injected: the sticky bit is refused", str(path))
             return real_chmod(path, mode, *a, **k)
 
+        vec_failures = []
         os.chmod = sticky_refusing_chmod
         try:
-            vec_verdict = sticky_fixture_failure(vec_root / AGENTS_REL)
+            t21_leg(vec_failures)
         finally:
             os.chmod = real_chmod
-        if vec_verdict is not None and "NOT RUN" not in vec_verdict:
-            failures.append("T21 vector: the refused sticky-bit fixture must be a named NOT RUN "
-                            "failure, got {!r}".format(vec_verdict))
-        if vec_verdict is None:
-            # The fixture fell back silently (the reverted behaviour): a special-bit-retaining engine
-            # must then go red on the mode assertion, or this vector fails the run.
+        if not any("T21 NOT RUN" in f for f in vec_failures):
+            failures.append("T21 vector: with the sticky-bit chmod refused, the T21 leg must record "
+                            "its named NOT RUN failure, got {!r}".format(vec_failures))
+
+        # (b) With chmod silently stripping the sticky bit, the leg must record the mode-comparison
+        # NOT RUN failure ("did not take"): red when the helper's after-chmod mode check is removed.
+        def sticky_stripping_chmod(path, mode, *a, **k):
+            return real_chmod(path, mode & ~stat.S_ISVTX, *a, **k)
+
+        vec_failures = []
+        os.chmod = sticky_stripping_chmod
+        try:
+            t21_leg(vec_failures)
+        finally:
+            os.chmod = real_chmod
+        if not any("T21 NOT RUN" in f and "did not take" in f for f in vec_failures):
+            failures.append("T21 vector: with the sticky bit silently stripped by chmod, the T21 leg "
+                            "must record its named NOT RUN failure from the mode comparison, got "
+                            "{!r}".format(vec_failures))
+
+        # (c) The faulty engine's own outcome, asserted separately and never conditioned on what the
+        # fixture returned: on a 0o5751 fixture an engine keeping special permission bits must succeed
+        # (exit 0, so an unrelated engine refusal cannot satisfy this vector) and leave the sticky bit
+        # standing, the very outcome the leg's whole-mode assertion refuses. Where the platform
+        # refuses the sticky bit, t21_leg above already recorded the named NOT RUN failure, so nothing
+        # passes silently.
+        vec_root = tree(ac.registry_text(), blocks=(), agents=legacy_golden)
+        (vec_root / ".aiqt" / "core" / "rules" / "r1.md").write_text(new_rule, encoding="utf-8")
+        if sticky_fixture_failure(vec_root / AGENTS_REL) is None:
             special = stat.S_IMODE(os.stat(vec_root / AGENTS_REL).st_mode) & 0o7000
             real_fchmod = ac.os.fchmod
 
@@ -755,14 +802,18 @@ def self_test_main(nested_run=False):
 
             ac.os.fchmod = special_bit_keeping_fchmod
             try:
-                vec_code, _vec_out = drive(vec_root, False)
+                vec_code, vec_out = drive(vec_root, False)
             finally:
                 ac.os.fchmod = real_fchmod
             vec_kept = stat.S_IMODE(os.stat(vec_root / AGENTS_REL).st_mode)
-            if vec_code == 0 and vec_kept == 0o751:
-                failures.append("T21 vector: with the sticky-bit chmod refused, an engine keeping "
-                                "special permission bits passed (exit 0, mode 751): the fallback "
-                                "fixture dropped the discriminator")
+            if vec_code != 0:
+                failures.append("T21 vector: the special-bit-keeping engine did not run to success "
+                                "(exit {}), so the discriminator was not judged: {}".format(
+                                    vec_code, vec_out.strip()))
+            elif not vec_kept & stat.S_ISVTX:
+                failures.append("T21 vector: the special-bit-keeping engine left mode {:o} without "
+                                "the sticky bit: the fixture no longer discriminates a kept special "
+                                "bit".format(vec_kept))
 
         # T22. A parent directory swapped for a symlink AFTER the write-side walk cannot redirect the
         #      write: the temporary create and the rename go through the directory descriptor the walk
@@ -1305,33 +1356,46 @@ def self_test_main(nested_run=False):
                 failures.append("T37: the directory was replaced or a temporary file was left: {}".format(
                     nested_strays(root)))
 
-        # T38. A nested target swapped for a UNIX socket after the read-side walk: the read leg's open fails
-        #      with ENXIO, refused (exit 2 in both modes) in the engine's wording naming the path from the
-        #      root, never the raw errno text naming the bare file name. The read leg's open of the final
-        #      name is observed through a wrapper; where this environment cannot bind the socket, or answers
-        #      its open with another errno (a sandbox can refuse it with EPERM), the wrapper raises ENXIO in
-        #      its place, its message naming the errno it replaced, so the engine's mapping is judged
-        #      either way and the environment's real answer stays visible in the diagnostic.
-        for check in (True, False):
+        # T38. A nested target swapped for a UNIX socket after the read-side walk: the read leg's open
+        #      fails with ENXIO, refused (exit 2 in both modes) in the engine's wording naming the path
+        #      from the root, never the raw errno text naming the bare file name. The read leg's open of
+        #      the final name is observed through a wrapper; where this environment cannot create or
+        #      bind the socket, or answers the open with another errno (a sandbox can refuse it with
+        #      EPERM), the wrapper raises ENXIO in its place, so the engine's mapping is judged either
+        #      way. The engine's refusal is generic and never carries the environment's own answer, so
+        #      that answer (the errno of the socket creation, bind or open failure) is recorded in a
+        #      printed SELF-TEST NOTE instead, and the whole leg is one function the vectors below rerun
+        #      with each failure forced, asserting the recorded cause.
+        def t38_leg(check, fail_list, force=None, forced_errno=None):
+            # force: None, or "socket", "bind" or "open", raising forced_errno at that step; "open"
+            # simulates a bound socket, so the forced errno is answered by the read-leg open itself.
             root = tree(ac.registry_text(), blocks=())
             (root / ".github").mkdir()
             (root / nested).write_bytes(b"old line\n")
-            sockets, bound, read_opens = [], [], []
+            sockets, bound, read_opens, notes = [], [], [], []
 
             def to_socket():
                 (root / nested).unlink()
+                if force == "open":
+                    bound.append(True)  # simulated: the forced errno is raised at the open below
+                    return
                 try:
+                    if force == "socket":
+                        raise OSError(forced_errno, os.strerror(forced_errno))
                     sk = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                except OSError:
+                except OSError as exc:
+                    notes.append("socket creation failed with errno {} ({})".format(exc.errno, exc.strerror))
                     return
                 sockets.append(sk)
                 here = os.getcwd()
                 os.chdir(root / ".github")  # a relative bind stays under the AF_UNIX path length limit
                 try:
+                    if force == "bind":
+                        raise OSError(forced_errno, os.strerror(forced_errno))
                     sk.bind(nested_name)
                     bound.append(True)
-                except OSError:
-                    pass
+                except OSError as exc:
+                    notes.append("bind failed with errno {} ({})".format(exc.errno, exc.strerror))
                 finally:
                     os.chdir(here)
 
@@ -1341,36 +1405,65 @@ def self_test_main(nested_run=False):
                     return real_open(path, flags, *a, **k)
                 read_opens.append(path)
                 if not bound:
+                    # Nothing is behind the name: ENXIO injected; to_socket recorded the cause above.
                     raise OSError(errno.ENXIO, os.strerror(errno.ENXIO), path)
                 try:
+                    if force == "open":
+                        raise OSError(forced_errno, os.strerror(forced_errno), path)
                     return real_open(path, flags, *a, **k)
                 except OSError as exc:
                     if exc.errno != errno.ENXIO:
-                        # The engine mapping is judged on ENXIO; the message keeps the errno this
-                        # environment really answered, so the diagnostic never hides it.
-                        raise OSError(errno.ENXIO, "{} (injected in place of errno {}: {})".format(
-                            os.strerror(errno.ENXIO), exc.errno, exc.strerror), path) from None
+                        notes.append("the open answered errno {} ({})".format(exc.errno, exc.strerror))
+                        raise OSError(errno.ENXIO, os.strerror(errno.ENXIO), path) from None
                     raise
 
             ac._target_dir_fd, fired = read_leg_swap(to_socket)
             ac.os.open = read_open
             try:
-                out = expect("T38 nested target swapped for a socket after the read-side walk", root, check, 2,
-                             targets=nested_target, unchanged=False)
+                out = expect("T38 nested target swapped for a socket after the read-side walk", root,
+                             check, 2, targets=nested_target, unchanged=False, fail_list=fail_list)
             finally:
                 ac.os.open = real_open
                 ac._target_dir_fd = real_walk
                 for sk in sockets:
                     sk.close()
             if not fired:
-                failures.append("T38: the read-leg swap hook did not run")
+                fail_list.append("T38: the read-leg swap hook did not run")
             if len(read_opens) != 1:
-                failures.append("T38: expected one read-leg open of the final name, saw {}".format(read_opens))
+                fail_list.append("T38: expected one read-leg open of the final name, saw {}".format(read_opens))
             if nested_refusal + " (a FIFO with no reader, a socket, or a device" not in out:
-                failures.append("T38: the refusal is not the engine's, naming {}: {}".format(nested, out.strip()))
+                fail_list.append("T38: the refusal is not the engine's, naming {}: {}".format(nested, out.strip()))
             if (root / nested).is_file() or nested_strays(root):
-                failures.append("T38: the socket was replaced or a temporary file was left: {}".format(
+                fail_list.append("T38: the socket was replaced or a temporary file was left: {}".format(
                     nested_strays(root)))
+            if notes and force is None:
+                # The environment's own answer, outside the engine's generic refusal (which never
+                # carries it): printed even where the leg passes on the injected ENXIO. The forced
+                # vector reruns below assert the recorded notes directly, without this print.
+                print("SELF-TEST NOTE: T38 ({}): no bound socket answered the read-leg open with its "
+                      "own ENXIO; {}; ENXIO was injected in its place, so the engine's mapping was "
+                      "still judged".format("--check" if check else "write", "; ".join(notes)))
+            return notes
+
+        for check in (True, False):
+            t38_leg(check, failures)
+
+        # T38 vectors: each forced environmental failure (socket creation, bind, a non-ENXIO answer at
+        # the open) must leave the engine's generic ENXIO refusal judged with no failure of the leg's
+        # own, and must be recorded, with its errno, in the notes the SELF-TEST NOTE prints: the
+        # engine's refusal never carries it.
+        for force, forced_errno, cause in (
+                ("socket", errno.EPERM, "socket creation failed with errno"),
+                ("bind", errno.EACCES, "bind failed with errno"),
+                ("open", errno.EPERM, "the open answered errno")):
+            vec_failures = []
+            notes = t38_leg(False, vec_failures, force=force, forced_errno=forced_errno)
+            if vec_failures:
+                failures.append("T38 vector (forced {} failure): the engine mapping was not judged "
+                                "cleanly: {!r}".format(force, vec_failures))
+            if not any("{} {}".format(cause, forced_errno) in n for n in notes):
+                failures.append("T38 vector (forced {} failure): the recorded cause must say {!r}, "
+                                "got {!r}".format(force, "{} {}".format(cause, forced_errno), notes))
 
         # T34. Descriptor accounting over every other vector (T1-T33, T35 to T38). An enumeration
         #      open_fds cannot trust on either side (unavailable, or omitting its sentinel) is a
@@ -1395,11 +1488,15 @@ def self_test_main(nested_run=False):
                 failures.append("T34 vector: a held-open descriptor was not reported as a leak: "
                                 "{!r}".format(leak))
         # (b) open_fds fails closed: with os.listdir refusing both descriptor directories the result
-        #     is None, and a listing that omits the sentinel descriptor (a truncated listing here:
-        #     the sentinel is never 0, 1 or 2) is None too, never a partial accounting; a None pair
-        #     is the named NOT RUN failure, on either side or both. The genuinely leaking writer
-        #     under unavailable enumeration is vector (c) below, end to end.
+        #     is None; with its sentinel unopenable (/dev/null refused) it is None; and a listing that
+        #     omits the sentinel descriptor is None too, never a partial accounting; a None pair is
+        #     the named NOT RUN failure, on either side or both. The omitted sentinel's number is the
+        #     one its open really returned (recorded, then dropped from the real listing), never
+        #     assumed to be 3 or above: with a standard descriptor closed, the sentinel can take 0, 1
+        #     or 2. The genuinely leaking writer under unavailable enumeration is vector (c) below,
+        #     end to end.
         real_listdir = os.listdir
+        real_os_open = os.open
 
         def unavailable_listdir(*_a, **_k):
             raise OSError(errno.EACCES, "injected: descriptor enumeration unavailable")
@@ -1413,15 +1510,40 @@ def self_test_main(nested_run=False):
             failures.append("T34 vector: open_fds did not report unavailable enumeration as None: "
                             "{!r}".format(unavailable_pair))
 
-        def sentinel_omitting_listdir(path, *a, **k):
-            if str(path) in ("/proc/self/fd", "/dev/fd"):
-                return ["0", "1", "2"]  # whatever number the sentinel took, it is 3 or above
-            return real_listdir(path, *a, **k)
+        def devnull_refusing_open(path, *a, **k):
+            if path == os.devnull:
+                raise OSError(errno.EACCES, "injected: the sentinel cannot be opened", str(path))
+            return real_os_open(path, *a, **k)
 
+        os.open = devnull_refusing_open
+        try:
+            no_sentinel = open_fds()
+        finally:
+            os.open = real_os_open
+        if no_sentinel is not None:
+            failures.append("T34 vector: with its sentinel unopenable, open_fds must fail closed as "
+                            "None, got {!r}".format(no_sentinel))
+
+        sentinel_fds = []
+
+        def sentinel_recording_open(path, *a, **k):
+            fd = real_os_open(path, *a, **k)
+            if path == os.devnull:
+                sentinel_fds.append(fd)
+            return fd
+
+        def sentinel_omitting_listdir(path, *a, **k):
+            names = real_listdir(path, *a, **k)
+            if str(path) in ("/proc/self/fd", "/dev/fd") and sentinel_fds:
+                return [n for n in names if n != str(sentinel_fds[-1])]
+            return names
+
+        os.open = sentinel_recording_open
         os.listdir = sentinel_omitting_listdir
         try:
             partial_listing = open_fds()
         finally:
+            os.open = real_os_open
             os.listdir = real_listdir
         if partial_listing is not None:
             failures.append("T34 vector: a listing omitting the sentinel descriptor must fail "
