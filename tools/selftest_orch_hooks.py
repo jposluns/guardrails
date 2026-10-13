@@ -5338,9 +5338,19 @@ def _main_isolated(report_path=None):
         check("attest/anchor-seq-false-holds", authority(), "hold")
         at_anchor_file.write_text(json.dumps({"seq": 1, "digest": "a" * 63}),
                                   encoding="utf-8")
-        check("attest/anchor-digest-short-holds", authority(), "hold")
+        # the SHAPE check must own these two holds (the specific malformed-anchor
+        # classification): a short digest already held on the base code through the digest
+        # COMPARISON, and a non-object anchor through the unreadable-authority catch, so the
+        # verdict alone does not discriminate the strict shape check
+        short_auth = aiqt_hooks._orch_register_authority(str(a.root), str(at_reg))
+        check("attest/anchor-digest-short-holds", short_auth[0], "hold")
+        check("attest/anchor-digest-short-names-malformed",
+              "anchor is malformed" in str(short_auth[1]), True)
         at_anchor_file.write_text(json.dumps([1, 2]), encoding="utf-8")
-        check("attest/anchor-non-object-holds", authority(), "hold")
+        nonobj_auth = aiqt_hooks._orch_register_authority(str(a.root), str(at_reg))
+        check("attest/anchor-non-object-holds", nonobj_auth[0], "hold")
+        check("attest/anchor-non-object-names-malformed",
+              "anchor is malformed" in str(nonobj_auth[1]), True)
         at_anchor(mirror_tip)
         check("attest/anchor-valid-after-shape-vectors-ok", authority(), "ok")
         # the tracked DECISION fails closed, as in the gate: a root where git ls-files answers

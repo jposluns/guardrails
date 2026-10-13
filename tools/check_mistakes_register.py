@@ -17,16 +17,21 @@ Append-only enforcement, two modes: a git-TRACKED register is checked as an exac
 merge-base state with origin/HEAD (so the protected-branch reference must be resolvable: on a fresh
 clone or CI checkout run `git remote set-head origin -a`); an UNTRACKED register is checked against a
 persisted anchor file (<register>.anchor: the last verified seq and line digest), which only
---update-anchor moves forward on a green run (and establishes the first anchor). Fail-closed: a
+--update-anchor moves forward on a green run (and establishes the first anchor). The anchor write
+never opens an existing entry: a non-regular anchor entry (a symlink, dangling or live, included)
+is refused as cannot-evaluate with its target neither created nor rewritten, and a green advance
+lands by atomic os.replace of an exclusively created temporary in the anchor's directory. Fail-closed: a
 DECLARED register that is absent or unreadable, a broken chain or sequence, a reused id, an illegal
 status transition, or a landed row whose commit or repo-relative check_ref does not exist is a
 violation (exit 1); and an append-only AUTHORITY that cannot be read (no computable merge-base, a git
 failure deciding whether the register is tracked, a malformed or unreadable anchor, an anchor
-entry that exists but is unusable (a dangling symlink or a non-regular file is never read as a
-missing anchor), or a declared untracked register with no anchor) is a distinct cannot-evaluate
+entry that exists but is unusable (anchor presence is an explicit lstat whose only absence answer
+is ENOENT: a dangling symlink, a non-regular file, or an lstat failure such as EIO is never read
+as a missing anchor), or a declared untracked register with no anchor) is a distinct cannot-evaluate
 failure (exit 2), never a
 silent skip nor a HEAD-against-itself self-comparison (chkfcl/grdinp). With no registry, or no declared
-register path, the live leg is NOT APPLICABLE and the self-test carries the assurance in CI.
+register path, the live leg is NOT APPLICABLE and the self-test carries the assurance in CI; a
+registry that is PRESENT but not a JSON object is cannot-evaluate (exit 2), never NOT APPLICABLE.
   check_mistakes_register.py                   run the live leg
   check_mistakes_register.py --update-anchor   verify, then advance the anchor on green
   check_mistakes_register.py --self-test       synthetic fixtures for every invariant
@@ -211,17 +216,24 @@ def verify_append_only(root, path, lines, allow_missing_anchor=False):
                 return ["the register is not an append-only extension of its merge-base state"]
             return []
     anchor = Path(str(path) + ".anchor")
-    # Anchor PRESENCE is decided with lstat semantics (os.path.lexists): the missing-anchor
-    # allowance covers only an anchor path with NO entry at all. An entry that exists but cannot
-    # be used (a dangling symlink, a directory, a FIFO or any other non-regular file) is an
-    # authority that cannot be read, so it is cannot-evaluate, never the allowance, and the
-    # --update-anchor bootstrap never writes through a dangling link.
-    if not os.path.lexists(str(anchor)):
+    # Anchor PRESENCE is an EXPLICIT lstat whose only absence answer is ENOENT: the
+    # missing-anchor allowance covers only an anchor path with NO entry at all. An lstat failure
+    # other than ENOENT (EIO, EACCES, ENOTDIR, ...) leaves the presence question OPEN, and an
+    # entry that exists but cannot be used (a dangling symlink, a directory, a FIFO or any other
+    # non-regular file) is an authority that cannot be read: each is cannot-evaluate, never the
+    # allowance.
+    try:
+        os.lstat(str(anchor))
+    except FileNotFoundError:
         if not allow_missing_anchor:
             raise CannotEvaluate("the declared untracked register has no anchor; run "
                                  "--update-anchor to establish the baseline (an absent authority "
                                  "is not a clean result)")
         return []
+    except OSError as exc:
+        raise CannotEvaluate("the anchor entry cannot be inspected ({}); an inspection failure "
+                             "that is not ENOENT is never the missing-anchor "
+                             "allowance".format(exc))
     try:
         anchor_stat = os.stat(str(anchor))
     except OSError as exc:
@@ -255,23 +267,69 @@ def verify_append_only(root, path, lines, allow_missing_anchor=False):
 
 
 def update_anchor(path, lines):
+    """Advance the anchor to the verified tip on a green run. The anchor write NEVER opens an
+    existing entry: a non-regular entry at the anchor path (a symlink, dangling or live,
+    included) is refused as CannotEvaluate, and the payload lands by atomic os.replace of an
+    exclusively created temporary in the same directory (O_NOFOLLOW included), so no link is
+    ever followed and no link target is ever created or rewritten. Residual: an entry planted
+    between the inspection and the replace is REPLACED as a whole entry, never followed."""
+    if not lines:
+        return
     anchor = Path(str(path) + ".anchor")
-    if lines:
-        anchor.write_text(json.dumps({"seq": len(lines), "digest": hashlib.sha256(
-            lines[-1].encode("utf-8")).hexdigest()}), encoding="utf-8")
+    try:
+        entry = os.lstat(str(anchor))
+    except FileNotFoundError:
+        entry = None
+    except OSError as exc:
+        raise CannotEvaluate("the anchor entry cannot be inspected before the anchor write "
+                             "({})".format(exc))
+    if entry is not None and not stat.S_ISREG(entry.st_mode):
+        raise CannotEvaluate("the anchor entry is not a regular file; the anchor write never "
+                             "follows a link (move the entry aside before --update-anchor)")
+    payload = json.dumps({"seq": len(lines), "digest": hashlib.sha256(
+        lines[-1].encode("utf-8")).hexdigest()}).encode("utf-8")
+    tmp_path = "{}.tmp.{}".format(anchor, os.getpid())
+    try:
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+    except OSError as exc:
+        raise CannotEvaluate("the anchor temporary cannot be created ({})".format(exc))
+    problem = None
+    try:
+        try:
+            written = os.write(fd, payload)
+        finally:
+            os.close(fd)
+        if written != len(payload):
+            problem = "short write to the anchor temporary ({} of {} byte(s))".format(
+                written, len(payload))
+        else:
+            os.replace(tmp_path, str(anchor))
+    except OSError as exc:
+        problem = "the anchor could not be written atomically ({})".format(exc)
+    if problem is not None:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise CannotEvaluate(problem)
 
 
 def run(root, update=False):
-    reg = None
+    reg, reg_found = None, False
     for rel in REGISTRY_FILES:
         p = Path(root) / rel
         if p.exists():
+            reg_found = True
             try:
                 reg = json.loads(p.read_text(encoding="utf-8"))
             except (OSError, ValueError) as exc:
                 print("error: cannot read the orchestration registry: {}".format(exc))
                 return 2
             break
+    if reg_found and not isinstance(reg, dict):
+        print("error: the orchestration registry is not a JSON object; cannot evaluate its "
+              "declared surfaces (a malformed registry is never NOT APPLICABLE)")
+        return 2
     surfaces = []
     if isinstance(reg, dict):
         for key, prefix in (("mistakes_register", "MR-"), ("attestations", "AT-")):
@@ -308,7 +366,11 @@ def run(root, update=False):
         return 1
     for key, path, lines in green:
         if update:
-            update_anchor(path, lines)
+            try:
+                update_anchor(path, lines)
+            except CannotEvaluate as exc:
+                print("error: cannot advance the {}'s anchor ({}); fail-closed".format(key, exc))
+                return 2
             print("PASS: {} verified; anchor advanced to seq {}".format(key, len(lines)))
         else:
             print("PASS: the {} is a verified append-only chain ({} row(s))".format(
@@ -408,14 +470,18 @@ def self_test():
             try:
                 verify_append_only(reg_dir, rp, good)
                 failures.append("a {} anchor should be cannot-evaluate".format(tag))
-            except CannotEvaluate:
-                pass
+            except CannotEvaluate as exc:
+                if "malformed" not in str(exc):
+                    failures.append("the {} anchor refusal should say malformed, got: "
+                                    "{}".format(tag, exc))
         anchor_path.write_text("not json", encoding="utf-8")
         try:
             verify_append_only(reg_dir, rp, good)
             failures.append("a not-json anchor should be cannot-evaluate")
-        except CannotEvaluate:
-            pass
+        except CannotEvaluate as exc:
+            if "cannot be read as JSON" not in str(exc):
+                failures.append("the not-json anchor refusal should name the JSON read, got: "
+                                "{}".format(exc))
         anchor_path.write_text("[1, 2]", encoding="utf-8")
         try:
             verify_append_only(reg_dir, rp, good)
@@ -449,6 +515,29 @@ def self_test():
                                 "{}".format(exc))
         anchor_path.rmdir()
         anchor_path.write_text(good_anchor, encoding="utf-8")
+        # anchor presence is an EXPLICIT lstat whose only absence answer is ENOENT: any other
+        # inspection failure (EIO here) leaves the presence question open and is
+        # cannot-evaluate, never the missing-anchor allowance, bootstrap included
+        real_os_lstat = os.lstat
+
+        def eio_lstat(p, *largs, **lkw):
+            if str(p) == str(anchor_path):
+                raise OSError(5, "injected input-output error")
+            return real_os_lstat(p, *largs, **lkw)
+
+        os.lstat = eio_lstat
+        try:
+            for allow in (False, True):
+                try:
+                    verify_append_only(reg_dir, rp, good, allow_missing_anchor=allow)
+                    failures.append("an anchor lstat failure should be cannot-evaluate "
+                                    "(allow_missing_anchor={})".format(allow))
+                except CannotEvaluate as exc:
+                    if "cannot be inspected" not in str(exc):
+                        failures.append("the anchor-lstat-failure refusal should name the "
+                                        "inspection, got: {}".format(exc))
+        finally:
+            os.lstat = real_os_lstat
         # a landed row citing a missing commit or check fails
         repo = tmp / "repo"
         repo.mkdir()
@@ -532,6 +621,9 @@ def self_test():
                  "cannot decide whether the register is tracked"),
                 ("merge-base launch error", "merge-base",
                  OSError(5, "injected launch failure"),
+                 "cannot compute the register authority"),
+                ("merge-base timeout", "merge-base",
+                 subprocess.TimeoutExpired(["git"], 10),
                  "cannot compute the register authority")):
             subprocess.run = _raising_for(target, raised)
             try:
@@ -545,24 +637,28 @@ def self_test():
             finally:
                 subprocess.run = real_sp_run
 
-        def _show_raises(cmd, *args, **kwargs):
-            if isinstance(cmd, list) and "merge-base" in cmd:
-                return subprocess.CompletedProcess(cmd, 0, stdout="1234abcd\n", stderr="")
-            if isinstance(cmd, list) and "show" in cmd:
-                raise OSError(5, "injected launch failure")
-            return real_sp_run(cmd, *args, **kwargs)
+        def _show_raising(raised):
+            def runner(cmd, *args, **kwargs):
+                if isinstance(cmd, list) and "merge-base" in cmd:
+                    return subprocess.CompletedProcess(cmd, 0, stdout="1234abcd\n", stderr="")
+                if isinstance(cmd, list) and "show" in cmd:
+                    raise raised
+                return real_sp_run(cmd, *args, **kwargs)
+            return runner
 
-        subprocess.run = _show_raises
-        try:
+        for tag, raised in (("git-show launch error", OSError(5, "injected launch failure")),
+                            ("git-show timeout", subprocess.TimeoutExpired(["git"], 10))):
+            subprocess.run = _show_raising(raised)
             try:
-                verify_append_only(repo, tracked, rewritten)
-                failures.append("a git-show launch error should be cannot-evaluate")
-            except CannotEvaluate as exc:
-                if "cannot read the register at its merge-base authority" not in str(exc):
-                    failures.append("the git-show refusal should name its read, got: "
-                                    "{}".format(exc))
-        finally:
-            subprocess.run = real_sp_run
+                try:
+                    verify_append_only(repo, tracked, rewritten)
+                    failures.append("a {} should be cannot-evaluate".format(tag))
+                except CannotEvaluate as exc:
+                    if "cannot read the register at its merge-base authority" not in str(exc):
+                        failures.append("the {} refusal should name its read, got: "
+                                        "{}".format(tag, exc))
+            finally:
+                subprocess.run = real_sp_run
         # P2: a declared UNTRACKED register present with no anchor is cannot-evaluate -> exit 2.
         untracked = repo / "untracked-register.jsonl"
         untracked.write_text("\n".join(tracked_good) + "\n", encoding="utf-8")
@@ -616,10 +712,89 @@ def self_test():
         at_anchor_path.write_text(saved_anchor, encoding="utf-8")
         if run(repo) != 0:
             failures.append("gate should pass again once the dangling anchor entry is replaced")
+        # a LIVE anchor symlink is refused by the anchor WRITE: the link is never followed,
+        # its target is never rewritten, and the link entry survives the refusal
+        at_store = repo / "at-anchor-store.json"
+        at_store.write_text(saved_anchor, encoding="utf-8")
+        at_anchor_path.unlink()
+        at_anchor_path.symlink_to("at-anchor-store.json")
+        if run(repo, update=True) != 2:
+            failures.append("--update-anchor through a live untracked anchor symlink should "
+                            "be cannot-evaluate (exit 2)")
+        if at_store.read_text(encoding="utf-8") != saved_anchor:
+            failures.append("--update-anchor wrote through a live untracked anchor symlink")
+        if not os.path.islink(str(at_anchor_path)):
+            failures.append("--update-anchor replaced the live untracked anchor symlink entry")
+        at_anchor_path.unlink()
+        at_anchor_path.write_text(saved_anchor, encoding="utf-8")
+        if run(repo) != 0:
+            failures.append("gate should pass again once the live-link anchor entry is "
+                            "replaced")
         at_wrong = chain(lambda p: row(1, "MR-1", "proposed", p))
         at_reg_path.write_text("\n".join(at_wrong) + "\n", encoding="utf-8")
         if run(repo) != 1:
             failures.append("an MR- row in the attestations register should fail the AT- prefix")
+        # a PRESENT registry that is not a JSON object (a list, null) is cannot-evaluate,
+        # never NOT APPLICABLE: a malformed control input is not an absent one
+        for bad in ("[1, 2]", "null"):
+            registry.write_text(bad, encoding="utf-8")
+            if run(repo) != 2:
+                failures.append("a non-object registry ({}) should be cannot-evaluate "
+                                "(exit 2), never NOT APPLICABLE".format(bad))
+        # TRACKED registers and the anchor WRITE: a green tracked run reaches update_anchor
+        # through the merge-base leg (no anchor inspection on the read side), so the write
+        # itself must refuse a symlink entry, dangling or live, and advance only by atomic
+        # replace of an exclusively created temporary
+        trk = tmp / "trk"
+        trk.mkdir()
+        subprocess.run(["git", "init", "-q", str(trk)], check=True, capture_output=True,
+                       timeout=30)
+        (trk / ".aiqt").mkdir()
+        trk_reg = trk / "trk-reg.jsonl"
+        trk_rows = chain(lambda p: row(1, "MR-1", "proposed", p))
+        trk_reg.write_text("\n".join(trk_rows) + "\n", encoding="utf-8")
+        (trk / ".aiqt" / "orchestration.local.json").write_text(json.dumps(
+            {"version": 1, "mistakes_register": "trk-reg.jsonl"}), encoding="utf-8")
+        _git_ci(trk, ".aiqt/orchestration.local.json", "trk-reg.jsonl", msg="track register")
+        subprocess.run(["git", "-C", str(trk), "update-ref", "refs/remotes/origin/main",
+                        "HEAD"], check=True, capture_output=True, timeout=30)
+        subprocess.run(["git", "-C", str(trk), "symbolic-ref", "refs/remotes/origin/HEAD",
+                        "refs/remotes/origin/main"], check=True, capture_output=True,
+                       timeout=30)
+        if run(trk) != 0:
+            failures.append("a clean tracked register with a computable merge-base should pass")
+        trk_anchor = Path(str(trk_reg) + ".anchor")
+        trk_anchor.symlink_to("missing-trk-anchor-target")
+        if run(trk, update=True) != 2:
+            failures.append("--update-anchor through a dangling tracked-register anchor "
+                            "symlink should be cannot-evaluate (exit 2)")
+        if (trk / "missing-trk-anchor-target").exists():
+            failures.append("--update-anchor created a dangling tracked anchor link's target")
+        if not os.path.islink(str(trk_anchor)):
+            failures.append("--update-anchor replaced the dangling tracked anchor symlink "
+                            "entry")
+        trk_anchor.unlink()
+        trk_store = trk / "trk-anchor-store.json"
+        trk_store.write_text("{}", encoding="utf-8")
+        trk_anchor.symlink_to("trk-anchor-store.json")
+        if run(trk, update=True) != 2:
+            failures.append("--update-anchor through a LIVE tracked-register anchor symlink "
+                            "should be cannot-evaluate (exit 2)")
+        if trk_store.read_text(encoding="utf-8") != "{}":
+            failures.append("--update-anchor wrote through a live tracked anchor symlink")
+        if not os.path.islink(str(trk_anchor)):
+            failures.append("--update-anchor replaced the live tracked anchor symlink entry")
+        trk_anchor.unlink()
+        if run(trk, update=True) != 0:
+            failures.append("--update-anchor on a green tracked register should advance the "
+                            "anchor and pass")
+        if json.loads(trk_anchor.read_text(encoding="utf-8")) != {
+                "seq": 1, "digest": hashlib.sha256(
+                    trk_rows[-1].encode("utf-8")).hexdigest()}:
+            failures.append("the advanced tracked anchor should carry the verified tip")
+        leftovers = [e.name for e in trk.iterdir() if ".anchor.tmp." in e.name]
+        if leftovers:
+            failures.append("the anchor write left a temporary behind: {}".format(leftovers))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     if failures:
@@ -634,11 +809,17 @@ def self_test():
           "anchor all fail; a malformed, non-object or wrongly shaped anchor (a zero, negative, "
           "boolean or float seq, a short or non-hex digest), an anchor entry that exists but is "
           "not a usable regular file (a dangling symlink or a directory, the --update-anchor "
-          "bootstrap included, which never writes through a dangling link), and a git launch "
-          "failure, timeout or undecidable exit on any of the three authority reads are "
-          "cannot-evaluate (exit 2); the --update-anchor bootstrap "
-          "establishes the baseline; and a declared attestations register is verified under the "
-          "AT- prefix with the optional class and ref fields accepted")
+          "bootstrap included), an anchor lstat failure that is not ENOENT (absence is only "
+          "ENOENT, bootstrap included), a present registry that is not a JSON object, and a "
+          "git launch failure or timeout on each of the three authority reads (ls-files, "
+          "merge-base, git show) plus an undecidable ls-files exit are cannot-evaluate (exit "
+          "2); the anchor write refuses a symlink anchor entry, dangling or live, tracked and "
+          "untracked registers alike, with the link's target neither created nor rewritten and "
+          "the link entry left in place, and a green advance (a clean tracked register with a "
+          "computable merge-base included) lands the verified tip by atomic replace of an "
+          "exclusively created temporary, leaving no temporary behind; the --update-anchor "
+          "bootstrap establishes the baseline; and a declared attestations register is "
+          "verified under the AT- prefix with the optional class and ref fields accepted")
     return 0
 
 

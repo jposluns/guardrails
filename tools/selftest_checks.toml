@@ -452,7 +452,9 @@ expected-check-ids = [
   "attest/anchor-seq-negative-holds",
   "attest/anchor-seq-false-holds",
   "attest/anchor-digest-short-holds",
+  "attest/anchor-digest-short-names-malformed",
   "attest/anchor-non-object-holds",
+  "attest/anchor-non-object-names-malformed",
   "attest/anchor-valid-after-shape-vectors-ok",
   "attest/git-failure-tracked-decision-holds",
   # ---------- GD-127: the systemic-lapse lifecycle (verdict-preservation legs) ----------
