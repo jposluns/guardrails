@@ -342,9 +342,11 @@ def _scope(root_fd, root, inputs, charge):
         try:
             manifest = tomllib.loads(raw.decode("utf-8"))
         except (ValueError, RecursionError, MemoryError) as exc:
-            # tomllib raises a bare ValueError on an over-long integer literal, RecursionError on deep
-            # nesting and MemoryError under memory pressure (F-TOML-BARE-VALUEERROR-CLASS): a manifest
-            # this investigation cannot evaluate, so each class maps to the resolver refusal.
+            # The store resolver has already parsed these very bytes (discover_machine_store_fd, whose
+            # _parse_store_toml maps ValueError, RecursionError and MemoryError to StoreError), so only
+            # a transient failure reaches this re-parse: a RecursionError at this deeper stack, or a
+            # MemoryError under pressure (F-TOML-BARE-VALUEERROR-CLASS). Each maps to the discovery
+            # PlanError, cannot-evaluate.
             raise planning.PlanError("resolved manifest does not parse: {}".format(exc)) from exc
         checked = store.validate_manifest(manifest)
         if checked.status != store.VALID:
@@ -1149,6 +1151,31 @@ def self_test():
             for bad in (5, None, "relative/root", str(self.root) + "/../product"):
                 with self.subTest(root=bad):
                     self.assertEqual(discover_sources(bad).status, store.CANNOT_EVALUATE)
+
+        def test_scope_parse_failure_is_cannot_evaluate(self):
+            import types
+            # tomllib raises a bare ValueError, RecursionError and MemoryError
+            # (F-TOML-BARE-VALUEERROR-CLASS); injected at this module binding, only the two _scope
+            # parses see them. Each class on each branch is cannot-evaluate under the site text, with
+            # no proposals (refused checks the empty tuple): a scope that failed open would instead
+            # propose notes/private/TODO.md, registered [unmanaged] on the resolved branch.
+            for branch, text in (("resolved", "resolved manifest does not parse: injected"),
+                                 ("generated", "generated store manifest does not parse: injected")):
+                for kind in (ValueError, RecursionError, MemoryError):
+                    with self.subTest(branch=branch, kind=kind.__name__):
+                        self.reset(branch + "-" + kind.__name__)
+                        if branch == "resolved":
+                            self.store_manifest(["notes/private"])
+                        self.write("notes/private/TODO.md", b"- secret\n")
+                        self.write("notes/TODO.md")
+                        parses = []
+
+                        def boom(data, kind=kind):
+                            parses.append(data)
+                            raise kind("injected {} at the _scope parse".format(kind.__name__))
+                        with mock.patch.object(module, "tomllib", types.SimpleNamespace(loads=boom)):
+                            self.refused(text)
+                        self.assertEqual(len(parses), 1)
 
         def test_change_during_discovery_is_cannot_evaluate(self):
             real_signal, real_ruled_out, real_open, real_read = _signal, _ruled_out, os.open, os.read
