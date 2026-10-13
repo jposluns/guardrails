@@ -343,8 +343,10 @@ def homes_generation(manifest_data):
 # The imported-series machine-store leaves (spec 8.2/4.2): a store that declares spec_version
 # IMPORTED_SPEC_VERSION or later keeps imported history beside the clean-series files, one leaf per
 # enabled type except legacy_fragment; worklog, a ledger, uses worklog.imported.toml instead of an
-# imported index. Inert until activation: SUPPORTED_SPEC_VERSION is 1.2.0, so no validated store
-# declares them yet.
+# imported index. Inert until activation: the gate below requires this tooling's OWN support
+# (SUPPORTED_SPEC_VERSION, currently 1.2.0, at or above IMPORTED_SPEC_VERSION), never the declared
+# version alone, because C-MANIFEST ACCEPTS one newer declaration today, the reserved spec_version
+# 2.0.0 / homes = 2 pair (spec 4.2).
 IMPORTED_SPEC_VERSION = "1.3.0"        # the first base spec_version whose stores carry the imported series
 IMPORTED_INDEX_SUFFIX = ".imported.index.toml"
 IMPORTED_WORKLOG_NAME = "worklog.imported.toml"
@@ -358,16 +360,22 @@ _IMPORTED_SERIES_NAMESPACES = (frozenset(BASELINE_TYPES.values())
 
 
 def imported_series_declared(manifest_data):
-    """True when the [opf] base table declares a spec_version of IMPORTED_SPEC_VERSION or later, the
-    activation gate the imported-series registrations read (spec 8.2/4.2). Graded through the house
-    SemVer parser; an absent, non-string, or unparseable spec_version reads False (manifest validation,
-    not this helper, reports it). Inert today: SUPPORTED_SPEC_VERSION is 1.2.0 and validate_manifest
-    fails a newer declaration closed, so no VALID store answers True here before the 1.3.0 activation
-    raises the supported version; raising it is that activation, and this helper needs no edit then."""
+    """True when the [opf] base table declares a spec_version of IMPORTED_SPEC_VERSION or later AND
+    this tooling itself supports that series (SUPPORTED_SPEC_VERSION at or above
+    IMPORTED_SPEC_VERSION), the activation gate the imported-series registrations read (spec 8.2/4.2).
+    Graded through the house SemVer parser; an absent, non-string, or unparseable spec_version reads
+    False (manifest validation, not this helper, reports it). The tooling-support condition mirrors
+    homes_generation's gate on SUPPORTED_HOMES: validate_manifest does NOT fail every newer
+    declaration closed (it accepts the reserved HOMES2_SPEC_VERSION / homes = 2 pair, spec 4.2), so a
+    VALID store can declare 2.0.0 today, and reading the declaration alone would register the
+    imported leaves on it while every imported-content check is still deferred. Raising
+    SUPPORTED_SPEC_VERSION to IMPORTED_SPEC_VERSION is the activation (OPF-SPEC-130); this helper
+    needs no edit then."""
     opf = manifest_data.get("opf") if isinstance(manifest_data, dict) else None
     version = opf.get("spec_version") if isinstance(opf, dict) else None
     parsed = _parse(version) if isinstance(version, str) else None
-    return parsed is not None and parsed >= _parse(IMPORTED_SPEC_VERSION)
+    return (parsed is not None and parsed >= _parse(IMPORTED_SPEC_VERSION)
+            and _parse(SUPPORTED_SPEC_VERSION) >= _parse(IMPORTED_SPEC_VERSION))
 
 
 def imported_leaf_names(enabled_types):
@@ -3867,13 +3875,27 @@ def self_test():
               imported_leaf_names(("release",)) == frozenset({"release" + IMPORTED_INDEX_SUFFIX}))
         check("imported-leaf-names-unknown-skipped",
               imported_leaf_names(("nonsense", "transaction")) == frozenset())
-        # imported_series_declared: the activation gate reads the declared spec_version through the
-        # house SemVer parser. 1.3.0 and later answer True; the current 1.2.0, an older, a non-string,
-        # and an unparseable declaration answer False (inert until the supported version rises;
-        # spec 8.2/4.2).
-        check("imported-series-declared-130-and-later",
-              imported_series_declared({"opf": {"spec_version": "1.3.0"}})
-              and imported_series_declared({"opf": {"spec_version": "2.0.0"}}))
+        # imported_series_declared: the activation gate requires BOTH the declared spec_version
+        # (IMPORTED_SPEC_VERSION or later, through the house SemVer parser) AND this tooling's own
+        # support (SUPPORTED_SPEC_VERSION at or above IMPORTED_SPEC_VERSION, the way homes_generation
+        # gates on SUPPORTED_HOMES). A newer declaration ALONE answers False, including the reserved
+        # 2.0.0 / homes = 2 pair validate_manifest accepts today (spec 4.2): without the
+        # tooling-support condition that accepted store would register the imported leaves while
+        # every imported-content check is still deferred. The current 1.2.0, an older, a non-string,
+        # and an unparseable declaration answer False in every case (spec 8.2/4.2).
+        check("imported-series-declared-false-until-tooling-supports",
+              not imported_series_declared({"opf": {"spec_version": "1.3.0"}})
+              and not imported_series_declared({"opf": {"spec_version": "2.0.0"}})
+              and not imported_series_declared(
+                  {"opf": {"spec_version": HOMES2_SPEC_VERSION, "homes": 2}}))
+        _isd_prev = SUPPORTED_SPEC_VERSION
+        try:
+            globals()["SUPPORTED_SPEC_VERSION"] = IMPORTED_SPEC_VERSION
+            check("imported-series-declared-130-and-later-once-supported",
+                  imported_series_declared({"opf": {"spec_version": "1.3.0"}})
+                  and imported_series_declared({"opf": {"spec_version": "2.0.0"}}))
+        finally:
+            globals()["SUPPORTED_SPEC_VERSION"] = _isd_prev
         check("imported-series-declared-current-and-malformed-false",
               not imported_series_declared({"opf": {"spec_version": SUPPORTED_SPEC_VERSION}})
               and not imported_series_declared({"opf": {"spec_version": "1.0.0"}})
