@@ -4366,6 +4366,7 @@ def _watchdog_completion_case(mode):
             waiting = Path(directory, "waiting")
             release = Path(directory, "release")
             marker = Path(directory, "marker")
+            acked = Path(directory, "acked")
             real_pdeathsig = emit._fixture_pdeathsig
 
             def hold(arm):
@@ -4405,10 +4406,24 @@ def _watchdog_completion_case(mode):
                 import select
                 waiting.unlink(missing_ok=True)
                 release.unlink(missing_ok=True)
+                acked.unlink(missing_ok=True)
                 marker.unlink(missing_ok=True)
                 child = emit._FixtureProcess(time.monotonic() + _WATCHDOG_FIXTURE_HOLD,
                                              subject=subject_body)
-                with patch.object(emit, "_fixture_pdeathsig", lambda: hold(arm)):
+                real_ack = emit._fixture_ack_subject
+
+                def publish_ack(fd):
+                    # Guardian-side (the patch below is live at fork time):
+                    # publish only AFTER the real acknowledgment write
+                    # returned, so the ack byte is buffered for the gated
+                    # subject before launch_held returns.
+                    real_ack(fd)
+                    scratch = Path(directory, "acked.tmp")
+                    scratch.write_text("acked", encoding="ascii")
+                    scratch.rename(acked)  # atomic: never a partial publication
+
+                with patch.object(emit, "_fixture_pdeathsig", lambda: hold(arm)), \
+                        patch.object(emit, "_fixture_ack_subject", publish_ack):
                     child.start()
                 bound = _watchdog_deadline(30)
                 while not waiting.exists():
@@ -4421,6 +4436,23 @@ def _watchdog_completion_case(mode):
                 # DELIVERED receipt (the no-receipt path is subject-receipt's leg).
                 assert select.select([child.control], [], [], 30)[0], \
                     "the subject receipt never arrived"
+                # A buffered receipt does not order a kill against the
+                # ownership acknowledgment: the guardian writes the ack byte
+                # strictly AFTER the receipt send, so a SIGKILL landing in
+                # between (seen under host load as F-OPF-WATCHDOG-ORPHAN-TIMING)
+                # hands the gated subject an acknowledgment EOF once released,
+                # and it refuses at _fixture_await_ack (which no leg here
+                # patches out) instead of exercising the stimulus under test;
+                # Flip A then fails as "the flip orphan never ran". Wait for
+                # the guardian-published ack marker, so every kill below lands
+                # only after the ack byte is buffered and a released subject
+                # always reads it. The 30 s bound is a backstop, never pacing:
+                # the marker is published on the launch path itself.
+                bound = _watchdog_deadline(30)
+                while not acked.exists():
+                    assert time.monotonic() < bound, \
+                        "the ownership acknowledgment was never published"
+                    time.sleep(0.005)
                 return child, subject
 
             def cancel(child, failures):
@@ -13103,7 +13135,11 @@ def _watchdog_regression_self_test():
         ("subject-setup", 22), ("overdue-success", 161.0 + 0.01), ("launch-ownership", 60),
         ("launch-cancel", 33), ("fd-hygiene-total", 92), ("nested-keep", 108),
         ("fd-census", 48), ("subject-gc", 32), ("guardian-preload", 20),
-        ("subject-receipt", 784), ("subject-ack", 814), ("subject-orphan", 1658),
+        ("subject-receipt", 784), ("subject-ack", 814),
+        # subject-orphan: the pre-fix 1658 timeout sum + 4 * 30 for the
+        # acknowledgment-published wait each of its four launches now makes
+        # before any leg kills the guardian (F-OPF-WATCHDOG-ORPHAN-TIMING).
+        ("subject-orphan", 1658 + 4 * 30),
         # escalation-subject: 884 is the UPPER bound on the leg's declared
         # timeouts, not an exact base (two of its charges are fixture holds
         # charged at what REMAINS of their 300 s hold when start() runs, so
