@@ -17,11 +17,20 @@ generator alone cannot assert:
     the nearest preceding ATX heading, or the top of the file, to the next heading of the same or a
     higher level), with headings found fence-aware (a '#' line inside an open ``` or ~~~ fence is
     content, not a heading) and an unterminated fence failing closed (exit 2, naming the file and the
-    fence's opening line), and each manifest name is matched case-insensitively with whitespace runs
-    collapsed, anywhere in that region; a table with pipe-free rows, a lazy list continuation, a
-    blockquoted list and an emphasis-split phrase are inside the region by construction, at the
-    disclosed cost of OVER-REFUSAL (a vendored name mentioned anywhere else in the same section is a
-    finding too);
+    fence's opening line); the section is REFUSED outright (exit 2, naming the file and line) when it
+    holds an arrangement this line reader cannot prove it bounds: a run of three or more fence
+    characters anywhere but a line-start fence (a list-item, indented or inline fence, whose '#'
+    content could read as a false heading and truncate the section), a line starting with '<' (an
+    HTML block or autolink), or a line opening with '#' that is not a provable ATX heading; no
+    CommonMark container model is attempted. Each manifest name is matched case-insensitively with
+    whitespace runs collapsed, anywhere in that region; a table with pipe-free rows, a lazy list
+    continuation, a blockquoted list and an emphasis-split phrase are inside the region by
+    construction, at the disclosed cost of OVER-REFUSAL (a vendored name mentioned anywhere else in
+    the same section is a finding too). The phrase/name match is CLAIMED only for the enumerated
+    joiners (whitespace, line wraps, hyphens, the inline marker characters *, _ and ~, and blockquote
+    markers): a phrase or name interrupted by any other inline markup (a backtick code span, link
+    brackets, emphasis markers inside the NAME) is NOT matched -- the claim is narrowed to these
+    joiners rather than the match extended (a disclosed residual, beside the entity-encoded one);
   - the subset-denominator invariant, checked structure-aware wherever the coverage of a curated-subset
     manifest is rendered: the registry row (name and coverage in one <tr>), the reverse view (name in a
     <summary>, coverage in a later <p> of the same <details>), AND the machine-readable JSON export (a
@@ -74,6 +83,9 @@ DEFERRED = re.compile(r"not[\s*_~-]+yet[\s*_~-]+vendored", re.I)
 HEADING = re.compile(r"^ {0,3}(#{1,6})(?:\s|$)")
 # A fenced-code-block fence (CommonMark: three or more backticks or tildes, up to 3 spaces of indent).
 FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+# Any run of three or more fence characters, wherever it sits on the line: used to REFUSE a fence this
+# line reader cannot bound (a list-item, indented or inline fence), never to open one.
+FENCE_RUN = re.compile(r"`{3,}|~{3,}")
 BLOCKQUOTE = re.compile(r"^ {0,3}> ?")
 N_OF_M = re.compile(r"\b\d+ of \d+\b")
 
@@ -196,6 +208,46 @@ def _heading_levels(lines, where):
     return headings
 
 
+def _refuse_unbounded(lines, first, end, where):
+    """Refuse (OSError -> exit 2, naming the file and line) every arrangement inside a deferred section
+    that this line reader cannot prove it bounds and reads correctly, instead of modelling CommonMark
+    containers: a run of three or more fence characters anywhere but a line-start fence (a list-item,
+    indented or inline fence can open a container-relative code block whose '#' content reads as a
+    false heading and truncates the section -- the opener always precedes that false heading, so it
+    sits inside the truncated section and is caught here); any line starting with '<' (an HTML block
+    can hold '#' lines that are content, not headings); and any line opening with '#' that is not a
+    provable ATX heading (HEADING: one to six '#' at up to three spaces of indent, then a space or
+    the line end). Lines inside a recognized line-start fence are bounded content and exempt. The
+    fence state is recomputed from the section's first line, which is a recognized heading or the top
+    of the text, so no fence is open there and the state agrees with _heading_levels. DELIBERATE
+    OVER-REFUSAL: a harmless list fence or autolink in the section exits 2 too; the alternative is a
+    silent truncation."""
+    fence_char, fence_len = None, 0
+    for k in range(first, end):
+        line = lines[k]
+        fm = FENCE.match(line)
+        if fence_char is not None:
+            if (fm and fm.group(1)[0] == fence_char and len(fm.group(1)) >= fence_len
+                    and not line.strip().strip(fence_char)):
+                fence_char = None
+            continue
+        if fm:
+            fence_char, fence_len = fm.group(1)[0], len(fm.group(1))
+            continue
+        if FENCE_RUN.search(line):
+            raise OSError("{}:{}: a code fence not at line start (a list-item, indented or inline "
+                          "fence); the section reader cannot bound the section through it "
+                          "(fail-closed)".format(where, k + 1))
+        stripped = line.lstrip()
+        if stripped.startswith("<"):
+            raise OSError("{}:{}: a line starting with '<' (an HTML block this reader does not "
+                          "model); the section reader cannot bound the section through it "
+                          "(fail-closed)".format(where, k + 1))
+        if stripped.startswith("#") and not HEADING.match(line):
+            raise OSError("{}:{}: a '#' line that is not a provable ATX heading; the section reader "
+                          "cannot bound the section through it (fail-closed)".format(where, k + 1))
+
+
 def deferred_sections(text, where):
     """Yield (line_number, section) for every occurrence of the deferred phrase (case-insensitive, its
     words joined by any run of whitespace, line wraps, hyphens, inline emphasis/strikethrough markers
@@ -204,7 +256,10 @@ def deferred_sections(text, where):
     heading of the same or a higher level (or any heading, for the pre-heading preamble), headings
     found fence-aware by _heading_levels. No finer Markdown block model is applied, so a table with
     pipe-free rows, a lazy list continuation, a blockquoted list and an emphasis-split phrase all sit
-    inside the checked region by construction. The DISCLOSED COST is over-refusal: a vendored name
+    inside the checked region by construction; a section holding an arrangement the reader cannot
+    prove it bounds (a fence not at line start, a line starting with '<', a '#' line that is not a
+    provable ATX heading) is REFUSED via _refuse_unbounded (OSError -> exit 2, naming the file and
+    line). The DISCLOSED COST is over-refusal: a vendored name
     mentioned anywhere else in the same section is read too."""
     lines = _unquoted_lines(text)
     headings = _heading_levels(lines, where)
@@ -223,6 +278,7 @@ def deferred_sections(text, where):
         else:
             first = 0
             end = min((k for k in headings if k > i), default=len(lines))
+        _refuse_unbounded(lines, first, end, where)
         yield i + 1, "\n".join(lines[first:end])
 
 
@@ -370,12 +426,24 @@ def main():
 #      continuation line, a heading section holding a '#' line inside a fence (which must not end the
 #      section), and the disclosed over-refusal (a vendored name elsewhere in the same section,
 #      outside any deferred block, is a finding too); and
+#  6zh. a fence whose pseudo-closing line carries an info string does not close (the closing fence
+#      carries nothing else): the '#' line after it stays fenced content, the section is not
+#      truncated, and the name is a finding -> exit 1 (dropping the nothing-else rule turns this
+#      case into a false heading plus an unterminated reopened fence, exit 2);
 #  6g. a vendored name in a section without the phrase, and 6q. one after the next same-level
 #      heading, stay clean (the read is scoped to the section),
+#  6zc-6zg. arrangements the section reader cannot prove it bounds are REFUSED (exit 2, naming the
+#      file and line), never read through a false heading's truncation: a list-item fence whose '#'
+#      content reads as a false heading even when a LATER INDEPENDENT fence rebalances the scanner
+#      (6zc, the clean-pass path), two list-item fences (6zd), an HTML comment block (6ze), a <pre>
+#      block (6zf), and a four-space-indented fence (6zg); each body keeps the vendored name in the
+#      same rendered section (confirmed against markdown-it), so a truncating read would pass it
+#      clean,
 #   7. a subset manifest rendered "3 of 3" in the fixture registry row -> finding (the CWE regression),
 #   8. a missing site/mappings.html -> exit 2 (fail-closed, not a skip),
 #   9. an unreadable standards dir (chmod 0, or an injected permission failure where chmod cannot
-#      bite) -> exit 2; the case runs on every runner,
+#      bite) -> exit 2; the case runs on every runner; 9b. a dangling-symlink manifest fails INSIDE
+#      the REAL load_manifests (its open() raises on every runner, no seam and no chmod) -> exit 2,
 #  10. a manifest without `catalogue`, and one with `catalogue = "partial"` -> ManifestError exit 2
 #      (the loader end of the invariant),
 #  11. a publisher with no FAMILY_ALIAS entry -> exit 2,
@@ -384,7 +452,7 @@ def main():
 #  13. a subset framework carrying ids_total in the JSON export -> finding (the export invariant),
 #  14. a missing site/downloads/mappings.json -> exit 2 (fail-closed, not a skip),
 #  15. an unterminated code fence in the README -> exit 2 (the section reader cannot bound a section
-#      through it, fail-closed).
+#      through it, fail-closed), naming the file and the fence's opening line.
 # (1, 7, 12, 13 are the invariant-bearing cases; the rest complete the fail-closed contract.)
 
 _MANIFEST = (
@@ -488,6 +556,15 @@ def self_test_main():
                 return run(root)
             except SystemExit as exc:
                 return "raised SystemExit({!r})".format(exc.code)
+
+    def run_capture(root):
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            try:
+                rc = run(root)
+            except SystemExit as exc:
+                rc = "raised SystemExit({!r})".format(exc.code)
+        return rc, out.getvalue() + err.getvalue()
 
     try:
         tmp = Path(tempfile.mkdtemp(prefix="aiqt-reference-facts-gate-selftest-"))
@@ -612,7 +689,11 @@ def self_test_main():
                     "### Not yet vendored\n\n```text\n# example\n```\n\n"
                     "- Fixture Full Framework\n"))),
                 ("6zb disclosed over-refusal (a name elsewhere in the same section)",
-                 _README + "\nFixture Full Framework is vendored and mapped.\n")):
+                 _README + "\nFixture Full Framework is vendored and mapped.\n"),
+                ("6zh pseudo-closing fence line with an info string does not close",
+                 _README.replace(prose, (
+                    "### Not yet vendored\n\n```text\ncontent\n``` unrelated words\n```\n\n"
+                    "- Fixture Full Framework\n")))):
             case = tmp / ("deferred-" + label.split()[0])
             _write_fixture(case, readme=readme)
             if run_quiet(case) != 1:
@@ -634,6 +715,34 @@ def self_test_main():
             "### Not yet vendored\n\n- Google SAIF\n\n### Vendored\n\nFixture Full Framework is mapped.\n"))
         if run_quiet(scoped_heading) != 0:
             failures.append("a vendored name after the next same-level heading expected exit 0")
+
+        # 6zc-6zg. arrangements the section reader cannot prove it bounds are refused (exit 2, naming
+        #     the file and line), never read through a false heading's truncation. Each offending line
+        #     is line 13 of its fixture README by construction; markdown-it renders none of the '#'
+        #     lines as a heading and keeps the vendored name in the same section, so a truncating
+        #     read passes each body clean.
+        for label, readme in (
+                ("6zc list fence with a later independent fence", _README.replace(prose, (
+                    "## Not yet vendored\n\n- ```\n  # example\n  ```\n\n"
+                    "- Fixture Full Framework\n\n```text\nexample\n```\n"))),
+                ("6zd list-item fences", _README.replace(prose, (
+                    "Not yet vendored:\n\n- ```text\n  # one\n  ```\n- ```text\n  # two\n  ```\n"
+                    "- Fixture Full Framework\n"))),
+                ("6ze HTML comment block", _README.replace(prose, (
+                    "Not yet vendored:\n\n<!--\n# maintainer note\n-->\n\n"
+                    "- Fixture Full Framework\n"))),
+                ("6zf pre block", _README.replace(prose, (
+                    "Not yet vendored:\n\n<pre>\n# example\n</pre>\n\n"
+                    "- Fixture Full Framework\n"))),
+                ("6zg four-space-indented fence", _README.replace(prose, (
+                    "Not yet vendored:\n\n    ```\n    # fake\n    ```\n\n"
+                    "- Fixture Full Framework\n")))):
+            case = tmp / ("deferred-" + label.split()[0])
+            _write_fixture(case, readme=readme)
+            rc, out = run_capture(case)
+            if rc != 2 or "standards README:13:" not in out:
+                failures.append("an unbounded section arrangement ({}) expected exit 2 naming "
+                                "standards README:13 (got {}: {!r})".format(label, rc, out))
 
         # 7. a subset manifest rendered "3 of 3" -> finding (the CWE regression case).
         denom = tmp / "denom"
@@ -671,6 +780,15 @@ def self_test_main():
             failures.append("an unreadable standards dir expected exit 2 (fail-closed)")
         os.chmod(unreadable_std, 0o755)
         unreadable_std = None
+
+        # 9b. a manifest that fails INSIDE the real loader on every runner (no seam, no chmod): a
+        #     dangling-symlink *.toml raises inside load_manifests' open() -> exit 2 (fail-closed).
+        unread_real = tmp / "unread-real"
+        _write_fixture(unread_real)
+        os.symlink("no-such-manifest.toml", str(unread_real / ".aiqt" / "standards" / "ghost.toml"))
+        if run_quiet(unread_real) != 2:
+            failures.append("a dangling-symlink manifest expected exit 2 from inside the real loader "
+                            "(fail-closed)")
 
         # 10. a manifest without `catalogue`, and one with `catalogue = "partial"` -> exit 2.
         nocat = tmp / "nocat"
@@ -738,8 +856,10 @@ def self_test_main():
         #     fails closed (exit 2), never a partial or truncated section read.
         unfenced = tmp / "unfenced"
         _write_fixture(unfenced, readme=_README + "\n```text\nnever closed\n")
-        if run_quiet(unfenced) != 2:
-            failures.append("an unterminated code fence expected exit 2 (fail-closed)")
+        rc, out = run_capture(unfenced)
+        if rc != 2 or "standards README: unterminated code fence opened at line 13" not in out:
+            failures.append("an unterminated code fence expected exit 2 naming standards README and "
+                            "line 13 (got {}: {!r})".format(rc, out))
     finally:
         if unreadable_std is not None:
             os.chmod(unreadable_std, 0o755)  # restore even on an unexpected early exit
@@ -760,7 +880,11 @@ def self_test_main():
           "a subset manifest rendered with an edition denominator in the registry row or the reverse-view "
           "<p>, and a subset framework carrying ids_total in the JSON export each report a finding (exit "
           "1); and a missing page, a missing JSON export, an unreadable standards dir, an unterminated "
-          "code fence, a missing/invalid catalogue, and an unaliased publisher all fail closed (exit 2)")
+          "code fence (naming the file and the fence's opening line), a section holding a fence not "
+          "at line start, an HTML block, or a '#' line that is not a provable ATX heading (each "
+          "naming the file and line, never read through a false heading's truncation), a "
+          "dangling-symlink manifest failing inside the real loader, a missing/invalid catalogue, "
+          "and an unaliased publisher all fail closed (exit 2)")
     return 0
 
 

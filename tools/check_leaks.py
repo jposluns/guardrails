@@ -21,13 +21,17 @@ SCANNED SET. The walk yields every file in the working tree except the .git, nod
 __pycache__ subtrees (the denylist file included). Each yielded path is first CLASSIFIED by a stat probe
 (a metadata check, not a content read), then its content is read as bytes and handled one of four ways:
   - it decodes as UTF-8: it is scanned, whatever its suffix (a .csv, .example or .sha256 included);
-  - it starts with a UTF-16 or UTF-32 byte-order mark: it is decoded as the declared encoding AND
-    decoded losslessly as bytes, and BOTH views are scanned (a leak one view hides, the other still
-    shows, so a fake mark over single-byte text cannot hide it), counted as one lossless decode; a
-    BOM-declared stream that does not decode as its declared encoding (an odd length, an unpaired
-    surrogate) is a read error (exit 2, naming the file), never an ineffective clean scan (a wide
-    encoding WITHOUT such a mark still falls to the byte decode below, where the patterns cannot
-    match across its wide characters; a disclosed residual);
+  - it starts with a UTF-16 or UTF-32 byte-order mark: the declared encoding is decided by a
+    successful decode, never by the 4-byte prefix alone (the UTF-32 LE mark embeds the UTF-16 LE
+    mark, and a valid UTF-16 stream whose first character is U+0000 carries the same four bytes:
+    UTF-32 is tried first, UTF-16 is the fallback where its 2-byte mark is present); a stream
+    decoding as neither candidate (an odd length, an unpaired surrogate) is a read error (exit 2,
+    naming the file), never an ineffective clean scan. A decodable BOM-marked file is scanned in
+    EVERY wide view -- UTF-16 LE and BE each at byte offsets 0 and 1, and UTF-32 LE and BE, each
+    decoded best-effort with undecodable units replaced -- AND in the lossless byte view, so a
+    mismatched-endian or misaligned mark cannot hide text from every view at once; counted as one
+    lossless decode (a wide encoding WITHOUT such a mark still falls to the byte decode below, where
+    the patterns cannot match across its wide characters; a disclosed residual);
   - its suffix is on the named binary allow-list BINARY_SUFFIXES (matched case-insensitively; an
     archive): it is named on a SKIP line and counted, never passed silently;
   - anything else holding a non-UTF-8 byte, whatever its suffix or that suffix's case (a missing suffix
@@ -187,11 +191,13 @@ def read_scan_text(path):
     was decoded without dropping or replacing a byte; skip_reason says why a file is not scanned. The
     policy, in order: a non-regular file (the stat probe follows a file symlink, so a symlink to a
     regular file reads as its target) is a named SKIP whose content is never opened; UTF-8 content is
-    scanned whatever the suffix; content behind a UTF-16 or UTF-32 byte-order mark is decoded as the
-    declared encoding AND decoded losslessly with surrogateescape, BOTH views scanned (so a fake mark
-    over single-byte text cannot hide it in the wide view), and a stream that does not decode as its
-    declared encoding raises OSError naming the file (fail-closed exit 2, never an ineffective clean
-    scan; the four-byte UTF-32 marks are probed before the two-byte UTF-16 prefix they embed); a
+    scanned whatever the suffix; content behind a UTF-16 or UTF-32 byte-order mark has its declared
+    encoding decided by a successful decode (UTF-32 first, then UTF-16 where its 2-byte mark is
+    present), never by the 4-byte prefix alone, a stream decoding as neither candidate raising
+    OSError naming the file (fail-closed exit 2, never an ineffective clean scan), and the decodable
+    file scanned in every wide view (UTF-16 LE and BE at byte offsets 0 and 1, UTF-32 LE and BE,
+    undecodable units replaced) AND in the lossless surrogateescape byte view, so a fake, a
+    mismatched-endian or a misaligned mark cannot hide text from every view at once; a
     remaining non-UTF-8 file whose suffix is on BINARY_SUFFIXES (case-insensitively) is a named SKIP;
     anything else is decoded losslessly with surrogateescape and scanned, whatever its suffix. A read
     error raises OSError for the caller's fail-closed exit 2 (a dangling symlink included)."""
@@ -204,16 +210,33 @@ def read_scan_text(path):
         pass
     bom_encoding = None
     if data[:4] in (b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff"):
+        # The UTF-32 LE mark embeds the UTF-16 LE mark, and a valid UTF-16 stream whose first
+        # character is U+0000 carries the same four bytes: decide by a successful decode (UTF-32
+        # first, UTF-16 as the fallback where its 2-byte mark is present), never by the prefix alone.
         bom_encoding = "utf-32"
+        if data[:2] == b"\xff\xfe":
+            try:
+                data.decode("utf-32")
+            except UnicodeDecodeError:
+                bom_encoding = "utf-16"
     elif data[:2] in (b"\xff\xfe", b"\xfe\xff"):
         bom_encoding = "utf-16"
     if bom_encoding is not None:
         try:
             wide = data.decode(bom_encoding)
         except UnicodeDecodeError as exc:
-            raise OSError("{}: byte-order mark declares {} but the stream does not decode as it "
-                          "({}); fail-closed".format(path, bom_encoding, exc))
-        return (wide, data.decode("utf-8", errors="surrogateescape")), True, None
+            raise OSError("{}: byte-order mark declares {} (decided by decode, not by the prefix "
+                          "alone) but the stream does not decode as it ({}); fail-closed"
+                          .format(path, bom_encoding, exc))
+        views = [wide, data.decode("utf-8", errors="surrogateescape")]
+        # Every wide view beside the declared one: a mark that misstates the endianness or sits over
+        # a misaligned stream cannot hide text from all of them at once. Best-effort decodes:
+        # undecodable units are replaced, never raised (the declared decode above is the fail-closed
+        # one, and the byte view stays lossless).
+        for enc, off in (("utf-16-le", 0), ("utf-16-le", 1), ("utf-16-be", 0), ("utf-16-be", 1),
+                         ("utf-32-le", 0), ("utf-32-be", 0)):
+            views.append(data[off:].decode(enc, errors="replace"))
+        return tuple(views), True, None
     if path.suffix.lower() in BINARY_SUFFIXES:
         return None, False, "not UTF-8, on the binary allow-list (suffix {})".format(path.suffix.lower())
     return (data.decode("utf-8", errors="surrogateescape"),), True, None
@@ -288,10 +311,14 @@ def main():
 #   3. a host path in a Latin-1 .md is a finding, decoded losslessly; 3b. the same in a Latin-1
 #      README.MD (an upper-case suffix) is found, not skipped; 3c. a host path in a UTF-16 file with a
 #      byte-order mark is decoded as UTF-16 and found; 3d. a fake UTF-16 byte-order mark over
-#      single-byte text hides nothing (the lossless byte view is scanned beside the wide view);
-#      3e/3f. an odd-length or unpaired-surrogate BOM-declared UTF-16 stream fails closed (exit 2);
-#      3g. a host path in a valid UTF-32 file with a byte-order mark is decoded as UTF-32 and found;
-#      3h. a malformed BOM-declared UTF-32 stream fails closed (exit 2),
+#      single-byte text hides nothing (the lossless byte view is scanned beside the wide views);
+#      3e/3f. an odd-length or unpaired-surrogate BOM-declared UTF-16 stream fails closed (exit 2,
+#      naming the file); 3g. a host path in a valid UTF-32 file with a byte-order mark is decoded as
+#      UTF-32 and found; 3h. a malformed BOM-declared UTF-32 stream fails closed (exit 2, naming the
+#      file); 3i. a valid UTF-16 stream whose first character is U+0000 (its first four bytes equal
+#      the UTF-32 LE mark) is scanned as UTF-16, decided by a successful decode and never by the
+#      prefix alone; 3j. a UTF-16 LE mark over big-endian text is found in the UTF-16-BE wide view;
+#      3k. a misaligned stream behind a UTF-16 LE mark is found in the odd-offset wide view,
 #   4. a codename in a Latin-1 .txt matches the hash layer (exit 1); 4b. the denylist file itself is
 #      scanned (a private IP in one of its comment lines is a finding); 4c. a suffixless Latin-1 file is
 #      decoded losslessly and its host path found,
@@ -309,7 +336,10 @@ def main():
 # case-insensitive allow-list, the stat-follows-a-file-symlink rule, the dangling-symlink error).
 # Against the round-2 revision this replaces, 3d and 3g are new findings and 3e, 3f and 3h pin the
 # fail-closed malformed-BOM contract, while the raising read seam in 6 makes a read-before-SKIP
-# regression fail rather than pass. The planted host path and private IP are assembled from pieces so
+# regression fail rather than pass. Against the round-3 revision this replaces, 3i pins the
+# decode-decided (never prefix-decided) BOM classification and 3j and 3k pin the every-wide-view
+# scan (a mismatched-endian and a misaligned mark), while 3e, 3f and 3h now also assert the file is
+# named. The planted host path and private IP are assembled from pieces so
 # this source stays clean under its own scan.
 _HOST_PATH = "/" + "opt/" + "fixture-host/private/path"
 _PRIVATE_IP = "10." + "20.30.40"
@@ -323,10 +353,10 @@ def self_test_main():
     from contextlib import redirect_stderr, redirect_stdout
 
     def run_capture(root):
-        out = io.StringIO()
-        with redirect_stdout(out), redirect_stderr(io.StringIO()):
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
             rc = run(root)
-        return rc, out.getvalue()
+        return rc, out.getvalue() + err.getvalue()
 
     def tree(name, files):
         base = tmp / name
@@ -408,15 +438,15 @@ def self_test_main():
         files = dict(clean_files)
         files["docs/odd.md"] = ("see " + _HOST_PATH + "\n").encode("utf-16") + b"x"
         rc, out = run_capture(tree("utf16-odd", files))
-        if rc != 2:
-            failures.append("an odd-length BOM-declared UTF-16 stream expected exit 2, fail-closed "
-                            "(got {}: {!r})".format(rc, out))
+        if rc != 2 or "odd.md" not in out:
+            failures.append("an odd-length BOM-declared UTF-16 stream expected exit 2 naming odd.md, "
+                            "fail-closed (got {}: {!r})".format(rc, out))
         files = dict(clean_files)
         files["docs/surrogate.md"] = ("see " + _HOST_PATH + "\n").encode("utf-16") + b"\x00\xd8"
         rc, out = run_capture(tree("utf16-surrogate", files))
-        if rc != 2:
-            failures.append("an unpaired-surrogate BOM-declared UTF-16 stream expected exit 2, "
-                            "fail-closed (got {}: {!r})".format(rc, out))
+        if rc != 2 or "surrogate.md" not in out:
+            failures.append("an unpaired-surrogate BOM-declared UTF-16 stream expected exit 2 naming "
+                            "surrogate.md, fail-closed (got {}: {!r})".format(rc, out))
 
         # 3g. a UTF-32 byte-order mark is honoured (probed before the UTF-16 prefix it embeds): a host
         #     path in a valid UTF-32 file is found in the wide view and counted as a lossless decode.
@@ -432,9 +462,44 @@ def self_test_main():
         files = dict(clean_files)
         files["docs/bad32.md"] = b"\xff\xfe\x00\x00" + b"\x01"
         rc, out = run_capture(tree("utf32-bad", files))
-        if rc != 2:
-            failures.append("a malformed BOM-declared UTF-32 stream expected exit 2, fail-closed "
-                            "(got {}: {!r})".format(rc, out))
+        if rc != 2 or "bad32.md" not in out:
+            failures.append("a malformed BOM-declared UTF-32 stream expected exit 2 naming bad32.md, "
+                            "fail-closed (got {}: {!r})".format(rc, out))
+
+        # 3i. a valid UTF-16 stream whose FIRST character is U+0000 carries the 4-byte UTF-32 LE mark
+        #     as its prefix: the declared encoding is decided by a successful decode (UTF-32 fails,
+        #     the UTF-16 fallback decodes), so the host path is found, never refused as a misdeclared
+        #     UTF-32 stream.
+        files = dict(clean_files)
+        files["docs/nulfirst.md"] = ("\x00see " + _HOST_PATH + "\n").encode("utf-16")
+        rc, out = run_capture(tree("utf16-nul-first", files))
+        if (rc != 1 or "docs/nulfirst.md:1: absolute host path" not in out
+                or "1 non-UTF-8 text file(s) decoded losslessly" not in out):
+            failures.append("a U+0000-leading UTF-16 stream expected exit 1, decided by decode and "
+                            "scanned as UTF-16 (got {}: {!r})".format(rc, out))
+
+        # 3j. a UTF-16 LE mark over BIG-ENDIAN text: the declared LE decode succeeds but garbles the
+        #     text and the byte view interleaves NULs, so only the UTF-16-BE wide view shows the host
+        #     path (the vector that discriminates the every-wide-view scan).
+        files = dict(clean_files)
+        files["docs/bemasked.md"] = b"\xff\xfe" + ("see " + _HOST_PATH + "\n").encode("utf-16-be")
+        rc, out = run_capture(tree("utf16-be-masked", files))
+        if (rc != 1 or "docs/bemasked.md:1: absolute host path" not in out
+                or "1 non-UTF-8 text file(s) decoded losslessly" not in out):
+            failures.append("a host path in big-endian text behind a UTF-16 LE mark expected exit 1 "
+                            "via the UTF-16-BE view (got {}: {!r})".format(rc, out))
+
+        # 3k. a UTF-16 LE mark over a MISALIGNED LE stream (one byte inserted after the mark, one
+        #     appended to keep the length even): the declared decode succeeds garbled, and only the
+        #     odd-offset UTF-16-LE view shows the host path.
+        files = dict(clean_files)
+        files["docs/shifted.md"] = (b"\xff\xfe" + b"a"
+                                    + ("see " + _HOST_PATH + "\n").encode("utf-16-le") + b"\x00")
+        rc, out = run_capture(tree("utf16-shifted", files))
+        if (rc != 1 or "docs/shifted.md:1: absolute host path" not in out
+                or "1 non-UTF-8 text file(s) decoded losslessly" not in out):
+            failures.append("a host path in a misaligned stream behind a UTF-16 LE mark expected "
+                            "exit 1 via the odd-offset view (got {}: {!r})".format(rc, out))
 
         # 4. a codename in a .txt holding a Latin-1 byte matches the hash layer.
         rc, out = run_capture(tree("codename", dict(clean_files, **{
@@ -563,14 +628,17 @@ def self_test_main():
         return 1
     print("SELF-TEST PASS: a clean tree passes and states its scanned and skipped counts; a private IP in a "
           ".csv or a Latin-1 .tsv, a host path in a Latin-1 .md, a Latin-1 README.MD, a UTF-16 or UTF-32 "
-          "file with a byte-order mark, single-byte text behind a fake UTF-16 mark (the byte view is "
-          "scanned beside the wide view), a suffixless Latin-1 file or a symlinked regular file's target, "
+          "file with a byte-order mark, a UTF-16 stream starting with U+0000 (decided by a successful "
+          "decode, never the 4-byte prefix alone), single-byte text behind a fake UTF-16 mark (the "
+          "byte view is scanned beside the wide views), big-endian or misaligned text behind a UTF-16 "
+          "LE mark (every wide view is scanned), a suffixless Latin-1 file or a symlinked regular "
+          "file's target, "
           "a codename in a Latin-1 .txt, and a private IP inside the denylist file are each a finding "
           "(exit 1); an undecodable .zip (in either suffix case) and an injected non-regular file are "
           "each named on a SKIP line and counted, the non-regular content never read (its read seam "
           "raises if it is); a symlinked directory is named on a SKIP line, never silently dropped; and "
-          "a dangling symlink, an injected unreadable file, and a BOM-declared UTF-16 or UTF-32 stream "
-          "that does not decode as declared each fail closed (exit 2)")
+          "a dangling symlink, an injected unreadable file, and a BOM-declared stream that decodes as "
+          "neither declared candidate each fail closed (exit 2, naming the file)")
     return 0
 
 

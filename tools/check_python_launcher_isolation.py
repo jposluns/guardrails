@@ -461,14 +461,18 @@ def _yaml_run_lines(text):
     library). A block header is read under the full block-header grammar (BLOCK_HEADER_RE: indicator,
     optional indentation digit and chomping indicator in either order, optional comment); the block's
     content is the run of lines indented deeper than the `run:` key, ending at the first non-blank line
-    indented no deeper. An EMPTY same-line value is read ONLY in the two shapes proven against PyYAML:
+    indented no deeper. An EMPTY same-line value -- a bare `run:`, or a `run:` whose only same-line
+    text is a YAML comment (`run: # note`), which YAML strips to the SAME empty value (proven against
+    PyYAML) -- is read ONLY in the two shapes proven against PyYAML:
     the next non-blank, NON-COMMENT line, when deeper than the key, is either the plain-scalar command
     itself or a block header whose content is deeper than both the header and the key (its content
     lines, bounded by the key column, are yielded). The value is null (nothing is yielded) only when
     that next non-blank, non-comment line is not deeper than the key, or the text ends. Unsupported
     (cannot-evaluate, never a silent null): a comment line between an empty `run:` and a deeper value
     line, a next-line block header with no content deeper than the key, block content at or above that
-    header's column, a comment line inside that block before its content, any other value starting with
+    header's column, a line opening with `#` directly after that next-line header (YAML reads it as
+    block CONTENT, not a comment; this line reader refuses rather than reads it, a disclosed
+    over-refusal), any other value starting with
     `|` or `>` (on the key line or the deeper line), a value opening with a node property or alias, and
     a plain scalar continued onto a further deeper-indented line (YAML folds it into the command, so a
     launcher there would otherwise go unread). Only `run:` payloads are yielded, so `uses:`/`with:`
@@ -483,8 +487,15 @@ def _yaml_run_lines(text):
             continue
         val = (m.group("val") or "").strip()
         key_indent = len(m.group("indent"))
+        if val.startswith("#"):
+            # A same-line value that is ONLY a YAML comment carries no value: YAML strips the comment
+            # (proven against PyYAML), so the key has the SAME empty value as a bare `run:` and is
+            # read through the bounded empty-value path below, never as an inline scalar (whose
+            # continuation lookahead would step past the real deeper value).
+            val = ""
         if not val:
-            # An empty same-line value: YAML reads the run: value from a following deeper-indented
+            # An empty same-line value (a bare `run:`, or one whose only same-line text was a YAML
+            # comment): YAML reads the run: value from a following deeper-indented
             # line. FAIL-CLOSED BOUNDS: the value is read ONLY in the two shapes proven against
             # PyYAML (a next-line plain scalar; a next-line block header whose content is deeper
             # than both the header and the key, the content run bounded by the key column). The
@@ -492,7 +503,8 @@ def _yaml_run_lines(text):
             # null ONLY when the next non-blank, NON-COMMENT line is not deeper than the key, or
             # the text ends. Any other arrangement (a comment line before a deeper value, a header
             # with no content deeper than the key, block content at or above the header's column,
-            # a comment line inside the block before its content) is a cannot-evaluate, never a
+            # a line opening with '#' directly after the header, which YAML reads as block content
+            # but this reader refuses) is a cannot-evaluate, never a
             # silent null and never a partial read.
             j = i + 1
             saw_comment = False
@@ -525,9 +537,10 @@ def _yaml_run_lines(text):
                     i = j + 1
                     continue
                 if lines[k].lstrip().startswith("#"):
-                    unsupported.append((k + 1, "comment line inside the block after an empty run: "
-                                              "before its content, outside the supported line "
-                                              "grammar"))
+                    unsupported.append((k + 1, "line opening with '#' directly after the block header "
+                                              "after an empty run: (YAML reads it as block content; "
+                                              "this line reader refuses rather than reads it), "
+                                              "outside the supported line grammar"))
                     i = j + 1
                     continue
                 if len(lines[k]) - len(lines[k].lstrip(" ")) <= nxt_indent:
@@ -909,12 +922,16 @@ def main():
 #      dangling, looping or resolvable symlink (none followed; a readable, CLEAN target included, the
 #      vector that discriminates no-follow on a non-root runner), a directory, and an injected
 #      non-regular mode are each a named cannot-evaluate (exit 2),
-#  37. an empty run: value is read ONLY in the two proven shapes (a next-line plain scalar; a
-#      next-line block header whose content is deeper than both the header and the key): each carries
-#      a bare launcher (exit 1) or an isolated one (exit 0); an anchored value, a malformed header, a
-#      further continuation, a comment line before a deeper value, a header with no content deeper
-#      than the key or with content at or above its own column, and a comment inside the block before
-#      its content are cannot-evaluate (exit 2); a null run: (next non-blank, non-comment line not
+#  37. an empty run: value -- a bare `run:`, or a `run: # note` whose only same-line text is a YAML
+#      comment (YAML strips it to the SAME empty value; proven against PyYAML) -- is read ONLY in the
+#      two proven shapes (a next-line plain scalar; a next-line block header whose content is deeper
+#      than both the header and the key): each carries a bare launcher (exit 1) or an isolated one
+#      (exit 0); an anchored value, a malformed header, a further continuation, a comment line before
+#      a deeper value (after a bare `run:` or a comment-only value alike), a header with no content
+#      deeper than the key (a header at the end of the text included) or with content at or above its
+#      own column, and a line opening with '#' directly after the header (YAML block content this
+#      reader refuses, at the header's column or deeper) are cannot-evaluate (exit 2), each naming
+#      .github/workflows/quality.yml and the line; a null run: (next non-blank, non-comment line not
 #      deeper than the key) carries no command text (exit 0), a comment line alone never making it
 #      one.
 
@@ -985,6 +1002,12 @@ def self_test_main():
     def run_quiet(root):
         with redirect_stdout(io.StringIO()):
             return run(root)
+
+    def run_capture(root):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = run(root)
+        return rc, out.getvalue()
 
     try:
         tmp = Path(tempfile.mkdtemp(prefix="aiqt-launcher-isolation-selftest-"))
@@ -1495,25 +1518,51 @@ def self_test_main():
         #     alone never making it one. The bare forms passed unread, and the exit-2 arrangements
         #     passed as silent nulls or partial reads, before this rule.
         head = "name: Q\njobs:\n  q:\n    steps:\n      - run:\n"
-        for label, tail, want in (
-                ("p3-bare", "          python3 tools/alpha.py\n", 1),
-                ("p3-iso", "          python3 -I -B tools/alpha.py\n", 0),
-                ("p4-bare", "          |\n            python3 tools/alpha.py\n", 1),
-                ("p4-iso", "          | # note\n            python3 -I -B tools/alpha.py\n", 0),
-                ("anchored", "          &a python3 tools/alpha.py\n", 2),
-                ("bad-header", "          |0\n            python3 tools/alpha.py\n", 2),
-                ("continued", "          echo a &&\n          python3 tools/alpha.py\n", 2),
-                ("comment-first", "          # setup\n          python3 tools/alpha.py\n", 2),
+        # chead's same-line value is ONLY a YAML comment: PyYAML strips it to the SAME empty value as
+        # head's bare `run:`, so every head arrangement must behave identically under chead.
+        chead = "name: Q\njobs:\n  q:\n    steps:\n      - run: # c\n"
+        for label, wf_text, want, named_line in (
+                ("p3-bare", head + "          python3 tools/alpha.py\n", 1, None),
+                ("p3-iso", head + "          python3 -I -B tools/alpha.py\n", 0, None),
+                ("p4-bare", head + "          |\n            python3 tools/alpha.py\n", 1, None),
+                ("p4-iso", head + "          | # note\n            python3 -I -B tools/alpha.py\n",
+                 0, None),
+                ("comment-val-p3-bare", chead + "          python3 tools/alpha.py\n", 1, None),
+                ("comment-val-p3-iso", chead + "          python3 -I -B tools/alpha.py\n", 0, None),
+                ("comment-val-p4-bare", chead + "          |\n            python3 tools/alpha.py\n",
+                 1, None),
+                ("anchored", head + "          &a python3 tools/alpha.py\n", 2, 6),
+                ("bad-header", head + "          |0\n            python3 tools/alpha.py\n", 2, 6),
+                ("continued", head + "          echo a &&\n          python3 tools/alpha.py\n", 2, 7),
+                ("comment-first", head + "          # setup\n          python3 tools/alpha.py\n",
+                 2, 7),
+                ("comment-val-then-comment-plain",
+                 chead + "          # d\n          python3 tools/alpha.py\n", 2, 7),
+                ("comment-val-then-comment-block",
+                 chead + "          # d\n          |\n            python3 tools/alpha.py\n", 2, 7),
                 ("comment-in-block",
-                 "          |\n          # x\n            python3 tools/alpha.py\n", 2),
-                ("header-equal-content", "          |\n          python3 tools/alpha.py\n", 2),
-                ("header-deeper-than-content", "            |\n          python3 tools/alpha.py\n", 2),
-                ("header-no-content", "          |\n        shell: bash\n", 2),
-                ("comment-then-null", "          # note\n        shell: bash\n", 0),
-                ("null-value", "        shell: bash\n", 0)):
-            if run_quiet(_build(tmp / ("empty-run-" + label), workflow=head + tail)) != want:
-                failures.append("an empty run: followed by the {} form expected exit {}".format(
-                    label, want))
+                 head + "          |\n          # x\n            python3 tools/alpha.py\n", 2, 7),
+                ("comment-in-block-deeper",
+                 head + "          |\n            # x\n            python3 tools/alpha.py\n", 2, 7),
+                ("header-equal-content", head + "          |\n          python3 tools/alpha.py\n",
+                 2, 7),
+                ("header-deeper-than-content",
+                 head + "            |\n          python3 tools/alpha.py\n", 2, 7),
+                ("header-no-content", head + "          |\n        shell: bash\n", 2, 6),
+                ("header-at-eof", head + "          |\n", 2, 6),
+                ("comment-then-null", head + "          # note\n        shell: bash\n", 0, None),
+                ("comment-val-null", chead + "        shell: bash\n", 0, None),
+                ("comment-val-at-eof", chead, 0, None),
+                ("null-value", head + "        shell: bash\n", 0, None)):
+            rc, out = run_capture(_build(tmp / ("empty-run-" + label), workflow=wf_text))
+            if rc != want:
+                failures.append("an empty run: {} form expected exit {} (got {})".format(
+                    label, want, rc))
+            elif named_line is not None and (
+                    "cannot-evaluate: .github/workflows/quality.yml:{}:".format(named_line)
+                    not in out):
+                failures.append("the {} cannot-evaluate expected to name quality.yml:{} "
+                                "(got {!r})".format(label, named_line, out))
 
         # 10. The gate REFUSES (exit 2) when its own interpreter is not isolated (a real subprocess: no
         #     -I, so the bootstrap self-guard fires before any scan or sibling import).
@@ -1576,12 +1625,14 @@ def self_test_main():
           "while the sanctioned sys.path.append form is clean (exit 0) and a missing required QA source "
           "fails closed (exit 2); a run: block header in the full block-header grammar (a trailing "
           "comment, an indentation digit, a chomping indicator in either order) is read as a block; an "
-          "empty run: is read only in the two proven shapes (a next-line plain scalar, or a next-line "
+          "empty run: (a bare `run:` or a comment-only same-line value, the same empty value) is read only "
+          "in the two proven shapes (a next-line plain scalar, or a next-line "
           "block header with content deeper than both the header and the key; a bare launcher there "
           "fails, an isolated one passes) while a null run: (next non-blank, non-comment line not "
           "deeper than the key) stays clean; a comment line before a deeper value, a header without "
-          "content deeper than the key or with content at or above its own column, and a comment "
-          "inside the block before its content are cannot-evaluate (exit 2); any other run: value "
+          "content deeper than the key (a header at the end of the text included) or with content at "
+          "or above its own column, and a '#' line directly after the header (YAML block content this "
+          "reader refuses) are cannot-evaluate (exit 2), each naming the file and line; any other run: value "
           "starting with | or > on either line, a node property or alias, and a further-continued plain "
           "scalar are cannot-evaluate (exit 2); every *.yml workflow candidate that is not a regular "
           "file (a symlink of any kind, a directory, or another non-regular entry) is a named "
