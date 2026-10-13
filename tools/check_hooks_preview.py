@@ -323,7 +323,9 @@ def _tail(data, n=15):
 
 def leg_selftest(pdir, hooks, findings, unverifiable):
     """(a) Run each hook's own --self-test isolated; nonzero is a finding (also when it exited nonzero
-    before a bound stopped the wait), a stop with no exit status is unverifiable, also when stderr was
+    before a bound stopped the wait); a stop with no exit status, or with an own exit of 0 (a 0 beside
+    a stop is not the proven pass a completed 0 is: the stop may have cut the verdict's delivery
+    short), is unverifiable, also when stderr was
     captured beside it: this gate judges the exit status alone (a hook self-test legitimately writes its
     progress to stderr, a tolerance named in the _load_bound module docstring). The
     environment is scrubbed of AIQT_, ORCH_ and CLAUDE_ variables and then carries AIQT_HOOKS_REQUIRE_SIBLINGS=1

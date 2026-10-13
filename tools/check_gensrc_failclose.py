@@ -159,14 +159,14 @@ REGEN_RE = re.compile(r"^tools/gen_([A-Za-z0-9_]+)\.py$")
 # Both bounds are in LOAD-ADJUSTED seconds (tools/_load_bound.py): they stretch while the host runs more
 # work than it has CPUs, so a loaded host slows the sweep without turning it into cannot-evaluate, and a
 # probe is also stopped early once its process tree makes no CPU or output progress for PROBE_STALL_S
-# wall seconds. That stall test is a heuristic bound (silence is not proof of a hang). Either stop is the
-# bound firing, cannot-evaluate (exit 2), never a verdict on the generator, unless the generator had
-# already exited 0 on a corrupt target before the stop: that wrong result is a violation (exit 1).
+# wall seconds. That stall test is a heuristic bound (silence is not proof of a hang). A stop with no
+# exit status at all is the bound firing, cannot-evaluate (exit 2), never a verdict on the generator.
 # This gate judges the exit status of a generator run alone (generators print their rejections to
 # stderr, so captured stderr beside a stop is NOT failure evidence here, a tolerance named in the
 # _load_bound module docstring). An exit status the generator reached on its own before a stop stands
-# exactly as a completed run: 0 on a corrupt target is the F-154 violation, nonzero is the wanted
-# rejection; only a stop with no exit status at all is cannot-evaluate. The baseline run is different
+# exactly as a completed run, once the stopped probe has passed the SAME post-probe containment
+# validation a completed one gets (_run_probe): 0 on a corrupt target is the F-154 violation, nonzero
+# is the wanted rejection. The baseline run is different
 # by contract: it needs a clean completed 0 (any other outcome, stop or not, is unattributable).
 PROBE_TIMEOUT = 120  # per --check; an own exit beside the stop stands, else cannot-evaluate
 # Longest silent wait a generator --check legitimately makes: none deliberate. It reads files and runs git
@@ -601,7 +601,11 @@ def _run_probe(template, script_rel, rel_path, corrupt_bytes, deadline, cleanup_
     so neither the copytree nor the write can consume the budget while the subprocess still launches with a
     near-full timeout; an already-elapsed deadline at that point raises _DeadlineExceeded rather than
     launching. Re-validates the target is a contained regular file before the write and again after the
-    probe (a generator that swapped it for an escaping symlink raises _ContainmentError). Raises
+    probe (a generator that swapped it for an escaping symlink raises _ContainmentError). The post-probe
+    validation also runs when the probe was STOPPED (the exception path), while the sandbox still
+    exists: an exit status carried beside the stop is judged by _process_entry exactly as a completed
+    run, so it must pass the same containment check first, and a containment failure outranks the stop
+    (fail-closed). Raises
     _ContainmentError, subprocess.TimeoutExpired/OSError, or _DeadlineExceeded; the caller maps all to
     cannot-evaluate."""
     holder, sandbox, env_overrides = _new_sandbox(template)
@@ -611,7 +615,14 @@ def _run_probe(template, script_rel, rel_path, corrupt_bytes, deadline, cleanup_
         where = "{} (in the sandbox)".format(rel_path)
         _write_bytes_safe(tpath, corrupt_bytes, sandbox_real, where)  # re-validate + O_NOFOLLOW write
         timeout = _remaining_timeout(deadline)  # clamp AFTER the copy+write, immediately before the launch
-        rc = _run_check(sandbox / script_rel, sandbox, timeout=timeout, env_overrides=env_overrides)
+        try:
+            rc = _run_check(sandbox / script_rel, sandbox, timeout=timeout, env_overrides=env_overrides)
+        except (subprocess.TimeoutExpired, OSError):
+            # A stopped probe can carry the generator's own exit, which _process_entry judges exactly
+            # as a completed run, so the stopped path runs the SAME post-probe validation first; a
+            # containment failure raised here outranks the stop (fail-closed, _ContainmentError).
+            _validate_contained_regular(tpath, sandbox_real, where)
+            raise
         _validate_contained_regular(tpath, sandbox_real, where)  # post-probe symlink-swap detection
         return rc
     finally:
@@ -702,7 +713,9 @@ def _process_entry(entry, template, baselines, deadline, violations, cannot, cle
                     continue
                 if own_exit is not None:
                     # It exited NONZERO before the stop: the rejection this probe wanted, standing exactly
-                    # as a completed nonzero run does (the _load_bound contract); nothing is recorded.
+                    # as a completed nonzero run does (the _load_bound contract), accepted only because the
+                    # stopped probe already passed the post-probe containment validation (_run_probe);
+                    # nothing is recorded.
                     continue
                 cannot.append("{}: probe 'gen_{} --check' on {} corrupted with {} failed to complete ({})"
                               .format(target_rel, stem, rel_path, shape, exc))
@@ -863,8 +876,10 @@ def main() -> int:
 #   (n) load tolerance: under an injected host load a generator slower than a 1 s per-probe bound passes
 #       while printing progress, a silent sleeper is still stopped by the stall bound (exit 2), and the
 #       same slow generator on an idle host overruns the bound (exit 2), a generator that exits 0 on a
-#       corrupt target while a leaked descendant holds its output is a violation (exit 1), not a stop;
-#       the shared _load_bound vectors also run here.
+#       corrupt target while a leaked descendant holds its output is a violation (exit 1), not a stop,
+#       a nonzero rejection beside the same leak stands (exit 0), and a stopped rejection that left the
+#       target as an escaping symlink is cannot-evaluate (exit 2): the post-probe containment validation
+#       runs on the stopped path too; the shared _load_bound vectors also run here.
 # Every fixture is synthetic; any invalid-UTF-8 corruption bytes are assembled from non-secret parts so
 # this file never trips the repo secret scan.
 
@@ -1483,7 +1498,10 @@ def _self_test_main_isolated():
         #     (exit 2), so the pass is owed to the load adjustment; a generator exiting 0 on a corrupt target
         #     beside a leaked descendant is a violation (exit 1), and a generator REJECTING the corrupt
         #     target (nonzero) beside the same leak passes (exit 0): the own exit stands either way, never
-        #     filed as cannot-evaluate. The shared vectors follow.
+        #     filed as cannot-evaluate, but only once the stopped probe passed the same post-probe
+        #     containment validation a completed one gets: the same rejection that ALSO swapped the target
+        #     for an escaping symlink is cannot-evaluate (exit 2), never an accepted rejection. The shared
+        #     vectors follow.
         slow_main = ("def main():\n    import time\n    for _ in range(8):\n"
                      "        print(\"working\", flush=True)\n        time.sleep(0.25)\n")
         slow = _build_repo(tmp / "slow", {"goodfile": _GOODFILE.replace("def main():\n", slow_main)})
@@ -1503,6 +1521,17 @@ def _self_test_main_isolated():
         leaky_reject = _build_repo(tmp / "leaky-reject", {"goodfile": _GOODFILE.replace(
             "def main():\n    return run(repo_root(), \"--check\" in sys.argv[1:])\n",
             ("def main():\n    import subprocess\n    if \"--check\" in sys.argv[1:] and run(repo_root(), True):\n"
+             "        subprocess.Popen([sys.executable, \"-c\", \"import time; time.sleep(30)\", {!r}])\n"
+             "        return 2\n    return run(repo_root(), \"--check\" in sys.argv[1:])\n").format(leaked))})
+        # Rejects the corrupt target (exit 2) beside the same leak, but FIRST swaps the target for a
+        # symlink escaping the sandbox: the stopped rejection must still run the post-probe containment
+        # validation, so the sweep is cannot-evaluate (exit 2), never an accepted rejection (exit 0).
+        leaky_reject_escape = _build_repo(tmp / "leaky-reject-escape", {"goodfile": _GOODFILE.replace(
+            "def main():\n    return run(repo_root(), \"--check\" in sys.argv[1:])\n",
+            ("def main():\n    import os, subprocess\n"
+             "    if \"--check\" in sys.argv[1:] and run(repo_root(), True):\n"
+             "        target = repo_root() / \"out\" / \"goodfile.txt\"\n"
+             "        os.unlink(target)\n        os.symlink(sys.executable, target)\n"
              "        subprocess.Popen([sys.executable, \"-c\", \"import time; time.sleep(30)\", {!r}])\n"
              "        return 2\n    return run(repo_root(), \"--check\" in sys.argv[1:])\n").format(leaked))})
         stops = []
@@ -1527,20 +1556,22 @@ def _self_test_main_isolated():
             rc_idle = sweep_quiet(slow)
             rc_leaky = sweep_quiet(leaky)
             rc_leaky_reject = sweep_quiet(leaky_reject)
+            rc_leaky_reject_escape = sweep_quiet(leaky_reject_escape)
         finally:
             _load_factor, PROBE_TIMEOUT, PROBE_STALL_S = saved_bounds
             _now = saved_now
             _run_check = saved_run_check
             for pid in _load_bound._alive_with(leaked):
                 _load_bound._kill_pid(pid)
-        if (rc_slow, rc_hang, rc_idle, sorted(set(stops)), rc_leaky, rc_leaky_reject) != (
-                0, 2, 2, ["stall"], 1, 0):
+        if (rc_slow, rc_hang, rc_idle, sorted(set(stops)), rc_leaky, rc_leaky_reject,
+                rc_leaky_reject_escape) != (0, 2, 2, ["stall"], 1, 0, 2):
             failures.append("load tolerance: expected (slow under load, silent hang, slow on an idle host, "
                             "the bound that stopped the hang, exit 0 on a corrupt target beside a leaked "
-                            "descendant, a nonzero rejection beside the same leak) = "
-                            "(0, 2, 2, ['stall'], 1, 0), got {!r}"
+                            "descendant, a nonzero rejection beside the same leak, a stopped rejection "
+                            "that left the target escaping) = "
+                            "(0, 2, 2, ['stall'], 1, 0, 2), got {!r}"
                             .format((rc_slow, rc_hang, rc_idle, sorted(set(stops)), rc_leaky,
-                                     rc_leaky_reject)))
+                                     rc_leaky_reject, rc_leaky_reject_escape)))
         failures.extend(_load_bound.vector_failures(sys.executable))
 
         # (l) A sandbox-setup mkdtemp failure (injected OSError) returns cannot-evaluate (exit 2), not an

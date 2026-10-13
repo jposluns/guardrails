@@ -1780,8 +1780,10 @@ def _pl239_launch_verdict(launch, detail, attempts=3, factor=None):
     back to be judged (a failure) at once, whatever its stdout says, and a bound stop that carries an exit
     status the hook reached on its own (nonzero) or captured stderr is a failure. Only the two results
     host load can cause are retried: the whole production-deadline response of the hook
-    (_pl239_deadline_denial), where the case does not expect it, and a clean bound stop (no exit status,
-    no stderr); every other result is judged at once. When every launch ends in that deadline response
+    (_pl239_deadline_denial), where the case does not expect it, and a clean bound stop (no stderr and
+    no NONZERO exit status: a stop beside an own exit of 0 is retried the same way, its verdict not
+    having been observed, and stdout is not consulted beside a stop); every other result is judged at
+    once. When every launch ends in that deadline response
     and the load factor (factor, default _load_bound.measured_load_factor) read at every launch was a
     MEASURED reading at most _PL239_UNLOADED_FACTOR, it is a failure: the latency regression it is. An
     unavailable reading (None) is never read as an unloaded host, so with one among them the persistent
@@ -4775,7 +4777,8 @@ def _main_isolated(monitor):
                 # The generated hook process enforces its production commit limits itself, so a loaded
                 # host can turn a correct verdict into the attributed "commit evaluation deadline
                 # exhausted" denial; _pl239_launch_verdict judges failure evidence (a nonzero exit, stderr)
-                # first, retries only the whole deadline response, and reports a persistent one as
+                # first, retries the whole deadline response and a clean bound stop (no stderr, no
+                # nonzero own exit), and reports a persistent deadline as
                 # cannot-evaluate on a loaded host and as a failure on an unloaded one (vectors:
                 # _pl239_launch_failures). The launch itself is bounded by
                 # progress: the registered hook timeout plus 5 s of load-adjusted time, or the heuristic
