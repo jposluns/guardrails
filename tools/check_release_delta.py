@@ -2902,8 +2902,9 @@ def _not_run(failures, case, cause):
 
 # One label per git-availability gate in _self_test_main_isolated, in SOURCE order; the LAST entry is the
 # final gate, which dispatches the real full-pack / POST-RELEASE case sets. The transient-availability
-# vectors in _not_run_net_vectors replay a failed probe over this order, so this tuple and the _git_gate
-# call sites must stay aligned (a new git-gated block extends both).
+# vectors in _not_run_net_vectors replay a failed probe over this order; the alignment (every probe
+# through _git_gate, one _git_gate call per label) is enforced by _git_gate_alignment_failures over this
+# module's own source in the self-test, never left to a comment (PR #530 QA round-3 claude MINOR-4).
 _GIT_GATE_LABELS = (
     "the materialized executable/plain-file mode cases (round-7 finding 4)",
     "the duplicate-predecessor-clause inventory case (finding 1, predecessor object)",
@@ -2924,6 +2925,38 @@ def _git_gate(label, failures):
     _not_run(failures, label, "git is unavailable at this block's probe (QA round-4 codex R4-3 / "
              "claude m4; a transient probe failure never skips a block silently)")
     return False
+
+
+def _git_gate_alignment_failures(source):
+    """The _GIT_GATE_LABELS/_git_gate alignment as an AST CHECK over module source, not a comment (PR
+    #530 QA round-3 claude MINOR-4). Two invariants: _git_available is called ONLY inside _git_gate (a
+    bare probe elsewhere would consume or outlive the transient vectors' planned answers: one added
+    AFTER the final gate would receive the REAL probe in both scenarios, so a transient failure there
+    would skip silently), and the number of _git_gate calls equals len(_GIT_GATE_LABELS) (one named
+    gate per label, so a new git-gated block extends both). Returns the list of findings (empty when
+    aligned); the self-test runs it over this module's own source and requires red on a planted bare
+    probe and on a planted extra gate call."""
+    import ast
+    tree = ast.parse(source)
+
+    def _calls(node, name):
+        return [n for n in ast.walk(node) if isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Name) and n.func.id == name]
+
+    inside_gate = set()
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == "_git_gate":
+            inside_gate.update(id(call) for call in _calls(node, "_git_available"))
+    findings = ["line {}: _git_available is called outside _git_gate (a bare probe, unnamed on "
+                "failure)".format(call.lineno)
+                for call in _calls(tree, "_git_available") if id(call) not in inside_gate]
+    gate_calls = _calls(tree, "_git_gate")
+    if len(gate_calls) != len(_GIT_GATE_LABELS):
+        findings.append("{} _git_gate call(s) (lines {}) for {} label(s) in _GIT_GATE_LABELS".format(
+            len(gate_calls), ", ".join(str(line) for line in sorted(
+                call.lineno for call in gate_calls)) or "none",
+            len(_GIT_GATE_LABELS)))
+    return findings
 
 
 def _plant_notice_omission(mpath, failures):
@@ -6146,6 +6179,28 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
     from _git_fixture_env import scrub_git_environment
     scrub_git_environment()
     failures = []
+
+    # PR #530 QA round-3 claude MINOR-4: the _GIT_GATE_LABELS/_git_gate alignment is a CHECK over this
+    # module's own source, not a comment. A planted bare probe (one added after the final gate would
+    # receive the vectors' real probe in both scenarios and skip silently on a transient failure) and a
+    # planted extra gate call (one more call than labels) must each be red.
+    own_source = Path(__file__).resolve().read_text(encoding="utf-8")
+    align = _git_gate_alignment_failures(own_source)
+    if align:
+        failures.append("(git-gate alignment) this module must probe git only through _git_gate, one "
+                        "call per label: {}".format("; ".join(align)))
+    for tagg, plantg, wantg in (
+            ("a planted bare probe",
+             "def _planted_probe_vector():\n    return _git_available()\n",
+             "outside _git_gate"),
+            ("a planted extra gate call",
+             "def _planted_gate_vector(failures):\n"
+             "    return _git_gate(_GIT_GATE_LABELS[0], failures)\n",
+             "label(s) in _GIT_GATE_LABELS")):
+        gotg = _git_gate_alignment_failures(own_source + "\n\n" + plantg)
+        if not any(wantg in fg for fg in gotg):
+            failures.append("(git-gate alignment) {} must be a finding naming {!r} (got {})".format(
+                tagg, wantg, gotg))
 
     # QA round-9 codex minor: the drift consumer requires EXACTLY ONE DRIFT-STATES record. A
     # duplicate (identical or contradictory) and a malformed record are failures that a later

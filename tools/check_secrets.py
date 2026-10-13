@@ -57,15 +57,22 @@ complete):
      TEXT_SUFFIXES is never read; a suffixless file that is not valid UTF-8 is treated as binary and
      skipped): unchanged, gitleaks-or-nothing territory. A dotenv or TEXT_SUFFIXES file that is not valid
      UTF-8 is NOT skipped: it is decoded losslessly and scanned (_read_scan_text). A scan candidate that
-     starts with a UTF-16 byte-order mark and decodes as UTF-16 is scanned BOTH as UTF-16 AND through the
-     lossless byte view, the findings merged with exact duplicates dropped: almost any even-length byte
-     string decodes as UTF-16, so a BOM-prefixed file that actually holds 8-bit or ASCII text keeps the
-     lossless-view coverage it had before UTF-16 support; a suffixless file that is not valid UTF-8 and
-     does not take the UTF-16 views stays binary and is skipped. Two or more stray
+     starts with a UTF-32 byte-order mark and decodes as UTF-32, or that starts with a UTF-16 byte-order
+     mark and has EVEN length, is scanned BOTH through that wide decode AND through the lossless byte
+     view, the findings merged: the UTF-32 marks are tested first because each embeds a UTF-16 one, and
+     the UTF-16 decode uses errors="surrogatepass", so an unpaired surrogate never costs the wide view
+     (PR #530 QA round-3 claude MEDIUM-1 / MINOR-1); almost any even-length byte string takes the UTF-16
+     wide view, so a BOM-prefixed file that actually holds 8-bit or ASCII text keeps the lossless-view
+     coverage it had before the wide views. The merge drops exact duplicates PER REPORTED LINE AND
+     LABEL, never per secret: two DIFFERENT tokens that share a path, view-relative line number and
+     label (one per view) are ONE reported finding, so the FAIL total counts reported findings, not an
+     inventory of distinct credentials (round-3 claude MINOR-2). Only an odd-length BOM-marked file
+     takes no wide view: with a declared-text suffix it falls back to the lossless byte view, and
+     suffixless it stays binary and is skipped. Two or more stray
      non-ASCII bytes that together form a valid UTF-8 letter decode as that letter, so beside a token they
      break its word boundary and can hide it (the same word-boundary behaviour as in valid UTF-8 text);
-     UTF-16 without a byte-order mark and other non-UTF-8 encodings are not decoded as such, so a secret in
-     them can be missed.
+     UTF-16 or UTF-32 without a byte-order mark and other non-UTF-8 encodings are not decoded as such, so
+     a secret in them can be missed.
   R6 the F-127 env-reference exclusion residual: unchanged, and it now ALSO governs the entropy path's
      unquoted branch.
   R7 a high-entropy value that is actually a filesystem path, URL fragment, or opaque identifier assigned
@@ -357,32 +364,47 @@ def _is_declared_text(path):
 
 def _read_scan_text(path):
     """Return (texts, note) for a scan candidate; texts is a tuple of decoded VIEWS to scan (the caller
-    merges the views' findings and drops exact duplicates), or None when the file is skipped as binary.
-    Valid UTF-8 decodes as is (one view, note None). A candidate that is text by declaration
-    (_is_declared_text) but is NOT valid UTF-8 is decoded LOSSLESSLY with errors="surrogateescape": every
-    valid character keeps its meaning and each undecodable byte becomes its own lone surrogate, which is
-    neither a word character nor a line break, so every ASCII pattern still matches beside it (a latin-1
-    view would turn 0xFE into a letter that breaks a word boundary, and 0x85 into a line break). A
-    candidate that is not valid UTF-8 but starts with a UTF-16 byte-order mark and decodes as UTF-16 is
-    scanned BOTH as UTF-16 (a byte view of real UTF-16 carries a NUL between every two ASCII characters,
-    which defeats every pattern) AND through the lossless surrogateescape view: almost any even-length
-    byte string decodes as UTF-16, so a BOM-prefixed file that actually holds 8-bit or ASCII text keeps
-    the lossless-view coverage it had before UTF-16 support (PR #530 QA round-2 claude MEDIUM-1); the
-    UTF-16 attempt only ever ADDS a view. Otherwise only a SUFFIXLESS file that is not valid UTF-8 and
-    did not take the UTF-16 views is treated as binary and skipped, as the existing rule
-    (_is_scan_candidate) defines."""
+    merges the views' findings and drops exact duplicates per reported line and label, see main()), or
+    None when the file is skipped as binary. Valid UTF-8 decodes as is (one view, note None). A candidate
+    that is text by declaration (_is_declared_text) but is NOT valid UTF-8 is decoded LOSSLESSLY with
+    errors="surrogateescape": every valid character keeps its meaning and each undecodable byte becomes
+    its own lone surrogate, which is neither a word character nor a line break, so every ASCII pattern
+    still matches beside it (a latin-1 view would turn 0xFE into a letter that breaks a word boundary,
+    and 0x85 into a line break). A candidate that is not valid UTF-8 but starts with a byte-order mark
+    gets a WIDE view BESIDE the lossless surrogateescape view (a byte view of real UTF-16 or UTF-32
+    carries NULs between the ASCII characters, which defeat every pattern); the wide attempt only ever
+    ADDS a view (PR #530 QA round-2 claude MEDIUM-1). The UTF-32 marks are tested FIRST, decided by a
+    successful decode, because each embeds a UTF-16 one (BOM_UTF32_LE begins with the BOM_UTF16_LE
+    bytes), so a UTF-32-LE file is scanned as UTF-32, never mistaken for UTF-16 with a NUL between every
+    two code units in BOTH views (round-3 claude MINOR-1). The UTF-16 decode uses errors="surrogatepass",
+    so a BOM-marked file of EVEN length ALWAYS gets the wide view: an unpaired surrogate decodes to its
+    lone code point (neither a word character nor a line break) instead of costing the whole view and
+    hiding a well-formed UTF-16 token elsewhere in the file (round-3 claude MEDIUM-1). Only an ODD-length
+    UTF-16-marked file yields no wide view; it is judged as any other non-UTF-8 file: a SUFFIXLESS one is
+    treated as binary and skipped, as the existing rule (_is_scan_candidate) defines, and a declared-text
+    one keeps the lossless view."""
     data = path.read_bytes()
     try:
         return (data.decode("utf-8"),), None
     except UnicodeDecodeError:
         pass
+    if data[:4] in (codecs.BOM_UTF32_LE, codecs.BOM_UTF32_BE):
+        try:
+            return ((data.decode("utf-32"), data.decode("utf-8", errors="surrogateescape")),
+                    "NOTE (UTF-32 byte-order mark: decoded as UTF-32 and also scanned losslessly as "
+                    "bytes; findings merged)")
+        except UnicodeDecodeError:
+            pass  # a length not a multiple of four, or an invalid code point: judged as UTF-16 (the
+            # embedded mark, LE only) or as any other non-UTF-8 file below
     if data[:2] in (codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE):
         try:
-            return ((data.decode("utf-16"), data.decode("utf-8", errors="surrogateescape")),
+            return ((data.decode("utf-16", errors="surrogatepass"),
+                     data.decode("utf-8", errors="surrogateescape")),
                     "NOTE (UTF-16 byte-order mark: decoded as UTF-16 and also scanned losslessly as "
                     "bytes; findings merged)")
         except UnicodeDecodeError:
-            pass  # not valid UTF-16 after all (an odd length): judged as any other non-UTF-8 file below
+            pass  # an ODD length (a truncated final code unit) is the ONE failure surrogatepass leaves:
+            # no wide view exists, so judged as any other non-UTF-8 file below
     if not _is_declared_text(path):
         return None, "SKIP (not utf-8, no suffix: treated as binary)"
     return ((data.decode("utf-8", errors="surrogateescape"),),
@@ -454,7 +476,11 @@ def main(root=None) -> int:
                                                      f"to a credential-like name")
                                 break
             # The views of ONE file are merged with exact duplicates dropped: a finding both views
-            # produce (the same path, line number and label) is one finding, never two.
+            # produce (the same path, view-relative line number and label) is one finding, never two.
+            # The dedup key is the REPORTED LINE AND LABEL, never the secret itself: two DIFFERENT
+            # tokens that share that key (such as one token per view on the same line number) also
+            # merge to ONE finding, so the FAIL total counts reported findings, not an inventory of
+            # distinct credentials (PR #530 QA round-3 claude MINOR-2).
             seen = set()
             for finding in file_findings:
                 if finding not in seen:
@@ -699,15 +725,32 @@ def _self_test() -> int:
             "utf-16-le"))
         # A BOM-prefixed file that holds 8-BIT TEXT, not UTF-16 (PR #530 QA round-2 claude MEDIUM-1):
         # even length, so it decodes as UTF-16 (to CJK text with no match); the merged lossless byte
-        # view must still find the ASCII token. The odd-length variants cannot decode as UTF-16: the
-        # .txt one falls through to the lossless view (claude MINOR-1) and the suffixless one stays a
-        # binary SKIP. dup16.txt carries the token in BOTH views at line 1, so the merge must count it
-        # ONCE (the FAIL total below pins the deduplication).
+        # view must still find the ASCII token. The odd-length variants cannot decode as UTF-16, with
+        # surrogatepass included: the .txt one falls through to the lossless view (round-2 claude
+        # MINOR-1) and the suffixless one stays a binary SKIP. dup16.txt carries the token in BOTH
+        # views at line 1, so the merge must count it ONCE (the FAIL total below pins the
+        # deduplication).
         (troot / "bom8.txt").write_bytes(codecs.BOM_UTF16_LE + b"caf\xe9 " + _tok + b"\n")
         (troot / "bomodd.txt").write_bytes(codecs.BOM_UTF16_BE + _tok + b"\n")
         (troot / "bombin").write_bytes(codecs.BOM_UTF16_LE + _tok + b"\n")
         (troot / "dup16.txt").write_bytes(codecs.BOM_UTF16_LE + _tok + ("  " + _tok.decode("ascii")
                                                                         + "\n").encode("utf-16-le"))
+        # EVEN-length BOM-marked files with an UNPAIRED SURROGATE after the secret (PR #530 QA round-3
+        # claude MEDIUM-1), little- and big-endian and suffixless: a STRICT decode raised and dropped
+        # the whole wide view, hiding the well-formed UTF-16 token before the surrogate (the byte view
+        # holds NUL-separated characters, which defeat every pattern); surrogatepass keeps the view, so
+        # each is a finding, and the suffixless one is text with two views, never a binary SKIP.
+        _sur = (_tok.decode("ascii") + "\n").encode("utf-16-le") + b"\x00\xd8" + "x".encode("utf-16-le")
+        (troot / "lone_sur.txt").write_bytes(codecs.BOM_UTF16_LE + _sur)
+        (troot / "lone_sur_be.md").write_bytes(
+            codecs.BOM_UTF16_BE + (_tok.decode("ascii") + "\n").encode("utf-16-be") + b"\xd8\x00"
+            + "x".encode("utf-16-be"))
+        (troot / "lone_sur_bin").write_bytes(codecs.BOM_UTF16_LE + _sur)
+        # A UTF-32-LE file (round-3 claude MINOR-1): its mark BEGINS with the UTF-16-LE one, so a
+        # UTF-16-first test took it for UTF-16 and every view carried a NUL between the characters;
+        # tested as UTF-32 FIRST (decided by a successful decode), the token is a finding.
+        (troot / "u32le.txt").write_bytes(codecs.BOM_UTF32_LE + (_tok.decode("ascii")
+                                                                 + "\n").encode("utf-32-le"))
         out = io.StringIO()
         with redirect_stdout(out):
             scan_rc = main(troot)
@@ -741,9 +784,19 @@ def _self_test() -> int:
         ("  bombin:", False),                            # suffixless odd-length BOM: still a binary SKIP
         ("SKIP (not utf-8, no suffix: treated as binary): bombin", True),
         ("  dup16.txt:1: GitHub token", True),           # present in both views, counted once (see below)
+        ("  lone_sur.txt:1: GitHub token", True),        # even length, unpaired surrogate after the token:
+                                                         # surrogatepass keeps the wide view (round-3
+                                                         # claude MEDIUM-1)
+        ("  lone_sur_be.md:1: GitHub token", True),      # the same, big-endian
+        ("  lone_sur_bin:1: GitHub token", True),        # the same, suffixless: two views, never binary
+        ("SKIP (not utf-8, no suffix: treated as binary): lone_sur_bin", False),
+        ("  u32le.txt:1: GitHub token", True),           # UTF-32-LE, tested before the UTF-16 mark it
+                                                         # embeds (round-3 claude MINOR-1)
+        ("NOTE (UTF-32 byte-order mark: decoded as UTF-32 and also scanned losslessly as bytes; "
+         "findings merged): u32le.txt", True),
     ]
-    if "FAIL: 9 possible hardcoded secret(s)" not in scan_out:
-        failures.append("non-UTF-8 scan: expected exactly 9 merged findings (dup16.txt counted once, "
+    if "FAIL: 13 possible hardcoded secret(s)" not in scan_out:
+        failures.append("non-UTF-8 scan: expected exactly 13 merged findings (dup16.txt counted once, "
                         "never per view); output was {!r}".format(scan_out))
     if scan_rc != 1:
         failures.append("non-UTF-8 scan: main() over the fixture root must exit 1, got {}".format(scan_rc))
