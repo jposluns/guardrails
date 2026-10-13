@@ -129,7 +129,19 @@ never restarts it, on the Stop that reads the reset or on any later Stop (round 
 new-turn signal; round 40: the reset is RECORDED in the state, and from then on only an explicit false, never
 transcript content, re-enables the transcript-derived new-turn signal; before, a truncation that saved a zero
 boundary let the next Stop read the restored old user message as new, so a truncate-restore alternation
-blocked at every Stop). So within one continuous run of Stops that carries no new-turn signal this
+blocked at every Stop). Where the host omits the field, a recorded reset therefore suppresses every
+transcript-derived new turn, a genuinely NEW user message included, until an explicit false: once the count
+reaches the cap, the hook stays in CAPPED-ALLOW mode for the rest of that transcript (each violating Stop
+is allowed with the cap warning, the fail-open direction), a disclosed residual of recording the reset.
+Round 41: an UNREADABLE state hides any recorded reset, so the history is UNKNOWN, never read as cleared:
+the repair such a Stop writes keeps the flag SET, and only an explicit-false Stop writes it cleared (read
+as False, the unknown history let the save-time repair re-arm restored old transcript bytes one Stop
+later, so a failed state read followed by a restore restarted the count without new user input); and a
+clean explicit-false Stop SAVES whenever a reset stands, clearing it even at offset 0 and counter 0, where
+it previously wrote nothing and the flag stuck. A v2 state written before round 40 carries no reset field,
+which reads as False, so reset history lost before the upgrade can let a restored old user message restart
+the count ONCE (that Stop records normally, so the sequence stays bounded from there), a disclosed
+residual. So within one continuous run of Stops that carries no new-turn signal this
 hook blocks at most BLOCK_CAP times, for any interleaving of
 other hooks' feedback, transcript contents, and clean or violating messages (the argument is at the counter
 code in _evaluate()). Round 28: that bound assumes the Stops for one transcript are SERIALIZED (two concurrent
@@ -1782,13 +1794,24 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None):
         offset, tail, pending, state_ok = load_state(None, tp, extra, dfd)
     blocks = extra.get("blocks")  # None: the counter is unavailable (no transcript_path, or unusable state)
     reset_seen = bool(extra.get("reset"))  # round 40: a reset scan recorded by an earlier Stop still stands
+    # round 41: an UNREADABLE state hides any recorded reset, so the history is UNKNOWN, never read as
+    # cleared: the repair below writes the flag SET, and only an explicit-false Stop, the one signal that
+    # clears a recorded reset, writes it cleared (reading the unknown history as False let the save-time
+    # repair write the counter at the cap with the flag CLEAR, so restored OLD transcript bytes re-armed
+    # the new-turn signal one Stop later and the count restarted without new user input); a transcript-
+    # derived message is never a new turn on such a Stop regardless: state_ok False means `extra` is
+    # empty, so `blocks` is None and `fresh` below can only come from an explicit false
+    reset_unknown = not state_ok
     active = payload.get("stop_hook_active") is True
     new_turn = payload.get("stop_hook_active") is False  # round 38: an ABSENT field is NOT a new turn
     if active and extra.get("absent"):
         # round 26: this hook writes the state at the block that starts a corrective loop, so an ABSENT state under
         # stop_hook_active (deleted between Stops, or its directory removed mid-call) is an UNKNOWN count, never 0
         blocks = None
-    had_state = bool(offset or pending or blocks)
+    # round 41: a recorded reset is state too (codex round 40: a READABLE clean explicit-false Stop at
+    # offset 0, counter 0 and the flag set skipped the save, so the one signal that clears the flag left
+    # it standing and every later transcript-derived new turn stayed suppressed)
+    had_state = bool(offset or pending or blocks or reset_seen)
     t = turn_messages(tp, offset, tail) if tp else {"msgs": [], "size": None}
     msgs = t["msgs"]
     # round 38: the count restarts ONLY at an observable new-turn signal: a Stop whose stop_hook_active field
@@ -1945,7 +1968,8 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None):
     # that omits the field; round 39: a Stop whose scan was RESET is inside the run too, whatever user message
     # the re-read from the start meets; round 40: so is every LATER Stop while the recorded reset stands, an
     # explicit false being the only signal that clears it, and so is a Stop whose scan was UNREADABLE, its
-    # size None; and a user-message new-turn Stop whose boundary save FAILS separates
+    # size None, and (round 41) a Stop whose STATE was unreadable, its repair writing the flag SET; and a
+    # user-message new-turn Stop whose boundary save FAILS separates
     # two runs without blocking, its block failing open as unrecorded below; a run of
     # explicit trues is round 27's special case). The state file is written only by save_state(), called
     # through save() below with
@@ -1973,7 +1997,9 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None):
     # host omits the field, the disclosed synthetic-entry residual above), and when its boundary save fails
     # it ends the run without blocking (round 39: that block is unrecorded and fails open). CORRUPTION of the
     # state file (unreadable or malformed) makes the next load UNAVAILABLE, an unknown count, which fails
-    # open (a violation) or records BLOCK_CAP or nothing (a pass), never a lower integer. An external
+    # open (a violation) or records BLOCK_CAP or nothing (a pass), never a lower integer, and any repair
+    # it writes records the reset flag SET (round 41), so corruption cannot erase the recorded reset
+    # history either, and restored old bytes replayed after it stay inside the run. An external
     # DELETION makes the next load ABSENT: under an explicit true that too is an unknown count (round 26),
     # but where the field is absent it reads as an established 0 and restarts the count, the disclosed
     # deletion residual (round 38). The residual is a writer
@@ -1989,8 +2015,9 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None):
         new_blocks = blocks  # a capped allow or a pass that is no observed new turn: preserved (rounds 27, 38)
     # round 40: the reset history this Stop records: a reset scan, this one or a recorded earlier one, stands
     # until an explicit-false Stop, the platform's own new-turn statement, clears it; transcript content
-    # never does (what follows a reset is exactly what cannot be trusted)
-    new_reset = not new_turn and (reset_seen or bool(t.get("reset")))
+    # never does (what follows a reset is exactly what cannot be trusted); round 41: an UNKNOWN history
+    # (the state unreadable at this Stop's load) is recorded as SET, the conservative direction
+    new_reset = not new_turn and (reset_seen or reset_unknown or bool(t.get("reset")))
 
     def save(off, tl, pend):
         """Write the state with `new_blocks` and `new_reset`; True only when it was written and, for a block,
@@ -5402,6 +5429,162 @@ def _self_test():
             extra = {}
             self.assertTrue(load_state(sdir, self.tr, extra)[3])
             self.assertEqual(extra["blocks"], BLOCK_CAP)  # each block was recorded on the unmoved boundary
+
+        # -- round 41 (codex BLOCKER and codex MEDIUM / claude MINOR-1 QA of round 40: unreadable reset
+        # history is UNKNOWN, never read as cleared, and an explicit-false clean Stop always clears a
+        # recorded reset; claude MAJOR-1 and MINOR-2: the carry-forward and the commit's reset-field
+        # claims get their own vectors) --
+        def test_r41_unreadable_state_repair_keeps_the_reset_set(self):
+            # the defect (codex BLOCKER, 12 blocks in 19 Stops): an unreadable state read the reset history
+            # as False, and the save-time repair wrote the counter at the cap with the flag CLEAR, so the
+            # restored OLD user record (104 bytes serialized here, not 63: round-40 wording corrected) was
+            # read as a new turn one Stop later and the count restarted without new user input. The history
+            # is UNKNOWN there: the repair writes the flag SET and the sequence stays bounded at the cap
+            bad = "[2026-09-23T20:00Z] still wrong"
+            sdir = os.path.join(self.tmp, "state41a")
+            self.write([self.user("go")])
+            with open(self.tr, "rb") as f:
+                record = f.read()
+            kinds = [self.r38_ev(sdir, bad)[0]]  # the one user record: a new turn, block 1
+            with open(self.tr, "wb") as f:
+                f.write(b"")  # truncate: a reset scan, block 2, the reset recorded
+            kinds.append(self.r38_ev(sdir, bad)[0])
+            with open(self.key(sdir=sdir), "w") as f:
+                f.write("{not json")  # the next Stop's initial AND save-time state reads both fail
+            kinds.append(self.r38_ev(sdir, bad)[0])  # fails open; the repair must keep the flag
+            with open(self.tr, "wb") as f:
+                f.write(record)  # restore the OLD bytes: never a new turn while the reset stands
+            for _ in range(3):
+                kinds.append(self.r38_ev(sdir, bad)[0])
+            self.assertEqual(kinds, ["block", "block", "open", "cap", "cap", "cap"])
+            extra = {}
+            self.assertTrue(load_state(sdir, self.tr, extra)[3])
+            self.assertEqual(extra["blocks"], BLOCK_CAP)
+            self.assertTrue(extra["reset"])  # the unknown history was repaired as SET, never as cleared
+
+        def test_r41_explicit_false_clean_stop_clears_a_recorded_reset(self):
+            # the defect (codex MEDIUM, claude MINOR-1): had_state ignored the reset field, so a READABLE
+            # clean explicit-false Stop at offset 0, counter 0 and the flag set wrote nothing: the one
+            # signal that clears the flag left it standing, and every later genuine user turn stayed
+            # suppressed (codex recovery table: zero offset, zero counter). A recorded reset now triggers
+            # the save, so the explicit false always writes the cleared flag
+            bad = "[2026-09-23T20:00Z] still wrong"
+            sdir = os.path.join(self.tmp, "state41b")
+            self.write([self.user("go"), self.asst(bad)])
+            self.assertEqual(self.r38_ev(sdir, bad)[0], "block")
+            clean = {"transcript_path": self.tr, "stop_hook_active": False,
+                     "last_assistant_message": "Done."}
+            self.assertIsNone(evaluate(dict(clean), self.now, self.start, sdir))  # counter back to 0
+            with open(self.tr, "wb") as f:
+                f.write(b"")  # truncate, then a clean Stop: offset 0, counter 0, the flag set
+            self.assertEqual(self.r38_ev(sdir, "Done.")[0], "pass")
+            extra = {}
+            self.assertTrue(load_state(sdir, self.tr, extra)[3])
+            self.assertEqual((extra["blocks"], extra["reset"]), (0, True))
+            self.assertIsNone(evaluate(dict(clean), self.now, self.start, sdir))  # explicit false, clean
+            extra = {}
+            self.assertTrue(load_state(sdir, self.tr, extra)[3])
+            self.assertEqual((extra["blocks"], extra["reset"]), (0, False))  # the flag no longer sticks
+            # the cleared flag re-enables the transcript-derived signal: each genuinely new user turn
+            # starts a fresh count of 1 instead of running to the cap
+            kinds = [self.r38_ev(sdir, bad, append=[self.user(f"try {k}"), self.asst(bad)])[0]
+                     for k in range(4)]
+            self.assertEqual(kinds, ["block"] * 4)
+            extra = {}
+            self.assertTrue(load_state(sdir, self.tr, extra)[3])
+            self.assertEqual(extra["blocks"], 1)
+
+        def test_r41_reset_survives_a_stop_that_records_no_reset(self):
+            # claude MAJOR-1: TWO pieces of code carry the recorded flag forward (reset_seen in new_reset,
+            # and the save re-read), each alone sufficient under the lock, so a mutant removing BOTH
+            # passed every round-40 test while restore, truncate, truncate, restore blocked without limit
+            # (the counter going 1, 2, 3, 1, ...). The Stop between the truncation and the restore scans
+            # an UNCHANGED empty transcript and re-records nothing: the flag must be CARRIED, not
+            # re-derived, so the restore meets it and the cap binds
+            bad = "[2026-09-23T20:00Z] still wrong"
+            sdir = os.path.join(self.tmp, "state41c")
+            self.write([self.user("go")])
+            with open(self.tr, "rb") as f:
+                record = f.read()
+            kinds = []
+            for data in (record, b"", b"", record, b"", b"", record):
+                with open(self.tr, "wb") as f:
+                    f.write(data)
+                kinds.append(self.r38_ev(sdir, bad)[0])
+            self.assertEqual(kinds, ["block"] * BLOCK_CAP + ["cap"] * 4)
+            extra = {}
+            self.assertTrue(load_state(sdir, self.tr, extra)[3])
+            self.assertEqual((extra["blocks"], extra["reset"]), (BLOCK_CAP, True))
+
+        def test_r41_non_bool_stored_reset_makes_the_state_unavailable(self):
+            # the round-40 commit claims non-boolean `reset` values make the state unavailable; no vector
+            # pinned it (the mutant dropping the type check survived). Each such state is UNAVAILABLE: an
+            # unknown count that fails open and is repaired at the cap with the flag SET, never a readable
+            # state that blocks
+            bad = "[2026-09-23T20:00Z] still wrong"
+            for i, v in enumerate((None, "true", "false", 1, 0, "")):
+                sdir = os.path.join(self.tmp, f"state41d{i}")
+                self.write([self.block_entry(), self.asst(bad)])  # no genuine user message: no new turn
+                with open(self.key(sdir=sdir, make=True), "w") as f:
+                    f.write(json.dumps({"v": 2, "offset": 0, "tail": None, "pending": [], "blocks": 1,
+                                        "reset": v}))
+                self.assertFalse(load_state(sdir, self.tr, {})[3], repr(v))
+                kind, notes = self.r38_ev(sdir, bad)
+                self.assertEqual(kind, "open", repr(v))
+                self.assertIn("block count unknown", notes[0])
+                extra = {}
+                self.assertTrue(load_state(sdir, self.tr, extra)[3], repr(v))
+                self.assertEqual((extra["blocks"], extra["reset"]), (BLOCK_CAP, True), repr(v))
+
+        def test_r41_pre_round40_state_restarts_the_count_once(self):
+            # a v2 state written before round 40 carries no `reset` key, which reads as False, never True
+            # (the mutant defaulting it to True survived round 40 with no vector), so reset history lost
+            # before the upgrade can let a restored OLD user message restart the count ONCE, a disclosed
+            # residual; the restarting Stop records normally, so the sequence is bounded from there
+            bad = "[2026-09-23T20:00Z] still wrong"
+            sdir = os.path.join(self.tmp, "state41e")
+            self.write([self.user("go"), self.asst(bad)])
+            with open(self.key(sdir=sdir, make=True), "w") as f:  # the shape a round-39 truncation saved
+                f.write(json.dumps({"v": 2, "offset": 0, "tail": None, "pending": [], "blocks": 2}))
+            kinds = [self.r38_ev(sdir, bad)[0]]
+            extra = {}
+            self.assertTrue(load_state(sdir, self.tr, extra)[3])
+            self.assertEqual(extra["blocks"], 1)  # the old user message restarted the count exactly once
+            for _ in range(3):
+                kinds.append(self.r38_ev(sdir, bad, append=[self.block_entry(), self.asst(bad)])[0])
+            self.assertEqual(kinds, ["block"] * BLOCK_CAP + ["cap"])
+
+        def test_r41_recorded_reset_caps_genuine_turns_until_explicit_false(self):
+            # the disclosed trade-off of recording the reset (claude MEDIUM-1), now stated in the residual
+            # list: where the host omits the field, genuinely NEW user messages are suppressed as new-turn
+            # signals while the flag stands, so once the count reaches the cap the hook stays in capped-
+            # allow mode for that transcript (violations allowed with the cap warning, the fail-open
+            # direction) until an explicit-false Stop, which clears the flag and blocks with a fresh
+            # count of 1
+            bad = "[2026-09-23T20:00Z] still wrong"
+            sdir = os.path.join(self.tmp, "state41f")
+            self.write([self.user("go")])
+            with open(self.tr, "rb") as f:
+                record = f.read()
+            kinds = [self.r38_ev(sdir, bad)[0]]
+            with open(self.tr, "wb") as f:
+                f.write(b"")  # truncate: the reset is recorded
+            kinds.append(self.r38_ev(sdir, bad)[0])
+            with open(self.tr, "wb") as f:
+                f.write(record)  # restore: not a new turn while the reset stands
+            kinds.append(self.r38_ev(sdir, bad)[0])
+            for k in range(3):  # three genuinely NEW violating user turns, field absent: each capped
+                kinds.append(self.r38_ev(sdir, bad, append=[self.user(f"redo {k}"), self.asst(bad)])[0])
+            self.assertEqual(kinds, ["block"] * BLOCK_CAP + ["cap"] * 3)
+            extra = {}
+            self.assertTrue(load_state(sdir, self.tr, extra)[3])
+            self.assertEqual((extra["blocks"], extra["reset"]), (BLOCK_CAP, True))
+            payload = {"transcript_path": self.tr, "stop_hook_active": False,
+                       "last_assistant_message": bad}
+            self.assertTrue(evaluate(payload, self.now, self.start, sdir))  # the explicit false releases
+            extra = {}
+            self.assertTrue(load_state(sdir, self.tr, extra)[3])
+            self.assertEqual((extra["blocks"], extra["reset"]), (1, False))
 
         # -- no wall-clock verdict (a 2.0 s ceiling failed at 2.53 s on a slower CI runner) --
         HANG_GUARD_TESTS = ()
