@@ -238,25 +238,34 @@ CONFIG_LAUNCHERS = frozenset((
     "xargs", "nohup", "setsid", "nice", "ionice", "stdbuf", "timeout", "doas", "sudo"))
 # Interpreter heads whose leading option words are parsed against _INTERPRETER_GRAMMAR in a
 # configured command (FIX-541 round 3, decided 2). The first word the grammar does not consume as
-# an option or an operand is the script; later words belong to it.
-CONFIG_INTERPRETERS = re.compile(r"\A(python|pypy|perl|ruby|node|nodejs|lua)[0-9.]*\Z")
-# The per-interpreter option grammar guard_config_fail_closed scans, fail closed: a 3-tuple of
-# exact no-operand flags, exact options whose operand is the NEXT word, and prefixes whose operand
-# is attached in the same word. ANY other leading option word is refused as unclassifiable: every
+# an option or an operand is the script; later words belong to it. A free-threaded, debug or
+# -dbg build suffix after the version (python3.13t, python3.13d, python3.12-dbg) names the same
+# interpreter and parses the same grammar (FIX-541 round 4, decided 6).
+CONFIG_INTERPRETERS = re.compile(
+    r"\A(python|pypy|perl|ruby|node|nodejs|lua)[0-9.]*([td]|-dbg)?\Z")
+# The per-interpreter option grammar guard_config_fail_closed scans, fail closed: a 4-tuple of
+# exact no-operand flags, exact options whose operand is the NEXT word, prefixes whose operand is
+# attached in the same word, and exact options whose NEXT-word operand IS the program (python -m
+# <module>) and so ends the scan the way a script word does (FIX-541 round 4, decided 6). ANY
+# other leading option word is refused as unclassifiable: every
 # inline-code option (python/perl/ruby/lua -c and -e, perl -E, node -e, -p and --eval), every
 # bundled cluster (-Icprint(1)) and every unknown option lands there, so an option's operand or a
 # cluster's tail can never be misread as a harmless script path. Over-refusal of an exotic but
-# legitimate option (a flag cluster, perl -n, node -i) is the accepted fail-closed boundary.
+# legitimate option (a flag cluster, perl -s, node -i) is the accepted fail-closed boundary
+# (FIX-541 round 4, decided 6: the boundary's example used to name perl -n, a flag the grammar
+# accepts).
 _INTERPRETER_GRAMMAR = dict(
     python=(frozenset(("-b", "-B", "-d", "-E", "-I", "-O", "-OO", "-P", "-q", "-s", "-S", "-u",
                        "-v", "-V", "-x")),
-            frozenset(("-W", "-X", "--check-hash-based-pycs")), ("-W", "-X")),
+            frozenset(("-W", "-X", "--check-hash-based-pycs")), ("-W", "-X"),
+            frozenset(("-m",))),
     perl=(frozenset(("-a", "-l", "-n", "-p", "-T", "-t", "-U", "-w", "-W", "-X")),
-          frozenset(("-I",)), ("-I",)),
-    ruby=(frozenset(("-a", "-l", "-n", "-p", "-w")), frozenset(("-I", "-r")), ("-I",)),
+          frozenset(("-I",)), ("-I",), frozenset()),
+    ruby=(frozenset(("-a", "-l", "-n", "-p", "-w")), frozenset(("-I", "-r")), ("-I",),
+          frozenset()),
     node=(frozenset(("--no-deprecation", "--no-warnings")), frozenset(("-r", "--require")),
-          ("--require=",)),
-    lua=(frozenset(("-v", "-E", "-W")), frozenset(("-l",)), ("-l",)),
+          ("--require=",), frozenset()),
+    lua=(frozenset(("-v", "-E", "-W")), frozenset(("-l",)), ("-l",), frozenset()),
 )
 _INTERPRETER_FAMILY = dict(pypy="python", nodejs="node")
 
@@ -461,18 +470,25 @@ def _run_child(argv, cwd=None, env=None, timeout=None, push=False):
     return subprocess.CompletedProcess(list(argv), proc.returncode, out, err)
 
 
-def _config_pair_forbidden(pair):
+def _config_pair_forbidden(pair, env=False):
     """A -c or --config-env payload whose KEY can redefine what a later argv word MEANS or where
     a push GOES, stated exactly: alias.* (the resolved subcommand would dispatch elsewhere);
     push.*; include.* and includeIf.* (an included file can define any of the others);
     remote.<name>.mirror, .push, .pushurl, .url and remote.pushDefault; branch.<name>.pushRemote;
-    and url.<base>.insteadOf and .pushInsteadOf (FIX-541 round 3, decided 6: every key git
-    documents as moving or redefining a push destination, not only the pushurl sibling). Git
-    reads section and variable names case-insensitively; the subsection between them is not
-    inspected. The tool's own -c keys (gc.*, maintenance.*, core.*, protocol.*) are outside
-    these classes and stay allowed (FIX-541 round 2, decided 4: neither predicate used to read
-    what a -c value DID)."""
-    key = pair.split("=", 1)[0].split(".")
+    and url.<base>.insteadOf and .pushInsteadOf (FIX-541 round 3, decided 6, reworded round 4,
+    decided 6: the LISTED keys, a deliberate deny-list; git documents further routing keys,
+    branch.<name>.remote and remote.<name>.receivepack among them, that stay outside it, inside
+    the trusted-argv residual the predicates already accept for a harmless resolved
+    subcommand). Git reads section and variable names case-insensitively; the subsection
+    between them is not inspected. The key ends at the FIRST "=" of a -c payload but at the
+    LAST "=" of a --config-env payload, whose trailing word names an environment variable,
+    never part of a value, so a subsection carrying "=" cannot shift the variable name out of
+    the key (FIX-541 round 4, decided 2: both predicates used to split every payload at the
+    first "=", reading the key of --config-env=remote.a=b.pushurl=VAR as remote.a); env says
+    which form pair came from. The tool's own -c keys (gc.*, maintenance.*, core.*,
+    protocol.*) are outside these classes and stay allowed (FIX-541 round 2, decided 4:
+    neither predicate used to read what a -c value DID)."""
+    key = (pair.rsplit("=", 1)[0] if env else pair.split("=", 1)[0]).split(".")
     section, var = key[0].lower(), key[-1].lower()
     if section in ("alias", "push", "include", "includeif"):
         return True
@@ -506,12 +522,12 @@ def _forbidden(args):
             i += 1
         elif w in GIT_GLOBAL_VALUED:
             if (w in ("-c", "--config-env") and i + 1 < len(words)
-                    and _config_pair_forbidden(words[i + 1])):
+                    and _config_pair_forbidden(words[i + 1], env=w == "--config-env")):
                 return True
             i += 2
         elif "=" in w and w.split("=", 1)[0] in GIT_GLOBAL_EQUALS:
             if (w.split("=", 1)[0] == "--config-env"
-                    and _config_pair_forbidden(w.split("=", 1)[1])):
+                    and _config_pair_forbidden(w.split("=", 1)[1], env=True)):
                 return True
             i += 1
         else:
@@ -664,7 +680,8 @@ def guard_config_fail_closed(data):
             # later. Deny-list, stated exactly: a head naming git; a head in CONFIG_LAUNCHERS;
             # a CONFIG_INTERPRETERS head whose leading option words leave the supported
             # per-interpreter grammar (_INTERPRETER_GRAMMAR: exact flags, valued options whose
-            # operand is the next word, and attached-operand prefixes; anything else, every
+            # operand is the next word, attached-operand prefixes, and program-naming options
+            # that end the scan, python -m; anything else, every
             # inline-code option and bundled cluster included, is refused unclassified). A
             # configured program outside this list can still run git itself: the trusted-config
             # threat model accepts that residual.
@@ -678,7 +695,7 @@ def guard_config_fail_closed(data):
             interp = CONFIG_INTERPRETERS.match(head)
             if interp:
                 family = _INTERPRETER_FAMILY.get(interp.group(1), interp.group(1))
-                flags, valued, attached = _INTERPRETER_GRAMMAR[family]
+                flags, valued, attached, program = _INTERPRETER_GRAMMAR[family]
                 words, i = command[1:], 0
                 while i < len(words) and words[i].startswith("-"):
                     word = words[i]
@@ -691,6 +708,12 @@ def guard_config_fail_closed(data):
                         i += 2
                     elif any(word.startswith(p) and len(word) > len(p) for p in attached):
                         i += 1
+                    elif word in program:
+                        # The NEXT word names the program itself (python -m <module>), so it
+                        # ends the option scan exactly as a script word does; later words
+                        # belong to the module. A trailing -m with no operand leaves nothing
+                        # to run (FIX-541 round 4, decided 6).
+                        break
                     else:
                         bad("%s command %r option %r is outside the supported %s option "
                             "grammar: inline code, a bundled option cluster or an unknown "
@@ -1430,8 +1453,9 @@ def _merge_commit_push(ctx, scratch, old, base, apply):
     # ok=None: the return code is decided HERE, before any conflict processing (FIX-541 round 3,
     # decided 1, blocker: acceptance used to read only MERGE_HEAD, so a merge reporting an
     # abnormal exit after creating MERGE_HEAD went on to commit and push). Exit 0 is accepted;
-    # exit 1 is accepted only as the supported conflict condition (MERGE_HEAD exists and the
-    # index holds unmerged entries, resolved below); a negative code (the merge child died by a
+    # exit 1 is accepted only as the supported conflict condition (MERGE_HEAD exists, the
+    # index holds unmerged entries and stderr carries no fatal or error diagnostic; see the
+    # boundary below), resolved below; a negative code (the merge child died by a
     # signal) or any other code proves nothing about the resulting state and is refused with
     # git's exit code and stderr (QA round 8, claude minor 2), whether or not MERGE_HEAD exists:
     # nothing after an abnormally ended merge may commit or push.
@@ -1449,6 +1473,19 @@ def _merge_commit_push(ctx, scratch, old, base, apply):
     if rc == 1 and not unmerged:
         raise Refuse("git-failed", "git merge exited 1 with no unmerged index entry, not the "
                      "supported conflict condition: %s" % (err.strip()[:300] or "(no stderr)"))
+    # The accepted exit-1 diagnostic boundary, stated exactly: a conflicted merge may write
+    # conflict notices, warnings and hints to stderr, but never a line git prefixes "fatal:" or
+    # "error:"; such a diagnostic proves the merge ended abnormally even when MERGE_HEAD and
+    # unmerged entries present the supported conflict shape, so it refuses HERE, before any
+    # conflict resolution (FIX-541 round 4, decided 1, blocker: acceptance used to stop reading
+    # stderr once unmerged entries existed, so an exit-1 merge reporting a fatal failure beside
+    # a real conflict went on to resolve, commit and push).
+    if rc == 1:
+        diagnostic = [line for line in err.splitlines()
+                      if line.startswith(("fatal:", "error:"))]
+        if diagnostic:
+            raise Refuse("git-failed", "git merge exited 1 with a fatal or error diagnostic, "
+                         "not the supported conflict condition: %s" % diagnostic[0][:300])
     _guard("source-conflict")(unmerged, generated)
     for path in sorted(unmerged):
         if unmerged[path] != set((1, 2, 3)):
@@ -1915,7 +1952,9 @@ def _audit_violation(args):
     medium). A -c or --config-env payload whose key names alias.*, push.*, include.* or
     includeIf.*, remote.<name>.mirror, .push, .pushurl, .url or remote.pushDefault,
     branch.<name>.pushRemote, or url.<base>.insteadOf or .pushInsteadOf is a violation even
-    under a harmless resolved subcommand; these key classes are DELIBERATELY identical in
+    under a harmless resolved subcommand; the key ends at the FIRST "=" of a -c payload and
+    at the LAST "=" of a --config-env payload (FIX-541 round 4, decided 2), the same split
+    rule as the funnel's; these key classes are DELIBERATELY identical in
     membership to _config_pair_forbidden's (agreement on every argv is the invariant;
     independence lives in the implementation), and case_audit probes each predicate
     independently so a shared gap still turns its vectors red (FIX-541 rounds 2 and 3, decided
@@ -1929,8 +1968,8 @@ def _audit_violation(args):
     equals = ("--config-env", "--git-dir", "--work-tree", "--namespace", "--attr-source",
               "--exec-path", "--list-cmds")
 
-    def key_violation(payload):
-        key = payload.split("=", 1)[0].split(".")
+    def key_violation(payload, env=False):
+        key = (payload.rsplit("=", 1)[0] if env else payload.split("=", 1)[0]).split(".")
         section, var = key[0].lower(), key[-1].lower()
         return (section in ("alias", "push", "include", "includeif")
                 or (section == "remote"
@@ -1945,11 +1984,12 @@ def _audit_violation(args):
             i += 1
         elif w in valued:
             if (w in ("-c", "--config-env") and i + 1 < len(words)
-                    and key_violation(words[i + 1])):
+                    and key_violation(words[i + 1], env=w == "--config-env")):
                 return True
             i += 2
         elif "=" in w and w.split("=", 1)[0] in equals:
-            if w.split("=", 1)[0] == "--config-env" and key_violation(w.split("=", 1)[1]):
+            if (w.split("=", 1)[0] == "--config-env"
+                    and key_violation(w.split("=", 1)[1], env=True)):
                 return True
             i += 1
         else:
@@ -2249,6 +2289,12 @@ def case_config(_tmp):
     check("config/interpreter-valued-option-script-accepted",
           verdict(lambda d: d["generated"].update(
               check=[["perl", "-I", "lib", "tools/gen.pl"]])), "accepted")
+    # FIX-541 round 4 (decided 6): python -m <module> names the program the way a script word
+    # does, so it ends the option scan and the launch stays accepted (a COMPATIBILITY check,
+    # as above).
+    check("config/python-module-launch-accepted",
+          verdict(lambda d: d["generated"].update(
+              check=[["python3", "-I", "-m", "tools.gen"]])), "accepted")
 
     # FIX-541 round 3 (decided 2): the option scan parses each interpreter's own grammar, so an
     # option's operand never ends the scan, a bundled cluster never hides attached code, and a
@@ -2273,7 +2319,15 @@ def case_config(_tmp):
              ["lua", "-l", "mod", "-e", "print(1)"]),
             ("config/ash-shell-inline-command-refused", ["ash", "-c", "git status"]),
             ("config/interpreter-unclassified-option-refused",
-             ["python3", "--jit", "tools/gen.py"])):
+             ["python3", "--jit", "tools/gen.py"]),
+            # FIX-541 round 4 (decided 6): a build-suffixed interpreter name (free-threaded t,
+            # debug d, distribution -dbg) parses the same grammar instead of skipping the scan.
+            ("config/python-free-threaded-inline-code-refused",
+             ["python3.13t", "-c", "print(1)"]),
+            ("config/python-debug-build-inline-code-refused",
+             ["python3.13d", "-c", "print(1)"]),
+            ("config/python-dbg-suffix-inline-code-refused",
+             ["python3.12-dbg", "-c", "print(1)"])):
         check(check_id,
               verdict(lambda d, a=argv: d["generated"].update(check=[list(a)])), "refused")
 
@@ -2653,6 +2707,36 @@ def case_audit(_tmp):
         probes.append(list(vector))
         check(funnel_id, _forbidden(vector), True)
         check(audit_id, _audit_violation(vector), True)
+    # FIX-541 round 4 (decided 2 and 3): conditional includes (the camel-case and folded
+    # spellings and the config-env form), and --config-env keys read before the LAST "=" (the
+    # trailing word names an environment variable), so a subsection carrying "=" cannot shift
+    # the variable out of the key; attached and separated forms, each probed against each
+    # predicate independently (both tables stay deliberately identical in membership, as
+    # above).
+    for funnel_id, audit_id, vector in (
+            ("audit/config-key-includeif-funnel", "audit/config-key-includeif-audit",
+             ["-c", "includeIf.gitdir:/tmp/x/.path=/tmp/extra.gitconfig", "status"]),
+            ("audit/config-key-includeif-case-folded-funnel",
+             "audit/config-key-includeif-case-folded-audit",
+             ["-c", "INCLUDEIF.gitdir:/tmp/x/.PATH=/tmp/extra.gitconfig", "status"]),
+            ("audit/config-key-includeif-config-env-funnel",
+             "audit/config-key-includeif-config-env-audit",
+             ["--config-env=includeIf.gitdir:/tmp/x/.path=EXTRA", "status"]),
+            ("audit/config-env-last-equals-pushurl-funnel",
+             "audit/config-env-last-equals-pushurl-audit",
+             ["--config-env=remote.a=b.pushurl=VAR", "status"]),
+            ("audit/config-env-last-equals-pushurl-separated-funnel",
+             "audit/config-env-last-equals-pushurl-separated-audit",
+             ["--config-env", "remote.a=b.pushurl=VAR", "status"]),
+            ("audit/config-env-last-equals-insteadof-funnel",
+             "audit/config-env-last-equals-insteadof-audit",
+             ["--config-env=url./x=1.insteadOf=VAR", "status"]),
+            ("audit/config-env-last-equals-insteadof-separated-funnel",
+             "audit/config-env-last-equals-insteadof-separated-audit",
+             ["--config-env", "url./x=1.insteadOf=VAR", "status"])):
+        probes.append(list(vector))
+        check(funnel_id, _forbidden(vector), True)
+        check(audit_id, _audit_violation(vector), True)
     check("audit/predicates-agree",
           [a for a in probes if _forbidden(a) != _audit_violation(a)], [])
     # FIX-541 round 1: the maintenance-pin scan cannot resolve _run_child's head and relies on
@@ -2700,64 +2784,91 @@ def case_conflict(tmp):
     check("refuse/source-conflict-invariants", _invariants(fx), [])
 
 
-def case_mergefault(tmp):
-    # FIX-541 round 3 (decided 1, blocker): a merge whose child reports an abnormal exit AFTER
-    # creating MERGE_HEAD (a signal death, a fatal error) must refuse with nothing pushed, in
-    # both modes; so must an exit 1 that presents no unmerged index entry. The real merge runs
-    # first (MERGE_HEAD and the merge state exist exactly as git leaves them: conflicted for the
-    # signal and fatal codes, clean for the injected exit 1); only the REPORTED return code is
-    # replaced at the funnel's return boundary.
-    fx = _fixture(tmp, "mergefault")
-    wt = _stale_pr(fx)
+def _mergefault_run(tmp, name, fault, apply, clean=False):
+    """One tool run over a FRESH fixture with the given merge fault injected at the funnel's
+    return boundary (the real merge runs first, so MERGE_HEAD and the merge state exist exactly
+    as git leaves them; only the REPORTED code and stderr are replaced), the observations
+    captured immediately after the run, before any later run can disturb them, and the
+    injection itself asserted reached (FIX-541 round 4, decided 4: the fault vectors used to
+    share one mutable fixture across codes and modes, so one accepted fault could contaminate
+    every later observation instead of failing only its own vector). Returns the observation
+    tuple (exit code, result, snapshot diff, remote head unchanged, pushes, marker, injection
+    reached once) and the fixture."""
+    fx = _fixture(tmp, name)
+    if clean:
+        # A CLEAN merge (MERGE_HEAD, no unmerged index entry): the base advances a path the
+        # generated digest does not read.
+        wt = fx.add_pr(1, "feat/x", dict([("src/b.txt", "bravo\n")]))
+        fx.advance_main(dict([("docs/note.txt", "note\n")]))
+    else:
+        wt = _stale_pr(fx)
     old = fx.remote_ref("feat/x")
     before = _snapshot(wt)
-    fx2 = _fixture(tmp, "mergefault-clean")
-    wt2 = fx2.add_pr(1, "feat/x", dict([("src/b.txt", "bravo\n")]))
-    fx2.advance_main(dict([("docs/note.txt", "note\n")]))
-    old2 = fx2.remote_ref("feat/x")
-    before2 = _snapshot(wt2)
     global _git
     real_git = _git
-    fault = dict(code=0)
+    reached = []
 
     def fault_git(cwd, *args, **kwargs):
         rc, out, err = real_git(cwd, *args, **kwargs)
         if args[:1] == ("merge",):
-            return fault["code"], out, err
+            reached.append(rc)
+            return fault(rc, out, err)
         return rc, out, err
 
     _git = fault_git
     try:
-        for dry_id, apply_id, code in (
-                ("refuse/merge-signal-exit-dry-agrees", "refuse/merge-signal-exit", -11),
-                ("refuse/merge-fatal-exit-dry-agrees", "refuse/merge-fatal-exit", 128)):
-            fault["code"] = code
-            rc_dry, reports_dry, _fatal = fx.run()
-            rc, reports, _fatal = fx.run(apply=True)
-            check(dry_id,
-                  (rc_dry, _result(reports_dry, 1), _snapshot_diff(before, _snapshot(wt)),
-                   fx.remote_ref("feat/x"), fx.pushes(), _has_marker(wt)),
-                  (1, "git-failed", [], old, [], False))
-            check(apply_id,
-                  (rc, _result(reports, 1), _snapshot_diff(before, _snapshot(wt)),
-                   fx.remote_ref("feat/x"), fx.pushes(), _has_marker(wt)),
-                  (1, "git-failed", [], old, [], False))
-        # Exit 1 over a CLEAN merge (MERGE_HEAD exists, no unmerged index entry): not the
-        # supported conflict condition, so it is refused, never resolved as a conflict.
-        fault["code"] = 1
-        rc_dry, reports_dry, _fatal = fx2.run()
-        rc, reports, _fatal = fx2.run(apply=True)
-        check("refuse/merge-exit1-no-conflict-dry-agrees",
-              (rc_dry, _result(reports_dry, 1), _snapshot_diff(before2, _snapshot(wt2)),
-               fx2.remote_ref("feat/x"), fx2.pushes(), _has_marker(wt2)),
-              (1, "git-failed", [], old2, [], False))
-        check("refuse/merge-exit1-no-conflict",
-              (rc, _result(reports, 1), _snapshot_diff(before2, _snapshot(wt2)),
-               fx2.remote_ref("feat/x"), fx2.pushes(), _has_marker(wt2)),
-              (1, "git-failed", [], old2, [], False))
+        rc, reports, _fatal = fx.run(apply=apply)
     finally:
         _git = real_git
-    check("refuse/mergefault-invariants", _invariants(fx, fx2), [])
+    return (rc, _result(reports, 1), _snapshot_diff(before, _snapshot(wt)),
+            fx.remote_ref("feat/x") == old, fx.pushes(), _has_marker(wt),
+            len(reached) == 1), fx
+
+
+def _fault_signal(_rc, out, err):
+    return -11, out, err
+
+
+def _fault_fatal(_rc, out, err):
+    return 128, out, err
+
+
+def _fault_exit1(_rc, out, err):
+    return 1, out, err
+
+
+def _fault_fatal_stderr(rc, out, err):
+    # The REAL conflicted exit (1, unmerged entries present) with a fatal diagnostic appended:
+    # the round-4 blocker shape (decided 1).
+    return rc, out, err + "fatal: injected merge failure after index write\n"
+
+
+def case_mergefault(tmp):
+    # FIX-541 rounds 3 and 4 (decided 1, blocker, in both rounds): a merge whose child reports
+    # an abnormal exit AFTER creating MERGE_HEAD (a signal death, a fatal error), an exit 1
+    # that presents no unmerged index entry, and an exit 1 whose real conflict sits BESIDE a
+    # fatal stderr diagnostic must each refuse with nothing pushed, in both modes. Each fault
+    # and each mode runs on its own fresh fixture through _mergefault_run (decided 4).
+    fixtures = []
+    refused = (1, "git-failed", [], True, [], False, True)
+    for dry_id, apply_id, clean, fault in (
+            ("refuse/merge-signal-exit-dry-agrees", "refuse/merge-signal-exit", False,
+             _fault_signal),
+            ("refuse/merge-fatal-exit-dry-agrees", "refuse/merge-fatal-exit", False,
+             _fault_fatal),
+            ("refuse/merge-exit1-no-conflict-dry-agrees", "refuse/merge-exit1-no-conflict",
+             True, _fault_exit1),
+            ("refuse/merge-conflict-fatal-stderr-dry-agrees",
+             "refuse/merge-conflict-fatal-stderr", False, _fault_fatal_stderr)):
+        got_dry, fx_dry = _mergefault_run(tmp, dry_id.split("/", 1)[1], fault, False,
+                                          clean=clean)
+        fixtures.append(fx_dry)
+        check(dry_id, got_dry, refused)
+        got_apply, fx_apply = _mergefault_run(tmp, apply_id.split("/", 1)[1], fault, True,
+                                              clean=clean)
+        fixtures.append(fx_apply)
+        check(apply_id, got_apply, refused)
+    check("refuse/mergefault-invariants", _invariants(*fixtures), [])
 
 
 def _refusal_run(tmp, name, env_key=None, failing_check=False, seen=None):
@@ -4785,9 +4896,10 @@ def case_harness(tmp):
         raise RuntimeError("injected probe exception after a recorded failure")
 
     GUARDS["probe-synthetic"] = _noop
+    probe_stale, probe_cannot = [], []
     try:
         outcome = _revert_one("probe-synthetic", _noop, "probe-synthetic", tmp,
-                              fn=probe_fail_then_raise)
+                              probe_stale, probe_cannot, fn=probe_fail_then_raise)
     finally:
         del GUARDS["probe-synthetic"]
         _RECORDER.update(saved)
@@ -4795,6 +4907,14 @@ def case_harness(tmp):
     # whose case records a failure and then raises counts cannot-evaluate through _revert_one,
     # the exact step every REVERTS entry goes through (FIX-541 round 3, decided 3).
     check("meta/revert-call-site-crash-outranks-failure", outcome, "cannot")
+    # The stale/cannot BOOKKEEPING lives in _revert_one too (FIX-541 round 4, decided 5): the
+    # synthetic crash lands in the cannot list _revert_one itself appended, never in stale and
+    # never as silent red credit, so the sweep keeps no outcome handling of its own that a
+    # failures-first re-read could weaken unexercised.
+    check("meta/revert-bookkeeping-in-revert-one",
+          (probe_stale,
+           [c.startswith("probe-synthetic (case probe-synthetic): ") for c in probe_cannot]),
+          ([], [True]))
 
 
 CASES = dict([
@@ -4882,12 +5002,15 @@ def _revert_outcome(failures, crashes):
     return "stale"
 
 
-def _revert_one(name, revert, case, tmp, fn=None):
+def _revert_one(name, revert, case, tmp, stale, cannot, fn=None):
     """ONE reverted guard's case under a fresh recorder, counted through _revert_outcome: the
-    crash-outranks-failure precedence is applied HERE, at the step every sweep entry goes
-    through (pinned by meta/revert-call-site-crash-outranks-failure over a synthetic guard
-    whose case records a failure and then raises; FIX-541 round 3, decided 3). The caller reads
-    the crash diagnostics out of _RECORDER."""
+    crash-outranks-failure precedence AND the stale/cannot bookkeeping are applied HERE, at the
+    step every sweep entry goes through, so the sweep keeps no outcome handling of its own
+    (FIX-541 round 4, decided 5: _red_on_revert used to re-derive its bookkeeping from this
+    function's return value at its own call site, a step no vector pinned). Pinned by
+    meta/revert-call-site-crash-outranks-failure and meta/revert-bookkeeping-in-revert-one
+    over a synthetic guard whose case records a failure and then raises (FIX-541 rounds 3 and
+    4, decided 3 and 5)."""
     saved = GUARDS[name]
     GUARDS[name] = revert
     _RECORDER.update(executed=set(), list=[], failures=[], skipped=[], crashes=[])
@@ -4895,22 +5018,25 @@ def _revert_one(name, revert, case, tmp, fn=None):
         _run_case(case, tempfile.mkdtemp(prefix="red-%s-" % name, dir=tmp), fn=fn)
     finally:
         GUARDS[name] = saved
-    return _revert_outcome(_RECORDER["failures"], _RECORDER["crashes"])
+    outcome = _revert_outcome(_RECORDER["failures"], _RECORDER["crashes"])
+    if outcome == "cannot":
+        cannot.append("%s (case %s): %s" % (name, case, "; ".join(_RECORDER["crashes"])))
+    elif outcome == "stale":
+        stale.append("%s (case %s)" % (name, case))
+    return outcome
 
 
 def _red_on_revert(tmp):
     """(stale, cannot): the guards whose reverted form left their named case green, and the
     guards whose case raised (cannot-evaluate, and the crash OUTRANKS any assertion failure
     recorded beside it: an exception proves nothing about the guard even when a named check
-    failed first; FIX-541 rounds 1 to 3, see _revert_one and _revert_outcome). Both lists must
-    be empty to pass; the crash diagnostics are kept in the cannot entries."""
+    failed first; FIX-541 rounds 1 to 4, see _revert_one and _revert_outcome: the per-guard
+    bookkeeping lives in _revert_one, so no step here re-reads the recorder around the
+    precedence). Both lists must be empty to pass; the crash diagnostics are kept in the
+    cannot entries."""
     stale, cannot = [], []
     for name, (revert, case) in REVERTS.items():
-        outcome = _revert_one(name, revert, case, tmp)
-        if outcome == "cannot":
-            cannot.append("%s (case %s): %s" % (name, case, "; ".join(_RECORDER["crashes"])))
-        elif outcome == "stale":
-            stale.append("%s (case %s)" % (name, case))
+        _revert_one(name, revert, case, tmp, stale, cannot)
     _RECORDER.update(executed=_EXECUTED_SET, list=EXECUTED, failures=FAILURES, skipped=SKIPPED,
                      crashes=CRASHES)
     return stale, cannot
