@@ -5,18 +5,19 @@ under `.claude/rules/` and the AIQT block in `CLAUDE.md`, plus `.claude/CLAUDE.m
 gate, `tools/check_instruction_budget.py`, measures that text, with the header line Claude Code writes
 before each file, and fails if the pack's share grows. The enforced figure lives in
 `.aiqt/core/instruction-budget.toml` (`ratchet`), lowered as the pack shrinks and raised only with a
-reviewed reason; the `ceiling` in that file is a separate figure, a target for the pack's own share
-alone, reported, not enforced.
+reviewed reason; the `ceiling` in that file is a separate figure, a reported bound for the pack's
+own share alone, not enforced.
 
 Treat 150,000 characters as this project's target for everything Claude Code loads at the start of a
-session. One caveat: on models with a 200k-token context window, Claude Code applies a lower total limit,
-observed by this project at 120,000 characters (Claude Code behaviour, which can change, not a pack
+session. One caveat: on models with a 200k-token context window, Claude Code applies a total limit
+below that figure: 120,000 characters, read from the pinned Claude Code build the gate models
+(2.1.287 in `.aiqt/core/instruction-budget.toml`; Claude Code behaviour, which can change, not a pack
 guarantee), so on those models budget to 120,000, not 150,000. The gate prints two totals: PACK, the
 pack's own share, and SESSION, which adds the rest of your `CLAUDE.md` and its imports. Both count
 `.claude/CLAUDE.md` and its imports, and a header for each loaded file with its resolved path relative to
 the repository root (not the absolute part, which depends on where the repository sits). Compare SESSION,
 not PACK, plus your own files under `~/.claude/`, such as `~/.claude/CLAUDE.md` and any rules there,
-against the target when you check your setup; the observed Claude Code limit counts file contents only, so
+against the target when you check your setup; that Claude Code limit counts file contents only, so
 the headers make SESSION read a little high.
 The gate reads only an enumerated grammar and exits 2, naming the file and line, on anything outside it: a
 control, format, or Unicode whitespace character other than tab and a line ending; frontmatter that is not

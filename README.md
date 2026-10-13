@@ -4,10 +4,10 @@
 
 AIQT Guardrails holds your AI assistant to one standard: **A**ccuracy, **I**ntegrity, **Q**uality, and
 **T**rust. More than guidance: these principles outrank progress, speed, and cost. In chat, the standard
-guides your assistant. In this repository, CI gates check every change against the standard. Open source,
-and built to be read.
+guides your assistant. In this repository, CI gates check each pull request and each push to main
+against the rules the gates cite, a subset of the standard. Open source, and built to be read.
 
-**132 rules. 108 CI gates that check this repository. 26 Claude Code hooks shipped with the pack. Mapped to 17 frameworks.**
+**132 rules. 108 CI gates that check this repository. 26 Claude Code hooks shipped as an opt-in plugin. Mapped to 17 frameworks.**
 
 The full pack and per-assistant setup guides live at [aiqt.ai](https://aiqt.ai).
 
@@ -16,14 +16,14 @@ The full pack and per-assistant setup guides live at [aiqt.ai](https://aiqt.ai).
 | Where | What you get | Tag |
 | --- | --- | --- |
 | **In a chat assistant** | Add AIQT to Claude, ChatGPT, Gemini, or Copilot in the form each assistant supports: a skill, a Gem, an agent, or an uploaded instruction file. The standard guides every conversation: instructions are context the assistant follows, not an enforcement mechanism. | Available |
-| **In a coding assistant** | For Claude Code, Codex, Cursor, or Copilot in the editor, the governance core is published to inspect and use as preview instructions today. The generated adapters, a guided install, a setup doctor, and the enforcement controls that catch a violation as it happens arrive with the 1.1.0 developer release, in development. | Preview |
+| **In a coding assistant** | For Claude Code, Codex, Cursor, or Copilot in the editor, the governance core is published to inspect and use as preview instructions today, and the repository ships its Claude Code enforcement hooks as a generated plugin you can install by hand. The generated adapters, a guided install, and a setup doctor arrive with the 1.1.0 developer release, in development. | Preview |
 
 ## 02. What is inside.
 
 | Piece | In one breath | Tag |
 | --- | --- | --- |
 | **The standard** | 132 clear, single-behaviour rules across the four AIQT facets, plus a security floor covering confidentiality, integrity, availability, and privacy. | Rules |
-| **Technical controls** | 108 CI gates that check this repository and 26 Claude Code hooks shipped with the pack (21 blocking, 5 warning). Today 35 of the 132 rules have automated enforcement; [ENFORCEMENT.md](ENFORCEMENT.md) lists each rule's status. | Controls |
+| **Technical controls** | 108 CI gates that check this repository and 26 Claude Code hooks shipped as an opt-in plugin (21 blocking, 5 warning). Today 35 of the 132 rules are linked to at least one shipped gate or hook; [ENFORCEMENT.md](ENFORCEMENT.md) lists each rule's status. | Controls |
 | **Generated adapters** | The Claude, AGENTS.md, Gemini, Copilot, and Cursor surfaces are generated from one source and drift-checked in CI. | Generated |
 | **A standards crosswalk** | Mappings from the rules to 17 pinned external control catalogues, for teams that report against a framework. | Mappings |
 
@@ -40,10 +40,10 @@ The full pack and per-assistant setup guides live at [aiqt.ai](https://aiqt.ai).
 Claude Code reads some files into every session before you type anything. A shipped gate measures the
 pack's share of that always loaded text and fails if it grows. This project's target is to keep
 everything Claude Code loads at the start of a session under 150,000 characters in total. One caveat: on
-models with a 200k-token context window, Claude Code applies a lower total limit, observed by this
-project at 120,000 characters (Claude Code behaviour, which can change, not a pack guarantee), so on
-those models budget to 120,000. The counting rules, the totals the gate prints, and what not to load
-twice are in [Keep the always loaded instructions small](INSTRUCTION-BUDGET.md).
+models with a 200k-token context window, Claude Code applies a total limit below that figure: 120,000
+characters, read from the pinned Claude Code build the gate models (2.1.287; Claude Code behaviour,
+which can change, not a pack guarantee), so on those models budget to 120,000. The counting rules,
+the totals the gate prints, and what not to load twice are in [Keep the always loaded instructions small](INSTRUCTION-BUDGET.md).
 
 ## 05. Verify your download.
 

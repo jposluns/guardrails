@@ -182,7 +182,7 @@ the block is not.
 
 The budget source, .aiqt/core/instruction-budget.toml, carries exactly four keys: `ratchet` (the PACK
 figure enforced today; lower it as the pack shrinks, and raise it only with a reviewed reason), `ceiling`
-(the target PACK figure, reported, not enforced), and `claude-code-version` and `binary-sha256`, which pin
+(the reported PACK bound, not enforced), and `claude-code-version` and `binary-sha256`, which pin
 the Claude Code build whose loading behaviour this gate follows.
 
 KNOWN OVER-COUNTS, by design (each can make PACK or SESSION higher than what the loader keeps):
@@ -1289,7 +1289,7 @@ def run(root):
           "file headers {})".format(m["session"], m["rules"], m["claude"], DOT_CLAUDE_REL, m["dot_claude"],
                                     m["session_imports"], m["session_headers"]))
     print("conditional rule files not counted: {}".format(m["conditional_files"]))
-    print("ratchet {}; ceiling {} (the target, reported, not enforced); loading modelled on Claude "
+    print("ratchet {}; ceiling {} (the reported bound, not enforced); loading modelled on Claude "
           "Code {} (binary sha256 {})".format(ratchet, budget["ceiling"], budget["claude-code-version"],
                                                  budget["binary-sha256"]))
     findings = list(m["findings"])

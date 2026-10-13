@@ -12,9 +12,9 @@ Evidence: [The 1.0.5 release](https://aiqt.ai/evidence#release) [Where 1.1.0 sta
 
 ## What the product is made of
 
-Claim: The 1.0.5 artefacts are prose instructions and reference material only, with no executable code and no network calls.
+Claim: The 1.0.5 chat artefacts, the Claude Skill and the portable instruction files, are prose instructions and reference material only, with no executable code and no network calls. The repository that ships them also carries code: the Python checks under tools/ and a generated Claude Code hooks plugin, each listed in the 1.0.5 release manifest; none of it runs unless you run a check or install the plugin.
 
-Limitation: Instructions cannot do anything your assistant platform cannot already do. The 1.1.0 design adds local tooling whose exact behaviour is documented before it ships.
+Limitation: Instructions cannot do anything your assistant platform cannot already do. The 1.1.0 design adds a guided install and a setup doctor around that tooling, each documented before it ships.
 
 Evidence: [What the files are](https://aiqt.ai/install#pick) [The 1.1.0 directory](https://aiqt.ai/tech-details#directory)
 
@@ -22,7 +22,7 @@ Evidence: [What the files are](https://aiqt.ai/install#pick) [The 1.1.0 director
 
 Claim: AIQT is a behavioural standard your assistant is required to follow: it announces what its guardrails catch, surfaces issues instead of hiding them, and backs its claims with evidence.
 
-Limitation: It does not technically prevent a model from erring. Results still depend on the model, the platform, competing instructions, and the tools in the conversation. AIQT does not make an AI infallible, and it does not sandbox, monitor, or block anything at runtime.
+Limitation: It does not technically prevent a model from erring. Results still depend on the model, the platform, competing instructions, and the tools in the conversation. AIQT does not make an AI infallible, and the chat skill does not sandbox, monitor, or block anything at runtime; the repository's CI gates and the opt-in Claude Code hooks plugin block or warn only on the specific actions they are built to catch, within each control's stated residuals.
 
 Evidence: [What AIQT does not do](https://aiqt.ai/evidence#limits)
 
@@ -52,9 +52,9 @@ Evidence: [One QA standard, whichever model checks](https://aiqt.ai/tech-details
 
 ## Data handling
 
-Claim: The 1.0.5 pack sends nothing anywhere: it is instructions your assistant reads, with no code and no network calls. What you type still goes to your assistant's vendor under that vendor's terms, exactly as it would without AIQT. In the 1.1.0 design, routine checks run locally and send nothing to a model.
+Claim: The 1.0.5 chat artefacts send nothing anywhere: they are instructions your assistant reads, with no code and no network calls. The 1.0.5 release is wider than those artefacts: its repository ships code, the Python checks under tools/ and a Claude Code hooks plugin, and none of it runs unless you run a check or install the plugin. What you type still goes to your assistant's vendor under that vendor's terms, exactly as it would without AIQT. In the 1.1.0 design, routine checks run locally and send nothing to a model.
 
-Limitation: The 1.1.0 substantive and delicate review tiers will send content to model providers. The providers, credentials, retention, and cost stay marked pending until they are documented before 1.1.0 ships. AIQT cannot intercept, encrypt, or block data that your assistant platform itself sends.
+Limitation: The shipped repository code is not network-free when run: one check verifies that published framework URLs are live, so running it makes network requests. The 1.1.0 substantive and delicate review tiers will send content to model providers. The providers, credentials, retention, and cost stay marked pending until they are documented before 1.1.0 ships. AIQT cannot intercept, encrypt, or block data that your assistant platform itself sends.
 
 Evidence: [What the 1.0.5 files are](https://aiqt.ai/install#pick) [The data flow, by tier](https://aiqt.ai/tech-details#qa-where)
 
