@@ -57,7 +57,11 @@ complete):
      TEXT_SUFFIXES is never read; a suffixless file that is not valid UTF-8 is treated as binary and
      skipped): unchanged, gitleaks-or-nothing territory. A dotenv or TEXT_SUFFIXES file that is not valid
      UTF-8 is NOT skipped: it is decoded losslessly and scanned (_read_scan_text). A scan candidate that
-     starts with a UTF-16 byte-order mark and decodes as UTF-16 is scanned as UTF-16. Two or more stray
+     starts with a UTF-16 byte-order mark and decodes as UTF-16 is scanned BOTH as UTF-16 AND through the
+     lossless byte view, the findings merged with exact duplicates dropped: almost any even-length byte
+     string decodes as UTF-16, so a BOM-prefixed file that actually holds 8-bit or ASCII text keeps the
+     lossless-view coverage it had before UTF-16 support; a suffixless file that is not valid UTF-8 and
+     does not take the UTF-16 views stays binary and is skipped. Two or more stray
      non-ASCII bytes that together form a valid UTF-8 letter decode as that letter, so beside a token they
      break its word boundary and can hide it (the same word-boundary behaviour as in valid UTF-8 text);
      UTF-16 without a byte-order mark and other non-UTF-8 encodings are not decoded as such, so a secret in
@@ -352,29 +356,36 @@ def _is_declared_text(path):
 
 
 def _read_scan_text(path):
-    """Return (text, note) for a scan candidate; text is None when the file is skipped as binary. Valid
-    UTF-8 decodes as is (note None). A candidate that is text by declaration (_is_declared_text) but is NOT
-    valid UTF-8 is decoded LOSSLESSLY with errors="surrogateescape": every valid character keeps its
-    meaning and each undecodable byte becomes its own lone surrogate, which is neither a word character
-    nor a line break, so every ASCII pattern still matches beside it (a latin-1 view would turn 0xFE into
-    a letter that breaks a word boundary, and 0x85 into a line break). A candidate that is not valid UTF-8
-    but starts with a UTF-16 byte-order mark and decodes as UTF-16 is scanned as UTF-16 (a UTF-8 view puts
-    a placeholder between every two ASCII characters, which defeats every pattern). Otherwise only a
-    SUFFIXLESS file that is not valid UTF-8 is treated as binary and skipped, as the existing rule
+    """Return (texts, note) for a scan candidate; texts is a tuple of decoded VIEWS to scan (the caller
+    merges the views' findings and drops exact duplicates), or None when the file is skipped as binary.
+    Valid UTF-8 decodes as is (one view, note None). A candidate that is text by declaration
+    (_is_declared_text) but is NOT valid UTF-8 is decoded LOSSLESSLY with errors="surrogateescape": every
+    valid character keeps its meaning and each undecodable byte becomes its own lone surrogate, which is
+    neither a word character nor a line break, so every ASCII pattern still matches beside it (a latin-1
+    view would turn 0xFE into a letter that breaks a word boundary, and 0x85 into a line break). A
+    candidate that is not valid UTF-8 but starts with a UTF-16 byte-order mark and decodes as UTF-16 is
+    scanned BOTH as UTF-16 (a byte view of real UTF-16 carries a NUL between every two ASCII characters,
+    which defeats every pattern) AND through the lossless surrogateescape view: almost any even-length
+    byte string decodes as UTF-16, so a BOM-prefixed file that actually holds 8-bit or ASCII text keeps
+    the lossless-view coverage it had before UTF-16 support (PR #530 QA round-2 claude MEDIUM-1); the
+    UTF-16 attempt only ever ADDS a view. Otherwise only a SUFFIXLESS file that is not valid UTF-8 and
+    did not take the UTF-16 views is treated as binary and skipped, as the existing rule
     (_is_scan_candidate) defines."""
     data = path.read_bytes()
     try:
-        return data.decode("utf-8"), None
+        return (data.decode("utf-8"),), None
     except UnicodeDecodeError:
         pass
     if data[:2] in (codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE):
         try:
-            return data.decode("utf-16"), "NOTE (UTF-16 byte-order mark: decoded as UTF-16 and scanned)"
+            return ((data.decode("utf-16"), data.decode("utf-8", errors="surrogateescape")),
+                    "NOTE (UTF-16 byte-order mark: decoded as UTF-16 and also scanned losslessly as "
+                    "bytes; findings merged)")
         except UnicodeDecodeError:
-            pass  # not valid UTF-16 after all: judged as any other non-UTF-8 file below
+            pass  # not valid UTF-16 after all (an odd length): judged as any other non-UTF-8 file below
     if not _is_declared_text(path):
         return None, "SKIP (not utf-8, no suffix: treated as binary)"
-    return (data.decode("utf-8", errors="surrogateescape"),
+    return ((data.decode("utf-8", errors="surrogateescape"),),
             "NOTE (not valid utf-8: scanned, each undecodable byte kept as a placeholder)")
 
 
@@ -406,40 +417,49 @@ def main(root=None) -> int:
                 continue
             if not _is_scan_candidate(path):
                 continue
-            # A text-by-declaration file with a stray non-UTF-8 byte is scanned (lossless decode); only a
-            # suffixless non-UTF-8 file is binary and skipped (gitleaks scans binaries).
-            text, note = _read_scan_text(path)
+            # A text-by-declaration file with a stray non-UTF-8 byte is scanned (lossless decode); only
+            # a suffixless non-UTF-8 file that did not take the UTF-16 views is binary and skipped
+            # (gitleaks scans binaries).
+            texts, note = _read_scan_text(path)
             if note is not None:
                 print(f"{note}: {path.relative_to(root)}")
-            if text is None:
+            if texts is None:
                 continue
-            lines = text.splitlines()
-            for number, line in enumerate(lines, 1):
-                rel = path.relative_to(root)
-                before = len(findings)
-                for pattern, label in PREFIXES:
-                    if pattern.search(line):
-                        findings.append(f"{rel}:{number}: {label}")
-                # Scan EVERY credential-named assignment on the line, not just the first: a
-                # placeholder assignment earlier on the line must not mask a real one after it.
-                # One finding per line suffices, so append on the first real match and stop.
-                for match in ASSIGN.finditer(line):
-                    if _assign_is_secret(match):
-                        findings.append(
-                            f"{rel}:{number}: credential-named variable assigned a literal"
-                        )
-                        break
-                # GD-121: only when neither a provider prefix nor a credential-named ASSIGN flagged this
-                # line, try the entropy-gated generic detector. One finding per line; the first real
-                # match wins, and finditer skips earlier placeholder/metadata matches so they cannot
-                # mask it (parity with the ASSIGN scan-all-assignments behaviour above).
-                if len(findings) == before:
-                    for match in ENTROPY_ASSIGN.finditer(line):
-                        if _entropy_assign_is_secret(match):
-                            findings.append(
-                                f"{rel}:{number}: high-entropy literal assigned to a credential-like name"
+            rel = path.relative_to(root)
+            file_findings = []
+            for text in texts:
+                for number, line in enumerate(text.splitlines(), 1):
+                    before = len(file_findings)
+                    for pattern, label in PREFIXES:
+                        if pattern.search(line):
+                            file_findings.append(f"{rel}:{number}: {label}")
+                    # Scan EVERY credential-named assignment on the line, not just the first: a
+                    # placeholder assignment earlier on the line must not mask a real one after it.
+                    # One finding per line suffices, so append on the first real match and stop.
+                    for match in ASSIGN.finditer(line):
+                        if _assign_is_secret(match):
+                            file_findings.append(
+                                f"{rel}:{number}: credential-named variable assigned a literal"
                             )
                             break
+                    # GD-121: only when neither a provider prefix nor a credential-named ASSIGN
+                    # flagged this line, try the entropy-gated generic detector. One finding per line;
+                    # the first real match wins, and finditer skips earlier placeholder/metadata matches
+                    # so they cannot mask it (parity with the ASSIGN scan-all-assignments behaviour
+                    # above).
+                    if len(file_findings) == before:
+                        for match in ENTROPY_ASSIGN.finditer(line):
+                            if _entropy_assign_is_secret(match):
+                                file_findings.append(f"{rel}:{number}: high-entropy literal assigned "
+                                                     f"to a credential-like name")
+                                break
+            # The views of ONE file are merged with exact duplicates dropped: a finding both views
+            # produce (the same path, line number and label) is one finding, never two.
+            seen = set()
+            for finding in file_findings:
+                if finding not in seen:
+                    seen.add(finding)
+                    findings.append(finding)
     except OSError as exc:
         # An unreadable directory or file is a read error, not a clean skip: fail closed (exit 2) so the
         # secret gate never reports clean without having scanned an unreadable subtree.
@@ -677,6 +697,17 @@ def _self_test() -> int:
             "utf-16-be"))
         (troot / "winkey16").write_bytes(codecs.BOM_UTF16_LE + (_tok.decode("ascii") + "\n").encode(
             "utf-16-le"))
+        # A BOM-prefixed file that holds 8-BIT TEXT, not UTF-16 (PR #530 QA round-2 claude MEDIUM-1):
+        # even length, so it decodes as UTF-16 (to CJK text with no match); the merged lossless byte
+        # view must still find the ASCII token. The odd-length variants cannot decode as UTF-16: the
+        # .txt one falls through to the lossless view (claude MINOR-1) and the suffixless one stays a
+        # binary SKIP. dup16.txt carries the token in BOTH views at line 1, so the merge must count it
+        # ONCE (the FAIL total below pins the deduplication).
+        (troot / "bom8.txt").write_bytes(codecs.BOM_UTF16_LE + b"caf\xe9 " + _tok + b"\n")
+        (troot / "bomodd.txt").write_bytes(codecs.BOM_UTF16_BE + _tok + b"\n")
+        (troot / "bombin").write_bytes(codecs.BOM_UTF16_LE + _tok + b"\n")
+        (troot / "dup16.txt").write_bytes(codecs.BOM_UTF16_LE + _tok + ("  " + _tok.decode("ascii")
+                                                                        + "\n").encode("utf-16-le"))
         out = io.StringIO()
         with redirect_stdout(out):
             scan_rc = main(troot)
@@ -687,9 +718,10 @@ def _self_test() -> int:
         for index, data in enumerate(lossless_cases):
             path = troot / "lossless{}.md".format(index)
             path.write_bytes(data)
-            text, _note = _read_scan_text(path)
-            if text is None or text.encode("utf-8", errors="surrogateescape") != data:
-                failures.append("non-UTF-8 decode of {!r} must be lossless (got {!r})".format(data, text))
+            texts, _note = _read_scan_text(path)
+            if texts is None or texts[0].encode("utf-8", errors="surrogateescape") != data:
+                failures.append("non-UTF-8 decode of {!r} must be lossless (got {!r})".format(
+                    data, texts))
     scan_out = out.getvalue()
     non_utf8_cases = [
         ("  notes.md:2: GitHub token", True),            # one invalid byte BESIDE a planted token: a finding
@@ -700,8 +732,19 @@ def _self_test() -> int:
         ("  win16le.txt:1: credential-named variable assigned a literal", True),  # UTF-16 LE with a BOM
         ("  win16be.md:1: GitHub token", True),          # UTF-16 BE with a BOM
         ("  winkey16:1: GitHub token", True),            # a suffixless UTF-16 file is text, not binary
-        ("NOTE (UTF-16 byte-order mark: decoded as UTF-16 and scanned): win16le.txt", True),
+        ("NOTE (UTF-16 byte-order mark: decoded as UTF-16 and also scanned losslessly as bytes; "
+         "findings merged): win16le.txt", True),
+        ("  bom8.txt:1: GitHub token", True),            # BOM + 8-bit text: the byte view finds the token
+        ("  bomodd.txt:1: GitHub token", True),          # odd length: not UTF-16; the lossless view scans it
+        ("NOTE (not valid utf-8: scanned, each undecodable byte kept as a placeholder): "
+         "bomodd.txt", True),
+        ("  bombin:", False),                            # suffixless odd-length BOM: still a binary SKIP
+        ("SKIP (not utf-8, no suffix: treated as binary): bombin", True),
+        ("  dup16.txt:1: GitHub token", True),           # present in both views, counted once (see below)
     ]
+    if "FAIL: 9 possible hardcoded secret(s)" not in scan_out:
+        failures.append("non-UTF-8 scan: expected exactly 9 merged findings (dup16.txt counted once, "
+                        "never per view); output was {!r}".format(scan_out))
     if scan_rc != 1:
         failures.append("non-UTF-8 scan: main() over the fixture root must exit 1, got {}".format(scan_rc))
     for needle, want in non_utf8_cases:

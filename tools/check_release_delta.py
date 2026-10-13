@@ -2900,6 +2900,32 @@ def _not_run(failures, case, cause):
                     "PASS".format(case, cause))
 
 
+# One label per git-availability gate in _self_test_main_isolated, in SOURCE order; the LAST entry is the
+# final gate, which dispatches the real full-pack / POST-RELEASE case sets. The transient-availability
+# vectors in _not_run_net_vectors replay a failed probe over this order, so this tuple and the _git_gate
+# call sites must stay aligned (a new git-gated block extends both).
+_GIT_GATE_LABELS = (
+    "the materialized executable/plain-file mode cases (round-7 finding 4)",
+    "the duplicate-predecessor-clause inventory case (finding 1, predecessor object)",
+    "the predecessor-ownership-via-git-plumbing case (VC-4 QA #11)",
+    "the drift-advisory, fsmonitor-pin and promisor cases (QA rounds 6-10)",
+    "the real full-pack and POST-RELEASE run() cases",
+)
+
+
+def _git_gate(label, failures):
+    """One NAMED availability gate per git-dependent block of _self_test_main_isolated (PR #530 QA
+    round-2 codex MAJOR): when the probe fails, the gated block is a recorded NOT RUN failure naming the
+    block, never a silent skip beside a PASS, so a TRANSIENTLY failed probe at one gate can no longer
+    leave its block unrun while a later probe succeeds and the suite still prints SELF-TEST PASS.
+    Red-on-revert: the transient-availability scenarios in _not_run_net_vectors."""
+    if _git_available():
+        return True
+    _not_run(failures, label, "git is unavailable at this block's probe (QA round-4 codex R4-3 / "
+             "claude m4; a transient probe failure never skips a block silently)")
+    return False
+
+
 def _plant_notice_omission(mpath, failures):
     """Drop the NOTICE [[sources]] row from the regenerated manifest at mpath (the round-8 finding 1
     fixture). Corpus content decides whether that row exists, so this can fail in CI: a manifest without
@@ -3008,7 +3034,13 @@ def _not_run_net_vectors(tmp, failures):
     the corpus-dependent NOTICE-row and source-path fixtures, the two caller nets in _e2e_git_cases (an
     end-to-end function that returns False without recording a cause), and the POST-RELEASE cases that
     lose their discriminating power on a git that ignores a planted replace ref, graft or filter mask, or
-    for a root user (os.geteuid patched to 0)."""
+    for a root user (os.geteuid patched to 0); and the git-availability gates (_git_gate over
+    _GIT_GATE_LABELS, PR #530 QA round-2 codex MAJOR), replayed with a TRANSIENT probe (every earlier
+    gate fails while the final gate succeeds: the nested self-test must exit nonzero, name each skipped
+    block, and still dispatch the final gate's case sets) and with git unavailable at every gate (every
+    block named, the final one included), so a revert of any single gate's recorded failure is red. A git
+    that STOPS honouring info/grafts makes the grafts case a STANDING NOT RUN failure of this self-test
+    on that host (fail-closed and disclosed, resolved by porting the case, never by skipping it)."""
     import tempfile
     # The nested self-test (the self_test_main entry, which sets up its own git lifecycle) with ONLY the
     # end-to-end temp allocation failing. It cannot recurse: without that temp directory it never reaches
@@ -3104,6 +3136,60 @@ def _not_run_net_vectors(tmp, failures):
         if not any(f.startswith("NOT RUN: ") and want in f for f in got):
             failures.append("(NOT RUN post-release) a case that loses its discriminating power must record a "
                             "NOT RUN failure naming {!r} (got {})".format(want, got))
+
+    # The git-availability gates (PR #530 QA round-2 codex MAJOR), two red-on-revert scenarios over a
+    # nested self-test run. Scenario 1, TRANSIENT: every earlier gate reports no git while the FINAL
+    # gate reports git present; the nested run must exit nonzero and NAME each earlier gate's block.
+    # The three case sets behind the final gate are replaced for the nested run by recording sentinels
+    # (so this vector is not re-entered from the nested run, and the final gate's dispatch is itself
+    # observed). Scenario 2: no gate reports git, so every block must be named, the final one included.
+    real_probe = _git_available
+    saved_sets = {name: globals()[name] for name in (
+        "_real_pack_not_run_vectors", "_not_run_net_vectors", "_e2e_git_cases")}
+    for scenario, answers, named, unnamed in (
+            ("transient probe (final gate succeeds)",
+             [False] * (len(_GIT_GATE_LABELS) - 1) + [True],
+             _GIT_GATE_LABELS[:-1], _GIT_GATE_LABELS[-1:]),
+            ("git unavailable at every gate",
+             [False] * len(_GIT_GATE_LABELS), _GIT_GATE_LABELS, ())):
+        plan = list(answers)
+        final_ran = []
+
+        def _planned_probe(plan=plan):
+            return plan.pop(0) if plan else real_probe()
+
+        def _sentinel(which, ran=final_ran):
+            def _record(_tmp, _failures):
+                ran.append(which)
+            return _record
+
+        globals()["_git_available"] = _planned_probe
+        globals()["_real_pack_not_run_vectors"] = _sentinel("real-pack")
+        globals()["_not_run_net_vectors"] = _sentinel("net")
+        globals()["_e2e_git_cases"] = _sentinel("e2e")
+        out = io.StringIO()
+        try:
+            with redirect_stdout(out), redirect_stderr(io.StringIO()):
+                rc = self_test_main()
+        finally:
+            globals().update(saved_sets)
+            globals()["_git_available"] = real_probe
+        text = out.getvalue()
+        if rc == 0:
+            failures.append("(NOT RUN git-gate) {}: the nested self-test must exit nonzero, never "
+                            "SELF-TEST PASS beside an unrun git-gated block".format(scenario))
+        for label in named:
+            if "NOT RUN: " + label not in text:
+                failures.append("(NOT RUN git-gate) {}: the nested self-test must NAME the skipped "
+                                "block {!r} (output ended {!r})".format(
+                                    scenario, label, text.strip()[-300:]))
+        for label in unnamed:
+            if "NOT RUN: " + label in text:
+                failures.append("(NOT RUN git-gate) {}: the final gate's block must RUN when its "
+                                "probe succeeds, not record {!r}".format(scenario, label))
+        if scenario.startswith("transient") and sorted(final_ran) != ["e2e", "net", "real-pack"]:
+            failures.append("(NOT RUN git-gate) transient probe: the final gate must dispatch all "
+                            "three case sets when its probe succeeds (ran {})".format(final_ran))
 
 
 def _real_pack_e2e(tmp, failures):
@@ -3955,7 +4041,10 @@ def _post_release_e2e(tmp, failures, only=None):
     nets a False return that recorded none), True otherwise. A case that would lose its discriminating
     power on this host records a NOT RUN failure instead of passing: a git that does not substitute the
     planted replace ref, ignores info/grafts, or leaves the filter-masked status dirty, and a root user,
-    for whom directory search permission is not enforced."""
+    for whom directory search permission is not enforced. DISCLOSED: a git that stops honouring
+    info/grafts (a removed or disabled grafts mechanism) therefore makes the grafts case a STANDING NOT
+    RUN failure of this self-test on that host; that fails closed, and is resolved by porting the case,
+    never by skipping it."""
     env = _selftest_env()
     arch = _archive_head(repo_root())
     if arch is None:
@@ -4394,7 +4483,7 @@ def _post_release_e2e(tmp, failures, only=None):
             return False
         if _edit_clause_consistently(r2) is None:
             failures.append("fixture setup (two-release): no clause admits a consistent edit")
-            return True
+            return False
         (r2 / "VERSION").write_text("1.0.1\n", encoding="utf-8")
         (r2 / CHANGELOG_REL).write_text(
             '[[release]]\nversion = "1.0.0"\n\n[[release]]\nversion = "1.0.1"\n', encoding="utf-8")
@@ -6729,7 +6818,7 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
 
     # --- materialize_tree_raw preserves git file modes (round-7 finding 4) ------------------------
     import stat as _stat
-    if _git_available():
+    if _git_gate(_GIT_GATE_LABELS[0], failures):
         import shutil as _sh4
         import tempfile as _tf4
         mtmp = Path(_tf4.mkdtemp(prefix="aiqt-delta-mode-"))
@@ -6933,7 +7022,7 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
             # object). Commit 1 carries a malformed clause inventory; the working tree (HEAD) carries a
             # one-row releases record pointing at commit 1, so run() resolves the predecessor via git show
             # and the strict inventory validator fails closed exit 2 BEFORE any delta leg runs.
-            if _git_available():
+            if _git_gate(_GIT_GATE_LABELS[1], failures):
                 def _predecessor_dupclause(dirname):
                     repo = tmp / dirname
                     (repo / ".aiqt" / "core").mkdir(parents=True)
@@ -6968,7 +7057,7 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
             # an ownership map and tracked files; _ownership_classes_at must read the FIRST commit's tree
             # via git show / git ls-tree (never a materialized worktree) and classify it, while HEAD carries
             # an extra file. Env is neutralized (git_tracked strips GIT_*; commits use a fixed identity).
-            if _git_available():
+            if _git_gate(_GIT_GATE_LABELS[2], failures):
                 repo = tmp / "own-repo"
                 (repo / ".aiqt" / "core").mkdir(parents=True)
                 (repo / "pkg").mkdir()
@@ -7054,7 +7143,7 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
             finally:
                 globals()["_git"] = _real_g6
 
-            if _git_available():
+            if _git_gate(_GIT_GATE_LABELS[3], failures):
                 # ---- QA round-6 codex majors 3/4 / claude 2, extended round 7 (claude F1/F2):
                 # the drift advisory reads nothing it must not, blocks on nothing, and classifies
                 # every special-file swap as drift. The outside copies behind the symlinked parent
@@ -7227,14 +7316,10 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
                         failures.append("{}: the core.sshCommand marker RAN; a lazy fetch "
                                         "started a transport mid-read".format(label6p))
 
-            if _git_available():
+            if _git_gate(_GIT_GATE_LABELS[4], failures):
                 _real_pack_not_run_vectors(tmp, failures)
                 _not_run_net_vectors(tmp, failures)
                 _e2e_git_cases(tmp, failures)
-            else:
-                failures.append("NOT RUN: the real full-pack and POST-RELEASE run() cases: git is "
-                                "unavailable; coverage that did not run FAILS the self-test (QA round-4 "
-                                "codex R4-3 / claude m4)")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
