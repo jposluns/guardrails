@@ -2887,9 +2887,24 @@ def _git(args, cwd, env, allow_fail=False, input_bytes=None):
 
 
 def _write(path, data):
+    """Fixture bytes at `path`, hermetic against the ambient process umask: every directory
+    and file this helper CREATES takes an explicit mode (DIR_MODE, 0o644; a fixture needing
+    another mode chmods after writing), while a pre-existing file keeps its mode and only its
+    bytes change. A fixture's verdict comes from the code under test, never from the umask
+    the harness happened to inherit."""
+    made = []
+    parent = os.path.dirname(path)
+    while parent and not os.path.lexists(parent):
+        made.append(parent)
+        parent = os.path.dirname(parent)
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    for d in made:
+        os.chmod(d, DIR_MODE)
+    fresh = not os.path.lexists(path)
     with open(path, "wb") as fh:
         fh.write(data)
+    if fresh:
+        os.chmod(path, 0o644)
 
 
 def _counters_toml(values):
@@ -3499,6 +3514,21 @@ def _seam_tests(base, env, ok):
     ok("SEAM-world-writable-working-refused", res.status == REFUSED
        and "writable" in res.primary_failure["detail"]
        and _tree_snapshot(root) == before and sub_ops(root) == [], str(res.primary_failure))
+
+    # The accepting fixture is hermetic against the ambient umask: built while the process
+    # umask is the group-permissive 0o002, the admitted tree is still accepted (red when a
+    # fixture directory takes its mode from the process umask instead of an explicit one).
+    saved_umask = os.umask(0o002)
+    try:
+        root, adm, payload = admit_fixture("umask002")
+    finally:
+        os.umask(saved_umask)
+    res = run_init_operation(root, admitted=adm, operation_id=oid(11))
+    with open(os.path.join(root, ".working/notes/frozen.md"), "rb") as fh:
+        live = fh.read()
+    ok("SEAM-admitted-accepted-under-umask-0002", res.status == VIEWS_READY
+       and live == payload and _opf_store.resolve_store(root).status == _opf_store.RESOLVED
+       and len(sub_ops(root)) == 1, str(res.primary_failure))
 
     # The seam's second leg: a pre-existing EMPTY machine home (what archival of an occupying
     # machine-store file leaves behind) is admitted ONLY through admitted_dirs, at exactly its
