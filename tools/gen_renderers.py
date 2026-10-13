@@ -213,14 +213,21 @@ _FOLD_CAP = 64
 
 def _folded_strings(tree):
     """{id(node): str} for every expression node whose string value a BOUNDED constant fold computes: a str
-    constant (an implicit concatenation is already one), an f-string whose every part is such a value (a
-    replacement field with no conversion other than !s and no format spec), and a + of two such operands.
-    Folded bottom-up over the reversed breadth-first walk, where every child precedes its parent, so a long
-    chain needs no recursion; a value longer than _FOLD_CAP is dropped."""
+    constant (an implicit concatenation is already one), a bytes constant decoded as latin-1 (every byte
+    decodes, so a spelled bytes name or path is judged by the same rules as a str one; a consumer such as
+    pickle reads spelled bytes directly, with no decode in the source), an f-string whose every part is
+    such a value (a replacement field with no conversion other than !s and no format spec), and a + of two
+    such operands. Folded bottom-up over the reversed breadth-first walk, where every child precedes its
+    parent, so a long chain needs no recursion; a value longer than _FOLD_CAP is dropped."""
     folded = {}
     for node in reversed(list(ast.walk(tree))):
         if isinstance(node, ast.Constant):
-            value = node.value if isinstance(node.value, str) else None
+            if isinstance(node.value, str):
+                value = node.value
+            elif isinstance(node.value, bytes):
+                value = node.value.decode("latin-1")
+            else:
+                value = None
         elif isinstance(node, ast.FormattedValue):
             value = (folded.get(id(node.value)) if node.conversion in (-1, ord("s")) and node.format_spec is None
                      else None)
@@ -252,18 +259,21 @@ def _unsupported_binding(tree):
     changes in place the value the reader recovered; a chained assignment is refused because its other
     target is an alias. A Constant, because the bounded fold below judges its value.
 
-    A string CONSTANT is governed by the bounded fold, never the identifier rule: any expression
+    A string or bytes CONSTANT is governed by the bounded fold, never the identifier rule (a bytes value
+    folds decoded as latin-1, so a spelled bytes name or path is judged like a str one): any expression
     _folded_strings computes to exactly 'RENDERER_DECL' is refused unless _inert allows it as one of
     the TWO EXEMPT USES, a comparison operand or a third or later positional argument of a call with no
     starred argument before it, and any folded value whose dot- or colon-separated components include the
     name is refused with NO exemption, because a resolver splits such a path at run time and reaches the
     declared value through it (pkgutil.resolve_name('pkg.RENDERER_DECL'), pkgutil.resolve_name
     ('pkg:RENDERER_DECL'), operator.attrgetter('m.RENDERER_DECL')); this file's own scan never
-    spells such a path in a foldable string. Both exemptions are required by this file's own scan
+    spells such a path in a foldable string. Dot and colon are the ONLY separators this rule knows; a
+    spelled path in any other resolver syntax is NOT detected and is part of the residual
+    _declared_renderer_stems discloses. Both exemptions are required by this file's own scan
     (self-test case (q)): the walk compares folded values and str fields against the literal name, and
     _parse_module takes it as the third positional argument (purpose). The exemptions are allowed uses, NOT
     proof of inertness: an overloaded comparison method (ANY comparison method receives the spelled name as
-    its operand; __eq__, __lt__ and __contains__ are examples, never a closed list) and a
+    its operand; __eq__, __ne__, __lt__ and __contains__ are examples, never a closed list) and a
     helper taking it as a third or later argument (functools.partial(setattr, module, 'RENDERER_DECL'))
     each consume the literal name at run time and can store or read through it; both routes are part of the
     residual _declared_renderer_stems discloses."""
@@ -382,11 +392,17 @@ def _declared_renderer_stems(tools_dir):
     DISCLOSED RESIDUAL (disclose-guard-residuals): the walk sees the name only where the source spells it, in
     a string-valued or list-of-string AST field (an identifier, an attribute, an import name, a
     keyword-argument name, a pattern or parameter name, or any such field a later Python adds), or as a
-    string the bounded fold of _folded_strings computes, where both a fold equal to the name and a fold
+    string the bounded fold of _folded_strings computes (a str or bytes constant, bytes decoded as
+    latin-1, an f-string, a + chain), where both a fold equal to the name and a fold
     whose dot- or colon-separated components include it (a pkgutil.resolve_name or operator.attrgetter
     path) are refused. What remains is beyond this static scan, which does not detect it and does not claim
-    to: a name or resolver path computed any other way (a join, %-formatting, str.format, a case change,
-    bytes.decode, chr, an f-string format spec) or folded to more than _FOLD_CAP characters, then stored
+    to: a SPELLED name or path framed by any resolver syntax other than dot- or colon-separated components,
+    such as a str.format or string.Formatter replacement-field path ('0[RENDERER_DECL]', whose bracket
+    field string.Formatter().get_field resolves to the declared value) or pickle opcode text (a GLOBAL
+    frame is newline-separated, so a spelled pickle reaches a module attribute with no dot or colon in
+    sight); a name or resolver path computed any other way (a join, %-formatting, str.format, a case
+    change, a decode of computed bytes, chr, an f-string format spec) or folded to more than _FOLD_CAP
+    characters, then stored
     through setattr(module, name, ...), globals()[name] = ..., globals().update({name: ...}), handed to a
     resolver (pkgutil.resolve_name, operator.attrgetter, importlib) or consumed by any other namespace
     write or read; the literal name consumed through one of the two EXEMPT USES, by a comparison operand
@@ -580,7 +596,8 @@ def main():
 #       type alias, a store through the module object by attribute, vars()/globals() subscript or
 #       setattr, a literal-name store through any other call (qualified or aliased setattr, __setattr__,
 #       setdefault, __setitem__, dict.__setitem__, operator.setitem), a dict-display or keyword update, a
-#       variable holding the name, an f-string, split f-string or concatenated key, an import naming it, an
+#       variable holding the name, an f-string, split f-string, concatenated or spelled-bytes key (folded
+#       decoded as latin-1), an import naming it, an
 #       import from it (the module position), an import of a package rooted at it (the dotted module
 #       position), a match-mapping rest, a match-star name, and a later argument that a starred argument
 #       before it can shift to the key position)
@@ -592,7 +609,8 @@ def main():
 #       annotated (or a second plain) rebinding, or a bare annotation, fails closed (exit 2), and the reader
 #       alone also refuses two bindings; each _MUTATED in-place change to the declared dict (a subscript
 #       store, an update call, a chained-assignment alias, a module attribute read, a class-pattern keyword
-#       read, a pkgutil.resolve_name path string, an operator.attrgetter path string) also fails closed, so
+#       read, a pkgutil.resolve_name path string, an operator.attrgetter path string spelled as str or as
+#       bytes decoded at run time) also fails closed, so
 #       none of these routes can make the value Python runs differ from the value read.
 #   (k) a PEP 263 cookie cannot hide a declaration: a UTF-7 cookie that makes a UTF-8 comment a declaration,
 #       and any other non-UTF-8 cookie, fail --check (exit 2); a UTF-8 BOM is parsed as Python parses it.
@@ -702,6 +720,7 @@ _UNSUPPORTED_BINDINGS = (
     ("f-string subscript key", "vars()[f'RENDERER_DECL'] = {}\n".format(_DECL_LITERAL)),
     ("split f-string subscript key", "vars()[f'RENDERER_{{({!r})}}'] = {}\n".format("DECL", _DECL_LITERAL)),
     ("concatenated subscript key", "globals()['RENDERER_' + 'DECL'] = {}\n".format(_DECL_LITERAL)),
+    ("bytes subscript key", "vars()[b'RENDERER_DECL'.decode()] = {}\n".format(_DECL_LITERAL)),
     ("import naming it", "from gen_alpha import RENDERER_DECL as other\nother['semantics-revision'] = 99\n"),
     ("import from it", "from RENDERER_DECL import x\n"),
     ("dotted import root", "import RENDERER_DECL.sub\n"),
@@ -745,6 +764,10 @@ _MUTATED = (
      + "import operator, types\n"
        "operator.attrgetter('m.RENDERER_DECL')(types.SimpleNamespace(m=sys.modules[__name__]))"
        "['semantics-revision'] = 99\n"),
+    ("a bytes operator.attrgetter path", _ENTRY_GOOD
+     + "import operator, types\n"
+       "operator.attrgetter(b'm.RENDERER_DECL'.decode())"
+       "(types.SimpleNamespace(m=sys.modules[__name__]))['semantics-revision'] = 99\n"),
 )
 
 # (k) unlisted tools/gen_beta.py bodies (bytes) a coding cookie must not hide; '+AAo-' is UTF-7 for a newline.
@@ -816,6 +839,18 @@ def self_test_main():
             except SystemExit as exc:
                 return "raised SystemExit({!r})".format(exc.code)
 
+    def run_refused(root, check):
+        # The exit code AND the stderr text, for a vector that must be refused FOR ITS OWN REASON: asserting
+        # only exit 2 would keep a vector green when it is refused for an unrelated reason (an unreadable or
+        # unparsable fixture, say) while the guard under test no longer sees it.
+        err = io.StringIO()
+        with redirect_stdout(io.StringIO()), redirect_stderr(err):
+            try:
+                rc = run(root, check)
+            except SystemExit as exc:
+                rc = "raised SystemExit({!r})".format(exc.code)
+        return rc, err.getvalue()
+
     try:
         tmp = Path(tempfile.mkdtemp(prefix="aiqt-gen-renderers-selftest-"))
     except OSError as exc:
@@ -823,7 +858,10 @@ def self_test_main():
         return 2
     failures = []
     try:
-        # (a) conformant + determinism.
+        # (a) conformant + determinism. The second generation must SUCCEED before its output is compared:
+        # were its return ignored, a failed second run that writes nothing would compare the first output
+        # with itself, so a nondeterminism defect could escape whenever regeneration fails. The injection
+        # control proves a reported failure is recorded, never a silent pass.
         good = tmp / "good"
         _fixture(good, _ENTRY_GOOD)
         if run_quiet(good, check=False) != 0:
@@ -831,16 +869,44 @@ def self_test_main():
         if run_quiet(good, check=True) != 0:
             failures.append("conformant: regeneration expected drift-clean exit 0")
         first = (good / RENDERERS_REL).read_text(encoding="utf-8")
-        run_quiet(good, check=False)
-        if (good / RENDERERS_REL).read_text(encoding="utf-8") != first:
-            failures.append("determinism: two runs are not byte-identical")
 
-        # (b) a helper edit inside the closure changes the framed code-digest.
+        def _determinism_failure(generate):
+            rc = generate(good, False)
+            if rc != 0:
+                return "determinism: second generation expected exit 0, got {}".format(rc)
+            if (good / RENDERERS_REL).read_text(encoding="utf-8") != first:
+                return "determinism: two runs are not byte-identical"
+            return None
+
+        problem = _determinism_failure(run_quiet)
+        if problem is not None:
+            failures.append(problem)
+        if _determinism_failure(lambda root, check: 2) != \
+                "determinism: second generation expected exit 0, got 2":
+            failures.append("determinism control: an injected failing second generation (no write) expected "
+                            "a recorded failure, not a comparison of the first output with itself")
+
+        # (b) a helper edit inside the closure changes the framed code-digest. The generation must SUCCEED
+        # before its output is compared (the same shape as (a) and (c)); the injection control proves that
+        # output written by a run that then reports failure is never accepted.
         edited = tmp / "edited"
         _fixture(edited, _ENTRY_GOOD, helper_body="VALUE = 2\n")
-        run_quiet(edited, check=False)
-        if (edited / RENDERERS_REL).read_text(encoding="utf-8") == first:
-            failures.append("closure completeness: a helper edit did not change the code-digest")
+
+        def _closure_failure(generate):
+            rc = generate(edited, False)
+            if rc != 0:
+                return "closure completeness: generation expected exit 0, got {}".format(rc)
+            if (edited / RENDERERS_REL).read_text(encoding="utf-8") == first:
+                return "closure completeness: a helper edit did not change the code-digest"
+            return None
+
+        problem = _closure_failure(run_quiet)
+        if problem is not None:
+            failures.append(problem)
+        if _closure_failure(lambda root, check: (run_quiet(root, check), 2)[1]) != \
+                "closure completeness: generation expected exit 0, got 2":
+            failures.append("closure control: an injected failure after a real generation expected a "
+                            "recorded failure, not acceptance of the written output")
 
         # (c) a mutated renderers.toml is caught by --check. The regeneration prerequisite records its own
         # failure: were it skipped silently, a drift-detection defect could escape whenever regeneration
@@ -898,9 +964,11 @@ def self_test_main():
                 pkg.mkdir()
                 (pkg / "__init__.py").write_text("", encoding="utf-8")
                 (pkg / "sub.py").write_text("VALUE = 1\n", encoding="utf-8")
-            if run_quiet(case, check=True) != 2:
+            rc, err = run_refused(case, check=True)
+            if rc != 2 or "unsupported use of RENDERER_DECL" not in err:
                 failures.append("an unlisted tools/gen_beta.py binding RENDERER_DECL by {} expected --check "
-                                "exit 2 (unsupported binding, fail-closed)".format(label))
+                                "exit 2 naming an unsupported use (fail-closed), got exit {}"
+                                .format(label, rc))
 
         # (i) a *.py entry that is not a regular file is refused, never skipped.
         def _dangling(p):
@@ -945,18 +1013,27 @@ def self_test_main():
             if run_quiet(case, check=False) != 2:
                 failures.append("a listed generator with {} of RENDERER_DECL expected generation exit 2 "
                                 "(fail-closed)".format(label))
-        try:
-            _read_renderer_decl(tmp / "decl-annotated-rebinding" / "tools" / "gen_alpha.py", "gen_alpha.py")
-            failures.append("the reader alone expected GateError on an annotated rebinding of RENDERER_DECL")
-        except GateError:
-            pass
+        rebound = tmp / "decl-annotated-rebinding" / "tools" / "gen_alpha.py"
+        if not rebound.is_file():
+            failures.append("the reader-alone fixture decl-annotated-rebinding/tools/gen_alpha.py is "
+                            "missing, so the two-binding refusal was never exercised")
+        else:
+            try:
+                _read_renderer_decl(rebound, "gen_alpha.py")
+                failures.append("the reader alone expected GateError on an annotated rebinding of "
+                                "RENDERER_DECL")
+            except GateError as exc:
+                if "bound 2 times at top level" not in str(exc):
+                    failures.append("the reader alone expected the GateError to name the rebinding ('bound "
+                                    "2 times at top level'), got {!r}".format(str(exc)))
         for label, body in _MUTATED:
             case = tmp / ("mutated-" + label.replace(" ", "-"))
             _fixture(case, body)
-            if run_quiet(case, check=False) != 2:
+            rc, err = run_refused(case, check=False)
+            if rc != 2 or "unsupported use of RENDERER_DECL" not in err:
                 failures.append("a listed generator changing RENDERER_DECL in place through {} expected "
-                                "generation exit 2 (the value run would differ from the value read)"
-                                .format(label))
+                                "generation exit 2 naming an unsupported use (the value run would differ "
+                                "from the value read), got exit {}".format(label, rc))
 
         # (k) a coding cookie cannot hide a declaration; a UTF-8 BOM parses as Python parses it.
         for label, data in _COOKIES:
@@ -1046,7 +1123,8 @@ def self_test_main():
             (case / "tools" / "gen_beta.py").write_text(body, encoding="utf-8")
             if run_quiet(case, check=True) != 0:
                 failures.append("an unlisted tools/gen_beta.py with a {} of RENDERER_DECL expected --check "
-                                "exit 0 (not a binding, read or store)".format(label))
+                                "exit 0 (an exempt use or a non-matching string, never proof of "
+                                "inertness)".format(label))
 
         # (p) the fold keeps no value longer than _FOLD_CAP, so a long + chain of long strings stays bounded.
         chain = " + ".join([repr("x" * _FOLD_CAP)] * 4)
@@ -1081,9 +1159,9 @@ def self_test_main():
           "or bare annotations, {} in-place changes to a listed declaration, {} non-UTF-8 coding cookies and "
           "{} injected parser or literal stack overflows each fail closed (exit 2), while an annotated "
           "declaration alone renders, a UTF-8 BOM parses, {} refusal messages name where the binder runs, an "
-          "unreadable file is reported as a read failure, {} uses that only compare against, pass later, "
-          "mention or safely format the name pass, the string fold stays bounded, and this file passes its "
-          "own scan".format(
+          "unreadable file is reported as a read failure, {} exempt or non-matching uses of the name stay "
+          "allowed (allowed uses, never proof of inertness), the string fold stays bounded, and this file "
+          "passes its own scan".format(
               len(_UNSUPPORTED_BINDINGS), len(_REBOUND), len(_MUTATED), len(_COOKIES), len(_DEEP),
               len(_WHERE_MESSAGES), len(_ALLOWED_USES)))
     return 0
