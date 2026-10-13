@@ -4715,6 +4715,24 @@ def _main_isolated(monitor):
         pexpect("(pl-cf1-outside) a real force-push OUTSIDE the quoted heredoc body still DENIES (CLAUDE-F1)",
                 "git push -f origin main <(echo x)", "deny", cwd=plr)
 
+        # FIX-PUSH-LEX-NESTED: a << heredoc opener quoted inside a nested command/parameter
+        # substitution (a dollar-paren, a backquote, or a brace expansion) that is itself nested in
+        # double quotes is DATA at any depth, never a heredoc opener, so it can no longer swallow the
+        # following line. Each form hiding a protected force-push is now SEEN and DENIES; the identical
+        # lines carrying only a harmless command still ALLOW (the discrimination control).
+        pexpect("(pl-lexnest-dollar-paren) a force-push hidden behind a nested-quote heredoc opener DENIES",
+                'echo "$(echo "<<\'EOF\'")"\ngit push --force origin main', "deny", cwd=plr)
+        pexpect("(pl-lexnest-dollar-paren-ctl) the same nested-quote form with only a harmless command ALLOWS",
+                'echo "$(echo "<<\'EOF\'")"\necho done', "allow", cwd=plr)
+        pexpect("(pl-lexnest-backquote) a force-push hidden behind a nested-quote heredoc opener DENIES",
+                'echo "`echo "<<\'EOF\'"`"\ngit push --force origin main', "deny", cwd=plr)
+        pexpect("(pl-lexnest-backquote-ctl) the same nested-quote form with only a harmless command ALLOWS",
+                'echo "`echo "<<\'EOF\'"`"\necho done', "allow", cwd=plr)
+        pexpect("(pl-lexnest-brace) a force-push hidden behind a nested-quote heredoc opener DENIES",
+                'echo "${x:-"<<\'EOF\'"}"\ngit push --force origin main', "deny", cwd=plr)
+        pexpect("(pl-lexnest-brace-ctl) the same nested-quote form with only a harmless command ALLOWS",
+                'echo "${x:-"<<\'EOF\'"}"\necho done', "allow", cwd=plr)
+
         # Push retains its HEAD probe. Commit uses the separate bounded proof probe.
         _orig_head = aiqt_hooks._head_branch
         aiqt_hooks._head_branch = lambda repo: None
@@ -5386,6 +5404,24 @@ def _main_isolated(monitor):
         if not (isinstance(_f17ro, dict)):
             failures.append("(f17-outside) a real 'git reset --hard' OUTSIDE a quoted heredoc must still be "
                             "in scope (not a boundary allow); finding 17 preserves it")
+
+        # FIX-PUSH-LEX-NESTED (lexer + a second consumer): a nested-quote << opener is data at any
+        # depth, so the hidden git command is a visible segment and git_discard keeps a hidden reset
+        # in scope rather than silently allowing it at the true boundary.
+        for _xnm, _xhead in (
+                ("dollar-paren", 'echo "$(echo "<<\'EOF\'")"'),
+                ("backquote", 'echo "`echo "<<\'EOF\'"`"'),
+                ("brace", 'echo "${x:-"<<\'EOF\'"}"'),
+        ):
+            _xcmd = _xhead + '\ngit push --force origin main'
+            texpect("(tok-lexnest-{}) a nested-quote heredoc opener is data; the hidden git push is a visible final segment".format(_xnm),
+                    (len(_argv(_xcmd)), _argv(_xcmd)[-1]),
+                    (2, ["git", "push", "--force", "origin", "main"]))
+            _xro = aiqt_hooks.git_discard({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                           "tool_input": {"command": _xhead + '\ngit reset --hard HEAD~1'}, "cwd": brr})[1]
+            if not isinstance(_xro, dict):
+                failures.append("(gd-lexnest-{}) a git reset --hard hidden behind a nested-quote heredoc "
+                                "opener must stay IN SCOPE for git_discard, not a boundary silent allow".format(_xnm))
 
         # === L11: additional diff-source vectors (the AIRTIGHT-NARROW contract) =======================
         dexpect("(l11-d1) bare git diff denies", "git diff", "deny")
