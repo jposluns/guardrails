@@ -16,21 +16,30 @@ generator alone cannot assert:
     markers, or blockquote markers; the checked region is the WHOLE SECTION the phrase occurs in (from
     the nearest preceding ATX heading, or the top of the file, to the next heading of the same or a
     higher level), with headings found fence-aware (a '#' line inside an open ``` or ~~~ fence is
-    content, not a heading) and an unterminated fence failing closed (exit 2, naming the file and the
-    fence's opening line); the section is REFUSED outright (exit 2, naming the file and line) when it
-    holds an arrangement this line reader cannot prove it bounds: a run of three or more fence
-    characters anywhere but a line-start fence (a list-item, indented or inline fence, whose '#'
-    content could read as a false heading and truncate the section), a line starting with '<' (an
-    HTML block or autolink), or a line opening with '#' that is not a provable ATX heading; no
-    CommonMark container model is attempted. Each manifest name is matched case-insensitively with
+    content, not a heading), a heading ACCEPTED only in the grammar this reader implements (one to six
+    '#' at up to three spaces of indent, then exactly U+0020 or the end of the line; a Unicode
+    whitespace separator such as U+00A0 is refused), and an unterminated fence failing closed (exit 2, naming the
+    file and the fence's opening line); STRUCTURE IS VALIDATED BEFORE A BOUNDARY MAY EXCLUDE TEXT: the
+    whole text from its top to the section's end boundary is REFUSED outright (exit 2, naming the file
+    and line) when any line outside a recognized line-start fence holds an arrangement this line
+    reader cannot prove it reads: a run of three or more fence characters anywhere but a line-start
+    fence (a list-item, indented or inline fence, whose '#' content could read as a false heading and
+    truncate or mis-start the section), a list item opening with '<' (list-item HTML such as
+    '- <pre>'), any other line starting with '<' unless it is a single-line HTML comment ('<!--' at up
+    to three spaces of indent with its '-->' on the same line, which CommonMark closes at that line),
+    or a line opening with '#' that is not a heading in the accepted grammar; no CommonMark container
+    model is attempted. Each manifest name is matched case-insensitively with
     whitespace runs collapsed, anywhere in that region; a table with pipe-free rows, a lazy list
     continuation, a blockquoted list and an emphasis-split phrase are inside the region by
     construction, at the disclosed cost of OVER-REFUSAL (a vendored name mentioned anywhere else in
-    the same section is a finding too). The phrase/name match is CLAIMED only for the enumerated
+    the same section is a finding too, and a refused arrangement anywhere above the section exits 2
+    even when it could not have affected it). The PHRASE match is CLAIMED only for the enumerated
     joiners (whitespace, line wraps, hyphens, the inline marker characters *, _ and ~, and blockquote
-    markers): a phrase or name interrupted by any other inline markup (a backtick code span, link
-    brackets, emphasis markers inside the NAME) is NOT matched -- the claim is narrowed to these
-    joiners rather than the match extended (a disclosed residual, beside the entity-encoded one);
+    markers); the NAME match is claimed only for whitespace, line wraps and blockquote markers. A
+    phrase or name interrupted by any other inline markup (a backtick code span, link brackets; for
+    the NAME also hyphens or emphasis/strikethrough markers) is NOT matched -- the claim is narrowed
+    to these joiners rather than the match extended (a disclosed residual, beside the entity-encoded
+    one);
   - the subset-denominator invariant, checked structure-aware wherever the coverage of a curated-subset
     manifest is rendered: the registry row (name and coverage in one <tr>), the reverse view (name in a
     <summary>, coverage in a later <p> of the same <details>), AND the machine-readable JSON export (a
@@ -80,12 +89,24 @@ PAREN = re.compile(r"frameworks \(([^)]*)\)")
 # The deferred phrase, its words joined by whitespace, line wraps, hyphens, or the inline emphasis or
 # strikethrough markers (*, _, ~), so "Not *yet* vendored" and "Not-yet-vendored" both match.
 DEFERRED = re.compile(r"not[\s*_~-]+yet[\s*_~-]+vendored", re.I)
-HEADING = re.compile(r"^ {0,3}(#{1,6})(?:\s|$)")
+# An ATX heading in the ONLY grammar this reader accepts: one to six '#' at up to three spaces of
+# indent, then exactly one U+0020 or the end of the line. \s is deliberately NOT used: it admits
+# U+00A0 and other Unicode whitespace, which CommonMark does not, so a '#' line with such a
+# separator would read as a false heading and truncate the section.
+HEADING = re.compile(r"^ {0,3}(#{1,6})(?: |$)")
 # A fenced-code-block fence (CommonMark: three or more backticks or tildes, up to 3 spaces of indent).
 FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 # Any run of three or more fence characters, wherever it sits on the line: used to REFUSE a fence this
 # line reader cannot bound (a list-item, indented or inline fence), never to open one.
 FENCE_RUN = re.compile(r"`{3,}|~{3,}")
+# A single-line HTML comment ('<!--' at up to three spaces of indent; the caller also requires its
+# '-->' on the same line): CommonMark ends a type-2 HTML block on the line holding '-->', so this
+# line is provably closed and cannot swallow a later heading. It is the ONLY '<' line the structure
+# scan accepts (the real standards README carries its generated roster markers in this exact shape).
+HTML_COMMENT_LINE = re.compile(r"^ {0,3}<!--")
+# A list item whose content opens with '<' (list-item HTML such as '- <pre>'): the HTML block it
+# opens is container-relative, so this line reader cannot bound it; refused.
+LIST_HTML = re.compile(r"^ {0,3}(?:[-*+]|\d{1,9}[.)])[ \t]+<")
 BLOCKQUOTE = re.compile(r"^ {0,3}> ?")
 N_OF_M = re.compile(r"\b\d+ of \d+\b")
 
@@ -208,22 +229,28 @@ def _heading_levels(lines, where):
     return headings
 
 
-def _refuse_unbounded(lines, first, end, where):
-    """Refuse (OSError -> exit 2, naming the file and line) every arrangement inside a deferred section
-    that this line reader cannot prove it bounds and reads correctly, instead of modelling CommonMark
-    containers: a run of three or more fence characters anywhere but a line-start fence (a list-item,
-    indented or inline fence can open a container-relative code block whose '#' content reads as a
-    false heading and truncates the section -- the opener always precedes that false heading, so it
-    sits inside the truncated section and is caught here); any line starting with '<' (an HTML block
-    can hold '#' lines that are content, not headings); and any line opening with '#' that is not a
-    provable ATX heading (HEADING: one to six '#' at up to three spaces of indent, then a space or
-    the line end). Lines inside a recognized line-start fence are bounded content and exempt. The
-    fence state is recomputed from the section's first line, which is a recognized heading or the top
-    of the text, so no fence is open there and the state agrees with _heading_levels. DELIBERATE
-    OVER-REFUSAL: a harmless list fence or autolink in the section exits 2 too; the alternative is a
-    silent truncation."""
+def _refuse_unbounded(lines, end, where):
+    """Refuse (OSError -> exit 2, naming the file and line) any arrangement, FROM THE TOP OF THE TEXT
+    to the section's end boundary, that this line reader cannot prove it reads, instead of modelling
+    CommonMark containers. Scanning from the top -- never only from the section's first line --
+    validates the structure BEFORE a boundary may exclude text: a container opened above the section
+    (a list fence, an HTML block, list-item HTML) can turn the very line chosen as the section's start
+    or end into a false heading, and the opener always precedes the false heading it manufactures, so
+    it sits in [0, end) and is caught here. Refused, outside recognized line-start fences: a run of
+    three or more fence characters anywhere but a line-start fence (a list-item, indented or inline
+    fence can open a container-relative code block whose '#' content reads as a false heading); a list
+    item opening with '<' (list-item HTML such as '- <pre>'); any other line starting with '<' (an
+    HTML block can hold '#' lines that are content, not headings) UNLESS it is a single-line HTML
+    comment ('<!--' at up to three spaces of indent with its '-->' on the same line, which CommonMark
+    closes at that line, so it cannot swallow a later heading); and any line opening with '#' that is
+    not a heading in the accepted grammar (HEADING: one to six '#' at up to three spaces of indent,
+    then exactly U+0020 or the line end). Lines inside a recognized line-start fence are bounded
+    content and exempt; the fence state is recomputed from the top of the text, where no fence is
+    open, so it agrees with _heading_levels. DELIBERATE OVER-REFUSAL: a harmless list fence, autolink
+    or '<div>' anywhere above the boundary exits 2 too; the alternative is a silent truncation or a
+    silently mis-started section."""
     fence_char, fence_len = None, 0
-    for k in range(first, end):
+    for k in range(end):
         line = lines[k]
         fm = FENCE.match(line)
         if fence_char is not None:
@@ -238,14 +265,20 @@ def _refuse_unbounded(lines, first, end, where):
             raise OSError("{}:{}: a code fence not at line start (a list-item, indented or inline "
                           "fence); the section reader cannot bound the section through it "
                           "(fail-closed)".format(where, k + 1))
-        stripped = line.lstrip()
-        if stripped.startswith("<"):
-            raise OSError("{}:{}: a line starting with '<' (an HTML block this reader does not "
+        if LIST_HTML.match(line):
+            raise OSError("{}:{}: a list item opening with '<' (list-item HTML this reader does not "
                           "model); the section reader cannot bound the section through it "
                           "(fail-closed)".format(where, k + 1))
+        stripped = line.lstrip()
+        if stripped.startswith("<") and not (HTML_COMMENT_LINE.match(line) and "-->" in line):
+            raise OSError("{}:{}: a line starting with '<' that is not a single-line HTML comment "
+                          "(an HTML block this reader does not model); the section reader cannot "
+                          "bound the section through it (fail-closed)".format(where, k + 1))
         if stripped.startswith("#") and not HEADING.match(line):
-            raise OSError("{}:{}: a '#' line that is not a provable ATX heading; the section reader "
-                          "cannot bound the section through it (fail-closed)".format(where, k + 1))
+            raise OSError("{}:{}: a '#' line that is not a heading in the accepted grammar (one to "
+                          "six '#' at up to three spaces of indent, then exactly U+0020 or the line "
+                          "end); the section reader cannot bound the section through it "
+                          "(fail-closed)".format(where, k + 1))
 
 
 def deferred_sections(text, where):
@@ -256,11 +289,14 @@ def deferred_sections(text, where):
     heading of the same or a higher level (or any heading, for the pre-heading preamble), headings
     found fence-aware by _heading_levels. No finer Markdown block model is applied, so a table with
     pipe-free rows, a lazy list continuation, a blockquoted list and an emphasis-split phrase all sit
-    inside the checked region by construction; a section holding an arrangement the reader cannot
-    prove it bounds (a fence not at line start, a line starting with '<', a '#' line that is not a
-    provable ATX heading) is REFUSED via _refuse_unbounded (OSError -> exit 2, naming the file and
-    line). The DISCLOSED COST is over-refusal: a vendored name
-    mentioned anywhere else in the same section is read too."""
+    inside the checked region by construction. The WHOLE TEXT from its top to the section's end
+    boundary -- never only the section -- is validated via _refuse_unbounded BEFORE the section is
+    yielded, so a boundary is proven before it may exclude text: an arrangement the reader cannot
+    prove it reads (a fence not at line start, list-item HTML, a line starting with '<' other than a
+    single-line HTML comment, a '#' line that is not a heading in the accepted grammar) is REFUSED
+    (OSError -> exit 2, naming the file and line) wherever it sits in that span. The DISCLOSED COST is
+    over-refusal: a vendored name mentioned anywhere else in the same section is read too, and a
+    refused arrangement above the section exits 2 even when it could not have affected it."""
     lines = _unquoted_lines(text)
     headings = _heading_levels(lines, where)
     joined = "\n".join(lines)
@@ -278,7 +314,7 @@ def deferred_sections(text, where):
         else:
             first = 0
             end = min((k for k in headings if k > i), default=len(lines))
-        _refuse_unbounded(lines, first, end, where)
+        _refuse_unbounded(lines, end, where)
         yield i + 1, "\n".join(lines[first:end])
 
 
@@ -426,10 +462,11 @@ def main():
 #      continuation line, a heading section holding a '#' line inside a fence (which must not end the
 #      section), and the disclosed over-refusal (a vendored name elsewhere in the same section,
 #      outside any deferred block, is a finding too); and
-#  6zh. a fence whose pseudo-closing line carries an info string does not close (the closing fence
-#      carries nothing else): the '#' line after it stays fenced content, the section is not
-#      truncated, and the name is a finding -> exit 1 (dropping the nothing-else rule turns this
-#      case into a false heading plus an unterminated reopened fence, exit 2);
+#  6zh. a fence whose pseudo-closing line carries trailing words does not close (the closing fence
+#      carries nothing else): the later bare fence line is the real close, the section is not
+#      truncated, and the name after it is a finding -> exit 1 (dropping the nothing-else rule
+#      closes the fence at the pseudo-closing line and reopens an unterminated fence at the bare
+#      line, exit 2);
 #  6g. a vendored name in a section without the phrase, and 6q. one after the next same-level
 #      heading, stay clean (the read is scoped to the section),
 #  6zc-6zg. arrangements the section reader cannot prove it bounds are REFUSED (exit 2, naming the
@@ -439,6 +476,18 @@ def main():
 #      block (6zf), and a four-space-indented fence (6zg); each body keeps the vendored name in the
 #      same rendered section (confirmed against markdown-it), so a truncating read would pass it
 #      clean,
+#  6zi-6zn. arrangements ABOVE or AT the section start are refused too (exit 2, naming the file and
+#      line): the structure scan runs from the top of the text to the section's end boundary, so a
+#      boundary is validated BEFORE it may exclude text. A list fence whose '#' content reads as the
+#      section's START heading (6zi), an HTML block whose '#' content reads as the start heading
+#      (6zj), a list fence above the phrase paragraph with a later independent fence rebalancing the
+#      scanner (6zk), list-item HTML ('- <pre>') whose '#' content reads as the end boundary (6zl),
+#      a '#' line separated by U+00A0 (not a heading in the accepted grammar: HEADING takes exactly
+#      U+0020 or the line end, 6zm), and a separator-less '#' line (pinning the '#'-not-a-heading
+#      refusal branch, 6zn); on the per-section reader this replaces, 6zi-6zm each passed clean
+#      through a truncated or mis-started section,
+#  6zp. a single-line HTML comment above the section ('<!-- ... -->', the real README's generated
+#      roster-marker shape) is NOT over-refused: the section below it is read and passes clean,
 #   7. a subset manifest rendered "3 of 3" in the fixture registry row -> finding (the CWE regression),
 #   8. a missing site/mappings.html -> exit 2 (fail-closed, not a skip),
 #   9. an unreadable standards dir (chmod 0, or an injected permission failure where chmod cannot
@@ -744,6 +793,50 @@ def self_test_main():
                 failures.append("an unbounded section arrangement ({}) expected exit 2 naming "
                                 "standards README:13 (got {}: {!r})".format(label, rc, out))
 
+        # 6zi-6zn. arrangements above or at the section start are refused (exit 2, naming the file
+        #     and line): the structure scan covers the whole text up to the section's end boundary,
+        #     so a false heading manufactured by a container opened ABOVE the section (which a
+        #     per-section scan missed: the mis-started section no longer contains the opener) is
+        #     caught at its opener, and a '#' line that is not a heading in the accepted grammar
+        #     (a U+00A0 separator, no separator) is refused rather than read as a boundary.
+        for label, lineno, readme in (
+                ("6zi list fence manufacturing the section-start heading", 11, _README.replace(prose, (
+                    "- ```\n  ## a\n  not yet vendored\n  ## b\n  ```\n\n"
+                    "- Fixture Full Framework\n\n```text\nexample\n```\n"))),
+                ("6zj HTML block manufacturing the section-start heading", 11, _README.replace(prose, (
+                    "<div>\n## a\nnot yet vendored\n## b\nFixture Full Framework\n</div>\n"))),
+                ("6zk list fence above the phrase with a later independent fence", 13,
+                 _README.replace(prose, (
+                    "- Fixture Full Framework\n\n- ```text\n  # example\n  ```\n\n"
+                    "Not yet vendored.\n\n```text\nexample\n```\n"))),
+                ("6zl list-item HTML manufacturing the end boundary", 13, _README.replace(prose, (
+                    "Not yet vendored:\n\n- <pre>\n  # example\n  </pre>\n\n"
+                    "- Fixture Full Framework\n"))),
+                ("6zm U+00A0-separated '#' line (not a heading in the accepted grammar)", 13,
+                 _README.replace(prose, (
+                    "Not yet vendored:\n\n#\u00a0example\n\n- Fixture Full Framework\n"))),
+                ("6zn separator-less '#' line (pins the '#'-not-a-heading refusal)", 13,
+                 _README.replace(prose, (
+                    "Not yet vendored:\n\n#example\n\n- Fixture Full Framework\n")))):
+            case = tmp / ("deferred-" + label.split()[0])
+            _write_fixture(case, readme=readme)
+            rc, out = run_capture(case)
+            if rc != 2 or "standards README:{}:".format(lineno) not in out:
+                failures.append("a structure arrangement above or at the section start ({}) expected "
+                                "exit 2 naming standards README:{} (got {}: {!r})".format(
+                                    label, lineno, rc, out))
+
+        # 6zp. a single-line HTML comment above the section (the real README's generated roster
+        #     markers carry this exact shape) is NOT over-refused: '-->' on the opening line provably
+        #     closes a CommonMark type-2 HTML block, so the deferred section below it is read and the
+        #     fixture passes clean.
+        roster = tmp / "deferred-6zp"
+        _write_fixture(roster, readme=_README.replace(prose, (
+            "<!-- ROSTER:BEGIN (generated) -->\n\n## Deferred\n\n" + prose)))
+        if run_quiet(roster) != 0:
+            failures.append("a single-line HTML comment above the section expected exit 0 (no "
+                            "over-refusal)")
+
         # 7. a subset manifest rendered "3 of 3" -> finding (the CWE regression case).
         denom = tmp / "denom"
         _write_fixture(denom, page=_PAGE.replace(
@@ -786,9 +879,10 @@ def self_test_main():
         unread_real = tmp / "unread-real"
         _write_fixture(unread_real)
         os.symlink("no-such-manifest.toml", str(unread_real / ".aiqt" / "standards" / "ghost.toml"))
-        if run_quiet(unread_real) != 2:
+        rc, out = run_capture(unread_real)
+        if rc != 2 or "ghost.toml" not in out:
             failures.append("a dangling-symlink manifest expected exit 2 from inside the real loader "
-                            "(fail-closed)")
+                            "naming ghost.toml (fail-closed; got {}: {!r})".format(rc, out))
 
         # 10. a manifest without `catalogue`, and one with `catalogue = "partial"` -> exit 2.
         nocat = tmp / "nocat"
@@ -880,11 +974,16 @@ def self_test_main():
           "a subset manifest rendered with an edition denominator in the registry row or the reverse-view "
           "<p>, and a subset framework carrying ids_total in the JSON export each report a finding (exit "
           "1); and a missing page, a missing JSON export, an unreadable standards dir, an unterminated "
-          "code fence (naming the file and the fence's opening line), a section holding a fence not "
-          "at line start, an HTML block, or a '#' line that is not a provable ATX heading (each "
-          "naming the file and line, never read through a false heading's truncation), a "
-          "dangling-symlink manifest failing inside the real loader, a missing/invalid catalogue, "
-          "and an unaliased publisher all fail closed (exit 2)")
+          "code fence (naming the file and the fence's opening line), a fence not at line start, "
+          "list-item HTML, an HTML block other than a single-line comment, or a '#' line that is not "
+          "a heading in the accepted grammar (one to six '#', then exactly U+0020 or the line end), "
+          "each refused anywhere from the top of the text to the section's end boundary (naming the "
+          "file and line, the structure validated BEFORE a boundary may exclude text, a mis-started "
+          "section included), a "
+          "dangling-symlink manifest failing inside the real loader naming the manifest, a "
+          "missing/invalid catalogue, "
+          "and an unaliased publisher all fail closed (exit 2); a single-line HTML comment above the "
+          "section is not over-refused")
     return 0
 
 

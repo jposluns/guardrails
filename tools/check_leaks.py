@@ -27,9 +27,11 @@ __pycache__ subtrees (the denylist file included). Each yielded path is first CL
     UTF-32 is tried first, UTF-16 is the fallback where its 2-byte mark is present); a stream
     decoding as neither candidate (an odd length, an unpaired surrogate) is a read error (exit 2,
     naming the file), never an ineffective clean scan. A decodable BOM-marked file is scanned in
-    EVERY wide view -- UTF-16 LE and BE each at byte offsets 0 and 1, and UTF-32 LE and BE, each
-    decoded best-effort with undecodable units replaced -- AND in the lossless byte view, so a
-    mismatched-endian or misaligned mark cannot hide text from every view at once; counted as one
+    EVERY wide view -- UTF-16 LE and BE each at byte offsets 0 and 1 (every phase of a 2-byte unit),
+    and UTF-32 LE and BE each at byte offsets 0 to 3 (every phase of a 4-byte unit), each decoded
+    best-effort with undecodable units replaced -- AND in the lossless byte view, so a
+    mismatched-endian or misaligned mark cannot hide UTF-16 or UTF-32 text from every view at once
+    (each unit size is covered at every byte phase); counted as one
     lossless decode (a wide encoding WITHOUT such a mark still falls to the byte decode below, where
     the patterns cannot match across its wide characters; a disclosed residual);
   - its suffix is on the named binary allow-list BINARY_SUFFIXES (matched case-insensitively; an
@@ -185,6 +187,17 @@ def _read_bytes(path):
     return path.read_bytes()
 
 
+# The wide views scanned for every decodable BOM-marked file, beside the declared decode and the
+# lossless byte view: UTF-16 LE and BE at byte offsets 0 and 1 (every phase of a 2-byte unit) and
+# UTF-32 LE and BE at byte offsets 0 to 3 (every phase of a 4-byte unit), so UTF-16 or UTF-32 text at
+# ANY byte alignment behind a mismatched-endian or misaligned mark is decoded by at least one view.
+# The self-test asserts this enumeration DIRECTLY (case 3v): several arrangements match in more than
+# one view, so no single planted file can discriminate every entry.
+WIDE_VIEWS = (("utf-16-le", 0), ("utf-16-le", 1), ("utf-16-be", 0), ("utf-16-be", 1),
+              ("utf-32-le", 0), ("utf-32-le", 1), ("utf-32-le", 2), ("utf-32-le", 3),
+              ("utf-32-be", 0), ("utf-32-be", 1), ("utf-32-be", 2), ("utf-32-be", 3))
+
+
 def read_scan_text(path):
     """Read one walked file for the scan. Returns (texts, lossless, skip_reason): texts is a tuple of
     the decoded views to scan, or None when the file is skipped; lossless is True when a non-UTF-8 file
@@ -195,9 +208,10 @@ def read_scan_text(path):
     encoding decided by a successful decode (UTF-32 first, then UTF-16 where its 2-byte mark is
     present), never by the 4-byte prefix alone, a stream decoding as neither candidate raising
     OSError naming the file (fail-closed exit 2, never an ineffective clean scan), and the decodable
-    file scanned in every wide view (UTF-16 LE and BE at byte offsets 0 and 1, UTF-32 LE and BE,
-    undecodable units replaced) AND in the lossless surrogateescape byte view, so a fake, a
-    mismatched-endian or a misaligned mark cannot hide text from every view at once; a
+    file scanned in every WIDE_VIEWS view (UTF-16 LE and BE at byte offsets 0 and 1, UTF-32 LE and BE
+    at byte offsets 0 to 3, undecodable units replaced) AND in the lossless surrogateescape byte view,
+    so a fake, a mismatched-endian or a misaligned mark cannot hide UTF-16 or UTF-32 text from every
+    view at once (each unit size is covered at every byte phase); a
     remaining non-UTF-8 file whose suffix is on BINARY_SUFFIXES (case-insensitively) is a named SKIP;
     anything else is decoded losslessly with surrogateescape and scanned, whatever its suffix. A read
     error raises OSError for the caller's fail-closed exit 2 (a dangling symlink included)."""
@@ -229,12 +243,12 @@ def read_scan_text(path):
                           "alone) but the stream does not decode as it ({}); fail-closed"
                           .format(path, bom_encoding, exc))
         views = [wide, data.decode("utf-8", errors="surrogateescape")]
-        # Every wide view beside the declared one: a mark that misstates the endianness or sits over
-        # a misaligned stream cannot hide text from all of them at once. Best-effort decodes:
+        # Every wide view beside the declared one (WIDE_VIEWS: each unit size at every byte phase): a
+        # mark that misstates the endianness or sits over a stream misaligned by any byte offset
+        # cannot hide UTF-16 or UTF-32 text from all of them at once. Best-effort decodes:
         # undecodable units are replaced, never raised (the declared decode above is the fail-closed
         # one, and the byte view stays lossless).
-        for enc, off in (("utf-16-le", 0), ("utf-16-le", 1), ("utf-16-be", 0), ("utf-16-be", 1),
-                         ("utf-32-le", 0), ("utf-32-be", 0)):
+        for enc, off in WIDE_VIEWS:
             views.append(data[off:].decode(enc, errors="replace"))
         return tuple(views), True, None
     if path.suffix.lower() in BINARY_SUFFIXES:
@@ -317,8 +331,15 @@ def main():
 #      UTF-32 and found; 3h. a malformed BOM-declared UTF-32 stream fails closed (exit 2, naming the
 #      file); 3i. a valid UTF-16 stream whose first character is U+0000 (its first four bytes equal
 #      the UTF-32 LE mark) is scanned as UTF-16, decided by a successful decode and never by the
-#      prefix alone; 3j. a UTF-16 LE mark over big-endian text is found in the UTF-16-BE wide view;
-#      3k. a misaligned stream behind a UTF-16 LE mark is found in the odd-offset wide view,
+#      prefix alone; 3j. a UTF-16 LE mark over big-endian text is found in the wide views (the
+#      UTF-16-BE offset-0 and the odd-offset UTF-16-LE view both show it); 3k. a misaligned stream
+#      behind a UTF-16 LE mark is found in the wide views (the odd-offset UTF-16-LE and the
+#      UTF-16-BE offset-0 view both show it); 3l-3p. UTF-32 text behind a mismatched or misaligned
+#      mark (a UTF-16 LE or BE mark over UTF-32 text, and a UTF-32 or UTF-16 mark over a stream
+#      misaligned by one, two or three bytes) is found in a UTF-32 view at offsets 0 to 3; 3v. the
+#      WIDE_VIEWS enumeration (each unit size at every byte phase) is asserted DIRECTLY, because
+#      several arrangements match in more than one view and no single planted file discriminates
+#      every entry,
 #   4. a codename in a Latin-1 .txt matches the hash layer (exit 1); 4b. the denylist file itself is
 #      scanned (a private IP in one of its comment lines is a finding); 4c. a suffixless Latin-1 file is
 #      decoded losslessly and its host path found,
@@ -339,7 +360,9 @@ def main():
 # regression fail rather than pass. Against the round-3 revision this replaces, 3i pins the
 # decode-decided (never prefix-decided) BOM classification and 3j and 3k pin the every-wide-view
 # scan (a mismatched-endian and a misaligned mark), while 3e, 3f and 3h now also assert the file is
-# named. The planted host path and private IP are assembled from pieces so
+# named. Against the round-4 revision this replaces, 3l-3p pin the UTF-32 views at byte offsets 0 to
+# 3 (each planted text hid from every then-scanned view) and 3v asserts the WIDE_VIEWS enumeration
+# itself. The planted host path and private IP are assembled from pieces so
 # this source stays clean under its own scan.
 _HOST_PATH = "/" + "opt/" + "fixture-host/private/path"
 _PRIVATE_IP = "10." + "20.30.40"
@@ -479,8 +502,9 @@ def self_test_main():
                             "scanned as UTF-16 (got {}: {!r})".format(rc, out))
 
         # 3j. a UTF-16 LE mark over BIG-ENDIAN text: the declared LE decode succeeds but garbles the
-        #     text and the byte view interleaves NULs, so only the UTF-16-BE wide view shows the host
-        #     path (the vector that discriminates the every-wide-view scan).
+        #     text and the byte view interleaves NULs; the host path shows in the UTF-16-BE offset-0
+        #     view AND in the odd-offset UTF-16-LE view (two views, not one, so this vector alone
+        #     discriminates neither: the required view set is asserted directly by case 3v).
         files = dict(clean_files)
         files["docs/bemasked.md"] = b"\xff\xfe" + ("see " + _HOST_PATH + "\n").encode("utf-16-be")
         rc, out = run_capture(tree("utf16-be-masked", files))
@@ -490,8 +514,9 @@ def self_test_main():
                             "via the UTF-16-BE view (got {}: {!r})".format(rc, out))
 
         # 3k. a UTF-16 LE mark over a MISALIGNED LE stream (one byte inserted after the mark, one
-        #     appended to keep the length even): the declared decode succeeds garbled, and only the
-        #     odd-offset UTF-16-LE view shows the host path.
+        #     appended to keep the length even): the declared decode succeeds garbled; the host path
+        #     shows in the odd-offset UTF-16-LE view AND in the UTF-16-BE offset-0 view (two views,
+        #     not one, so this vector alone discriminates neither: case 3v asserts the view set).
         files = dict(clean_files)
         files["docs/shifted.md"] = (b"\xff\xfe" + b"a"
                                     + ("see " + _HOST_PATH + "\n").encode("utf-16-le") + b"\x00")
@@ -500,6 +525,51 @@ def self_test_main():
                 or "1 non-UTF-8 text file(s) decoded losslessly" not in out):
             failures.append("a host path in a misaligned stream behind a UTF-16 LE mark expected "
                             "exit 1 via the odd-offset view (got {}: {!r})".format(rc, out))
+
+        # 3l-3p. UTF-32 text behind a mismatched or misaligned mark: a UTF-16 LE mark over UTF-32 LE
+        #     text (3l; the stream sits at byte offset 2) and a UTF-16 BE mark over UTF-32 BE text
+        #     (3m) -- each declared decode succeeds as garbled UTF-16 -- and a UTF-32 LE mark with
+        #     one byte (3n) or two bytes (3o) inserted after it (padded so the declared UTF-32 decode
+        #     still succeeds garbled), and a UTF-16 LE mark with one byte inserted over a UTF-32 LE
+        #     stream (3p; the stream sits at byte offset 3). Each host path is visible only in
+        #     UTF-32 views; 3l-3o hid from every view the previous revision scanned (each passed
+        #     clean before the offset-1..3 views existed), while 3p is the phase-3 control (an LE
+        #     stream at offset 3 also reads in the UTF-32-BE offset-0 view, so no planted file
+        #     discriminates a single view: case 3v asserts the enumeration).
+        for label, name, blob in (
+                ("3l", "docs/u32le-off2.md",
+                 b"\xff\xfe" + ("see " + _HOST_PATH + "\n").encode("utf-32-le")),
+                ("3m", "docs/u32be-off2.md",
+                 b"\xfe\xff" + ("see " + _HOST_PATH + "\n").encode("utf-32-be")),
+                ("3n", "docs/u32le-off1.md",
+                 b"\xff\xfe\x00\x00" + b"a" + ("see " + _HOST_PATH + "\n").encode("utf-32-le")
+                 + b"\x00\x00\x00"),
+                ("3o", "docs/u32le-off2b.md",
+                 b"\xff\xfe\x00\x00" + b"ab" + ("see " + _HOST_PATH + "\n").encode("utf-32-le")
+                 + b"\x00\x00"),
+                ("3p", "docs/u32le-off3.md",
+                 b"\xff\xfe" + b"a" + ("see " + _HOST_PATH + "\n").encode("utf-32-le")
+                 + b"\x00")):
+            files = dict(clean_files)
+            files[name] = blob
+            rc, out = run_capture(tree("u32-" + label, files))
+            if (rc != 1 or "{}:1: absolute host path".format(name) not in out
+                    or "1 non-UTF-8 text file(s) decoded losslessly" not in out):
+                failures.append("a host path in UTF-32 text behind a mismatched or misaligned mark "
+                                "({}) expected exit 1 naming {} via a UTF-32 view "
+                                "(got {}: {!r})".format(label, name, rc, out))
+
+        # 3v. the required view enumeration is asserted DIRECTLY: several arrangements (3j and 3k
+        #     included) match in more than one view, so no single planted file can discriminate
+        #     every entry; dropping any view fails here even where the planted files still match
+        #     elsewhere.
+        expected_views = (("utf-16-le", 0), ("utf-16-le", 1), ("utf-16-be", 0), ("utf-16-be", 1),
+                          ("utf-32-le", 0), ("utf-32-le", 1), ("utf-32-le", 2), ("utf-32-le", 3),
+                          ("utf-32-be", 0), ("utf-32-be", 1), ("utf-32-be", 2), ("utf-32-be", 3))
+        if sys.modules[__name__].WIDE_VIEWS != expected_views:
+            failures.append("WIDE_VIEWS must enumerate UTF-16 LE/BE at byte offsets 0-1 and UTF-32 "
+                            "LE/BE at byte offsets 0-3 (got {!r})".format(
+                                sys.modules[__name__].WIDE_VIEWS))
 
         # 4. a codename in a .txt holding a Latin-1 byte matches the hash layer.
         rc, out = run_capture(tree("codename", dict(clean_files, **{
@@ -631,7 +701,9 @@ def self_test_main():
           "file with a byte-order mark, a UTF-16 stream starting with U+0000 (decided by a successful "
           "decode, never the 4-byte prefix alone), single-byte text behind a fake UTF-16 mark (the "
           "byte view is scanned beside the wide views), big-endian or misaligned text behind a UTF-16 "
-          "LE mark (every wide view is scanned), a suffixless Latin-1 file or a symlinked regular "
+          "mark, UTF-32 text behind a mismatched or misaligned mark (the wide views cover UTF-16 LE "
+          "and BE at byte offsets 0-1 and UTF-32 LE and BE at byte offsets 0-3, the enumeration "
+          "itself asserted), a suffixless Latin-1 file or a symlinked regular "
           "file's target, "
           "a codename in a Latin-1 .txt, and a private IP inside the denylist file are each a finding "
           "(exit 1); an undecodable .zip (in either suffix case) and an injected non-regular file are "

@@ -44,7 +44,17 @@ launcher is isolated iff ``I`` is among those option letters, or all of ``P``, `
 Options after the script are never credited, and environment variables (PYTHONSAFEPATH and the like) are
 never credited.
 
-WORKFLOW run: GRAMMAR. A workflow `run:` value is read line-lexically. A block-scalar header is read under the
+WORKFLOW run: GRAMMAR. A workflow `run:` value is read line-lexically, under a CLOSED grammar: the
+only key spelling read is the bare word ``run`` (optionally under a ``- `` sequence dash) with no
+whitespace before its colon, and the only VALUE forms accepted are a plain unquoted scalar, a block
+scalar under the full header grammar below, and a single-quoted scalar with no ``''`` escape (decoded
+to its body, exactly PyYAML's reading). Every other spelling that could carry or hide a run key or
+value is cannot-evaluate (exit 2, naming the file and line), never a misread: a double-quoted scalar
+(its backslash escapes are not decoded here, so its shell text cannot be proven), a single-quoted
+scalar with a ``''`` escape or no closing quote, a quoted scalar followed by anything (a trailing
+comment included), a flow mapping or flow sequence step, value or line, a run key inside a flow
+collection, a quoted run key (``"run":``), an explicit-key marker (``? run``), and a run key with
+whitespace before its colon (``run :``). A block-scalar header is read under the
 full YAML block-header grammar: the ``|`` or ``>`` indicator, an optional indentation digit (1-9) and an
 optional chomping indicator (``+``/``-``) in either order, and an optional trailing comment (``run: | # x``,
 ``run: |2``, ``run: >-2``); every content line of that block is scanned. An EMPTY same-line value is
@@ -73,7 +83,9 @@ programmatic ``subprocess`` children in the tools and the ``regenerate`` strings
 three enumerated QA-suite sources (a ``sys.path[0:0]`` slice, a computed index, a runtime-assembled
 insertion, or one in another source is not caught, and even for those three ``-I`` cannot prevent a
 runtime mutation the source performs), an unrecognized interpreter name, launcher configuration outside the enumerated surfaces,
-YAML or shell constructs beyond the supported line grammar, and the PATH provenance of ``python3``
+YAML or shell constructs beyond the supported line grammar (each known run-key or run-value spelling
+outside it is refused, exit 2; a spelling this line reader does not see at all remains unscanned),
+and the PATH provenance of ``python3``
 itself. A ``python3 tools/*.py`` token embedded in a quoted argument or a heredoc may be miscounted,
 mirroring the roster-scan limit the enforceability ledger discloses.
 
@@ -176,6 +188,26 @@ BLOCK_HEADER_RE = re.compile(r"^[|>](?:[1-9][+-]?|[+-][1-9]?)?(?:[ \t]+#.*)?$")
 # A `run:` value that opens with a YAML node property or alias (an `&anchor`, a `!tag`, a `*alias`) does not
 # carry its shell text where this line grammar reads it, so it is a cannot-evaluate too.
 NODE_PROPERTY_LEADS = ("&", "!", "*")
+# Line spellings OUTSIDE the one supported `run:` key form (RUN_RE: an optional `- ` dash, the bare
+# word `run`, a colon with no whitespace before it) under which YAML could still read a run key or
+# value: each is REFUSED (cannot-evaluate, exit 2, naming the file and line), never silently skipped.
+# A flow mapping or flow sequence -- as a sequence step, as a line of its own, or carrying a `run:`
+# key inline -- an explicit-key marker, a quoted `run` key, and a `run` key with whitespace before
+# its colon are all spellings this line reader does not decode, so none may pass unread.
+UNSUPPORTED_LINE_FORMS = (
+    (re.compile(r"^\s*-\s*[\[{]"),
+     "a flow mapping or flow sequence step, outside the supported line grammar"),
+    (re.compile(r"^\s*[\[{]"),
+     "a line opening a flow collection, outside the supported line grammar"),
+    (re.compile(r"""^\s*(?:-\s+)?(['"])run\1\s*:"""),
+     "a quoted run key, outside the supported line grammar"),
+    (re.compile(r"^\s*(?:-\s+)?\?(?:[ \t]|$)"),
+     "an explicit-key marker ('? '), outside the supported line grammar"),
+    (re.compile(r"^\s*(?:-\s+)?run[ \t]+:(?:[ \t]|$)"),
+     "a run key with whitespace before its colon, outside the supported line grammar"),
+    (re.compile(r"""[\[{,][ \t]*(['"]?)run\1[ \t]*:"""),
+     "a run key inside a flow collection, outside the supported line grammar"),
+)
 # Shell separators (as whole tokens after shlex) that end one simple command and begin the next.
 SEPARATORS = {";", ";;", "|", "||", "&&", "&"}
 # Unquoted shell operators separated from adjacent words before tokenizing, longest first so `;;`,
@@ -454,6 +486,30 @@ def _check_shell_line(rel, lineno, line, errors, failures):
     _scan_command_tokens(rel, lineno, "", tokens, code.strip(), errors, failures)
 
 
+def _decode_scalar(val):
+    """Decode a same-line (or next-line) `run:` scalar under the CLOSED accepted value grammar.
+    Returns (decoded, None) for an accepted form, (None, message) for a refused one. Accepted: a
+    plain unquoted scalar, returned as-is (YAML strips its ` #` trailing comment exactly where the
+    downstream shell comment strip does, so the two readings agree), and a single-quoted scalar
+    whose body holds no quote (no `''` escape), decoded to its body, exactly what PyYAML yields for
+    it. REFUSED (cannot-evaluate, never a misread): a double-quoted scalar (its backslash escapes,
+    `\\n` or `\\u0070` and the like, are not decoded by this line reader, so its shell text cannot
+    be proven), a single-quoted scalar carrying a `''` escape, a quoted scalar followed by anything
+    (a trailing comment included: naive quote-stripping would hand the shell a still-quoted or
+    rejoined command), and an unterminated quoted scalar."""
+    lead = val[:1]
+    if lead == "'":
+        body = val[1:-1]
+        if len(val) >= 2 and val.endswith("'") and "'" not in body:
+            return body, None
+        return None, ("a single-quoted run: value with a quote escape, trailing text or no closing "
+                      "quote, outside the supported scalar grammar")
+    if lead == '"':
+        return None, ("a double-quoted run: value (its escapes are not decoded by this line "
+                      "reader), outside the supported scalar grammar")
+    return val, None
+
+
 def _yaml_run_lines(text):
     """Return (lines, unsupported): lines is a (lineno, shell_line) for every YAML `run:` scalar and every
     line inside a `run:` block scalar; unsupported is a (lineno, message) for every `run:` value this line
@@ -475,7 +531,14 @@ def _yaml_run_lines(text):
     over-refusal), any other value starting with
     `|` or `>` (on the key line or the deeper line), a value opening with a node property or alias, and
     a plain scalar continued onto a further deeper-indented line (YAML folds it into the command, so a
-    launcher there would otherwise go unread). Only `run:` payloads are yielded, so `uses:`/`with:`
+    launcher there would otherwise go unread). The VALUE grammar is CLOSED: a same-line or next-line
+    scalar is accepted only as a plain unquoted scalar or a single-quoted scalar with no `''` escape
+    (decoded by _decode_scalar); a double-quoted scalar, a single-quoted scalar with an escape or no
+    closing quote, a quoted scalar followed by anything (a trailing comment included), and a flow
+    mapping or flow sequence value are unsupported (cannot-evaluate). So is every line spelling a run
+    key outside RUN_RE (UNSUPPORTED_LINE_FORMS): a flow mapping or flow sequence step or line, a run
+    key inside a flow collection, a quoted run key, an explicit-key marker, and a run key with
+    whitespace before its colon. Only `run:` payloads are yielded, so `uses:`/`with:`
     lines (setup-python and the like) are never scanned."""
     lines = text.splitlines()
     out, unsupported = [], []
@@ -483,6 +546,10 @@ def _yaml_run_lines(text):
     while i < n:
         m = RUN_RE.match(lines[i])
         if not m:
+            for pattern, message in UNSUPPORTED_LINE_FORMS:
+                if pattern.search(lines[i]):
+                    unsupported.append((i + 1, message))
+                    break
             i += 1
             continue
         val = (m.group("val") or "").strip()
@@ -571,6 +638,11 @@ def _yaml_run_lines(text):
                                           "grammar".format(nval)))
                 i = j + 1
                 continue
+            if nval[:1] in ("{", "["):
+                unsupported.append((j + 1, "run: value on the line after an empty run: is a flow "
+                                          "collection, outside the supported scalar grammar"))
+                i = j + 1
+                continue
             k = j + 1
             while k < n and lines[k].strip() == "":
                 k += 1
@@ -580,9 +652,11 @@ def _yaml_run_lines(text):
                         and not follow.lstrip().startswith("#")):
                     unsupported.append((k + 1, "run: plain scalar continues on a deeper-indented line, "
                                               "outside the supported line grammar"))
-            if len(nval) >= 2 and nval[0] == nval[-1] and nval[0] in ("'", '"'):
-                nval = nval[1:-1]
-            out.append((j + 1, nval))
+            decoded, refused = _decode_scalar(nval)
+            if refused is not None:
+                unsupported.append((j + 1, refused))
+            else:
+                out.append((j + 1, decoded))
             i = j + 1
             continue
         if BLOCK_HEADER_RE.match(val):
@@ -608,6 +682,11 @@ def _yaml_run_lines(text):
                                        "the supported line grammar".format(val)))
             i += 1
             continue
+        if val[:1] in ("{", "["):
+            unsupported.append((i + 1, "run: value is a flow collection, outside the supported "
+                                       "scalar grammar"))
+            i += 1
+            continue
         if val:
             j = i + 1
             while j < n and lines[j].strip() == "":
@@ -618,9 +697,11 @@ def _yaml_run_lines(text):
                         and not nxt.lstrip().startswith("#")):
                     unsupported.append((j + 1, "run: plain scalar continues on a deeper-indented line, "
                                                "outside the supported line grammar"))
-            if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
-                val = val[1:-1]
-            out.append((i + 1, val))
+            decoded, refused = _decode_scalar(val)
+            if refused is not None:
+                unsupported.append((i + 1, refused))
+            else:
+                out.append((i + 1, decoded))
         i += 1
     return out, unsupported
 
@@ -933,7 +1014,15 @@ def main():
 #      reader refuses, at the header's column or deeper) are cannot-evaluate (exit 2), each naming
 #      .github/workflows/quality.yml and the line; a null run: (next non-blank, non-comment line not
 #      deeper than the key) carries no command text (exit 0), a comment line alone never making it
-#      one.
+#      one,
+#  38. the run: VALUE grammar is closed: a single-quoted scalar with no escape decodes to its body
+#      (a bare launcher there fails, an isolated one passes); a quoted scalar followed by a trailing
+#      comment, a double-quoted scalar (escapes undecoded: `\n`, `\x70`, `\u0074`, `\t`), a
+#      single-quoted scalar with a `''` escape or no closing quote, a flow mapping or flow sequence
+#      step or value, a run key inside a flow collection, a quoted run key, an explicit-key marker,
+#      and a run key with whitespace before its colon are each cannot-evaluate (exit 2), naming
+#      .github/workflows/quality.yml and the line; before this rule the quoted/escaped forms passed
+#      with their launcher unread and the off-grammar key spellings were silently skipped.
 
 SCRIPT = "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py"
 
@@ -1564,6 +1653,62 @@ def self_test_main():
                 failures.append("the {} cannot-evaluate expected to name quality.yml:{} "
                                 "(got {!r})".format(label, named_line, out))
 
+        # 38. The run: VALUE grammar is CLOSED: a plain unquoted scalar, a block scalar (case 34),
+        #     and a single-quoted scalar with no escape are the only accepted forms (the two
+        #     single-quoted controls decode to their body, exactly PyYAML's reading); everything
+        #     else that could carry or hide a run key or value is cannot-evaluate (exit 2, naming
+        #     .github/workflows/quality.yml and the line), never a misread: a quoted scalar followed
+        #     by a trailing comment (naive quote-stripping left the quotes in the shell text, one
+        #     opaque token), a double-quoted scalar (its backslash escapes, `\n`, `\x70`, `\u0074`,
+        #     `\t`, are not decoded here, so PyYAML's command differs from any undecoded reading),
+        #     a single-quoted scalar with a `''` escape or no closing quote, a flow mapping or flow
+        #     sequence step or value, a run key inside a flow collection, a quoted run key, an
+        #     explicit-key marker, and a run key with whitespace before its colon (each a spelling
+        #     PyYAML reads as a run key where the line reader saw none). Before this rule the
+        #     quoted-with-comment and escaped forms passed with their launcher unread, and the
+        #     off-grammar key spellings were silently skipped.
+        sbase = "name: Q\njobs:\n  q:\n    steps:\n"
+        for label, wf_text, want, named_line in (
+                ("sq-plain-iso", sbase + "      - run: 'python3 -I -B tools/alpha.py'\n", 0, None),
+                ("sq-plain-bare", sbase + "      - run: 'python3 tools/alpha.py'\n", 1, None),
+                ("sq-then-comment",
+                 sbase + "      - run: 'python3 tools/alpha.py' # note\n", 2, 5),
+                ("dq-then-comment",
+                 sbase + '      - run: "python3 tools/alpha.py" # note\n', 2, 5),
+                ("dq-backslash-n",
+                 sbase + '      - run: "echo a\\npython3 tools/alpha.py"\n', 2, 5),
+                ("dq-escape-x",
+                 sbase + '      - run: "\\x70ython3 tools/alpha.py"\n', 2, 5),
+                ("dq-escape-u",
+                 sbase + '      - run: "py\\u0074hon3 tools/alpha.py"\n', 2, 5),
+                ("dq-escape-tab",
+                 sbase + '      - run: "echo a;\\tpython3 tools/alpha.py"\n', 2, 5),
+                ("dq-plain", sbase + '      - run: "python3 -I -B tools/alpha.py"\n', 2, 5),
+                ("sq-escape",
+                 sbase + "      - run: 'it''s python3 tools/alpha.py'\n", 2, 5),
+                ("sq-unterminated", sbase + "      - run: 'python3 tools/alpha.py\n", 2, 5),
+                ("flow-map-step", sbase + "      - {run: python3 tools/alpha.py}\n", 2, 5),
+                ("flow-seq-step", sbase + "      - [run, python3 tools/alpha.py]\n", 2, 5),
+                ("flow-steps-value",
+                 "name: Q\njobs:\n  q:\n    steps: [{run: python3 tools/alpha.py}]\n", 2, 4),
+                ("quoted-key", sbase + '      - "run": python3 tools/alpha.py\n', 2, 5),
+                ("quoted-key-sq", sbase + "      - 'run': python3 tools/alpha.py\n", 2, 5),
+                ("explicit-key",
+                 sbase + "      - ? run\n        : python3 tools/alpha.py\n", 2, 5),
+                ("spaced-key", sbase + "      - run : python3 tools/alpha.py\n", 2, 5),
+                ("flow-value", sbase + "      - run: {a: python3 tools/alpha.py}\n", 2, 5),
+                ("comment-val-dq-next",
+                 sbase + '      - run: # c\n          "echo a\\npython3 tools/alpha.py"\n', 2, 6)):
+            rc, out = run_capture(_build(tmp / ("value-grammar-" + label), workflow=wf_text))
+            if rc != want:
+                failures.append("a run: value-grammar {} form expected exit {} (got {})".format(
+                    label, want, rc))
+            elif named_line is not None and (
+                    "cannot-evaluate: .github/workflows/quality.yml:{}:".format(named_line)
+                    not in out):
+                failures.append("the {} cannot-evaluate expected to name quality.yml:{} "
+                                "(got {!r})".format(label, named_line, out))
+
         # 10. The gate REFUSES (exit 2) when its own interpreter is not isolated (a real subprocess: no
         #     -I, so the bootstrap self-guard fires before any scan or sibling import).
         refuse = subprocess.run([sys.executable, str(Path(__file__).resolve())], capture_output=True,
@@ -1634,7 +1779,13 @@ def self_test_main():
           "or above its own column, and a '#' line directly after the header (YAML block content this "
           "reader refuses) are cannot-evaluate (exit 2), each naming the file and line; any other run: value "
           "starting with | or > on either line, a node property or alias, and a further-continued plain "
-          "scalar are cannot-evaluate (exit 2); every *.yml workflow candidate that is not a regular "
+          "scalar are cannot-evaluate (exit 2); the run: value grammar is closed (a plain scalar, a "
+          "block scalar, a single-quoted scalar with no escape decoded to its body): a double-quoted "
+          "scalar, a quoted scalar followed by a trailing comment or text, a single-quoted escape or "
+          "unterminated quote, a flow mapping or sequence step or value, a run key in a flow "
+          "collection, a quoted or explicit run key, and a run key with whitespace before its colon "
+          "are each cannot-evaluate (exit 2) naming the file and line; "
+          "every *.yml workflow candidate that is not a regular "
           "file (a symlink of any kind, a directory, or another non-regular entry) is a named "
           "cannot-evaluate (exit 2); and "
           "the gate refuses to run non-isolated (exit 2), with stderr on /dev/full and with descriptor "
