@@ -4,8 +4,9 @@
 
 AIQT Guardrails holds your AI assistant to one standard: **A**ccuracy, **I**ntegrity, **Q**uality, and
 **T**rust. More than guidance: these principles outrank progress, speed, and cost. In chat, the standard
-guides your assistant. In this repository, CI gates check each pull request and each push to main
-against the rules the gates cite, a subset of the standard. Open source, and built to be read.
+guides your assistant. In this repository, CI gates check each pull request targeting main and each
+push to main against the rules the gates cite, a subset of the standard. Open source, and built to
+be read.
 
 **132 rules. 108 CI gates that check this repository. 26 Claude Code hooks shipped as an opt-in plugin. Mapped to 17 frameworks.**
 
@@ -16,7 +17,7 @@ The full pack and per-assistant setup guides live at [aiqt.ai](https://aiqt.ai).
 | Where | What you get | Tag |
 | --- | --- | --- |
 | **In a chat assistant** | Add AIQT to Claude, ChatGPT, Gemini, or Copilot in the form each assistant supports: a skill, a Gem, an agent, or an uploaded instruction file. The standard guides every conversation: instructions are context the assistant follows, not an enforcement mechanism. | Available |
-| **In a coding assistant** | For Claude Code, Codex, Cursor, or Copilot in the editor, the governance core is published to inspect and use as preview instructions today, and the repository ships its Claude Code enforcement hooks as a generated plugin you can install by hand. The generated adapters, a guided install, and a setup doctor arrive with the 1.1.0 developer release, in development. | Preview |
+| **In a coding assistant** | For Claude Code, Codex, Cursor, or Copilot in the editor, the governance core is published to inspect and use as preview instructions today, and the repository ships its Claude Code enforcement hooks as a generated plugin. The generated adapters, a guided install, and a setup doctor arrive with the 1.1.0 developer release, in development. | Preview |
 
 ## 02. What is inside.
 
@@ -39,11 +40,12 @@ The full pack and per-assistant setup guides live at [aiqt.ai](https://aiqt.ai).
 
 Claude Code reads some files into every session before you type anything. A shipped gate measures the
 pack's share of that always loaded text and fails if it grows. This project's target is to keep
-everything Claude Code loads at the start of a session under 150,000 characters in total. One caveat: on
-models with a 200k-token context window, Claude Code applies a total limit below that figure: 120,000
-characters, read from the pinned Claude Code build the gate models (2.1.287; Claude Code behaviour,
-which can change, not a pack guarantee), so on those models budget to 120,000. The counting rules,
-the totals the gate prints, and what not to load twice are in [Keep the always loaded instructions small](INSTRUCTION-BUDGET.md).
+everything Claude Code loads at the start of a session under 150,000 characters in total. One caveat:
+the loader of the pinned Claude Code build the gate models (2.1.287, pinned with its binary hash in
+`.aiqt/core/instruction-budget.toml`) carries its own 120,000-character check on loaded file contents,
+a total limit below that figure (Claude Code behaviour, which can change, not a pack guarantee), so
+budget to 120,000. The counting rules, the totals the gate prints, and what not to load twice are
+in [Keep the always loaded instructions small](INSTRUCTION-BUDGET.md).
 
 ## 05. Verify your download.
 

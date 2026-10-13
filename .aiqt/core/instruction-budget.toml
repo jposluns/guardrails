@@ -46,9 +46,9 @@
 #                        admits only reference docs produced and published independently of the assistant's
 #                        instances and agents (secprv.5), net of same-meaning cuts (secprv.1 to secprv.4): rule
 #                        files 116234 -> 116279 (+45 units); managed block 360 and file headers 16136 unchanged.
-#   ceiling              the reported PACK bound; not enforced. Its value predates header counting,
-#                        which added 16136 units to PACK at the 112222 -> 128358 ratchet raise; it was not
-#                        raised with it.
+#   ceiling              a reported PACK figure; not enforced, and PACK currently exceeds it. Its value
+#                        predates header counting, which added 16136 units to PACK at the 112222 ->
+#                        128358 ratchet raise; it was not raised with it.
 #   claude-code-version  the Claude Code build whose loading behaviour the gate models.
 #   binary-sha256        the SHA-256 of that build's binary.
 ratchet = 132775

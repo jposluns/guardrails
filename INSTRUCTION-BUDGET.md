@@ -5,14 +5,15 @@ under `.claude/rules/` and the AIQT block in `CLAUDE.md`, plus `.claude/CLAUDE.m
 gate, `tools/check_instruction_budget.py`, measures that text, with the header line Claude Code writes
 before each file, and fails if the pack's share grows. The enforced figure lives in
 `.aiqt/core/instruction-budget.toml` (`ratchet`), lowered as the pack shrinks and raised only with a
-reviewed reason; the `ceiling` in that file is a separate figure, a reported bound for the pack's
-own share alone, not enforced.
+reviewed reason; the `ceiling` in that file is a separate reported figure for the pack's own share
+alone, not enforced, and PACK currently exceeds it (its value predates the header counting that
+raised PACK, and was not raised with it).
 
 Treat 150,000 characters as this project's target for everything Claude Code loads at the start of a
-session. One caveat: on models with a 200k-token context window, Claude Code applies a total limit
-below that figure: 120,000 characters, read from the pinned Claude Code build the gate models
-(2.1.287 in `.aiqt/core/instruction-budget.toml`; Claude Code behaviour, which can change, not a pack
-guarantee), so on those models budget to 120,000, not 150,000. The gate prints two totals: PACK, the
+session. One caveat: the loader of the pinned Claude Code build the gate models (2.1.287 in
+`.aiqt/core/instruction-budget.toml`) carries its own 120,000-character check on loaded file
+contents, a total limit below that figure (Claude Code behaviour, which can change, not a pack
+guarantee), so budget to 120,000, not 150,000. The gate prints two totals: PACK, the
 pack's own share, and SESSION, which adds the rest of your `CLAUDE.md` and its imports. Both count
 `.claude/CLAUDE.md` and its imports, and a header for each loaded file with its resolved path relative to
 the repository root (not the absolute part, which depends on where the repository sits). Compare SESSION,
