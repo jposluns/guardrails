@@ -112,10 +112,15 @@ A DRY RUN (--dry-run, or any live selection without --apply) prepares and valida
 candidate in the same private scratch checkout: the branch and head agreement, the
 checkout-completeness probe, the merge and its conflict policy, regeneration, the declared checks
 and the pushed-bytes, commit-tree, parent and fresh-normal-checkout guards all run exactly as under
---apply, and the run stops before the retry marker and the push, so nothing outside the private
-scratch is written. would-merge is therefore reported only for a candidate that passed that whole
+--apply, and the run stops before the retry marker and the push. What a dry run still WRITES,
+stated exactly: the lock file (every run opens and locks it), and the objects the private
+scratch's merge, regeneration and commit-tree work writes through the SHARED object store, whose
+byte-identical writes may refresh the mtime of an already-present author-side object (the
+disclosed residual above); no retry marker, no push, no ref, and nothing else outside the private
+scratch. would-merge is therefore reported only for a candidate that passed that whole
 validation; a conflict or a failing check is refused with the same status --apply would give
-(FIX-541 round 1, codex major: the dry run used to report would-merge before any of it ran).
+(FIX-541 round 1, codex major: the dry run used to report would-merge before any of it ran; round
+2, decided 6: the lock file and the shared-object writes are named here as what a dry run writes).
 
 The config is read from the fetched base tip (`git show <M>:.aiqt/merge-train.toml`), never from a
 PR branch or the checkout; the [busy] table is still accepted, and ignored, for config
@@ -213,6 +218,19 @@ GIT_GLOBAL_VALUED = frozenset(("-c", "-C", "--config-env", "--git-dir", "--work-
                                "--namespace", "--attr-source"))
 GIT_GLOBAL_EQUALS = frozenset(("--config-env", "--git-dir", "--work-tree", "--namespace",
                                "--attr-source", "--exec-path", "--list-cmds"))
+
+# Configured-command heads guard_config_fail_closed refuses outright, stated exactly: these heads
+# execute their own argument vector (env and the exec-wrapper family) or a shell command string,
+# so a trusted-but-mistaken config could hand git an unpinned argv one hop past the head check
+# (FIX-541 round 2, decided 3).
+CONFIG_LAUNCHERS = frozenset((
+    "env", "sh", "bash", "dash", "ksh", "mksh", "zsh", "csh", "tcsh", "fish", "busybox",
+    "xargs", "nohup", "setsid", "nice", "ionice", "stdbuf", "timeout", "doas", "sudo"))
+# Interpreter heads whose inline-code options are refused in a configured command: -c or -e among
+# the leading option words (attached values and single-dash clusters ending in c or e included; a
+# cluster like -We is over-refused by that last rule, accepted as fail-closed). The first word not
+# starting with - ends the scan: options after a script path belong to the script.
+CONFIG_INTERPRETERS = re.compile(r"\A(python|pypy|perl|ruby|node|nodejs|lua)[0-9.]*\Z")
 
 # Every argv the tool hands to git, for the self-test's forbidden-operation audit.
 GIT_AUDIT = []
@@ -409,6 +427,20 @@ def _run_child(argv, cwd=None, env=None, timeout=None, push=False):
     return subprocess.CompletedProcess(list(argv), proc.returncode, out, err)
 
 
+def _config_pair_forbidden(pair):
+    """A -c or --config-env payload whose KEY can redefine what a later argv word MEANS or where
+    a push GOES, stated exactly: alias.* (the resolved subcommand would dispatch elsewhere),
+    push.*, and remote.<name>.mirror, remote.<name>.push and remote.<name>.pushurl (the pushurl
+    sibling is included: it moves the push destination, the same class). Git reads section and
+    variable names case-insensitively; the subsection between them is not inspected. The tool's
+    own -c keys (gc.*, maintenance.*, core.*, protocol.*) are outside these classes and stay
+    allowed (FIX-541 round 2, decided 4: neither predicate used to read what a -c value DID)."""
+    key = pair.split("=", 1)[0].split(".")
+    if key[0].lower() in ("alias", "push"):
+        return True
+    return key[0].lower() == "remote" and key[-1].lower() in ("mirror", "push", "pushurl")
+
+
 def _forbidden(args):
     """The argv audit enforced on every git call, kept in exact agreement with the self-test's
     independently written _audit_violation: no rebase, cherry-pick, stash, clean, gc, worktree
@@ -420,8 +452,10 @@ def _forbidden(args):
     src:dst alias). The subcommand is resolved after git's global options (-c k=v, -C dir,
     --git-dir, --work-tree and the rest git accepts before a subcommand; see GIT_GLOBAL_FLAGS,
     GIT_GLOBAL_VALUED and GIT_GLOBAL_EQUALS), and an argv whose subcommand cannot be resolved is
-    forbidden outright, never read as harmless (FIX-541 round 1, codex medium). After the
-    subcommand, the first non-option word is the repository (a URL may carry a colon)."""
+    forbidden outright, never read as harmless (FIX-541 round 1, codex medium). A -c or
+    --config-env payload whose key falls in _config_pair_forbidden is forbidden even when the
+    resolved subcommand is harmless (FIX-541 round 2, decided 4). After the subcommand, the
+    first non-option word is the repository (a URL may carry a colon)."""
     words = list(args)
     i = 0
     while i < len(words) and words[i].startswith("-"):
@@ -429,8 +463,14 @@ def _forbidden(args):
         if w in GIT_GLOBAL_FLAGS:
             i += 1
         elif w in GIT_GLOBAL_VALUED:
+            if (w in ("-c", "--config-env") and i + 1 < len(words)
+                    and _config_pair_forbidden(words[i + 1])):
+                return True
             i += 2
         elif "=" in w and w.split("=", 1)[0] in GIT_GLOBAL_EQUALS:
+            if (w.split("=", 1)[0] == "--config-env"
+                    and _config_pair_forbidden(w.split("=", 1)[1])):
+                return True
             i += 1
         else:
             return True
@@ -574,13 +614,30 @@ def guard_config_fail_closed(data):
             bad("%s must be a non-empty list of commands" % where)
         for command in value:
             str_list(command, where + " command")
-            # FIX-541 round 1 (codex medium): the maintenance-scan exception's premise is
-            # ENFORCED here, never just asserted: a configured command whose argv head names git
-            # (any path form) would reach _run_child without the funnel's maintenance pins.
+            # FIX-541 rounds 1 and 2 (codex medium; decided 3): the maintenance-scan exception's
+            # premise is ENFORCED here, never just asserted: a configured command whose argv head
+            # names git (any path form) would reach _run_child without the funnel's maintenance
+            # pins, and a launcher head or an interpreter handed inline code could hand git that
+            # same unpinned argv one hop later. Deny-list, stated exactly: a head naming git; a
+            # head in CONFIG_LAUNCHERS; a CONFIG_INTERPRETERS head given -c or -e (inline code)
+            # among its leading option words. A configured program outside this list can still
+            # run git itself: the trusted-config threat model accepts that residual.
             head = command[0].replace("\\", "/").rsplit("/", 1)[-1]
             if head == "git":
                 bad("%s command %r must not launch git: the merge train runs git only through "
                     "its own pinned funnel" % (where, command[0]))
+            if head in CONFIG_LAUNCHERS:
+                bad("%s command %r must not run through launcher %r: a launcher can hand git an "
+                    "unpinned argv around the funnel" % (where, command[0], head))
+            if CONFIG_INTERPRETERS.match(head):
+                for word in command[1:]:
+                    if not word.startswith("-"):
+                        break
+                    if (word.startswith("-c") or word.startswith("-e")
+                            or (not word.startswith("--") and word[-1] in "ce")):
+                        bad("%s command %r must not pass inline interpreter code (%r): inline "
+                            "code can hand git an unpinned argv around the funnel" % (
+                                where, command[0], word))
 
     if not isinstance(data, dict):
         bad("not a table")
@@ -1615,9 +1672,10 @@ EXECUTED = []
 _EXECUTED_SET = set()
 SKIPPED = []
 # Case exceptions, kept APART from check failures: in a normal run a crash fails the suite like
-# any failure, but red-on-revert never counts one as a red mutant (FIX-541 round 1, claude minor:
-# a guard is proven red only by its case's own named assertion failing; a case exception during a
-# revert is reported as cannot-evaluate for that guard, and the suite fails).
+# any failure, but red-on-revert never counts one as a red mutant (FIX-541 rounds 1 and 2: a
+# guard is proven red only by its case's own named assertions failing WITH no crash recorded; a
+# case exception during a revert is cannot-evaluate for that guard even when a named check also
+# failed, and the suite fails; see _revert_outcome).
 CRASHES = []
 _RECORDER = dict(executed=_EXECUTED_SET, list=EXECUTED, failures=FAILURES, skipped=SKIPPED,
                  crashes=CRASHES)
@@ -1634,6 +1692,8 @@ for dirpath, dirnames, filenames in os.walk(os.path.join(root, "src")):
                                     os.path.relpath(path, root)))
 text = "\n".join(sorted(lines)) + "\n"
 target = os.path.join(root, "gen", "digest.txt")
+if "--check-fail" in sys.argv:
+    sys.exit(1)
 if "--check" in sys.argv:
     with open(target) as handle:
         sys.exit(0 if handle.read() == text else 1)
@@ -1652,6 +1712,31 @@ if os.environ.get("TOY_DRIFT"):
 os.makedirs(os.path.dirname(target), exist_ok=True)
 with open(target, "w") as handle:
     handle.write(text)
+"""
+
+# Fixture sleeper scripts, committed into the fixture repo and named by its config: the config
+# schema refuses an interpreter handed inline -c code, so these cases route their sleeping
+# regenerate through a committed script instead (FIX-541 round 2, decided 3). The -c spawns
+# INSIDE the scripts are direct child launches, never config-routed argvs.
+TOY_SLEEP_TIMEOUT = r"""import os, subprocess, sys, time
+gc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
+with open(os.environ["TIMEOUT_PID_FILE"], "w") as handle:
+    handle.write(str(os.getpid()) + " " + str(gc.pid))
+time.sleep(300)
+"""
+
+TOY_SLEEP_SIGNAL = r"""import os, subprocess, sys, time
+CODE = ("import os, signal, sys, time;"
+        " signal.signal(signal.SIGTERM, signal.SIG_IGN);"
+        " fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT);"
+        " os.write(fd, (sys.argv[2] + chr(32) + str(os.getpid())).encode());"
+        " os.close(fd); time.sleep(300)")
+subprocess.Popen([sys.executable, "-c", CODE, os.environ["SIG_PID_FILE"], str(os.getpid())])
+time.sleep(120)
+"""
+
+TOY_SLEEP_LAUNCH = r"""import time
+time.sleep(120)
 """
 
 FAKE_GH = r"""import json, os, subprocess, sys
@@ -1756,7 +1841,13 @@ def _audit_violation(args):
     force spec, no :delete spec, no src:dst alias). The subcommand is resolved after git's
     global options through this predicate's OWN tables (kept apart from GIT_GLOBAL_*), and an
     argv whose subcommand cannot be resolved is a violation outright (FIX-541 round 1, codex
-    medium). After the subcommand, the first non-option word is the repository."""
+    medium). A -c or --config-env payload whose key names alias.*, push.*, or
+    remote.<name>.mirror, .push or .pushurl is a violation even under a harmless resolved
+    subcommand; these key classes are DELIBERATELY identical in membership to
+    _config_pair_forbidden's (agreement on every argv is the invariant; independence lives in
+    the implementation), and case_audit probes each predicate independently so a shared gap
+    still turns its vectors red (FIX-541 round 2, decided 4). After the subcommand, the first
+    non-option word is the repository."""
     words = list(args)
     flags = ("-p", "--paginate", "-P", "--no-pager", "--bare", "--no-replace-objects",
              "--literal-pathspecs", "--glob-pathspecs", "--noglob-pathspecs",
@@ -1771,8 +1862,20 @@ def _audit_violation(args):
         if w in flags:
             i += 1
         elif w in valued:
+            if w in ("-c", "--config-env") and i + 1 < len(words):
+                key = words[i + 1].split("=", 1)[0].split(".")
+                if key[0].lower() in ("alias", "push") or (
+                        key[0].lower() == "remote"
+                        and key[-1].lower() in ("mirror", "push", "pushurl")):
+                    return True
             i += 2
         elif "=" in w and w.split("=", 1)[0] in equals:
+            if w.split("=", 1)[0] == "--config-env":
+                key = w.split("=", 1)[1].split("=", 1)[0].split(".")
+                if key[0].lower() in ("alias", "push") or (
+                        key[0].lower() == "remote"
+                        and key[-1].lower() in ("mirror", "push", "pushurl")):
+                    return True
             i += 1
         else:
             return True
@@ -2050,6 +2153,22 @@ def case_config(_tmp):
     check("config/git-regenerate-command-refused",
           verdict(lambda d: d["generated"].update(regenerate=[["/usr/bin/git", "fetch"]])),
           "refused")
+    # FIX-541 round 2 (decided 3): nor may a configured command reach git one hop away through a
+    # launcher head or inline interpreter code; the boundary case, an interpreter running a
+    # script with leading isolation options, stays accepted.
+    check("config/env-git-command-refused",
+          verdict(lambda d: d["generated"].update(check=[["env", "git", "status"]])), "refused")
+    check("config/env-path-git-command-refused",
+          verdict(lambda d: d["generated"].update(check=[["/usr/bin/env", "git", "status"]])),
+          "refused")
+    check("config/shell-inline-command-refused",
+          verdict(lambda d: d["generated"].update(check=[["sh", "-c", "git status"]])), "refused")
+    check("config/interpreter-inline-code-refused",
+          verdict(lambda d: d["generated"].update(check=[["python3", "-c", "print(1)"]])),
+          "refused")
+    check("config/interpreter-script-accepted",
+          verdict(lambda d: d["generated"].update(
+              check=[["python3", "-I", "-B", "tools/gen.py", "--check"]])), "accepted")
 
 
 def case_absent(tmp):
@@ -2264,8 +2383,13 @@ def case_badname(tmp):
         rc, reports, _fatal = fx.run(apply=True)
     except AssertionError as exc:
         # With the branch-name guard reverted, the argv audit refuses the inexpressible lease at
-        # the push; surface that as a result shape so red-on-revert reads this case's own NAMED
-        # assertions going red, never a crash (FIX-541 round 1, claude minor).
+        # the push; surface EXACTLY that refusal as a result shape so red-on-revert reads this
+        # case's own NAMED assertions going red, never a crash (FIX-541 round 1, claude minor).
+        # Any OTHER AssertionError is re-raised into crash recording: an unrelated fixture
+        # exception must never masquerade as mutation discrimination (FIX-541 round 2, decided 1;
+        # pinned by meta/unrelated-assertion-reaches-crash-recording).
+        if "forbidden git operation refused by the argv audit" not in str(exc):
+            raise
         rc, reports = "argv-audit refused: %s" % exc, []
     worked = [a for a in GIT_AUDIT[audit:] if a[:1] in (
         ["clone"], ["merge"], ["commit-tree"], ["push"], ["checkout"], ["add"], ["write-tree"])]
@@ -2349,11 +2473,40 @@ def case_audit(_tmp):
     check("audit/global-option-reset-funnel", _forbidden(prefixed_reset), True)
     check("audit/global-option-reset-audit", _audit_violation(prefixed_reset), True)
     # An argv whose subcommand cannot be resolved is forbidden outright (fail closed), and a
-    # benign global-option prefix still resolves to its harmless subcommand.
+    # benign global-option prefix still resolves to its harmless subcommand (a COMPATIBILITY
+    # check guarding against forbidding too much, NOT a red-on-revert vector: both predicates
+    # returned False for this argv before the round-1 fix too).
     check("audit/global-option-unresolvable-fails-closed",
           (probed(["--exec-path"]), probed(["-c"]), probed([])), (both, both, both))
     check("audit/global-option-benign-resolves",
           probed(["-c", "color.ui=false", "status", "--porcelain"]), neither)
+    # FIX-541 round 2 (decided 4): a forbidden operation DEFINED through configuration (-c or
+    # --config-env): alias dispatch, the push destination and mirror keys, and the push.*
+    # section. The two predicates' option and key tables are DELIBERATELY identical in
+    # membership (they must agree on every argv; their independence is in implementation, not
+    # in membership), so each probe below tests each predicate INDEPENDENTLY: a gap shared by
+    # both tables still turns these vectors red.
+    alias_push = ["-c", "alias.x=push --force", "x", "origin", "feat/x"]
+    alias_reset = ["-c", "alias.r=reset --hard", "r"]
+    env_alias = ["--config-env=alias.x=EVIL", "x"]
+    remote_mirror = ["-c", "remote.origin.mirror=true", "push", "origin"]
+    remote_push = ["-c", "remote.origin.push=+refs/heads/*:refs/heads/*", "push", "origin"]
+    push_section = ["-c", "push.default=matching", "status"]
+    for vector in (alias_push, alias_reset, env_alias, remote_mirror, remote_push,
+                   push_section):
+        probes.append(list(vector))
+    check("audit/config-key-alias-push-funnel", _forbidden(alias_push), True)
+    check("audit/config-key-alias-push-audit", _audit_violation(alias_push), True)
+    check("audit/config-key-alias-reset-funnel", _forbidden(alias_reset), True)
+    check("audit/config-key-alias-reset-audit", _audit_violation(alias_reset), True)
+    check("audit/config-key-config-env-alias-funnel", _forbidden(env_alias), True)
+    check("audit/config-key-config-env-alias-audit", _audit_violation(env_alias), True)
+    check("audit/config-key-remote-mirror-funnel", _forbidden(remote_mirror), True)
+    check("audit/config-key-remote-mirror-audit", _audit_violation(remote_mirror), True)
+    check("audit/config-key-remote-push-funnel", _forbidden(remote_push), True)
+    check("audit/config-key-remote-push-audit", _audit_violation(remote_push), True)
+    check("audit/config-key-push-section-funnel", _forbidden(push_section), True)
+    check("audit/config-key-push-section-audit", _audit_violation(push_section), True)
     check("audit/predicates-agree",
           [a for a in probes if _forbidden(a) != _audit_violation(a)], [])
     # FIX-541 round 1: the maintenance-pin scan cannot resolve _run_child's head and relies on
@@ -2402,16 +2555,20 @@ def case_conflict(tmp):
 
 
 def _refusal_run(tmp, name, env_key=None, failing_check=False, seen=None):
-    """A stale-generated PR run with --apply under one injected generator fault; returns
-    (exit code, result, reason, (snapshot differences, tool pushes)). The fixture is appended to
-    seen for the invariant check."""
+    """A stale-generated PR run twice under one injected generator fault, dry first and then
+    with --apply; returns (exit code, result, reason, (snapshot differences, tool pushes),
+    (dry exit code, dry result)). The dry run must refuse with the SAME status --apply gives
+    (FIX-541 round 2, decided 2). The fixture is appended to seen for the invariant check."""
     fx = _fixture(tmp, name)
     if seen is not None:
         seen.append(fx)
     wt = _stale_pr(fx)
     if failing_check:
+        # The failing check stays a config-routed command: the schema now refuses inline
+        # interpreter code, so the toy generator grew a --check-fail mode instead (FIX-541
+        # round 2, decided 3).
         text = _read_text(fx.main / CONFIG_PATH).replace(
-            '"tools/gen.py", "--check"', '"-c", "import sys; sys.exit(1)"')
+            '"tools/gen.py", "--check"', '"tools/gen.py", "--check-fail"')
         fx.write(fx.main, CONFIG_PATH, text)
         _git(fx.main, "commit", "-q", "-am", "failing check", extra_env=FIXTURE_IDENT)
         _git(fx.main, "push", "-q", "origin", "main")
@@ -2419,26 +2576,37 @@ def _refusal_run(tmp, name, env_key=None, failing_check=False, seen=None):
     if env_key:
         os.environ[env_key] = "1"
     try:
+        rc_dry, reports_dry, _fatal = fx.run()
         rc, reports, _fatal = fx.run(apply=True)
     finally:
         os.environ.pop(env_key or "TOY_UNSET", None)
     reason = reports[0]["reason"] if reports else ""
-    return rc, _result(reports, 1), reason, (_snapshot_diff(before, _snapshot(wt)), fx.pushes())
+    return (rc, _result(reports, 1), reason,
+            (_snapshot_diff(before, _snapshot(wt)), fx.pushes()),
+            (rc_dry, _result(reports_dry, 1)))
 
 
 def case_regen(tmp):
     # Every generator fault happens in the PRIVATE checkout: the refusal is exit 1 and the author's
-    # worktree is untouched by construction; there is no restore-failed state left to reach.
+    # worktree is untouched by construction; there is no restore-failed state left to reach. The
+    # dry run must agree with --apply on every refusal here (FIX-541 round 2, decided 2: these
+    # -dry-agrees vectors go red if the dry-run return ever moves before regeneration and the
+    # declared checks again).
     seen = []
-    rc, result, _reason, untouched = _refusal_run(tmp, "regen-fail", "TOY_FAIL", seen=seen)
+    rc, result, _reason, untouched, dry = _refusal_run(tmp, "regen-fail", "TOY_FAIL", seen=seen)
     check("refuse/regenerate-failed", (rc, result, untouched), (1, "regenerate-failed", ([], [])))
-    rc, result, _reason, untouched = _refusal_run(tmp, "check-fail", failing_check=True, seen=seen)
+    check("refuse/regenerate-failed-dry-agrees", dry, (1, "regenerate-failed"))
+    rc, result, _reason, untouched, dry = _refusal_run(tmp, "check-fail", failing_check=True,
+                                                       seen=seen)
     check("refuse/check-failed", (rc, result, untouched), (1, "check-failed", ([], [])))
-    rc, result, _reason, untouched = _refusal_run(tmp, "not-fixpoint", "TOY_DRIFT", seen=seen)
+    check("refuse/check-failed-dry-agrees", dry, (1, "check-failed"))
+    rc, result, _reason, untouched, dry = _refusal_run(tmp, "not-fixpoint", "TOY_DRIFT", seen=seen)
     check("refuse/regenerate-not-fixpoint", (rc, result, untouched),
           (1, "regenerate-not-fixpoint", ([], [])))
-    rc, result, _reason, untouched = _refusal_run(tmp, "litter", "TOY_LITTER", seen=seen)
+    check("refuse/regenerate-not-fixpoint-dry-agrees", dry, (1, "regenerate-not-fixpoint"))
+    rc, result, _reason, untouched, dry = _refusal_run(tmp, "litter", "TOY_LITTER", seen=seen)
     check("refuse/undeclared-write", (rc, result, untouched), (1, "undeclared-write", ([], [])))
+    check("refuse/undeclared-write-dry-agrees", dry, (1, "undeclared-write"))
     check("refuse/scratch-removed", [p for p in SCRATCHES if os.path.exists(p)], [])
     check("refuse/regenerate-invariants", _invariants(*seen), [])
 
@@ -2775,11 +2943,14 @@ def case_timeout(tmp):
     pid_file = Path(tmp) / "timeout-regen-pids"
     text = _read_text(fx2.main / CONFIG_PATH)
     plain = 'regenerate = [["%s", "-I", "-B", "tools/gen.py"]]' % sys.executable
-    sleeper = ('regenerate = [["%s", "-I", "-B", "tools/gen.py"], ["%s", "-c", "import os,'
-               " subprocess, sys, time; gc = subprocess.Popen([sys.executable, '-c',"
-               " 'import time; time.sleep(300)']);"
-               " open(os.environ['TIMEOUT_PID_FILE'],'w').write(str(os.getpid()) + ' ' +"
-               ' str(gc.pid)); time.sleep(300)"]]') % (sys.executable, sys.executable)
+    # The sleeper is a committed SCRIPT, not inline -c code (the config schema refuses an
+    # interpreter handed inline code; FIX-541 round 2, decided 3); the grandchild -c spawn
+    # inside it is a direct child launch, never a config-routed argv.
+    sleeper = ('regenerate = [["%s", "-I", "-B", "tools/gen.py"],'
+               ' ["%s", "-I", "-B", "tools/sleep_timeout.py"]]'
+               % (sys.executable, sys.executable))
+    fx2.write(fx2.main, "tools/sleep_timeout.py", TOY_SLEEP_TIMEOUT)
+    _git(fx2.main, "add", "--", "tools/sleep_timeout.py")
     text = text.replace(plain, sleeper).replace("command_timeout_seconds = 60",
                                                 "command_timeout_seconds = 3")
     fx2.write(fx2.main, CONFIG_PATH, text)
@@ -3010,15 +3181,28 @@ def case_lock_held(tmp):
     old = fx.remote_ref("feat/x")
     common = _git_text(fx.main, "rev-parse", "--path-format=absolute", "--git-common-dir")
     before, pushed = _snapshot(wt), fx.pushes()
+    # Both tool fetches are recorded with the _ALTERNATE_FETCH_CONFIG -c prefix, so the filter
+    # matches that recorded shape (FIX-541 round 2, decided 7: a bare ["fetch"] head can never
+    # match a recorded tool fetch); the lock-released run below pins the filter non-vacuous.
+    prefix = list(_ALTERNATE_FETCH_CONFIG)
+
+    def tool_fetches(rows):
+        return [a for a in rows if a[:len(prefix) + 1] == prefix + ["fetch"]]
+
     with open(os.path.join(common, LOCK_NAME), "a+") as holder:
         fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         audit = len(GIT_AUDIT)
         rc, reports, fatal = fx.run(apply=True)
-        fetched = [a for a in GIT_AUDIT[audit:] if a[:1] == ["fetch"]]
+        fetched = tool_fetches(GIT_AUDIT[audit:])
     check("run/lock-held-exit2", (rc, reports, LOCK_NAME in (fatal or "")), (2, [], True))
     check("run/lock-held-touches-nothing",
           (fetched, _snapshot_diff(before, _snapshot(wt)), fx.remote_ref("feat/x"),
            fx.pushes() == pushed, _has_marker(wt)), ([], [], old, True, False))
+    audit = len(GIT_AUDIT)
+    rc2, reports2, _fatal = fx.run()
+    check("run/lock-released-fetch-filter-matches",
+          (rc2, _result(reports2, 1), len(tool_fetches(GIT_AUDIT[audit:]))),
+          (0, "would-merge", 2))
     check("run/lock-held-invariants", _invariants(fx), [])
 
 
@@ -3689,23 +3873,20 @@ def case_signal(tmp):
         pid_file = probe_dir / "sleeper.pid"
         text = _read_text(fx.main / CONFIG_PATH)
         plain = 'regenerate = [["%s", "-I", "-B", "tools/gen.py"]]' % sys.executable
-        # The sleeping regenerate command spawns its OWN child (a grandchild of the tool), so the
-        # case also pins the process-GROUP termination: round-4 M1 showed a plain kill of the
-        # direct child leaves such a grandchild running in the scratch TMPDIR. The grandchild
+        # The sleeping regenerate command (a committed SCRIPT: the config schema refuses inline
+        # -c code, FIX-541 round 2, decided 3) spawns its OWN child (a grandchild of the tool),
+        # so the case also pins the process-GROUP termination: round-4 M1 showed a plain kill of
+        # the direct child leaves such a grandchild running in the scratch TMPDIR. The grandchild
         # IGNORES SIGTERM (round-5: codex major 2, claude major 1), and the GRANDCHILD itself
         # writes the readiness file, AFTER installing SIG_IGN (round-6: claude minor 1 - when the
         # direct child wrote it, the signal could land before the grandchild was stubborn, so the
         # post-exit group probe was exercised only on some runs). The grandchild takes the pid
-        # file and the direct child's pid as argv and avoids quote characters (os.open plus chr)
-        # because its code sits two -c levels deep inside a TOML basic string.
-        sleeper = ('regenerate = [["%s", "-I", "-B", "tools/gen.py"], ["%s", "-c", "import os,'
-                   " subprocess, sys, time; subprocess.Popen([sys.executable, '-c',"
-                   " 'import os, signal, sys, time;"
-                   " signal.signal(signal.SIGTERM, signal.SIG_IGN);"
-                   " fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT);"
-                   " os.write(fd, (sys.argv[2] + chr(32) + str(os.getpid())).encode());"
-                   " os.close(fd); time.sleep(300)', os.environ['SIG_PID_FILE'],"
-                   ' str(os.getpid())]); time.sleep(120)"]]') % (sys.executable, sys.executable)
+        # file and the direct child's pid as argv (see TOY_SLEEP_SIGNAL).
+        sleeper = ('regenerate = [["%s", "-I", "-B", "tools/gen.py"],'
+                   ' ["%s", "-I", "-B", "tools/sleep_signal.py"]]'
+                   % (sys.executable, sys.executable))
+        fx.write(fx.main, "tools/sleep_signal.py", TOY_SLEEP_SIGNAL)
+        _git(fx.main, "add", "--", "tools/sleep_signal.py")
         fx.write(fx.main, CONFIG_PATH, text.replace(plain, sleeper))
         _git(fx.main, "commit", "-q", "-am", "sleeping regenerate", extra_env=FIXTURE_IDENT)
         _git(fx.main, "push", "-q", "origin", "main")
@@ -3850,9 +4031,13 @@ def _launch_window(tmp):
     _stale_pr(fx)
     text = _read_text(fx.main / CONFIG_PATH)
     plain = 'regenerate = [["%s", "-I", "-B", "tools/gen.py"]]' % sys.executable
-    marker = "import time; time.sleep(120)"
-    sleeper = ('regenerate = [["%s", "-I", "-B", "tools/gen.py"], ["%s", "-c", "%s"]]'
+    # A committed sleeper script (the config schema refuses inline -c code; FIX-541 round 2,
+    # decided 3); its path doubles as the launch marker kicking_popen watches for.
+    marker = "tools/sleep_launch.py"
+    sleeper = ('regenerate = [["%s", "-I", "-B", "tools/gen.py"], ["%s", "-I", "-B", "%s"]]'
                % (sys.executable, sys.executable, marker))
+    fx.write(fx.main, "tools/sleep_launch.py", TOY_SLEEP_LAUNCH)
+    _git(fx.main, "add", "--", "tools/sleep_launch.py")
     fx.write(fx.main, CONFIG_PATH, text.replace(plain, sleeper))
     _git(fx.main, "commit", "-q", "-am", "sleeping regenerate", extra_env=FIXTURE_IDENT)
     _git(fx.main, "push", "-q", "origin", "main")
@@ -4090,6 +4275,12 @@ def case_crlf(tmp):
                                   cwd=str(fresh), env=_clean_env(), timeout=60).returncode
     fx.advance_main(dict([("src/c.txt", "charlie\n")]))
     before = _snapshot(wt)
+    # FIX-541 round 2 (decided 2): the dry run must refuse this candidate with the same status
+    # --apply gives; this goes red if the dry-run return moves before the fresh-checkout guard.
+    rc_dry, reports_dry, _fatal = fx.run()
+    check("fresh/eol-crlf-dry-agrees",
+          (rc_dry, _result(reports_dry, 1), fx.pushes(), _has_marker(wt)),
+          (1, "normal-checkout-failed", [], False))
     rc, reports, _fatal = fx.run(apply=True)
     check("fresh/eol-crlf-refused", (check_before, rc, _result(reports, 1)),
           (0, 1, "normal-checkout-failed"))
@@ -4226,6 +4417,50 @@ def case_childfault(tmp):
     check("childfault/invariants", _invariants(*seen), [])
 
 
+def case_harness(tmp):
+    # The mutation-run accounting itself (FIX-541 round 2, decided 1). The pure checks pin
+    # _revert_outcome, the precedence _red_on_revert counts with; the two probes below pin the
+    # routing those outcomes depend on, through the REAL _run_case and case_badname, each under
+    # a scoped recorder restored before this case's own checks run.
+    check("meta/revert-crash-only-cannot-evaluate", _revert_outcome([], ["boom"]), "cannot")
+    check("meta/revert-assertion-then-crash-cannot-evaluate",
+          _revert_outcome(["named: got 1, want 2"], ["boom"]), "cannot")
+    check("meta/revert-assertion-only-red", _revert_outcome(["named: got 1, want 2"], []), "red")
+    check("meta/revert-neither-stale", _revert_outcome([], []), "stale")
+
+    def probe_raise(_tmp):
+        raise RuntimeError("injected case exception")
+
+    saved = dict((k, _RECORDER[k]) for k in ("executed", "list", "failures", "skipped",
+                                             "crashes"))
+    try:
+        _RECORDER.update(executed=set(), list=[], failures=[], skipped=[], crashes=[])
+        _run_case("probe-raise", tmp, fn=probe_raise)
+        routed = (list(_RECORDER["failures"]),
+                  ["injected case exception" in c for c in _RECORDER["crashes"]])
+    finally:
+        _RECORDER.update(saved)
+    # A case exception lands in CRASHES, never in the failures a revert would read as red.
+    check("meta/case-exception-recorded-as-crash-not-failure", routed, ([], [True]))
+    real_run = Fixture.run
+
+    def unrelated_run(self, apply=False, only=None):
+        raise AssertionError("unrelated fixture failure")
+
+    Fixture.run = unrelated_run
+    try:
+        _RECORDER.update(executed=set(), list=[], failures=[], skipped=[], crashes=[])
+        _run_case("badname", tempfile.mkdtemp(prefix="harness-badname-", dir=tmp))
+        routed = ["case badname raised AssertionError: unrelated fixture failure" in c
+                  for c in _RECORDER["crashes"]]
+    finally:
+        Fixture.run = real_run
+        _RECORDER.update(saved)
+    # An AssertionError the argv audit did not raise passes THROUGH case_badname's handler into
+    # crash recording: an unrelated fixture exception never masquerades as a refusal result.
+    check("meta/unrelated-assertion-reaches-crash-recording", routed, [True])
+
+
 CASES = dict([
     ("config", case_config), ("absent", case_absent), ("frombase", case_frombase),
     ("dry", case_dry), ("happy", case_happy), ("carry", case_carry), ("discover", case_discover),
@@ -4242,6 +4477,7 @@ CASES = dict([
     ("crlf", case_crlf), ("latepush", case_latepush), ("rename", case_rename),
     ("gitread", case_gitread), ("ancestry", case_ancestry), ("rootskip", case_rootskip),
     ("faultscan", case_faultscan), ("childfault", case_childfault),
+    ("harness", case_harness),
 ])
 
 
@@ -4286,20 +4522,34 @@ REVERTS = dict([
 ])
 
 
-def _run_case(name, tmp):
-    """One case; an unexpected exception fails that case (recorded apart from check failures,
-    see CRASHES) and never crashes the suite."""
+def _run_case(name, tmp, fn=None):
+    """One case (fn overrides the CASES lookup for the harness probes in case_harness); an
+    unexpected exception fails that case (recorded apart from check failures, see CRASHES) and
+    never crashes the suite."""
     try:
-        CASES[name](tmp)
+        (fn or CASES[name])(tmp)
     except (Exception, KeyboardInterrupt) as exc:  # noqa: BLE001
         _RECORDER["crashes"].append("case %s raised %s: %s" % (name, type(exc).__name__, exc))
 
 
+def _revert_outcome(failures, crashes):
+    """How one reverted guard's case counts: any crash is cannot-evaluate, EVEN beside a failed
+    named check (the exception may have forced that failure, so it proves nothing about the
+    guard; FIX-541 round 2, decided 1); a failure with no crash is the red credit; neither is a
+    stale mutant. Pinned by the meta/revert-* vectors in case_harness."""
+    if crashes:
+        return "cannot"
+    if failures:
+        return "red"
+    return "stale"
+
+
 def _red_on_revert(tmp):
     """(stale, cannot): the guards whose reverted form left their named case green, and the
-    guards whose case raised instead of failing one of its own assertions (cannot-evaluate: an
-    unrelated exception proves nothing about the guard; FIX-541 round 1, claude minor). Both
-    lists must be empty to pass."""
+    guards whose case raised (cannot-evaluate, and the crash OUTRANKS any assertion failure
+    recorded beside it: an exception proves nothing about the guard even when a named check
+    failed first; FIX-541 rounds 1 and 2, see _revert_outcome). Both lists must be empty to
+    pass; the crash diagnostics are kept in the cannot entries."""
     stale, cannot = [], []
     for name, (revert, case) in REVERTS.items():
         saved = GUARDS[name]
@@ -4310,11 +4560,10 @@ def _red_on_revert(tmp):
             _run_case(case, sub)
         finally:
             GUARDS[name] = saved
-        if _RECORDER["failures"]:
-            continue
-        if _RECORDER["crashes"]:
+        outcome = _revert_outcome(_RECORDER["failures"], _RECORDER["crashes"])
+        if outcome == "cannot":
             cannot.append("%s (case %s): %s" % (name, case, "; ".join(_RECORDER["crashes"])))
-        else:
+        elif outcome == "stale":
             stale.append("%s (case %s)" % (name, case))
     _RECORDER.update(executed=_EXECUTED_SET, list=EXECUTED, failures=FAILURES, skipped=SKIPPED,
                      crashes=CRASHES)
@@ -4371,8 +4620,8 @@ def self_test(red_on_revert=False, report_path=None):
     for guard in stale:
         FAILURES.append("red-on-revert: reverting guard %s left its case green" % guard)
     for guard in cannot:
-        FAILURES.append("red-on-revert: cannot evaluate guard %s: its case raised instead of "
-                        "failing its own assertion" % guard)
+        FAILURES.append("red-on-revert: cannot evaluate guard %s: its case raised (a crash "
+                        "outranks its assertion failures)" % guard)
     FAILURES.extend(CRASHES)
     if FAILURES:
         print("SELF-TEST FAIL:")
@@ -4383,8 +4632,9 @@ def self_test(red_on_revert=False, report_path=None):
           "tools/selftest_checks.toml%s" % (len(EXECUTED), (
               "%d registered checks NOT RUN (%s), not counted as executed; " % (
                   len(SKIPPED), ", ".join(n for n, _why in SKIPPED))) if SKIPPED else "", (
-              "; all %d guards in GUARDS went red through their cases' own assertions when "
-              "reverted" % len(REVERTS))
+              "; all %d guards in GUARDS went red when reverted through their cases' own "
+              "assertions with no case exception recorded (a crash counts as cannot-evaluate, "
+              "never as red)" % len(REVERTS))
               if red_on_revert else ""))
     return 0
 
