@@ -711,14 +711,16 @@ def _marker_candidate(line):
     whitespace of any script, emphasis, heading, quote and list marks, backslashes and invisible
     format characters (category Cf), a Q or a letter that looks like one, digits of any script and a
     full stop or one that looks like one, read after NFKC normalisation (so fullwidth and
-    mathematical forms count), then whitespace, emphasis or the line's end."""
+    mathematical forms count), then whitespace, emphasis or the line's end. The scan reads at most
+    the first 256 characters that remain once format characters are dropped: the bound counts only
+    characters that render, so invisible padding cannot push the digits or the stop past it."""
     rest = line.lstrip(MARKER_DECORATION)
     if not rest or (rest[0] < "\x80" and rest[0] not in "Qq"):
         return False
     at = len(line) - len(rest)
     while at < len(line) and (line[at].isspace() or unicodedata.category(line[at]) == "Cf"):
         at += 1
-    head = "".join(char for char in line[at:at + 256] if unicodedata.category(char) != "Cf")
+    head = "".join(char for char in line[at:] if unicodedata.category(char) != "Cf")[:256]
     return bool(MARKER_RE.match(unicodedata.normalize("NFKC", head)))
 
 
@@ -1689,6 +1691,20 @@ def _self_test_cases(fx):
         check(check_id, refusal(fx.run(_mixed(sha, {4: A4 + "\n" + line})), "reads as an answer marker"), refused)
     check("shape/lookalike-marker-in-fence-cannot-evaluate", refusal(fx.run(
         _mixed(sha, {2: A2.replace("```python\n", "```python\nQ\uff12.\n")})), "inside the fenced block"), refused)
+    # The marker scan bound counts only characters that render (category Cf dropped first):
+    # "Q" + padding + "4." places the digit at raw index padding + 1, just under, at and
+    # just over 256, where a slice of the raw prefix truncated the digits away and the disguised
+    # marker passed.
+    pad = "\N{ZERO WIDTH SPACE}"
+    for check_id, padding in (("shape/padded-marker-digit-under-bound-cannot-evaluate", 254),
+                              ("shape/padded-marker-digit-at-bound-cannot-evaluate", 255),
+                              ("shape/padded-marker-digit-over-bound-cannot-evaluate", 256)):
+        check(check_id, refusal(fx.run(_mixed(sha, {4: A4 + "\nQ" + pad * padding + "4. Additional answer"})),
+                                "reads as an answer marker"), refused)
+    mixed_formats = "\u200b\u200c\u200d\u2060\u00ad\u200e\u200f\ufeff" * 75
+    check("shape/mixed-format-run-marker-cannot-evaluate",
+          refusal(fx.run(_mixed(sha, {4: A4 + "\nQ" + mixed_formats + "4. Additional answer"})),
+                  "reads as an answer marker"), refused)
 
     # Quote and code forms CommonMark reads that this grammar does not: refused, never read as prose
     lazy = _mixed(sha, {1: "Q1. docs/alpha.md:\n> The first rule is plain.\nunless the caller overrides it, which is "
