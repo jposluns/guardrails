@@ -448,6 +448,13 @@ expected-check-ids = [
   "attest/failed-write-finding-names-it",
   "attest/broken-chain-finding",
   "attest/broken-chain-stop-holds",
+  "attest/anchor-seq-zero-holds",
+  "attest/anchor-seq-negative-holds",
+  "attest/anchor-seq-false-holds",
+  "attest/anchor-digest-short-holds",
+  "attest/anchor-non-object-holds",
+  "attest/anchor-valid-after-shape-vectors-ok",
+  "attest/git-failure-tracked-decision-holds",
   # ---------- GD-127: the systemic-lapse lifecycle (verdict-preservation legs) ----------
   "lapse/klass-recorded",
   "lapse/no-bypass-still-denies",

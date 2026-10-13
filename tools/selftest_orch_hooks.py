@@ -5317,9 +5317,55 @@ def _main_isolated(report_path=None):
               bool(aiqt_hooks._orch_validate_attestations(areg, str(a.root))), True)
         a.set_turn_state({})
         check("attest/broken-chain-stop-holds", _verdict(astop()), "block2")
+        # the hooks mirror carries the gate's strict anchor shape: a seq of 0, -1 or false
+        # (each formerly int()-coerced past the digest comparison), a short digest and a
+        # non-object anchor are each a HOLD, never ok
+        mirror_tip = chained(
+            {"seq": 1, "id": "AT-1", "ts": now_iso(0), "status": "accepted",
+             "mistake": "attests ci", "evidence": "run pending", "rule": "corexc",
+             "guardrail": "n/a", "ref": "ci", "check_ref": "seed.txt"})
+        at_reg.write_text(mirror_tip, encoding="utf-8")
+        at_anchor_file = Path(str(at_reg) + ".anchor")
+        authority = lambda: aiqt_hooks._orch_register_authority(str(a.root), str(at_reg))[0]
+        at_anchor_file.write_text(json.dumps({"seq": 0, "digest": "0" * 64}),
+                                  encoding="utf-8")
+        check("attest/anchor-seq-zero-holds", authority(), "hold")
+        at_anchor_file.write_text(json.dumps({"seq": -1, "digest": "0" * 64}),
+                                  encoding="utf-8")
+        check("attest/anchor-seq-negative-holds", authority(), "hold")
+        at_anchor_file.write_text(json.dumps({"seq": False, "digest": "0" * 64}),
+                                  encoding="utf-8")
+        check("attest/anchor-seq-false-holds", authority(), "hold")
+        at_anchor_file.write_text(json.dumps({"seq": 1, "digest": "a" * 63}),
+                                  encoding="utf-8")
+        check("attest/anchor-digest-short-holds", authority(), "hold")
+        at_anchor_file.write_text(json.dumps([1, 2]), encoding="utf-8")
+        check("attest/anchor-non-object-holds", authority(), "hold")
+        at_anchor(mirror_tip)
+        check("attest/anchor-valid-after-shape-vectors-ok", authority(), "ok")
+        # the tracked DECISION fails closed, as in the gate: a root where git ls-files answers
+        # neither 0 (tracked) nor 1 (not tracked), here a non-repository root (exit 128), is a
+        # HOLD, never a fall-through into the anchor leg
+        nonrepo = tmp / "authority-nonrepo"
+        nonrepo.mkdir()
+        nr_reg = nonrepo / "attestations.jsonl"
+        nr_reg.write_text(mirror_tip, encoding="utf-8")
+        nr_lines = mirror_tip.splitlines()
+        Path(str(nr_reg) + ".anchor").write_text(json.dumps(
+            {"seq": len(nr_lines), "digest": _hashlib.sha256(
+                nr_lines[-1].encode("utf-8")).hexdigest()}), encoding="utf-8")
+        check("attest/git-failure-tracked-decision-holds",
+              aiqt_hooks._orch_register_authority(str(nonrepo), str(nr_reg))[0], "hold")
 
         # ---------- GD-127: the systemic-lapse lifecycle (verdict-preservation legs) ----------
-        regtool = str(repo_root() / "tools" / "orch_register.py")
+        # The appender validates in the register gate's own root, resolved from the gate's
+        # location; install the appender (with the gate modules it imports) inside the fixture
+        # repository so that root IS the fixture, exactly like an adopter's installed tool.
+        fixture_tools = a.root / "tools"
+        fixture_tools.mkdir()
+        for tool_name in ("orch_register.py", "check_mistakes_register.py", "_gen_common.py"):
+            shutil.copy(str(repo_root() / "tools" / tool_name), str(fixture_tools / tool_name))
+        regtool = str(fixture_tools / "orch_register.py")
 
         def mr_append(rid, check_ref):
             subprocess.run([sys.executable, "-I", "-B", regtool, "append",

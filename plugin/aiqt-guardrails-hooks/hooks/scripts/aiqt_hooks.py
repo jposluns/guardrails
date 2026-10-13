@@ -14483,12 +14483,19 @@ def _orch_register_authority(root, path):
     except (OSError, ValueError):
         rel = None
     if rel and not rel.startswith(os.pardir + os.sep) and rel != os.pardir:
+        # The tracked/untracked DECISION is an authority read (the same rule as the gate's
+        # verify_append_only): git confirms "not tracked" only with exit 1; any other exit (a
+        # corrupt index: 128, a non-repository root), launch error or timeout leaves the
+        # question open and is a HOLD, never a fall-through into the anchor leg.
         try:
-            tracked = subprocess.run(["git", "-C", root, "ls-files", "--error-unmatch", rel],
-                                     capture_output=True, timeout=10, env=env).returncode == 0
+            probe = subprocess.run(["git", "-C", root, "ls-files", "--error-unmatch", rel],
+                                   capture_output=True, timeout=10, env=env)
         except (OSError, subprocess.SubprocessError) as exc:
             return ("hold", "cannot determine register tracking ({})".format(exc), None)
-        if tracked:
+        if probe.returncode not in (0, 1):
+            return ("hold", "cannot determine register tracking (git ls-files exited "
+                    "{})".format(probe.returncode), None)
+        if probe.returncode == 0:
             try:
                 base = subprocess.run(["git", "-C", root, "merge-base", "HEAD", "origin/HEAD"],
                                       capture_output=True, text=True, timeout=10, env=env)
@@ -14510,12 +14517,22 @@ def _orch_register_authority(root, path):
     try:
         with open(anchor, "r", encoding="utf-8") as fh:
             a = json.load(fh)
-        n, digest = int(a["seq"]), str(a["digest"])
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, ValueError):
         return ("hold", "declared register has no readable anchor authority", None)
+    # The same strict anchor shape as the gate: an object whose seq is an int (bools excluded)
+    # of at least 1 and whose digest is 64 lowercase hex. A zero, negative or false seq, a
+    # wrong-length or non-hex digest, and a non-object anchor are each a HOLD, never a
+    # bypassed digest comparison.
+    n = a.get("seq") if isinstance(a, dict) else None
+    digest = a.get("digest") if isinstance(a, dict) else None
+    if (not isinstance(n, int) or isinstance(n, bool) or n < 1
+            or not isinstance(digest, str) or len(digest) != 64
+            or set(digest) - set("0123456789abcdef")):
+        return ("hold", "the register anchor is malformed (an anchor is an object with an "
+                "integer seq >= 1 and a 64-hex digest)", None)
     if len(lines) < n:
         return ("hold", "register is shorter than its verified anchor (rows removed)", None)
-    if n > 0 and _orch_sha256_hex(lines[n - 1]) != digest:
+    if _orch_sha256_hex(lines[n - 1]) != digest:
         return ("hold", "the anchored row was rewritten (tamper or reorder)", None)
     return _orch_register_tip(lines)
 

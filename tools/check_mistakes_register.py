@@ -21,8 +21,10 @@ persisted anchor file (<register>.anchor: the last verified seq and line digest)
 DECLARED register that is absent or unreadable, a broken chain or sequence, a reused id, an illegal
 status transition, or a landed row whose commit or repo-relative check_ref does not exist is a
 violation (exit 1); and an append-only AUTHORITY that cannot be read (no computable merge-base, a git
-failure deciding whether the register is tracked, a malformed or unreadable anchor, or a declared
-untracked register with no anchor) is a distinct cannot-evaluate failure (exit 2), never a
+failure deciding whether the register is tracked, a malformed or unreadable anchor, an anchor
+entry that exists but is unusable (a dangling symlink or a non-regular file is never read as a
+missing anchor), or a declared untracked register with no anchor) is a distinct cannot-evaluate
+failure (exit 2), never a
 silent skip nor a HEAD-against-itself self-comparison (chkfcl/grdinp). With no registry, or no declared
 register path, the live leg is NOT APPLICABLE and the self-test carries the assurance in CI.
   check_mistakes_register.py                   run the live leg
@@ -46,6 +48,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 import hashlib
 import json
 import os
+import stat
 import subprocess
 from pathlib import Path
 
@@ -208,29 +211,46 @@ def verify_append_only(root, path, lines, allow_missing_anchor=False):
                 return ["the register is not an append-only extension of its merge-base state"]
             return []
     anchor = Path(str(path) + ".anchor")
-    if not anchor.exists() and not allow_missing_anchor:
-        raise CannotEvaluate("the declared untracked register has no anchor; run --update-anchor to "
-                             "establish the baseline (an absent authority is not a clean result)")
-    if anchor.exists():
-        # The anchor is the append-only AUTHORITY: one that cannot be read, or that does not hold
-        # the declared shape (an object with an integer seq >= 1, bools excluded, and a 64-hex
-        # digest), is cannot-evaluate, never a violation list and never a silently skipped digest
-        # comparison (a negative or boolean seq used to bypass the anchored-row check).
-        try:
-            a = json.loads(anchor.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            raise CannotEvaluate("the anchor file cannot be read as JSON ({})".format(exc))
-        n = a.get("seq") if isinstance(a, dict) else None
-        digest = a.get("digest") if isinstance(a, dict) else None
-        if (not isinstance(n, int) or isinstance(n, bool) or n < 1
-                or not isinstance(digest, str) or len(digest) != 64
-                or set(digest) - set("0123456789abcdef")):
-            raise CannotEvaluate("the anchor file is malformed (an anchor is an object with an "
-                                 "integer seq >= 1 and a 64-hex digest)")
-        if len(lines) < n:
-            return ["the register is shorter than its verified anchor (rows removed)"]
-        if hashlib.sha256(lines[n - 1].encode("utf-8")).hexdigest() != digest:
-            return ["the anchored row was rewritten (tamper or reorder before seq {})".format(n)]
+    # Anchor PRESENCE is decided with lstat semantics (os.path.lexists): the missing-anchor
+    # allowance covers only an anchor path with NO entry at all. An entry that exists but cannot
+    # be used (a dangling symlink, a directory, a FIFO or any other non-regular file) is an
+    # authority that cannot be read, so it is cannot-evaluate, never the allowance, and the
+    # --update-anchor bootstrap never writes through a dangling link.
+    if not os.path.lexists(str(anchor)):
+        if not allow_missing_anchor:
+            raise CannotEvaluate("the declared untracked register has no anchor; run "
+                                 "--update-anchor to establish the baseline (an absent authority "
+                                 "is not a clean result)")
+        return []
+    try:
+        anchor_stat = os.stat(str(anchor))
+    except OSError as exc:
+        raise CannotEvaluate("the anchor entry exists but cannot be used ({}); a dangling symlink "
+                             "or an uninspectable entry is never the missing-anchor "
+                             "allowance".format(exc))
+    if not stat.S_ISREG(anchor_stat.st_mode):
+        raise CannotEvaluate("the anchor entry exists but is not a regular file; a non-regular "
+                             "entry is never the missing-anchor allowance")
+    # The anchor is the append-only AUTHORITY: one that cannot be read, or that does not hold
+    # the declared shape (an object with an integer seq >= 1, bools excluded, and a 64-hex
+    # digest), is cannot-evaluate, never a violation list and never a silently skipped digest
+    # comparison (a zero, negative or false seq used to bypass the anchored-row check; a true
+    # seq was coerced to 1 and still compared).
+    try:
+        a = json.loads(anchor.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise CannotEvaluate("the anchor file cannot be read as JSON ({})".format(exc))
+    n = a.get("seq") if isinstance(a, dict) else None
+    digest = a.get("digest") if isinstance(a, dict) else None
+    if (not isinstance(n, int) or isinstance(n, bool) or n < 1
+            or not isinstance(digest, str) or len(digest) != 64
+            or set(digest) - set("0123456789abcdef")):
+        raise CannotEvaluate("the anchor file is malformed (an anchor is an object with an "
+                             "integer seq >= 1 and a 64-hex digest)")
+    if len(lines) < n:
+        return ["the register is shorter than its verified anchor (rows removed)"]
+    if hashlib.sha256(lines[n - 1].encode("utf-8")).hexdigest() != digest:
+        return ["the anchored row was rewritten (tamper or reorder before seq {})".format(n)]
     return []
 
 
@@ -378,8 +398,11 @@ def self_test():
         anchor_path = Path(str(rp) + ".anchor")
         good_anchor = anchor_path.read_text(encoding="utf-8")
         for tag, seq_val, digest_val in (("seq -1", -1, "0" * 64),
+                                         ("seq 0", 0, "0" * 64),
                                          ("seq true", True, "0" * 64),
-                                         ("bad digest", 1, "Z" * 64)):
+                                         ("float seq", 1.0, "0" * 64),
+                                         ("bad digest", 1, "Z" * 64),
+                                         ("short hex digest", 1, "a" * 63)):
             anchor_path.write_text(json.dumps({"seq": seq_val, "digest": digest_val}),
                                    encoding="utf-8")
             try:
@@ -393,6 +416,38 @@ def self_test():
             failures.append("a not-json anchor should be cannot-evaluate")
         except CannotEvaluate:
             pass
+        anchor_path.write_text("[1, 2]", encoding="utf-8")
+        try:
+            verify_append_only(reg_dir, rp, good)
+            failures.append("a non-object anchor should be cannot-evaluate")
+        except CannotEvaluate as exc:
+            if "malformed" not in str(exc):
+                failures.append("the non-object anchor refusal should say malformed, got: "
+                                "{}".format(exc))
+        # anchor presence is lstat-based: an entry that EXISTS at the anchor path but cannot be
+        # used (a dangling symlink, a directory) is cannot-evaluate, never the missing-anchor
+        # allowance, with allow_missing_anchor True (the --update-anchor bootstrap) included
+        anchor_path.unlink()
+        anchor_path.symlink_to("missing-anchor-target")
+        for allow in (False, True):
+            try:
+                verify_append_only(reg_dir, rp, good, allow_missing_anchor=allow)
+                failures.append("a dangling-symlink anchor should be cannot-evaluate "
+                                "(allow_missing_anchor={})".format(allow))
+            except CannotEvaluate as exc:
+                if "never the missing-anchor allowance" not in str(exc):
+                    failures.append("the dangling-symlink anchor refusal should name the "
+                                    "allowance, got: {}".format(exc))
+        anchor_path.unlink()
+        anchor_path.mkdir()
+        try:
+            verify_append_only(reg_dir, rp, good, allow_missing_anchor=True)
+            failures.append("a directory at the anchor path should be cannot-evaluate")
+        except CannotEvaluate as exc:
+            if "not a regular file" not in str(exc):
+                failures.append("the directory-anchor refusal should name the shape, got: "
+                                "{}".format(exc))
+        anchor_path.rmdir()
         anchor_path.write_text(good_anchor, encoding="utf-8")
         # a landed row citing a missing commit or check fails
         repo = tmp / "repo"
@@ -456,6 +511,58 @@ def self_test():
                                     "{}".format(exc))
         finally:
             os.environ.pop("GIT_INDEX_FILE", None)
+        # each of the three git AUTHORITY reads (ls-files, merge-base, show) fails closed on a
+        # launch error or a timeout: cannot-evaluate with the decision named, never an unhandled
+        # exception and never a fall-through into the untracked anchor leg
+        real_sp_run = subprocess.run
+
+        def _raising_for(target, raised):
+            def runner(cmd, *args, **kwargs):
+                if isinstance(cmd, list) and target in cmd:
+                    raise raised
+                return real_sp_run(cmd, *args, **kwargs)
+            return runner
+
+        for tag, target, raised, named in (
+                ("ls-files launch error", "ls-files",
+                 OSError(5, "injected launch failure"),
+                 "cannot decide whether the register is tracked"),
+                ("ls-files timeout", "ls-files",
+                 subprocess.TimeoutExpired(["git"], 10),
+                 "cannot decide whether the register is tracked"),
+                ("merge-base launch error", "merge-base",
+                 OSError(5, "injected launch failure"),
+                 "cannot compute the register authority")):
+            subprocess.run = _raising_for(target, raised)
+            try:
+                try:
+                    verify_append_only(repo, tracked, rewritten)
+                    failures.append("a {} should be cannot-evaluate".format(tag))
+                except CannotEvaluate as exc:
+                    if named not in str(exc):
+                        failures.append("the {} refusal should name its decision, got: "
+                                        "{}".format(tag, exc))
+            finally:
+                subprocess.run = real_sp_run
+
+        def _show_raises(cmd, *args, **kwargs):
+            if isinstance(cmd, list) and "merge-base" in cmd:
+                return subprocess.CompletedProcess(cmd, 0, stdout="1234abcd\n", stderr="")
+            if isinstance(cmd, list) and "show" in cmd:
+                raise OSError(5, "injected launch failure")
+            return real_sp_run(cmd, *args, **kwargs)
+
+        subprocess.run = _show_raises
+        try:
+            try:
+                verify_append_only(repo, tracked, rewritten)
+                failures.append("a git-show launch error should be cannot-evaluate")
+            except CannotEvaluate as exc:
+                if "cannot read the register at its merge-base authority" not in str(exc):
+                    failures.append("the git-show refusal should name its read, got: "
+                                    "{}".format(exc))
+        finally:
+            subprocess.run = real_sp_run
         # P2: a declared UNTRACKED register present with no anchor is cannot-evaluate -> exit 2.
         untracked = repo / "untracked-register.jsonl"
         untracked.write_text("\n".join(tracked_good) + "\n", encoding="utf-8")
@@ -495,6 +602,20 @@ def self_test():
         at_anchor_path.write_text(saved_anchor, encoding="utf-8")
         if run(repo) != 0:
             failures.append("gate should pass again once the anchor is restored")
+        # a dangling-symlink anchor entry is exit 2 even for the --update-anchor bootstrap, and
+        # the bootstrap never creates the link's target
+        at_anchor_path.unlink()
+        at_anchor_path.symlink_to("missing-at-anchor-target")
+        if run(repo, update=True) != 2:
+            failures.append("a dangling-symlink anchor should be cannot-evaluate (exit 2) even "
+                            "with --update-anchor")
+        if (repo / "missing-at-anchor-target").exists():
+            failures.append("the --update-anchor bootstrap wrote through a dangling anchor "
+                            "symlink")
+        at_anchor_path.unlink()
+        at_anchor_path.write_text(saved_anchor, encoding="utf-8")
+        if run(repo) != 0:
+            failures.append("gate should pass again once the dangling anchor entry is replaced")
         at_wrong = chain(lambda p: row(1, "MR-1", "proposed", p))
         at_reg_path.write_text("\n".join(at_wrong) + "\n", encoding="utf-8")
         if run(repo) != 1:
@@ -510,8 +631,12 @@ def self_test():
           "transition, a non-object line, a bool or float seq, a duplicated key, an anchored "
           "rewrite or reorder, an unverifiable or absolute-path landed check_ref, a tracked "
           "rewrite with no computable merge-base, and a declared untracked register with no "
-          "anchor all fail; a malformed or unreadable anchor and a git failure deciding whether "
-          "the register is tracked are cannot-evaluate (exit 2); the --update-anchor bootstrap "
+          "anchor all fail; a malformed, non-object or wrongly shaped anchor (a zero, negative, "
+          "boolean or float seq, a short or non-hex digest), an anchor entry that exists but is "
+          "not a usable regular file (a dangling symlink or a directory, the --update-anchor "
+          "bootstrap included, which never writes through a dangling link), and a git launch "
+          "failure, timeout or undecidable exit on any of the three authority reads are "
+          "cannot-evaluate (exit 2); the --update-anchor bootstrap "
           "establishes the baseline; and a declared attestations register is verified under the "
           "AT- prefix with the optional class and ref fields accepted")
     return 0

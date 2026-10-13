@@ -8,10 +8,14 @@
       parameterizes the id family (MR for the mistakes register, AT for an attestation register,
       GD-127 C.2) and must agree with the registry declaration; --klass writes the optional class
       field (for example systemic-lapse); --ref writes the blocker ref an attestation row covers.
-      The appender validates in the register gate's own context: the id family comes from the
-      registry declaration (.aiqt/orchestration.local.json or .aiqt/orchestration.json) that names
-      the register path, and the validation root is the git repository that contains the register,
-      never the cwd. Before anything is written, the register text as the append would leave it
+      The appender validates in the register gate's own context: the validation root is the
+      gate's own root (tools/_gen_common.repo_root resolved from the gate's location, exactly as
+      check_mistakes_register.main resolves it), never the repository that merely contains the
+      register and never a root derived from where this invocation runs; the id family comes from
+      that root's registry declaration (.aiqt/orchestration.local.json or
+      .aiqt/orchestration.json) that names the register path, and two declarations resolving to
+      the same register path are refused as ambiguous. Before anything is written, the register
+      text as the append would leave it
       (the existing decoded lines plus the new row; validation runs on the decoded UTF-8 text with
       the gate's own line splitting, not on raw bytes) is run through the register gate's own
       parser, check_mistakes_register.verify_lines and verify_append_only (with the --update-anchor
@@ -19,26 +23,39 @@
       any unanchored untracked register, not only an empty one), so an append the gate would reject
       is refused at write time instead of reaching CI. A violation (an illegal transition, an
       unknown status, a wrong-family id, a landed row without an existing --commit and --check-ref)
-      exits 1; a context or authority the appender cannot evaluate (an unreadable register, a
-      symlinked register path, a register outside any git repository, a path no registry
-      declaration names, a git failure deciding whether the register is tracked, no computable
-      merge-base for a tracked register, a malformed or unreadable anchor) exits 2; each refusal
-      names its reasons on stderr and leaves the register byte-identical (an absent register and
-      its directory stay absent). Cooperating appenders are serialized by an exclusive flock held
-      across the read, the validation and the write, and the write goes through the same descriptor
-      the validation read (opened with O_NOFOLLOW, written only while its device and inode still
-      match the path); a failed or short write is truncated back to the validated size, so no
-      partial row remains. A writer that does not take the lock (a hand edit, any other tool) is
-      outside that serialization and is caught later by the mistakes-register gate, not here.
+      exits 1; a context or authority the appender cannot evaluate (an unreadable register or
+      register descriptor, a symlinked register path, a gate root that is not a git repository, a
+      path no registry declaration names, conflicting declarations resolving to one path, a git
+      failure deciding whether the register is tracked, no computable merge-base for a tracked
+      register, a malformed or unusable anchor entry, a dangling symlink included) exits 2; each
+      refusal names its reasons on stderr and leaves every row other appenders wrote
+      byte-identical (a refusal after the exclusive first-row creation removes the file and the
+      directory components this call itself created, but only while that file is still this
+      call's own empty file; anything else is left in place and the refusal says so).
+      Cooperating appenders are serialized by an exclusive flock held across the read, the
+      validation and the write of an existing register; a first row is created exclusively
+      (O_EXCL) and then re-checked under the acquired lock (the path still names the created
+      file and its size is still zero), so an appender that lands between the creation and the
+      lock forces a refusal, never an interleaved row. The write goes through the same
+      descriptor the validation read (opened with O_NOFOLLOW, written only while its device and
+      inode still match the path and the on-disk size still equals the validated text); a failed
+      or short write is truncated back to the validated size, so no partial row remains, with one
+      disclosed RESIDUAL: when that truncation itself fails, the partial bytes remain and the
+      refusal names the un-truncated state and directs to the register gate. A writer that does
+      not take the lock (a hand edit, any other tool) is outside that serialization: the size
+      re-check catches one that lands between the validation and the write, any other is caught
+      later by the mistakes-register gate, not here.
   orch_register.py project --register PATH
       Emit an AEI v1 enumeration of the rows whose LATEST status is proposed or accepted and not yet
       landed, as granted open items, so the stop guard itself enforces mistake-to-guardrail
       follow-through. A registry can name this as (part of) its enumerator. An attestation register
       is evidence, never backlog: project the mistakes register, not the attestations file.
   orch_register.py --self-test
-      Synthetic fixtures for the write-time validation: each refusal vector leaves the register and
-      its anchor byte-identical, every clean append is re-read and its landed last row and a clean
-      verify_lines asserted, and the serialization lock and the write binding are probed in place.
+      Synthetic fixtures for the write-time validation: each refusal vector leaves the register
+      and its anchor byte-identical (the disclosed failed-rollback residual vector excepted,
+      which asserts the named partial bytes instead), every clean append is re-read and its
+      landed last row and a clean verify_lines asserted, and the serialization lock, the
+      first-row creation re-check and the write binding are probed in place.
 """
 import sys
 
@@ -64,6 +81,7 @@ import os
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _gen_common import repo_root  # noqa: E402
 from check_mistakes_register import (  # noqa: E402
     REGISTRY_FILES, CannotEvaluate, verify_append_only, verify_lines)
 
@@ -77,23 +95,24 @@ def _lines(path):
         return []
 
 
-def _register_root(path):
-    """The git repository that contains the register, or None. The register gate validates a
-    declared register against the repository that contains it, so the appender resolves that same
-    root instead of falling back to the cwd (a cwd fallback made acceptance depend on where the
-    appender happened to run, which the gate never does)."""
-    parent = path.resolve().parent
-    for anc in [parent, *parent.parents]:
-        if (anc / ".git").exists():
-            return anc
-    return None
+def _gate_root():
+    """The register gate's own validation root: tools/_gen_common.repo_root resolved from the
+    gate's location (the repository that contains the installed gate and this appender), exactly
+    as check_mistakes_register.main resolves it. The gate validates a DECLARED register against
+    THIS root, not against the repository that happens to contain the register (a register inside
+    a nested repository that a declaring outer root names is validated in the outer root's
+    context), so the appender resolves the same root; its previous register-based resolution
+    could disagree with the gate on nested repositories, and a root derived from the cwd is never
+    used while the gate script sits inside a repository."""
+    return repo_root()
 
 
 def _declared_family(root, path):
     """The (registry key, id family) of the declaration that names this register path. Raises
-    CannotEvaluate when there is no registry, the registry cannot be read, or no declaration names
-    the path: the register gate evaluates declared surfaces only, so an undeclared append has no
-    gate context to validate in."""
+    CannotEvaluate when there is no registry, the registry cannot be read, no declaration names
+    the path, or two declarations resolve to the same register path (the declared id family is
+    then ambiguous, so there is no single gate context to validate in): the register gate
+    evaluates declared surfaces only."""
     registry = None
     for rel in REGISTRY_FILES:
         candidate = Path(root) / rel
@@ -107,12 +126,22 @@ def _declared_family(root, path):
         raise CannotEvaluate("no orchestration registry declares this register (the gate "
                              "validates declared surfaces only)")
     want = path.resolve()
+    matched = None
+    resolved = []
     for key, family in (("mistakes_register", "MR"), ("attestations", "AT")):
         declared = registry.get(key)
         if isinstance(declared, str) and declared:
             declared_path = Path(declared) if os.path.isabs(declared) else Path(root) / declared
-            if declared_path.resolve() == want:
-                return key, family
+            target = declared_path.resolve()
+            resolved.append(target)
+            if matched is None and target == want:
+                matched = (key, family)
+    if len(set(resolved)) < len(resolved):
+        raise CannotEvaluate("conflicting registry declarations resolve to the same register "
+                             "path, so the declared id family is ambiguous (fix the registry "
+                             "before appending)")
+    if matched is not None:
+        return matched
     raise CannotEvaluate("no registry declaration names this register path (the gate validates "
                          "the declared mistakes_register and attestations surfaces only)")
 
@@ -129,14 +158,40 @@ def _rolled_back(fd, size):
             "remains".format(size))
 
 
+def _creation_cleanup(fd, path, made_dirs):
+    """After a refusal that follows the exclusive first-row creation: remove the created file,
+    but only while it is still this call's own, still-empty file (the path still names the
+    created device and inode, size zero), then the directory components this call itself created
+    (innermost first, each only while empty). Returns the sentence for the refusal message; an
+    entry this helper cannot prove safe to remove is left in place and named, and the register
+    gate stays the authority over whatever remains."""
+    try:
+        st_fd = os.fstat(fd)
+        st_path = os.lstat(str(path))
+        if (st_fd.st_dev, st_fd.st_ino) != (st_path.st_dev, st_path.st_ino):
+            return "the created register was left in place (the path no longer names it)"
+        if st_fd.st_size != 0:
+            return "the created register was left in place (it is no longer empty)"
+        os.unlink(str(path))
+    except OSError as exc:
+        return "the created register could not be removed ({})".format(exc)
+    for made in made_dirs:
+        try:
+            os.rmdir(str(made))
+        except OSError as exc:
+            return ("the created register was removed; its directory was not fully removed "
+                    "({})".format(exc))
+    return "the created register and the directory components this call made were removed"
+
+
 def cmd_append(a):
     path = Path(a.register)
-    root = _register_root(path)
-    if root is None:
-        print("append: refused, the register lies outside any git repository, so the gate's "
-              "validation context cannot be established (the gate validates a declared register "
-              "against the repository that contains it, never the cwd); nothing written",
-              file=sys.stderr)
+    root = _gate_root()
+    if not (Path(root) / ".git").exists():
+        print("append: refused, the gate's validation root is not a git repository, so the "
+              "register gate's context cannot be established (the appender resolves the same "
+              "root the gate's live leg validates, from the gate's own location); nothing "
+              "written", file=sys.stderr)
         return 2
     try:
         key, family = _declared_family(root, path)
@@ -150,6 +205,8 @@ def cmd_append(a):
               file=sys.stderr)
         return 1
     fd = -1
+    created = False
+    made_dirs = []
     try:
         try:
             fd = os.open(str(path), os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW)
@@ -175,11 +232,16 @@ def cmd_append(a):
                     exc), file=sys.stderr)
                 return 2
             raw = bytearray()
-            while True:
-                chunk = os.read(fd, 1 << 16)
-                if not chunk:
-                    break
-                raw += chunk
+            try:
+                while True:
+                    chunk = os.read(fd, 1 << 16)
+                    if not chunk:
+                        break
+                    raw += chunk
+            except OSError as exc:
+                print("append: refused, the register cannot be read from its open descriptor "
+                      "({}); nothing written".format(exc), file=sys.stderr)
+                return 2
             try:
                 text = bytes(raw).decode("utf-8")
             except ValueError as exc:
@@ -187,6 +249,7 @@ def cmd_append(a):
                       "written".format(exc), file=sys.stderr)
                 return 2
         else:
+            raw = bytearray()
             text = ""
         lines = text.splitlines()
         prev = ZERO if not lines else hashlib.sha256(lines[-1].encode("utf-8")).hexdigest()
@@ -232,48 +295,78 @@ def cmd_append(a):
         if fd < 0:
             # First row: the register was absent at the read, so create it exclusively; a file
             # that appeared since is never appended to blindly (O_EXCL refuses it, symlinks
-            # included), and a refused row never reaches this point, so the directory of a
-            # refused first row stays absent.
+            # included). A row refused by the validation never reaches this point, so its
+            # directory stays absent; the directory components this call itself creates are
+            # recorded (innermost first) so a refusal past this point can remove them again.
+            anc = path.parent
+            while not anc.exists() and anc != anc.parent:
+                made_dirs.append(anc)
+                anc = anc.parent
             path.parent.mkdir(parents=True, exist_ok=True)
             try:
                 fd = os.open(str(path),
                              os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_EXCL, 0o644)
             except OSError as exc:
+                for made in made_dirs:  # best-effort: only empty components this call made
+                    try:
+                        os.rmdir(str(made))
+                    except OSError:
+                        break
                 print("append: refused, the register could not be created exclusively ({}); a "
                       "file that appeared between the validation and the write is never "
                       "appended to blindly; nothing written by this call".format(exc),
                       file=sys.stderr)
                 return 2
+            created = True
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX)
             except OSError as exc:
-                print("append: refused, cannot lock the register ({}); nothing written".format(
-                    exc), file=sys.stderr)
+                print("append: refused, cannot lock the register ({}); nothing written; "
+                      "{}".format(exc, _creation_cleanup(fd, path, made_dirs)), file=sys.stderr)
                 return 2
-        else:
-            # Bind the write to the file the validation read: if the path no longer names that
-            # file, refuse rather than write through either name.
-            st_fd = os.fstat(fd)
-            try:
-                st_path = os.lstat(str(path))
-            except OSError:
-                st_path = None
-            if st_path is None or (st_fd.st_dev, st_fd.st_ino) != \
-                    (st_path.st_dev, st_path.st_ino):
-                print("append: refused, the register at this path is no longer the file that "
-                      "was validated (replaced between validation and write); nothing written "
-                      "to either file", file=sys.stderr)
-                return 2
-        size = os.fstat(fd).st_size
+        # Bind the write to the file the validation read (or, for a first row, to the file this
+        # call just created, re-checked UNDER the acquired lock): if the path no longer names
+        # that file, refuse rather than write through either name.
+        st_fd = os.fstat(fd)
+        try:
+            st_path = os.lstat(str(path))
+        except OSError:
+            st_path = None
+        if st_path is None or (st_fd.st_dev, st_fd.st_ino) != \
+                (st_path.st_dev, st_path.st_ino):
+            print("append: refused, the register at this path is no longer the file that "
+                  "was validated (replaced between validation and write); nothing written "
+                  "to either file", file=sys.stderr)
+            return 2
+        # The on-disk size must still be the validated length (for a first row: still zero).
+        # This is the serialization re-check for a freshly created register, where the lock is
+        # necessarily taken only after the creation: a cooperating appender that landed between
+        # the creation and this lock forces a refusal here, never an interleaved row. For an
+        # existing register it narrows the non-cooperating-writer window to after this check.
+        size = st_fd.st_size
+        if size != len(raw):
+            msg = ("append: refused, the register on disk is {} byte(s) but the validated text "
+                   "is {} byte(s) (a writer changed the file between the validation and the "
+                   "write; for a first row, between its exclusive creation and the lock); "
+                   "nothing further written".format(size, len(raw)))
+            if created:
+                msg += "; " + _creation_cleanup(fd, path, made_dirs)
+            print(msg, file=sys.stderr)
+            return 2
         try:
             written = os.write(fd, data)
         except OSError as exc:
-            print("append: the write failed ({}); {}".format(exc, _rolled_back(fd, size)),
-                  file=sys.stderr)
+            msg = "append: the write failed ({}); {}".format(exc, _rolled_back(fd, size))
+            if created:
+                msg += "; " + _creation_cleanup(fd, path, made_dirs)
+            print(msg, file=sys.stderr)
             return 2
         if written != len(data):
-            print("append: short write ({} of {} bytes); {}".format(
-                written, len(data), _rolled_back(fd, size)), file=sys.stderr)
+            msg = "append: short write ({} of {} bytes); {}".format(
+                written, len(data), _rolled_back(fd, size))
+            if created:
+                msg += "; " + _creation_cleanup(fd, path, made_dirs)
+            print(msg, file=sys.stderr)
             return 2
         print("appended {} seq {}".format(a.id, seq))
         return 0
@@ -319,6 +412,12 @@ def self_test():
     scrub_git_environment()
     tmp = Path(tempfile.mkdtemp(prefix="aiqt-orch-register-"))
     failures = []
+    # The appender resolves the register gate's own root (production: repo_root(), the same
+    # function the gate's main() calls); each fixture stands in its own repository, so the
+    # resolution is routed at the fixture root under test and restored in the finally.
+    gate_root = {"root": None}
+    real_gate_root = _gate_root
+    globals()["_gate_root"] = lambda: gate_root["root"]
 
     def append(reg, rid, status="proposed", **extra):
         fields = {"register": str(reg), "id": rid, "mistake": "m", "evidence": "e",
@@ -335,9 +434,14 @@ def self_test():
         return rc, err.getvalue()
 
     def snapshot(reg):
-        anchor = Path(str(reg) + ".anchor")
-        return (reg.read_bytes() if reg.exists() else None,
-                anchor.read_bytes() if anchor.exists() else None)
+        def state(p):
+            sp = str(p)
+            if os.path.islink(sp):
+                return ("symlink", os.readlink(sp))
+            if os.path.isdir(sp):
+                return ("dir", tuple(sorted(os.listdir(sp))))
+            return Path(sp).read_bytes() if os.path.lexists(sp) else None
+        return (state(reg), state(Path(str(reg) + ".anchor")))
 
     def accepted(name, reg, rid, status="proposed", **extra):
         before = _lines(reg)
@@ -365,7 +469,7 @@ def self_test():
         if got != want or not isinstance(row.get("ts"), str) or not row["ts"]:
             failures.append("{}: the landed last row {!r} is not the appended row {!r}".format(
                 name, got, want))
-        problems = verify_lines(after, root=_register_root(reg), prefix=prefix + "-")
+        problems = verify_lines(after, root=gate_root["root"], prefix=prefix + "-")
         if problems:
             failures.append("{}: the register after the append fails verify_lines: {}".format(
                 name, problems))
@@ -395,6 +499,7 @@ def self_test():
         head = git(repo, "rev-parse", "HEAD").stdout.strip()
         (repo / ".aiqt").mkdir()
         registry = repo / ".aiqt" / "orchestration.local.json"
+        gate_root["root"] = repo
 
         def declare(**surfaces):
             registry.write_text(json.dumps({"version": 1, **surfaces}), encoding="utf-8")
@@ -444,7 +549,9 @@ def self_test():
                     fcntl.flock(probe_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     fcntl.flock(probe_fd, fcntl.LOCK_UN)
                     seen["held"] = False
-                except OSError:
+                except OSError as exc:
+                    if exc.errno not in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES):
+                        raise  # an unrelated probe error is not lock contention
                     seen["held"] = True
             finally:
                 os.close(probe_fd)
@@ -472,16 +579,25 @@ def self_test():
             os.replace(str(decoy), str(swap))
             return out
 
-        globals()["verify_append_only"] = swapping
+        # hold a handle on the inode the append validates, so the DISPLACED file can be proven
+        # row-free after the refusal (the replacement check alone reads only the decoy)
+        displaced_fd = os.open(str(swap), os.O_RDONLY)
         try:
-            rc, err = append(swap, "MR-1", "accepted")
+            globals()["verify_append_only"] = swapping
+            try:
+                rc, err = append(swap, "MR-1", "accepted")
+            finally:
+                globals()["verify_append_only"] = real_vao
+            displaced = os.pread(displaced_fd, 1 << 16, 0)
         finally:
-            globals()["verify_append_only"] = real_vao
+            os.close(displaced_fd)
         if rc != 2 or "replaced between validation and write" not in err:
             failures.append("replaced-register-refused: want exit 2 naming the replacement, got "
                             "exit {}: {}".format(rc, err.strip()))
         if swap.read_text(encoding="utf-8") != swap_seed:
             failures.append("replaced-register-refused: the replacement file received the row")
+        if displaced != swap_seed.encode("utf-8"):
+            failures.append("replaced-register-refused: the displaced file received the row")
         # an attestation register validates under its own id family, which the registry declares
         declare(mistakes_register="reg.jsonl", attestations="attest.jsonl")
         accepted("attestation-prefix-appends", repo / "attest.jsonl", "AT-1", prefix="AT")
@@ -499,13 +615,17 @@ def self_test():
         bare.mkdir()
         subprocess.run(["git", "init", "-q", str(bare)], check=True, capture_output=True,
                        timeout=30)
+        gate_root["root"] = bare
         refused("no-registry-refused", bare / "reg.jsonl", 2, "no orchestration registry",
                 "MR-1")
-        # a register outside any git repository has no gate context (never a cwd fallback)
+        gate_root["root"] = repo
+        # a gate root that is not a git repository offers no gate context to validate in
         outside = tmp / "outside"
         outside.mkdir()
-        refused("outside-any-repo-refused", outside / "reg.jsonl", 2,
-                "outside any git repository", "MR-1")
+        gate_root["root"] = outside
+        refused("gate-root-not-a-repo-refused", outside / "reg.jsonl", 2,
+                "validation root is not a git repository", "MR-1")
+        gate_root["root"] = repo
         # a register whose last line lacks its newline would fuse the new row onto it on disk
         fused = repo / "fused.jsonl"
         declare(mistakes_register="fused.jsonl")
@@ -534,10 +654,28 @@ def self_test():
                  "the anchor file is malformed"),
                 ("digest-not-hex", json.dumps({"seq": 1, "digest": "Z" * 64}),
                  "the anchor file is malformed"),
+                ("digest-short-hex", json.dumps({"seq": 1, "digest": "a" * 63}),
+                 "the anchor file is malformed"),
+                ("seq-zero", json.dumps({"seq": 0, "digest": "0" * 64}),
+                 "the anchor file is malformed"),
+                ("seq-float", json.dumps({"seq": 1.0, "digest": "0" * 64}),
+                 "the anchor file is malformed"),
+                ("non-object", json.dumps([1, 2]),
+                 "the anchor file is malformed"),
                 ("not-json", "not json", "cannot be read as JSON")):
             Path(str(anchbad) + ".anchor").write_text(body, encoding="utf-8")
             refused("anchor-{}-exit-2".format(tag), anchbad, 2, reason, "MR-2")
-        Path(str(anchbad) + ".anchor").unlink()
+        # an anchor ENTRY that exists but cannot be used is cannot-evaluate, never the
+        # missing-anchor bootstrap allowance: a dangling symlink, then a directory
+        anchbad_anchor = Path(str(anchbad) + ".anchor")
+        anchbad_anchor.unlink()
+        anchbad_anchor.symlink_to("missing-anchor-target")
+        refused("anchor-dangling-symlink-exit-2", anchbad, 2,
+                "never the missing-anchor allowance", "MR-2")
+        anchbad_anchor.unlink()
+        anchbad_anchor.mkdir()
+        refused("anchor-directory-exit-2", anchbad, 2, "not a regular file", "MR-2")
+        anchbad_anchor.rmdir()
         # a symlinked register path is refused: the append binds to one file identity
         target = repo / "target.jsonl"
         declare(mistakes_register="target.jsonl")
@@ -558,15 +696,20 @@ def self_test():
         # allowance; the register, its anchor and the directory stay byte-identical
         junk_index = tmp / "junk-index"
         junk_index.write_text("broken-index", encoding="utf-8")
-        entries = sorted(entry.name for entry in repo.iterdir())
+        def dir_state(d):
+            return {e.name: (e.read_bytes() if e.is_file() and not e.is_symlink() else None)
+                    for e in d.iterdir()}
+
+        entries = dir_state(repo)
         os.environ["GIT_INDEX_FILE"] = str(junk_index)
         try:
             refused("git-failure-is-cannot-evaluate", tracked, 2,
                     "cannot decide whether the register is tracked", "MR-2")
         finally:
             os.environ.pop("GIT_INDEX_FILE", None)
-        if sorted(entry.name for entry in repo.iterdir()) != entries:
-            failures.append("a git-failure refusal changed the register directory")
+        if dir_state(repo) != entries:
+            failures.append("a git-failure refusal changed the register directory (an entry "
+                            "name or its bytes)")
         # an unreadable (non-UTF-8) register is refused as cannot-evaluate, never read as empty
         garbled = repo / "garbled.jsonl"
         declare(mistakes_register="garbled.jsonl")
@@ -578,9 +721,170 @@ def self_test():
                 "first row for MR-1 must be proposed", "MR-1", "accepted")
         if (repo / "sub").exists():
             failures.append("a refused first row created the register's directory")
+        # the validation root is the GATE's root, never the repository that merely contains
+        # the register: a register inside a nested repository, declared by the outer root's
+        # registry, validates in the outer root's context (the earlier register-based
+        # resolution consulted the nested repository, found no registry there, and refused)
+        nested = repo / "nestedrepo"
+        nested.mkdir()
+        subprocess.run(["git", "init", "-q", str(nested)], check=True, capture_output=True,
+                       timeout=30)
+        declare(mistakes_register="nestedrepo/nested-reg.jsonl")
+        accepted("nested-repo-validates-in-gate-root", nested / "nested-reg.jsonl", "MR-1")
+        # two declarations resolving to one path are an ambiguous id family: cannot-evaluate,
+        # even when the register exists and the row itself would be legal under one family
+        declare(mistakes_register="shared.jsonl", attestations="shared.jsonl")
+        refused("conflicting-declarations-refused", repo / "shared.jsonl", 2,
+                "conflicting registry declarations", "MR-1")
+        declare(mistakes_register="reg.jsonl", attestations="./reg.jsonl")
+        refused("aliased-declarations-refused", reg, 2,
+                "conflicting registry declarations", "MR-4")
+        # FIRST-ROW SERIALIZATION (both reviews, MAJOR 1): an appender that lands between the
+        # exclusive creation and the creator's lock forces the creator to refuse under its
+        # lock; exactly the interleaved row remains, and the chain stays clean
+        declare(mistakes_register="race.jsonl")
+        race_reg = repo / "race.jsonl"
+        race = {"fired": False, "inner": None}
+        real_flock = fcntl.flock
+
+        def interleaving(lock_fd, op):
+            if not race["fired"]:
+                race["fired"] = True
+                race["inner"] = append(race_reg, "MR-1")
+            return real_flock(lock_fd, op)
+
+        fcntl.flock = interleaving
+        try:
+            rc, err = append(race_reg, "MR-1")
+        finally:
+            fcntl.flock = real_flock
+        if race["inner"] is None or race["inner"][0] != 0:
+            failures.append("first-row-race: the interleaved appender should land its row, "
+                            "got {!r}".format(race["inner"]))
+        if rc != 2 or "between its exclusive creation and the lock" not in err \
+                or "left in place" not in err:
+            failures.append("first-row-race: the creator should refuse (exit 2) naming the "
+                            "window and keep the row, got exit {}: {}".format(rc, err.strip()))
+        race_lines = _lines(race_reg)
+        if len(race_lines) != 1 or verify_lines(race_lines, root=gate_root["root"],
+                                                prefix="MR-"):
+            failures.append("first-row-race: exactly the interleaved row should remain, with "
+                            "a clean verify_lines")
+        # a file that APPEARS between the validation and the exclusive creation is refused
+        # (O_CREAT with O_EXCL) and the appeared file's bytes stay intact
+        declare(mistakes_register="appeared.jsonl")
+        appeared = repo / "appeared.jsonl"
+
+        def planting(vroot, vpath, vlines, allow_missing_anchor=False):
+            out = real_vao(vroot, vpath, vlines, allow_missing_anchor=allow_missing_anchor)
+            appeared.write_bytes(b"interloper bytes\n")
+            return out
+
+        globals()["verify_append_only"] = planting
+        try:
+            rc, err = append(appeared, "MR-1")
+        finally:
+            globals()["verify_append_only"] = real_vao
+        if rc != 2 or "could not be created exclusively" not in err:
+            failures.append("appeared-register-refused: want exit 2 naming the exclusive "
+                            "creation, got exit {}: {}".format(rc, err.strip()))
+        if appeared.read_bytes() != b"interloper bytes\n":
+            failures.append("appeared-register-refused: the appeared file was modified")
+        # a register UNLINKED between the validation and the write is refused and never
+        # re-created (the vanished-path leg of the write binding)
+        vanish = repo / "vanish.jsonl"
+        declare(mistakes_register="vanish.jsonl")
+        accepted("vanish-seed", vanish, "MR-1")
+
+        def vanishing(vroot, vpath, vlines, allow_missing_anchor=False):
+            out = real_vao(vroot, vpath, vlines, allow_missing_anchor=allow_missing_anchor)
+            os.unlink(str(vanish))
+            return out
+
+        globals()["verify_append_only"] = vanishing
+        try:
+            rc, err = append(vanish, "MR-1", "accepted")
+        finally:
+            globals()["verify_append_only"] = real_vao
+        if rc != 2 or "no longer the file that was validated" not in err:
+            failures.append("vanished-register-refused: want exit 2 naming the binding, got "
+                            "exit {}: {}".format(rc, err.strip()))
+        if os.path.lexists(str(vanish)):
+            failures.append("vanished-register-refused: a refusal re-created the register")
+        # a descriptor read failure is cannot-evaluate with a named reason, never an
+        # unhandled exception
+        declare(mistakes_register="reg.jsonl")
+        real_os_read = os.read
+        read_fail = {"fired": False}
+
+        def failing_read(read_fd, count):
+            if not read_fail["fired"]:
+                read_fail["fired"] = True
+                raise OSError(5, "injected input-output error")
+            return real_os_read(read_fd, count)
+
+        os.read = failing_read
+        try:
+            refused("descriptor-read-failure-exit-2", reg, 2,
+                    "cannot be read from its open descriptor", "MR-4")
+        finally:
+            os.read = real_os_read
+        # an OSError DURING the write rolls back to the validated size exactly like a short
+        # write (the failed-write branch, distinct from the RLIMIT short-write leg above)
+        real_os_write = os.write
+        write_fail = {"fired": False}
+
+        def failing_write(write_fd, payload):
+            if not write_fail["fired"] and isinstance(payload, bytes) \
+                    and payload.startswith(b'{"'):
+                write_fail["fired"] = True
+                real_os_write(write_fd, payload[:7])
+                raise OSError(5, "injected write failure")
+            return real_os_write(write_fd, payload)
+
+        os.write = failing_write
+        try:
+            refused("oserror-write-rolls-back", reg, 2, "truncated back", "MR-4")
+        finally:
+            os.write = real_os_write
+        # the disclosed rollback RESIDUAL: when the truncation itself fails, the refusal
+        # names the un-truncated state and the partial bytes remain for the register gate
+        declare(mistakes_register="rollfail.jsonl")
+        rollfail = repo / "rollfail.jsonl"
+        accepted("rollfail-seed", rollfail, "MR-1")
+        rollfail_seed = rollfail.read_bytes()
+        real_ftruncate = os.ftruncate
+        write_fail2 = {"fired": False}
+
+        def failing_write2(write_fd, payload):
+            if not write_fail2["fired"] and isinstance(payload, bytes) \
+                    and payload.startswith(b'{"'):
+                write_fail2["fired"] = True
+                real_os_write(write_fd, payload[:7])
+                raise OSError(5, "injected write failure")
+            return real_os_write(write_fd, payload)
+
+        def failing_truncate(trunc_fd, length):
+            raise OSError(5, "injected truncate failure")
+
+        os.write = failing_write2
+        os.ftruncate = failing_truncate
+        try:
+            rc, err = append(rollfail, "MR-1", "accepted")
+        finally:
+            os.write = real_os_write
+            os.ftruncate = real_ftruncate
+        if rc != 2 or "could NOT be truncated back" not in err:
+            failures.append("failed-rollback-residual: the refusal must name the failed "
+                            "truncation, got exit {}: {}".format(rc, err.strip()))
+        left = rollfail.read_bytes()
+        if not left.startswith(rollfail_seed) or len(left) != len(rollfail_seed) + 7:
+            failures.append("failed-rollback-residual: exactly the named partial bytes "
+                            "should remain (a disclosed residual, repaired by hand)")
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         failures.append("a fixture step raised {}: {}".format(type(exc).__name__, exc))
     finally:
+        globals()["_gate_root"] = real_gate_root
         shutil.rmtree(tmp, ignore_errors=True)
     if failures:
         print("SELF-TEST FAIL:")
@@ -590,14 +894,21 @@ def self_test():
     print("SELF-TEST PASS: an illegal transition, an unknown status, a landed row without an "
           "existing commit or check_ref, a row that would fuse onto an unterminated last line, an "
           "anchored rewrite, a wrong-family id in either direction, and a --prefix that disagrees "
-          "with the registry declaration are each refused (exit 1); an unreadable register, a "
-          "symlinked register path, an undeclared or out-of-repository register, a malformed or "
-          "unreadable anchor, a git failure deciding whether the register is tracked, a tracked "
-          "register with no computable merge-base, a register replaced between validation and "
-          "write, and a failed write (rolled back to the validated size) are refused as "
-          "cannot-evaluate (exit 2); every refusal leaves the register and its anchor "
-          "byte-identical; the lock is held across the validation; and every clean append is "
-          "re-read with its last row and verify_lines checked")
+          "with the registry declaration are each refused (exit 1); an unreadable register or "
+          "register descriptor, a symlinked register path, an undeclared register, a gate root "
+          "that is not a git repository, conflicting declarations resolving to one path, a "
+          "malformed, unreadable or unusable anchor entry (a dangling symlink and a directory "
+          "included), a git failure deciding whether the register is tracked, a tracked "
+          "register with no computable merge-base, a register replaced or unlinked between "
+          "validation and write, a first row interleaved between the exclusive creation and "
+          "the lock (the interleaved row survives, the creator refuses), a file that appeared "
+          "before the exclusive creation, and a failed or short write (rolled back to the "
+          "validated size, a failed rollback disclosed with its partial bytes named) are "
+          "refused as cannot-evaluate (exit 2); every refusal leaves the rows other appenders "
+          "wrote byte-identical (the disclosed failed-rollback residual excepted); the "
+          "register validates in the gate root's own context (a nested-repository register "
+          "validates under the declaring outer root); the lock is held across the validation; "
+          "and every clean append is re-read with its last row and verify_lines checked")
     return 0
 
 
