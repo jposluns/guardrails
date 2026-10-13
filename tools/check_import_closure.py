@@ -6,12 +6,14 @@ standard library of the declared floor version, to a module file in this reposit
 recorded provenance and licence; every reference to the dynamic-import machinery (an occurrence of a watched name
 or import-system member) is one a reviewed row lists exactly, by its scope, text and ordinal there (no position),
 with exactly one exemption: a name Python's own compile-time scoping proves a plain local of a def or lambda that
-no import statement binds (or a free variable bound to such a local) needs no row;
+no import statement binds (or a free variable bound to such a local) needs no row, a binding rule, not a value
+proof (what such a local can still hold is disclosed under dynamic-import);
 every action reference in .github/workflows (and in every action.yml or action.yaml in the tree) has the form of a
 full commit SHA; and every container image there is pinned by digest. A third-party or invented package name
 therefore cannot enter through an import statement in a scanned file or as a string-literal name an importer call
 of LITERAL_IMPORTERS passes in a form the gate reads (below), a watched-name occurrence cannot enter unless a
-reviewed row lists that exact node or it is the one exemption above (a proven plain def or lambda local), and
+reviewed row lists that exact node or it is the one exemption above (a proven plain def or lambda local, its
+residual disclosed under dynamic-import), and
 vendored Python cannot enter without a recognised SPDX identifier whose licence text it carries.
 
 Search roots. A file's search roots are its own directory (Python puts a script's directory first on
@@ -64,17 +66,35 @@ Rules (each self-test vector is caught by exactly its rule, and passes with that
                      identifier chain (getattr(builtins, "__import__"), sys.modules["_frozen_importlib"]). A name
                      read or bound as a scoped variable (a read, an assignment, deletion, loop, with, except,
                      walrus or match target, or a parameter) that Python's own compile-time scoping (the standard
-                     library symtable over the same source, never a hand-rolled walk) proves a plain local of a
+                     library symtable over the same source; the walk that puts each reference in its compile-time
+                     scope is this gate's own, and the self-test pins their agreement) proves a plain local of a
                      def or lambda bound by no import statement, or a free variable whose binding is such a local
-                     in an enclosing def or lambda, is no site: that local is fixed at compile time, so the name
-                     is that variable, not the watched module. Everything else stays a site: a module-scope or
-                     class-body binding (names there are looked up at run time and can fall through to the globals
-                     or the builtins, so a conditional, deleted or later binding proves nothing), a comprehension
-                     target, a global or nonlocal declared name, a local an import statement binds (import imp in
-                     the scope that reads imp), a name any scope imports under a global or nonlocal declaration, a
-                     reference to no binding in the file (the builtin __import__), every reference in a file with
-                     a * import, every ambiguity (two lambdas on one line, a source symtable cannot read), and a
-                     dunder watched name (__import__, __builtins__, __loader__, __path__, __spec__) wherever it is
+                     (found by walking every binding scope between the reference and the module, defs, lambdas,
+                     generator expressions and type-parameter scopes among them, a class body skipped as Python
+                     skips it), is no site. The exemption is a binding rule, not a value proof: the binding is
+                     local and fixed at compile time, so the name resolves to that variable and never to a
+                     module-level or builtin binding; what the variable holds is not proven, and a local that
+                     import machinery reaches another way is the accepted residual, watched only where the gate
+                     watches that way (help bound as a parameter and then read or called is reported nowhere, and
+                     so is a local bound from eval or another unwatched dynamic call; an import statement, an
+                     importer call and every watched-name occurrence stay watched as this rule reads them). Each
+                     reference is resolved in the compile-time scope that actually holds it: a generator
+                     expression is a scope of its own (its body, targets, conditions and every iterable after the
+                     first; the first iterable is read where the expression occurs), and a type parameter list
+                     with its bounds, constraints and defaults, a generic class's bases and keywords, a generic
+                     def's annotations and a generic type alias's value resolve in the definition's type-parameter
+                     scope (an annotation, type-variable or type-alias scope binds nothing a name could resolve
+                     to, so a reference it holds resolves by the innermost binding scope around it).
+                     Everything else stays a site: a module-scope or class-body binding (names there are looked
+                     up at run time and can fall through to the globals or the builtins, so a conditional,
+                     deleted or later binding proves nothing), a comprehension target, a walrus target in a
+                     generator expression (an implicit nonlocal there), a global or nonlocal declared name, a
+                     type-parameter binding (a type parameter is no def's or lambda's local), a local an import
+                     statement binds (import imp in the scope that reads imp), a name any scope imports under a
+                     global or nonlocal declaration, a reference to no binding in the file (the builtin
+                     __import__), every reference in a file with a * import, every ambiguity (two lambdas on one
+                     line, nested generator expressions on one line, a source symtable cannot read), and a dunder
+                     watched name (__import__, __builtins__, __loader__, __path__, __spec__) wherever it is
                      bound, since binding one rebinds the import machinery itself; and an import statement, a
                      def's or class's header, an attribute, a keyword's name, a type parameter and a literal are
                      never resolved, so each stays a site as before. The reference
@@ -95,7 +115,8 @@ Rules (each self-test vector is caught by exactly its rule, and passes with that
                      and so the identity of every sibling of that name (each row there goes stale); only an edit that
                      keeps N (siblings reordered, or as many added as removed) can leave a moved reference on the
                      #K/N it held (DISCLOSED RESIDUAL). A comprehension or generator expression is not a scope here:
-                     what it holds belongs to the scope around it. An identity two scopes share would tell neither
+                     what it holds is listed under the scope around it (a generator expression's references are
+                     still resolved in its own compile-time scope, above). An identity two scopes share would tell neither
                      apart, so it exits 2 (cannot evaluate) and is never merged. A definition's name, decorators,
                      defaults, annotations, bases, keywords and type parameters (their bounds, constraints and
                      defaults) belong to the scope that runs the definition, and only its parameters and body to
@@ -1311,35 +1332,64 @@ def watched_names(modules=IMPORT_SYSTEM_MODULES, inert=INERT_IMPORT_SYSTEM_MEMBE
     return names, frozenset(members) - names - frozenset(n for n, _reason in inert)
 
 
-def _scoped_children(node, scope, inner=None):
-    """(child, scope, descend) for each child of node. A def, class or lambda runs its body, and binds its
-    parameters, in a scope of its own, inner (its identity, scope_identities); everything else it holds (decorators,
-    defaults, annotations, bases, keywords, type parameters with their bounds, constraints and defaults) is read in
-    the enclosing scope, where the definition runs. A parameter is a leaf there: its annotation is pushed apart, in
-    the enclosing scope. A type alias is no scope here, so its value is read in the scope that runs the type
-    statement. The floor version evaluates an annotation, a type parameter's bound, constraints and default, and a
-    type alias's value only when it is read, in an annotation scope (all the annotations of one definition share one,
+def _scoped_children(node, scope, inner=None, res=None):
+    """(child, identity scope, resolution scope, descend) for each child of node. A def, class or lambda runs its
+    body, and binds its parameters, in a scope of its own, inner (its identity, scope_identities); everything else
+    it holds (decorators, defaults, annotations, bases, keywords, type parameters with their bounds, constraints
+    and defaults) is read in the enclosing scope, where the definition runs, and that scope names its row. A
+    parameter is a leaf there: its annotation is pushed apart, in the enclosing scope. A type alias is no scope
+    here, so its value is read in the scope that runs the type statement. The resolution scope is the compile-time
+    scope the reference's name is resolved in (_kept): None resolves by the identity scope's own table, and a key
+    ((kind, name, line), _scope_tables) by the exact table of a scope the identity walk does not enter. A
+    generator expression is such a scope: its body, targets, conditions and every iterable after the first resolve
+    there (the first iterable is read where the expression occurs). So is a type-parameter scope: a type parameter
+    list with its bounds, constraints and defaults, a generic class's bases and keywords, a generic def's
+    annotations and a generic type alias's value resolve there (an annotation, type-variable or type-alias scope
+    binds nothing a name could resolve to, so a reference it holds resolves by the innermost binding scope around
+    it, the type-parameter scope where the definition is generic, else the scope that runs the definition).
+    The floor version evaluates an annotation, a type parameter's bound, constraints and default, and a type
+    alias's value only when it is read, in an annotation scope (all the annotations of one definition share one,
     its __annotate__), and a generic class's bases and keywords at once in the annotation scope of its type
-    parameters, yet each is read here in the scope around it, so a move between one of them and the code beside it is
-    a move within that scope (DISCLOSED RESIDUAL). The annotation of an annotated assignment directly in a function
-    body, or of one whose target is not a simple name, is never evaluated (one in a class body or a def nested in that
-    function is), and is read here like any other expression of the scope that holds it."""
+    parameters, yet each is read here in the scope around it, so a move between one of them and the code beside it
+    is a move within that scope (DISCLOSED RESIDUAL). The annotation of an annotated assignment directly in a
+    function body, or of one whose target is not a simple name, is never evaluated (one in a class body or a def
+    nested in that function is), and is read here like any other expression of the scope that holds it."""
+    if isinstance(node, ast.GeneratorExp):
+        own = ("function", "genexpr", node.lineno)
+        out = [(node.elt, scope, own, True)]
+        for index, comp in enumerate(node.generators):
+            out.append((comp.target, scope, own, True))
+            out.append((comp.iter, scope, res if index == 0 else own, True))
+            out.extend((test, scope, own, True) for test in comp.ifs)
+        return out
+    if isinstance(node, ast.TypeAlias):
+        params = ("type parameters", node.name.id, node.lineno) if node.type_params else None
+        out = [(node.name, scope, res, True)]
+        out.extend((child, scope, params, True) for child in node.type_params)
+        out.append((node.value, scope, params if params is not None else res, True))
+        return out
     if not isinstance(node, SCOPE_NODES):
-        return [(child, scope, True) for child in ast.iter_child_nodes(node)]
+        return [(child, scope, res, True) for child in ast.iter_child_nodes(node)]
+    params = ("type parameters", node.name, node.lineno) if getattr(node, "type_params", None) else None
+    definition = params if params is not None else res
     out = []
     for field, value in ast.iter_fields(node):
         for child in value if isinstance(value, list) else (value,):
             if field == "body":
-                out.append((child, inner, True))
+                out.append((child, inner, None, True))
+            elif field == "type_params":
+                out.append((child, scope, params, True))
+            elif field in ("returns", "bases", "keywords") and child is not None:
+                out.append((child, scope, definition, True))
             elif isinstance(child, ast.arguments):
                 for arg in child.posonlyargs + child.args + [child.vararg] + child.kwonlyargs + [child.kwarg]:
                     if arg is not None:
-                        out.append((arg, inner, False))
+                        out.append((arg, inner, None, False))
                         if arg.annotation is not None:
-                            out.append((arg.annotation, scope, True))
-                out.extend((d, scope, True) for d in child.defaults + child.kw_defaults if d is not None)
+                            out.append((arg.annotation, scope, definition, True))
+                out.extend((d, scope, res, True) for d in child.defaults + child.kw_defaults if d is not None)
             elif isinstance(child, ast.AST):
-                out.append((child, scope, True))
+                out.append((child, scope, res, True))
     return out
 
 
@@ -1359,13 +1409,13 @@ def scope_identities(tree):
     comprehension or generator expression is not a scope here. No line or column is part of it; the source order only
     numbers same-named siblings."""
     held = dict()
-    stack = [(tree, tree, True)]
+    stack = [(tree, tree, None, True)]
     while stack:
-        node, scope, descend = stack.pop()
+        node, scope, res, descend = stack.pop()
         if isinstance(node, SCOPE_NODES):
             held.setdefault(id(scope), []).append(node)
         if descend:
-            stack.extend(_scoped_children(node, scope, node))
+            stack.extend(_scoped_children(node, scope, node, res))
     identities = {id(tree): MODULE_SCOPE}
     order = [tree]
     for parent in order:
@@ -1394,7 +1444,8 @@ RESOLVED_NAME_FIELDS = ((ast.Name, "id"), (ast.arg, "arg"), (ast.ExceptHandler, 
 def _comprehension_targets(tree):
     """id() of every node under a comprehension's for-target: a comprehension target always keeps its site,
     wherever Python binds it (the floor version inlines a list, set or dict comprehension into the def around
-    it and keeps a generator expression a scope of its own; this gate reads neither, it keeps both)."""
+    it and keeps a generator expression a scope of its own; the gate resolves a generator expression in its own
+    scope, _scoped_children, and still keeps every target)."""
     out = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.comprehension):
@@ -1411,30 +1462,42 @@ def _starred_import(tree):
 
 
 def _scope_tables(tree, source, identities):
-    """({scope identity: (symbol table, function tables around it, kind)}, tainted names) for the module and
-    for every def, class and lambda of tree exactly one compile-time symbol table matches, by its name (a
-    lambda as lambda) and line: the tables are Python's own scope analysis (the standard library symtable
-    module over the same source), never a hand-rolled walk. A scope more than one table could match (two
-    lambdas on one line) is left unmatched, and every reference in an unmatched scope keeps its site. A
-    tainted name is one some scope binds by an import statement under a global or nonlocal declaration (run
-    that import and an enclosing def's local, or the module's name, becomes the imported module), so no
-    reference to it is ever suppressed. A source symtable cannot read gives no tables: every reference then
-    keeps its site."""
+    """({scope: (symbol table, binding scopes around it, kind)}, tainted names): for the module and for every def,
+    class and lambda of tree exactly one compile-time symbol table matches, by its name (a lambda as lambda) and
+    line, keyed by its identity; and for every generator-expression and type-parameter scope one matches, keyed by
+    (kind, name, line), the resolution keys _scoped_children gives. The tables are Python's own scope analysis
+    (the standard library symtable module over the same source); the walk that puts each reference in its
+    compile-time scope is this gate's own (_scoped_children), and the self-test pins their agreement. A scope more
+    than one table could match (two lambdas on one line, nested generator expressions on one line, a def named
+    genexpr beside a generator expression on its line) is left unmatched, and every reference in an unmatched
+    scope keeps its site. The binding scopes around a table are the ones a free variable's binding is searched in,
+    innermost first: every def, lambda and generator expression and every type-parameter scope between the
+    reference and the module (a class body is skipped, as Python skips it; an annotation, type-variable or
+    type-alias scope binds nothing, so it provides nothing to search). A tainted name is one some scope binds by
+    an import statement under a global or nonlocal declaration (run that import and an enclosing def's local, or
+    the module's name, becomes the imported module), so no reference to it is ever suppressed. A source symtable
+    cannot read gives no tables: every reference then keeps its site."""
     try:
         top = symtable.symtable(source, "<dynamic-import>", "exec")
     except (SyntaxError, ValueError):
         return dict(), frozenset()
-    functions, classes, tainted = dict(), dict(), set()
+    functions, classes, resolved, tainted = dict(), dict(), dict(), set()
     stack = [(top, ())]
     while stack:
         table, around = stack.pop()
         for sym in table.get_symbols():
             if sym.is_imported() and not sym.is_local():
                 tainted.add(sym.get_name())
-        if table.get_type() == "function":
+        kind = table.get_type()
+        if kind == "function":
             functions.setdefault((table.get_name(), table.get_lineno()), []).append((table, around))
+            if table.get_name() == "genexpr":
+                resolved.setdefault((kind, "genexpr", table.get_lineno()), []).append((table, around))
             around = (table,) + around
-        elif table.get_type() == "class":
+        elif kind == "type parameters":
+            resolved.setdefault((kind, table.get_name(), table.get_lineno()), []).append((table, around))
+            around = (table,) + around
+        elif kind == "class":
             classes.setdefault((table.get_name(), table.get_lineno()), []).append(table)
         stack.extend((child, around) for child in table.get_children())
     out = {MODULE_SCOPE: (top, (), "module")}
@@ -1447,17 +1510,22 @@ def _scope_tables(tree, source, identities):
             held = functions.get(("lambda" if isinstance(node, ast.Lambda) else node.name, node.lineno), ())
             if len(held) == 1:
                 out[identities[id(node)]] = (held[0][0], held[0][1], "function")
+    for key, held in resolved.items():
+        if len(held) == 1:
+            out[key] = (held[0][0], held[0][1], key[0])
     return out, frozenset(tainted)
 
 
 def _plain_local(sym, around, tainted):
     """True when sym is a plain compile-time local of a def or lambda: Python's own analysis binds it there,
     no import statement binds it, no import under a global or nonlocal declaration can rebind it (tainted),
-    it is no comprehension variable of the floor version's inlined comprehensions, and it is not declared
-    nonlocal; or when it is a free variable whose binding is such a local in an enclosing def or lambda
-    (around, innermost first, Python's own rule: a class body never provides a free variable's binding).
-    Everything else, an implicit or declared global and a free name with no provable binding among them, is
-    unproven: the reference keeps its site."""
+    it is no comprehension variable (a generator expression's target among them) and it is not declared
+    nonlocal (a walrus in a generator expression is an implicit nonlocal there); or when it is a free variable
+    whose binding, found by walking the binding scopes around it (around, innermost first: defs, lambdas,
+    generator expressions and type-parameter scopes, a class body skipped, Python's own rule), is such a local
+    of a def or lambda. A binding found in a scope that is no def or lambda (a type parameter) is no such
+    local: the reference keeps its site. Everything else, an implicit or declared global and a free name with
+    no provable binding among them, is unproven: the reference keeps its site."""
     if sym.get_name() in tainted:
         return False
     if sym.is_imported():
@@ -1475,20 +1543,27 @@ def _plain_local(sym, around, tainted):
             except KeyError:
                 continue
             if held.is_local():
+                if table.get_type() != "function":
+                    return False
                 return _plain_local(held, (), tainted)
         return False
     return False
 
 
 def _kept(name, scope, node, tables, tainted, comp_targets, starred):
-    """True when the reference to the watched name in scope stays a site: a dunder name (binding __import__,
-    __builtins__ or __path__ rebinds the import machinery itself, so every occurrence is reviewed), any
-    reference in a file with a * import, a comprehension target, a module-scope or class-body resolution
-    (names there are looked up at run time and can fall through to the globals or the builtins, however they
-    are bound), a scope no symbol table matches, and a name its own table does not hold or _plain_local does
-    not prove. False only for the one exemption: Python's own compile-time scoping proves the name a plain
-    local of a def or lambda (or a free variable bound to such a local), so the name is that variable and can
-    never be the watched module."""
+    """True when the reference to the watched name in scope (an identity, or a resolution key for a scope the
+    identity walk does not enter) stays a site: a dunder name (binding __import__, __builtins__ or __path__
+    rebinds the import machinery itself, so every occurrence is reviewed), any reference in a file with a *
+    import, a comprehension target, a module-scope or class-body resolution (names there are looked up at run
+    time and can fall through to the globals or the builtins, however they are bound), a scope no symbol table
+    matches (a source symtable cannot read, and every ambiguity, among them), a type-parameter binding (a type
+    parameter is no def's or lambda's local), and a name its own table does not hold or _plain_local does not
+    prove. False only for the one exemption, a binding rule and not a value proof: Python's own compile-time
+    scoping proves the name a plain local of a def or lambda (or a free variable bound to such a local), so the
+    name resolves to that variable's binding, never to a module-level or builtin one. What the variable holds is
+    not proven: such a local can still hold import machinery obtained another way (a parameter, an eval or
+    another dynamic call), and that way is watched only where the gate watches it, an accepted residual the rule
+    text discloses and the site vectors pin."""
     if name.startswith("__") and name.endswith("__"):
         return True
     if starred:
@@ -1499,11 +1574,13 @@ def _kept(name, scope, node, tables, tainted, comp_targets, starred):
     if held is None:
         return True
     table, around, kind = held
-    if kind != "function":
+    if kind not in ("function", "type parameters"):
         return True
     try:
         sym = table.lookup(name)
     except KeyError:
+        return True
+    if kind == "type parameters" and not sym.is_free():
         return True
     return not _plain_local(sym, around, tainted)
 
@@ -1564,10 +1641,12 @@ def dynamic_sites(tree, source, names, members):
     reported with a finding and no part of its key. The enclosing scope is its lexical scope instance
     (scope_identities); an identity two scopes share cannot tell them apart, so it is refused, never merged.
     A name read or bound as a scoped variable (RESOLVED_NAME_FIELDS) that Python's own compile-time scoping
-    over source proves a plain local of a def or lambda, or a free variable bound to such a local (_kept), is
-    no site: the name is that variable, not the watched module. Every other occurrence stays a site: a module
-    or class-body resolution, a comprehension target, an import binding, a global or nonlocal declared name,
-    a dunder, every reference in a file with a * import, and every ambiguity."""
+    over source proves a plain local of a def or lambda, or a free variable bound to such a local (_kept,
+    resolved in the compile-time scope that holds the reference: a generator expression's own scope and a
+    type-parameter scope among them, _scoped_children), is no site: the binding is that variable's, never a
+    module-level or builtin one (a binding rule, not a value proof). Every other occurrence stays a site: a
+    module or class-body resolution, a comprehension target, an import binding, a global or nonlocal declared
+    name, a type-parameter binding, a dunder, every reference in a file with a * import, and every ambiguity."""
     parents = dict()
     for node in ast.walk(tree):
         for child in ast.iter_child_nodes(node):
@@ -1582,9 +1661,9 @@ def dynamic_sites(tree, source, names, members):
     tables, tainted = _scope_tables(tree, source, identities)
     comp_targets, starred = _comprehension_targets(tree), _starred_import(tree)
     found = dict()
-    stack = [(tree, MODULE_SCOPE, True)]
+    stack = [(tree, MODULE_SCOPE, None, True)]
     while stack:
-        node, scope, descend = stack.pop()
+        node, scope, res, descend = stack.pop()
         for field, value in ast.iter_fields(node):
             for item in value if isinstance(value, list) else (value,):
                 if isinstance(item, bytes):
@@ -1596,13 +1675,13 @@ def dynamic_sites(tree, source, names, members):
                 if isinstance(node, ast.keyword):
                     hits -= KEYWORD_EXEMPT_NAMES
                 if hits and any(isinstance(node, kind) and field == named for kind, named in RESOLVED_NAME_FIELDS):
-                    hits = set(hit for hit in hits if _kept(hit, scope, node, tables, tainted,
-                                                            comp_targets, starred))
+                    hits = set(hit for hit in hits if _kept(hit, scope if res is None else res, node, tables,
+                                                            tainted, comp_targets, starred))
                 if hits:
                     reference = _site_reference(node, parents)
                     found.setdefault(id(reference), (reference, scope, set()))[2].update(hits)
         if descend:
-            stack.extend(_scoped_children(node, scope, identities.get(id(node))))
+            stack.extend(_scoped_children(node, scope, identities.get(id(node)), res))
     out = []
     for reference, scope, hits in found.values():
         span = reference_text(reference)
@@ -2465,8 +2544,10 @@ _RULE_VECTORS = (
                      "    return help(topic)\n"),), (), {}, True),
     ("a module binding after the def that reads it, end to end", "dynamic-import", "tools/t.py",
      (("tools/t.py", "def show(t):\n    return help(t)\nhelp = print\n"),), (), {}, True),
-    # The import statements and declarations round 9 already kept are listed, so each of these is red on the
-    # round-9 code: the only unlisted reference is the one round 9 suppressed.
+    # Each of these is red on the round-9 code: the references round 9 already kept are listed (import
+    # statements, a global declaration and, for the inward barrier, the inner read), round 9 reported none of
+    # the rest, and this gate reports every remaining reference, one or two findings per vector, each without
+    # a row.
     ("a class-body read before its binding, end to end", "dynamic-import", "tools/t.py",
      (("tools/t.py", "import pydoc\nclass C:\n    loader = pydoc.importfile\n    pydoc = None\n"),), (),
      dict(allowlist=_FIXTURE_SITES + (("tools/t.py", MODULE_SCOPE, ("#1: import pydoc",), "r"),)), True),
@@ -3017,9 +3098,10 @@ _SITE_VECTORS = (
     ("a default's lambda numbered in the scope that runs the definition",
      "def f(a=lambda: __import__):\n    return lambda: __import__\ng = lambda: __import__\n",
      ("<lambda>#1/2 | #1: __import__", "f.<lambda> | #1: __import__", "<lambda>#2/2 | #1: __import__")),
-    # A comprehension or generator expression is not a scope here: what it holds is read in the scope around it. A
-    # regression pin, not red on revert: the gate read it this way before this boundary was disclosed, so it fails
-    # only against a later change to that reading.
+    # A comprehension or generator expression is not a scope for rows: what it holds is listed under the scope
+    # around it (a generator expression is resolved in its own compile-time scope: the Round-11 vectors below). A
+    # regression pin, not red on revert: the gate listed it this way before this boundary was disclosed, so it
+    # fails only against a later change to that listing.
     ("comprehension and generator expression read in the def around them",
      "def f(a):\n    return [__import__(n) for n in a], (__import__(n) for n in a)\n",
      ("f | #1: __import__(n)", "f | #2: __import__(n)")),
@@ -3133,6 +3215,62 @@ _SITE_VECTORS = (
      "    return g\n", ()),
     ("a generator-expression read of a name no def binds",
      "def f(rows):\n    return (imp for r in rows)\n", ("f | #1: imp",)),
+    # Round-11: each reference is resolved in the compile-time scope that actually holds it. A generator
+    # expression is a scope of its own: a read, call or condition naming its target names the comprehension
+    # variable, never the enclosing def's local, so it keeps its site; a free read there still resolves through
+    # the binding scopes around it, and the first iterable is read where the expression occurs.
+    ("a generator-expression target read in its body",
+     "def f(rows):\n    help = 0\n    return (help for help in rows)\n", ("f | #1: help", "f | #2: help")),
+    ("a generator-expression target called in its body",
+     "def f(rows):\n    help = 0\n    return (help('json') for help in rows)\n",
+     ("f | #1: help('json')", "f | #1: help")),
+    ("a generator-expression target read in its condition",
+     "def f(rows):\n    help = 0\n    return (x for help in rows if help)\n", ("f | #1: help", "f | #2: help")),
+    ("a generator-expression free read of an enclosing local",
+     "def f(rows):\n    imp = 1\n    return (imp for x in rows)\n", ()),
+    ("a generator expression's first iterable read where it occurs",
+     "def f():\n    help = 0\n    return (x for x in help)\n", ()),
+    ("a walrus target in a generator expression's condition",
+     "def f(rows):\n    imp = 0\n    return (1 for x in rows if (imp := x))\n", ("f | #1: imp",)),
+    ("nested generator expressions on one line, each scope unmatched",
+     "def f(rows):\n    return ((imp for imp in r) for r in rows)\n", ("f | #1: imp", "f | #2: imp")),
+    ("a def named genexpr beside a generator expression on its line",
+     "def genexpr(rows): return (imp for r in rows)\n", ("genexpr | #1: imp",)),
+    # Round-11: a free variable's binding is searched through every binding scope between the reference and the
+    # module; a binding that is no def's or lambda's local (a type parameter) keeps the site, and so does a
+    # reference a type-parameter scope holds when the name is bound there (a bound, a generic class's base, a
+    # generic def's annotation, a generic type alias's value).
+    ("a type parameter shadowing an enclosing local, read in the def's body",
+     "def outer():\n    help = 0\n    def inner[help]():\n        return help\n    return inner\n",
+     ("outer | #1: help", "outer.inner | #1: help")),
+    ("a generic class's base read in its type-parameter scope",
+     "def outer():\n    help = 0\n    class C[help](help):\n        pass\n    return C\n",
+     ("outer | #1: help", "outer | #2: help")),
+    ("a generic type alias's value read in its type-parameter scope",
+     "def outer():\n    help = 0\n    type Alias[help] = help\n    return Alias\n",
+     ("outer | #1: help", "outer | #2: help")),
+    ("a type parameter's bound read in its type-parameter scope",
+     "def outer():\n    help = 0\n    def g[help, T: help]():\n        return T\n    return g\n",
+     ("outer | #1: help", "outer | #2: help")),
+    ("a generic def's annotation read in its type-parameter scope",
+     "def outer():\n    help = 0\n    def g[help](x: help):\n        return x\n    return g\n",
+     ("outer | #1: help", "outer | #2: help")),
+    # Round-11: the exemption is a binding rule, not a value proof. A plain local can still hold import machinery
+    # obtained another way (a parameter, an eval or another unwatched dynamic call), and the gate reports nothing
+    # for it: the disclosed residual, pinned here. A source symtable rejects keeps every site.
+    ("a parameter named help, read and called", "def f(help):\n    return help('json')\n", ()),
+    ("a local bound from eval, read and called",
+     "def f():\n    help = eval('he' + 'lp')\n    return help('json')\n", ()),
+    ("a source symtable rejects keeps every site",
+     "def f():\n    imp = 1\n    global imp\n    return imp\n",
+     ("f | #1: imp", "f | #1: global imp", "f | #2: imp")),
+    # Round-11: the two keeps the own-scope resolution does not already give: a read inside a comprehension
+    # target (a subscript index there is under the target, so it keeps its site) and a name its scope's table
+    # does not hold (a function-body annotation is dropped from the table, never evaluated).
+    ("a comprehension target's subscript read kept with it",
+     "def f(rows, d):\n    imp = 1\n    return [x for d[imp] in rows]\n", ("f | #1: imp",)),
+    ("an annotation read of a name no def binds",
+     "def f():\n    x: imp = 1\n    return x\n", ("f | #1: imp",)),
 )
 
 # (name, source before, source after, the lines of the findings the after source gives as tools/t.py, exactly, 0 for a
@@ -3199,6 +3337,18 @@ _MOVE_VECTORS = (
     ("generic class's base and keyword moved into statements beside the class",
      "class C[U](__import__(x), metaclass=__import__(y)):\n    pass\n",
      "class C[U]:\n    pass\nv = __import__(x)\nw = __import__(y)\n", ()),
+    # Round-11: a generator expression resolved in its own scope, the rows unchanged: an edit that adds a read,
+    # call or condition naming the generator's target is a finding (the shadowed target was listed, so a stale
+    # row or an unlisted reference discriminates).
+    ("call added to a generator-expression target read, its rows unchanged",
+     "def f(rows):\n    help = 0\n    return (help for help in rows)\n",
+     "def f(rows):\n    help = 0\n    return (help('json') for help in rows)\n", (0, 3)),
+    ("condition added to a generator expression, its rows unchanged",
+     "def f(rows):\n    help = 0\n    return (x for help in rows)\n",
+     "def f(rows):\n    help = 0\n    return (x for help in rows if help)\n", (3,)),
+    ("target read added to a generator expression, its rows unchanged",
+     "def f(rows):\n    help = 0\n    return (0 for help in rows)\n",
+     "def f(rows):\n    help = 0\n    return (help for help in rows)\n", (3,)),
 )
 
 
@@ -3642,20 +3792,20 @@ MUTANTS = (
     ("row-reference-ordinal", 'REFERENCE_RE = re.compile(r"#[1-9][0-9]*: \\S.*")',
      'REFERENCE_RE = re.compile(r"\\S+: \\S.*")', "allowlist row with a malformed reference"),
     ("site-definition-outer",
-     "            elif isinstance(child, ast.AST):\n                out.append((child, scope, True))",
-     "            elif isinstance(child, ast.AST):\n                out.append((child, inner, True))",
+     "            elif isinstance(child, ast.AST):\n                out.append((child, scope, res, True))",
+     "            elif isinstance(child, ast.AST):\n                out.append((child, inner, res, True))",
      "decorator evaluated outside its function"),
-    # Not a new mutation: the site-definition-outer mutation again, bound to a second vector (the type-parameter
-    # edit vector).
+    # The type parameter list read in the definition's own identity scope, not the enclosing one: the
+    # type-parameter edit vector catches it.
     ("site-definition-outer-type-parameters",
-     "            elif isinstance(child, ast.AST):\n                out.append((child, scope, True))",
-     "            elif isinstance(child, ast.AST):\n                out.append((child, inner, True))",
+     '            elif field == "type_params":\n                out.append((child, scope, params, True))',
+     '            elif field == "type_params":\n                out.append((child, inner, params, True))',
      "type-parameter bound moved into a statement beside it"),
-    ("site-defaults-outer", "out.extend((d, scope, True) for d in", "out.extend((d, inner, True) for d in",
+    ("site-defaults-outer", "out.extend((d, scope, res, True) for d in", "out.extend((d, inner, res, True) for d in",
      "default argument evaluated outside its function"),
-    ("site-annotations-outer", "out.append((arg.annotation, scope, True))",
-     "out.append((arg.annotation, inner, True))", "definition-time expressions in the enclosing scope"),
-    ("site-parameters-inner", "out.append((arg, inner, False))", "out.append((arg, scope, False))",
+    ("site-annotations-outer", "out.append((arg.annotation, scope, definition, True))",
+     "out.append((arg.annotation, inner, definition, True))", "definition-time expressions in the enclosing scope"),
+    ("site-parameters-inner", "out.append((arg, inner, None, False))", "out.append((arg, scope, None, False))",
      "parameter and attribute in a nested class method"),
     ("site-reference-climbed", "            return node\n        node = parent\n",
      "            return node\n        return node\n", "one reference per attribute chain and call"),
@@ -3734,11 +3884,11 @@ MUTANTS = (
     ("local-binding-star-kept", "    if starred:\n        return True\n", "    if False:\n        return True\n",
      "a * import keeps a def's plain local a site"),
     ("local-binding-comp-target-kept", "    if id(node) in comp_targets:\n        return True\n",
-     "    if False:\n        return True\n", "a generator-expression target shadowing a def's local"),
-    ("local-binding-module-kept", '    if kind != "function":\n        return True\n',
+     "    if False:\n        return True\n", "a comprehension target's subscript read kept with it"),
+    ("local-binding-module-kept", '    if kind not in ("function", "type parameters"):\n        return True\n',
      '    if kind == "class":\n        return True\n',
      "a module binding under a false branch keeps the builtin's sites"),
-    ("local-binding-class-kept", '    if kind != "function":\n        return True\n',
+    ("local-binding-class-kept", '    if kind not in ("function", "type parameters"):\n        return True\n',
      '    if kind == "module":\n        return True\n',
      "a class-body read before the class binds the name"),
     ("local-binding-ambiguity-kept",
@@ -3749,7 +3899,7 @@ MUTANTS = (
      "two lambdas on one line, each scope unmatched"),
     ("local-binding-missing-name-kept", "    except KeyError:\n        return True\n",
      "    except KeyError:\n        return False\n",
-     "a generator-expression read of a name no def binds"),
+     "an annotation read of a name no def binds"),
     ("local-binding-import-kept", "    if sym.is_imported():\n        return False\n",
      "    if False:\n        return False\n",
      "an import of the watched module in the scope that reads it"),
@@ -3765,11 +3915,48 @@ MUTANTS = (
     ("local-binding-local-proven", "    if sym.is_local():\n        return True\n",
      "    if False:\n        return True\n", "a loop target"),
     ("local-binding-free-proven",
-     "            if held.is_local():\n                return _plain_local(held, (), tainted)\n",
-     "            if False:\n                return _plain_local(held, (), tainted)\n",
+     '            if held.is_local():\n                if table.get_type() != "function":\n'
+     '                    return False\n                return _plain_local(held, (), tainted)\n',
+     '            if False:\n                if table.get_type() != "function":\n'
+     '                    return False\n                return _plain_local(held, (), tainted)\n',
      "a free read through an intervening def"),
     ("local-binding-provider-import-kept", "                return _plain_local(held, (), tainted)\n",
      "                return True\n", "a def's import read from a lambda it holds"),
+    # Round-11: the own-scope resolution removed one rule at a time (a generator expression's scope, the first
+    # iterable read outside it, a type-parameter scope for a definition and for a type alias, the provider walk
+    # through every binding scope, the def-or-lambda provider rule, the type-parameter keep, and the fail-closed
+    # keep for a scope no table matches), each caught by its own vector.
+    ("local-binding-genexpr-own-scope", '        own = ("function", "genexpr", node.lineno)\n',
+     "        own = res\n", "a generator-expression target read in its body"),
+    ("local-binding-genexpr-first-iterable",
+     "            out.append((comp.iter, scope, res if index == 0 else own, True))\n",
+     "            out.append((comp.iter, scope, own, True))\n",
+     "a generator expression's first iterable read where it occurs"),
+    ("local-binding-type-parameters-read",
+     '    params = ("type parameters", node.name, node.lineno) if getattr(node, "type_params", None) else None\n',
+     "    params = None\n", "a generic class's base read in its type-parameter scope"),
+    ("local-binding-alias-value-read",
+     '        params = ("type parameters", node.name.id, node.lineno) if node.type_params else None\n',
+     "        params = None\n", "a generic type alias's value read in its type-parameter scope"),
+    ("local-binding-provider-type-parameters",
+     '        elif kind == "type parameters":\n'
+     "            resolved.setdefault((kind, table.get_name(), table.get_lineno()), []).append((table, around))\n"
+     "            around = (table,) + around\n",
+     '        elif kind == "type parameters":\n'
+     "            resolved.setdefault((kind, table.get_name(), table.get_lineno()), []).append((table, around))\n",
+     "a type parameter shadowing an enclosing local, read in the def's body"),
+    ("local-binding-provider-plain",
+     '            if held.is_local():\n                if table.get_type() != "function":\n'
+     "                    return False\n                return _plain_local(held, (), tainted)\n",
+     "            if held.is_local():\n                return _plain_local(held, (), tainted)\n",
+     "a type parameter shadowing an enclosing local, read in the def's body"),
+    ("local-binding-type-parameter-exempt",
+     '    if kind == "type parameters" and not sym.is_free():\n        return True\n',
+     "    if False:\n        return True\n",
+     "a type parameter's bound read in its type-parameter scope"),
+    ("local-binding-unmatched-kept", "    held = tables.get(scope)\n    if held is None:\n        return True\n",
+     "    held = tables.get(scope)\n    if held is None:\n        return False\n",
+     "a source symtable rejects keeps every site"),
     # Each (node type, field) pair of RESOLVED_NAME_FIELDS removed in turn: its occurrences then stay sites, so
     # its own suppression vector fails.
     ("resolved-name-read", '(ast.Name, "id"), ', "", "a walrus target"),
