@@ -26,7 +26,11 @@
       unknown status, a wrong-family id, a landed row without an existing --commit and --check-ref)
       exits 1; a context or authority the appender cannot evaluate (an unreadable register or
       register descriptor, a symlinked register path, an appender installed outside any git
-      repository, a gate root that is not a git repository, a
+      repository, a gate root git itself does not confirm as a repository toplevel (an invalid
+      gitfile or an empty .git directory is a marker, not a repository; a valid linked
+      worktree passes), a registry entry or declared register path whose inspection fails with
+      anything but ENOENT (only confirmed absence reads as absent), a non-string or empty
+      registry declaration, a
       path no registry declaration names, conflicting declarations resolving to one path, a git
       failure deciding whether the register is tracked, no computable merge-base for a tracked
       register, a malformed or unusable anchor entry, a dangling symlink and an anchor lstat
@@ -50,7 +54,9 @@
       refusal names the un-truncated state and directs to the register gate. A writer that does
       not take the lock (a hand edit, any other tool) is outside that serialization: the size
       re-check catches one that lands between the validation and the write, any other is caught
-      later by the mistakes-register gate, not here.
+      later by the mistakes-register gate, not here. A second RESIDUAL: the hard-link conflict
+      check on the registry declarations is point-in-time; a hard link created after that
+      check is not caught by this appender and is left to the register gate.
   orch_register.py project --register PATH
       Emit an AEI v1 enumeration of the rows whose LATEST status is proposed or accepted and not yet
       landed, as granted open items, so the stop guard itself enforces mistake-to-guardrail
@@ -87,6 +93,7 @@ import fcntl
 import hashlib
 import json
 import os
+import subprocess
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -111,7 +118,10 @@ def _gate_root():
     a declaring outer root names is validated in the outer root's context). Unlike the gate's
     live leg (tools/_gen_common.repo_root), this resolver has NO cwd fallback: an appender
     installed outside any git repository returns None and cmd_append refuses with exit 2, so a
-    validation root is never derived from where the invocation runs."""
+    validation root is never derived from where the invocation runs. The returned candidate is
+    the nearest ancestor holding a .git ENTRY; cmd_append then requires git itself to confirm
+    it (_root_validated), so a marker that is not a repository is refused, never trusted and
+    never walked past."""
     here = Path(__file__).resolve()
     for anc in [here, *here.parents]:
         if (anc / ".git").exists():
@@ -119,41 +129,87 @@ def _gate_root():
     return None
 
 
+def _root_validated(root):
+    """True only when git itself confirms ROOT as a repository toplevel (rev-parse
+    --show-toplevel naming it): a bare '.git' entry (an invalid gitfile, an empty .git
+    directory) is a repository MARKER, not a repository, and an appender under one must refuse
+    rather than trust the marker's registry or write any register, an external register
+    included. A valid linked worktree passes: git reports the worktree's own toplevel."""
+    try:
+        probe = subprocess.run(["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+                               capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if probe.returncode != 0 or not probe.stdout.strip():
+        return False
+    try:
+        return os.path.realpath(probe.stdout.splitlines()[0]) == os.path.realpath(str(root))
+    except OSError:
+        return False
+
+
 def _declared_family(root, path):
     """The (registry key, id family) of the declaration that names this register path. Raises
-    CannotEvaluate when there is no registry, the registry cannot be read, no declaration names
-    the path, or two declarations resolve to the same register path (the declared id family is
-    then ambiguous, so there is no single gate context to validate in): the register gate
-    evaluates declared surfaces only."""
+    CannotEvaluate when there is no registry, the registry cannot be inspected or read
+    (registry PRESENCE is an explicit lstat whose only absence answer is ENOENT, so an
+    inspection failure or a dangling entry never selects the lower-priority registry file), a
+    declaration is not a non-empty string, no declaration names the path, a declared path's
+    file identity cannot be inspected (only confirmed absence, ENOENT, omits an identity from
+    the hard-link conflict check: an unreadable identity is never a missing identity), or two
+    declarations resolve to the same register path (the declared id family is then ambiguous,
+    so there is no single gate context to validate in): the register gate evaluates declared
+    surfaces only. RESIDUAL: the identity comparison is point-in-time; a hard link created
+    after this check is not caught here and is left to the register gate."""
     registry = None
+    found = False
     for rel in REGISTRY_FILES:
         candidate = Path(root) / rel
-        if candidate.exists():
-            try:
-                registry = json.loads(candidate.read_text(encoding="utf-8"))
-            except (OSError, ValueError) as exc:
-                raise CannotEvaluate("the orchestration registry cannot be read ({})".format(exc))
-            break
-    if not isinstance(registry, dict):
+        try:
+            os.lstat(str(candidate))
+        except FileNotFoundError:
+            continue  # confirmed absence: the next registry file may still be present
+        except OSError as exc:
+            raise CannotEvaluate("the orchestration registry at {} cannot be inspected ({}); "
+                                 "only confirmed absence (ENOENT) selects the next registry "
+                                 "file".format(rel, exc))
+        found = True
+        try:
+            registry = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise CannotEvaluate("the orchestration registry cannot be read ({})".format(exc))
+        break
+    if not found:
         raise CannotEvaluate("no orchestration registry declares this register (the gate "
                              "validates declared surfaces only)")
+    if not isinstance(registry, dict):
+        raise CannotEvaluate("the orchestration registry is not a JSON object; a malformed "
+                             "registry offers no declared surfaces to evaluate")
     want = path.resolve()
     matched = None
     resolved = []
     identities = []
     for key, family in (("mistakes_register", "MR"), ("attestations", "AT")):
-        declared = registry.get(key)
-        if isinstance(declared, str) and declared:
-            declared_path = Path(declared) if os.path.isabs(declared) else Path(root) / declared
-            target = declared_path.resolve()
-            resolved.append(target)
-            try:
-                declared_stat = os.stat(str(declared_path))
-                identities.append((declared_stat.st_dev, declared_stat.st_ino))
-            except OSError:
-                pass  # an absent declared path has no file identity to collide on
-            if matched is None and target == want:
-                matched = (key, family)
+        if key not in registry:
+            continue
+        declared = registry[key]
+        if not isinstance(declared, str) or not declared:
+            raise CannotEvaluate("the registry's {} declaration is not a non-empty string; a "
+                                 "malformed declaration offers no register path to "
+                                 "evaluate".format(key))
+        declared_path = Path(declared) if os.path.isabs(declared) else Path(root) / declared
+        target = declared_path.resolve()
+        resolved.append(target)
+        try:
+            declared_stat = os.stat(str(declared_path))
+            identities.append((declared_stat.st_dev, declared_stat.st_ino))
+        except FileNotFoundError:
+            pass  # confirmed absence: an absent declared path has no identity to collide on
+        except OSError as exc:
+            raise CannotEvaluate("the declared {} path cannot be inspected ({}); only "
+                                 "confirmed absence (ENOENT) omits a file identity from the "
+                                 "hard-link conflict check".format(key, exc))
+        if matched is None and target == want:
+            matched = (key, family)
     if len(set(resolved)) < len(resolved) or len(set(identities)) < len(identities):
         raise CannotEvaluate("conflicting registry declarations resolve to the same register "
                              "path (two names for one file, hard links included), so the "
@@ -177,32 +233,67 @@ def _rolled_back(fd, size):
             "remains".format(size))
 
 
+def _made_dirs_swept(made_dirs):
+    """Remove the directory components this call itself created (innermost first, each only
+    while empty). A component that is already absent (ENOENT: never created before the
+    failure) does not stop the sweep, because an OUTER component may still have been created.
+    Returns (left, skipped): the components left in place and the already-absent ones."""
+    left, skipped = [], []
+    for made in made_dirs:
+        try:
+            os.rmdir(str(made))
+        except FileNotFoundError:
+            skipped.append(str(made))
+        except OSError:
+            left.append(str(made))
+    return left, skipped
+
+
+def _made_dirs_note(made_dirs):
+    """The refusal-message clause for the directory sweep: empty when nothing was planned,
+    else it reports the sweep's actual outcome, naming every component left in place (claims
+    follow the sweep, never the plan)."""
+    if not made_dirs:
+        return ""
+    left, skipped = _made_dirs_swept(made_dirs)
+    if left:
+        return ("; directory component(s) this call made could not be removed and were left "
+                "in place: {}".format(", ".join(left)))
+    if skipped:
+        return "; no directory component this call made remains"
+    return "; the directory components this call made were removed"
+
+
 def _creation_cleanup(fd, path, made_dirs):
     """After a refusal taken UNDER the acquired lock that follows the exclusive first-row
     creation (a lock that cannot be acquired never reaches this helper: removal without the
     lock could race a cooperating appender, so that path leaves the file): remove the created file,
     but only while it is still this call's own, still-empty file (the path still names the
     created device and inode, size zero), then the directory components this call itself created
-    (innermost first, each only while empty). Returns the sentence for the refusal message; an
-    entry this helper cannot prove safe to remove is left in place and named, and the register
-    gate stays the authority over whatever remains."""
+    (innermost first, each only while empty; an already-absent component does not stop the
+    sweep). Returns the sentence for the refusal message; an entry this helper cannot prove
+    safe to remove is left in place and NAMED, the made directory components included, and the
+    register gate stays the authority over whatever remains."""
+    note = None
     try:
         st_fd = os.fstat(fd)
         st_path = os.lstat(str(path))
         if (st_fd.st_dev, st_fd.st_ino) != (st_path.st_dev, st_path.st_ino):
-            return "the created register was left in place (the path no longer names it)"
-        if st_fd.st_size != 0:
-            return "the created register was left in place (it is no longer empty)"
-        os.unlink(str(path))
+            note = ("the entry now at the register path was left in place (the path no "
+                    "longer names the created file)")
+        elif st_fd.st_size != 0:
+            note = "the created register was left in place (it is no longer empty)"
+        else:
+            os.unlink(str(path))
     except OSError as exc:
-        return "the created register could not be removed ({})".format(exc)
-    for made in made_dirs:
-        try:
-            os.rmdir(str(made))
-        except OSError as exc:
-            return ("the created register was removed; its directory was not fully removed "
-                    "({})".format(exc))
-    return "the created register and the directory components this call made were removed"
+        note = "the created register could not be removed ({})".format(exc)
+    if note is None:
+        left, _skipped = _made_dirs_swept(made_dirs)
+        if left:
+            return ("the created register was removed; directory component(s) this call made "
+                    "could not be removed and were left in place: {}".format(", ".join(left)))
+        return "the created register and the directory components this call made were removed"
+    return note + _made_dirs_note(made_dirs)
 
 
 def cmd_append(a):
@@ -214,11 +305,13 @@ def cmd_append(a):
               "from the appender's own location, never from the invocation directory); "
               "nothing written", file=sys.stderr)
         return 2
-    if not (Path(root) / ".git").exists():
-        print("append: refused, the gate's validation root is not a git repository, so the "
-              "register gate's context cannot be established (the appender resolves the same "
-              "root the gate's live leg validates, from the gate's own location); nothing "
-              "written", file=sys.stderr)
+    if not _root_validated(root):
+        print("append: refused, the gate's validation root is not a git repository git itself "
+              "confirms (rev-parse --show-toplevel must name it; an invalid gitfile or an "
+              "empty .git directory is a repository marker, not a repository), so the register "
+              "gate's context cannot be established and neither its registry nor any register "
+              "it declares, an external register included, is trusted; nothing written",
+              file=sys.stderr)
         return 2
     try:
         key, family = _declared_family(root, path)
@@ -332,31 +425,15 @@ def cmd_append(a):
             try:
                 path.parent.mkdir(parents=True, exist_ok=True)
             except OSError as exc:
-                for made in made_dirs:  # best-effort: only empty components this call made
-                    try:
-                        os.rmdir(str(made))
-                    except OSError:
-                        break
                 print("append: refused, the register's directory could not be created ({}); "
-                      "nothing written".format(exc), file=sys.stderr)
+                      "nothing written{}".format(exc, _made_dirs_note(made_dirs)),
+                      file=sys.stderr)
                 return 2
             try:
                 fd = os.open(str(path),
                              os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_EXCL, 0o644)
             except OSError as exc:
-                removed = 0
-                for made in made_dirs:  # best-effort: only empty components this call made
-                    try:
-                        os.rmdir(str(made))
-                        removed += 1
-                    except OSError:
-                        break
-                dirs_note = ""
-                if made_dirs:
-                    dirs_note = ("; the directory components this call made were removed"
-                                 if removed == len(made_dirs) else
-                                 "; a directory component this call made could not be removed "
-                                 "and was left in place")
+                dirs_note = _made_dirs_note(made_dirs)
                 print("append: refused, the register could not be created exclusively ({}); a "
                       "file that appeared between the validation and the write is never "
                       "appended to blindly; nothing written by this call{}".format(
@@ -382,9 +459,12 @@ def cmd_append(a):
             st_path = None
         if st_path is None or (st_fd.st_dev, st_fd.st_ino) != \
                 (st_path.st_dev, st_path.st_ino):
-            print("append: refused, the register at this path is no longer the file that "
-                  "was validated (replaced between validation and write); nothing written "
-                  "to either file", file=sys.stderr)
+            msg = ("append: refused, the register at this path is no longer the file that "
+                   "was validated (replaced between validation and write); nothing written "
+                   "to either file")
+            if created:
+                msg += "; " + _creation_cleanup(fd, path, made_dirs)
+            print(msg, file=sys.stderr)
             return 2
         # The on-disk size must still be the validated length (for a first row: still zero).
         # This is the serialization re-check for a freshly created register, where the lock is
@@ -460,9 +540,11 @@ def self_test():
     scrub_git_environment()
     tmp = Path(tempfile.mkdtemp(prefix="aiqt-orch-register-"))
     failures = []
-    # The appender resolves the register gate's own root (production: repo_root(), the same
-    # function the gate's main() calls); each fixture stands in its own repository, so the
-    # resolution is routed at the fixture root under test and restored in the finally.
+    # The appender resolves the register gate's own root (production: _gate_root(), the
+    # nearest .git entry above the appender's own installed location, git-confirmed by
+    # _root_validated and with NO cwd fallback, unlike the gate live leg's repo_root());
+    # each fixture stands in its own repository, so the resolution is routed at the fixture
+    # root under test and restored in the finally.
     gate_root = {"root": None}
     real_gate_root = _gate_root
     globals()["_gate_root"] = lambda: gate_root["root"]
@@ -829,6 +911,64 @@ def self_test():
         if os.path.lexists(str(repo / "cwd-probe.jsonl")):
             failures.append("production-root-outside-install: the refused append created the "
                             "register")
+        # (c) a '.git' entry git itself rejects (an invalid gitfile, an empty .git directory)
+        # is a repository MARKER, not a repository: the installed appender refuses BEFORE
+        # trusting the marker's registry or writing the declared EXTERNAL register
+        ext_regs = tmp / "ext-regs"
+        ext_regs.mkdir()
+        for marker_tag in ("invalid-gitfile", "empty-gitdir"):
+            bad_inst = tmp / ("inst-" + marker_tag)
+            (bad_inst / "tools").mkdir(parents=True)
+            if marker_tag == "invalid-gitfile":
+                (bad_inst / ".git").write_text("not a gitfile\n", encoding="utf-8")
+            else:
+                (bad_inst / ".git").mkdir()
+            for tool_name in ("orch_register.py", "check_mistakes_register.py",
+                              "_gen_common.py"):
+                shutil.copy(str(src_tools / tool_name), str(bad_inst / "tools" / tool_name))
+            (bad_inst / ".aiqt").mkdir()
+            ext_reg = ext_regs / (marker_tag + "-reg.jsonl")
+            (bad_inst / ".aiqt" / "orchestration.local.json").write_text(json.dumps(
+                {"version": 1, "mistakes_register": str(ext_reg)}), encoding="utf-8")
+            proc = subprocess.run(
+                [sys.executable, "-I", "-B", str(bad_inst / "tools" / "orch_register.py"),
+                 "append", "--register", str(ext_reg), "--id", "MR-1", "--mistake", "m",
+                 "--evidence", "e", "--rule", "mstreg", "--guardrail", "g"],
+                capture_output=True, text=True, timeout=60, cwd=str(tmp))
+            if proc.returncode != 2 \
+                    or "validation root is not a git repository" not in proc.stderr:
+                failures.append("production-root-{}: want exit 2 naming the unconfirmed "
+                                "root, got exit {}: {}".format(marker_tag, proc.returncode,
+                                                               proc.stderr.strip()))
+            if os.path.lexists(str(ext_reg)):
+                failures.append("production-root-{}: the refused append created the external "
+                                "register".format(marker_tag))
+        # (d) the valid linked-worktree case keeps working: a worktree's .git FILE is a
+        # git-confirmed root, and the append lands
+        wt_main = tmp / "wt-main"
+        wt_main.mkdir()
+        subprocess.run(["git", "init", "-q", str(wt_main)], check=True, capture_output=True,
+                       timeout=30)
+        (wt_main / "seed.txt").write_text("seed\n", encoding="utf-8")
+        git(wt_main, "add", "seed.txt")
+        git(wt_main, "commit", "-q", "-m", "seed")
+        wt = tmp / "wt-linked"
+        git(wt_main, "worktree", "add", "-q", str(wt))
+        (wt / "tools").mkdir()
+        for tool_name in ("orch_register.py", "check_mistakes_register.py", "_gen_common.py"):
+            shutil.copy(str(src_tools / tool_name), str(wt / "tools" / tool_name))
+        (wt / ".aiqt").mkdir()
+        (wt / ".aiqt" / "orchestration.local.json").write_text(json.dumps(
+            {"version": 1, "mistakes_register": "wt-reg.jsonl"}), encoding="utf-8")
+        proc = subprocess.run(
+            [sys.executable, "-I", "-B", str(wt / "tools" / "orch_register.py"),
+             "append", "--register", str(wt / "wt-reg.jsonl"), "--id", "MR-1", "--mistake",
+             "m", "--evidence", "e", "--rule", "mstreg", "--guardrail", "g"],
+            capture_output=True, text=True, timeout=60, cwd=str(tmp))
+        if proc.returncode != 0 or len(_lines(wt / "wt-reg.jsonl")) != 1:
+            failures.append("production-root-linked-worktree: a valid worktree gitfile root "
+                            "should append cleanly, got exit {}: {}".format(
+                                proc.returncode, proc.stderr.strip()))
         # two declarations resolving to one path are an ambiguous id family: cannot-evaluate,
         # even when the register exists and the row itself would be legal under one family
         declare(mistakes_register="shared.jsonl", attestations="shared.jsonl")
@@ -846,6 +986,64 @@ def self_test():
         declare(mistakes_register="hard-a.jsonl", attestations="hard-b.jsonl")
         refused("hardlinked-declarations-refused", hard_a, 2,
                 "conflicting registry declarations", "MR-1", "accepted")
+        # a DECLARATION whose identity inspection fails with anything but ENOENT is
+        # cannot-evaluate: an unreadable identity is never a missing identity (it could hide
+        # a hard link to the register, landing the append in both aliases)
+        declare(mistakes_register="hid-a.jsonl", attestations="hid-b.jsonl")
+        hid_a = repo / "hid-a.jsonl"
+        accepted("hidden-link-seed", hid_a, "MR-1")
+        os.link(str(hid_a), str(repo / "hid-b.jsonl"))
+        hid_b_path = str(repo / "hid-b.jsonl")
+        real_os_stat = os.stat
+        for errtag, errnum, errname in (("eio", 5, "injected input-output error"),
+                                        ("eacces", 13, "injected permission denied")):
+            def hiding_stat(p, *sargs, **skw):
+                if str(p) == hid_b_path:
+                    raise OSError(errnum, errname)
+                return real_os_stat(p, *sargs, **skw)
+            os.stat = hiding_stat
+            try:
+                refused("declaration-stat-{}-exit-2".format(errtag), hid_a, 2,
+                        "only confirmed absence (ENOENT) omits a file identity", "MR-1",
+                        "accepted")
+            finally:
+                os.stat = real_os_stat
+        if len(_lines(hid_a)) != 1 or len(_lines(repo / "hid-b.jsonl")) != 1:
+            failures.append("declaration-stat-errors: a refused append changed a hard-linked "
+                            "alias")
+        # registry PRESENCE is ENOENT-only: a dangling registry symlink entry is SELECTED and
+        # refused, never skipped into the lower-priority registry file, and a registry lstat
+        # failure that is not ENOENT is cannot-evaluate
+        declare(mistakes_register="reg.jsonl")
+        saved_registry = registry.read_bytes()
+        fallback_registry = repo / ".aiqt" / "orchestration.json"
+        fallback_registry.write_text(json.dumps(
+            {"version": 1, "mistakes_register": "reg.jsonl"}), encoding="utf-8")
+        registry.unlink()
+        registry.symlink_to("missing-registry-target")
+        refused("dangling-registry-symlink-refused", reg, 2,
+                "the orchestration registry cannot be read", "MR-4")
+        registry.unlink()
+        registry.write_bytes(saved_registry)
+        real_reg_lstat = os.lstat
+
+        def registry_eio_lstat(p, *largs, **lkw):
+            if str(p) == str(registry):
+                raise OSError(5, "injected input-output error")
+            return real_reg_lstat(p, *largs, **lkw)
+
+        os.lstat = registry_eio_lstat
+        try:
+            refused("registry-lstat-eio-refused", reg, 2,
+                    "only confirmed absence (ENOENT) selects the next registry file", "MR-4")
+        finally:
+            os.lstat = real_reg_lstat
+        fallback_registry.unlink()
+        # a declared value that is not a non-empty string is a named cannot-evaluate, never
+        # a TypeError traceback
+        registry.write_text(json.dumps({"version": 1, "mistakes_register": 5}),
+                            encoding="utf-8")
+        refused("non-string-declaration-refused", reg, 2, "not a non-empty string", "MR-4")
         # FIRST-ROW SERIALIZATION (both reviews, MAJOR 1): an appender that lands between the
         # exclusive creation and the creator's lock forces the creator to refuse under its
         # lock; exactly the interleaved row remains, and the chain stays clean
@@ -925,7 +1123,9 @@ def self_test():
         read_fail = {"fired": False}
 
         def failing_read(read_fd, count):
-            if not read_fail["fired"]:
+            # fire only on the appender's own register read (its 64 KiB chunk size), never
+            # on a subprocess pipe read from the root-validation git probe
+            if not read_fail["fired"] and count == 1 << 16:
                 read_fail["fired"] = True
                 raise OSError(5, "injected input-output error")
             return real_os_read(read_fd, count)
@@ -1064,6 +1264,33 @@ def self_test():
                             "{}: {}".format(rc, err.strip()))
         if ident_reg.read_bytes() != b"decoy bytes\n":
             failures.append("first-row-identity: the displacing file received the row")
+        # FIRST-ROW IDENTITY with made directory components: the refusal NAMES the components
+        # this call made that were left in place (the displacing file occupies them)
+        declare(mistakes_register="mk3/deep/ident2.jsonl")
+        ident2_reg = repo / "mk3" / "deep" / "ident2.jsonl"
+        ident2 = {"fired": False}
+
+        def displacing2(lock_fd, op):
+            if not ident2["fired"]:
+                ident2["fired"] = True
+                decoy2 = repo / "ident2-decoy.jsonl"
+                decoy2.write_bytes(b"decoy bytes\n")
+                os.replace(str(decoy2), str(ident2_reg))
+            return real_flock(lock_fd, op)
+
+        fcntl.flock = displacing2
+        try:
+            rc, err = append(ident2_reg, "MR-1")
+        finally:
+            fcntl.flock = real_flock
+        if rc != 2 or "no longer the file that was validated" not in err \
+                or "left in place" not in err or "mk3" not in err:
+            failures.append("first-row-identity-made-dirs: the refusal should name the made "
+                            "directory components left in place, got exit {}: {}".format(
+                                rc, err.strip()))
+        if ident2_reg.read_bytes() != b"decoy bytes\n":
+            failures.append("first-row-identity-made-dirs: the displacing file received the "
+                            "row")
         # a lock that cannot be acquired on the created first-row file leaves that empty file
         # in place and says so: removing it without the lock could race a cooperating appender
         declare(mistakes_register="lockfail.jsonl")
@@ -1102,6 +1329,32 @@ def self_test():
             Path.mkdir = real_mkdir
         if (repo / "mkfail").exists():
             failures.append("mkdir-failure-exit-2: a failed mkdir left directory components "
+                            "behind")
+        # a PARTIAL directory creation failure removes the component it did make (an absent
+        # inner component does not stop the sweep) and the refusal reports the sweep's
+        # outcome, never the plan
+        declare(mistakes_register="mk4/deep/part.jsonl")
+        part_outer = repo / "mk4"
+        part = {"fired": False}
+
+        def partial_mkdir(self, *margs, **mkw):
+            if not part["fired"]:
+                part["fired"] = True
+                os.mkdir(str(part_outer))
+                raise OSError(28, "injected no space")
+            return real_mkdir(self, *margs, **mkw)
+
+        Path.mkdir = partial_mkdir
+        try:
+            rc, err = append(repo / "mk4" / "deep" / "part.jsonl", "MR-1")
+        finally:
+            Path.mkdir = real_mkdir
+        if rc != 2 or "directory could not be created" not in err \
+                or "no directory component this call made remains" not in err:
+            failures.append("partial-mkdir-cleanup: the refusal should report the completed "
+                            "sweep, got exit {}: {}".format(rc, err.strip()))
+        if part_outer.exists():
+            failures.append("partial-mkdir-cleanup: the created outer component was left "
                             "behind")
         # an anchor lstat failure that is NOT absence (EIO here) is cannot-evaluate, never the
         # missing-anchor allowance and never an append past an uninspectable authority
@@ -1143,7 +1396,12 @@ def self_test():
           "with the registry declaration are each refused (exit 1); an unreadable register or "
           "register descriptor, a symlinked register path, an undeclared register, an appender "
           "installed outside any git repository (subprocess vector, never a cwd-derived root), "
-          "a gate root that is not a git repository, conflicting declarations resolving to one "
+          "a gate root git itself does not confirm as a repository toplevel (an invalid "
+          "gitfile and an empty .git directory included; a valid linked worktree appends "
+          "cleanly), a registry entry or declared register path whose inspection fails with "
+          "anything but ENOENT (EIO and EACCES included; a dangling registry symlink is "
+          "selected and refused, never the lower-priority registry file), a non-string or "
+          "empty registry declaration, conflicting declarations resolving to one "
           "path (two hard links to one inode included), a malformed, unreadable or unusable "
           "anchor entry (a dangling symlink, a directory and an anchor lstat failure that is "
           "not ENOENT included), a git failure deciding whether the register is tracked, a "
@@ -1157,7 +1415,9 @@ def self_test():
           "back to the validated size, a failed rollback disclosed with exactly the seed plus "
           "the injected partial bytes remaining) are refused as cannot-evaluate (exit 2); a "
           "refusal under the acquired lock after the first-row creation removes the created "
-          "file and the directory components the call made and names the removal; every "
+          "file and the directory components the call made and names the removal (the sweep "
+          "does not stop at an already-absent component, and what cannot be removed is named "
+          "and left in place); every "
           "refusal leaves the rows other appenders wrote byte-identical (the disclosed "
           "failed-rollback residual excepted); the register validates in the gate root's own "
           "context (a nested-repository register validates under the declaring outer root, "
