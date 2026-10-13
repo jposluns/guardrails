@@ -10,9 +10,11 @@ the loss is a finding before any run is trusted.
 Surface: every Python script tools/run_all_checks.sh launches, read through the parity gate's validated roster
 loader (check_ci_parity.read_runner_text and extract_local, never a second shell parser), plus every runner in
 tools/selftest_checks.toml, whose schema is validated by the execution gate's own validator
-(check_selftest_execution._manifest_rows). Every control input (the roster, the registry and each listed
-script) is opened non-blocking without following a final symlink, and is refused unless the opened descriptor
-is a regular file, so a FIFO, device, directory or symlink is cannot-evaluate and never blocks the run.
+(check_selftest_execution._manifest_rows); a row's optional args, which the execution gate forwards to its
+runner, do not change which script this gate reads, and a runner that several rows share is read once. Every
+control input (the roster, the registry and each listed script) is opened non-blocking without following a
+final symlink, and is refused unless the opened descriptor is a regular file, so a FIFO, device, directory or
+symlink is cannot-evaluate and never blocks the run.
 
 This file is on its own surface, but no gate can hold its own entry: with its guard lost, both of its steps
 exit 0 with no output, because nothing in the file runs. Its own entry is therefore held by an independent,
@@ -465,8 +467,10 @@ OWN_REL = "tools/" + Path(__file__).name
 
 def _guardless_copy(base):
     """A scratch repository holding this checker with its own entry deleted, beside the execution gate, the
-    report finalizer, the roster loader and the real registry, or None when this file does not end in its own
-    entry."""
+    report finalizer, the roster loader, the real registry, every other runner it registers and the real
+    launch rosters (before it launches any suite, the execution gate resolves every registered runner strictly
+    and requires every registered suite to have a launch line in both rosters), or None when this file does
+    not end in its own entry."""
     head, entry, tail = Path(__file__).read_text(encoding="utf-8").rpartition(OWN_ENTRY)
     if not entry or tail:
         return None
@@ -475,7 +479,9 @@ def _guardless_copy(base):
     (root / ".git").write_text("gitdir: absent\n", encoding="ascii")
     (root / OWN_REL).write_text(head + "\n", encoding="utf-8")
     for rel in ("tools/check_selftest_execution.py", "tools/_selftest_exit_report.py", "tools/check_ci_parity.py",
-                REGISTRY_REL):
+                REGISTRY_REL, check_ci_parity.LOCAL_SOURCE, check_ci_parity.CI_SOURCE,
+                *sorted(registry_runners(ROOT) - {OWN_REL})):
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
         (root / rel).write_bytes((ROOT / rel).read_bytes())
     return root
 
@@ -605,12 +611,21 @@ def _fixtures(base):
             ("string-ids", good.replace('["fixture-check"]', '"fixture-check"'),
              "expected-check-ids must be a non-empty array"),
             ("no-suite", "format-version = 1\n", "top-level keys must be exactly"),
-            ("outside-runner", _registry_text(["lib/registered.py"]), "is not a literal tools/*.py")):
+            ("outside-runner", _registry_text(["lib/registered.py"]), "is not a literal tools/*.py"),
+            ("bad-args",
+             good.replace("expected-check-ids", 'args = ["--execution-report"]\nexpected-check-ids'),
+             "args element")):
         root = _tree(base, "registry-" + case, scripts + (("lib/registered.py", INTACT),),
                      registry_text="" if text is None else text)
         if text is None:
             (root / REGISTRY_REL).write_bytes(good.encode("utf-8").replace(b"fixture-1", b"fixture-\xff"))
         add("registry/" + case, root, 2, reason)
+    # a split registry (two rows sharing one runner, each with its own args) passes the shared schema
+    split = "".join('\n[[suite]]\nid = "fixture-{0}"\nrunner = "{1}"\nexpected-check-ids = ["fixture-{0}"]\n'
+                    'args = ["--lane", "{0}"]\n'.format(lane, REGISTERED) for lane in ("one", "two"))
+    add("registry/split-rows",
+        _tree(base, "registry-split", scripts, registry_text="format-version = 1\n" + split), 0,
+        "checked 2 launched scripts")
     return vectors
 
 
@@ -680,8 +695,10 @@ MUTANTS = (
     ("nested-depth", "for inner in ast.walk(node) if inner is not node", "for inner in ast.iter_child_nodes(node)",
      "shape/nested-deep"),
 )
-# The intact twin is the one vector no removal can fail: each finding vector is one edit from it.
-UNMUTATED = {"intact/passes"}
+# The intact twin is the one vector no removal can fail: each finding vector is one edit from it. The split
+# registry twin is the other: it differs from the intact tree only in a schema the execution gate owns, whose
+# own self-test holds it.
+UNMUTATED = {"intact/passes", "registry/split-rows"}
 
 
 def _load_mutant(source, directory, number):
@@ -792,7 +809,8 @@ def self_test(report_path=None):
         return 1
     print("SELF-TEST PASS: entry-guard {} checks ({} vectors: splice reproduced and caught; displaced, "
           "duplicated, else-bearing, misnamed, callless, dormant-call, unreachable, nested and unlaunched-runner "
-          "entries are findings; non-regular, unreadable, malformed and schema-invalid inputs fail closed; {} "
+          "entries are findings; non-regular, unreadable, malformed and schema-invalid inputs fail closed; a "
+          "split registry passes; {} "
           "mutants each caught, every vector discriminating; this gate's own lost guard caught by the execution "
           "gate; live surface {} scripts)".format(len(results), len(vectors), len(MUTANTS), count))
     return 0
