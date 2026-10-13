@@ -3887,7 +3887,8 @@ def self_test():
         # and an unparseable declaration answer False in every case (spec 8.2/4.2), INCLUDING while
         # support is raised: once the tooling-support clause is satisfied, only the declared-version
         # comparison keeps them out, so that arm is asserted on its False side under the patch (red
-        # when the comparison is removed or its threshold drifts down to the current version).
+        # when the comparison is removed or its threshold drifts down to the current version or
+        # to an interior 1.2.x).
         check("imported-series-declared-false-until-tooling-supports",
               not imported_series_declared({"opf": {"spec_version": "1.3.0"}})
               and not imported_series_declared({"opf": {"spec_version": "2.0.0"}})
@@ -3901,8 +3902,16 @@ def self_test():
                   and imported_series_declared({"opf": {"spec_version": "2.0.0"}}))
             check("imported-series-declared-below-130-false-even-once-supported",
                   not imported_series_declared({"opf": {"spec_version": "1.2.0"}})
+                  and not imported_series_declared({"opf": {"spec_version": "1.2.1"}})
+                  and not imported_series_declared({"opf": {"spec_version": "1.2.9"}})
                   and not imported_series_declared({"opf": {"spec_version": "1.0.0"}})
                   and not imported_series_declared({"opf": {"spec_version": "one.three"}}))
+            # Support ABOVE the threshold activates too: the support comparison is at-or-above,
+            # not equality (red when its ">=" tightens to "==").
+            globals()["SUPPORTED_SPEC_VERSION"] = "1.3.1"
+            check("imported-series-declared-under-support-above-130",
+                  imported_series_declared({"opf": {"spec_version": "1.3.0"}})
+                  and imported_series_declared({"opf": {"spec_version": "1.3.1"}}))
         finally:
             globals()["SUPPORTED_SPEC_VERSION"] = _isd_prev
         check("imported-series-declared-current-and-malformed-false",

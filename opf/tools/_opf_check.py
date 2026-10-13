@@ -194,8 +194,9 @@ HOMES2_CHECKS = ("C-EVIDENCE-ENUM",)
 # leaves, deferred until activation (OPF-SPEC-130) lands them, so EMPTY today. While it is empty the
 # activation tripwire in _check_containment routes any store whose imported series is ACTIVE to
 # CANNOT-EVALUATE (the leaves would be registered as managed while nothing reads their content), and
-# the self-test requires it non-empty once SUPPORTED_SPEC_VERSION reaches IMPORTED_SPEC_VERSION, so
-# raising that constant alone cannot ship. At activation these ids join the required roster the way
+# the self-test requires it non-empty, and its ids inside the activated (homes-2) required roster,
+# once SUPPORTED_SPEC_VERSION reaches IMPORTED_SPEC_VERSION, so raising that constant alone, or with
+# a placeholder roster, cannot ship. At activation these ids join the required roster the way
 # HOMES2_CHECKS does.
 IMPORTED_CONTENT_CHECKS = ()
 
@@ -4330,12 +4331,15 @@ def self_test():
               and ".working/toml/manifest.toml" in _is2_agi_scope["store"])
         # The tooling-side tripwire at the SHIPPED constants (red on a bare activation): once
         # SUPPORTED_SPEC_VERSION reaches IMPORTED_SPEC_VERSION the imported-content checks must
-        # exist, so raising the constant without landing them fails HERE, in the suite, and the
-        # runtime tripwire above never stands alone.
+        # exist AND sit inside the required roster of an activated store (graded against the
+        # homes-2 roster, the activated pair validate_manifest accepts today), so raising the
+        # constant without landing them, or landing a placeholder roster the required set does not
+        # carry, fails HERE, in the suite, and the runtime tripwire above never stands alone.
         check("imported-content-checks-required-once-supported",
               _opf_store._parse(_opf_store.SUPPORTED_SPEC_VERSION)
               < _opf_store._parse(_opf_store.IMPORTED_SPEC_VERSION)
-              or bool(IMPORTED_CONTENT_CHECKS))
+              or (bool(IMPORTED_CONTENT_CHECKS)
+                  and set(IMPORTED_CONTENT_CHECKS) <= set(required_checks(2))))
         # F2 (per-record): worklog/<WL-n>.toml is never a per-record body -> INVALID; a garbage body control
         # is still caught.
         wlr = copy.deepcopy(pr_machine)
