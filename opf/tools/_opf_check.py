@@ -190,6 +190,14 @@ _REQUIRED_SET = frozenset(REQUIRED_CHECKS)
 # Checks a homes-2 store also requires (spec 4.2), inserted after C-ARCHIVE-ENUM. A legacy (homes 1) store's
 # roster, and so its report, is exactly REQUIRED_CHECKS.
 HOMES2_CHECKS = ("C-EVIDENCE-ENUM",)
+# The imported-content checks (C-IMPORTED-*, spec 8.2): the content grading of the imported-series
+# leaves, deferred until activation (OPF-SPEC-130) lands them, so EMPTY today. While it is empty the
+# activation tripwire in _check_containment routes any store whose imported series is ACTIVE to
+# CANNOT-EVALUATE (the leaves would be registered as managed while nothing reads their content), and
+# the self-test requires it non-empty once SUPPORTED_SPEC_VERSION reaches IMPORTED_SPEC_VERSION, so
+# raising that constant alone cannot ship. At activation these ids join the required roster the way
+# HOMES2_CHECKS does.
+IMPORTED_CONTENT_CHECKS = ()
 
 
 def required_checks(homes):
@@ -2336,8 +2344,20 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep, 
     enabled_types / layout are derived inside that helper from the manifest (D2), so they are no longer
     passed in. `imported` is the explicit imported-series activation flag classify_containment
     documents; the walk itself needs no imported awareness (the imported leaves are plain managed
-    leaves directly in the machine store, spec 8.2/4.2)."""
+    leaves directly in the machine store, spec 8.2/4.2). While IMPORTED_CONTENT_CHECKS is empty, an
+    ACTIVE imported series is routed to CANNOT-EVALUATE (the activation tripwire below):
+    registration without content grading never certifies."""
     cls = classify_containment(manifest_data, machine_rel, imported=imported)
+    # The activation tripwire (spec 8.2/4.2): an ACTIVE imported series while every imported-content
+    # check (C-IMPORTED-*) is still deferred must never certify, or the imported leaves would be
+    # registered as managed while nothing reads their content (the PRC-F1 N-1 blind spot, reopened
+    # at activation). A CANNOT-EVALUATE, not a finding: the store is not known bad, the tooling is
+    # known incomplete. Activation (OPF-SPEC-130) lands the checks, populates
+    # IMPORTED_CONTENT_CHECKS, and so disarms this.
+    if imported and not IMPORTED_CONTENT_CHECKS:
+        rep.cant("C-CONTAINMENT: the imported series is active but every imported-content check "
+                 "(C-IMPORTED-*) is still deferred; the imported leaves would be certified "
+                 "unread, so the store cannot be evaluated (spec 8.2/4.2; OPF-SPEC-130)")
     # Re-emit the classifier's collected messages in the ORIGINAL order (all malformed CANNOT-EVALUATEs, then
     # all colliding findings), exactly as the inline classification emitted them before the extraction.
     for msg in cls.malformed + cls.worklog_errors:
@@ -4196,25 +4216,33 @@ def self_test():
         _is2_prev_ssv = _opf_store.SUPPORTED_SPEC_VERSION
         try:
             _opf_store.SUPPORTED_SPEC_VERSION = _opf_store.IMPORTED_SPEC_VERSION
-            # The clean activated store with both imported leaves present is VALID: red when EITHER
-            # flag-forwarding step (the driver to _check_containment, or _check_containment to
-            # classify_containment) is removed, because the leaves then grade as unregistered strays.
+            # The clean activated store with both imported leaves present REGISTERS them: no
+            # unregistered-stray finding (red when EITHER flag-forwarding step, the driver to
+            # _check_containment or _check_containment to classify_containment, is removed, because
+            # the leaves then grade as unregistered strays), and the activation tripwire routes the
+            # run to CANNOT-EVALUATE with the deferred C-IMPORTED-* roster as the ONLY cant, never
+            # VALID, because nothing reads the leaves' content yet (red if an activated store ever
+            # certifies while the imported-content checks are deferred).
             _is2_act = clean_machine()
             _is2_act["manifest.toml"]["opf"]["spec_version"] = _opf_store.IMPORTED_SPEC_VERSION
             _is2_act["worklog.imported.toml"] = {"schema": 1, "entry": []}
             _is2_act["backlog_item.imported.index.toml"] = idx([])
             _is2_act_run = run(copy.deepcopy(_is2_act))
             check("containment-imported-leaf-registered-when-activated",
-                  _is2_act_run is not None and _is2_act_run.status == VALID
-                  and not _is2_act_run.findings and not _is2_act_run.cannot_evaluate)
+                  _is2_act_run is not None and not _is2_act_run.findings
+                  and _is2_act_run.status == CANNOT_EVALUATE
+                  and len(_is2_act_run.cannot_evaluate) == 1
+                  and "C-IMPORTED" in _is2_act_run.cannot_evaluate[0])
             # The leaf roster the classification derives is the ENABLED types, never the full
             # section-8.1 roster: a disabled module type (release is not enabled here) gets no leaf,
             # so its imported index stays an unregistered stray even while activated (red if the
-            # imported_leaf_names call is ever fed the full roster instead of enabled_types).
+            # imported_leaf_names call is ever fed the full roster instead of enabled_types). The
+            # activation-tripwire cant dominates the finding, so the status is asserted as
+            # not-VALID, and the discriminating assertion is the unregistered finding itself.
             _is2_act["release.imported.index.toml"] = idx([])
             _is2_dis_run = run(_is2_act)
             check("containment-disabled-type-imported-leaf-stray-when-activated",
-                  _is2_dis_run is not None and _is2_dis_run.status == INVALID
+                  _is2_dis_run is not None and _is2_dis_run.status != VALID
                   and any("C-CONTAINMENT" in f and "release.imported.index.toml" in f
                           and "unregistered" in f for f in _is2_dis_run.findings))
             # Writer/doctor single authority (F10-1): plan_write_scope passes the SAME derived flag
@@ -4238,8 +4266,76 @@ def self_test():
             check("containment-writer-doctor-agree-on-imported-collision",
                   bool(_is2_wg_cls.colliding) and _is2_wg_refused is not None
                   and all(msg in _is2_wg_refused for msg in _is2_wg_cls.colliding))
+            # The SAME agreement in the doctor's own idiom, not a direct classify call: the FULL
+            # doctor run over the colliding declaration emits the C-CONTAINMENT collision
+            # finding, and plan_write_scope refuses the SAME manifest naming that collision
+            # verbatim (red when the write guard falls back to the default flag while the
+            # doctor-derived flag is True: the writer would then plan writes over a
+            # declaration the doctor flags as colliding).
+            _is2_agx = clean_machine()
+            _is2_agx["manifest.toml"]["opf"]["spec_version"] = _opf_store.IMPORTED_SPEC_VERSION
+            _is2_agx["manifest.toml"]["unmanaged"] = dict(
+                paths=[".working/toml/worklog.imported.toml"])
+            _is2_agx_run = run(copy.deepcopy(_is2_agx))
+            try:
+                _opf_write_guard.plan_write_scope(".working/toml", _is2_agx["manifest.toml"],
+                                                  (".working/toml/manifest.toml",), "upgrade")
+                _is2_agx_refused = None
+            except _opf_write_guard.WriteGuardError as exc:
+                _is2_agx_refused = str(exc)
+            _is2_agx_coll = [f for f in (_is2_agx_run.findings if _is2_agx_run is not None else ())
+                             if "collides" in f]
+            check("containment-writer-doctor-agree-on-doctor-run-when-activated",
+                  _is2_agx_run is not None and _is2_agx_run.status != VALID
+                  and any("worklog.imported.toml" in f for f in _is2_agx_coll)
+                  and _is2_agx_refused is not None
+                  and all(f in _is2_agx_refused for f in _is2_agx_coll))
+            # The activation tripwire end to end, the garbage-leaf probe fail-closed: both
+            # imported leaves hold bytes that are not even TOML, and with every imported-content
+            # check deferred nothing reads them, so a VALID verdict would certify files nothing
+            # read. The tripwire routes the ACTIVE store to CANNOT-EVALUATE naming the deferred
+            # checks (red if an activated store with unread imported leaves ever certifies).
+            _is2_p1 = clean_machine()
+            _is2_p1["manifest.toml"]["opf"]["spec_version"] = _opf_store.IMPORTED_SPEC_VERSION
+            _is2_p1["worklog.imported.toml"] = "deliberately invalid TOML ["
+            _is2_p1["backlog_item.imported.index.toml"] = "garbage = ["
+            _is2_p1_run = run(_is2_p1)
+            check("containment-activated-garbage-leaf-never-certified",
+                  _is2_p1_run is not None and _is2_p1_run.status == CANNOT_EVALUATE
+                  and any("C-IMPORTED" in m and "unread" in m
+                          for m in _is2_p1_run.cannot_evaluate))
         finally:
             _opf_store.SUPPORTED_SPEC_VERSION = _is2_prev_ssv
+        # The writer/doctor agreement in the OTHER direction, at the SHIPPED support (the derived
+        # flag False): an [unmanaged] declaration of an imported-leaf NAME is a legitimate
+        # declaration while the series is inactive (the name is not a managed leaf), so the FULL
+        # doctor run certifies the store with the declared file covered, and plan_write_scope
+        # plans the SAME manifest without refusing (red when the write guard forces or defaults
+        # the flag ACTIVE: it would then refuse a declaration the doctor certifies, the
+        # over-refusal divergence; fail-closed, but a divergence all the same).
+        _is2_agi = clean_machine()
+        _is2_agi["manifest.toml"]["unmanaged"] = dict(paths=[".working/toml/worklog.imported.toml"])
+        _is2_agi["worklog.imported.toml"] = "unmanaged legacy bytes, never read ["
+        _is2_agi_run = run(copy.deepcopy(_is2_agi))
+        try:
+            _is2_agi_scope = _opf_write_guard.plan_write_scope(
+                ".working/toml", _is2_agi["manifest.toml"],
+                (".working/toml/manifest.toml",), "upgrade")
+        except _opf_write_guard.WriteGuardError:
+            _is2_agi_scope = None
+        check("containment-writer-doctor-agree-inactive-unmanaged-imported-name",
+              _is2_agi_run is not None and _is2_agi_run.status == VALID
+              and not any("worklog.imported.toml" in f for f in _is2_agi_run.findings)
+              and _is2_agi_scope is not None
+              and ".working/toml/manifest.toml" in _is2_agi_scope["store"])
+        # The tooling-side tripwire at the SHIPPED constants (red on a bare activation): once
+        # SUPPORTED_SPEC_VERSION reaches IMPORTED_SPEC_VERSION the imported-content checks must
+        # exist, so raising the constant without landing them fails HERE, in the suite, and the
+        # runtime tripwire above never stands alone.
+        check("imported-content-checks-required-once-supported",
+              _opf_store._parse(_opf_store.SUPPORTED_SPEC_VERSION)
+              < _opf_store._parse(_opf_store.IMPORTED_SPEC_VERSION)
+              or bool(IMPORTED_CONTENT_CHECKS))
         # F2 (per-record): worklog/<WL-n>.toml is never a per-record body -> INVALID; a garbage body control
         # is still caught.
         wlr = copy.deepcopy(pr_machine)

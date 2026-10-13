@@ -370,7 +370,9 @@ def imported_series_declared(manifest_data):
     VALID store can declare 2.0.0 today, and reading the declaration alone would register the
     imported leaves on it while every imported-content check is still deferred. Raising
     SUPPORTED_SPEC_VERSION to IMPORTED_SPEC_VERSION is the activation (OPF-SPEC-130); this helper
-    needs no edit then."""
+    needs no edit then, but activation must also land the imported-content checks (C-IMPORTED-*):
+    the opf-check activation tripwire refuses to certify an active imported series while that
+    roster is empty, so raising the constant alone cannot ship."""
     opf = manifest_data.get("opf") if isinstance(manifest_data, dict) else None
     version = opf.get("spec_version") if isinstance(opf, dict) else None
     parsed = _parse(version) if isinstance(version, str) else None
@@ -3882,7 +3884,10 @@ def self_test():
         # 2.0.0 / homes = 2 pair validate_manifest accepts today (spec 4.2): without the
         # tooling-support condition that accepted store would register the imported leaves while
         # every imported-content check is still deferred. The current 1.2.0, an older, a non-string,
-        # and an unparseable declaration answer False in every case (spec 8.2/4.2).
+        # and an unparseable declaration answer False in every case (spec 8.2/4.2), INCLUDING while
+        # support is raised: once the tooling-support clause is satisfied, only the declared-version
+        # comparison keeps them out, so that arm is asserted on its False side under the patch (red
+        # when the comparison is removed or its threshold drifts down to the current version).
         check("imported-series-declared-false-until-tooling-supports",
               not imported_series_declared({"opf": {"spec_version": "1.3.0"}})
               and not imported_series_declared({"opf": {"spec_version": "2.0.0"}})
@@ -3894,6 +3899,10 @@ def self_test():
             check("imported-series-declared-130-and-later-once-supported",
                   imported_series_declared({"opf": {"spec_version": "1.3.0"}})
                   and imported_series_declared({"opf": {"spec_version": "2.0.0"}}))
+            check("imported-series-declared-below-130-false-even-once-supported",
+                  not imported_series_declared({"opf": {"spec_version": "1.2.0"}})
+                  and not imported_series_declared({"opf": {"spec_version": "1.0.0"}})
+                  and not imported_series_declared({"opf": {"spec_version": "one.three"}}))
         finally:
             globals()["SUPPORTED_SPEC_VERSION"] = _isd_prev
         check("imported-series-declared-current-and-malformed-false",
