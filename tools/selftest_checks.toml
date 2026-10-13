@@ -1274,6 +1274,8 @@ expected-check-ids = [
   "tomllib/handler-valueerror-passthrough-unrecorded-fails",
   "tomllib/key-cap-emulation-independent-of-underlying-cap",
   "tomllib/lambda-inside-try-fails",
+  "tomllib/nested-class-method-recorded-exempt-passes",
+  "tomllib/nested-class-method-unclassified-fails",
   "tomllib/newtab-contract-deep-exit-2",
   "tomllib/newtab-contract-key-1001-memory-exit-2",
   "tomllib/newtab-contract-key-1001-recursion-exit-2",

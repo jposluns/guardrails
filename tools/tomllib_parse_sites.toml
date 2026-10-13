@@ -45,6 +45,30 @@ count = 2
 class = "EXEMPT"
 reason = "self-emitted-bytes"
 
+[[site]]
+path = "opf/tools/_opf_adopt_discover.py"
+function = "self_test.DiscoveryTests.store_manifest"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_discover.py"
+function = "self_test.DiscoveryTests.test_excludes_unmanaged_content"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_discover.py"
+function = "self_test.DiscoveryTests.test_proposals_feed_investigate_only_when_passed"
+form = "call"
+count = 2
+class = "EXEMPT"
+reason = "test-code"
+
 # plan maps the classes to CANNOT-EVALUATE
 [[site]]
 path = "opf/tools/_opf_adopt_plan.py"

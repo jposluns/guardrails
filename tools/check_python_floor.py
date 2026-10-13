@@ -2369,6 +2369,13 @@ def _tomllib_cases(base):
                                      "        return (lambda: tomllib.loads(text))()\n    except Exception:\n"
                                      "        return None\n")
     check("tomllib/lambda-inside-try-fails", (code, _has(lines, "in read.<lambda> is not HANDLED")), (1, True))
+    nested = ("import tomllib\n\n\ndef suite():\n    class Tests:\n        def store_manifest(self, text):\n"
+              "            return tomllib.loads(text)\n    return Tests\n")
+    code, lines = _tomllib_leg(base, nested)
+    check("tomllib/nested-class-method-unclassified-fails",
+          (code, _has(lines, "in suite.Tests.store_manifest is not HANDLED")), (1, True))
+    check("tomllib/nested-class-method-recorded-exempt-passes",
+          _tomllib_leg(base, nested, _tomllib_row("suite.Tests.store_manifest"))[0], 0)
     code, _lines = _tomllib_leg(base, "import tomllib\n\n\ndef read(text):\n    try:\n        return 1\n"
                                       "    except Exception:\n        return tomllib.loads(text)\n")
     check("tomllib/call-in-handler-fails", code, 1)
