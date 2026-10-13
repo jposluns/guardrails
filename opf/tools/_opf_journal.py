@@ -197,32 +197,40 @@ def _project(root_fd, jr_fd, txn_dir, kind, run_id):
     payload = projection_payload(kind, run_id, state_of_frames(frames), intent["header"]["operation_id"])
     rel = _opf_store.txn_record(kind, run_id)
     # The ancestor fsyncs run on EVERY projection, an existing entry included: the payload derives
-    # from the journal's own INTENT header (never the caller's capability), so a run killed between
-    # the projection's link and its directory flush IS retried here with byte-identical bytes,
-    # under whatever capability recovers it, and presence cannot stand in for durability.
+    # from the journal's own INTENT header (never the caller's capability), so a run killed
+    # anywhere inside publication (a torn staging write, the link made but the staging name not
+    # yet retired, or a kill between the link and the directory flush) IS retried here with
+    # byte-identical bytes, under whatever capability recovers it, and presence cannot stand in
+    # for durability.
     _journal.ensure_journal_dirs(root_fd, rel.rsplit("/", 1)[0])
-    prior = _journal._lstat_contained(root_fd, rel)
-    if prior is not None:
-        raw, _ = _journal._read_contained(root_fd, rel, require_single_link=True)
-        if raw != payload:
-            raise _journal.JournalError("terminal transaction projection differs from its journal")
-        # Byte-equal: re-establish the containing directory's durability (the same directory
-        # fsync a fresh publication ends with) before accepting the existing projection.
-        existing_pfd, _name = _journal._open_parent(root_fd, rel)
-        try:
-            os.fsync(existing_pfd)
-        finally:
-            os.close(existing_pfd)
-        return
     pfd, name = _journal._open_parent(root_fd, rel)
     try:
-        # Publish complete bytes atomically and exclusively. Recovery can retry after an
-        # interrupted staging write; it never overwrites a conflicting projection.
-        _opf_oplock._remove_staging_garbage(pfd, name, "transaction projection")
-        fd, _ident = _opf_oplock._create_control_file(pfd, name, payload, "transaction projection")
-        os.close(fd)
-    except _opf_oplock.OpLockError as exc:
-        raise _journal.JournalError(str(exc))
+        # Garbage first, reserve_allocation's ordering: a leftover killed after its os.link (link
+        # count 2, the complete projection's second name) is retired BEFORE the final name is
+        # tested or read, so the single-link read below accepts the surviving projection instead
+        # of refusing it on every retry.
+        try:
+            _opf_oplock._remove_staging_garbage(pfd, name, "transaction projection")
+        except _opf_oplock.OpLockError as exc:
+            raise _journal.JournalError(str(exc))
+        prior = _journal._lstat_contained(root_fd, rel)
+        if prior is not None:
+            raw, _ = _journal._read_contained(root_fd, rel, require_single_link=True)
+            if raw != payload:
+                raise _journal.JournalError(
+                    "terminal transaction projection differs from its journal")
+            # Byte-equal: re-establish the containing directory's durability (the same directory
+            # fsync a fresh publication ends with) before accepting the existing projection.
+            os.fsync(pfd)
+            return
+        try:
+            # Publish complete bytes atomically and exclusively. Recovery can retry after an
+            # interrupted staging write; it never overwrites a conflicting projection.
+            fd, _ident = _opf_oplock._create_control_file(pfd, name, payload,
+                                                          "transaction projection")
+            os.close(fd)
+        except _opf_oplock.OpLockError as exc:
+            raise _journal.JournalError(str(exc))
     finally:
         os.close(pfd)
 
@@ -264,10 +272,12 @@ def recover_transaction(cap, kind, run_id):
 # journaled publication and never rewritten, whatever the run's outcome. It is read back on exactly
 # one path: a repeat call that finds the entry present judges it against the exact payload it would
 # publish. A failure inside publication (a failed directory fsync included) removes the just-linked
-# entry, leaving no reservation rather than a non-durable one, EXCEPT when that cleanup unlink
-# itself fails: _create_control_file then KEEPS the entry and names it in the refusal (DEF-5), and
-# the kept entry reads as reserved (conservative) until a repeat call under the same capability
-# re-establishes its durability through the read-back below.
+# entry, leaving no reservation rather than a non-durable one, EXCEPT when that cleanup cannot
+# prove the entry exclusively its own or cannot remove it (a failed stat or unlink, or a link
+# count that does not match the names the publication bound): _create_control_file then KEEPS
+# the entry and names it in the refusal (DEF-5), and the kept entry reads as reserved
+# (conservative) until a repeat call under the same capability re-establishes its durability
+# through the read-back below.
 # Inert until the record writer connects to it: no shipped caller reserves yet.
 
 ALLOCATION_FORMAT = "opf.journal.allocation/v1"
@@ -321,9 +331,12 @@ def _existing_reservation(pfd, name, kind, run_id, payload):
     reservation of an earlier call under this SAME capability: it is answered idempotently, the
     containing directory fsynced again before the payload is returned (the earlier publication may
     have failed after its link with a cleanup that could not remove the entry, so presence alone
-    does not establish durability). This is NOT crash repair: a retry after a kill holds a NEW
-    capability whose fresh op_id changes the payload, so it is refused as different bytes, and the
-    killed run's leftover reservation stays, its numbers conservatively still reserved. Different
+    does not establish durability). A retry after a kill that re-enters through acquire_operation
+    holds a NEW capability whose fresh op_id changes the payload, so it is refused as different
+    bytes, and the killed run's leftover reservation stays, its numbers conservatively still
+    reserved. A resumed init instead attaches the PERSISTED operation id (attach_init_lease), so
+    its retry presents byte-identical content and the byte-equal answer IS crash repair, safe
+    because the directory is fsynced before the payload is returned. Different
     bytes, a non-regular entry, and an unreadable entry each refuse with their own message. A
     refusal is NEVER evidence that the run holds its numbers; only the read-back reservation
     bytes are."""
@@ -373,9 +386,12 @@ def reserve_allocation(cap, kind, run_id, claims):
     _existing_reservation: the byte-identical payload of an earlier call under this SAME capability
     is answered idempotently (the directory fsynced again, the payload returned); different bytes,
     a non-regular entry, or an unreadable entry refuses, naming which. The payload embeds the
-    capability's op_id, so a retry after a kill, which necessarily holds a NEW capability, is
-    refused as different bytes: the killed run's leftover reservation is the disclosed residual,
-    its numbers conservatively still reserved. A refusal is NEVER evidence that the run holds its
+    capability's op_id, so a retry after a kill that re-enters through acquire_operation (which
+    mints a fresh op_id) is refused as different bytes: the killed run's leftover reservation is
+    the disclosed residual, its numbers conservatively still reserved. A resumed init attaches
+    the PERSISTED operation id instead (attach_init_lease), so its byte-identical retry is
+    answered as crash repair, safe because the directory is fsynced before the payload is
+    returned. A refusal is NEVER evidence that the run holds its
     numbers; only the returned payload bytes are. This seam publishes ONE run's claims; per-series
     uniqueness ACROSS runs (spec 8.2's next-ID derivation over the counters.toml high-water and
     every reservation's [claims] value) is the calling allocator's job under the same held lock
@@ -407,8 +423,10 @@ def reserve_allocation(cap, kind, run_id, claims):
                     # unreachable under the held capability's single-writer discipline: refuse with
                     # the reservation's own meaning, never the oplock anchor-recovery advice, and
                     # leave judging the entry to a later call's read-back. Any cleanup-failure
-                    # detail the publication reported (a torn staging record it could not remove)
-                    # is carried over, not dropped with the advice.
+                    # detail the publication reported (a torn staging record it could not remove
+                    # or could not prove exclusively its own, a stat or link-count refusal that
+                    # stopped the cleanup, or a descriptor close that failed) is carried over,
+                    # not dropped with the advice.
                     message = ("the {} id reservation for {} appeared during publication; a retry "
                                "judges the existing entry against its own payload "
                                "(spec 8.2)".format(kind, run_id))

@@ -3873,8 +3873,9 @@ def _self_test_vectors():
     # directory entry durable once the publication's final fsync ran), and the complete reservation
     # plus its shared-inode staging leftover. A later call under the SAME capability retires the
     # garbage and then completes or refuses deterministically; a call under a NEW capability (what
-    # any retry after a kill holds) is refused, and the leftover reservation is the disclosed
-    # conservative residual.
+    # a retry after a kill holds when it re-enters through acquire_operation; a resumed init
+    # attaches the persisted operation id and so repeats the SAME capability instead) is refused,
+    # and the leftover reservation is the disclosed conservative residual.
     import os
     import signal
     import threading
@@ -3990,8 +3991,11 @@ def _self_test_vectors():
                   and os.stat(target).st_nlink == 1 and target.read_bytes() == payload)
             # The same leftover state, retried by the SAME capability with the SAME claims,
             # completes idempotently: the shared-inode leftover is retired, the entry read back
-            # and the payload returned. (A retry after a kill holds a NEW capability and is
-            # refused; reservation-new-capability-refused below shows it.)
+            # and the payload returned. This is also the resumed-init shape (attach_init_lease
+            # re-attaches the persisted operation id): the byte-equal retry is crash repair, safe
+            # because the directory is fsynced before the payload is returned. (A retry under a
+            # fresh acquire_operation capability mints a new op_id and is refused;
+            # reservation-new-capability-refused below shows it.)
             os.link(target, leftover)
             check("reservation-leftover-retried-same-capability", lambda: home_journal.reserve_allocation(
                 cap, "record", record_run, {"BI": 7, "WL": 12}) == payload
@@ -4022,9 +4026,14 @@ def _self_test_vectors():
                   and "appeared during publication" in raced and "recover=True" not in raced
                   and os.stat(target).st_nlink == 1 and target.read_bytes() == payload)
             # The same race where the publication's own cleanup also fails must keep that
-            # cleanup-failure detail (the named staging leftover) in the reservation-specific
-            # refusal instead of dropping it with the oplock advice (fix round 2, claude
-            # MINOR-3); the stranded leftover is retired as garbage by the next reserving call.
+            # cleanup-failure detail in the reservation-specific refusal instead of dropping it
+            # with the oplock advice (fix round 2, claude MINOR-3; strengthened in fix round 3,
+            # codex MEDIUM): the refusal must NAME the actual stranded staging entry and keep the
+            # injected unlink failure, so a mutant dropping the whole carried detail (if kept: to
+            # if False:) and a mutant keeping the marker but dropping the leftover suffix
+            # (message += detail + leftover to message += detail) both go red here. The stranded
+            # leftover is retired as garbage by the next reserving call;
+            # reservation-stranded-leftover-retired below asserts that retirement.
             def refusing_unlink(entry, **kwargs):
                 raise OSError(5, "injected unlink failure")
 
@@ -4032,15 +4041,21 @@ def _self_test_vectors():
                     _patch.object(os, "unlink", refusing_unlink):
                 stranded = reservation_refusal(lambda: home_journal.reserve_allocation(
                     cap, "record", record_run, {"BI": 7, "WL": 12}))
+            stranded_names = [entry for entry in os.listdir(target.parent)
+                              if oplock._is_staging_name(entry, record_run + ".toml")]
             check("reservation-link-race-keeps-cleanup-detail", lambda: stranded is not None
                   and "appeared during publication" in stranded
                   and "could not be cleaned up" in stranded and "recover=True" not in stranded
+                  and len(stranded_names) == 1 and stranded_names[0] in stranded
+                  and "injected unlink failure" in stranded
                   and target.read_bytes() == payload)
-            # Fix round 2 (claude MEDIUM-1, decided stricter-safe): any retry after a kill holds a
-            # NEW capability (acquire_operation mints a fresh op_id per acquisition), and it stays
-            # refused: the payload embeds the op_id, so the bytes differ. The killed run's leftover
-            # reservation is the disclosed residual; its numbers stay reserved (conservative). The
-            # byte-equal idempotent answer serves a repeat call under the SAME capability only.
+            # Fix round 2 (claude MEDIUM-1, decided stricter-safe; wording fixed in fix round 3):
+            # a retry after a kill that re-enters through acquire_operation holds a NEW capability
+            # (a fresh op_id per acquisition), and it stays refused: the payload embeds the op_id,
+            # so the bytes differ. The killed run's leftover reservation is the disclosed
+            # residual; its numbers stay reserved (conservative). The byte-equal idempotent answer
+            # serves a repeat call under the SAME capability: a plain repeat, or a resumed init,
+            # which attaches the persisted operation id rather than minting a new one.
             cap2 = oplock.OpCapability.__new__(oplock.OpCapability)
             cap2._claim = threading.Lock()
             cap2._claimant = None
@@ -4063,6 +4078,13 @@ def _self_test_vectors():
                   and "already exists with different content" in fresh
                   and "does not establish that the run holds" in fresh
                   and target.read_bytes() == payload)
+            # Fix round 3 (claude MINOR, decided assert): the cleanup-detail vector's comment
+            # claimed the stranded leftover is retired as garbage by the next reserving call;
+            # that next call is the cap2 refusal just above, and the retirement is asserted here
+            # rather than claimed, with the reservation keeping its single link.
+            check("reservation-stranded-leftover-retired", lambda: len(stranded_names) == 1
+                  and not (target.parent / stranded_names[0]).exists()
+                  and os.stat(target).st_nlink == 1)
             # Fix round 2 (claude MINOR-1): a FIFO squatting a reservation name refuses AT ONCE
             # (the read-back open carries O_NONBLOCK, so a writer-less FIFO cannot block it),
             # judged in a BOUNDED child: a blocking mutant turns this check red at the deadline
@@ -4098,14 +4120,18 @@ def _self_test_vectors():
                 os.waitpid(fifo_child, 0)
             check("reservation-fifo-refused-bounded", lambda s=fifo_status: s is not None
                   and os.WIFEXITED(s) and os.WEXITSTATUS(s) == 7)
-            # Fix round 2 (codex MEDIUM-1): _project's EXISTING-projection branch restores the
-            # same ancestor and containing-directory durability a fresh publication gets. Unlike
-            # a reservation, the projection payload derives from the journal's own INTENT header,
-            # so a run killed between the projection's link and its directory flush IS retried
-            # with byte-identical bytes (recovery under a fresh capability); the retry must
-            # flush, not trust presence. projection-published pins the fresh publication this
-            # builds on; projection-crash-retry-flushes is the discriminator (red when the
-            # existing branch returns without the flushes).
+            # Fix round 2 (codex MEDIUM-1), reworked in fix round 3 (both reviews, MAJOR):
+            # _project's EXISTING-projection branch restores the same ancestor and
+            # containing-directory durability a fresh publication gets, and it retires staging
+            # garbage BEFORE testing or reading the final entry (reserve_allocation's ordering).
+            # Unlike a reservation, the projection payload derives from the journal's own INTENT
+            # header, so a run killed anywhere inside publication IS retried with byte-identical
+            # bytes (recovery under a fresh capability); the retry must flush, not trust
+            # presence. projection-published pins the fresh publication this builds on;
+            # projection-complete-retry-flushes is the durability discriminator over a COMPLETE
+            # publication (red when the existing branch returns without the flushes);
+            # projection-staging-crash-retry-recovers builds the partial-publication crash state
+            # and is red on the pre-fix _project.
             proj_run = "record-20260917T120006Z-0123456789abcdef"
             proj_frames = [
                 (native_journal.F_INTENT, dict(txn=proj_run, header=dict(
@@ -4133,9 +4159,35 @@ def _self_test_vectors():
                     proj_ancestors = [os.stat(root).st_ino] + [
                         os.stat(root.joinpath(*proj_parts[:depth])).st_ino
                         for depth in range(1, len(proj_parts))]
-                    check("projection-crash-retry-flushes", lambda: retried is None
+                    check("projection-complete-retry-flushes", lambda: retried is None
                           and proj_target.read_bytes() == proj_payload
                           and all(ino in proj_flushed for ino in proj_ancestors))
+                    # Fix round 3 (both reviews, MAJOR): the crash state a kill between the
+                    # exclusive link and the staging retire leaves is the complete projection
+                    # PLUS its shared-inode staging leftover (link count 2). The retry must
+                    # retire the leftover, accept the byte-equal projection unchanged, leave a
+                    # single link and flush the directory; the pre-fix _project read the final
+                    # entry first and refused its second link on every retry; that refusal
+                    # lands here as a red check through reservation_refusal, never an escaping
+                    # cannot-evaluate.
+                    proj_staging = proj_target.parent / oplock._staging_name(proj_target.name)
+                    os.link(proj_target, proj_staging)
+                    crash_flushed = []
+
+                    def crash_flush_recorder(fd):
+                        crash_flushed.append(os.fstat(fd).st_ino)
+                        real_fsync(fd)
+
+                    with _patch.object(os, "fsync", crash_flush_recorder):
+                        crash_retried = reservation_refusal(lambda: home_journal._project(
+                            proj_root_fd, -1, root / "unused", "record", proj_run))
+                    check("projection-staging-crash-retry-recovers",
+                          lambda: crash_retried is None
+                          and not proj_staging.exists()
+                          and proj_target.read_bytes() == proj_payload
+                          and os.stat(proj_target).st_nlink == 1
+                          and os.stat(proj_target.parent).st_ino in crash_flushed
+                          and all(ino in crash_flushed for ino in proj_ancestors))
             finally:
                 os.close(proj_root_fd)
             cap._released = True
@@ -4150,7 +4202,7 @@ def _self_test_vectors():
     # trace per boundary; the injected fsync failure is BOUND to an observed creation (the first
     # fsync at or after the boundary-th mkdir), the interrupted attempt stops there, and the clean
     # retry runs on the same trace. journal-dirs-fsync-fault-N requires the injection to have fired
-    # after exactly N creations (setup plus that binding; the first three also pass on the pre-fix
+    # after exactly N creations (setup plus that binding; all four also pass on the pre-fix
     # helper). journal-dirs-created-then-flushed-N (discriminator) requires EVERY observed creation
     # to be followed by a flush of its parent directory, so a mutant that fsyncs each parent BEFORE
     # looking up or creating its child (the same inode set, the wrong order) goes red here, and at
