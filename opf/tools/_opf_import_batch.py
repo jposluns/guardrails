@@ -37,18 +37,37 @@ batch_digest is the SHA-256 of the canonical bytes, the batch half of the spec 8
 MAX_CANON_DEPTH deep): a float, a native TOML date-time or an out-of-range integer has no canonical batch
 form in v1 (timestamps are RFC 3339 UTC strings, as the imported envelope requires), and a batch over
 MAX_BATCH_BYTES is refused unread. An ITERATIVE preflight enforces the depth and integer bounds on the
-parsed document before any copy, row validation or emission, so no recursive helper and no value
-formatting ever sees a value past the bounds.
+parsed document before any copy, row validation or emission, and a preflight refusal is reported ALONE,
+so once the schema is identified no recursive helper and no value formatting ever sees a value past the
+bounds (the schema-mismatch refusal itself renders the foreign `schema` value first, through the
+iterative, bounded _opf_schema._bounded_display; no unbounded formatting exists on any path).
 
 VALIDATION. Each row is built into an imported record and checked with _opf_schema.validate_imported_record
-(IS-0): the builder assigns per-namespace PLACEHOLDER ids (`imported:<NS>-<n>` in batch order; they are
-never allocations, spec 8.8 keeps the one allocation seam in the writer), the placeholder importer actor,
-and a placeholder `import` table whose `source` is the preserved-original path the record's own run will
-hold. A `links` row targets either another row by its batch-local `key`, which the builder resolves to that
-row's placeholder id (dangling and duplicate keys are refused), or an existing imported-series id verbatim
-(never an id this batch itself mints: a link to this batch's own row must use its local key, so a key link
-and a verbatim link can never resolve to the same id); a clean-series id is refused by the validator
-("Imported-to-clean links MUST be refused by both writer and doctor", spec 8.6). The importer-only
+(IS-0): the builder assigns per-namespace PLACEHOLDER ids (`imported:<NS>-0<n>` in batch order: a spelling
+the spec 8.2 id grammar refuses outright, since `[1-9][0-9]*` admits no leading zero, so NO real imported
+id, an earlier import run's included, can ever spell a placeholder; placeholders are never allocations,
+spec 8.8 keeps the one allocation seam in the writer, which replaces every placeholder occurrence with a
+freshly allocated `imported:<NS>-<n>` inside its journaled transaction and re-validates, and the
+unspellable spelling is what lets it find every occurrence structurally while leaving every verbatim id
+alone), the placeholder importer actor, and a placeholder `import` table whose `source` is the
+preserved-original path the record's own run will hold. The validator judges each record under its
+placeholder's well-formed MASK (`imported:<NS>-<n>`, the placeholder minus its leading zero, substituted
+at exactly the record-id-bearing positions), so it sees the real envelope, link and scope shape while the
+returned Batch carries only placeholder spellings. A `links` row targets either another row by its
+batch-local `key`, which the builder resolves to that row's placeholder id (dangling and duplicate keys
+are refused), or an existing imported-series id verbatim, which ALWAYS passes through: a well-formed id
+can never spell a placeholder, so a key link and a verbatim link can never resolve to the same id in the
+result, and a verbatim link to an id an earlier import run allocated is never refused for colliding with
+a placeholder. A verbatim id that SPELLS a placeholder this batch itself mints is a genuine alias of a
+batch row and is refused by name, with no second finding (a link to this batch's own row must use its
+local key); a clean-series id is refused by the validator ("Imported-to-clean links MUST be refused by
+both writer and doctor", spec 8.6). The same aliasing rule covers every record-id-bearing row member, and
+`links[].id` and a block row's `scopes` entries are the ONLY two, enumerated against the schema: the
+record's own `id` is writer-authored and refused in a row, `refs` rows carry {kind, locator, note}
+locators, `unrecorded` and `history` rows carry schema FIELD names, `actor.id` names an actor, and no
+other baseline member holds a record id. A `scopes` entry spelling a minted placeholder is refused by
+name (scopes resolve no batch-local key: a scope names a record that already exists in the store, never a
+row of its own batch). The importer-only
 legacy_fragment type is refused (spec 8.1/8.2: new imports use the imported series, never LF
 quarantine), and a module-tier type is refused in this release (decision
 D-OPF-PLAN-BATCH-ACCEPT D6: the first imported-series release supports baseline types only).
@@ -58,7 +77,10 @@ v1 assumptions (not exactly bytes, over the byte bound, not UTF-8, not TOML, an 
 literal, another or absent `schema`, nesting past the canonical depth bound, or a validator control
 failure), never a pass; INVALID for a parsed batch that violates the format (a row finding names its row,
 and collection stops early in three places: a preflight refusal is reported alone, a batch refused for its
-source skips row validation, and a row refused at staging, for its key or type, is not built); VALID
+source builds and validates no row (staging still grades every row's key and type, and the
+writer-authored and measurement refusals still fire), and a row whose TYPE is refused at staging is not
+built, while a row refused for its KEY alone is still built under its placeholder and validated, so its
+remaining findings are still collected); VALID
 otherwise, and only then does the result carry a Batch. batch_digest(data) returns the digest only for a
 VALID batch, so no replay key is ever minted from a batch THIS PARSER refuses; the writer re-validates
 every built record and can still refuse a parser-VALID batch (e.g. against its own run clock, spec 8.8).
@@ -69,7 +91,7 @@ recomputed source size and digest, replay lookup, the type being enabled in the 
 bound on historical timestamps, which a pure parser has no clock for: the placeholder `imported_at` is the
 latest RFC 3339 instant, so the writer MUST re-validate against its own run clock); that `source.path`
 names a migrate-disposed source inside the approved plan scope; that a local-key link is acyclic or
-non-self-referential; and whether a verbatim imported-series link target exists (C-LINKS resolves the
+non-self-referential; and whether a verbatim imported-series link or block-scopes target exists (C-LINKS resolves the
 union, spec 8.3).
 
 Offline, stdlib only, fail-closed. It lives under `opf/tools/` and imports ONLY sibling `opf/tools/`
@@ -136,14 +158,70 @@ PROVENANCE_CONTENT_KEYS = ("history", "span", "unparsed")
 LOCAL_KEY_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,63}\Z")
 # Control areas no import source may name (a legacy source lives in the product tree, never under
 # version control's or the store's own machinery), derived from the store's own constants so the two
-# lists cannot drift. Components compare CASEFOLDED: on a case-insensitive filesystem an aliased
-# spelling such as .GIT names the same directory, and an aliased spelling is a refused input, never a
-# different destination. Root-anchored: the store-root control dirs and the working directory name.
-_CONTROL_ROOTS = frozenset(n.casefold() for n in store.STORE_ROOT_CONTROL_DIRS + (store.WORKING_DIRNAME,))
-# Refused at ANY depth: version control's fixed `.git` (a nested repository is machinery too), the
-# store working directory (a store root need not be the product root), and the store pointer names.
-_CONTROL_COMPONENTS = frozenset(n.casefold() for n in (
-    ".git", store.WORKING_DIRNAME, store.POINTER_REL, store.LOCAL_POINTER_REL))
+# lists cannot drift: the store-root control dirs (.git and .aiqt), the store working directory and the
+# two store pointer names. ALL are refused at ANY depth: the store's own exclusions are anchored at the
+# STORE ROOT (see _opf_store.STORE_ROOT_CONTROL_DIRS), and a store root need not be the product root, so
+# a batch's product-relative path cannot tell which subtree roots a store; a control name anywhere is
+# some potential store root's machinery, and this inert parser refuses it fail-closed (the writer, which
+# resolves the real store root, owns the final plan-scope judgement).
+_CONTROL_COMPONENTS = frozenset(n.casefold() for n in store.STORE_ROOT_CONTROL_DIRS + (
+    store.WORKING_DIRNAME, store.POINTER_REL, store.LOCAL_POINTER_REL))
+# An ALIASED spelling of a control name is a refused input, never a different destination. The compare
+# folds the alias spellings git itself treats as `.git` (its verify_path: an NTFS or HFS+ lookup
+# reaches the directory through them), applied to every control name alike:
+#   - case (on a case-insensitive filesystem .GIT names .git), folded by casefold();
+#   - NTFS: an alternate-data-stream suffix (`.git::` U+0024 `INDEX_ALLOCATION` opens the directory
+#     itself, so everything from the first colon is cut), trailing dots and spaces (`.git.` and
+#     `.git ` resolve to `.git`), and the 8.3 short name (`GIT~1`; matched as the control name's DOS
+#     stem, dots dropped and cut to six characters, `~` with any digit run, and the three-character
+#     extension where the name carries one, e.g. `OPF~1.TOM` for `.opf.toml`);
+#   - HFS+: the ignorable code points an HFS+ name lookup skips (U+200C..U+200F, U+202A..U+202E,
+#     U+206A..U+206F and U+FEFF), dropped before the compare.
+# DISCLOSED, deliberately left open beside this check: it closes the git-documented LEXICAL alias set,
+# not every filesystem equivalence. Unicode NFC/NFD normalization and single-script confusables (a
+# dotless U+0131 in place of the i of .git) are not folded; NTFS hash-mangled short names (the
+# `GI7EBA~1` style) are not enumerated; a trailing-dot, trailing-space or stream alias of a
+# NON-control name stays a plain (odd) product path, the store file-operand grammar's business; and
+# filesystem-level aliasing (links, mounts, case-insensitive lookups of whole trees) is no lexical
+# check's to close. The writer re-judges the real path against its own plan scope and store root
+# (spec 8.8).
+_HFS_IGNORABLE = frozenset(chr(c) for c in (
+    tuple(range(0x200C, 0x2010)) + tuple(range(0x202A, 0x202F))
+    + tuple(range(0x206A, 0x2070)) + (0xFEFF,)))
+
+
+def _dos_short_pattern(name):
+    """The NTFS 8.3 short-name pattern of one control name: the DOS stem (the name before its last
+    dot, or the whole name when nothing precedes that dot, dots and other non-alphanumerics dropped,
+    cut to six), `~` with any digit run, and the cut extension where the name carries one (`.git` to
+    `git~N`, `.opf.toml` to `opf~N.tom`)."""
+    base, dot, ext = name.rpartition(".")
+    if not dot or not base:
+        base, ext = name, ""
+    stem = re.sub(r"[^a-z0-9]", "", base.casefold())[:6]
+    tail = re.sub(r"[^a-z0-9]", "", ext.casefold())[:3]
+    return re.escape(stem) + "~[0-9]+" + ("\\." + re.escape(tail) if tail else "")
+
+
+_CONTROL_SHORT_RE = re.compile(
+    "(?:" + "|".join(sorted({_dos_short_pattern(n) for n in _CONTROL_COMPONENTS})) + ")\\Z")
+
+
+def _alias_component(comp):
+    """The spelling a case-, NTFS- and HFS+-aliasing lookup compares one path component under (the
+    fold the _CONTROL_COMPONENTS comment derives): HFS+-ignorable code points dropped, an NTFS stream
+    suffix cut at the first colon, NTFS-ignored trailing dots and spaces dropped, then casefolded."""
+    comp = "".join(ch for ch in comp if ch not in _HFS_IGNORABLE)
+    comp = comp.split(":", 1)[0]
+    return comp.rstrip(". ").casefold()
+
+
+def _names_control_area(comp):
+    """True when one path component names a control area under any folded alias spelling, the 8.3
+    short names included."""
+    folded = _alias_component(comp)
+    return folded in _CONTROL_COMPONENTS or _CONTROL_SHORT_RE.match(folded) is not None
+
 
 # PLACEHOLDERS: the fixed stand-ins validation runs under. None is an allocation or a clock read; the
 # writer replaces every one of them inside its journaled transaction and re-validates there.
@@ -159,6 +237,33 @@ PLACEHOLDER_ACTOR_ID = "importer-unassigned"
 # The preserved-original prefix every built record's import.source carries, derived from the store's own
 # evidence-home constructor so the two grammars cannot drift (import of this module raises if they do).
 PLACEHOLDER_ORIGINALS = store.evidence_run("import", PLACEHOLDER_RUN) + "/originals/"
+# Placeholder ids are spelled `imported:<NS>-0<n>` (per namespace, in batch order): the id grammar is
+# `imported:<NS>-<n>` with n drawn from `[1-9][0-9]*` (spec 8.2, _opf_schema.parse_series_id), which
+# admits NO leading zero, so no allocated id, this run's or any earlier run's, can ever spell a
+# placeholder, and a verbatim id in a row can never alias a batch row by accident. The writer still
+# allocates the real id: a placeholder cannot be written to the store at all (the store's own
+# validators refuse the spelling), so the writer replaces every placeholder occurrence with a freshly
+# allocated `imported:<NS>-<n>` inside its journaled transaction (the one allocation seam, spec 8.8)
+# and re-validates there, finding each occurrence structurally by this spelling alone. Validation in
+# THIS parser runs under _validation_mask's well-formed mask, so the validator never sees the
+# unspellable form.
+_PLACEHOLDER_RE = re.compile(r"imported:([A-Z]{2})-0([1-9][0-9]*)\Z")
+
+
+def _mint_placeholder(ns, n):
+    """The nth placeholder of namespace `ns`: `imported:<NS>-0<n>`, a spelling parse_series_id refuses
+    (no real id carries a leading zero, spec 8.2), so a placeholder and a real id can never collide."""
+    return "{}{}-0{}".format(schema.IMPORTED_PREFIX, ns, n)
+
+
+def _validation_mask(placeholder):
+    """The well-formed `imported:<NS>-<n>` id validation runs under for one placeholder (the
+    placeholder minus its leading zero), or None for a string that is not a placeholder spelling."""
+    m = _PLACEHOLDER_RE.match(placeholder)
+    if m is None:
+        return None
+    return "{}{}-{}".format(schema.IMPORTED_PREFIX, m.group(1), m.group(2))
+
 
 _NOT_BYTES = "import batch must be exactly bytes (fail-closed)"
 _MEASUREMENT_REFUSAL = ("carries the caller-supplied measurement {!r}: the writer recomputes source size "
@@ -175,7 +280,7 @@ class BatchRow:
         self.key = key
         self.kind = kind                      # "record" or "worklog"
         self.type = rtype
-        self.placeholder_id = placeholder_id  # imported:<NS>-<n>, a placeholder, never an allocation
+        self.placeholder_id = placeholder_id  # imported:<NS>-0<n>, a placeholder, never an allocation
         self.record = record
 
 
@@ -212,11 +317,16 @@ class _CanonError(Exception):
 
 _BARE_KEY_RE = re.compile(r"[A-Za-z0-9_-]+\Z")
 # Code points escaped beyond the named short escapes: DEL, every C1 control (NEL among them), the
-# non-LF line boundaries splitlines knows (LS, PS) and the bidirectional format characters (ALM, LRM,
-# RLM, the embedding/override set and the isolate set), each emitted as a backslash-u escape so no
-# emitted line is split by a data character and no invisible control or direction-spoofing character
-# lands raw in a canonical batch.
+# non-LF line boundaries splitlines knows (LS, PS), the bidirectional format characters (ALM, LRM,
+# RLM, the embedding/override set and the isolate set) and the zero-width set, each emitted as a
+# backslash-u escape so no emitted line is split by a data character and no invisible control or
+# direction-spoofing character lands raw in a canonical batch. DECIDED, not merely disclosed: U+200B
+# (ZWSP), U+200C (ZWNJ), U+200D (ZWJ) and U+FEFF (ZWNBSP/BOM) are ESCAPED, since an invisible
+# zero-width character spoofs a reader exactly as a bidirectional control does and a mid-string BOM
+# survives a naive re-decode; the self-test enumerates the whole required set independently of this
+# table, so shrinking it turns a vector red.
 _EXTRA_ESCAPED = (frozenset((0x7F, 0x2028, 0x2029, 0x061C, 0x200E, 0x200F))
+                  | frozenset((0x200B, 0x200C, 0x200D, 0xFEFF))  # zero-width: ZWSP, ZWNJ, ZWJ, BOM
                   | frozenset(range(0x80, 0xA0))       # the C1 controls, NEL included
                   | frozenset(range(0x202A, 0x202F))   # LRE, RLE, PDF, LRO, RLO
                   | frozenset(range(0x2066, 0x206A)))  # LRI, RLI, FSI, PDI
@@ -227,8 +337,8 @@ _STR_ESCAPES = {"\\": "\\\\", '"': '\\"', "\b": "\\b", "\t": "\\t", "\n": "\\n",
 def _canon_string(s):
     """The one canonical TOML basic-string spelling: the named short escapes, backslash-u (upper-case hex)
     for every other C0 and C1 control character, for the non-LF line boundaries splitlines knows (NEL, LS,
-    PS, so no emitted line is ever split by a data character) and for the bidirectional format characters,
-    and every other code point raw UTF-8."""
+    PS, so no emitted line is ever split by a data character), for the bidirectional format characters,
+    for the zero-width set (ZWSP, ZWNJ, ZWJ, ZWNBSP/BOM), and every other code point raw UTF-8."""
     out = ['"']
     for ch in s:
         esc = _STR_ESCAPES.get(ch)
@@ -306,9 +416,9 @@ def canonical_batch_bytes(doc):
 def _source_path_error(path):
     """None when `path` is a legal source path, else the finding: the store's canonical file-operand
     grammar (no absolute, drive or backslash form, no empty, '.' or '..' component, no control
-    character), spelled from the product root and outside every control area (the root-anchored control
-    dirs, plus `.git`, the working directory name and the store pointer names at ANY depth, every
-    component compared casefolded)."""
+    character), spelled from the product root and outside every control area (the store control dirs,
+    the working directory name and the store pointer names, each at ANY depth and under any folded
+    alias spelling; see _CONTROL_COMPONENTS and _names_control_area)."""
     if type(path) is not str:
         return "source.path must be a string (the legacy file's product-relative path)"
     try:
@@ -317,12 +427,10 @@ def _source_path_error(path):
         return ("source.path {} is not a canonical product-relative file path (no absolute, drive or "
                 "backslash form, no empty, '.' or '..' component, no control character)".format(
                     schema._bounded_display(path)))
-    comps = [c.casefold() for c in path.split("/")]
-    if comps[0] in _CONTROL_ROOTS or any(c in _CONTROL_COMPONENTS for c in comps):
-        return ("source.path {} lies inside a control area ({} at the root; {} at any depth): a legacy "
-                "source lives in the product tree".format(
-                    schema._bounded_display(path), ", ".join(sorted(_CONTROL_ROOTS)),
-                    ", ".join(sorted(_CONTROL_COMPONENTS))))
+    if any(_names_control_area(c) for c in path.split("/")):
+        return ("source.path {} lies inside a control area ({} at any depth, case, NTFS and HFS+ alias "
+                "spellings included): a legacy source lives in the product tree".format(
+                    schema._bounded_display(path), ", ".join(sorted(_CONTROL_COMPONENTS))))
     return None
 
 
@@ -338,7 +446,12 @@ def _first_difference(a, b):
 def _preflight_error(doc):
     """The ITERATIVE depth and integer-range preflight over the whole parsed document, run before any
     copy, row validation or canonical emission, so no recursive helper (deepcopy, the validator, the
-    emitter) and no value formatting ever sees a value past the bounds. Depth counts exactly as the
+    emitter) and, once the schema is identified, no value formatting ever sees a value past the bounds
+    (the preceding schema-mismatch refusal renders the foreign `schema` value through the iterative,
+    bounded _opf_schema._bounded_display, the only formatting on any earlier path). A preflight refusal
+    is returned ALONE, one finding, before staging or the validator can add another, and the self-test
+    pins that aloneness, so the preflight itself is discriminated from the emitter backstop (a removed
+    or depth-limited preflight check turns those vectors red). Depth counts exactly as the
     emitter counts it (a member of the top level, of [source] or of a row sits at depth 1, and the bound
     refuses a value AT a depth past MAX_CANON_DEPTH, scalar or container alike); a shape the emitter
     refuses without walking is still walked here, strict side, so a refusal can only move earlier, never
@@ -390,13 +503,17 @@ def _closed_keys(table, where, allowed, findings):
 def _resolve_links(content, where, local_ids, minted, findings):
     """Resolve each {rel, key} link in a FRESH copy of a row's links to {rel, id} through the batch-local
     key table (spec 8.8: the writer resolves local keys to claimed imported IDs; here they resolve to the
-    same rows' placeholder ids, so the validator judges the real link shape). A {rel, id} link passes
-    through verbatim for the validator's own imported-series judgement (a clean-series id is ITS refusal),
-    EXCEPT an id this batch itself mints (`minted` holds every staged placeholder id): that one is refused
-    by name, since a link to this batch's own row must use its local key, so a key link and a verbatim
-    link can never resolve to the same id in the result. A link with both members, with neither, or with
-    a dangling or non-string key is a finding. A links member that is not a list, or a link that is not a
-    table, passes through for the validator's own shape findings."""
+    same rows' placeholder ids, so the validator judges the real link shape under the placeholders'
+    masks). A {rel, id} link passes through verbatim for the validator's own imported-series judgement (a
+    clean-series id is ITS refusal), ALWAYS when the id is well-formed: no real id can spell a
+    placeholder, so a verbatim link to an id an earlier run allocated is never refused and a key link
+    and a verbatim link can never resolve to the same id in the result. The ONE refusal left is a
+    GENUINE alias: an id that spells a placeholder this batch itself mints (`minted` holds every staged
+    placeholder id), refused by name, since a link to this batch's own row must use its local key; the
+    link passes through unchanged so _masked_for_validation re-spells it and the refusal stays the
+    single finding for that link. A link with both members, with neither, or with a dangling or
+    non-string key is a finding. A links member that is not a list, or a link that is not a table,
+    passes through for the validator's own shape findings."""
     links = content.get("links")
     if not isinstance(links, list):
         return
@@ -415,12 +532,11 @@ def _resolve_links(content, where, local_ids, minted, findings):
         if not has_key:
             vid = link.get("id")
             if type(vid) is str and vid in minted:
-                findings.append("{} links[{}].id {} is a placeholder this batch itself mints: a link "
-                                "to this batch's own row must use its local key (a verbatim id names a "
-                                "row that already exists in the store, spec 8.8)".format(
-                                    where, i, schema._bounded_display(vid)))
-                resolved.append({k: v for k, v in link.items() if k != "id"})
-                continue
+                findings.append("{} links[{}].id {} spells a placeholder this batch itself mints, a "
+                                "genuine alias of a batch row: a link to this batch's own row must use "
+                                "its local key (no real imported id can spell a placeholder, so a "
+                                "well-formed verbatim id always names a store row and is never "
+                                "refused, spec 8.8)".format(where, i, schema._bounded_display(vid)))
             resolved.append(link)
             continue
         lk = link.get("key")
@@ -433,6 +549,47 @@ def _resolve_links(content, where, local_ids, minted, findings):
         row_link["id"] = local_ids[lk]
         resolved.append(row_link)
     content["links"] = resolved
+
+
+def _refuse_minted_scopes(content, where, minted, findings):
+    """The links aliasing rule applied to a block row's `scopes`, the ONLY other record-id-bearing row
+    member (enumerated in the module docstring: the record's own `id` is writer-authored and refused,
+    `refs` rows carry locators, `unrecorded` and `history` rows carry schema field names, and no other
+    baseline member holds a record id): a scopes entry spelling a placeholder this batch itself mints
+    is a genuine alias of a batch row and is refused by name; scopes resolve no batch-local key, so a
+    verbatim entry names a record that already exists in the store, and no real id can spell a
+    placeholder. The entry stays in place for _masked_for_validation, so the refusal is the single
+    finding for that entry. A scopes member that is not a list, and a non-string entry, pass through
+    for the validator's own shape findings."""
+    scopes = content.get("scopes")
+    if type(scopes) is not list:
+        return
+    for i, entry in enumerate(scopes):
+        if type(entry) is str and entry in minted:
+            findings.append("{} scopes[{}] {} spells a placeholder this batch itself mints: a scope "
+                            "names a record that already exists in the store, never a row of its own "
+                            "batch (spec 8.5/8.8)".format(where, i, schema._bounded_display(entry)))
+
+
+def _masked_for_validation(record, minted):
+    """A FRESH copy of a built record with every minted placeholder re-spelled as its well-formed
+    _validation_mask, at exactly the record-id-bearing positions (the record's own `id`, each
+    `links[].id` and each `scopes` entry), so validate_imported_record judges the real envelope, link
+    and scope shape without ever seeing the unspellable placeholder form; the stored BatchRow keeps
+    the placeholder spelling, which the writer replaces (spec 8.8)."""
+    masked = copy.deepcopy(record)
+    if type(masked.get("id")) is str and masked.get("id") in minted:
+        masked["id"] = _validation_mask(masked["id"])
+    links = masked.get("links")
+    if type(links) is list:
+        for link in links:
+            if type(link) is dict and type(link.get("id")) is str and link.get("id") in minted:
+                link["id"] = _validation_mask(link["id"])
+    scopes = masked.get("scopes")
+    if type(scopes) is list:
+        masked["scopes"] = [_validation_mask(s) if type(s) is str and s in minted else s
+                            for s in scopes]
+    return masked
 
 
 def parse_batch(data):
@@ -505,8 +662,9 @@ def parse_batch(data):
                         "spec 14.1)")
 
     # First pass: batch-local keys, row types and placeholder ids, so links can resolve forward and
-    # backward alike. Placeholder numbering is per namespace in batch order; it is NEVER an allocation
-    # (spec 8.8 keeps the one allocation seam in the writer).
+    # backward alike. Placeholder numbering is per namespace in batch order, spelled outside the id
+    # grammar by _mint_placeholder; it is NEVER an allocation (spec 8.8 keeps the one allocation seam
+    # in the writer).
     local_ids = {}
     counts = {}
     staged = []
@@ -551,7 +709,7 @@ def parse_batch(data):
         if rtype is not None:
             ns = schema.BASELINE_SPECS[rtype].namespace
             counts[ns] = counts.get(ns, 0) + 1
-            placeholder = "{}{}-{}".format(schema.IMPORTED_PREFIX, ns, counts[ns])
+            placeholder = _mint_placeholder(ns, counts[ns])
             if key is not None:
                 local_ids[key] = placeholder
         staged.append((kind, where, row, key, rtype, placeholder))
@@ -576,6 +734,7 @@ def parse_batch(data):
                    if k not in ("key", "type") and k not in WRITER_KEYS
                    and k not in MEASUREMENT_KEYS and k not in PROVENANCE_CONTENT_KEYS}
         _resolve_links(content, where, local_ids, minted, findings)
+        _refuse_minted_scopes(content, where, minted, findings)
         record = {"id": placeholder, "type": rtype}
         record.update(content)
         record["actor"] = {"kind": "importer", "id": PLACEHOLDER_ACTOR_ID}
@@ -585,7 +744,8 @@ def parse_batch(data):
             if k in row:
                 provenance[k] = copy.deepcopy(row[k])
         record["import"] = provenance
-        verdict = schema.validate_imported_record(record, expected_type=rtype)
+        verdict = schema.validate_imported_record(_masked_for_validation(record, minted),
+                                                   expected_type=rtype)
         if verdict.status == CANNOT_EVALUATE:
             # Unreachable for a tomllib model under the default controls, but a validator that cannot
             # evaluate a built record must never read as a mere finding (fail-closed).
@@ -703,10 +863,10 @@ def self_test():
         batch = base.batch
         check("batch-model", batch.source_path == "notes/old.md" and batch.canonical == _FIXTURE
               and [(r.kind, r.type, r.key, r.placeholder_id) for r in batch.rows]
-              == [("record", "backlog_item", "r1", "imported:{}-1".format(bi)),
-                  ("worklog", "worklog", "w1", "imported:{}-1".format(wl))]
-              and batch.local_ids == {"r1": "imported:{}-1".format(bi),
-                                      "w1": "imported:{}-1".format(wl)})
+              == [("record", "backlog_item", "r1", "imported:{}-01".format(bi)),
+                  ("worklog", "worklog", "w1", "imported:{}-01".format(wl))]
+              and batch.local_ids == {"r1": "imported:{}-01".format(bi),
+                                      "w1": "imported:{}-01".format(wl)})
         record = batch.rows[0].record
         check("record-built-under-placeholders",
               record["actor"] == {"kind": "importer", "id": PLACEHOLDER_ACTOR_ID}
@@ -715,9 +875,18 @@ def self_test():
               and record["import"]["source_sha256"] == PLACEHOLDER_SOURCE_SHA256
               and record["import"]["imported_at"] == PLACEHOLDER_IMPORTED_AT
               and record["links"] == [{"rel": "relates", "id": batch.local_ids["w1"]}])
+        minted_base = frozenset(r.placeholder_id for r in batch.rows)
         check("rows-revalidate-valid",
-              all(schema.validate_imported_record(r.record, expected_type=r.type).status == VALID
+              all(schema.validate_imported_record(_masked_for_validation(r.record, minted_base),
+                                                  expected_type=r.type).status == VALID
                   for r in batch.rows))
+        # The placeholder spelling itself is pinned OUTSIDE the id grammar: parse_series_id refuses
+        # every minted placeholder (no real id can spell one, so no verbatim id can ever alias a
+        # batch row), while each placeholder's validation mask parses as the well-formed id its
+        # leading zero was stripped from.
+        check("placeholder-unspellable",
+              all(schema.parse_series_id(p) is None for p in minted_base)
+              and all(schema.parse_series_id(_validation_mask(p)) is not None for p in minted_base))
         independent = hashlib.sha256(_FIXTURE).hexdigest()
         check("digest-deterministic", batch.digest == independent
               and batch_digest(_FIXTURE) == independent and batch_digest(_FIXTURE) == independent)
@@ -820,16 +989,42 @@ def self_test():
         check("link-imported-id-verbatim-valid", verbatim.status == VALID
               and verbatim.batch.rows[0].record["links"] == [{"id": "imported:" + bi + "-9",
                                                               "rel": "relates"}])
-        # A verbatim id this batch itself MINTS is refused by name, for the linking row's own
-        # placeholder and for a sibling row's alike, so a key link and a verbatim link can never
-        # resolve to the same id (the imported:<NS>-9 vector above is the just-outside case: an id
-        # the batch does not mint still passes through verbatim).
+        # MAJOR-1 (round 2): a verbatim link to a REAL imported id an EARLIER run allocated is never
+        # refused, even to imported:<NS>-1, the id the old `imported:<NS>-<n>` placeholder scheme
+        # collided with: placeholders now live outside the id grammar, so imported:<NS>-1 always
+        # names a store row, never this batch's own row, and the link rides through with no finding.
+        existing = parse_batch(_edited('{key = "w1", rel = "relates"}',
+                                       '{id = "imported:' + bi + '-1", rel = "relates"}'))
+        check("link-existing-id-never-refused", existing.status == VALID
+              and existing.batch.rows[0].record["links"] == [{"id": "imported:" + bi + "-1",
+                                                              "rel": "relates"}]
+              and "imported:" + bi + "-1" not in {r.placeholder_id for r in existing.batch.rows})
+        # The same verbatim link in a ONE-ROW batch: VALID, one result per row, no refusal and no
+        # spurious second finding.
+        one_head = _FIXTURE.decode("utf-8").split("\n[[worklog]]", 1)[0]
+        one_row = one_head.replace('links = [{key = "w1", rel = "relates"}]',
+                                   'links = [{id = "imported:' + bi + '-1", rel = "relates"}]',
+                                   1).encode("utf-8")
+        got = parse_batch(one_row)
+        check("link-existing-id-one-row-valid", got.status == VALID and got.findings == []
+              and len(got.batch.rows) == 1
+              and got.batch.rows[0].record["links"] == [{"id": "imported:" + bi + "-1",
+                                                         "rel": "relates"}])
+        # A verbatim id that SPELLS a minted placeholder is the one GENUINE alias left: refused by
+        # name, for the linking row's own placeholder and for a sibling row's alike, and refused
+        # ALONE (the link passes to the validator under its mask, so no spurious `links[0].id None`
+        # or malformed-id finding rides along; the imported:<NS>-9 and imported:<NS>-1 vectors above
+        # are the just-outside cases).
         got = parse_batch(_edited('{key = "w1", rel = "relates"}',
-                                  '{id = "imported:' + bi + '-1", rel = "relates"}'))
-        check("link-own-placeholder-refused", _refuses(got, INVALID, "must use its local key"))
+                                  '{id = "imported:' + bi + '-01", rel = "relates"}'))
+        check("link-own-placeholder-refused", _refuses(got, INVALID, "must use its local key")
+              and len(got.findings) == 1
+              and not any("not a well-formed id" in f for f in got.findings))
         got = parse_batch(_edited('{key = "w1", rel = "relates"}',
-                                  '{id = "imported:' + wl + '-1", rel = "relates"}'))
-        check("link-sibling-placeholder-refused", _refuses(got, INVALID, "must use its local key"))
+                                  '{id = "imported:' + wl + '-01", rel = "relates"}'))
+        check("link-sibling-placeholder-refused", _refuses(got, INVALID, "must use its local key")
+              and len(got.findings) == 1
+              and not any("not a well-formed id" in f for f in got.findings))
 
         # Row types: the LF quarantine, a module-tier type (decision D6), an unknown type, and the two
         # worklog placements.
@@ -845,9 +1040,10 @@ def self_test():
         got = parse_batch(_edited('key = "w1"\n', 'key = "w1"\ntype = "worklog"\n'))
         check("worklog-row-type-key-refused", _refuses(got, INVALID, "fixed by its array"))
 
-        # The source table and the batch shape: non-canonical paths; control-area paths (root-anchored,
-        # any-depth, case-aliased and pointer-file spellings alike); the just-outside names that stay
-        # plain product paths; the absent path; the absent table; and the empty batch.
+        # The source table and the batch shape: non-canonical paths; control-area paths (every
+        # control name at any depth, case-, NTFS- and HFS+-aliased and pointer-file spellings
+        # alike); the just-outside names that stay plain product paths; the absent path; the absent
+        # table; and the empty batch.
         for name, bad, text in (
                 ("dotdot", "../x", "not a canonical product-relative file path"),
                 ("absolute", "/etc/x", "not a canonical product-relative file path"),
@@ -862,12 +1058,56 @@ def self_test():
                 ("local-pointer", ".opf.local.toml", "lies inside a control area"),
                 ("nested-git", "sub/.git/config", "lies inside a control area"),
                 ("nested-working", "docs/store/.working/imported/x.md", "lies inside a control area"),
-                ("nested-pointer-case", "docs/.OPF.TOML", "lies inside a control area")):
+                ("nested-pointer-case", "docs/.OPF.TOML", "lies inside a control area"),
+                # The store-root control dirs are refused at ANY depth too: the store's own
+                # exclusions anchor at the STORE root, and a store root need not be the product
+                # root, so docs/.aiqt/ is some potential store's control dir.
+                ("nested-store-area", "docs/.aiqt/x", "lies inside a control area"),
+                ("nested-store-area-case", "sub/.AIQT/config", "lies inside a control area"),
+                # The alias spellings git itself treats as .git (NTFS trailing dot and space, the
+                # 8.3 short name, an alternate-data-stream suffix, HFS+-ignorable code points),
+                # each refused, and the SAME forms of the store control names and pointer files.
+                ("git-trailing-dot", ".git./x", "lies inside a control area"),
+                ("git-trailing-space", ".git /x", "lies inside a control area"),
+                ("git-shortname", "GIT~1/x", "lies inside a control area"),
+                ("git-stream", ".git::" + chr(0x24) + "INDEX_ALLOCATION/x",
+                 "lies inside a control area"),
+                ("git-zwnj", ".g\u200cit/x", "lies inside a control area"),
+                ("git-bom", ".git\ufeff/x", "lies inside a control area"),
+                ("nested-git-trailing-dot", "sub/.GIT./config", "lies inside a control area"),
+                ("store-area-trailing-dot", ".aiqt./x", "lies inside a control area"),
+                ("store-area-trailing-space", ".AIQT /x", "lies inside a control area"),
+                ("store-area-shortname", "AIQT~1/x", "lies inside a control area"),
+                ("store-area-stream", ".aiqt::" + chr(0x24) + "INDEX_ALLOCATION/x",
+                 "lies inside a control area"),
+                ("store-area-zwj", ".ai\u200dqt/x", "lies inside a control area"),
+                ("working-trailing-dot", ".working./x", "lies inside a control area"),
+                ("working-shortname", "WORKIN~1/x", "lies inside a control area"),
+                ("working-bom", ".working\ufeff/x", "lies inside a control area"),
+                ("pointer-trailing-dot", ".opf.toml.", "lies inside a control area"),
+                ("pointer-trailing-space", ".opf.toml ", "lies inside a control area"),
+                ("pointer-shortname", "OPF~1.TOM", "lies inside a control area"),
+                ("pointer-shortname-later", "opf~4.tom", "lies inside a control area"),
+                ("pointer-stream", ".opf.toml::" + chr(0x24) + "DATA",
+                 "lies inside a control area"),
+                ("local-pointer-shortname", "OPFLOC~1.TOM", "lies inside a control area"),
+                ("local-pointer-trailing-dot", "docs/.opf.local.toml.",
+                 "lies inside a control area")):
             got = parse_batch(_edited('path = "notes/old.md"', 'path = "{}"'.format(bad)))
             check("source-path-" + name + "-refused", got.status == INVALID
                   and any(text in f for f in got.findings))
         for name, good in (("github-root", ".github/workflows/ci.yml"), ("git-substring", "my.git/x"),
-                           ("gitlike-dir", "git/x")):
+                           ("gitlike-dir", "git/x"),
+                           # Just OUTSIDE each alias form: no short-name tilde or digits, a stem
+                           # that is not a control stem, a four-character extension no 8.3 name
+                           # carries, a trailing dot on a NON-control name, and prefixed spellings
+                           # that fold to nothing in the control set.
+                           ("gitx-shortname", "gitx~1/x"),
+                           ("git-tilde-no-digit", "git~/x"),
+                           ("toml-long-ext", "opf~1.toml"),
+                           ("dot-tail-noncontrol", "notes/old.md."),
+                           ("working-prefix", ".workingx/x"),
+                           ("store-area-prefix", ".aiqtx/x")):
             got = parse_batch(_edited('path = "notes/old.md"', 'path = "{}"'.format(good)))
             check("source-path-" + name + "-valid", got.status == VALID)
         got = parse_batch(_edited('path = "notes/old.md"\n', ''))
@@ -916,7 +1156,34 @@ def self_test():
         got = parse_batch(two)
         check("placeholder-numbering-per-namespace", got.status == VALID
               and [r.placeholder_id for r in got.batch.rows]
-              == ["imported:{}-1".format(bi), "imported:{}-1".format(wl), "imported:{}-2".format(wl)])
+              == ["imported:{}-01".format(bi), "imported:{}-01".format(wl),
+                  "imported:{}-02".format(wl)])
+
+        # The aliasing rule holds at CLASS WIDTH: a block row's `scopes` is the only other
+        # record-id-bearing row member (the enumeration sits on _refuse_minted_scopes and in the
+        # module docstring). A verbatim scope naming a real imported id from an earlier run is never
+        # refused and can never collide with a placeholder, while a scope spelling a minted
+        # placeholder is the genuine alias, refused by name and ALONE (validation sees the mask, so
+        # no second shape finding rides along).
+        bk = store.BASELINE_TYPES["block"]
+        block_row = ('\n[[record]]\nkey = "b1"\ntype = "block"\n'
+                     'scopes = ["imported:' + bi + '-1"]\nstatus = "active"\ntitle = "Old block"\n'
+                     'unrecorded = [{field = "created_at", reason = "not_recorded_in_source"}, '
+                     '{field = "updated_at", reason = "not_recorded_in_source"}]\n')
+        blocked = _edited("\n[[worklog]]", block_row + "\n[[worklog]]")
+        got = parse_batch(blocked)
+        check("scopes-existing-id-valid", got.status == VALID
+              and got.batch.rows[1].record["scopes"] == ["imported:" + bi + "-1"]
+              and got.batch.rows[1].placeholder_id == "imported:" + bk + "-01"
+              and "imported:" + bi + "-1" not in {r.placeholder_id for r in got.batch.rows})
+        aliased = blocked.decode("utf-8").replace(
+            'scopes = ["imported:' + bi + '-1"]',
+            'scopes = ["imported:' + bi + '-01"]', 1).encode("utf-8")
+        got = parse_batch(aliased)
+        check("scopes-minted-placeholder-refused",
+              _refuses(got, INVALID, "spells a placeholder this batch itself mints")
+              and len(got.findings) == 1 and "scopes[0]" in got.findings[0]
+              and not any("not a record id" in f for f in got.findings))
 
         # A value outside the v1 grammar has no canonical form: refused, never re-spelled.
         got = parse_batch(_edited('status = "done"\n', 'num = 1.5\nstatus = "done"\n'))
@@ -932,6 +1199,7 @@ def self_test():
         got = parse_batch(_edited('key = "r1"\ntype = "backlog_item"\n',
                                   'key = "r1"\ntype = "backlog_item"\nd = ' + deep_value + '\n'))
         check("depth-over-bound-cannot", got.status == CANNOT_EVALUATE and got.batch is None
+              and len(got.findings) == 1
               and any("deeper than {} levels".format(MAX_CANON_DEPTH) in f for f in got.findings))
         # Both ends of the bound: MAX_CANON_DEPTH - 1 nested containers put the innermost SCALAR at
         # depth MAX_CANON_DEPTH exactly (inside: the unknown row key is the only finding), and one
@@ -944,7 +1212,11 @@ def self_test():
         at_value = "{d = " * MAX_CANON_DEPTH + "1" + "}" * MAX_CANON_DEPTH
         got = parse_batch(_edited('key = "r1"\ntype = "backlog_item"\n',
                                   'key = "r1"\ntype = "backlog_item"\nd = ' + at_value + '\n'))
-        check("depth-scalar-past-bound-cannot", got.status == CANNOT_EVALUATE
+        # Reported ALONE pins the PREFLIGHT bound exactly: were the preflight lenient by one, this
+        # row would build and the validator's unknown-key finding would ride beside the emitter
+        # backstop's depth refusal, so the single-finding assertion turns red on that revert.
+        check("depth-scalar-past-bound-cannot", got.status == CANNOT_EVALUATE and got.batch is None
+              and len(got.findings) == 1
               and any("deeper than" in f for f in got.findings))
         # The ITERATIVE preflight refuses a dotted-key structure deep enough to exhaust recursive
         # copying, in ordinary content and in provenance content alike, BEFORE any copy or recursion:
@@ -963,19 +1235,50 @@ def self_test():
         # INT64_MIN under an unknown key, so the only finding is the key's, never a range refusal), one
         # past either end is a structured range refusal, an over-long decimal literal is refused at
         # parse time, and a huge non-decimal literal is refused before any emission or formatting.
+        # Every boundary vector is a LITERAL digit string, never spelled from the module's own
+        # constants, and the constants are pinned to TOML's bounds, so a drifted INT64_MIN or
+        # INT64_MAX cannot move the vectors with it (each end's cases are derived for that end).
+        check("int64-bounds-are-tomls", INT64_MAX == 9223372036854775807
+              and INT64_MIN == -9223372036854775808)
         got = parse_batch(_edited('status = "done"\n',
-                                  'span = [0, {}]\nstatus = "done"\n'.format(INT64_MAX)))
+                                  'span = [0, 9223372036854775807]\nstatus = "done"\n'))
         check("int-at-max-valid", got.status == VALID)
         got = parse_batch(_edited('status = "done"\n',
-                                  'span = [0, {}]\nstatus = "done"\n'.format(INT64_MAX + 1)))
+                                  'span = [0, 9223372036854775808]\nstatus = "done"\n'))
         check("int-over-max-refused", _refuses(got, INVALID, "signed 64-bit"))
-        got = parse_batch(_edited('status = "done"\n', 'n = {}\nstatus = "done"\n'.format(INT64_MIN)))
+        got = parse_batch(_edited('status = "done"\n', 'n = -9223372036854775808\nstatus = "done"\n'))
         check("int-at-min-not-range-refused", got.status == INVALID
               and not any("signed 64-bit" in f for f in got.findings))
-        got = parse_batch(_edited('status = "done"\n', 'n = {}\nstatus = "done"\n'.format(INT64_MIN - 1)))
+        got = parse_batch(_edited('status = "done"\n', 'n = -9223372036854775809\nstatus = "done"\n'))
         check("int-under-min-refused", _refuses(got, INVALID, "signed 64-bit"))
         got = parse_batch(_edited('status = "done"\n', "n = " + "9" * 5000 + '\nstatus = "done"\n'))
         check("int-overlong-decimal-cannot", _refuses(got, CANNOT_EVALUATE, "not parseable"))
+        # Both bounds JUST INSIDE: INT64_MAX - 1 in a valid span stays VALID, and INT64_MIN + 1 under
+        # an unknown key draws no range finding (the at-bound and just-outside vectors sit above, so
+        # each end carries inside, at and outside cases, each derived for its own end).
+        got = parse_batch(_edited('status = "done"\n',
+                                  'span = [0, 9223372036854775806]\nstatus = "done"\n'))
+        check("int-just-inside-max-valid", got.status == VALID)
+        got = parse_batch(_edited('status = "done"\n', 'n = -9223372036854775807\nstatus = "done"\n'))
+        check("int-just-inside-min-not-range-refused", got.status == INVALID
+              and not any("signed 64-bit" in f for f in got.findings))
+        # The PREFLIGHT ITSELF is pinned apart from the emitter backstop: a preflight refusal is
+        # reported ALONE, while with the preflight's int check removed, or limited to depth 1, or
+        # its depth bound lenient by one, the same vectors draw staging, validator or canonicality
+        # findings beside the backstop's, so each such revert turns one of these red. The members
+        # cover every refusal seam a huge int can reach (key and type at staging, status through the
+        # validator, a history row at depth 2, source.path through the source check).
+        big = str(INT64_MAX + 1)
+        for name, needle, repl in (
+                ("key", 'key = "r1"\n', "key = " + big + "\n"),
+                ("type", 'type = "backlog_item"\n', "type = " + big + "\n"),
+                ("status", 'status = "done"\n', "status = " + big + "\n"),
+                ("history", "links = [{key", "history = [" + big + "]\nlinks = [{key"),
+                ("source-path", 'path = "notes/old.md"\n', "path = " + str(INT64_MIN - 1) + "\n")):
+            got = parse_batch(_edited(needle, repl))
+            check("preflight-int-" + name + "-reported-alone",
+                  got.status == INVALID and got.batch is None and len(got.findings) == 1
+                  and "signed 64-bit" in got.findings[0])
         got = parse_batch(_edited('status = "done"\n', "n = 0x" + "f" * 4000 + '\nstatus = "done"\n'))
         check("int-huge-hex-refused", _refuses(got, INVALID, "signed 64-bit"))
 
@@ -1014,6 +1317,42 @@ def self_test():
         check("raw-bidi-refused", _refuses(got, INVALID, "not canonical"))
         got = parse_batch(_edited('title = "Old backlog item"', 'title = "Old\\u009B backlog item"'))
         check("escaped-c1-valid", got.status == VALID)
+
+        # The REQUIRED escape set, enumerated INDEPENDENTLY of _EXTRA_ESCAPED (the expected set is
+        # never re-derived from the implementation, so a shrunken emitter table turns these red):
+        # DEL, every C1 control, LS, PS, ALM, LRM, RLM, the embeddings U+202A..U+202E, the isolates
+        # U+2066..U+2069, and the zero-width set U+200B, U+200C, U+200D and U+FEFF (DECIDED:
+        # escaped, not merely disclosed). Three pins per code point: the emitter's exact upper-case
+        # backslash-u spelling, the raw character refused (for DEL alone, TOML itself forbids the
+        # raw form in a basic string, so tomllib refuses it unparseable; fail-closed either way),
+        # and the escaped spelling as the one accepted form.
+        required_escapes = ([0x7F, 0x2028, 0x2029, 0x061C, 0x200E, 0x200F,
+                             0x200B, 0x200C, 0x200D, 0xFEFF]
+                            + list(range(0x80, 0xA0))       # every C1 control
+                            + list(range(0x202A, 0x202F))   # LRE, RLE, PDF, LRO, RLO
+                            + list(range(0x2066, 0x206A)))  # LRI, RLI, FSI, PDI
+        for cp in required_escapes:
+            tag = "U+{:04X}".format(cp)
+            check("escape-exact-" + tag,
+                  _canon_string("a" + chr(cp)) == '"a' + "\\u" + "{:04X}".format(cp) + '"')
+            raw = parse_batch(_edited('title = "Old backlog item"',
+                                      'title = "Old' + chr(cp) + ' item"'))
+            if cp == 0x7F:
+                check("escape-raw-" + tag + "-refused",
+                      _refuses(raw, CANNOT_EVALUATE, "not parseable"))
+            else:
+                check("escape-raw-" + tag + "-refused", _refuses(raw, INVALID, "not canonical"))
+            if cp in (0x85, 0x2028, 0x2029):
+                # NEL, LS and PS are splitlines boundaries, which the single-line `title` refuses
+                # for its own reason, so their escaped-acceptance pin rides in `summary`, a plain
+                # (multi-line-capable) string field of a full-envelope record.
+                esc = parse_batch(_edited('title = "Old backlog item"',
+                                          'summary = "Old\\u' + "{:04X}".format(cp)
+                                          + ' item"\ntitle = "Old backlog item"'))
+            else:
+                esc = parse_batch(_edited('title = "Old backlog item"',
+                                          'title = "Old\\u' + "{:04X}".format(cp) + ' item"'))
+            check("escape-escaped-" + tag + "-valid", esc.status == VALID)
 
     except Exception as exc:  # noqa: BLE001  fail-closed backstop, never an uncaught exit-1 escape
         print("OPF-IMPORT-BATCH SELF-TEST: harness error ({!r}); failing closed to exit 2".format(exc),
