@@ -55,8 +55,9 @@ residual are in the docstring of `tools/check_cited_standards.py`.
   runner's gate line is not exactly `--config .aiqt/cited-standards.toml` with nothing added; without
   `--config` the gate scans the rule files alone. The config and the two repository-only `.github`
   contract scripts (`check_cited_standards_contract.py` and `check_newtab_contract.py`) are tracked, not
-  shipped: in a tree without them the cited-standards gate line and the two contract gate lines exit 2
-  (cannot evaluate) and the shipped `tools/run_all_checks.sh` then ends `RESULT: FAIL`. The gate prints
+  shipped: in a tree without them the cited-standards gate line and the three contract gate lines (one
+  newtab, plus the cited-standards contract and its self-test) exit 2 (cannot evaluate) and the shipped
+  `tools/run_all_checks.sh` then ends `RESULT: FAIL`. The gate prints
   its residual on every run, the self-test and a usage error included; a clean result is not a complete
   enumeration of the standards the prose names.
 

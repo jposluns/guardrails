@@ -22,13 +22,17 @@ corpus; it is kept because its message names the fallback.
 
 --self-test (registered in both runners) drives the real entry point, main, over fixture vectors and
 asserts main's exit code and its diagnostics for every finding and every cannot-evaluate path above:
-among them the --root redirect regression, the mixed cases (the permitted line plus a forbidden one, in
-each runner alone and in both), a self-test line with extra arguments (live, never excluded), the
-workflow-side extraction diagnostic, the post-validation pack.toml re-read failure (the owning validator
-stubbed to accept: in production both reads see the same bytes, so only a race reaches that handler),
-the usage error, the unexpected-exception backstop and, in a fresh process over a scratch copy whose
-stub collaborators rename validate_pack away, the import-time guard; an edit that disables one of these
-checks, or routes a failing branch of main to exit 0, is red.
+among them the --root redirect regression, the mixed cases (the permitted line plus a forbidden one
+that sorts after it, and one that sorts before it, in each runner alone and in both, so a loop over
+only the first or only the last sorted gate line is red), a self-test line with extra arguments (live,
+never excluded), the workflow-side extraction diagnostic, the post-validation pack.toml re-read failure
+(the owning validator stubbed to accept: in production both reads see the same bytes, so only a race
+reaches that handler), the usage error, the unexpected-exception backstop, the self-test harness
+backstop (a harness failure surfaces as exit 2 through main --self-test, never a false 0) and, in a
+fresh process checked with the shared exit/stdout/stderr assertions over a scratch copy whose stub
+collaborators rename validate_pack away, the import-time guard; every vector but that fresh-process one
+drives main in process; an edit that disables one of these checks, or routes a failing branch of main
+to exit 0, is red.
 This guards declaration and wiring drift, not environment overrides, a member the gate scans and reads
 short, or the content of recorded exclusions. Removing this contract (or its self-test, or the newtab
 contract) from both runners together is a missing-mandatory finding in tools/check_ci_parity.py.
@@ -221,10 +225,13 @@ def _decoy_redirect(root):
     _both_runners("--config {} --root decoy".format(CONFIG))(root)
 
 
-def _mixed_runners(local_mixed, ci_mixed):
-    """codex PR #520 round 3 MEDIUM: the permitted line PLUS a forbidden --root line, in one runner
-    alone or in both; a loop that checks only the first extracted member accepts these."""
-    forbidden = "--config {} --root decoy".format(CONFIG)
+def _mixed_runners(local_mixed, ci_mixed, forbidden=None):
+    """codex PR #520 round 3 MEDIUM: the permitted line PLUS a forbidden line, in one runner alone
+    or in both; a loop that checks only the first extracted member accepts these. The default
+    forbidden --root line sorts after the permitted line; claude PR #520 round 4 MEDIUM passes a
+    config respelling that sorts before it, so a loop over only the last line is red as well."""
+    if forbidden is None:
+        forbidden = "--config {} --root decoy".format(CONFIG)
 
     def build(root):
         local_lines = ['run_gate "cited-standards-selftest" python3 -I -B {} --self-test'.format(GATE),
@@ -328,6 +335,15 @@ def _vectors():
          _mixed_runners(False, True), 1, "permitted invocation", 1),
         ("permitted line plus a forbidden --root line in both runners",
          _mixed_runners(True, True), 1, "permitted invocation", 2),
+        # claude PR #520 round 4 MEDIUM: the forbidden --root lines above all sort AFTER the
+        # permitted line, so they miss a loop over only the LAST sorted gate line; this forbidden
+        # config respelling (./ before .aiqt) sorts BEFORE it and catches that loop.
+        ("permitted line plus a forbidden line sorting before it in the local runner alone",
+         _mixed_runners(True, False, forbidden="--config ./" + CONFIG), 1, "permitted invocation", 1),
+        ("permitted line plus a forbidden line sorting before it in the workflow alone",
+         _mixed_runners(False, True, forbidden="--config ./" + CONFIG), 1, "permitted invocation", 1),
+        ("permitted line plus a forbidden line sorting before it in both runners",
+         _mixed_runners(True, True, forbidden="--config ./" + CONFIG), 1, "permitted invocation", 2),
     )
 
 
@@ -435,7 +451,7 @@ def _import_failure_process(root):
 
 
 def _self_test_vectors():
-    global validate_pack
+    global validate_pack, _self_test_vectors
     failures = []
     count = 0
 
@@ -468,6 +484,25 @@ def _self_test_vectors():
         problems, lines = _case_problems(code, out_text, err_text, 2, "unexpected error", None)
         record("unexpected exception inside the check is caught and returned as 2", problems, lines)
 
+        # codex PR #520 round 4 MINOR: the self-test harness backstop: a harness failure inside
+        # _self_test_vectors must surface as exit 2 through main --self-test, never a false 0 or
+        # a SELF-TEST PASS line (red when the backstop returns 0).
+        real_vectors = _self_test_vectors
+
+        def _exploding_vectors():
+            raise RuntimeError("contract self-test: synthetic harness failure")
+
+        _self_test_vectors = _exploding_vectors
+        try:
+            code, out_text, err_text = _run_main(Path(tmp), argv=("--self-test",))
+        finally:
+            _self_test_vectors = real_vectors
+        problems, lines = _case_problems(code, out_text, err_text, 2,
+                                         "self-test: cannot evaluate: unexpected error", None)
+        if "SELF-TEST PASS" in out_text:
+            problems.append("stdout carries a SELF-TEST PASS line despite the harness failure")
+        record("harness failure inside the self-test is caught and returned as 2", problems, lines)
+
         # The post-validation pack.toml re-read failure: in production the owning validator and the
         # re-read see the same bytes, so only a race reaches that handler; the vector stubs the
         # module-level validate_pack to accept while pack.toml is unparseable, restoring it always.
@@ -487,22 +522,21 @@ def _self_test_vectors():
         # The import-time guard, in a fresh process over a scratch copy (a renamed collaborator
         # symbol is cannot-evaluate, never a traceback exit 1).
         completed = _import_failure_process(Path(tmp) / "case-import-failure")
-        problems = []
-        if completed.returncode != 2:
-            problems.append("fresh process exited {}, expected 2".format(completed.returncode))
-        if "cannot import a collaborator module" not in completed.stderr:
-            problems.append("stderr lacks the cannot-import diagnostic")
-        record("import-time failure of a collaborator is cannot-evaluate (exit 2)",
-               problems, completed.stderr.splitlines())
+        # codex PR #520 round 4 MINOR: the shared exit/stdout/stderr assertions apply here too,
+        # so a contract PASS line printed before the import guard exits 2 is red.
+        problems, lines = _case_problems(completed.returncode, completed.stdout, completed.stderr,
+                                         2, "cannot import a collaborator module", None)
+        record("import-time failure of a collaborator is cannot-evaluate (exit 2)", problems, lines)
 
     if failures:
         print("SELF-TEST FAIL ({} of {} contract vector(s)):".format(len(failures), count))
         for failure in failures:
             print("  - " + failure)
         return 1
-    print("SELF-TEST PASS: {} contract vector(s), every one driven through main, including the "
-          "--root redirect regression, the mixed permitted-plus-forbidden lines and the usage, "
-          "backstop, re-read and import-failure paths, passed".format(count))
+    print("SELF-TEST PASS: {} contract vector(s) ({} driven through main, plus the import-time "
+          "subprocess vector), including the --root redirect regression, the mixed "
+          "permitted-plus-forbidden lines in both sort orders and the usage, backstop, re-read, "
+          "harness-failure and import-failure paths, passed".format(count, count - 1))
     return 0
 
 
