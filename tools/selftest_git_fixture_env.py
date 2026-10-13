@@ -1455,6 +1455,9 @@ def _config_injection_lane(base):
 # registered roster argv, each override, the default), config/member-bound-opf-selftest pins
 # the opf.py --self-test entry, and config/member-bound-reaches-run pins that _run_config_member
 # hands the looked-up bound to _run_bounded (_member_bound_checks); none of them tests any sizing.
+# Figures in this comment carry one of four labels: MEASURED (run for SIZING below), ESTIMATED
+# (derived by the SIZING formula), REPORTED (an earlier account, not reproduced here) or
+# READ FROM SOURCE (read from the member's own code, not measured).
 #
 # CONFIG_MEMBER_BOUND_DEFAULT is a DELIBERATE SHORTER DEADLINE, not a bound sized above every
 # member's own end-to-end budget. Budgets the members grant themselves, READ FROM SOURCE (not
@@ -1471,8 +1474,10 @@ def _config_injection_lane(base):
 # that exception: none is offered as a bound above its member's whole self-granted budget.
 # CHOICE: the default is NOT raised above 5766 s, and neither is any entry below (each is sized
 # from config-lane runs MEASURED on this host; see SIZING); each stays a deliberate shorter
-# deadline, and cutting a member short is the explicit intent here because this lane owns no
-# member's verdict.
+# deadline relative to the member's self-granted budget, yet each is sized above the member's
+# measured lane runs so that the member finishes under the load the SIZING factor covers;
+# reaching a bound stays cannot-evaluate, attributed to the bound, never a FAIL of that member
+# and never a pass, because this lane owns no member's verdict.
 # Every roster member is a registered step or the runner behind a registered --suite step
 # (_registered_selftests reads the CI workflow, both standalone runners and the suite manifest),
 # and that step runs the member to completion under no deadline from this suite, so no member's
@@ -1480,22 +1485,26 @@ def _config_injection_lane(base):
 # member stay clean under injected caller hooks, ignore files, attributes and fsmonitor). The
 # roster is every registered self-test except CONFIG_EXCLUSIONS["all"] (this suite's own runner);
 # the combined and system lanes rerun every roster member, the malformed lane every one outside
-# CONFIG_EXCLUSIONS["malformed"], and the bound caps how long one stalled rerun can hold that
+# CONFIG_EXCLUSIONS["malformed"], the fsmonitor pass four of them under --self-test (its
+# _run_config_member calls), and the bound caps how long one stalled rerun can hold that
 # answer back. Cutting a rerun short leaves the question unanswered, never answered wrongly:
 # reaching the bound is cannot-evaluate (exit 2 when nothing definite was found), never a FAIL of
 # that member and never a pass.
 #
 # SIZING. MEASURED (2026-10-12, 24-CPU host, nice 10, every bound lifted to 10800 s): the suite's
 # own _config_results (four workers, run through main() with its lanes replaced) under the combined
-# lane's injected configuration over opf.py, check_opf_record.py --red-on-revert,
+# lane's injected configuration, rebuilt by a copy of that lane's setup code (NOT a call to
+# _config_injection_lane itself), over opf.py, check_opf_record.py --red-on-revert,
 # _opf_adopt_observe.py, check_release_delta.py and check_opf_init.py --self-test plus six shorter
-# opf/tools self-tests, twice (load5 24.02 to 29.27, then 29.29 to 33.68); once over the whole
+# opf/tools self-tests, twice (load5 24.02 to 29.29, then 29.29 to 33.68); once over the whole
 # combined roster, 101 members (load5 27.35 to 32.99); and once under the malformed lane's
-# configuration over the same members less its exclusion (load5 30.01 to 32.14). Every member
-# exited 0 with no hook, fsmonitor or exposure record in every run. Each entry below gives its
-# lane time per run. No other member's lane time exceeded half the 1200 s default (the slowest:
-# _opf_adopt_observe.py 265.55 s, check_release_delta.py 243.45 s, check_opf_init.py 229.02 s).
-# ESTIMATED: bound = the slowest measured lane time * 20 / 3, rounded up to a multiple of 300 s.
+# configuration over the same members less its exclusion (load5 30.01 to 32.14). The system lane
+# was NOT measured; these bounds govern its reruns all the same. Every member exited 0 with no
+# hook, fsmonitor or exposure record in every run. Each entry below gives its lane time per run.
+# ESTIMATED: bound = the slowest measured lane time * 20 / 3, rounded up to a multiple of 300 s,
+# applied to every member with a measured or reported time: each member whose formula value
+# exceeds the 1200 s default carries an explicit entry below at that value, and every member
+# without an entry has a measured or reported time whose formula value is at most the default.
 # The factor is 40 / 24 * 4. 40 / 24 covers load5 40 under the model that wall time grows in
 # proportion to load5 once load5 exceeds the 24 CPUs, and not below (every measured run had load5
 # above 24 throughout, so this overstates the growth from where it was measured). 4 is headroom for
@@ -1516,6 +1525,15 @@ CONFIG_MEMBER_BOUNDS = {
     # 467.16 s wall and 255.64 s CPU and passed; lane runs of 730 s and 1192 s, and four lane
     # reruns that reached the 1200 s default in config/opf/rc or config/opf/malformed.
     ("opf/tools/opf.py", "--self-test"): 3600,
+    # MEASURED slowest lane time (see SIZING): 265.55 s. ESTIMATED: 265.55 * 20 / 3 = 1770.3, so
+    # 1800 s.
+    ("opf/tools/_opf_adopt_observe.py", "--self-test"): 1800,
+    # MEASURED slowest lane time (see SIZING): 243.45 s. ESTIMATED: 243.45 * 20 / 3 = 1623.0, so
+    # 1800 s.
+    ("tools/check_release_delta.py", "--self-test"): 1800,
+    # MEASURED slowest lane time (see SIZING): 229.02 s. ESTIMATED: 229.02 * 20 / 3 = 1526.8, so
+    # 1800 s.
+    ("opf/tools/check_opf_init.py", "--self-test"): 1800,
 }
 # After the process-group kill: the bounded drain of output still held by a descendant that left
 # the group (setsid or setpgid), the bounded reap of the leader, and the bounded wait for the group
@@ -5730,13 +5748,17 @@ def _member_bound_checks(roster):
     opf/tools/opf.py --self-test is registered and the bound applied to it is its own 3600 s
     entry, not the default (red when that entry is removed or changed).
     config/member-bound-reaches-run: _run_config_member hands the bound it looks up to
-    _run_bounded (a stub records it; nothing is launched), for both overrides and for one
+    _run_bounded (a stub records it; nothing is launched), for every override and for one
     non-member argv that keeps the default (red when the lookup is bypassed)."""
     from unittest.mock import patch
 
     record = ("opf/tools/check_opf_record.py", "--self-test", "--red-on-revert")
     opf_selftest = ("opf/tools/opf.py", "--self-test")
-    overrides = {record: 5100, opf_selftest: 3600}
+    adopt_observe = ("opf/tools/_opf_adopt_observe.py", "--self-test")
+    release_delta = ("tools/check_release_delta.py", "--self-test")
+    opf_init = ("opf/tools/check_opf_init.py", "--self-test")
+    overrides = {record: 5100, opf_selftest: 3600, adopt_observe: 1800, release_delta: 1800,
+                 opf_init: 1800}
     check("config/member-bound-table",
           (sorted(key for key in CONFIG_MEMBER_BOUNDS if key not in roster),
            {key: _config_member_bound(key) for key in CONFIG_MEMBER_BOUNDS},
@@ -5754,10 +5776,13 @@ def _member_bound_checks(roster):
         return 0, "", ""
 
     with patch.object(sys.modules[__name__], "_run_bounded", recording):
-        for member in (record, opf_selftest, ("opf/tools/opf.py",)):
+        for member in (record, opf_selftest, adopt_observe, release_delta, opf_init,
+                       ("opf/tools/opf.py",)):
             _run_config_member(member, {})
     check("config/member-bound-reaches-run", handed,
-          [(" ".join(record), 5100), (" ".join(opf_selftest), 3600), ("opf/tools/opf.py", 1200)])
+          [(" ".join(record), 5100), (" ".join(opf_selftest), 3600),
+           (" ".join(adopt_observe), 1800), (" ".join(release_delta), 1800),
+           (" ".join(opf_init), 1800), ("opf/tools/opf.py", 1200)])
 
 
 def _verdict(failures, cannot_evaluate, caused):
