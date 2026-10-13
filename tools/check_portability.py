@@ -835,11 +835,24 @@ _REAL_GIT_CASE = "the real-git tracked/untracked GD-130 pair"
 
 
 def _not_run_vectors(failures):
-    """Red-on-revert vectors for the skips that printed SELF-TEST PASS (PARTIAL) and exited 0: a nested
-    self-test run with an unavailable temp directory (mkdtemp raises OSError), one with no symlink
-    support (symlink creation raises OSError), and one with git absent (the lookup returns None), must
-    each exit nonzero AND name the unrun cases on a NOT RUN line."""
+    """Red-on-revert vectors for the skips that printed SELF-TEST PASS (PARTIAL) and exited 0.
+
+    Scoped layer: a nested self-test run with an unavailable temp directory (mkdtemp raises
+    OSError), one with no symlink support (symlink creation raises OSError), and one with git
+    absent (the lookup returns None), must each exit nonzero AND name the unrun cases on a NOT
+    RUN line. These enter through _self_test_main_isolated, AFTER self_test_main's entry scrub
+    and lifecycle setup already succeeded.
+
+    Fresh-process public-entry layer: the scoped injections cannot reach a failure of that setup
+    itself (fixture_git_lifecycle raises RuntimeError before any case when git is absent, and the
+    scrub's scratch HOME or the lifecycle's wrapper directory raises OSError first when no temp
+    directory is writable), so each child below runs this tool as __main__ --self-test with the
+    failure injected BEFORE the scrub or the lifecycle can run (a PATH with no git, or a
+    process-wide tempfile.mkdtemp that raises OSError) and must exit 1 with the same named NOT
+    RUN line on stdout, never a bare traceback."""
     import io
+    import shutil
+    import tempfile
     from contextlib import redirect_stderr, redirect_stdout
     from _git_fixture_env import fixture_git_lifecycle
 
@@ -860,12 +873,68 @@ def _not_run_vectors(failures):
             failures.append("(NOT RUN vector {}) must exit nonzero AND record {!r}, never a PASS "
                             "(PARTIAL) exit 0 (got exit {})".format(label, want, rc))
 
+    tool = str(Path(__file__).resolve())
+    children = []
+    try:
+        no_git_dir = tempfile.mkdtemp(prefix="aiqt-portability-selftest-nogit-")
+    except OSError as exc:
+        _not_run(failures, "the fresh-process public-entry git-absent vector",
+                 "no writable temp directory ({})".format(exc))
+    else:
+        try:
+            child_env = dict(os.environ)
+            child_env["PATH"] = no_git_dir  # an empty directory: no git resolvable on PATH
+            children.append(("public-entry git-absent",
+                             subprocess.run([sys.executable, "-I", "-B", tool, "--self-test"],
+                                            capture_output=True, text=True, env=child_env),
+                             "NOT RUN: {}: git is unavailable".format(_REAL_GIT_CASE)))
+        finally:
+            shutil.rmtree(no_git_dir, ignore_errors=True)
+    inject = ("import runpy, sys, tempfile\n"
+              "def _unavailable(*_args, **_kwargs):\n"
+              "    raise OSError('injected: unavailable')\n"
+              "tempfile.mkdtemp = _unavailable\n"
+              "tool = sys.argv[1]\n"
+              "sys.argv[:] = [tool, '--self-test']\n"
+              "runpy.run_path(tool, run_name='__main__')\n")
+    children.append(("public-entry no-tempdir",
+                     subprocess.run([sys.executable, "-I", "-B", "-c", inject, tool],
+                                    capture_output=True, text=True),
+                     "NOT RUN: {}: no writable temp directory".format(_E2E_SURFACE_CASES)))
+    for label, proc, want in children:
+        if proc.returncode != 1 or want not in proc.stdout:
+            failures.append("(NOT RUN vector {}) must exit 1 AND record {!r} through the real "
+                            "--self-test entry, never a bare traceback (got exit {})".format(
+                                label, want, proc.returncode))
+
 
 def self_test_main():
+    """The public --self-test entry. A dependency the SETUP itself needs is reported as the same
+    named NOT RUN failure (exit 1) the in-run guards record, never a bare traceback:
+    fixture_git_lifecycle raises RuntimeError("self-test requires git") when git is absent, and
+    the scrub's scratch HOME or the lifecycle's wrapper directory raises OSError when no temp
+    directory is writable. Both are caught narrowly, only when raised by that setup (never from
+    inside the isolated run); any other exception still propagates."""
     from _git_fixture_env import fixture_git_lifecycle, scrub_git_environment
-    scrub_git_environment()
-    with fixture_git_lifecycle():
-        return _self_test_main_isolated()
+    failures = []
+    entered = False
+    try:
+        scrub_git_environment()
+        with fixture_git_lifecycle():
+            entered = True
+            return _self_test_main_isolated()
+    except RuntimeError as exc:
+        if entered or "self-test requires git" not in str(exc):
+            raise
+        _not_run(failures, _REAL_GIT_CASE, "git is unavailable ({})".format(exc))
+    except OSError as exc:
+        if entered:
+            raise
+        _not_run(failures, _E2E_SURFACE_CASES, "no writable temp directory ({})".format(exc))
+    print("SELF-TEST FAIL:")
+    for failure in failures:
+        print("  - " + failure)
+    return 1
 
 
 def _self_test_main_isolated(_mkdtemp=None, _symlink=None, _which=None, _vectors=True):
@@ -1374,19 +1443,20 @@ def _self_test_main_isolated(_mkdtemp=None, _symlink=None, _which=None, _vectors
 
         try:
             # GD-130: the REAL _disk_kind rejects a symlinked ANCESTOR (never follows it) and a terminal
-            # symlink; run() canonicalizes a symlinked ROOT anchor. ALL symlink/fs setup is inside the guard
-            # so a symlink-less host records a NAMED NOT RUN failure (never a raise); the root-boundary
-            # check DISCRIMINATES (it fails if root.resolve() is absent, because the injected lister would
-            # then receive the symlink rather than the canonical root).
+            # symlink; run() canonicalizes a symlinked ROOT anchor. ONLY the symlink creations are inside
+            # the no-symlink guard, so just a symlink-less host records that NAMED NOT RUN failure (a
+            # mkdir/write failure in the plain-file setup propagates like the rest of this block); the
+            # root-boundary check DISCRIMINATES (it fails if root.resolve() is absent, because the
+            # injected lister would then receive the symlink rather than the canonical root).
             _dk = base_tmp / "disk-kind"
             _symlink_fn = _symlink or os.symlink
+            (_dk / "ext").mkdir(parents=True); (_dk / "ext" / "f.md").write_text("decoy")
+            (_dk / "sub" / "real").mkdir(parents=True); (_dk / "sub" / "real" / "g.md").write_text("ok")
+            _rsroot, _rentries = _fresh("rootlink-real")
+            _rlink = base_tmp / "rootlink-link"
             try:
-                (_dk / "ext").mkdir(parents=True); (_dk / "ext" / "f.md").write_text("decoy")
-                (_dk / "sub" / "real").mkdir(parents=True); (_dk / "sub" / "real" / "g.md").write_text("ok")
                 _symlink_fn(_dk / "ext", _dk / "sub" / "mid")
                 _symlink_fn(_dk / "ext" / "f.md", _dk / "sub" / "real" / "term.md")
-                _rsroot, _rentries = _fresh("rootlink-real")
-                _rlink = base_tmp / "rootlink-link"
                 _symlink_fn(_rsroot, _rlink)
             except OSError as exc:
                 _not_run(failures, _DISK_KIND_CASES, "no symlink support ({})".format(exc))

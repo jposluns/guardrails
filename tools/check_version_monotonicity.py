@@ -574,17 +574,26 @@ _GIT_CASES = ("the git-level history, tag, release-order/id-history append-only,
 
 
 def _not_run_vectors(failures):
-    """Red-on-revert vectors for the skips that printed SELF-TEST PASS (PARTIAL) and exited 0: a nested
-    self-test run with git unavailable (the git probe raises OSError), and one with an unavailable temp
-    directory (mkdtemp raises OSError), must each exit nonzero AND name the git-level cases on a NOT RUN
-    line."""
+    """Red-on-revert vectors for the skips that printed SELF-TEST PASS (PARTIAL) and exited 0.
+
+    Scoped layer: a nested self-test run with git unavailable (the git probe raises OSError), and
+    one with an unavailable temp directory (mkdtemp raises OSError; the git probe is ALSO injected
+    to succeed, so a host where git is genuinely absent still reaches the mkdtemp branch and the
+    nested run records ONLY the no-tempdir line), must each exit nonzero AND name the git-level
+    cases on a NOT RUN line. Both enter self_test_main AFTER its entry scrub already succeeded.
+
+    Fresh-process public-entry layer: the scoped injections cannot reach a failure of the entry
+    scrub itself (scrub_git_environment allocates its scratch HOME with tempfile.mkdtemp before
+    any case runs), so a child runs this tool as __main__ --self-test with tempfile.mkdtemp
+    raising OSError process-wide, before the scrub, and must exit 1 with the same named NOT RUN
+    line on stdout, never a bare traceback."""
     def _unavailable(*_args, **_kwargs):
         raise OSError("injected: unavailable")
 
     for label, kwargs, want in (
             ("git-absent", {"_git_probe": _unavailable},
              "NOT RUN: {}: git is unavailable".format(_GIT_CASES)),
-            ("no-tempdir", {"_mkdtemp": _unavailable},
+            ("no-tempdir", {"_git_probe": lambda: 0, "_mkdtemp": _unavailable},
              "NOT RUN: {}: no writable temp directory".format(_GIT_CASES))):
         out = io.StringIO()
         with redirect_stdout(out), redirect_stderr(io.StringIO()):
@@ -593,6 +602,22 @@ def _not_run_vectors(failures):
             failures.append("(NOT RUN vector {}) must exit nonzero AND record {!r}, never a PASS "
                             "(PARTIAL) exit 0 (got exit {})".format(label, want, rc))
 
+    tool = str(Path(__file__).resolve())
+    inject = ("import runpy, sys, tempfile\n"
+              "def _unavailable(*_args, **_kwargs):\n"
+              "    raise OSError('injected: unavailable')\n"
+              "tempfile.mkdtemp = _unavailable\n"
+              "tool = sys.argv[1]\n"
+              "sys.argv[:] = [tool, '--self-test']\n"
+              "runpy.run_path(tool, run_name='__main__')\n")
+    want = "NOT RUN: {}: no writable temp directory".format(_GIT_CASES)
+    proc = subprocess.run([sys.executable, "-I", "-B", "-c", inject, tool],
+                          capture_output=True, text=True)
+    if proc.returncode != 1 or want not in proc.stdout:
+        failures.append("(NOT RUN vector public-entry no-tempdir) must exit 1 AND record {!r} "
+                        "through the real --self-test entry, never a bare traceback (got exit "
+                        "{})".format(want, proc.returncode))
+
 
 def self_test_main(_git_probe=None, _mkdtemp=None, _vectors=True):
     # Hermetic git fixtures (test-hermeticity): every fixture git call below inherits
@@ -600,8 +625,19 @@ def self_test_main(_git_probe=None, _mkdtemp=None, _vectors=True):
     # children) would redirect the fixture's init/add/commit into the CALLER's repository.
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from _git_fixture_env import scrub_git_environment
-    scrub_git_environment()
     failures = []
+    try:
+        # The scrub allocates its scratch HOME with tempfile.mkdtemp BEFORE any case runs, so a
+        # host with no writable temp directory fails here first: report the same named NOT RUN
+        # failure (exit 1) the in-run guard records, never a bare traceback. Only OSError is
+        # caught; any other exception still propagates.
+        scrub_git_environment()
+    except OSError as exc:
+        _not_run(failures, _GIT_CASES, "no writable temp directory ({})".format(exc))
+        print("SELF-TEST FAIL:")
+        for failure in failures:
+            print("  - " + failure)
+        return 1
 
     # F-TOML-BARE-VALUEERROR-CLASS: a parser overflow makes tomllib raise RecursionError (a RuntimeError, not
     # a ValueError); the baseline parse must still fail closed as GateError carrying the overflow.
