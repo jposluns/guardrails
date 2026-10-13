@@ -215,6 +215,56 @@ def _roots(sources):
     return paths
 
 
+def _require_no_store_manifest(root_fd, resolution):
+    """Prove that a .working the resolver cannot evaluate is foreign content with NO candidate store
+    manifest before reading any of its files. Do not infer this from resolver prose. Source discovery
+    (_opf_adopt_discover) shares this proof: an unresolved manifest may register unmanaged paths."""
+    working = store._journal._lstat_at(root_fd, store.WORKING_DIRNAME)
+    if working is None or not stat.S_ISDIR(working.st_mode):
+        raise PlanError("store resolution cannot be evaluated: " + resolution.detail)
+    wfd = os.open(store.WORKING_DIRNAME,
+                  os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
+    try:
+        count = 0
+        with os.scandir(wfd) as listing:
+            for entry in listing:
+                count += 1
+                if count > MAX_ENTRIES:
+                    raise PlanError("store discovery exceeds entry bound")
+                st = os.stat(entry.name, dir_fd=wfd, follow_symlinks=False)
+                if stat.S_ISDIR(st.st_mode):
+                    child = os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY
+                                    | os.O_NOFOLLOW, dir_fd=wfd)
+                    try:
+                        if store._journal._lstat_at(child, store.MANIFEST_NAME) is not None:
+                            raise PlanError("unresolved store manifest requires repair")
+                    finally:
+                        store._journal._close_fd_propagating(child)
+    finally:
+        store._journal._close_fd_propagating(wfd)
+
+
+def _resolved_unmanaged(manifest, machine_rel):
+    """The resolved manifest's [unmanaged] paths, in order, each a contained path (_path) that neither
+    equals, contains nor lies within a reserved store path: the machine subtree at `machine_rel`, a store
+    control root of the manifest's homes generation, or a declared view target. Source discovery
+    (_opf_adopt_discover) shares this check, so it refuses an [unmanaged] entry exactly where
+    investigation does."""
+    control = list(store.store_control_roots(store.homes_generation(manifest)))
+    paths = []
+    for path in manifest.get("unmanaged", {}).get("paths", []):
+        # Conservative collision check: do not let an exclusion conceal the
+        # machine subtree, a store control root, or a declared view. Fine-grained store
+        # membership remains the doctor's job, not an adoption-planner reimplementation.
+        path = _path(path)
+        reserved = [machine_rel] + control
+        reserved += [v["target"] for v in manifest.get("views", {}).values()]
+        if any(_under(path, p) or _under(p, path) for p in reserved):
+            raise PlanError("unmanaged exclusion overlaps a reserved store path")
+        paths.append(path)
+    return paths
+
+
 def _inventory(root, sources, targets):
     store._journal.require_containment()
     root_fd = store._open_dir_nofollow(root)
@@ -238,31 +288,7 @@ def _inventory(root, sources, targets):
         resolution, manifest_raw = store.resolve_store_fd(root_fd, root)
         excluded = []
         if resolution.status == store.CANNOT_EVALUATE:
-            # Prove that this is foreign content with NO candidate store manifest
-            # before reading any of its files. Do not infer this from resolver prose.
-            working = store._journal._lstat_at(root_fd, store.WORKING_DIRNAME)
-            if working is None or not stat.S_ISDIR(working.st_mode):
-                raise PlanError("store resolution cannot be evaluated: " + resolution.detail)
-            wfd = os.open(store.WORKING_DIRNAME,
-                          os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
-            try:
-                count = 0
-                with os.scandir(wfd) as listing:
-                    for entry in listing:
-                        count += 1
-                        if count > MAX_ENTRIES:
-                            raise PlanError("store discovery exceeds entry bound")
-                        st = os.stat(entry.name, dir_fd=wfd, follow_symlinks=False)
-                        if stat.S_ISDIR(st.st_mode):
-                            child = os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY
-                                            | os.O_NOFOLLOW, dir_fd=wfd)
-                            try:
-                                if store._journal._lstat_at(child, store.MANIFEST_NAME) is not None:
-                                    raise PlanError("unresolved store manifest requires repair")
-                            finally:
-                                store._journal._close_fd_propagating(child)
-            finally:
-                store._journal._close_fd_propagating(wfd)
+            _require_no_store_manifest(root_fd, resolution)
         if resolution.status == store.RESOLVED:
             manifest_path = resolution.machine_rel + "/" + store.MANIFEST_NAME
             # The exact bytes discovery already read through the .working listing descriptor,
@@ -283,16 +309,8 @@ def _inventory(root, sources, targets):
             # also reserves every store control root and excludes it from investigation (spec 14.2).
             homes = store.homes_generation(manifest)
             control = list(store.store_control_roots(homes))
-            for path in manifest.get("unmanaged", {}).get("paths", []):
-                # Conservative collision check: do not let an exclusion conceal the
-                # machine subtree, a store control root, or a declared view. Fine-grained store
-                # membership remains the doctor's job, not an adoption-planner reimplementation.
-                path = _path(path)
-                reserved = [resolution.machine_rel] + control
-                reserved += [v["target"] for v in manifest.get("views", {}).values()]
-                if any(_under(path, p) or _under(p, path) for p in reserved):
-                    raise PlanError("unmanaged exclusion overlaps a reserved store path")
-                excluded.append({"path": path, "reason": "registered-unmanaged"})
+            excluded.extend({"path": path, "reason": "registered-unmanaged"}
+                            for path in _resolved_unmanaged(manifest, resolution.machine_rel))
             if homes >= 2:
                 excluded.extend({"path": path, "reason": "store-control"} for path in control)
             manifest_digest = _digest(raw)

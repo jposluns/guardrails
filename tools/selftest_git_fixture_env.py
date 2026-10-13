@@ -1453,8 +1453,10 @@ def _config_injection_lane(base):
 # Per-member time bounds (seconds) for _run_config_member. A member absent here keeps
 # CONFIG_MEMBER_BOUND_DEFAULT. config/member-bound-table pins this table (every key an exact
 # registered roster argv, each override, the default), config/member-bound-opf-selftest pins
-# the opf.py --self-test entry, and config/member-bound-reaches-run pins that _run_config_member
-# hands the looked-up bound to _run_bounded (_member_bound_checks); none of them tests any sizing.
+# the opf.py --self-test entry, config/member-bound-reaches-run pins that _run_config_member
+# hands the looked-up bound to _run_bounded, and config/member-roster-figures pins this
+# comment's roster figures against _registered_selftests() (all in _member_bound_checks); none
+# of them tests any sizing.
 # Figures in this comment carry one of four labels: MEASURED (run for SIZING below), ESTIMATED
 # (derived by the SIZING formula), REPORTED (an earlier account, not reproduced here) or
 # READ FROM SOURCE (read from the member's own code, not measured).
@@ -1502,23 +1504,37 @@ def _config_injection_lane(base):
 # 27.35 to 32.99); and once under the malformed lane's configuration over those eleven members
 # less its exclusion, ten members (load5 30.01 to 32.14). Every member exited 0 with no hook,
 # fsmonitor or exposure record in every run. Each entry below gives its lane time per run.
+# Those runs predate the 2026-10-13 merge from main that added four roster members
+# (opf/tools/_opf_adopt_discover.py --self-test, tools/check_brief_capability.py, the same with
+# --self-test, and tools/check_selftest_execution.py --suite brief-capability-selftest): the
+# whole-roster run above was measured over the then 101 members, before those four existed. The
+# merged roster is 105 members, 103 of them in the malformed lane (counted by running
+# _registered_selftests() on the merged tree, 2026-10-13; config/member-roster-figures asserts
+# these counts and the two derived counts below against _registered_selftests(), so a later
+# roster change turns this comment red instead of stale).
 # NOT MEASURED, though these bounds govern those reruns all the same: the system lane; the
-# malformed lane's configuration for the 89 of its 99 members outside those ten; and the fsmonitor
-# pass's own configuration (fsmonitor set in both config files, ignore and attributes files
-# removed, its four members run one at a time).
+# malformed lane's configuration for the 93 of its 103 members outside those ten; and the
+# fsmonitor pass's own configuration (fsmonitor set in both config files, ignore and attributes
+# files removed, its four members run one at a time).
+# The opf.py --self-test times above and below and its 3600 s entry were sized before that merge
+# added the opf-write-guard delegate to opf.py --self-test; the delegate's own self-test,
+# MEASURED standalone on the merged tree (2026-10-13), exited 0 in 0.23 s wall, so the entry is
+# not resized for it.
 # ESTIMATED: bound = the slowest MEASURED lane time * 20 / 3, rounded up to a multiple of 300 s;
 # the formula value exceeds the 1200 s default exactly when that time exceeds 180 s. REPORTED times
 # (opf.py's 1192 s lane run, and the opf.py and check_opf_record.py lane runs that reached a 1200 s
 # bound) are not fed to the formula; the factor's headroom is meant to allow for them, but a run
 # that reached a bound has no known length, so no bound here is shown to cover it (below).
 # Roster coverage: the account of the whole-roster run gives a time or an upper bound for 89 of
-# the 101 members.
+# the 105 members (every member registered when it was taken; the four added by the 2026-10-13
+# merge are outside it).
 # Five took over 180 s and carry the entries below. The other 84 took 180 s or less: nine named
 # here (the six shorter opf/tools self-tests, check_python_floor.py, check_release_cut.py
 # --self-test --red-on-revert and check_selftest_execution.py --suite orch-behaviour-selftest),
 # the slowest 142.55 s; and 75 REPORTED by that account as each 62.42 s or less, with no
-# per-member time and no names given. The remaining 12 roster members have no recorded time (the
-# account does not say which 12 they are), so their default bound is NOT sized from a measurement.
+# per-member time and no names given. The remaining 16 roster members have no recorded time (the
+# 12 the account does not name, plus the four added by that merge, named above), so their
+# default bound is NOT sized from a measurement.
 # For every member, reaching its bound is cannot-evaluate, never a pass.
 # The factor is 40 / 24 * 4. 40 / 24 covers load5 40 under the model that wall time grows in
 # proportion to load5 once load5 exceeds the 24 CPUs, and not below (every measured run had load5
@@ -5764,8 +5780,22 @@ def _member_bound_checks(roster):
     entry, not the default (red when that entry is removed or changed).
     config/member-bound-reaches-run: _run_config_member hands the bound it looks up to
     _run_bounded (a stub records it; nothing is launched), for every override and for one
-    non-member argv that keeps the default (red when the lookup is bypassed)."""
+    non-member argv that keeps the default (red when the lookup is bypassed).
+    config/member-roster-figures: the sizing comment's roster figures hold against the live
+    roster (105 members, 103 in the malformed lane) and, with the sizing account's fixed
+    coverage (89 members timed or bounded, ten measured under the malformed lane), the derived
+    figures (16 members with no recorded time, 93 malformed-lane members unmeasured); red when
+    a roster change leaves that comment stale."""
     from unittest.mock import patch
+
+    malformed = {argv for argv in roster
+                 if _command_identity(argv) not in CONFIG_EXCLUSIONS["malformed"]}
+    # 89 and 10 are the sizing account's fixed coverage (see the SIZING comment above
+    # CONFIG_MEMBER_BOUND_DEFAULT); the roster counts are live, so a roster change turns that
+    # comment's figures (105, 103, 16 and 93) red here.
+    check("config/member-roster-figures",
+          (len(roster), len(malformed), len(roster) - 89, len(malformed) - 10),
+          (105, 103, 16, 93))
 
     record = ("opf/tools/check_opf_record.py", "--self-test", "--red-on-revert")
     opf_selftest = ("opf/tools/opf.py", "--self-test")
@@ -5903,6 +5933,7 @@ OPF_LIFECYCLE_EXEMPTIONS = {
     "opf/tools/_opf_adopt.py": ("Adoption vocabulary and validator vectors; its observe vector suite runs "
                                 "git only inside _opf_adopt_observe._git_archive_fixture's lifecycle."),
     "opf/tools/_opf_adopt_apply.py": "Apply-shell refusal, evidence and journal vectors over temporary filesystem fixtures.",
+    "opf/tools/_opf_adopt_discover.py": "Read-only source-discovery vectors over temporary filesystem fixtures.",
     "opf/tools/_opf_adopt_hook.py": "Pure enable-hook merge vectors over synthetic registration bytes.",
     "opf/tools/_opf_init.py": "Canonical model bytes, defaults and validator vectors.",
     "opf/tools/_opf_init_contract.py": "KEEP contract validation over synthetic models.",
