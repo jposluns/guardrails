@@ -486,12 +486,14 @@ def main():
 #  21. a present marker that is not exactly the authoring marker (other content, a bool format-version,
 #      unparseable, a directory, a symlink, a FIFO, empty, non-UTF-8, one byte over the size bound) fails
 #      closed (exit 2) and renders no project settings, while a valid marker of exactly the bound renders them;
-#      a marker fixture the loop cannot plant (os.symlink or os.mkfifo failing) is a NAMED NOT RUN failure
-#      (exit 1), never a skipped PASS, and the FIFO case runs in a bounded child so a regression that blocks
-#      opening the FIFO is a reported failure, never a hang,
-#  22. the NOT RUN discipline is red on revert: a child interpreter whose os.symlink refuses, with
-#      authoring_tree replaced by a faulty symlink-accepting one, must still exit nonzero naming the
-#      unplanted fixture.
+#      a marker fixture the loop cannot plant (os.symlink or os.mkfifo failing, or os.mkfifo absent) is
+#      a NAMED NOT RUN failure (exit 1), never a skipped PASS, and the FIFO case runs in a bounded child
+#      so a regression that blocks opening the FIFO is a reported failure, never a hang,
+#  22. the NOT RUN discipline is red on revert: a child interpreter whose os.symlink refuses must still
+#      exit nonzero naming the unplanted fixture; the child skips its own cases 22 and 23 through the
+#      explicit self_test_main(_nested=True) argument, never through inherited environment,
+#  23. the bad-marker handler stays narrow: an ordinary write failure inside a planter propagates as
+#      itself, never as a NOT RUN unplantable-fixture diagnosis, red on widening the handler to OSError.
 
 _APEX = """---
 corpus-id: apex01
@@ -603,25 +605,33 @@ def _build_project_tree(base, authoring=True):
 
 
 # The bad-marker loop's NOT RUN discipline (#535's rule: coverage that did not run FAILS the self-test,
-# never a silent PASS). Raised ONLY by a planter's fixture-CONSTRUCTION step (os.symlink, os.mkfifo), the
-# one step whose failure can mean the runner lacks that filesystem support; an ordinary write failure in a
-# planter propagates as itself, so it is never dressed as unavailable support. The loop converts this into
-# a named NOT RUN entry in `failures`, so an unplantable fixture exits 1, never a skip note beside PASS.
+# never a silent PASS). Raised ONLY by a planter's fixture-CONSTRUCTION step (an os.symlink or os.mkfifo
+# call, or a platform with no os.mkfifo at all), the steps whose failure can mean the runner lacks that
+# filesystem support; an ordinary write failure in a planter propagates as itself, so it is never dressed
+# as unavailable support (case 23 pins that narrowness red-on-widening). The loop converts this into a
+# named NOT RUN entry in `failures`, so an unplantable fixture exits 1, never a skip note beside PASS.
 class _FixtureUnavailable(Exception):
     pass
 
 
-# Set in the environment of the case-22 child (which re-enters self_test_main with os.symlink refusing and
-# a faulty authoring_tree installed), so that child skips its own case 22 instead of recursing forever.
-_SELFTEST_NESTED_ENV = "GEN_HOOKS_SELFTEST_NESTED"
-# The hard bound on every self-test child interpreter: a healthy case finishes in well under a second; a
-# regression that BLOCKS (opening the FIFO marker with no writer) is killed and reported as a failure.
+# The DEFAULT hard bound on a self-test child interpreter: a healthy child finishes in well under a
+# second; the nested-suite children of cases 22 and 23 pass a longer bound derived from this one,
+# because each runs this whole suite again. A child that exceeds its bound is killed together with its
+# whole process group, and the kill is reported as a failure attributed to the BOUND: the child may be
+# blocked (as a regression reopening the FIFO marker read would be) or merely slower than the bound.
+# Recursion suppression for the nested suites is the explicit self_test_main(_nested=True) argument
+# their code text passes; it is never read from inherited environment, so no ambient variable can
+# silently remove coverage while the PASS line still claims it ran.
 _CHILD_TIMEOUT = 120
 
 
-def self_test_main():
+def self_test_main(_nested=False):
+    # _nested=True is passed ONLY by the code text of the case-22 and case-23 child drivers, so a
+    # nested suite skips those two cases instead of recursing; it is an explicit internal argument,
+    # never an inherited environment variable.
     import io
     import shutil
+    import signal
     import subprocess
     import tempfile
     from contextlib import redirect_stdout
@@ -654,22 +664,54 @@ def self_test_main():
 
     tools_dir = str(Path(__file__).resolve().parent)
 
-    def _run_bounded(label, code_text, env=None, timeout=_CHILD_TIMEOUT):
-        """Run a small driver in a fresh isolated interpreter under a hard bound, so a case that could
-        BLOCK (the FIFO marker open) or must be observed from outside (case 22) is a reported failure on
-        regression, never a hang. Returns (exit code, combined output); a timeout or a spawn failure
-        appends its own named failure and returns (None, "")."""
+    def _run_bounded(label, code_text, timeout=_CHILD_TIMEOUT):
+        # Run a small driver in a fresh isolated interpreter under a hard bound, so a case that could
+        # BLOCK (the FIFO marker open) or must be observed from outside (cases 22 and 23) is a reported
+        # failure on regression, never a hang. A top-level driver starts its own session (where the
+        # platform has os.killpg), and its TMPDIR is a private directory under this suite's own tmp, so
+        # on timeout the WHOLE process group is killed and reaped and the child's temp tree is removed:
+        # a blocked FIFO grandchild dies with its group instead of surviving as an orphan. A NESTED
+        # suite's drivers stay in the nested suite's own group, so the top-level group kill reaches
+        # them too; their only blocking candidate is the driver process itself, which the direct kill
+        # covers. Residual: a descendant that starts its OWN session leaves the group and would survive
+        # the group kill (no driver here starts one); draining such a survivor's pipe is bounded below,
+        # so this suite still cannot hang. Returns (exit code, combined output); a timeout or a spawn
+        # failure appends its own named failure and returns (None, "").
+        child_tmp = tempfile.mkdtemp(prefix="bounded-child-", dir=str(tmp))
+        child_env = dict(os.environ)
+        child_env["TMPDIR"] = child_tmp
+        group = hasattr(os, "killpg") and not _nested
         try:
-            proc = subprocess.run([sys.executable, "-I", "-B", "-c", code_text], capture_output=True,
-                                  text=True, timeout=timeout, env=env)
-        except subprocess.TimeoutExpired:
-            failures.append("{}: the bounded child did not finish within {}s; a case that blocks is a "
-                            "failure, never a hang".format(label, timeout))
-            return None, ""
+            proc = subprocess.Popen([sys.executable, "-I", "-B", "-c", code_text],
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                    env=child_env, start_new_session=group)
         except OSError as exc:
+            shutil.rmtree(child_tmp, ignore_errors=True)
             failures.append("{}: could not launch the bounded child ({})".format(label, exc))
             return None, ""
-        return proc.returncode, proc.stdout + proc.stderr
+        with proc:
+            try:
+                out, err = proc.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                if group:
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except OSError:
+                        pass
+                else:
+                    proc.kill()
+                try:
+                    proc.communicate(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+                shutil.rmtree(child_tmp, ignore_errors=True)
+                failures.append("{}: the bounded child exceeded its {}s bound and was killed with "
+                                "its whole process group; exceeding the bound is a reported failure, "
+                                "never a hang".format(label, timeout))
+                return None, ""
+        shutil.rmtree(child_tmp, ignore_errors=True)
+        return proc.returncode, out + err
 
     try:
         # 1. Conformant manifest: generate, then --check is drift-clean.
@@ -730,8 +772,10 @@ def self_test_main():
         #    chmod-0 dir (root/DAC-bypass), observed via os.access, as in conformance.py. This skip is NOT
         #    the bad-marker loop's NOT RUN failure: there the fixture's CONSTRUCTION fails, an anomaly on
         #    every supported runner; here the fixture is PLANTED (chmod 0 succeeded) and the runner's own
-        #    identity defeats its semantics, which no portable construction can work around, so a failure
-        #    would turn every root runner permanently red (conformance.py, gen_gensrc.py and
+        #    identity defeats its semantics: no chmod-based fixture can make this path unreadable to a
+        #    DAC-bypassing runner (root is one such identity), and simulating the refusal in-process would
+        #    exercise the simulation, not the generator's own filesystem handling, so a failure here
+        #    would turn every DAC-bypassing runner permanently red (conformance.py, gen_gensrc.py and
         #    gen_first_pin_demo.py keep the same deliberate skip).
         unread = tmp / "unread"
         unread.mkdir()
@@ -981,7 +1025,8 @@ def self_test_main():
         #     marker padded one byte over the bound. 21b. The same marker padded to exactly the bound is the
         #     authoring marker (exit 0, settings rendered), so the bound is not off by one. A fixture this loop
         #     cannot plant is a NAMED NOT RUN failure (exit 1), never a skip: _FixtureUnavailable comes only
-        #     from the construction step inside a planter (os.symlink, os.mkfifo), so an ordinary write failure
+        #     from a planter's construction step (an os.symlink or os.mkfifo call, or a platform with no
+        #     os.mkfifo at all), so an ordinary write failure
         #     propagates as itself, never dressed as unavailable support. The FIFO case runs through
         #     _run_bounded (write mode, run()'s default project ids, exactly what run_project calls), so a
         #     regression that reopens the blocking FIFO read (dropping authoring_tree's regular-file refusal)
@@ -1048,15 +1093,19 @@ def self_test_main():
         if run_project(at_bound, check=False) != 0 or not (at_bound / PROJECT_SETTINGS_REL).is_file():
             failures.append("a valid marker padded to exactly the bound expected exit 0 with project settings")
 
-        # 22. The NOT RUN discipline itself, red on revert (the train #550 finding on #526): with the
-        #     symlink fixture unplantable (os.symlink refuses) AND authoring_tree replaced by a faulty
-        #     implementation that ACCEPTS a symlinked marker, this self-test must still exit nonzero and
-        #     NAME the unplanted fixture; a skip note beside PASS would let exactly that defect ship on a
-        #     runner without symlink support. Proven in a child interpreter that installs both patches,
-        #     then calls self_test_main(); _SELFTEST_NESTED_ENV keeps the child out of its own case 22.
-        if os.environ.get(_SELFTEST_NESTED_ENV) != "1":
-            child_env = dict(os.environ)
-            child_env[_SELFTEST_NESTED_ENV] = "1"
+        # Cases 22 and 23 each re-run this whole suite in a child interpreter whose code text calls
+        # self_test_main(_nested=True): recursion suppression is that explicit argument, NEVER inherited
+        # environment, so no ambient variable can remove these cases silently while PASS still claims
+        # their proof (the earlier environment gate did exactly that when GEN_HOOKS_SELFTEST_NESTED=1
+        # leaked into the suite's environment).
+        if not _nested:
+            # 22. The NOT RUN discipline itself, red on revert (the train #550 finding on #526): with
+            #     the symlink fixture unplantable (os.symlink refuses), this self-test must still exit
+            #     nonzero and NAME the unplanted fixture; a skip note beside PASS would let a
+            #     symlink-accepting authoring_tree regression ship unexercised on exactly such a
+            #     runner. No faulty authoring_tree is planted in the child: with the fixture
+            #     unplantable it could never execute, so the child proves the discipline, not the
+            #     fault.
             code, out = _run_bounded(
                 "the NOT RUN discipline (case 22)",
                 "import os\n"
@@ -1070,25 +1119,46 @@ def self_test_main():
                 "\n"
                 "\n"
                 "os.symlink = _refuse_symlink\n"
-                "_real_authoring_tree = gen_hooks.authoring_tree\n"
-                "\n"
-                "\n"
-                "def _faulty_authoring_tree(root):\n"
-                "    # the planted fault: a symlinked marker is accepted instead of refused\n"
-                "    if os.path.islink(root / gen_hooks.AUTHORING_MARKER_REL):\n"
-                "        return True\n"
-                "    return _real_authoring_tree(root)\n"
-                "\n"
-                "\n"
-                "gen_hooks.authoring_tree = _faulty_authoring_tree\n"
-                "sys.exit(gen_hooks.self_test_main())\n".format(tools=tools_dir),
+                "sys.exit(gen_hooks.self_test_main(_nested=True))\n".format(tools=tools_dir),
                 # Under a regression the child may itself wait out a FIFO grandchild's full
-                # _CHILD_TIMEOUT, so its own bound is longer: it then REPORTS that timeout and exits
-                # instead of being killed mid-wait (which would orphan the blocked grandchild).
-                env=child_env, timeout=_CHILD_TIMEOUT * 2 + 30)
+                # _CHILD_TIMEOUT, so its own bound is longer: it then REPORTS that timeout and exits;
+                # if the child instead overruns this longer bound, _run_bounded kills its whole
+                # process group, so a blocked grandchild dies with it instead of being orphaned.
+                timeout=_CHILD_TIMEOUT * 2 + 30)
             if code is not None and (code == 0 or "NOT RUN" not in out or "a symlink" not in out):
-                failures.append("an unplantable symlink fixture plus a faulty authoring_tree must fail the "
-                                "self-test with a named NOT RUN failure, got exit {!r}".format(code))
+                failures.append("an unplantable symlink fixture must fail the self-test with a named "
+                                "NOT RUN failure, got exit {!r}".format(code))
+
+            # 23. The bad-marker handler's NARROWNESS, red on widening: an ORDINARY write failure
+            #     inside a planter (the symlink planter's real-marker.toml write) must propagate as
+            #     itself, never be dressed as a NOT RUN unplantable-fixture diagnosis, because only a
+            #     construction step may claim the runner lacks filesystem support. Proven in a child
+            #     that makes exactly that write raise OSError, then calls self_test_main(_nested=True):
+            #     the fault must surface verbatim and the unplantable-fixture wording must be absent,
+            #     so widening the handler back to OSError goes red here.
+            code, out = _run_bounded(
+                "planter write-failure propagation (case 23)",
+                "import pathlib\n"
+                "import sys\n"
+                "sys.path.insert(0, {tools!r})\n"
+                "import gen_hooks\n"
+                "_real_write_text = pathlib.Path.write_text\n"
+                "\n"
+                "\n"
+                "def _failing_write_text(self, *args, **kwargs):\n"
+                "    if self.name == 'real-marker.toml':\n"
+                "        raise OSError('planter write failure (self-test fault)')\n"
+                "    return _real_write_text(self, *args, **kwargs)\n"
+                "\n"
+                "\n"
+                "pathlib.Path.write_text = _failing_write_text\n"
+                "sys.exit(gen_hooks.self_test_main(_nested=True))\n".format(tools=tools_dir),
+                timeout=_CHILD_TIMEOUT * 2 + 30)
+            if code is not None and (code == 0 or "planter write failure (self-test fault)" not in out
+                                     or "could not be planted" in out):
+                failures.append("an ordinary write failure in a planter must propagate as itself, "
+                                "never as an unplantable-fixture NOT RUN diagnosis, got exit {!r}"
+                                .format(code))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1101,6 +1171,11 @@ def self_test_main():
             " NOTE: skipped {} case(s) the runner cannot exercise (a chmod-0 path the runner can still "
             "read: a DAC bypass such as root, which no fixture can construct around): {}"
             .format(len(skipped), ", ".join(skipped)))
+    # The red-on-revert clause is claimed ONLY when the checks behind it (cases 22 and 23) actually
+    # ran: a nested suite skips them, so its PASS line must not claim their proof.
+    proof = ("" if _nested else
+             ", proven red-on-revert in a child, with an ordinary write failure in a planter proven "
+             "to propagate as itself")
     print("SELF-TEST PASS: a conformant manifest generates and regenerates drift-clean; every rendered "
           "launcher runs isolated (args[0] == '-I'); hooks.json "
           "drift and a plugin hooks/ orphan fail the check; an unknown corpus-id, an empty residue, "
@@ -1115,9 +1190,8 @@ def self_test_main():
           "in the authoring tree only: an adopter-shaped tree never gets, loses or changes a "
           ".claude/settings.json whatever the cwd, and a malformed authoring marker (a FIFO, an empty, a non-UTF-8 "
           "and a one-byte-oversize one included) fails closed while one of exactly the size bound is accepted; "
-          "a marker fixture that cannot be planted is a named NOT RUN failure, proven red-on-revert in a "
-          "child, and the FIFO case is time-bounded so a blocking regression is a reported failure, never a "
-          "hang" + note)
+          "a marker fixture that cannot be planted is a named NOT RUN failure" + proof + ", and the "
+          "FIFO case is time-bounded so a blocking regression is a reported failure, never a hang" + note)
     return 0
 
 
