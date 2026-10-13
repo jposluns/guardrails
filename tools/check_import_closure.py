@@ -56,9 +56,24 @@ Rules (each self-test vector is caught by exactly its rule, and passes with that
                      INERT_IMPORT_SYSTEM_MEMBERS. Both sets are read from the modules on every run, never from a hand
                      list. A site is a reference node holding a watched name as an identifier anywhere in the syntax
                      tree (a name read or bound, an attribute, an imported module or alias, a definition, parameter or
-                     keyword name; help excepted as a keyword argument's name, KEYWORD_EXEMPT_NAMES), a member as an
+                     keyword name; help excepted as a keyword argument's name, KEYWORD_EXEMPT_NAMES, and a name
+                     read or bound as a plain local excepted, next), a member as an
                      attribute name, or either as a dotted component of a string or bytes literal that is a dotted
-                     identifier chain (getattr(builtins, "__import__"), sys.modules["_frozen_importlib"]). The reference
+                     identifier chain (getattr(builtins, "__import__"), sys.modules["_frozen_importlib"]). A name
+                     read, bound or declared as a scoped variable (a read, an assignment, deletion, loop, with,
+                     except, walrus or match target, a parameter, or a global or nonlocal declaration) that
+                     Python's own scoping rules resolve to a binding no import statement makes (one of those
+                     targets, or a def or class of that name, in the reference's own scope, a function scope
+                     around it or the module; global and nonlocal honoured; a class body is read only as the
+                     reference's own scope, and this gate's scope model reads a comprehension in the def around
+                     it, so a comprehension target binds there, a DISCLOSED RESIDUAL wider than Python's own
+                     comprehension scope) is no site: the name is that variable, not the watched module. A
+                     reference resolving to an import binding (import imp in the scope that reads imp), into a
+                     scope a * import fills, or to no binding in the file (the builtin __import__) stays a site; a
+                     dunder watched name (__import__, __builtins__, __loader__, __path__, __spec__) stays a site
+                     wherever it is bound, since binding one rebinds the import machinery itself; and an import
+                     statement, a def's or class's header, an attribute, a keyword's name, a type parameter and a
+                     literal are never resolved, so each stays a site as before. The reference
                      node is an alias's import statement, a def or class by its header, a parameter, keyword or literal,
                      or the expression climbed through the attribute access, call and subscript the name is the target
                      of. A site is allowed only when a DYNAMIC_IMPORT_SITES row (file, enclosing scope, references,
@@ -667,13 +682,6 @@ DYNAMIC_IMPORT_SITES = (
       "#1: spec.loader.exec_module(_journal)"),
      "self-test loads a file of this tree by its path (spec_from_file_location, module_from_spec, exec_module): the "
      "close harness"),
-    ("opf/tools/_opf_schema.py", "self_test",
-     ("#1: imp",
-      "#1: imp['actor']",
-      "#1: imp['refs']",
-      "#1: imp['links']",
-      "#2: imp"),
-     "a local variable named imp (an import record), not the imp module"),
     ("opf/tools/_opf_store.py", MODULE_SCOPE,
      ("#1: 'imp'",
       "#2: 'imp'"),
@@ -708,13 +716,13 @@ DYNAMIC_IMPORT_SITES = (
       "#3: 'imp'",
       "#4: 'imp'"),
      "the string imp is a run-id prefix in vectors, not the imp module"),
-    ("opf/tools/check_opf_homes.py", "_self_test_vectors.<lambda>#12/109.<lambda>",
+    ("opf/tools/check_opf_homes.py", "_self_test_vectors.<lambda>#12/115.<lambda>",
      ("#1: 'imp'",),
      "the string imp is a run-id prefix in vectors, not the imp module"),
-    ("opf/tools/check_opf_homes.py", "_self_test_vectors.<lambda>#29/109.<lambda>",
+    ("opf/tools/check_opf_homes.py", "_self_test_vectors.<lambda>#29/115.<lambda>",
      ("#1: 'imp'",),
      "the string imp is a run-id prefix in vectors, not the imp module"),
-    ("opf/tools/check_opf_homes.py", "_self_test_vectors.<lambda>#42/109",
+    ("opf/tools/check_opf_homes.py", "_self_test_vectors.<lambda>#42/115",
      ("#1: 'imp'",),
      "the string imp is a run-id prefix in vectors, not the imp module"),
     ("opf/tools/check_opf_init.py", "_suite_isolated",
@@ -880,10 +888,6 @@ DYNAMIC_IMPORT_SITES = (
       "#1: importlib.util.module_from_spec(spec)",
       "#1: spec.loader.exec_module(mutant)"),
      "self-test loads a scratch copy or mutant of this file, written from its own source, by its path"),
-    ("tools/check_instruction_budget.py", "self_test",
-     ("#1: imp",
-      "#2: imp"),
-     "a local variable named imp (an import fixture tree), not the imp module"),
     ("tools/check_manifest.py", "_self_test_main_isolated",
      ("#1: __import__('subprocess').run(['git', '--version'], capture_output=True).returncode",),
      "inline __import__ of the standard-library module subprocess, a string literal"),
@@ -967,6 +971,10 @@ DYNAMIC_IMPORT_SITES = (
     ("tools/pin.py", "self_test.class _NestedMissingFinder",
      ("#1: def exec_module",),
      "the self-test finder's loader method, which raises to simulate a missing dependency"),
+    ("tools/selftest_git_fixture_env.py", MODULE_SCOPE,
+     ("#1: '__import__'",),
+     "the string names a reflective builtin the close-probe oracle refuses (fail closed); it is compared against "
+     "the probed child's own names, never called or resolved"),
     ("tools/selftest_orch_hooks.py", "_main_isolated",
      ("#1: import importlib",
       "#1: importlib.import_module('orch_doctor')",
@@ -1370,6 +1378,117 @@ def scope_identities(tree):
     return identities
 
 
+# The (node type, field) pairs that hold a watched name as a scoped variable: a read, binding or declaration
+# the scope rules below resolve (_unshadowed). An alias, a def's or class's name, an attribute, a keyword's
+# name, a type parameter and a literal are not among them: none reads a variable, so none is resolved and each
+# stays a site.
+RESOLVED_NAME_FIELDS = ((ast.Name, "id"), (ast.arg, "arg"), (ast.ExceptHandler, "name"), (ast.Global, "names"),
+                        (ast.Nonlocal, "names"), (ast.MatchAs, "name"), (ast.MatchStar, "name"),
+                        (ast.MatchMapping, "rest"))
+_NO_DECLARATIONS = (frozenset(), frozenset())
+
+
+def _bind(bound, scope, name, imported):
+    held = bound.setdefault(scope, dict())
+    held[name] = held.get(name, False) or imported
+
+
+def _scope_bindings(tree, identities):
+    """(bound, declared, enclosing) for tree: bound maps each lexical scope instance to {name: an import statement
+    binds it there}, every binding form read in the scope the binding runs in (_scoped_children: an assignment,
+    deletion, loop, with, except, walrus or match target, a parameter in its own def, a comprehension target in
+    the def around it, a def's or class's name and an import alias in the scope that runs the statement), a *
+    import as the name "*"; declared maps a scope to its (global, nonlocal) declarations; enclosing maps a scope
+    to (the scope around it, whether it is a class body)."""
+    bound, declared, enclosing = dict(), dict(), {MODULE_SCOPE: (None, False)}
+    stack = [(tree, MODULE_SCOPE, True)]
+    while stack:
+        node, scope, descend = stack.pop()
+        if isinstance(node, SCOPE_NODES):
+            enclosing[identities[id(node)]] = (scope, isinstance(node, ast.ClassDef))
+            if not isinstance(node, ast.Lambda):
+                _bind(bound, scope, node.name, False)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            _bind(bound, scope, node.id, False)
+        elif isinstance(node, ast.arg):
+            _bind(bound, scope, node.arg, False)
+        elif isinstance(node, ast.alias):
+            _bind(bound, scope, node.asname or node.name.partition(".")[0], True)
+        elif isinstance(node, ast.ExceptHandler) and node.name is not None:
+            _bind(bound, scope, node.name, False)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            declared.setdefault(scope, (set(), set()))[isinstance(node, ast.Nonlocal)].update(node.names)
+        elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name is not None:
+            _bind(bound, scope, node.name, False)
+        elif isinstance(node, ast.MatchMapping) and node.rest is not None:
+            _bind(bound, scope, node.rest, False)
+        if descend:
+            stack.extend(_scoped_children(node, scope, identities.get(id(node))))
+    return bound, declared, enclosing
+
+
+def _function_scopes_around(scope, enclosing):
+    """The function and lambda scopes strictly around scope, innermost first: every class body is skipped
+    (Python's own rule: no scope reads a name from a class body around it) and the module is left to the
+    caller."""
+    out = []
+    around = enclosing.get(scope, (None, False))[0]
+    while around is not None and around != MODULE_SCOPE:
+        if not enclosing[around][1]:
+            out.append(around)
+        around = enclosing[around][0]
+    return tuple(out)
+
+
+def _scope_locals(bound, declared, enclosing):
+    """{scope: {name: an import statement binds it}} with global and nonlocal honoured, Python's own rule: a
+    scope's locals are the names it binds less those it declares global or nonlocal; a binding under a global
+    declaration binds the module's name, one under a nonlocal declaration the nearest function scope around it
+    whose local the name is (none: it binds nothing the gate can place, and the name stays unresolved there)."""
+    out = dict((scope, dict((name, imported) for name, imported in names.items()
+                            if name not in declared.get(scope, _NO_DECLARATIONS)[0] and
+                            name not in declared.get(scope, _NO_DECLARATIONS)[1]))
+               for scope, names in bound.items())
+    for scope, names in bound.items():
+        own_globals, own_nonlocals = declared.get(scope, _NO_DECLARATIONS)
+        for name, imported in names.items():
+            if name in own_globals:
+                _bind(out, MODULE_SCOPE, name, imported)
+            elif name in own_nonlocals:
+                for around in _function_scopes_around(scope, enclosing):
+                    if name in out.get(around, ()):
+                        out[around][name] = out[around][name] or imported
+                        break
+    return out
+
+
+def _unshadowed(name, scope, bindings, declared, enclosing):
+    """True when a reference to the watched name in scope stays a site: a dunder name (binding __import__,
+    __builtins__ or __path__ rebinds the import machinery itself, so every occurrence is reviewed), a name
+    resolving to an import binding or into a scope a * import fills, or one no scope in the file binds (a
+    builtin, or truly unbound). False when it resolves, by Python's own rules in this gate's scope model (the
+    reference's own scope, then the function scopes around it, then the module; global and nonlocal honoured; a
+    class body is read only as the reference's own scope; a comprehension is read in the def around it), to a
+    binding no import statement makes: the name is then that variable, not the watched module."""
+    if name.startswith("__") and name.endswith("__"):
+        return True
+    own_globals, own_nonlocals = declared.get(scope, _NO_DECLARATIONS)
+    if name in own_globals:
+        chain = (MODULE_SCOPE,)
+    elif name in own_nonlocals:
+        chain = _function_scopes_around(scope, enclosing)
+    else:
+        chain = (scope,) + _function_scopes_around(scope, enclosing) + (
+            (MODULE_SCOPE,) if scope != MODULE_SCOPE else ())
+    for around in chain:
+        names = bindings.get(around, ())
+        if name in names:
+            return names[name]
+        if "*" in names:
+            return True
+    return True
+
+
 def _site_reference(node, parents):
     """The node a watched name is reviewed as: an alias's import statement, or the expression climbed through
     the attribute access, call and subscript the name is the target of. A literal (inside an f-string, that
@@ -1424,7 +1543,11 @@ def dynamic_sites(tree, names, members):
     name or a literal component only. called is true when the reference is a call. No alias is resolved: an
     alias is itself a site, and whatever later uses the name it binds is not. line is the reference's first line,
     reported with a finding and no part of its key. The enclosing scope is its lexical scope instance
-    (scope_identities); an identity two scopes share cannot tell them apart, so it is refused, never merged."""
+    (scope_identities); an identity two scopes share cannot tell them apart, so it is refused, never merged.
+    A name read or bound as a scoped variable (RESOLVED_NAME_FIELDS) that resolves to a binding no import
+    statement makes is no site (_unshadowed): the name is that variable, not the watched module; one resolving
+    to an import binding, into a scope a * import fills, or to no binding in the file stays a site, and a
+    dunder name is never suppressed."""
     parents = dict()
     for node in ast.walk(tree):
         for child in ast.iter_child_nodes(node):
@@ -1436,6 +1559,8 @@ def dynamic_sites(tree, names, members):
     if shared:
         raise CannotEvaluate("scope %r names %d lexical scopes, so no row could tell them apart; the gate refuses "
                              "rather than merge them" % (shared[0], holders[shared[0]]))
+    bound, declared, enclosing = _scope_bindings(tree, identities)
+    bindings = _scope_locals(bound, declared, enclosing)
     found = dict()
     stack = [(tree, MODULE_SCOPE, True)]
     while stack:
@@ -1450,6 +1575,8 @@ def dynamic_sites(tree, names, members):
                 hits = set(part for part in item.split(".") if part in names or (member and part in members))
                 if isinstance(node, ast.keyword):
                     hits -= KEYWORD_EXEMPT_NAMES
+                if hits and any(isinstance(node, kind) and field == named for kind, named in RESOLVED_NAME_FIELDS):
+                    hits = set(hit for hit in hits if _unshadowed(hit, scope, bindings, declared, enclosing))
                 if hits:
                     reference = _site_reference(node, parents)
                     found.setdefault(id(reference), (reference, scope, set()))[2].update(hits)
@@ -2301,6 +2428,9 @@ _RULE_VECTORS = (
      (("tools/t.py", "def f():\n    return __import__\n"),), (),
      dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "f", ("#1: __import__", "#1: __import__"), "r"),)),
      True),
+    # Round-PINS8: a local named like a watched module suppresses nothing outside its own scope.
+    ("a watched name bound only in an unrelated scope, used at module level", "dynamic-import", "tools/t.py",
+     (("tools/t.py", "def f():\n    imp = 1\n    return imp\nx = imp\n"),), (), {}, True),
     ("getattr with a default reaching __import__ at an allowlisted site", "import-closure", "tools/t.py",
      (("tools/t.py", "import builtins\ngetattr(builtins, '__import__', None)('requests')\n"),), (),
      dict(allowlist=_FIXTURE_SITES + (("tools/t.py", MODULE_SCOPE,
@@ -2730,6 +2860,9 @@ _GREEN_VECTORS = (
      (("tools/t.py", "def f():\n    return __import__('json')\ndef g():\n    return __import__('json')\n"),),
      dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "f", ("#1: __import__('json')",), "r"),
                                       ("tools/t.py", "g", ("#1: __import__('json')",), "r")))),
+    # Round-PINS8: a watched name bound in the scope that reads it needs no row.
+    ("a local bound in the scope that reads it, no row",
+     (("tools/t.py", "def f(record):\n    imp = record.get('import')\n    return imp.get('run')\n"),), dict()),
 )
 
 
@@ -2766,8 +2899,9 @@ _SITE_VECTORS = (
     ("submodule import and from-import", "import importlib.util as u\nfrom importlib import machinery\n",
      ("<module> | #1: import importlib.util as u", "<module> | #1: from importlib import machinery")),
     ("parameter and attribute in a nested class method",
-     "class A:\n    class B:\n        def m(self, run_path=None):\n            return self.find_spec\n",
-     ("class A.class B.m | #1: run_path", "class A.class B.m | #1: self.find_spec")),
+     "class A:\n    class B:\n        def m(self, run_path=None):\n            return self.find_spec\n"
+     "        x = run_path\n",
+     ("class A.class B.m | #1: self.find_spec", "class A.class B | #1: run_path")),
     ("whole dotted string and bytes literals only", "x = 'importlib.util'\ny = 'use importlib'\nz = b'__import__'\n",
      ("<module> | #1: 'importlib.util'", "<module> | #1: b'__import__'")),
     ("global and keyword names", "def f():\n    global imp\n    g(run_module=1)\n",
@@ -2818,6 +2952,42 @@ _SITE_VECTORS = (
     ("comprehension and generator expression read in the def around them",
      "def f(a):\n    return [__import__(n) for n in a], (__import__(n) for n in a)\n",
      ("f | #1: __import__(n)", "f | #2: __import__(n)")),
+    # Round-PINS8: a watched name bound in the scope that reads it is that variable, not the watched module
+    # (_unshadowed): each binding form suppresses the name's occurrences there, an import of the watched module in
+    # the scope, a global declaration naming a module-level import, a name bound only in an unrelated scope, a
+    # class body's binding read from a def it holds, and a dunder name wherever it is bound, still flag.
+    ("a parameter of the def that reads it", "def f(imp):\n    return imp\n", ()),
+    ("a loop target", "def f(rows):\n    for imp in rows:\n        rows.append(imp)\n", ()),
+    ("a comprehension target, read in the def around it",
+     "def f(rows):\n    return [imp for imp in rows if imp]\n", ()),
+    ("a with target", "def f(c):\n    with c as imp:\n        return imp\n", ()),
+    ("an except target", "def f():\n    try:\n        return 1\n    except OSError as imp:\n        return imp\n",
+     ()),
+    ("a walrus target", "def f(x):\n    if (imp := x):\n        return imp\n    return None\n", ()),
+    ("a match capture", "def f(x):\n    match x:\n        case imp:\n            return imp\n    return None\n",
+     ()),
+    ("a deleted name", "def f(x):\n    imp = x\n    del imp\n    return None\n", ()),
+    ("a nonlocal declaration naming an enclosing def's local",
+     "def f():\n    imp = 1\n    def g():\n        nonlocal imp\n        imp = 2\n        return imp\n"
+     "    return g\n", ()),
+    ("a def's name read in its scope, the def header still a site",
+     "def find_spec(x):\n    return x\ny = find_spec\n", ("<module> | #1: def find_spec",)),
+    ("an import of the watched module in the scope that reads it",
+     "def f():\n    import imp\n    return imp\ndef g():\n    imp = 1\n    return imp\n",
+     ("f | #1: import imp", "f | #1: imp")),
+    ("a global declaration naming a module-level import",
+     "import imp\ndef f():\n    global imp\n    imp = f()\n    return imp\ndef g():\n    imp = 1\n"
+     "    return imp\n",
+     ("<module> | #1: import imp", "f | #1: global imp", "f | #1: imp", "f | #2: imp")),
+    ("a global declaration reading past an enclosing def's local",
+     "def outer():\n    imp = 1\n    def inner():\n        global imp\n        return imp\n",
+     ("outer.inner | #1: global imp", "outer.inner | #1: imp")),
+    ("a name bound only in an unrelated scope",
+     "def f():\n    imp = 1\n    return imp\nx = imp\n", ("<module> | #1: imp",)),
+    ("a name bound in a class body is not read from the def it holds",
+     "class C:\n    imp = 1\n    def m(self):\n        return imp\n", ("class C.m | #1: imp",)),
+    ("a dunder bound by assignment stays a site",
+     "__path__ = ['x']\ndef f():\n    imp = 1\n    return imp\n", ("<module> | #1: __path__",)),
 )
 
 # (name, source before, source after, the lines of the findings the after source gives as tools/t.py, exactly, 0 for a
@@ -3410,6 +3580,23 @@ MUTANTS = (
      "(ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):", "except clause by its header"),
     ("keyword-name-exempt", "                    hits -= KEYWORD_EXEMPT_NAMES\n", "                    pass\n",
      "help as a keyword argument's name"),
+    # Round-PINS8: the local-binding resolution removed one branch at a time (_unshadowed, _scope_bindings).
+    ("local-binding-import-kept",
+     '            _bind(bound, scope, node.asname or node.name.partition(".")[0], True)\n',
+     '            _bind(bound, scope, node.asname or node.name.partition(".")[0], False)\n',
+     "an import of the watched module in the scope that reads it"),
+    ("local-binding-unresolved-site", '        if "*" in names:\n            return True\n    return True\n',
+     '        if "*" in names:\n            return True\n    return False\n',
+     "a name bound only in an unrelated scope"),
+    ("local-binding-class-skipped", "        if not enclosing[around][1]:\n            out.append(around)\n",
+     "        if True:\n            out.append(around)\n",
+     "a name bound in a class body is not read from the def it holds"),
+    ("local-binding-global-honoured", "    if name in own_globals:\n        chain = (MODULE_SCOPE,)\n",
+     "    if False:\n        chain = (MODULE_SCOPE,)\n",
+     "a global declaration reading past an enclosing def's local"),
+    ("local-binding-dunder-kept", '    if name.startswith("__") and name.endswith("__"):\n        return True\n',
+     '    if False:\n        return True\n',
+     "except clause by its header"),
     ("literal-callee-getattr", '_callee_name(func.func) == "getattr" and len(func.args) in (2, 3)',
      "False and len(func.args) in (2, 3)", "getattr reaching __import__ at an allowlisted site"),
     ("literal-callee-getattr-default", "len(func.args) in (2, 3)", "len(func.args) == 2",
