@@ -493,7 +493,18 @@ def main():
 #      exit nonzero naming the unplanted fixture; the child skips its own cases 22 and 23 through the
 #      explicit self_test_main(_nested=True) argument, never through inherited environment,
 #  23. the bad-marker handler stays narrow: an ordinary write failure inside a planter propagates as
-#      itself, never as a NOT RUN unplantable-fixture diagnosis, red on widening the handler to OSError.
+#      itself, never as a NOT RUN unplantable-fixture diagnosis, red on widening the handler to OSError,
+#  24. a timed-out bounded child is killed with its whole process group where one was created: a
+#      shortened-bound parent starts a grandchild in the same group, the grandchild is confirmed
+#      started, and after the timeout kill the grandchild is gone and the child TMPDIR removed
+#      (red with group creation disabled or with the group kill removed; skipped, named in the
+#      PASS NOTE, only where the platform has no os.killpg),
+#  25. an OSError raised by communicate while the child is alive still kills and reaps the child,
+#      removes the child TMPDIR and re-raises, never falling through to the unbounded wait in
+#      Popen.__exit__,
+#  26. the same discipline for a KeyboardInterrupt raised while the child is alive; a SIGTERM aimed
+#      at the suite is translated into an exception for the suite duration, so the same kill, reap
+#      and verified-removal cleanup runs before the signal is re-delivered.
 
 _APEX = """---
 corpus-id: apex01
@@ -614,10 +625,23 @@ class _FixtureUnavailable(Exception):
     pass
 
 
+# A termination request (SIGTERM) aimed at the running self-test suite, translated into an
+# exception by the handler self_test_main installs for its own duration: BaseException, not
+# Exception, so no ordinary handler inside a case can swallow it. _run_bounded then kills and
+# reaps its live bounded child and the suite removes (and verifies) its temp tree before the
+# signal is re-delivered with its default disposition. Residual, disclosed: SIGKILL, a SIGTERM
+# delivered while the handler is not installed, and a suite running off the main thread
+# (signal.signal refuses there) get no cleanup.
+class _SuiteTerminated(BaseException):
+    pass
+
+
 # The DEFAULT hard bound on a self-test child interpreter: a healthy child finishes in well under a
 # second; the nested-suite children of cases 22 and 23 pass a longer bound derived from this one,
 # because each runs this whole suite again. A child that exceeds its bound is killed together with its
-# whole process group, and the kill is reported as a failure attributed to the BOUND: the child may be
+# whole process group where one was created (the platform has os.killpg and the suite is top level;
+# otherwise only the direct child is killed), only the group LEADER is reaped by the suite, and the
+# kill is reported as a failure attributed to the BOUND: the child may be
 # blocked (as a regression reopening the FIFO marker read would be) or merely slower than the bound.
 # Recursion suppression for the nested suites is the explicit self_test_main(_nested=True) argument
 # their code text passes; it is never read from inherited environment, so no ambient variable can
@@ -627,13 +651,14 @@ _CHILD_TIMEOUT = 120
 
 def self_test_main(_nested=False):
     # _nested=True is passed ONLY by the code text of the case-22 and case-23 child drivers, so a
-    # nested suite skips those two cases instead of recursing; it is an explicit internal argument,
+    # nested suite skips cases 22 to 26 instead of recursing; it is an explicit internal argument,
     # never an inherited environment variable.
     import io
     import shutil
     import signal
     import subprocess
     import tempfile
+    import time
     from contextlib import redirect_stdout
 
     def run_quiet(root, check):
@@ -662,22 +687,68 @@ def self_test_main(_nested=False):
             failures.append("self-test setup: {!r} not found in manifest".format(old))
         mpath.write_text(text.replace(old, new), encoding="utf-8")
 
+    def _rmtree_verified(path, what):
+        # Removal is VERIFIED, never best effort: after shutil.rmtree the tree must be GONE. A
+        # failed first attempt restores owner permissions on the entries this suite itself
+        # created (a chmod-0 fixture from case 5 or 10 can survive an exception raised between
+        # plant and restore) and retries once; a tree still present afterwards is a NAMED
+        # failure, never a silent success.
+        path = str(path)
+        for attempt in (0, 1):
+            try:
+                shutil.rmtree(path)
+            except OSError:
+                pass
+            if not os.path.lexists(path):
+                return True
+            if attempt == 0:
+                try:
+                    os.chmod(path, 0o700)
+                except OSError:
+                    pass
+                for dirpath, dirnames, _filenames in os.walk(path):
+                    for name in dirnames:
+                        try:
+                            os.chmod(os.path.join(dirpath, name), 0o700)
+                        except OSError:
+                            pass
+        failures.append("{}: the temporary tree {} was not removed; a tree left behind is a "
+                        "named failure, never a silent success".format(what, path))
+        return False
+
     tools_dir = str(Path(__file__).resolve().parent)
 
-    def _run_bounded(label, code_text, timeout=_CHILD_TIMEOUT):
-        # Run a small driver in a fresh isolated interpreter under a hard bound, so a case that could
-        # BLOCK (the FIFO marker open) or must be observed from outside (cases 22 and 23) is a reported
-        # failure on regression, never a hang. A top-level driver starts its own session (where the
-        # platform has os.killpg), and its TMPDIR is a private directory under this suite's own tmp, so
-        # on timeout the WHOLE process group is killed and reaped and the child's temp tree is removed:
-        # a blocked FIFO grandchild dies with its group instead of surviving as an orphan. A NESTED
-        # suite's drivers stay in the nested suite's own group, so the top-level group kill reaches
-        # them too; their only blocking candidate is the driver process itself, which the direct kill
-        # covers. Residual: a descendant that starts its OWN session leaves the group and would survive
-        # the group kill (no driver here starts one); draining such a survivor's pipe is bounded below,
-        # so this suite still cannot hang. Returns (exit code, combined output); a timeout or a spawn
-        # failure appends its own named failure and returns (None, "").
-        child_tmp = tempfile.mkdtemp(prefix="bounded-child-", dir=str(tmp))
+    def _run_bounded(label, code_text, timeout=_CHILD_TIMEOUT, timeout_is_failure=True):
+        # Run a small driver in a fresh isolated interpreter under a hard bound, so a case that
+        # could BLOCK (the FIFO marker open) or must be observed from outside (cases 22 to 26)
+        # is a reported failure on regression, never a hang. A top-level driver starts its own
+        # session where the platform has os.killpg (otherwise only the direct child can be
+        # killed), and its TMPDIR is a private directory under the tmp dir of this suite, so on
+        # timeout the whole process group is killed where one was created; only the group
+        # LEADER (the direct child) is reaped here, other group members are reparented to and
+        # reaped by init or the nearest subreaper. The child TMPDIR is then removed and
+        # VERIFIED gone. Every exception communicate raises other than the timeout (an OSError,
+        # a KeyboardInterrupt, the SIGTERM-to-exception translation installed below) takes the
+        # same kill, reap and cleanup path and then re-raises the original exception; nothing
+        # falls through to the UNBOUNDED wait inside Popen.__exit__ (cases 25 and 26 hold
+        # this). A NESTED suite keeps its drivers in its own process group, so a top-level
+        # group kill reaches them too; their only blocking candidate is the driver process
+        # itself, which the direct kill covers. Residual: a descendant that starts its OWN
+        # session or moves itself to another process group (os.setpgid, start_new_session)
+        # leaves the group and survives the group kill (no driver here does either); draining
+        # the pipe of such a survivor is bounded inside _kill_and_reap, and a child the kernel
+        # does not release within those bounds is left to init rather than waited on without
+        # bound, so this suite still cannot hang. Returns (exit code, combined output); a
+        # child-TMPDIR or spawn failure appends its own named failure and returns (None, "");
+        # a timeout appends one too and returns (None, "") unless timeout_is_failure=False
+        # (case 24 expects its timeout), where it returns (None, "timeout: " + how the kill
+        # went).
+        try:
+            child_tmp = tempfile.mkdtemp(prefix="bounded-child-", dir=str(tmp))
+        except OSError as exc:
+            failures.append("{}: could not create the child TMPDIR ({}); a creation failure "
+                            "is a named failure, never a traceback".format(label, exc))
+            return None, ""
         child_env = dict(os.environ)
         child_env["TMPDIR"] = child_tmp
         group = hasattr(os, "killpg") and not _nested
@@ -686,33 +757,105 @@ def self_test_main(_nested=False):
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                                     env=child_env, start_new_session=group)
         except OSError as exc:
-            shutil.rmtree(child_tmp, ignore_errors=True)
+            _rmtree_verified(child_tmp, label)
             failures.append("{}: could not launch the bounded child ({})".format(label, exc))
             return None, ""
-        with proc:
-            try:
-                out, err = proc.communicate(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                if group:
-                    try:
-                        os.killpg(proc.pid, signal.SIGKILL)
-                    except OSError:
-                        pass
-                else:
-                    proc.kill()
+
+        def _kill_and_reap():
+            # Kill the whole process group where one was created (otherwise the direct child),
+            # then reap the direct child with BOUNDED waits. Returns True only when the group
+            # kill actually happened, so no caller claims a group kill that did not.
+            group_killed = False
+            if group:
                 try:
-                    proc.communicate(timeout=10)
+                    os.killpg(proc.pid, signal.SIGKILL)
+                    group_killed = True
+                except OSError:
+                    pass
+            if not group_killed:
+                proc.kill()
+            try:
+                proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                try:
+                    proc.wait(timeout=10)
                 except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait()
-                shutil.rmtree(child_tmp, ignore_errors=True)
-                failures.append("{}: the bounded child exceeded its {}s bound and was killed with "
-                                "its whole process group; exceeding the bound is a reported failure, "
-                                "never a hang".format(label, timeout))
+                    pass
+            return group_killed
+
+        try:
+            out, err = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            group_killed = _kill_and_reap()
+            _rmtree_verified(child_tmp, label)
+            how = ("killed with its whole process group" if group_killed else
+                   "killed (the direct child only: no process group was created, or the "
+                   "group kill failed)")
+            if timeout_is_failure:
+                failures.append("{}: the bounded child exceeded its {}s bound and was {}; "
+                                "exceeding the bound is a reported failure, never a hang"
+                                .format(label, timeout, how))
                 return None, ""
-        shutil.rmtree(child_tmp, ignore_errors=True)
+            return None, "timeout: " + how
+        except BaseException:
+            # An OSError, a KeyboardInterrupt or any other non-timeout exception out of
+            # communicate: kill and reap the child, remove and verify its TMPDIR, then
+            # re-raise the ORIGINAL exception (cases 25 and 26 exercise this path).
+            _kill_and_reap()
+            _rmtree_verified(child_tmp, label)
+            raise
+        finally:
+            # communicate already closed the pipes on every path above; closing again is a
+            # no-op, and no path is left for Popen.__exit__ to wait on.
+            for stream in (proc.stdout, proc.stderr):
+                if stream is not None:
+                    stream.close()
+        _rmtree_verified(child_tmp, label)
         return proc.returncode, out + err
 
+    def _pid_gone(pid):
+        # A SIGKILLed process may stay visible as a ZOMBIE until its reaper collects it (the
+        # case-24 grandchild is reparented to init or to the nearest subreaper), so a zombie
+        # counts as killed: it runs no code and holds no descriptor.
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        except OSError:
+            return False
+        try:
+            with open("/proc/{}/stat".format(pid), "rb") as fh:
+                return fh.read().rsplit(b")", 1)[1].split()[:1] == [b"Z"]
+        except (OSError, IndexError):
+            return False
+
+    def _wait_pid_gone(pid, bound):
+        deadline = time.monotonic() + bound
+        while time.monotonic() < deadline:
+            if _pid_gone(pid):
+                return True
+            time.sleep(0.1)
+        return _pid_gone(pid)
+
+    def _on_sigterm(signum, frame):
+        raise _SuiteTerminated("SIGTERM received by the suite")
+
+    # A SIGTERM aimed at the whole suite (an outer timeout group-killing it, a plain kill) is
+    # turned INTO AN EXCEPTION for the duration of the suite, so the same kill-and-reap and
+    # verified cleanup run before the process dies, and the signal is then re-delivered with
+    # the restored disposition so the caller still sees a SIGTERM death. Residual, disclosed
+    # at _SuiteTerminated: SIGKILL, a SIGTERM delivered outside the installed window, and a
+    # suite not running on the main thread (signal.signal raises ValueError there, and the
+    # handler stays out) still end the suite with no cleanup.
+    _terminated = False
+    _term_installed = False
+    _prev_term = None
+    try:
+        _prev_term = signal.signal(signal.SIGTERM, _on_sigterm)
+        _term_installed = True
+    except (ValueError, OSError):
+        pass
     try:
         # 1. Conformant manifest: generate, then --check is drift-clean.
         good = tmp / "good"
@@ -1030,7 +1173,8 @@ def self_test_main(_nested=False):
         #     propagates as itself, never dressed as unavailable support. The FIFO case runs through
         #     _run_bounded (write mode, run()'s default project ids, exactly what run_project calls), so a
         #     regression that reopens the blocking FIFO read (dropping authoring_tree's regular-file refusal)
-        #     is a reported failure within _CHILD_TIMEOUT seconds, never a hang of this suite.
+        #     is a reported failure within its bound plus a bounded kill, reap and cleanup, never
+        #     a hang of this suite.
         bad_markers = [("other content", lambda b: _write_marker(b, 'format-version = 1\nrole = "adopter"\n')),
                        ("a bool format-version", lambda b: _write_marker(
                            b, 'format-version = true\nrole = "pack-authoring-repository"\n')),
@@ -1123,7 +1267,8 @@ def self_test_main(_nested=False):
                 # Under a regression the child may itself wait out a FIFO grandchild's full
                 # _CHILD_TIMEOUT, so its own bound is longer: it then REPORTS that timeout and exits;
                 # if the child instead overruns this longer bound, _run_bounded kills its whole
-                # process group, so a blocked grandchild dies with it instead of being orphaned.
+                # process group (where one was created), so a blocked grandchild dies with it
+                # instead of being orphaned.
                 timeout=_CHILD_TIMEOUT * 2 + 30)
             if code is not None and (code == 0 or "NOT RUN" not in out or "a symlink" not in out):
                 failures.append("an unplantable symlink fixture must fail the self-test with a named "
@@ -1159,8 +1304,159 @@ def self_test_main(_nested=False):
                 failures.append("an ordinary write failure in a planter must propagate as itself, "
                                 "never as an unplantable-fixture NOT RUN diagnosis, got exit {!r}"
                                 .format(code))
+
+            # 24. Process-group containment, red on losing it: a shortened-bound parent starts a
+            #     grandchild in the SAME process group; the grandchild is confirmed started (its
+            #     beacon exists before the parent reports ready, and the parent then outlives
+            #     its bound); the timeout kill fires, and the grandchild must be gone (killed
+            #     with the group; a not-yet-collected zombie counts) and the child TMPDIR
+            #     removed. This goes red with group creation disabled (group = False) and with
+            #     the os.killpg call removed: both leave the grandchild alive and the kill
+            #     message naming only the direct child. Where the platform has no os.killpg at
+            #     all there is no group kill to hold, so the case is recorded as skipped (the
+            #     PASS NOTE names it), never silently dropped. Cases 24 to 26 run only at top
+            #     level, like cases 22 and 23.
+            if not hasattr(os, "killpg"):
+                skipped.append("24 no-os.killpg-on-this-platform")
+            else:
+                base24 = tmp / "case24"
+                base24.mkdir()
+                gc_code = ("import os\n"
+                           "import sys\n"
+                           "import time\n"
+                           "tmp_path = sys.argv[1] + \"/grandchild.pid.tmp\"\n"
+                           "with open(tmp_path, \"w\") as fh:\n"
+                           "    fh.write(str(os.getpid()))\n"
+                           "os.rename(tmp_path, sys.argv[1] + \"/grandchild.pid\")\n"
+                           "time.sleep(40)\n")
+                code, out = _run_bounded(
+                    "process-group containment (case 24)",
+                    "import os\n"
+                    "import subprocess\n"
+                    "import sys\n"
+                    "import time\n"
+                    "base = {base!r}\n"
+                    "subprocess.Popen([sys.executable, \"-I\", \"-c\", {gc!r}, base])\n"
+                    "deadline = time.monotonic() + 20\n"
+                    "while time.monotonic() < deadline and not os.path.exists(base + \"/grandchild.pid\"):\n"
+                    "    time.sleep(0.05)\n"
+                    "tmp_path = base + \"/parent-ready.tmp\"\n"
+                    "with open(tmp_path, \"w\") as fh:\n"
+                    "    fh.write(os.environ.get(\"TMPDIR\", \"\"))\n"
+                    "os.rename(tmp_path, base + \"/parent-ready\")\n"
+                    "time.sleep(40)\n".format(base=str(base24), gc=gc_code),
+                    timeout=6, timeout_is_failure=False)
+                if code is not None or "killed with its whole process group" not in out:
+                    failures.append("case 24: expected a timeout kill of the whole process "
+                                    "group, got exit {!r} ({!r})".format(code, out))
+                gc_pid_file = base24 / "grandchild.pid"
+                if not gc_pid_file.is_file() or not (base24 / "parent-ready").is_file():
+                    failures.append("case 24: the grandchild was never confirmed started "
+                                    "before the bound fired")
+                else:
+                    gc_pid = int(gc_pid_file.read_text(encoding="utf-8"))
+                    if not _wait_pid_gone(gc_pid, 10):
+                        failures.append("case 24: the grandchild (pid {}) survived the timeout "
+                                        "kill; the whole process group must die with the "
+                                        "bounded child".format(gc_pid))
+                    child_tmpdir = (base24 / "parent-ready").read_text(encoding="utf-8")
+                    if not child_tmpdir or os.path.lexists(child_tmpdir):
+                        failures.append("case 24: the child TMPDIR {!r} was not removed after "
+                                        "the timeout kill".format(child_tmpdir))
+
+            def _communicate_fault_case(case_no, injected):
+                # Inject a fault into the FIRST communicate call of one bounded child, once
+                # the child has written its beacon (so the fault fires while the child is
+                # ALIVE), then hold that _run_bounded killed and reaped the child, removed
+                # the child TMPDIR and re-raised the SAME exception within a bounded time:
+                # the old code fell through to the Popen context manager, whose wait has no
+                # bound, and removed nothing on this path.
+                base = tmp / "case{}".format(case_no)
+                base.mkdir()
+                beacon = base / "child.pid"
+                real_communicate = subprocess.Popen.communicate
+                state = {"armed": True}
+
+                def _faulting_communicate(self, *args, **kwargs):
+                    if state["armed"]:
+                        state["armed"] = False
+                        deadline = time.monotonic() + 20
+                        while time.monotonic() < deadline and not beacon.is_file():
+                            time.sleep(0.05)
+                        raise injected
+                    return real_communicate(self, *args, **kwargs)
+
+                start = time.monotonic()
+                subprocess.Popen.communicate = _faulting_communicate
+                try:
+                    code, _out = _run_bounded(
+                        "communicate fault (case {})".format(case_no),
+                        "import os\n"
+                        "import sys\n"
+                        "import time\n"
+                        "base = {base!r}\n"
+                        "tmp_path = base + \"/child.pid.tmp\"\n"
+                        "with open(tmp_path, \"w\") as fh:\n"
+                        "    fh.write(str(os.getpid()) + \" \" + os.environ.get(\"TMPDIR\", \"\"))\n"
+                        "os.rename(tmp_path, base + \"/child.pid\")\n"
+                        "time.sleep(40)\n".format(base=str(base)),
+                        timeout=30)
+                    failures.append("case {}: the injected {} must re-raise out of "
+                                    "_run_bounded, got exit {!r}".format(
+                                        case_no, type(injected).__name__, code))
+                    return
+                except BaseException as exc:
+                    if exc is not injected:
+                        raise
+                finally:
+                    subprocess.Popen.communicate = real_communicate
+                elapsed = time.monotonic() - start
+                if elapsed > 20:
+                    failures.append("case {}: kill, reap and cleanup after an injected {} took "
+                                    "{:.1f}s; the exception path must stay bounded, never an "
+                                    "unbounded wait".format(
+                                        case_no, type(injected).__name__, elapsed))
+                if not beacon.is_file():
+                    failures.append("case {}: the child was never confirmed alive before the "
+                                    "injected fault".format(case_no))
+                    return
+                pid_text, _, child_tmpdir = beacon.read_text(
+                    encoding="utf-8").partition(" ")
+                if not _wait_pid_gone(int(pid_text), 10):
+                    failures.append("case {}: the child (pid {}) survived the injected {}; "
+                                    "the exception path must kill and reap it".format(
+                                        case_no, pid_text, type(injected).__name__))
+                if not child_tmpdir or os.path.lexists(child_tmpdir):
+                    failures.append("case {}: the child TMPDIR {!r} was not removed on the "
+                                    "injected-{} path".format(
+                                        case_no, child_tmpdir, type(injected).__name__))
+
+            # 25. An injected communicate OSError while the child is alive: _run_bounded must
+            #     kill and reap the child, remove its TMPDIR and re-raise, within seconds.
+            _communicate_fault_case(
+                25, OSError("injected communicate failure (self-test fault)"))
+            # 26. The same discipline for an injected KeyboardInterrupt while the child is
+            #     alive (the old Popen context manager left the child and its TMPDIR behind).
+            _communicate_fault_case(
+                26, KeyboardInterrupt("injected interrupt (self-test fault)"))
+    except _SuiteTerminated:
+        # The SIGTERM handler installed above turned a termination request into this
+        # exception: any live bounded child was killed and reaped on the way out, the
+        # finally clause below removes and verifies the temp tree, and the suite then dies
+        # as SIGTERM would have, under the restored disposition, so the caller still sees
+        # a SIGTERM death.
+        _terminated = True
     finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        _rmtree_verified(tmp, "suite temp cleanup")
+        if _term_installed:
+            signal.signal(signal.SIGTERM,
+                          signal.SIG_DFL if _prev_term is None else _prev_term)
+    if _terminated:
+        # The finally clause restored the previous SIGTERM disposition (the default where
+        # none was set), so re-delivering the signal ends the suite the way the original
+        # SIGTERM would have; where a surviving handler ignores it, fail closed instead.
+        os.kill(os.getpid(), signal.SIGTERM)
+        return 1
 
     if failures:
         print("SELF-TEST FAIL:")
@@ -1169,13 +1465,19 @@ def self_test_main(_nested=False):
         return 1
     note = ("" if not skipped else
             " NOTE: skipped {} case(s) the runner cannot exercise (a chmod-0 path the runner can still "
-            "read: a DAC bypass such as root, which no fixture can construct around): {}"
+            "read, a DAC bypass such as root, or a platform with no os.killpg, which no fixture can "
+            "construct around): {}"
             .format(len(skipped), ", ".join(skipped)))
-    # The red-on-revert clause is claimed ONLY when the checks behind it (cases 22 and 23) actually
-    # ran: a nested suite skips them, so its PASS line must not claim their proof.
+    # The proof clause is claimed ONLY when the checks behind it (cases 22 to 26) actually ran: a
+    # nested suite skips them, so its PASS line must not claim their proof. The wording states what
+    # the suite itself RAN; that each guarded regression goes red was shown by mutation runs
+    # outside this suite, so the PASS line claims no revert was executed here.
     proof = ("" if _nested else
-             ", proven red-on-revert in a child, with an ordinary write failure in a planter proven "
-             "to propagate as itself")
+             "; a child with symlink construction refused fails with the named NOT RUN entry, an "
+             "ordinary write failure in a planter propagates as itself, a timed-out child is "
+             "killed with its whole process group (a started grandchild included) and its TMPDIR "
+             "verified removed, and an injected communicate OSError and KeyboardInterrupt each "
+             "kill, reap and clean up the live child before re-raising")
     print("SELF-TEST PASS: a conformant manifest generates and regenerates drift-clean; every rendered "
           "launcher runs isolated (args[0] == '-I'); hooks.json "
           "drift and a plugin hooks/ orphan fail the check; an unknown corpus-id, an empty residue, "
