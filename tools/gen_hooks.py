@@ -485,7 +485,13 @@ def main():
 #      in write or check mode, whatever the cwd, while its plugin surface still generates,
 #  21. a present marker that is not exactly the authoring marker (other content, a bool format-version,
 #      unparseable, a directory, a symlink, a FIFO, empty, non-UTF-8, one byte over the size bound) fails
-#      closed (exit 2) and renders no project settings, while a valid marker of exactly the bound renders them.
+#      closed (exit 2) and renders no project settings, while a valid marker of exactly the bound renders them;
+#      a marker fixture the loop cannot plant (os.symlink or os.mkfifo failing) is a NAMED NOT RUN failure
+#      (exit 1), never a skipped PASS, and the FIFO case runs in a bounded child so a regression that blocks
+#      opening the FIFO is a reported failure, never a hang,
+#  22. the NOT RUN discipline is red on revert: a child interpreter whose os.symlink refuses, with
+#      authoring_tree replaced by a faulty symlink-accepting one, must still exit nonzero naming the
+#      unplanted fixture.
 
 _APEX = """---
 corpus-id: apex01
@@ -596,9 +602,27 @@ def _build_project_tree(base, authoring=True):
         _write_marker(base)
 
 
+# The bad-marker loop's NOT RUN discipline (#535's rule: coverage that did not run FAILS the self-test,
+# never a silent PASS). Raised ONLY by a planter's fixture-CONSTRUCTION step (os.symlink, os.mkfifo), the
+# one step whose failure can mean the runner lacks that filesystem support; an ordinary write failure in a
+# planter propagates as itself, so it is never dressed as unavailable support. The loop converts this into
+# a named NOT RUN entry in `failures`, so an unplantable fixture exits 1, never a skip note beside PASS.
+class _FixtureUnavailable(Exception):
+    pass
+
+
+# Set in the environment of the case-22 child (which re-enters self_test_main with os.symlink refusing and
+# a faulty authoring_tree installed), so that child skips its own case 22 instead of recursing forever.
+_SELFTEST_NESTED_ENV = "GEN_HOOKS_SELFTEST_NESTED"
+# The hard bound on every self-test child interpreter: a healthy case finishes in well under a second; a
+# regression that BLOCKS (opening the FIFO marker with no writer) is killed and reported as a failure.
+_CHILD_TIMEOUT = 120
+
+
 def self_test_main():
     import io
     import shutil
+    import subprocess
     import tempfile
     from contextlib import redirect_stdout
 
@@ -627,6 +651,25 @@ def self_test_main():
         if old not in text:
             failures.append("self-test setup: {!r} not found in manifest".format(old))
         mpath.write_text(text.replace(old, new), encoding="utf-8")
+
+    tools_dir = str(Path(__file__).resolve().parent)
+
+    def _run_bounded(label, code_text, env=None, timeout=_CHILD_TIMEOUT):
+        """Run a small driver in a fresh isolated interpreter under a hard bound, so a case that could
+        BLOCK (the FIFO marker open) or must be observed from outside (case 22) is a reported failure on
+        regression, never a hang. Returns (exit code, combined output); a timeout or a spawn failure
+        appends its own named failure and returns (None, "")."""
+        try:
+            proc = subprocess.run([sys.executable, "-I", "-B", "-c", code_text], capture_output=True,
+                                  text=True, timeout=timeout, env=env)
+        except subprocess.TimeoutExpired:
+            failures.append("{}: the bounded child did not finish within {}s; a case that blocks is a "
+                            "failure, never a hang".format(label, timeout))
+            return None, ""
+        except OSError as exc:
+            failures.append("{}: could not launch the bounded child ({})".format(label, exc))
+            return None, ""
+        return proc.returncode, proc.stdout + proc.stderr
 
     try:
         # 1. Conformant manifest: generate, then --check is drift-clean.
@@ -684,7 +727,12 @@ def self_test_main():
             failures.append("empty residue expected exit 2 (fail-closed)")
 
         # 5. An unreadable .aiqt/core/hooks/ fails closed. Skipped where the runner can still read a
-        #    chmod-0 dir (root/DAC-bypass), observed via os.access, as in conformance.py.
+        #    chmod-0 dir (root/DAC-bypass), observed via os.access, as in conformance.py. This skip is NOT
+        #    the bad-marker loop's NOT RUN failure: there the fixture's CONSTRUCTION fails, an anomaly on
+        #    every supported runner; here the fixture is PLANTED (chmod 0 succeeded) and the runner's own
+        #    identity defeats its semantics, which no portable construction can work around, so a failure
+        #    would turn every root runner permanently red (conformance.py, gen_gensrc.py and
+        #    gen_first_pin_demo.py keep the same deliberate skip).
         unread = tmp / "unread"
         unread.mkdir()
         _build_tree(unread)
@@ -730,7 +778,8 @@ def self_test_main():
             failures.append("missing handler script expected exit 2 (fail-closed)")
 
         # 10. An unreadable manifest fails closed. Skipped where the runner can still read the chmod-0
-        #     file (root/DAC-bypass), observed via os.access, as in case 5.
+        #     file (root/DAC-bypass), observed via os.access, as in case 5, and kept a skip (not a NOT RUN
+        #     failure) for case 5's reason: the fixture is planted; the runner's identity defeats it.
         unreadman = tmp / "unreadman"
         unreadman.mkdir()
         _build_tree(unreadman)
@@ -930,7 +979,13 @@ def self_test_main():
         #     settings: other content, unparseable text, a directory, a symlink to a valid marker (lstat, never
         #     followed), a FIFO (lstat first, so no open and no hang), an empty file, non-UTF-8 bytes, and a valid
         #     marker padded one byte over the bound. 21b. The same marker padded to exactly the bound is the
-        #     authoring marker (exit 0, settings rendered), so the bound is not off by one.
+        #     authoring marker (exit 0, settings rendered), so the bound is not off by one. A fixture this loop
+        #     cannot plant is a NAMED NOT RUN failure (exit 1), never a skip: _FixtureUnavailable comes only
+        #     from the construction step inside a planter (os.symlink, os.mkfifo), so an ordinary write failure
+        #     propagates as itself, never dressed as unavailable support. The FIFO case runs through
+        #     _run_bounded (write mode, run()'s default project ids, exactly what run_project calls), so a
+        #     regression that reopens the blocking FIFO read (dropping authoring_tree's regular-file refusal)
+        #     is a reported failure within _CHILD_TIMEOUT seconds, never a hang of this suite.
         bad_markers = [("other content", lambda b: _write_marker(b, 'format-version = 1\nrole = "adopter"\n')),
                        ("a bool format-version", lambda b: _write_marker(
                            b, 'format-version = true\nrole = "pack-authoring-repository"\n')),
@@ -942,14 +997,22 @@ def self_test_main():
                        ("one byte over the bound", lambda b: _write_marker(b, _padded_marker(_MARKER_BOUND + 1)))]
 
         def _plant_link(b):
+            # The ordinary write stays OUTSIDE the construction guard: its failure is a plain error,
+            # never "unavailable symlink support".
             (b / "real-marker.toml").write_text(_MARKER_TEXT, encoding="utf-8")
-            os.symlink(b / "real-marker.toml", b / ".aiqt" / "authoring.toml")
+            try:
+                os.symlink(b / "real-marker.toml", b / ".aiqt" / "authoring.toml")
+            except (OSError, NotImplementedError) as exc:
+                raise _FixtureUnavailable("os.symlink: {}".format(exc)) from exc
         bad_markers.append(("a symlink", _plant_link))
 
         def _plant_fifo(b):
             if not hasattr(os, "mkfifo"):
-                raise NotImplementedError("no os.mkfifo on this platform")
-            os.mkfifo(str(b / ".aiqt" / "authoring.toml"))
+                raise _FixtureUnavailable("no os.mkfifo on this platform")
+            try:
+                os.mkfifo(str(b / ".aiqt" / "authoring.toml"))
+            except OSError as exc:
+                raise _FixtureUnavailable("os.mkfifo: {}".format(exc)) from exc
         bad_markers.append(("a FIFO", _plant_fifo))
         for i, (label, plant) in enumerate(bad_markers):
             badm = tmp / "badmarker{}".format(i)
@@ -957,10 +1020,24 @@ def self_test_main():
             _build_project_tree(badm, authoring=False)
             try:
                 plant(badm)
-            except (OSError, NotImplementedError) as exc:
-                skipped.append("marker {} ({})".format(label, exc))
+            except _FixtureUnavailable as exc:
+                failures.append("NOT RUN: a marker that is {}: the fixture could not be planted ({}); "
+                                "coverage that did not run fails the self-test".format(label, exc))
                 continue
-            if run_project(badm, check=False) != 2:
+            if label == "a FIFO":
+                code, _out = _run_bounded(
+                    "a marker that is a FIFO",
+                    "import sys\n"
+                    "sys.path.insert(0, {tools!r})\n"
+                    "from pathlib import Path\n"
+                    "import gen_hooks\n"
+                    "sys.exit(gen_hooks.run(Path({root!r}), False))\n".format(
+                        tools=tools_dir, root=str(badm)))
+                if code is None:
+                    continue
+            else:
+                code = run_project(badm, check=False)
+            if code != 2:
                 failures.append("a marker that is {} expected exit 2 (fail-closed)".format(label))
             if os.path.lexists(badm / ".claude" / "settings.json"):
                 failures.append("a marker that is {} must not render project settings".format(label))
@@ -970,6 +1047,48 @@ def self_test_main():
         _write_marker(at_bound, _padded_marker(_MARKER_BOUND))
         if run_project(at_bound, check=False) != 0 or not (at_bound / PROJECT_SETTINGS_REL).is_file():
             failures.append("a valid marker padded to exactly the bound expected exit 0 with project settings")
+
+        # 22. The NOT RUN discipline itself, red on revert (the train #550 finding on #526): with the
+        #     symlink fixture unplantable (os.symlink refuses) AND authoring_tree replaced by a faulty
+        #     implementation that ACCEPTS a symlinked marker, this self-test must still exit nonzero and
+        #     NAME the unplanted fixture; a skip note beside PASS would let exactly that defect ship on a
+        #     runner without symlink support. Proven in a child interpreter that installs both patches,
+        #     then calls self_test_main(); _SELFTEST_NESTED_ENV keeps the child out of its own case 22.
+        if os.environ.get(_SELFTEST_NESTED_ENV) != "1":
+            child_env = dict(os.environ)
+            child_env[_SELFTEST_NESTED_ENV] = "1"
+            code, out = _run_bounded(
+                "the NOT RUN discipline (case 22)",
+                "import os\n"
+                "import sys\n"
+                "sys.path.insert(0, {tools!r})\n"
+                "import gen_hooks\n"
+                "\n"
+                "\n"
+                "def _refuse_symlink(*args, **kwargs):\n"
+                "    raise OSError('symlink construction unavailable (self-test fault)')\n"
+                "\n"
+                "\n"
+                "os.symlink = _refuse_symlink\n"
+                "_real_authoring_tree = gen_hooks.authoring_tree\n"
+                "\n"
+                "\n"
+                "def _faulty_authoring_tree(root):\n"
+                "    # the planted fault: a symlinked marker is accepted instead of refused\n"
+                "    if os.path.islink(root / gen_hooks.AUTHORING_MARKER_REL):\n"
+                "        return True\n"
+                "    return _real_authoring_tree(root)\n"
+                "\n"
+                "\n"
+                "gen_hooks.authoring_tree = _faulty_authoring_tree\n"
+                "sys.exit(gen_hooks.self_test_main())\n".format(tools=tools_dir),
+                # Under a regression the child may itself wait out a FIFO grandchild's full
+                # _CHILD_TIMEOUT, so its own bound is longer: it then REPORTS that timeout and exits
+                # instead of being killed mid-wait (which would orphan the blocked grandchild).
+                env=child_env, timeout=_CHILD_TIMEOUT * 2 + 30)
+            if code is not None and (code == 0 or "NOT RUN" not in out or "a symlink" not in out):
+                failures.append("an unplantable symlink fixture plus a faulty authoring_tree must fail the "
+                                "self-test with a named NOT RUN failure, got exit {!r}".format(code))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -979,7 +1098,8 @@ def self_test_main():
             print("  - " + failure)
         return 1
     note = ("" if not skipped else
-            " NOTE: skipped {} case(s) the runner cannot exercise (chmod-0 still readable, or no symlink): {}"
+            " NOTE: skipped {} case(s) the runner cannot exercise (a chmod-0 path the runner can still "
+            "read: a DAC bypass such as root, which no fixture can construct around): {}"
             .format(len(skipped), ", ".join(skipped)))
     print("SELF-TEST PASS: a conformant manifest generates and regenerates drift-clean; every rendered "
           "launcher runs isolated (args[0] == '-I'); hooks.json "
@@ -994,8 +1114,10 @@ def self_test_main():
           "drift-checked by run(), stays out of build_desired(), and fails closed without its control, "
           "in the authoring tree only: an adopter-shaped tree never gets, loses or changes a "
           ".claude/settings.json whatever the cwd, and a malformed authoring marker (a FIFO, an empty, a non-UTF-8 "
-          "and a one-byte-oversize one included) fails closed while one of exactly the size bound is accepted"
-          + note)
+          "and a one-byte-oversize one included) fails closed while one of exactly the size bound is accepted; "
+          "a marker fixture that cannot be planted is a named NOT RUN failure, proven red-on-revert in a "
+          "child, and the FIFO case is time-bounded so a blocking regression is a reported failure, never a "
+          "hang" + note)
     return 0
 
 
