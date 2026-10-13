@@ -6485,11 +6485,14 @@ _SCAN_ALLOWED_UNPINNED = (
      "cannot-evaluate head: the tool's single child funnel (process-group termination and"
      " reaping live here) under three callers. _git passes git argvs that carry the"
      " three F-367 pins as literal -c pairs in option position, built immediately above its"
-     " call; _run_external launches the gh CLI (pr list / pr view reads) and the trusted"
-     " config's own argv lists (the regenerate and check commands,"
-     " python3 generator forms in this repo), never a git argv; and the self-test's"
-     " child-mask probe passes a literal sys.executable -I -B -c argv; so no unpinned git"
-     " launch can reach this head"),
+     " call, and the merge-train self-test check audit/pinned-git-funnel-prefix goes red if"
+     " that pinned prefix ever leaves _git; _run_external launches the gh CLI (pr list /"
+     " pr view reads) and the trusted config's own argv lists, whose heads the tool's config"
+     " validation REFUSES when they name git in any path form (guard_config_fail_closed;"
+     " checks config/git-check-command-refused and config/git-regenerate-command-refused), so"
+     " a config cannot route a git argv here; and the self-test's child-mask probe passes a"
+     " literal sys.executable -I -B -c argv. These are enforced runtime checks of the funnel"
+     " and the config schema, not a static resolution of this head"),
     ("tools/selftest_aiqt_hooks.py", "_main_isolated", ("unresolved",),
      "cannot-evaluate head: replays the REGISTERED hook entry's own dispatcher command (a"
      " python3 hook-script argv from the hooks registry), not a git launch; the suite's"

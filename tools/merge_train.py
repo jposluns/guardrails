@@ -108,6 +108,15 @@ classify it, and
 nothing else changes anywhere. There is no rollback machinery, because nothing local is mutated and
 so there is nothing to roll back.
 
+A DRY RUN (--dry-run, or any live selection without --apply) prepares and validates the SAME
+candidate in the same private scratch checkout: the branch and head agreement, the
+checkout-completeness probe, the merge and its conflict policy, regeneration, the declared checks
+and the pushed-bytes, commit-tree, parent and fresh-normal-checkout guards all run exactly as under
+--apply, and the run stops before the retry marker and the push, so nothing outside the private
+scratch is written. would-merge is therefore reported only for a candidate that passed that whole
+validation; a conflict or a failing check is refused with the same status --apply would give
+(FIX-541 round 1, codex major: the dry run used to report would-merge before any of it ran).
+
 The config is read from the fetched base tip (`git show <M>:.aiqt/merge-train.toml`), never from a
 PR branch or the checkout; the [busy] table is still accepted, and ignored, for config
 compatibility. The branch pushed to is the PR's own head branch as gh names it, re-confirmed before
@@ -116,9 +125,10 @@ own .aiqt/merge-train.toml does not (.aiqt/core/ownership.toml excludes it), bec
 is what enables the tool. An adopting project commits its own.
 
 Stdout carries one JSON line per PR (schema merge-train/1); stderr carries one human line per PR.
-Exit codes: 0 every PR current, pushed, already pushed or (dry run) mergeable; 1 any PR refused or
-skipped; 2 the run failed closed and touched nothing (no config, malformed config, lock held, gh or
-fetch failure, a possibly truncated PR list, bad arguments).
+Exit codes: 0 every PR current, pushed, already pushed or (dry run) validated as mergeable; 1 any
+PR refused or skipped, an explicitly requested PR (--pr) absent from the open-PR list included; 2
+the run failed closed and touched nothing (no config, malformed config, lock held, gh or fetch
+failure, a possibly truncated PR list, bad arguments).
 
 THREAT MODEL (cooperative): agents on a single-operator host. The repository's local config, the
 operator's global and system config, hooks and the object store are trusted; the tool guards
@@ -189,6 +199,20 @@ PUSH_LEASE = re.compile(r"\A--force-with-lease=refs/heads/[A-Za-z0-9][A-Za-z0-9.
 PUSH_SPEC = re.compile(r"\A[0-9a-f]{40}([0-9a-f]{24})?:refs/heads/[A-Za-z0-9][A-Za-z0-9._/-]*\Z")
 FORBIDDEN_PUSH_LONG = ("--force", "--force-with-lease", "--force-if-includes", "--delete",
                        "--mirror", "--all", "--prune")
+
+# Git's global (pre-subcommand) options, for resolving which subcommand an argv names: flags that
+# take no value, options whose value is the NEXT word, and options that take a value only after
+# "=". An argv whose subcommand cannot be resolved through these (an unknown or truncated global
+# option, an option-only argv) is treated as FORBIDDEN: the audit fails closed (FIX-541 round 1,
+# codex medium: a forbidden push or reset behind "-c k=v" or "-C dir" used to read as allowed).
+GIT_GLOBAL_FLAGS = frozenset((
+    "-p", "--paginate", "-P", "--no-pager", "--bare", "--no-replace-objects",
+    "--literal-pathspecs", "--glob-pathspecs", "--noglob-pathspecs", "--icase-pathspecs",
+    "--no-optional-locks", "--no-lazy-fetch", "--no-advice"))
+GIT_GLOBAL_VALUED = frozenset(("-c", "-C", "--config-env", "--git-dir", "--work-tree",
+                               "--namespace", "--attr-source"))
+GIT_GLOBAL_EQUALS = frozenset(("--config-env", "--git-dir", "--work-tree", "--namespace",
+                               "--attr-source", "--exec-path", "--list-cmds"))
 
 # Every argv the tool hands to git, for the self-test's forbidden-operation audit.
 GIT_AUDIT = []
@@ -393,8 +417,26 @@ def _forbidden(args):
     bundled short form (-uf, -fu), no lease other than the one exact-value compare-and-set form
     (PUSH_LEASE, 40- or 64-hex), and no refspec other than a plain name or the exact
     <hex>:refs/heads/<branch> form away from the base (no + force spec, no :delete spec, no
-    src:dst alias). The first non-option word is the repository (a URL may carry a colon)."""
+    src:dst alias). The subcommand is resolved after git's global options (-c k=v, -C dir,
+    --git-dir, --work-tree and the rest git accepts before a subcommand; see GIT_GLOBAL_FLAGS,
+    GIT_GLOBAL_VALUED and GIT_GLOBAL_EQUALS), and an argv whose subcommand cannot be resolved is
+    forbidden outright, never read as harmless (FIX-541 round 1, codex medium). After the
+    subcommand, the first non-option word is the repository (a URL may carry a colon)."""
     words = list(args)
+    i = 0
+    while i < len(words) and words[i].startswith("-"):
+        w = words[i]
+        if w in GIT_GLOBAL_FLAGS:
+            i += 1
+        elif w in GIT_GLOBAL_VALUED:
+            i += 2
+        elif "=" in w and w.split("=", 1)[0] in GIT_GLOBAL_EQUALS:
+            i += 1
+        else:
+            return True
+    if i >= len(words):
+        return True
+    words = words[i:]
     if words[:1] in (["rebase"], ["stash"], ["clean"], ["cherry-pick"], ["gc"], ["prune"],
                      ["reset"]):
         return True
@@ -532,6 +574,13 @@ def guard_config_fail_closed(data):
             bad("%s must be a non-empty list of commands" % where)
         for command in value:
             str_list(command, where + " command")
+            # FIX-541 round 1 (codex medium): the maintenance-scan exception's premise is
+            # ENFORCED here, never just asserted: a configured command whose argv head names git
+            # (any path form) would reach _run_child without the funnel's maintenance pins.
+            head = command[0].replace("\\", "/").rsplit("/", 1)[-1]
+            if head == "git":
+                bad("%s command %r must not launch git: the merge train runs git only through "
+                    "its own pinned funnel" % (where, command[0]))
 
     if not isinstance(data, dict):
         bad("not a table")
@@ -1246,17 +1295,17 @@ def _process_pr(ctx, apply):
             raise Refuse("pr-head-moved", "the remote head moved during the fetch")
         if _guard("ancestry")(scratch, ctx["base_sha"], old):
             return dict(result="current", old_head=old, new_head=None, reason="")
-        if not apply:
-            return dict(result="would-merge", old_head=old, new_head=None,
-                        reason="dry run: would merge %s (rerun with --apply)" % ctx["base_sha"])
+        # A dry run takes the SAME path as --apply through candidate preparation and validation
+        # (FIX-541 round 1, codex major: it used to report would-merge here, before any of it);
+        # _merge_commit_push stops before the retry marker and the push when apply is false.
         _git(scratch, "checkout", "--quiet", "--detach", old, timeout=ctx["cmd_timeout"])
         _guard("scratch-complete")(scratch)
-        return _merge_commit_push(ctx, scratch, old, ctx["base_sha"])
+        return _merge_commit_push(ctx, scratch, old, ctx["base_sha"], apply)
     finally:
         _cleanup(lambda: shutil.rmtree(scratch_root, ignore_errors=True))
 
 
-def _merge_commit_push(ctx, scratch, old, base):
+def _merge_commit_push(ctx, scratch, old, base, apply):
     generated = ctx["generated"]
     ident = dict(GIT_AUTHOR_NAME=ctx["cfg"]["commit"]["name"],
                  GIT_AUTHOR_EMAIL=ctx["cfg"]["commit"]["email"],
@@ -1309,6 +1358,11 @@ def _merge_commit_push(ctx, scratch, old, base):
     _guard("commit-tree")(scratch, new, validated_tree)
     _guard("commit-parents")(scratch, old, new)
     _guard("fresh-checkout")(ctx, scratch, new)
+    if not apply:
+        # The dry run validated the same candidate the apply path would push; it stops here,
+        # before the retry marker and the push (FIX-541 round 1, codex major).
+        return dict(result="would-merge", old_head=old, new_head=None,
+                    reason="dry run: would merge %s (rerun with --apply)" % base)
     _write_marker(ctx["git_dir"], dict(pr=ctx["pr"], branch=ctx["branch"], old=old, new=new))
     return _push_and_observe(ctx, scratch, old, new)
 
@@ -1479,6 +1533,15 @@ def _run_locked_with_base(root, run_dir, remote, base, apply, only, reports):
         if report["result"] not in OK_RESULTS:
             rc = 1
         reports.append(report)
+    # FIX-541 round 1 (codex medium): an explicitly requested PR the run did not find is a
+    # non-success outcome reported by number, never a silent exit 0.
+    for number in sorted(n for n in only if n not in set(p["number"] for p in prs)):
+        reports.append(dict(schema=SCHEMA, pr=number, branch=None, worktree=None, base=base_sha,
+                            old_head=None, new_head=None, result="pr-not-found",
+                            reason="PR #%d was requested but is not in the open-PR list for "
+                                   "base %s" % (number, base),
+                            regenerated=[], hand_resolution=False, review_carry=None))
+        rc = 1
     return rc, reports, None
 
 
@@ -1551,7 +1614,13 @@ FAILURES = []
 EXECUTED = []
 _EXECUTED_SET = set()
 SKIPPED = []
-_RECORDER = dict(executed=_EXECUTED_SET, list=EXECUTED, failures=FAILURES, skipped=SKIPPED)
+# Case exceptions, kept APART from check failures: in a normal run a crash fails the suite like
+# any failure, but red-on-revert never counts one as a red mutant (FIX-541 round 1, claude minor:
+# a guard is proven red only by its case's own named assertion failing; a case exception during a
+# revert is reported as cannot-evaluate for that guard, and the suite fails).
+CRASHES = []
+_RECORDER = dict(executed=_EXECUTED_SET, list=EXECUTED, failures=FAILURES, skipped=SKIPPED,
+                 crashes=CRASHES)
 
 TOY_GEN = r"""import hashlib, os, sys
 root = os.getcwd()
@@ -1684,8 +1753,32 @@ def _audit_violation(args):
     mirror, all or prune option in long, abbreviated or bundled short form (-uf, -fu), no lease
     other than the one exact-value refs/heads compare-and-set form (40- or 64-hex), and no refspec
     other than a plain name or the exact <hex>:refs/heads/<branch> form away from the base (no +
-    force spec, no :delete spec, no src:dst alias). The first non-option word is the repository."""
+    force spec, no :delete spec, no src:dst alias). The subcommand is resolved after git's
+    global options through this predicate's OWN tables (kept apart from GIT_GLOBAL_*), and an
+    argv whose subcommand cannot be resolved is a violation outright (FIX-541 round 1, codex
+    medium). After the subcommand, the first non-option word is the repository."""
     words = list(args)
+    flags = ("-p", "--paginate", "-P", "--no-pager", "--bare", "--no-replace-objects",
+             "--literal-pathspecs", "--glob-pathspecs", "--noglob-pathspecs",
+             "--icase-pathspecs", "--no-optional-locks", "--no-lazy-fetch", "--no-advice")
+    valued = ("-c", "-C", "--config-env", "--git-dir", "--work-tree", "--namespace",
+              "--attr-source")
+    equals = ("--config-env", "--git-dir", "--work-tree", "--namespace", "--attr-source",
+              "--exec-path", "--list-cmds")
+    i = 0
+    while i < len(words) and words[i].startswith("-"):
+        w = words[i]
+        if w in flags:
+            i += 1
+        elif w in valued:
+            i += 2
+        elif "=" in w and w.split("=", 1)[0] in equals:
+            i += 1
+        else:
+            return True
+    if i >= len(words):
+        return True
+    words = words[i:]
     if words[:1] in (["rebase"], ["cherry-pick"], ["stash"], ["clean"], ["gc"], ["prune"],
                      ["reset"]):
         return True
@@ -1949,6 +2042,14 @@ def case_config(_tmp):
     check("config/empty-command", verdict(lambda d: d["generated"].update(regenerate=[[]])),
           "refused")
     check("config/missing-identity", verdict(lambda d: d["commit"].pop("email")), "refused")
+    # FIX-541 round 1 (codex medium): no configured command may launch git, in any path form, so
+    # no unpinned git argv can reach _run_child through _run_external.
+    check("config/git-check-command-refused",
+          verdict(lambda d: d["generated"].update(check=[["git", "status", "--porcelain"]])),
+          "refused")
+    check("config/git-regenerate-command-refused",
+          verdict(lambda d: d["generated"].update(regenerate=[["/usr/bin/git", "fetch"]])),
+          "refused")
 
 
 def case_absent(tmp):
@@ -1989,6 +2090,15 @@ def case_dry(tmp):
     check("dry/would-merge", (rc, _result(reports, 1)), (0, "would-merge"))
     check("dry/changes-nothing", (_snapshot_diff(before, _snapshot(wt)), fx.remote_ref("feat/x"),
                                   fx.pushes()), ([], remote_before, []))
+    # FIX-541 round 1 (codex medium): an explicitly requested PR the run did not find must be a
+    # non-success outcome reported by number, and a found selection still processes normally.
+    rc2, reports2, _fatal = fx.run(only=set([999]))
+    check("select/absent-pr-nonzero",
+          (rc2, [(r["pr"], r["result"]) for r in reports2]), (1, [(999, "pr-not-found")]))
+    rc3, reports3, _fatal = fx.run(only=set([1, 999]))
+    check("select/mixed-selection-processes-found-and-reports-absent",
+          (rc3, [(r["pr"], r["result"]) for r in reports3]),
+          (1, [(1, "would-merge"), (999, "pr-not-found")]))
     check("dry/invariants", _invariants(fx), [])
 
 
@@ -2150,7 +2260,13 @@ def case_badname(tmp):
     fx.advance_main(dict([("src/c.txt", "charlie\n")]))
     befores = [_snapshot(p) for p in trees]
     audit = len(GIT_AUDIT)
-    rc, reports, _fatal = fx.run(apply=True)
+    try:
+        rc, reports, _fatal = fx.run(apply=True)
+    except AssertionError as exc:
+        # With the branch-name guard reverted, the argv audit refuses the inexpressible lease at
+        # the push; surface that as a result shape so red-on-revert reads this case's own NAMED
+        # assertions going red, never a crash (FIX-541 round 1, claude minor).
+        rc, reports = "argv-audit refused: %s" % exc, []
     worked = [a for a in GIT_AUDIT[audit:] if a[:1] in (
         ["clone"], ["merge"], ["commit-tree"], ["push"], ["checkout"], ["add"], ["write-tree"])]
     check("refuse/bad-branch-name-plus", (rc, _result(reports, 1)), (1, "bad-branch-name"))
@@ -2171,9 +2287,10 @@ def case_badname(tmp):
 
 
 def case_audit(_tmp):
-    # Pure predicate checks over forbidden and allowed push argv forms: no tool run, no git call.
-    # Both predicates must refuse every forbidden form and accept the one lease shape, and they
-    # must AGREE on every probe.
+    # Pure predicate checks over forbidden and allowed argv forms: no tool run, no real git call
+    # (the funnel probe at the end records argv through a replaced _run_child and launches
+    # nothing). Both predicates must refuse every forbidden form and accept the one lease shape,
+    # and they must AGREE on every probe.
     def verdict(args):
         return (_forbidden(args), _audit_violation(args))
 
@@ -2221,8 +2338,42 @@ def case_audit(_tmp):
     check("audit/lease-64-allowed",
           probed(["push", "--porcelain", "--no-follow-tags", l64, "--", "origin",
                   ("6" * 64) + ":refs/heads/feat/x"]), neither)
+    # FIX-541 round 1 (codex medium): forbidden operations behind git global options; each
+    # predicate is probed INDEPENDENTLY so a blind spot in one cannot hide behind the pair.
+    prefixed_force = ["-c", "color.ui=false", "push", "--force", "origin", "feat/x"]
+    prefixed_reset = ["-C", "/tmp/example", "reset", "--hard"]
+    probes.append(list(prefixed_force))
+    probes.append(list(prefixed_reset))
+    check("audit/global-option-push-force-funnel", _forbidden(prefixed_force), True)
+    check("audit/global-option-push-force-audit", _audit_violation(prefixed_force), True)
+    check("audit/global-option-reset-funnel", _forbidden(prefixed_reset), True)
+    check("audit/global-option-reset-audit", _audit_violation(prefixed_reset), True)
+    # An argv whose subcommand cannot be resolved is forbidden outright (fail closed), and a
+    # benign global-option prefix still resolves to its harmless subcommand.
+    check("audit/global-option-unresolvable-fails-closed",
+          (probed(["--exec-path"]), probed(["-c"]), probed([])), (both, both, both))
+    check("audit/global-option-benign-resolves",
+          probed(["-c", "color.ui=false", "status", "--porcelain"]), neither)
     check("audit/predicates-agree",
           [a for a in probes if _forbidden(a) != _audit_violation(a)], [])
+    # FIX-541 round 1: the maintenance-pin scan cannot resolve _run_child's head and relies on
+    # the _SCAN_ALLOWED_UNPINNED justification in tools/selftest_git_fixture_env.py; this check
+    # goes red if the pin-bearing _git funnel stops handing _run_child the three maintenance
+    # pins in option position. No child is launched: _run_child is replaced by a recorder.
+    recorded = []
+
+    def _recording_child(argv, cwd=None, env=None, timeout=None, push=False):
+        recorded.append(list(argv))
+        return subprocess.CompletedProcess(list(argv), 0, b"", b"")
+
+    saved_child = globals()["_run_child"]
+    globals()["_run_child"] = _recording_child
+    try:
+        _git(".", "version")
+    finally:
+        globals()["_run_child"] = saved_child
+    check("audit/pinned-git-funnel-prefix", recorded[0][:7] if recorded else [],
+          ["git", "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false"])
 
 
 def case_conflict(tmp):
@@ -2231,6 +2382,14 @@ def case_conflict(tmp):
     fx.advance_main(dict([("src/a.txt", "main side\n")]))
     before = _snapshot(wt)
     old = fx.remote_ref("feat/x")
+    # FIX-541 round 1 (codex major): the dry run runs the same candidate preparation and
+    # validation as --apply and must AGREE with it on this conflict: both refuse by name, and
+    # the dry run changes nothing anywhere.
+    rc_dry, reports_dry, _fatal = fx.run()
+    check("refuse/source-conflict-dry-agrees",
+          (rc_dry, _result(reports_dry, 1), _snapshot_diff(before, _snapshot(wt)),
+           fx.remote_ref("feat/x"), fx.pushes(), _has_marker(wt)),
+          (1, "source-conflict", [], old, [], False))
     rc, reports, _fatal = fx.run(apply=True)
     check("refuse/source-conflict",
           (rc, _result(reports, 1), "src/a.txt" in (reports[0]["reason"] if reports else "")),
@@ -4128,29 +4287,38 @@ REVERTS = dict([
 
 
 def _run_case(name, tmp):
-    """One case; an unexpected exception fails that case and never crashes the suite."""
+    """One case; an unexpected exception fails that case (recorded apart from check failures,
+    see CRASHES) and never crashes the suite."""
     try:
         CASES[name](tmp)
     except (Exception, KeyboardInterrupt) as exc:  # noqa: BLE001
-        _RECORDER["failures"].append("case %s raised %s: %s" % (name, type(exc).__name__, exc))
+        _RECORDER["crashes"].append("case %s raised %s: %s" % (name, type(exc).__name__, exc))
 
 
 def _red_on_revert(tmp):
-    """The guards whose reverted form left their named case green (an empty list passes)."""
-    stale = []
+    """(stale, cannot): the guards whose reverted form left their named case green, and the
+    guards whose case raised instead of failing one of its own assertions (cannot-evaluate: an
+    unrelated exception proves nothing about the guard; FIX-541 round 1, claude minor). Both
+    lists must be empty to pass."""
+    stale, cannot = [], []
     for name, (revert, case) in REVERTS.items():
         saved = GUARDS[name]
         GUARDS[name] = revert
-        _RECORDER.update(executed=set(), list=[], failures=[], skipped=[])
+        _RECORDER.update(executed=set(), list=[], failures=[], skipped=[], crashes=[])
         try:
             sub = tempfile.mkdtemp(prefix="red-%s-" % name, dir=tmp)
             _run_case(case, sub)
         finally:
             GUARDS[name] = saved
-        if not _RECORDER["failures"]:
+        if _RECORDER["failures"]:
+            continue
+        if _RECORDER["crashes"]:
+            cannot.append("%s (case %s): %s" % (name, case, "; ".join(_RECORDER["crashes"])))
+        else:
             stale.append("%s (case %s)" % (name, case))
-    _RECORDER.update(executed=_EXECUTED_SET, list=EXECUTED, failures=FAILURES, skipped=SKIPPED)
-    return stale
+    _RECORDER.update(executed=_EXECUTED_SET, list=EXECUTED, failures=FAILURES, skipped=SKIPPED,
+                     crashes=CRASHES)
+    return stale, cannot
 
 
 def _expected_check_ids():
@@ -4182,14 +4350,14 @@ def self_test(red_on_revert=False, report_path=None):
         import _selftest_exit_report
         _selftest_exit_report.arm(report_path, SUITE_ID, EXECUTED)
     from _git_fixture_env import fixture_git_lifecycle
-    stale = []
+    stale, cannot = [], []
     with fixture_git_lifecycle():
         with tempfile.TemporaryDirectory(prefix="merge-train-selftest-") as raw:
             tmp = os.path.realpath(raw)
             for name in CASES:
                 _run_case(name, tmp)
-            if red_on_revert and not FAILURES:
-                stale = _red_on_revert(tmp)
+            if red_on_revert and not FAILURES and not CRASHES:
+                stale, cannot = _red_on_revert(tmp)
     expected = _expected_check_ids()
     if expected is None:
         return 2
@@ -4202,6 +4370,10 @@ def self_test(red_on_revert=False, report_path=None):
         print("SELF-TEST NOT RUN %s: %s" % (check_id, why), file=sys.stderr)
     for guard in stale:
         FAILURES.append("red-on-revert: reverting guard %s left its case green" % guard)
+    for guard in cannot:
+        FAILURES.append("red-on-revert: cannot evaluate guard %s: its case raised instead of "
+                        "failing its own assertion" % guard)
+    FAILURES.extend(CRASHES)
     if FAILURES:
         print("SELF-TEST FAIL:")
         for failure in FAILURES:
@@ -4211,7 +4383,8 @@ def self_test(red_on_revert=False, report_path=None):
           "tools/selftest_checks.toml%s" % (len(EXECUTED), (
               "%d registered checks NOT RUN (%s), not counted as executed; " % (
                   len(SKIPPED), ", ".join(n for n, _why in SKIPPED))) if SKIPPED else "", (
-              "; all %d guards in GUARDS went red when reverted" % len(REVERTS))
+              "; all %d guards in GUARDS went red through their cases' own assertions when "
+              "reverted" % len(REVERTS))
               if red_on_revert else ""))
     return 0
 
