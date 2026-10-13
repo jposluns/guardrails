@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "a044b4c883c3183324bc008a09af6b90da3fc6af3ce9beef76f3c9c7a757eff5"
+tree-sha256 = "f8e1ed63f91f9581c97177fc618bec0cfc617a940d3b60962ae01c592f89c863"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2416,8 +2416,8 @@ sha256 = "2422016ee6acabb49fabd39b64a8dcee0ccd355cd4974bcefaac1f682bf3a2e9"
 
 [[sources]]
 path = "docs/development.md"
-bytes = 10788
-sha256 = "3f68b8ddaa157d95aaab1f6439d6fcb219fd405a92ee9bf073ed68a1dd969c64"
+bytes = 10828
+sha256 = "09ec29e47aaa5bfcdba4f95d4cae2e9db7e3af21ad33087660f2f67e62483e11"
 
 [[sources]]
 path = "docs/evidence.md"
@@ -3066,8 +3066,8 @@ sha256 = "9bf194d541fdc879d05ca10d4bf71a97658822ab75bea64ed8bbbd490248cd72"
 
 [[sources]]
 path = "site/development.html"
-bytes = 14637
-sha256 = "15131ff030d279b62b4dc57f4dc315eec9d3fd2259ccfa66592e20aed66247d5"
+bytes = 14677
+sha256 = "c16df5707630ccdc0e4450a6c98de69da51facf271be662b2f53f5feb62fa949"
 
 [[sources]]
 path = "site/disclosure.html"
