@@ -134,7 +134,11 @@ def main():
 #       (umask pinned; the kept bits hold execute bits no creation mode supplies, so a dropped fchmod
 #       cannot pass, and the whole S_IMODE is asserted, so a kept sticky bit, which no write clears, fails)
 #       and leaves no temporary file; a failed rename is exit 2 with the target unchanged and the
-#       temporary file left in place and named in the refusal.
+#       temporary file left in place and named in the refusal. A fixture that cannot set the sticky
+#       bit (chmod 0o5751 refused, or the bit not held afterwards) is a named NOT RUN failure, never
+#       a silent fallback to 0o4751: a write clears set-user-ID in any engine, so without the sticky
+#       bit an engine keeping special permission bits would pass unseen, and a vector pins that the
+#       refused chmod stays red with such an engine.
 #   T22 a parent directory swapped for a symlink after the write-side walk: the write lands through the
 #       held descriptor in the original directory and nothing outside the tree changes.
 #   T23 the same swap after the read-side walk: the bytes read are the real target's, never the planted
@@ -146,10 +150,12 @@ def main():
 #       (exit 2) and nothing lands outside the tree.
 #   T27 a pre-existing file at a colliding temporary name survives: every name colliding is exit 2 with
 #       the file kept; one collision is retried and the write succeeds, the file still kept.
-#   T28 an existing target without write permission is refused (exit 2) with its bytes and mode kept and
-#       no temporary file left; where the runner can write a mode-0444 target anyway (root or another DAC
-#       bypass, observed via os.access) the same refusal is driven by an EACCES injected at the write
-#       probe's open, so the refusal always runs and a pass never claims one that did not run.
+#   T28 an existing target without write permission is refused (exit 2) with its bytes and mode kept
+#       and no temporary file left. Two legs, each on its own fresh tree so its diagnosis is its own:
+#       the real mode-0444 leg runs where the mode binds the runner (observed via os.access; where a
+#       DAC bypass such as root unbinds it, the leg is skipped with a printed SELF-TEST NOTE), and on
+#       every runner an EACCES injected at the open the write probe makes drives the same refusal, so
+#       the refusal always runs and a pass never claims one that did not run.
 #   T29 a platform without dir_fd support is exit 2 in both modes: no path-based fallback.
 #   T30 the target swapped for a symlink after the write-side walk: the write probe's no-follow open
 #       refuses (exit 2), the link and the outside file are unchanged and no temporary file is made.
@@ -163,10 +169,14 @@ def main():
 #       target unchanged, the foreign file kept and its name given in the refusal (nothing is unlinked).
 #   T34 descriptor accounting: the descriptors open after every other vector (T1-T33, then T35 to T38,
 #       which run before it) are the ones open before them, so a close dropped on any ordinary success or
-#       error path fails; where descriptor enumeration is unavailable (neither /proc/self/fd nor /dev/fd
-#       can be listed, before or after the matrix) the accounting is a named NOT RUN failure, never a
-#       pass, and vectors pin that a held-open descriptor is reported as a leak and that unavailable
-#       enumeration around a leaking run cannot pass.
+#       error path fails. Each enumeration must contain a sentinel descriptor opened for it: a listing
+#       that cannot be made (neither /proc/self/fd nor /dev/fd) or that omits the sentinel is None, and
+#       a None on either side of the matrix is a named NOT RUN failure, never a pass. Residual: a
+#       partial listing that still holds the sentinel and matches its counterpart can hide a leak.
+#       Vectors pin that a held-open descriptor is reported as a leak, that a sentinel-omitting listing
+#       is None, and, end to end, that a whole matrix run whose writer leaks a descriptor under
+#       unavailable enumeration at both boundaries exits nonzero with the named NOT RUN failure and no
+#       PASS text.
 #   T35 on a nested target, an exception other than OSError raised at the rename (a stand-in for an
 #       interrupt) propagates with a note naming the temporary file it left by its path from the root;
 #       the target unchanged and the file left there.
@@ -177,7 +187,8 @@ def main():
 #       from the root; nothing replaced.
 #   T38 a nested target swapped for a UNIX socket after the read-side walk: the read leg's open fails
 #       with ENXIO, refused (exit 2 in both modes) in the engine's wording naming the path from the root
-#       (ENXIO is injected where this environment cannot bind the socket or refuses its open otherwise).
+#       (ENXIO is injected, its message naming the errno it replaces, where this environment cannot
+#       bind the socket or refuses its open otherwise).
 
 _APEX = ("---\ncorpus-id: prjint1\norigin: pack\nfamily: aiqt\napex: true\nslug: project-integrity\n---\n"
          "\n# Project integrity\n\nApex text.\n")
@@ -192,7 +203,10 @@ _BLOCK_A = ("OPF-A", "AGENTS.md", "before-rules", 1, "opf/blocks/a.md", _A_INNER
 _BLOCK_Z = ("OPF-Z", "AGENTS.md", "after-rules", 1, "opf/blocks/z.md", _Z_INNER + "\n")
 
 
-def self_test_main():
+def self_test_main(nested_run=False):
+    # nested_run=True marks the run the T34 end-to-end vector makes of this same matrix: that run
+    # skips the vector itself, so the matrix nests exactly once, and its exit code and output are
+    # judged by the vector in the outer run.
     import errno
     import hashlib
     import io
@@ -286,26 +300,57 @@ def self_test_main():
         return 2
 
     def open_fds():
-        for fd_dir in ("/proc/self/fd", "/dev/fd"):
-            try:
-                return sorted(os.listdir(fd_dir))
-            except OSError:
-                continue
+        """The open descriptors (the sentinel left out), or None when no trustworthy enumeration is
+        available. A sentinel descriptor opened for this call must appear in the listing: one that
+        omits it is incomplete and fails closed as None, exactly like an unlistable directory, so
+        the accounting never trusts a listing shown to drop descriptors. Residual: a partial listing
+        that still holds the sentinel and happens to match its counterpart can hide a leak; the
+        sentinel refutes a listing that drops it, it does not prove completeness."""
+        sentinel = os.open(os.devnull, os.O_RDONLY)
+        try:
+            for fd_dir in ("/proc/self/fd", "/dev/fd"):
+                try:
+                    names = os.listdir(fd_dir)
+                except OSError:
+                    continue
+                if str(sentinel) not in names:
+                    return None  # an incomplete listing: fail closed, never a partial accounting
+                return sorted(name for name in names if name != str(sentinel))
+        finally:
+            os.close(sentinel)
         return None
 
     # The T34 verdict for one before/after enumeration pair: None only when the accounting ran and the
-    # descriptors match. Unavailable enumeration (either side None) is a named NOT RUN failure, never a
-    # pass: the PASS text claims no descriptor is left open, which only the accounting can establish,
-    # and a leak behind an unlistable /proc/self/fd and /dev/fd would otherwise pass unseen.
+    # descriptors match. An enumeration open_fds could not trust (either side None: unlistable, or the
+    # sentinel omitted) is a named NOT RUN failure, never a pass: the PASS text claims no descriptor is
+    # left open, which only the accounting can establish, and a leak behind an unlistable or truncated
+    # /proc/self/fd and /dev/fd would otherwise pass unseen.
     def fd_accounting_failure(before, after):
         if before is None or after is None:
-            return ("T34 NOT RUN: descriptor enumeration is unavailable (neither /proc/self/fd nor "
-                    "/dev/fd could be listed {} the matrix), so the descriptor accounting did not run "
-                    "and a leaked descriptor would pass unseen".format(
-                        "before" if before is None else "after"))
+            return ("T34 NOT RUN: no trustworthy descriptor enumeration {} the matrix (neither "
+                    "/proc/self/fd nor /dev/fd could be listed, or the listing omitted its sentinel "
+                    "descriptor), so the descriptor accounting did not run and a leaked descriptor "
+                    "would pass unseen".format("before" if before is None else "after"))
         if after != before:
             return "T34: descriptors leaked across the matrix: {} open before, {} after".format(
                 len(before), len(after))
+        return None
+
+    # The T21 fixture: mode 0o5751 with the sticky bit verified held. A platform refusing the sticky
+    # bit (or quietly dropping it) is a named NOT RUN failure, never a fallback to 0o4751: a write
+    # clears set-user-ID in any engine, so set-user-ID alone cannot discriminate, and under such a
+    # fallback an engine keeping special permission bits would pass unseen.
+    def sticky_fixture_failure(path):
+        try:
+            os.chmod(path, 0o5751)
+        except OSError as exc:
+            return ("T21 NOT RUN: the fixture could not set the sticky bit (chmod 0o5751 refused: "
+                    "{}), so the special-bit discriminator is unavailable and a kept special bit "
+                    "would pass unseen".format(exc))
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+        if mode != 0o5751:
+            return ("T21 NOT RUN: the fixture holds mode {:o} after chmod 0o5751, so the sticky-bit "
+                    "discriminator did not take".format(mode))
         return None
 
     fds_before = open_fds()
@@ -636,42 +681,88 @@ def self_test_main():
         saved_umask = os.umask(0o022)
         try:
             root = tree(ac.registry_text(), blocks=(), agents=legacy_golden)
+            real_replace = ac.os.replace  # T33 restores to this, so it is bound whether or not T21 runs
             # Set-user-ID and sticky bits beyond the ordinary 0o751: the write drops both, and the sticky
-            # bit (which no write clears) makes a kept one visible even to an unprivileged runner.
-            try:
-                os.chmod(root / AGENTS_REL, 0o5751)
-            except OSError:  # a platform refusing the sticky bit on a regular file (EFTYPE)
-                os.chmod(root / AGENTS_REL, 0o4751)
-            if not stat.S_IMODE(os.stat(root / AGENTS_REL).st_mode) & 0o7000:
-                failures.append("T21: the fixture could not set a mode bit beyond 0o777")
-            (root / ".aiqt" / "core" / "rules" / "r1.md").write_text(new_rule, encoding="utf-8")
-            expect("T21 rewrite", root, False, 0, unchanged=False)
-            if read(root / AGENTS_REL) == legacy_golden:
-                failures.append("T21: the rewrite did not change AGENTS.md")
-            kept = stat.S_IMODE(os.stat(root / AGENTS_REL).st_mode)
-            if kept != 0o751:
-                failures.append("T21: the rewrite left mode {:o}, not the target's ordinary permission bits "
-                                "751".format(kept))
-            if sorted(p.name for p in root.iterdir()) != [".aiqt", AGENTS_REL]:
-                failures.append("T21: the write left a stray file: {}".format(sorted(p.name for p in root.iterdir())))
-            (root / ".aiqt" / "core" / "rules" / "r1.md").write_text(_RULE, encoding="utf-8")
-            real_replace = ac.os.replace
+            # bit (which no write clears) makes a kept one visible even to an unprivileged runner. A
+            # fixture without the sticky bit cannot be evaluated (sticky_fixture_failure, a named NOT
+            # RUN failure): the rest of T21 is then skipped, the failure already keeping the run red.
+            t21_fixture = sticky_fixture_failure(root / AGENTS_REL)
+            if t21_fixture is not None:
+                failures.append(t21_fixture)
+            else:
+                (root / ".aiqt" / "core" / "rules" / "r1.md").write_text(new_rule, encoding="utf-8")
+                expect("T21 rewrite", root, False, 0, unchanged=False)
+                if read(root / AGENTS_REL) == legacy_golden:
+                    failures.append("T21: the rewrite did not change AGENTS.md")
+                kept = stat.S_IMODE(os.stat(root / AGENTS_REL).st_mode)
+                if kept != 0o751:
+                    failures.append("T21: the rewrite left mode {:o}, not the target's ordinary permission "
+                                    "bits 751".format(kept))
+                if sorted(p.name for p in root.iterdir()) != [".aiqt", AGENTS_REL]:
+                    failures.append("T21: the write left a stray file: {}".format(
+                        sorted(p.name for p in root.iterdir())))
+                (root / ".aiqt" / "core" / "rules" / "r1.md").write_text(_RULE, encoding="utf-8")
 
-            def failing_replace(*_a, **_k):
-                raise OSError("injected rename failure")
+                def failing_replace(*_a, **_k):
+                    raise OSError("injected rename failure")
 
-            ac.os.replace = failing_replace
-            try:
-                out = expect("T21 failed rename", root, False, 2)
-            finally:
-                ac.os.replace = real_replace
-            left = [p.name for p in root.iterdir() if p.name not in (".aiqt", AGENTS_REL)]
-            if len(left) != 1 or not left[0].startswith("." + AGENTS_REL + ".") or not left[0].endswith(".tmp"):
-                failures.append("T21: a failed rename did not leave exactly its temporary file: {}".format(left))
-            elif left[0] not in out:
-                failures.append("T21: the refusal does not name the temporary file left: {}".format(out.strip()))
+                ac.os.replace = failing_replace
+                try:
+                    out = expect("T21 failed rename", root, False, 2)
+                finally:
+                    ac.os.replace = real_replace
+                left = [p.name for p in root.iterdir() if p.name not in (".aiqt", AGENTS_REL)]
+                if (len(left) != 1 or not left[0].startswith("." + AGENTS_REL + ".")
+                        or not left[0].endswith(".tmp")):
+                    failures.append("T21: a failed rename did not leave exactly its temporary file: "
+                                    "{}".format(left))
+                elif left[0] not in out:
+                    failures.append("T21: the refusal does not name the temporary file left: "
+                                    "{}".format(out.strip()))
         finally:
             os.umask(saved_umask)
+
+        # T21 vector: with the 0o5751 chmod refused and an engine that keeps special permission bits,
+        # the run must go red. Under the new fixture the refusal itself is the named NOT RUN failure;
+        # this vector pins that no silent fallback returns instead (the old fallback to 0o4751 passed
+        # such an engine: a write clears set-user-ID anyway, so nothing surviving the write
+        # discriminated a kept special bit without the sticky bit).
+        vec_root = tree(ac.registry_text(), blocks=(), agents=legacy_golden)
+        (vec_root / ".aiqt" / "core" / "rules" / "r1.md").write_text(new_rule, encoding="utf-8")
+        real_chmod = os.chmod
+
+        def sticky_refusing_chmod(path, mode, *a, **k):
+            if mode == 0o5751:
+                raise OSError(errno.EPERM, "injected: the sticky bit is refused", str(path))
+            return real_chmod(path, mode, *a, **k)
+
+        os.chmod = sticky_refusing_chmod
+        try:
+            vec_verdict = sticky_fixture_failure(vec_root / AGENTS_REL)
+        finally:
+            os.chmod = real_chmod
+        if vec_verdict is not None and "NOT RUN" not in vec_verdict:
+            failures.append("T21 vector: the refused sticky-bit fixture must be a named NOT RUN "
+                            "failure, got {!r}".format(vec_verdict))
+        if vec_verdict is None:
+            # The fixture fell back silently (the reverted behaviour): a special-bit-retaining engine
+            # must then go red on the mode assertion, or this vector fails the run.
+            special = stat.S_IMODE(os.stat(vec_root / AGENTS_REL).st_mode) & 0o7000
+            real_fchmod = ac.os.fchmod
+
+            def special_bit_keeping_fchmod(fd, mode, **k):
+                return real_fchmod(fd, mode | special, **k)
+
+            ac.os.fchmod = special_bit_keeping_fchmod
+            try:
+                vec_code, _vec_out = drive(vec_root, False)
+            finally:
+                ac.os.fchmod = real_fchmod
+            vec_kept = stat.S_IMODE(os.stat(vec_root / AGENTS_REL).st_mode)
+            if vec_code == 0 and vec_kept == 0o751:
+                failures.append("T21 vector: with the sticky-bit chmod refused, an engine keeping "
+                                "special permission bits passed (exit 0, mode 751): the fallback "
+                                "fixture dropped the discriminator")
 
         # T22. A parent directory swapped for a symlink AFTER the write-side walk cannot redirect the
         #      write: the temporary create and the rename go through the directory descriptor the walk
@@ -864,7 +955,9 @@ def self_test_main():
         #      open made by the write probe drives the same refusal, so the vector never silently skips
         #      (root or another DAC bypass included) and the read-only refusal the PASS text claims
         #      always ran. An engine that swallowed the permission failure and wrote anyway would fail
-        #      both the exit and the unchanged-bytes assertion.
+        #      both the exit and the unchanged-bytes assertion. Each leg runs on its own fresh tree,
+        #      so its diagnosis is its own, and a real-mode leg skipped because a DAC bypass unbinds
+        #      the mode is announced by a printed SELF-TEST NOTE, never silent.
         def expect_t28(label, root):
             expect(label, root, False, 2)
             if os.stat(root / AGENTS_REL).st_mode & 0o777 != 0o444:
@@ -878,6 +971,16 @@ def self_test_main():
         os.chmod(root / AGENTS_REL, 0o444)
         if not os.access(root / AGENTS_REL, os.W_OK):
             expect_t28("T28 read-only target", root)
+        else:
+            print("SELF-TEST NOTE: T28 real-mode leg not applicable (a mode-0444 target is still "
+                  "writable here: root or another DAC bypass); the injected-EACCES leg below still "
+                  "drives the refusal")
+        os.chmod(root / AGENTS_REL, 0o644)
+        # The injected leg on a fresh tree: its diagnosis is its own, never confused by whatever a
+        # faulty engine left behind on the real-mode leg above.
+        root = tree(ac.registry_text(), blocks=(), agents=legacy_golden)
+        (root / ".aiqt" / "core" / "rules" / "r1.md").write_text(new_rule, encoding="utf-8")
+        os.chmod(root / AGENTS_REL, 0o444)
         real_t28_open = ac.os.open
         denied = []
 
@@ -1207,7 +1310,8 @@ def self_test_main():
         #      root, never the raw errno text naming the bare file name. The read leg's open of the final
         #      name is observed through a wrapper; where this environment cannot bind the socket, or answers
         #      its open with another errno (a sandbox can refuse it with EPERM), the wrapper raises ENXIO in
-        #      its place, so the engine's mapping is judged either way.
+        #      its place, its message naming the errno it replaced, so the engine's mapping is judged
+        #      either way and the environment's real answer stays visible in the diagnostic.
         for check in (True, False):
             root = tree(ac.registry_text(), blocks=())
             (root / ".github").mkdir()
@@ -1242,7 +1346,10 @@ def self_test_main():
                     return real_open(path, flags, *a, **k)
                 except OSError as exc:
                     if exc.errno != errno.ENXIO:
-                        raise OSError(errno.ENXIO, os.strerror(errno.ENXIO), path) from None
+                        # The engine mapping is judged on ENXIO; the message keeps the errno this
+                        # environment really answered, so the diagnostic never hides it.
+                        raise OSError(errno.ENXIO, "{} (injected in place of errno {}: {})".format(
+                            os.strerror(errno.ENXIO), exc.errno, exc.strerror), path) from None
                     raise
 
             ac._target_dir_fd, fired = read_leg_swap(to_socket)
@@ -1265,10 +1372,10 @@ def self_test_main():
                 failures.append("T38: the socket was replaced or a temporary file was left: {}".format(
                     nested_strays(root)))
 
-        # T34. Descriptor accounting over every other vector (T1-T33, T35 to T38). Unavailable
-        #      enumeration on either side is a named NOT RUN failure (fd_accounting_failure), never a
-        #      pass: the PASS text claims no descriptor is left open, which only an accounting that
-        #      ran can establish.
+        # T34. Descriptor accounting over every other vector (T1-T33, T35 to T38). An enumeration
+        #      open_fds cannot trust on either side (unavailable, or omitting its sentinel) is a
+        #      named NOT RUN failure (fd_accounting_failure), never a pass: the PASS text claims no
+        #      descriptor is left open, which only an accounting that ran can establish.
         fds_after = open_fds()
         t34 = fd_accounting_failure(fds_before, fds_after)
         if t34 is not None:
@@ -1287,32 +1394,98 @@ def self_test_main():
             if leak is None or "leaked" not in leak:
                 failures.append("T34 vector: a held-open descriptor was not reported as a leak: "
                                 "{!r}".format(leak))
-        # (b) A leaking writer plus unavailable enumeration cannot pass: with os.listdir refusing both
-        #     descriptor directories, open_fds() is None on both sides of a run that holds a descriptor
-        #     open (the leak the pair cannot see), and the accounting on that pair is the named NOT RUN
-        #     failure.
+        # (b) open_fds fails closed: with os.listdir refusing both descriptor directories the result
+        #     is None, and a listing that omits the sentinel descriptor (a truncated listing here:
+        #     the sentinel is never 0, 1 or 2) is None too, never a partial accounting; a None pair
+        #     is the named NOT RUN failure, on either side or both. The genuinely leaking writer
+        #     under unavailable enumeration is vector (c) below, end to end.
         real_listdir = os.listdir
 
         def unavailable_listdir(*_a, **_k):
             raise OSError(errno.EACCES, "injected: descriptor enumeration unavailable")
 
-        unseen_fd = os.open(os.devnull, os.O_RDONLY)  # the descriptor the leaking writer holds, unseen here
         os.listdir = unavailable_listdir
         try:
             unavailable_pair = (open_fds(), open_fds())
         finally:
             os.listdir = real_listdir
-            os.close(unseen_fd)
         if unavailable_pair != (None, None):
             failures.append("T34 vector: open_fds did not report unavailable enumeration as None: "
                             "{!r}".format(unavailable_pair))
+
+        def sentinel_omitting_listdir(path, *a, **k):
+            if str(path) in ("/proc/self/fd", "/dev/fd"):
+                return ["0", "1", "2"]  # whatever number the sentinel took, it is 3 or above
+            return real_listdir(path, *a, **k)
+
+        os.listdir = sentinel_omitting_listdir
+        try:
+            partial_listing = open_fds()
+        finally:
+            os.listdir = real_listdir
+        if partial_listing is not None:
+            failures.append("T34 vector: a listing omitting the sentinel descriptor must fail "
+                            "closed as None, got {!r}".format(partial_listing))
         for label, before, after in (("before the matrix", None, fds_after or ["0"]),
                                      ("after the matrix", fds_before or ["0"], None),
-                                     ("on both sides, around a leaking writer", None, None)):
+                                     ("on both sides", None, None)):
             verdict = fd_accounting_failure(before, after)
             if verdict is None or "NOT RUN" not in verdict:
-                failures.append("T34 vector: unavailable enumeration {} must be a named NOT RUN "
+                failures.append("T34 vector: untrustworthy enumeration {} must be a named NOT RUN "
                                 "failure, never a pass, got {!r}".format(label, verdict))
+        # (c) End to end: this same matrix, run nested with enumeration unavailable at both of its
+        #     boundaries around a genuinely leaking writer (the first engine close inside a
+        #     _write_target call is dropped, so that writer leaves its descriptor open), must exit
+        #     nonzero with the named NOT RUN failure and no PASS text. Red on a revert to the old
+        #     condition that skipped the accounting when fds_before was None. The nested run skips
+        #     this vector (nested_run=True), so the matrix nests exactly once.
+        if not nested_run:
+            real_close = os.close
+            in_writer, leaked = [], []
+            real_write_target = ac._write_target
+
+            def leak_marking_write_target(*a, **k):
+                in_writer.append(True)
+                try:
+                    return real_write_target(*a, **k)
+                finally:
+                    in_writer.pop()
+
+            def writer_leaking_close(fd):
+                if in_writer and not leaked:
+                    leaked.append(fd)  # the leak: this close is dropped, the descriptor stays open
+                    return None
+                return real_close(fd)
+
+            def boundary_unlistable_listdir(path, *a, **k):
+                if str(path) in ("/proc/self/fd", "/dev/fd"):
+                    raise OSError(errno.EACCES, "injected: descriptor enumeration unavailable",
+                                  str(path))
+                return real_listdir(path, *a, **k)
+
+            nested_buf = io.StringIO()
+            ac._write_target = leak_marking_write_target
+            os.close = writer_leaking_close
+            os.listdir = boundary_unlistable_listdir
+            try:
+                with redirect_stdout(nested_buf), redirect_stderr(nested_buf):
+                    nested_code = self_test_main(nested_run=True)
+            finally:
+                os.listdir = real_listdir
+                os.close = real_close
+                ac._write_target = real_write_target
+                if leaked:
+                    os.close(leaked[0])
+            nested_out = nested_buf.getvalue()
+            if not leaked:
+                failures.append("T34 vector: the nested matrix ran no leaking writer, so the "
+                                "end-to-end vector judged nothing")
+            if (nested_code == 0 or "SELF-TEST PASS" in nested_out
+                    or "T34 NOT RUN" not in nested_out):
+                failures.append("T34 vector: a matrix run with untrustworthy enumeration at both "
+                                "boundaries around a leaking writer must exit nonzero with the named "
+                                "NOT RUN failure and no PASS text, got exit {} ending: {}".format(
+                                    nested_code, nested_out.strip()[-300:]))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1336,13 +1509,16 @@ def self_test_main():
           "leaves; a parent swapped for a symlink after the walk redirects neither a write nor a read; a "
           "symlink or a FIFO swapped in at the target is refused, as is a symlink planted against mkdir; "
           "a colliding "
-          "temporary name is retried and the colliding file kept; a read-only target is refused; a "
+          "temporary name is retried and the colliding file kept; a read-only target is refused (by "
+          "the mode where it binds, and by an injected EACCES on every runner); a "
           "platform without dir_fd support is refused; a symlink or a FIFO (held open or not) swapped in "
           "at the target after the write-side walk is refused by the write probe without blocking, as is a "
           "directory, each in the engine's wording naming the path from the root, and so is a directory or "
           "a socket swapped in after the read-side walk; a failed write leaves its temporary file, never "
           "deleting a foreign file at that name, and an interrupt at the rename carries a note naming it "
-          "by its path from the root; and no descriptor is left open.")
+          "by its path from the root; and no descriptor is left open in an enumeration verified to "
+          "hold its sentinel (an unlistable or sentinel-omitting listing is a named NOT RUN failure, "
+          "never a pass, and a partial listing keeping the sentinel could still hide a leak).")
     return 0
 
 
