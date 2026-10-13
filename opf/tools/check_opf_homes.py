@@ -2893,9 +2893,14 @@ def boundary_self_test():
         with patch.object(journal, "_read_contained", return_value=(b"corrupt", None)):
             check("internal-projection-conflict-refused", lambda: refuses(
                 lambda: home_journal._project(100, 103, Path("/unused") / run, "import", run)))
-        with patch.object(journal, "_read_contained", return_value=(payload, None)):
+        with patch.object(journal, "_read_contained", return_value=(payload, None)), \
+                patch.object(home_journal.os, "fsync") as flushed:
             check("internal-projection-idempotent", lambda: home_journal._project(
                 100, 103, Path("/unused") / run, "import", run) is None and publish.call_count == 1)
+            # Fix round 2 (codex MEDIUM): accepting the byte-equal projection re-establishes the
+            # containing directory's durability through the parent handle _open_parent returned.
+            check("internal-projection-idempotent-flushes-parent",
+                  lambda: flushed.call_args.args == (104,))
 
     # PR B (maintainer ruling): shared native-journal validation is kind-generic; adoption identities
     # validate through the same pure validators the adoption executor will bind to.
@@ -3863,12 +3868,17 @@ def _self_test_vectors():
     with _patch.object(store, "STAGING_KINDS", store.STAGING_KINDS + ("record",)):
         check("staging-record-flip-option-ii", lambda: not refuses(lambda: store.stage_run("record", record_run))
               and not refuses(lambda: store.evidence_run("record", record_run)))
-    # PR-3: the reservation writer on a real store: exclusive, create-only, durable publication; a
-    # process killed at any point leaves a state the next call refuses or completes deterministically
-    # (the four reachable states: nothing, a torn staging leftover, the complete reservation, and the
-    # complete reservation plus its shared-inode staging leftover).
+    # PR-3: the reservation writer on a real store: exclusive, create-only, durable publication. The
+    # reachable on-disk states are nothing, a torn staging leftover, the complete reservation (its
+    # directory entry durable once the publication's final fsync ran), and the complete reservation
+    # plus its shared-inode staging leftover. A later call under the SAME capability retires the
+    # garbage and then completes or refuses deterministically; a call under a NEW capability (what
+    # any retry after a kill holds) is refused, and the leftover reservation is the disclosed
+    # conservative residual.
     import os
+    import signal
     import threading
+    import time
     import _journal as native_journal
     import _opf_journal as home_journal
     import _opf_oplock as oplock
@@ -3948,10 +3958,11 @@ def _self_test_vectors():
                   home_journal.reservation_payload("record", record_run, "held-operation", {"WL": 12, "BI": 7}))
             check("reservation-on-disk-exact-destination",
                   lambda: sorted(os.listdir(target.parent)) == [record_run + ".toml"])
-            # A retry carrying the exact same claims is answered idempotently from the
-            # read-back entry and re-establishes durability: the containing directory is
-            # flushed again before the payload is returned (fix round 1, claude MEDIUM-1: the
-            # entry may predate a kill after the link but before the directory fsync).
+            # A repeat call under the SAME capability carrying the exact same claims is answered
+            # idempotently from the read-back entry and re-establishes durability: the containing
+            # directory is flushed again before the payload is returned (fix round 1, claude
+            # MEDIUM-1; fix round 2 wording: the entry may predate a publication failure whose
+            # cleanup could not remove it, so presence alone does not establish durability).
             flushed = []
 
             def flush_recorder(fd):
@@ -3977,10 +3988,12 @@ def _self_test_vectors():
             check("reservation-crash-after-link-refused", lambda: third is not None
                   and "already exists with different content" in third and not leftover.exists()
                   and os.stat(target).st_nlink == 1 and target.read_bytes() == payload)
-            # The same crash state retried with the SAME claims completes idempotently: the
-            # shared-inode leftover is retired, the entry read back and the payload returned.
+            # The same leftover state, retried by the SAME capability with the SAME claims,
+            # completes idempotently: the shared-inode leftover is retired, the entry read back
+            # and the payload returned. (A retry after a kill holds a NEW capability and is
+            # refused; reservation-new-capability-refused below shows it.)
             os.link(target, leftover)
-            check("reservation-crash-after-link-retried", lambda: home_journal.reserve_allocation(
+            check("reservation-leftover-retried-same-capability", lambda: home_journal.reserve_allocation(
                 cap, "record", record_run, {"BI": 7, "WL": 12}) == payload
                 and not leftover.exists() and os.stat(target).st_nlink == 1)
             run2 = "record-20260917T120001Z-0123456789abcdef"
@@ -4008,6 +4021,123 @@ def _self_test_vectors():
             check("reservation-link-race-refused", lambda: raced is not None
                   and "appeared during publication" in raced and "recover=True" not in raced
                   and os.stat(target).st_nlink == 1 and target.read_bytes() == payload)
+            # The same race where the publication's own cleanup also fails must keep that
+            # cleanup-failure detail (the named staging leftover) in the reservation-specific
+            # refusal instead of dropping it with the oplock advice (fix round 2, claude
+            # MINOR-3); the stranded leftover is retired as garbage by the next reserving call.
+            def refusing_unlink(entry, **kwargs):
+                raise OSError(5, "injected unlink failure")
+
+            with _patch.object(native_journal, "_lstat_at", lambda pfd, name: None), \
+                    _patch.object(os, "unlink", refusing_unlink):
+                stranded = reservation_refusal(lambda: home_journal.reserve_allocation(
+                    cap, "record", record_run, {"BI": 7, "WL": 12}))
+            check("reservation-link-race-keeps-cleanup-detail", lambda: stranded is not None
+                  and "appeared during publication" in stranded
+                  and "could not be cleaned up" in stranded and "recover=True" not in stranded
+                  and target.read_bytes() == payload)
+            # Fix round 2 (claude MEDIUM-1, decided stricter-safe): any retry after a kill holds a
+            # NEW capability (acquire_operation mints a fresh op_id per acquisition), and it stays
+            # refused: the payload embeds the op_id, so the bytes differ. The killed run's leftover
+            # reservation is the disclosed residual; its numbers stay reserved (conservative). The
+            # byte-equal idempotent answer serves a repeat call under the SAME capability only.
+            cap2 = oplock.OpCapability.__new__(oplock.OpCapability)
+            cap2._claim = threading.Lock()
+            cap2._claimant = None
+            cap2._released = False
+            cap2._acquirer_pid = os.getpid()
+            cap2._acquirer_pid_start = native_journal._pid_start(os.getpid())
+            cap2._anchor_fd = os.open(str(anchor_file), os.O_RDONLY)
+            cap2._anchor_ident = cap._anchor_ident
+            cap2._machine_ident = cap._machine_ident
+            cap2.store_root = root
+            cap2.machine_rel = ".working/toml"
+            cap2.op_id = "fresh-operation"
+            cap2.holder = "fixture"
+            try:
+                fresh = reservation_refusal(lambda: home_journal.reserve_allocation(
+                    cap2, "record", record_run, {"BI": 7, "WL": 12}))
+            finally:
+                os.close(cap2._anchor_fd)
+            check("reservation-new-capability-refused", lambda: fresh is not None
+                  and "already exists with different content" in fresh
+                  and "does not establish that the run holds" in fresh
+                  and target.read_bytes() == payload)
+            # Fix round 2 (claude MINOR-1): a FIFO squatting a reservation name refuses AT ONCE
+            # (the read-back open carries O_NONBLOCK, so a writer-less FIFO cannot block it),
+            # judged in a BOUNDED child: a blocking mutant turns this check red at the deadline
+            # instead of hanging the suite. The child re-binds the fixture capability's acquirer
+            # identity to itself (the fixture equivalent of acquiring in that process) and exits
+            # 7 only on the non-regular-entry refusal.
+            run5 = "record-20260917T120005Z-0123456789abcdef"
+            os.mkfifo(target.parent / (run5 + ".toml"))
+            fifo_child = os.fork()
+            if fifo_child == 0:
+                code = 1
+                try:
+                    cap._acquirer_pid = os.getpid()
+                    cap._acquirer_pid_start = native_journal._pid_start(os.getpid())
+                    squat = reservation_refusal(lambda: home_journal.reserve_allocation(
+                        cap, "record", run5, {"BI": 1}))
+                    if squat is not None and "non-regular entry" in squat:
+                        code = 7
+                except BaseException:
+                    code = 1
+                finally:
+                    os._exit(code)
+            fifo_deadline = time.monotonic() + 30.0
+            fifo_status = None
+            while time.monotonic() < fifo_deadline:
+                waited, raw_status = os.waitpid(fifo_child, os.WNOHANG)
+                if waited == fifo_child:
+                    fifo_status = raw_status
+                    break
+                time.sleep(0.05)
+            if fifo_status is None:
+                os.kill(fifo_child, signal.SIGKILL)
+                os.waitpid(fifo_child, 0)
+            check("reservation-fifo-refused-bounded", lambda s=fifo_status: s is not None
+                  and os.WIFEXITED(s) and os.WEXITSTATUS(s) == 7)
+            # Fix round 2 (codex MEDIUM-1): _project's EXISTING-projection branch restores the
+            # same ancestor and containing-directory durability a fresh publication gets. Unlike
+            # a reservation, the projection payload derives from the journal's own INTENT header,
+            # so a run killed between the projection's link and its directory flush IS retried
+            # with byte-identical bytes (recovery under a fresh capability); the retry must
+            # flush, not trust presence. projection-published pins the fresh publication this
+            # builds on; projection-crash-retry-flushes is the discriminator (red when the
+            # existing branch returns without the flushes).
+            proj_run = "record-20260917T120006Z-0123456789abcdef"
+            proj_frames = [
+                (native_journal.F_INTENT, dict(txn=proj_run, header=dict(
+                    kind="record", run_id=proj_run, operation_id="journal-operation"), ops=[])),
+                (native_journal.F_COMPLETE, dict(txn=proj_run))]
+            proj_rel = store.txn_record("record", proj_run)
+            proj_parts = proj_rel.split("/")
+            proj_target = root / proj_rel
+            proj_root_fd = store._open_root_fd(root)
+            try:
+                with _patch.object(home_journal, "_existing_frames", return_value=proj_frames):
+                    home_journal._project(proj_root_fd, -1, root / "unused", "record", proj_run)
+                    proj_payload = home_journal.projection_payload(
+                        "record", proj_run, "complete", "journal-operation")
+                    check("projection-published", lambda: proj_target.read_bytes() == proj_payload)
+                    proj_flushed = []
+
+                    def projection_flush_recorder(fd):
+                        proj_flushed.append(os.fstat(fd).st_ino)
+                        real_fsync(fd)
+
+                    with _patch.object(os, "fsync", projection_flush_recorder):
+                        retried = home_journal._project(proj_root_fd, -1, root / "unused",
+                                                        "record", proj_run)
+                    proj_ancestors = [os.stat(root).st_ino] + [
+                        os.stat(root.joinpath(*proj_parts[:depth])).st_ino
+                        for depth in range(1, len(proj_parts))]
+                    check("projection-crash-retry-flushes", lambda: retried is None
+                          and proj_target.read_bytes() == proj_payload
+                          and all(ino in proj_flushed for ino in proj_ancestors))
+            finally:
+                os.close(proj_root_fd)
             cap._released = True
             check("reservation-released-refused", lambda: reservation_refusal(
                 lambda: home_journal.reserve_allocation(
@@ -4015,24 +4145,43 @@ def _self_test_vectors():
         finally:
             os.close(cap._anchor_fd)
 
-    # PR-3 fix round 1 (codex MAJOR): ensure_journal_dirs makes each component entry durable
-    # on EVERY call. For each directory-creation boundary, fail the fsync right after that
-    # mkdir (the interrupted attempt), then a clean retry must flush EVERY ancestor again: the
+    # PR-3 fix round 1 (codex MAJOR), reworked in fix round 2 (codex MEDIUM-2): ensure_journal_dirs
+    # makes each component entry durable on EVERY call. mkdir and fsync are recorded on ONE shared
+    # trace per boundary; the injected fsync failure is BOUND to an observed creation (the first
+    # fsync at or after the boundary-th mkdir), the interrupted attempt stops there, and the clean
+    # retry runs on the same trace. journal-dirs-fsync-fault-N requires the injection to have fired
+    # after exactly N creations (setup plus that binding; the first three also pass on the pre-fix
+    # helper). journal-dirs-created-then-flushed-N (discriminator) requires EVERY observed creation
+    # to be followed by a flush of its parent directory, so a mutant that fsyncs each parent BEFORE
+    # looking up or creating its child (the same inode set, the wrong order) goes red here, and at
+    # the last boundary in the fault check itself (no fsync follows the final mkdir, so its
+    # injection never fires). journal-dirs-retry-flushes-ancestors-N (discriminator) requires the
+    # clean retry to flush every ancestor again, red when the helper flushes only on creation: the
     # components the interrupted attempt created exist, but presence cannot stand in for
-    # durability. The same shared helper serves _opened and _project, so this covers them too.
+    # durability. The same shared helper serves _opened and _project; the projection vectors above
+    # exercise its _project caller on a real store.
     journal_rel = ".working/journals/record/allocations"
     components = journal_rel.split("/")
     for boundary in range(1, len(components) + 1):
         with tempfile.TemporaryDirectory(prefix="opf-homes-") as faulty:
             dir_fd = os.open(faulty, os.O_RDONLY | os.O_DIRECTORY)
             try:
-                native_fsync = os.fsync
-                seen = []
+                native_fsync, native_mkdir = os.fsync, os.mkdir
+                trace = []
+                state = {"mkdirs": 0, "injected": None}
 
-                def failing_fsync(fd, _stop=boundary, _seen=seen):
-                    _seen.append(fd)
-                    if len(_seen) == _stop:
+                def recording_mkdir(entry, mode=0o777, *, dir_fd=None, _trace=trace, _state=state):
+                    native_mkdir(entry, mode, dir_fd=dir_fd)
+                    _state["mkdirs"] += 1
+                    _trace.append(("mkdir", os.fstat(dir_fd).st_ino, entry))
+
+                def bound_failing_fsync(fd, _stop=boundary, _trace=trace, _state=state):
+                    ino = os.fstat(fd).st_ino
+                    if _state["injected"] is None and _state["mkdirs"] >= _stop:
+                        _state["injected"] = len(_trace)
+                        _trace.append(("fsync-injected-failure", ino))
                         raise OSError(5, "injected fsync failure")
+                    _trace.append(("fsync", ino))
                     native_fsync(fd)
 
                 def interrupted():
@@ -4042,21 +4191,30 @@ def _self_test_vectors():
                         return True
                     return False
 
-                with _patch.object(os, "fsync", failing_fsync):
-                    check("journal-dirs-fsync-fault-{}".format(boundary), interrupted)
-                flushed_inodes = []
-
-                def ancestor_recorder(fd):
-                    flushed_inodes.append(os.fstat(fd).st_ino)
-                    native_fsync(fd)
-
-                with _patch.object(os, "fsync", ancestor_recorder):
-                    native_journal.ensure_journal_dirs(dir_fd, journal_rel)
+                with _patch.object(os, "fsync", bound_failing_fsync), \
+                        _patch.object(os, "mkdir", recording_mkdir):
+                    was_interrupted = interrupted()
+                    # The clean retry, guarded: a mutant whose injection fires only here (the
+                    # fsync-before-mkdir order leaves no fsync after the last boundary's mkdir)
+                    # must land as red checks below, not as an escaping cannot-evaluate.
+                    retry_interrupted = interrupted()
+                events = list(trace)
+                injected_at = state["injected"]
+                check("journal-dirs-fsync-fault-{}".format(boundary),
+                      lambda w=was_interrupted, i=injected_at, e=events: w and i is not None
+                      and sum(1 for ev in e[:i] if ev[0] == "mkdir") == boundary)
+                check("journal-dirs-created-then-flushed-{}".format(boundary),
+                      lambda e=events: all(
+                          any(later[0] == "fsync" and later[1] == ev[1] for later in e[idx + 1:])
+                          for idx, ev in enumerate(e) if ev[0] == "mkdir"))
                 ancestors = [os.stat(faulty).st_ino] + [
                     os.stat(os.path.join(faulty, *components[:depth])).st_ino
                     for depth in range(1, len(components))]
+                retried_flushes = [] if injected_at is None else [
+                    ev[1] for ev in events[injected_at + 1:] if ev[0] == "fsync"]
                 check("journal-dirs-retry-flushes-ancestors-{}".format(boundary),
-                      lambda a=ancestors, f=list(flushed_inodes): all(ino in f for ino in a))
+                      lambda a=ancestors, f=retried_flushes, r=retry_interrupted:
+                      not r and all(ino in f for ino in a))
             finally:
                 os.close(dir_fd)
 
