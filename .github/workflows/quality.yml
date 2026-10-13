@@ -665,12 +665,17 @@ jobs:
 
       - name: Standards mappings
         run: python3 -I -B tools/check_mappings.py
+      - name: Cited standards repository corpus contract self-test
+        run: python3 -I -B .github/check_cited_standards_contract.py --self-test
       - name: Cited standards repository corpus contract
         run: python3 -I -B .github/check_cited_standards_contract.py
       - name: Cited standards self-test
         run: python3 -I -B tools/check_cited_standards.py --self-test
       # This repository only: the reviewed corpus adds the OPF prompt-pack members to the rule corpus; the gate
-      # run without --config keeps the built-in default (the rule files alone).
+      # run without --config keeps the built-in default (the rule files alone). The config and the two .github
+      # contract scripts are not shipped, so in a tree without them this gate, the newtab contract and the
+      # cited-standards contract gate lines all exit 2 (cannot evaluate), and the shipped tools/run_all_checks.sh
+      # there ends RESULT: FAIL.
       - name: Cited standards
         run: python3 -I -B tools/check_cited_standards.py --config .aiqt/cited-standards.toml
 

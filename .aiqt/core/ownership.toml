@@ -38,7 +38,7 @@ reason = "Repository-local NEWTAB declaration-content assertion; tracked, not sh
 
 [[exclusion]]
 path = ".github/check_cited_standards_contract.py"
-reason = "Repository-local assertion that .aiqt/cited-standards.toml keeps the rule files and every OPF prompt-pack member pack.toml lists in its corpus, and that both runners pass it with --config; tracked, not shipped."
+reason = "Repository-local assertion that .aiqt/cited-standards.toml keeps the rule files and every OPF prompt-pack member pack.toml lists in its corpus (pack.toml validated by opf/tools/check_opf_prompt_pack.py), and that every cited-standards gate line in both runners is exactly the permitted invocation (--config .aiqt/cited-standards.toml and nothing else); a mandatory member of tools/check_ci_parity.py, so removing it from both runners is a parity finding; tracked, not shipped."
 
 [[exclusion]]
 path = ".aiqt/newtab.toml"
@@ -50,7 +50,7 @@ reason = "Repository-local character policy read by tools/check_no_dashes.py and
 
 [[exclusion]]
 path = ".aiqt/cited-standards.toml"
-reason = "Repository-local corpus config for tools/check_cited_standards.py, passed with --config by this repository's CI and tools/run_all_checks.sh to add the OPF prompt-pack members to the rule corpus, and pinned by .github/check_cited_standards_contract.py; tracked, not shipped. Run without --config, the gate applies its built-in default corpus (the rule files alone) and reads no default file. The shipped tools/run_all_checks.sh still passes --config, so in a tree without this file (an adopter install) its cited-standards gate exits 2 (cannot evaluate) and the runner ends RESULT: FAIL, as its newtab-repo-contract and cited-standards-repo-contract gates do there."
+reason = "Repository-local corpus config for tools/check_cited_standards.py, passed with --config by this repository's CI and tools/run_all_checks.sh to add the OPF prompt-pack members to the rule corpus, and pinned by .github/check_cited_standards_contract.py; tracked, not shipped. Run without --config, the gate applies its built-in default corpus (the rule files alone) and reads no default file. The shipped tools/run_all_checks.sh still passes --config, so in a tree without this file (an adopter install) its cited-standards gate exits 2 (cannot evaluate) and the runner ends RESULT: FAIL, as its newtab-repo-contract gate and its two cited-standards-repo-contract gate lines do there (their .github scripts are not shipped)."
 
 # --- concern-1: manifest-self and the managed block ----------------------------------------------------
 
