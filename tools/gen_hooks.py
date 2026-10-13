@@ -7,10 +7,19 @@ This tool renders them into the shipped, NESTED plugin surface under plugin/aiqt
   plugin/aiqt-guardrails-hooks/hooks/hooks.json             the plugin hook config
   plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py  the dispatcher, copied byte-identical
   plugin/aiqt-guardrails-hooks/.claude-plugin/plugin.json   the plugin manifest
+  .claude/settings.json                                     this repository's own project hook registration
+                                                            (the authoring tree only, never an adopter tree)
 The plugin is nested (not the whole repo) so an adopter installs only the plugin, never the authoring
 repo. The .aiqt/core/hooks/ tree is the single edit point; the generated surface is always
 regenerated, never hand-edited, and plugin/aiqt-guardrails-hooks/hooks/ is a RESERVED subtree (100%
-generated, orphan-pruned) exactly like the .cursor/rules/aiqt-guardrails/ adapter. Validation is
+generated, orphan-pruned) exactly like the .cursor/rules/aiqt-guardrails/ adapter. The repository-local
+.claude/settings.json is generated WHOLE (personal settings belong in .claude/settings.local.json): it
+registers the PROJECT_HOOK_IDS controls for this repository's own Claude Code sessions, each matcher copied
+from the manifest, so those controls run here without the plugin installed. run() renders it ONLY when the
+generated tree carries the authoring marker .aiqt/authoring.toml (tracked here, never shipped), so an
+adopter run never creates, overwrites or deletes an adopter's own .claude/settings.json; build_desired()
+never renders it, because conformance.py C5 reuses build_desired() to judge an adopter install, which this
+repository's project settings must not oblige. Validation is
 fail-closed: every manifest `rules` entry must name a real corpus-id in .aiqt/core/rules/ (via
 gen_rules.load_corpus), the event must be on the known-event whitelist, a tool event must carry a
 compilable matcher and a non-tool event must not, `default` must be an allowed keyword with the
@@ -39,6 +48,8 @@ if tuple(sys.version_info[:2]) < (3, 14):
 import json
 import os
 import re
+import stat
+import tomllib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -59,6 +70,33 @@ SCRIPT_NAME = "aiqt_hooks.py"
 # ${CLAUDE_PLUGIN_ROOT} resolves to the installed plugin dir, so the script path is relative to it
 # regardless of where the plugin is nested in this authoring repo.
 SCRIPT_PLUGIN_PATH = "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/" + SCRIPT_NAME
+# The repository-local project registration (the dogfood wiring): this repository's own sessions load
+# .claude/settings.json, so the controls listed here run without the plugin installed. Rendered by run()
+# only, never by build_desired() (conformance.py C5 reuses that for an adopter install). $CLAUDE_PROJECT_DIR
+# is the project root Claude Code sets when it spawns a hook command, double-quoted so a root holding a
+# space stays one word; the script is the drift-gated plugin copy, which the plugin hooks/ tree entry of
+# the gensrc registry protects (the source dispatcher is only a block entry there).
+PROJECT_SETTINGS_REL = ".claude/settings.json"
+PROJECT_HOOK_IDS = ("gensrc-edit-guard",)
+PROJECT_SCRIPT_PATH = '"$CLAUDE_PROJECT_DIR"/' + SCRIPT_REL
+# The authoring-tree test. Those project settings are this repository's dogfood wiring, but this tool ships to
+# adopters, so run() renders them ONLY when the tree it generates carries this marker: a tracked file that the
+# ownership map excludes from the release by an exact literal (gen_manifest.check_authoring_only refuses it a
+# release class), so no release, pin or install puts it in an adopter tree. The test reads the generated tree
+# itself, never an environment variable or the cwd, so the tree tested is the tree written. Without the
+# marker (every adopter tree) .claude/settings.json is never created, overwritten or deleted. A present
+# marker that is not a regular file of at most AUTHORING_MARKER_MAX_BYTES (the bound gensrc_guard applies,
+# _GENSRC_MAX_BYTES, pinned by tools/selftest_aiqt_hooks.py) holding exactly AUTHORING_MARKER fails closed
+# (exit 2), so damage to it here cannot silently drop the drift check. AUTHORING_ONLY_REL is the never-shipped
+# roster: gen_gensrc and gen_manifest both read it from this file statically (gen_gensrc.read_authoring_roster),
+# gen_gensrc scopes its registry entries "authoring", so gensrc_guard enforces them only where this marker is
+# exact, and gen_manifest keeps them out of the release (with this roster as imported beside it, whatever a
+# tree under check rosters). Keep it a tuple of literals, or of non-dunder names each bound exactly once, by
+# one plain top-level assignment above it, to a str literal; any other binding fails closed.
+AUTHORING_MARKER_REL = ".aiqt/authoring.toml"
+AUTHORING_MARKER = {"format-version": 1, "role": "pack-authoring-repository"}
+AUTHORING_MARKER_MAX_BYTES = 1_000_000
+AUTHORING_ONLY_REL = (AUTHORING_MARKER_REL, PROJECT_SETTINGS_REL)
 
 # The event whitelist, in the fixed render order (doc-confirmed event names, 2026-08-17; SessionStart
 # and TeammateIdle re-confirmed against the hooks reference 2026-08-29). A typo'd event must fail
@@ -97,6 +135,9 @@ GENSRC_OUTPUTS = (
      "regenerate": "python3 tools/gen_hooks.py"},
     {"target": "plugin/aiqt-guardrails-hooks/.claude-plugin/plugin.json", "kind": "file",
      "sources": (".aiqt/core/hooks/manifest.toml", ".aiqt/core/hooks/scripts/aiqt_hooks.py"),
+     "regenerate": "python3 tools/gen_hooks.py"},
+    {"target": ".claude/settings.json", "kind": "file",
+     "sources": (".aiqt/core/hooks/manifest.toml",),
      "regenerate": "python3 tools/gen_hooks.py"},
 )
 
@@ -257,6 +298,65 @@ def render_plugin_json(plugin):
     return json.dumps(obj, indent=2) + "\n"
 
 
+def render_project_settings(hooks, ids=PROJECT_HOOK_IDS):
+    """The repository-local .claude/settings.json, deterministic and generated whole: the controls named in
+    ids, in the render_hooks_json order (events in KNOWN_EVENTS order, entries sorted by id), each with its
+    matcher COPIED from the manifest so the project wiring cannot drift from the declared scope. The
+    settings form carries a shell-string command, not command + args, so the launcher is spelled
+    `python3 -I <script> <handler>` (isolated, as check_python_launcher_isolation requires). Raises
+    ValueError when an id names no manifest control, so a renamed control fails closed (exit 2) instead of
+    silently dropping the project wiring."""
+    known = {hook["id"]: hook for hook in hooks}
+    missing = [hid for hid in ids if hid not in known]
+    if missing:
+        raise ValueError("{}: project hook id(s) not in the manifest: {}".format(
+            PROJECT_SETTINGS_REL, ", ".join(missing)))
+    events = {}
+    for hook in sorted((known[hid] for hid in ids),
+                       key=lambda h: (KNOWN_EVENTS.index(h["event"]), h["id"])):
+        entry = {}
+        if "matcher" in hook:
+            entry["matcher"] = hook["matcher"]
+        entry["hooks"] = [{"type": "command",
+                           "command": "python3 -I {} {}".format(PROJECT_SCRIPT_PATH, hook["handler"]),
+                           "timeout": TIMEOUT}]
+        events.setdefault(hook["event"], []).append(entry)
+    return json.dumps({"hooks": events}, indent=2) + "\n"
+
+
+def authoring_tree(root):
+    """True when root is the pack authoring repository: AUTHORING_MARKER_REL is a regular file of at most
+    AUTHORING_MARKER_MAX_BYTES holding exactly AUTHORING_MARKER (format-version the integer 1, never the bool
+    true). False when it is absent (an adopter tree). Raises ValueError on a marker that is present but is not
+    a regular file (a symlink is not followed; a directory, FIFO, ...; lstat is probed before the open, so a
+    stationary FIFO never blocks), is over the bound, is not UTF-8 TOML, or holds anything else, and OSError on
+    an unreadable path; the caller maps both to exit 2. The bound and every refusal match gensrc_guard
+    (_gensrc_authoring_marker), so the two never disagree on which tree is the authoring tree."""
+    path = root / AUTHORING_MARKER_REL
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return False
+    if not stat.S_ISREG(st.st_mode):
+        raise ValueError("{}: the authoring marker must be a regular file".format(AUTHORING_MARKER_REL))
+    with open(path, "rb") as handle:
+        raw = handle.read(AUTHORING_MARKER_MAX_BYTES + 1)
+    if len(raw) > AUTHORING_MARKER_MAX_BYTES:
+        raise ValueError("{}: the authoring marker exceeds the {}-byte bound".format(
+            AUTHORING_MARKER_REL, AUTHORING_MARKER_MAX_BYTES))
+    try:
+        data = tomllib.loads(raw.decode("utf-8"))  # UnicodeDecodeError and TOMLDecodeError are ValueErrors
+    except RecursionError as exc:
+        raise ValueError("{}: the authoring marker nests too deeply to parse ({})".format(
+            AUTHORING_MARKER_REL, exc)) from exc
+    # type() as well as equality: the TOML bool true == 1 in Python, and gensrc_guard (which honours an
+    # authoring-scoped registry entry on this same marker) reads exactly the integer.
+    if data != AUTHORING_MARKER or type(data.get("format-version")) is not int:
+        raise ValueError("{}: the authoring marker must hold exactly {!r}".format(
+            AUTHORING_MARKER_REL, AUTHORING_MARKER))
+    return True
+
+
 def build_desired(root, src_dir):
     """The desired generated surface for an install rooted at root: {rel: content}. Raises ValueError
     or OSError on any malformed or unreadable input (the caller maps both to exit 2). Parameterized
@@ -279,8 +379,13 @@ def build_desired(root, src_dir):
             PLUGIN_JSON_REL: render_plugin_json(plugin)}
 
 
-def run(root, check):
-    """Reconcile the generated plugin surface under root; the gen_cursor.py reconcile idiom."""
+def run(root, check, project_ids=PROJECT_HOOK_IDS):
+    """Reconcile the generated plugin surface under root; the gen_cursor.py reconcile idiom. With the hooks
+    source present AND root the authoring tree (authoring_tree), the repository-local PROJECT_SETTINGS_REL
+    registering project_ids is reconciled too, outside build_desired() so conformance.py C5 never requires
+    it of an adopter. In any other tree it is not in the desired set, so it is never written or compared,
+    and it is never pruned: .claude/ is not a reserved subtree. The self-test's synthetic manifests carry
+    no project control, so its plugin-surface cases pass project_ids=()."""
     src_dir = root / ".aiqt" / "core" / "hooks"
     desired = {}
     try:
@@ -288,6 +393,9 @@ def run(root, check):
         # exit 2, not read as an absent manifest (which would prune the whole surface as orphans).
         if dir_present(src_dir):
             desired = build_desired(root, src_dir)
+            if project_ids and authoring_tree(root):
+                _plugin, hooks = load_manifest(src_dir / "manifest.toml")
+                desired[PROJECT_SETTINGS_REL] = render_project_settings(hooks, project_ids)
     except (ValueError, OSError) as exc:
         print("error: {}".format(exc))
         return 2
@@ -366,6 +474,18 @@ def main():
 #  12. render byte-identity: an otherwise-identical Stop hook renders the SAME hooks.json bytes whether
 #      its default is "block" or "warn" (default is authoring metadata, never rendered into output),
 #  13. a malformed/unknown default keyword fails closed (exit 2): the default whitelist.
+#  14. 'warn' on PreToolUse is accepted only under stage = "bake" (exit 2 without it),
+#  15. a SessionStart control declaring 'block' fails closed (exit 2): the platform cannot block there.
+#  16. the repository-local .claude/settings.json renders exactly one PreToolUse group for the project
+#      control, its matcher copied from the manifest and its launcher the exact isolated shell string,
+#  17. drift in (or deletion of) that file fails the check (exit 1): it is in run()'s desired set,
+#  18. build_desired() never carries it (conformance.py C5 reuses build_desired for an adopter install),
+#  19. a manifest without the project control fails closed (exit 2) under run()'s default project ids,
+#  20. an adopter-shaped tree (no authoring marker) never creates, overwrites or deletes .claude/settings.json,
+#      in write or check mode, whatever the cwd, while its plugin surface still generates,
+#  21. a present marker that is not exactly the authoring marker (other content, a bool format-version,
+#      unparseable, a directory, a symlink, a FIFO, empty, non-UTF-8, one byte over the size bound) fails
+#      closed (exit 2) and renders no project settings, while a valid marker of exactly the bound renders them.
 
 _APEX = """---
 corpus-id: apex01
@@ -430,6 +550,52 @@ def _build_tree(base, cid="tsthk1", residue="A self-test control catches nothing
         _MANIFEST.format(cid=cid, residue=residue), encoding="utf-8")
 
 
+# A second control appended to the synthetic manifest for the project-settings cases. Its matcher differs
+# from the real manifest's gensrc matcher, so a renderer that hard-codes the matcher fails case 16.
+_PROJECT_HOOK = """
+[[hook]]
+id = "gensrc-edit-guard"
+rules = ["tsthk1"]
+platform = "claude-code"
+event = "PreToolUse"
+matcher = "Edit|Bash"
+handler = "gensrc_guard"
+default = "block"
+class = "c"
+residue = "A self-test project control catches nothing real."
+"""
+
+_PROJECT_HANDLER = """
+def gensrc_guard(data):
+    return (0, None, None)
+"""
+
+
+# The authoring marker, spelled literally (never built from AUTHORING_MARKER), so a renamed key or role fails.
+_MARKER_TEXT = 'format-version = 1\nrole = "pack-authoring-repository"\n'
+# The marker size bound, spelled literally like _MARKER_TEXT (gensrc_guard _GENSRC_MAX_BYTES, which
+# tools/selftest_aiqt_hooks.py pins AUTHORING_MARKER_MAX_BYTES to), and the valid marker padded by a TOML comment
+# to exactly `size` bytes.
+_MARKER_BOUND = 1_000_000
+
+
+def _padded_marker(size):
+    return _MARKER_TEXT + "#" + "x" * (size - len(_MARKER_TEXT) - 2) + "\n"
+
+
+def _write_marker(base, text=_MARKER_TEXT):
+    (base / ".aiqt" / "authoring.toml").write_text(text, encoding="utf-8")
+
+
+def _build_project_tree(base, authoring=True):
+    _build_tree(base)
+    src = base / ".aiqt" / "core" / "hooks"
+    for path, tail in ((src / "manifest.toml", _PROJECT_HOOK), (src / "scripts" / SCRIPT_NAME, _PROJECT_HANDLER)):
+        path.write_text(path.read_text(encoding="utf-8") + tail, encoding="utf-8")
+    if authoring:
+        _write_marker(base)
+
+
 def self_test_main():
     import io
     import shutil
@@ -437,6 +603,12 @@ def self_test_main():
     from contextlib import redirect_stdout
 
     def run_quiet(root, check):
+        # The plugin-surface cases build manifests with no project control, so they pass project_ids=().
+        with redirect_stdout(io.StringIO()):
+            return run(root, check, project_ids=())
+
+    def run_project(root, check):
+        # The project-settings cases run with run()'s OWN default project ids, as main() does.
         with redirect_stdout(io.StringIO()):
             return run(root, check)
 
@@ -661,6 +833,143 @@ def self_test_main():
                 'event = "SessionStart"\nhandler = "test_handler"\ndefault = "block"')
         if run_quiet(ssblock, check=True) != 2:
             failures.append("default 'block' on SessionStart expected exit 2 (an overclaim)")
+
+        # 16. The repository-local .claude/settings.json: exactly one PreToolUse group, for the project
+        #     control only, its matcher copied from the manifest, and the exact isolated launcher. The
+        #     expected value is spelled literally, never built from the module constants.
+        proj = tmp / "project"
+        proj.mkdir()
+        _build_project_tree(proj)
+        if run_project(proj, check=False) != 0:
+            failures.append("project tree: generation expected exit 0")
+        want_cmd = ('python3 -I "$CLAUDE_PROJECT_DIR"/plugin/aiqt-guardrails-hooks/hooks/scripts/'
+                    'aiqt_hooks.py gensrc_guard')
+        want = {"hooks": {"PreToolUse": [{"matcher": "Edit|Bash", "hooks": [
+            {"type": "command", "command": want_cmd, "timeout": TIMEOUT}]}]}}
+        settings = proj / ".claude" / "settings.json"
+        try:
+            got = json.loads(settings.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            got = "unreadable ({})".format(exc)
+        if got != want:
+            failures.append("project settings: expected {!r}, got {!r}".format(want, got))
+
+        # 17. Drift in, or deletion of, the project settings fails the check (exit 1), and regeneration
+        #     reconciles it: the file is in run()'s desired set, not a write-only side output.
+        if run_project(proj, check=True) != 0:
+            failures.append("project tree: regeneration expected drift-clean exit 0")
+        try:
+            text = settings.read_text(encoding="utf-8")
+            if "python3 -I " not in text:
+                failures.append("project settings setup: no isolated launcher to strip")
+            settings.write_text(text.replace("python3 -I ", "python3 "), encoding="utf-8")
+            if run_project(proj, check=True) != 1:
+                failures.append("drifted project settings expected exit 1")
+            if run_project(proj, check=False) != 0 or run_project(proj, check=True) != 0:
+                failures.append("regeneration after project settings drift expected a clean reconcile")
+            settings.unlink()
+            if run_project(proj, check=True) != 1:
+                failures.append("a deleted project settings file expected exit 1")
+        except OSError as exc:
+            failures.append("project settings drift case: {}".format(exc))
+
+        # 18. build_desired() never carries the project settings: conformance.py C5 reuses it to judge an
+        #     adopter install, which this repository's project wiring must not oblige.
+        try:
+            keys = set(build_desired(proj, proj / ".aiqt" / "core" / "hooks"))
+        except (ValueError, OSError) as exc:
+            keys = set()
+            failures.append("project tree: build_desired expected to succeed: {}".format(exc))
+        if ".claude/settings.json" in keys or PROJECT_SETTINGS_REL in keys:
+            failures.append("build_desired() must not carry the project settings (adopter C5)")
+
+        # 19. A manifest without the project control fails closed (exit 2) under run()'s default, so a
+        #     renamed control cannot silently drop the project wiring.
+        noproj = tmp / "noproj"
+        noproj.mkdir()
+        _build_tree(noproj)
+        _write_marker(noproj)
+        if run_project(noproj, check=True) != 2:
+            failures.append("a manifest without the project control expected exit 2 (fail-closed)")
+
+        # 20. An adopter-shaped tree (the shipped hooks source, no authoring marker): a write run and a check
+        #     run leave an existing adopter .claude/settings.json byte-identical and exit 0, and a tree with
+        #     none gets none (not even .claude/). The cwd is an authoring-shaped tree throughout, so a test
+        #     that read the cwd instead of the generated tree fails here.
+        adopter_bytes = b'{\n  "permissions": {"allow": ["Bash(make test)"]}\n}\n'
+        adopter = tmp / "adopter"
+        adopter.mkdir()
+        _build_project_tree(adopter, authoring=False)
+        (adopter / ".claude").mkdir()
+        (adopter / ".claude" / "settings.json").write_bytes(adopter_bytes)
+        bare = tmp / "adopter-bare"
+        bare.mkdir()
+        _build_project_tree(bare, authoring=False)
+        saved_cwd = os.getcwd()
+        try:
+            os.chdir(proj)
+            for check in (False, True):
+                if run_project(adopter, check=check) != 0:
+                    failures.append("adopter tree (check={}): expected exit 0".format(check))
+                if run_project(bare, check=check) != 0:
+                    failures.append("bare adopter tree (check={}): expected exit 0".format(check))
+        finally:
+            os.chdir(saved_cwd)
+        try:
+            if (adopter / ".claude" / "settings.json").read_bytes() != adopter_bytes:
+                failures.append("an adopter run must leave the adopter .claude/settings.json byte-identical")
+        except OSError as exc:
+            failures.append("an adopter run must never delete the adopter .claude/settings.json ({})".format(
+                exc))
+        if os.path.lexists(bare / ".claude"):
+            failures.append("an adopter run must never create .claude/ or .claude/settings.json")
+        if not (adopter / HOOKS_JSON_REL).is_file():
+            failures.append("adopter tree: the plugin surface must still generate")
+
+        # 21. A present marker that is not exactly the authoring marker fails closed (exit 2) and renders no
+        #     settings: other content, unparseable text, a directory, a symlink to a valid marker (lstat, never
+        #     followed), a FIFO (lstat first, so no open and no hang), an empty file, non-UTF-8 bytes, and a valid
+        #     marker padded one byte over the bound. 21b. The same marker padded to exactly the bound is the
+        #     authoring marker (exit 0, settings rendered), so the bound is not off by one.
+        bad_markers = [("other content", lambda b: _write_marker(b, 'format-version = 1\nrole = "adopter"\n')),
+                       ("a bool format-version", lambda b: _write_marker(
+                           b, 'format-version = true\nrole = "pack-authoring-repository"\n')),
+                       ("unparseable", lambda b: _write_marker(b, "not toml [\n")),
+                       ("a directory", lambda b: (b / ".aiqt" / "authoring.toml").mkdir()),
+                       ("empty", lambda b: _write_marker(b, "")),
+                       ("non-UTF-8", lambda b: (b / ".aiqt" / "authoring.toml").write_bytes(
+                           b"\xff\xfe format-version = 1\n")),
+                       ("one byte over the bound", lambda b: _write_marker(b, _padded_marker(_MARKER_BOUND + 1)))]
+
+        def _plant_link(b):
+            (b / "real-marker.toml").write_text(_MARKER_TEXT, encoding="utf-8")
+            os.symlink(b / "real-marker.toml", b / ".aiqt" / "authoring.toml")
+        bad_markers.append(("a symlink", _plant_link))
+
+        def _plant_fifo(b):
+            if not hasattr(os, "mkfifo"):
+                raise NotImplementedError("no os.mkfifo on this platform")
+            os.mkfifo(str(b / ".aiqt" / "authoring.toml"))
+        bad_markers.append(("a FIFO", _plant_fifo))
+        for i, (label, plant) in enumerate(bad_markers):
+            badm = tmp / "badmarker{}".format(i)
+            badm.mkdir()
+            _build_project_tree(badm, authoring=False)
+            try:
+                plant(badm)
+            except (OSError, NotImplementedError) as exc:
+                skipped.append("marker {} ({})".format(label, exc))
+                continue
+            if run_project(badm, check=False) != 2:
+                failures.append("a marker that is {} expected exit 2 (fail-closed)".format(label))
+            if os.path.lexists(badm / ".claude" / "settings.json"):
+                failures.append("a marker that is {} must not render project settings".format(label))
+        at_bound = tmp / "markerbound"
+        at_bound.mkdir()
+        _build_project_tree(at_bound, authoring=False)
+        _write_marker(at_bound, _padded_marker(_MARKER_BOUND))
+        if run_project(at_bound, check=False) != 0 or not (at_bound / PROJECT_SETTINGS_REL).is_file():
+            failures.append("a valid marker padded to exactly the bound expected exit 0 with project settings")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -670,7 +979,7 @@ def self_test_main():
             print("  - " + failure)
         return 1
     note = ("" if not skipped else
-            " NOTE: skipped {} case(s) the runner cannot exercise (chmod-0 still readable): {}"
+            " NOTE: skipped {} case(s) the runner cannot exercise (chmod-0 still readable, or no symlink): {}"
             .format(len(skipped), ", ".join(skipped)))
     print("SELF-TEST PASS: a conformant manifest generates and regenerates drift-clean; every rendered "
           "launcher runs isolated (args[0] == '-I'); hooks.json "
@@ -679,8 +988,14 @@ def self_test_main():
           "the script, a missing handler script, an unreadable manifest, and a malformed default keyword "
           "all fail closed; the full 'warn' default policy holds across every known event (rejected on "
           "every non-warn event, accepted on every WARN_EVENTS event, plus warn+stage=bake on "
-          "PreToolUse and the SessionStart-cannot-block overclaim); and a Stop hook renders "
-          "byte-identical hooks.json whether its default is 'block' or 'warn'" + note)
+          "PreToolUse and the SessionStart-cannot-block overclaim); a Stop hook renders "
+          "byte-identical hooks.json whether its default is 'block' or 'warn'; and the repository-local "
+          ".claude/settings.json renders one isolated PreToolUse group with the manifest matcher, is "
+          "drift-checked by run(), stays out of build_desired(), and fails closed without its control, "
+          "in the authoring tree only: an adopter-shaped tree never gets, loses or changes a "
+          ".claude/settings.json whatever the cwd, and a malformed authoring marker (a FIFO, an empty, a non-UTF-8 "
+          "and a one-byte-oversize one included) fails closed while one of exactly the size bound is accepted"
+          + note)
     return 0
 
 
