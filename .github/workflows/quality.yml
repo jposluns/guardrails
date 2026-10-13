@@ -702,8 +702,8 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_entry_guard.py
 
-  git-fixture-env:
-    name: Git-fixture-env self-test
+  git-fixture-env-core:
+    name: Git-fixture-env core self-test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -715,9 +715,60 @@ jobs:
         with:
           python-version: '3.14'
 
-      - name: Git-fixture-env behaviour self-test (execution-reconciled)
+      - name: Git-fixture-env core behaviour self-test (execution-reconciled)
         shell: bash
-        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-selftest
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-core
+
+  git-fixture-env-config-combined:
+    name: Git-fixture-env combined config lane
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Git-fixture-env combined config-injection lane (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-combined
+
+  git-fixture-env-config-malformed:
+    name: Git-fixture-env malformed config lane
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Git-fixture-env malformed-config lane (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-malformed
+
+  git-fixture-env-config-system:
+    name: Git-fixture-env system config lane
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Git-fixture-env system-config lane (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-system
 
   registry:
     name: Records, manifest and parity
@@ -961,7 +1012,10 @@ jobs:
       - release
       - generated
       - selftest-execution
-      - git-fixture-env
+      - git-fixture-env-core
+      - git-fixture-env-config-combined
+      - git-fixture-env-config-malformed
+      - git-fixture-env-config-system
       - registry
       - byte-canon-matrix
     runs-on: ubuntu-latest

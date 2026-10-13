@@ -187,14 +187,16 @@ time (splitlines(), the adapter's line split and newline rejoin, and
 Path.read_text()'s universal-newline translation, which turns \r into \n
 before any text screen can see it), so EVERY read of a runner or workflow
 file, in the live check (run_paths), in self-test vector 26, and in
-tools/selftest_git_fixture_env.py's roster and roster checks, goes through
+tools/selftest_git_fixture_env.py's roster and the core runner's
+roster checks, goes through
 the ONE byte-level reader (read_runner_text): the RAW BYTES are screened
 against this same alphabet before any decode, so no decode-layer newline
 translation or multi-byte spelling can erase a forbidden byte ahead of the
 screen, and the accepted bytes are decoded strictly as ASCII, which maps
 each byte to one character and translates no newline. A self-test vector
 pins every read_text or splitlines attribute and every text-mode open()
-call in this file and in tools/selftest_git_fixture_env.py, as spelled,
+call in this file, in tools/selftest_git_fixture_env.py and in its four
+registered suite runners, as spelled,
 against an exact per-function allowlist, so a new read path written
 through those APIs turns the self-test red for review against the reader;
 a read spelled another way (getattr, an alias) is outside that tripwire.
@@ -4864,8 +4866,9 @@ def self_test():
 
     # codex qa10 MAJOR-1 (class closure): every read of runner or workflow
     # text must go through read_runner_text, the ONE byte-level reader.
-    # This structural vector parses this file and
-    # tools/selftest_git_fixture_env.py and pins EVERY read_text or
+    # This structural vector parses this file,
+    # tools/selftest_git_fixture_env.py and its four registered suite
+    # runners and pins EVERY read_text or
     # splitlines attribute and every text-mode open() call, as spelled, to
     # an exact per-function site count, so a new, moved or removed read
     # written through those APIs turns this vector red and forces review
@@ -4949,12 +4952,6 @@ def self_test():
             # inside the allowlist.
             ("_close_lock_sites", "open-text"): 1,
             ("_maintenance_pin_scan", "read_text"): 1,
-            ("_manifest_extra_setup_failures", "read_text"): 1,
-            # The member-timeout control's fixture pid file: no runner text.
-            ("_member_timeout_controls", "read_text"): 1,
-            # The cleanup-failure control's captured diagnostic lines: no runner text.
-            ("_member_timeout_controls", "splitlines"): 1,
-            ("_opf_home_lifecycles", "read_text"): 1,
             # /proc/<pid>/stat, the timeout control's liveness probe.
             ("_pid_state", "open-text"): 1,
             ("_registered_selftests", "splitlines"): 1,
@@ -4968,10 +4965,24 @@ def self_test():
             # disclosed residual applies: the pin is the per-function count
             # of text-mode open() calls, not the read target.
             ("_sweep_call_sites", "open-text"): 1,
-            ("_system_pin_checks", "read_text"): 1,
             ("_system_pin_probe", "splitlines"): 1,
             ("prepare", "read_text"): 1,
             ("run", "splitlines"): 1,
+        },
+        "tools/selftest_git_fixture_env_core.py": {
+            ("_manifest_extra_setup_failures", "read_text"): 1,
+            # The member-timeout control's fixture pid file: no runner text.
+            ("_member_timeout_controls", "read_text"): 1,
+            # The cleanup-failure control's captured diagnostic lines: no runner text.
+            ("_member_timeout_controls", "splitlines"): 1,
+            ("_system_pin_checks", "read_text"): 1,
+        },
+        # The two poison-only lanes spell no read_text, splitlines or text-mode open() site;
+        # a first one added there drifts from this empty allowlist and forces review.
+        "tools/selftest_git_fixture_env_config_combined.py": {},
+        "tools/selftest_git_fixture_env_config_malformed.py": {},
+        "tools/selftest_git_fixture_env_config_system.py": {
+            ("_opf_home_lifecycles", "read_text"): 1,
         },
     }
     for relative, allowed in sorted(allowed_read_sites.items()):
