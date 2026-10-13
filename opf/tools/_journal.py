@@ -421,14 +421,17 @@ def _fsync_contained_dir(pfd, name):
 
 def ensure_journal_dirs(root_fd, journal_rel):
     """J1 (journal-hierarchy crash durability): create every missing component of journal_rel beneath
-    root_fd, CONTAINED (an O_DIRECTORY|O_NOFOLLOW walk, mkdirat), fsyncing each newly-created directory's
-    PARENT fd immediately after creating it, so the COMPLETE journal hierarchy is durable BEFORE any INTENT
-    or apply begins. Without the per-parent fsync a power loss could make an applied tree mutation durable
-    (apply_ops fsyncs each touched file AND its parent) while the never-fsynced journal subtree is lost, so
-    a fresh recover would find no journal and falsely report 'nothing to recover' for a transaction whose
-    tree mutation had already begun. Idempotent: an already-present component is descended into, not
-    re-created (its durability was established when it was made). A symlinked or non-directory component
-    fails closed (JournalError), consistent with the engine's no-follow containment idiom."""
+    root_fd, CONTAINED (an O_DIRECTORY|O_NOFOLLOW walk, mkdirat), fsyncing each component's PARENT fd
+    on EVERY call, for a component that was already present as well as one this call creates, so the
+    COMPLETE journal hierarchy is durable BEFORE any INTENT or apply begins and a retry repairs an
+    earlier attempt interrupted between a mkdir and its parent fsync: that component exists, but its
+    entry was never made durable, so presence cannot stand in for durability. Without the per-parent
+    fsync a power loss could make an applied tree mutation durable (apply_ops fsyncs each touched file
+    AND its parent) while the never-fsynced journal subtree is lost, so a fresh recover would find no
+    journal and falsely report 'nothing to recover' for a transaction whose tree mutation had already
+    begun. Idempotent in effect: an already-present component is descended into, not re-created, and
+    its parent entry is flushed again. A symlinked or non-directory component fails closed
+    (JournalError), consistent with the engine's no-follow containment idiom."""
     parts = _check_rel(journal_rel)
     cur = root_fd
     opened = []
@@ -438,13 +441,13 @@ def ensure_journal_dirs(root_fd, journal_rel):
                 nfd = os.open(comp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=cur)
             except FileNotFoundError:
                 os.mkdir(comp, 0o777, dir_fd=cur)             # create the single missing component
-                os.fsync(cur)                                 # J1: its entry durable in the PARENT first
                 nfd = os.open(comp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=cur)
             except OSError as exc:
                 raise JournalError("cannot open/create journal component {!r} of {!r} ({})"
                                    .format(comp, journal_rel, exc))
             opened.append(nfd)
-            cur = nfd
+            os.fsync(cur)                                 # J1: the entry durable in the PARENT on EVERY
+            cur = nfd                                     # call: a retry repairs an interrupted attempt
     finally:
         for fd in opened:
             _close_fd_quietly(fd)                         # guarded: a raising close never aborts the rest

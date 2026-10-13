@@ -872,11 +872,17 @@ prior ancestry. Only a genuinely first adoption MAY start its counters at zero.
 At homes 2 the claim additionally begins with one irrevocable reservation,
 `journals/<kind>/allocations/<run-id>.toml` (sections 4.2 and 8.8), which MUST hold exactly
 `format = "opf.journal.allocation/v1"`, the run's `kind`, `run_id` and `operation_id`, and a
-non-empty `[claims]` table mapping each claimed namespace to that run's new high-water value.
-A reservation MUST NOT be rewritten, and a second reservation for the same run MUST be
-refused. At homes 2 the next ID in a namespace is one more than the maximum of the
-`counters.toml` high-water and every reservation's `[claims]` value for that namespace, so
-recovery MUST treat a reserved number as issued even where no published record carries it.
+non-empty `[claims]` table mapping each claimed counter key, a record namespace or, for a run of
+the import engine, a quoted imported-series `"imported:<NS>"` key, to that run's new high-water
+value, an integer of at least 1 and at most `2**63 - 1` so every conforming TOML reader can parse
+it. A reservation MUST NOT be rewritten, and a reservation request finding an existing entry for
+the same run MUST be refused unless the entry reads back byte-identical to the exact payload the
+request would publish, in which case the request MUST re-establish the entry's durability before
+relying on it; a refusal is not evidence that the run holds its numbers. The next-ID derivation
+applies per series key: at homes 2 the next ID under a counter key, the clean `<NS>` and quoted
+`"imported:<NS>"` number lines independently, is one more than the maximum of the `counters.toml`
+high-water and every reservation's `[claims]` value for that counter key, so recovery MUST treat
+a reserved number as issued even where no published record carries it.
 
 ### 8.3 The record envelope
 

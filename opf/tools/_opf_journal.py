@@ -12,7 +12,6 @@ fork while using the capability. Homes 2 has no homes migration and no legacy jo
 """
 import contextlib
 import os
-import re
 import stat
 from pathlib import Path
 
@@ -20,6 +19,7 @@ import _journal
 import _opf_emit
 import _opf_init_substrate
 import _opf_oplock
+import _opf_schema
 import _opf_store
 
 
@@ -42,8 +42,10 @@ def _check_ordinary_ops(ops):
 def _held_root(cap):
     """Validate the held capability (the shared open discipline of every store-journal entry point:
     a live, unclaimed OpCapability whose store identity still matches) and yield the trusted
-    store-root fd. Validation and open failures map to the one "cannot open store journal" refusal;
-    a failure the caller raises inside the yield propagates unchanged."""
+    store-root fd. A capability-state refusal (not an OpCapability, being released or used, no
+    longer live) raises its own message; an OSError or StoreError from the identity re-check or
+    the root open maps to the one "cannot open store journal" refusal; a failure the caller raises
+    inside the yield propagates unchanged."""
     if not isinstance(cap, _opf_oplock.OpCapability):
         raise _journal.JournalError("store journal access requires a held OpCapability")
     if not cap._claim.acquire(blocking=False):
@@ -247,21 +249,38 @@ def recover_transaction(cap, kind, run_id):
 
 # --- irrevocable ID reservations (homes plan PR-3): the homes-2 allocation seam's durable half ----------
 # One journals/<kind>/allocations/<run-id>.toml per run (spec 4.2/8.2), created BEFORE the reversible
-# journaled publication, never read back, rewritten or removed here, whatever the run's outcome.
+# journaled publication and never rewritten, whatever the run's outcome. It is read back on exactly
+# one path: a retry that finds the entry present judges it against the exact payload it would
+# publish. A failure inside publication (a failed directory fsync included) removes the just-linked
+# entry, leaving no reservation rather than a non-durable one.
 # Inert until the record writer connects to it: no shipped caller reserves yet.
 
 ALLOCATION_FORMAT = "opf.journal.allocation/v1"
-_CLAIM_NAMESPACE_RE = re.compile(r"[A-Z]{2}\Z")
+# The kinds whose runs may claim the imported series (spec 8.2): the import engine's kinds. Import
+# and ingest share the import engine's grammar (_opf_store); adoption seeds counters rather than
+# reserving, and every kind claims the clean series.
+_IMPORTED_SERIES_KINDS = frozenset(("import", "ingest"))
+# A claim value is a counters.toml high-water (spec 8.2): a TOML integer, so at most 2**63 - 1; a
+# larger emitted value would be unreadable by a conforming non-Python TOML reader.
+_CLAIM_VALUE_MAX = 2 ** 63 - 1
 
 
-def _check_claims(claims):
-    """Validate a reservation's claims purely (spec 8.2): a non-empty map of namespace (two uppercase
-    ASCII letters) to that run's new high-water value (an int >= 1; a bool is not an int here)."""
+def _check_claims(kind, claims):
+    """Validate a reservation's claims purely (spec 8.2): a non-empty map of counter key to that
+    run's new high-water value (an int in 1.._CLAIM_VALUE_MAX; a bool is not an int here). The
+    admitted keys are exactly the counter keys the store's counter grammar admits for the reserving
+    kind, judged through the one shared key validator (_opf_schema._is_counter_key, never a second
+    regex): every record namespace, plus the quoted imported-series "imported:<NS>" keys when
+    `kind` is an import-engine kind. `kind` was validated by the caller's _validate_identity."""
+    imported = kind in _IMPORTED_SERIES_KINDS
     if (not isinstance(claims, dict) or not claims
-            or not all(isinstance(ns, str) and _CLAIM_NAMESPACE_RE.fullmatch(ns) is not None
-                       and type(n) is int and n >= 1 for ns, n in claims.items())):
-        raise _journal.JournalError("id reservation claims must be a non-empty map of namespace "
-                                    "([A-Z]{2}) to the run's new high-water (an integer >= 1)")
+            or not all(_opf_schema._is_counter_key(ns, imported)
+                       and type(n) is int and 1 <= n <= _CLAIM_VALUE_MAX
+                       for ns, n in claims.items())):
+        raise _journal.JournalError(
+            "id reservation claims must be a non-empty map of counter key (a record namespace, "
+            "plus a quoted \"imported:<NS>\" key for an import-engine kind) to the run's new "
+            "high-water (an integer >= 1 and at most 2**63 - 1, TOML's integer range)")
 
 
 def reservation_record(kind, run_id, operation_id, claims):
@@ -270,7 +289,7 @@ def reservation_record(kind, run_id, operation_id, claims):
     _validate_identity(kind, run_id)
     if not isinstance(operation_id, str) or not operation_id:
         raise _journal.JournalError("an id reservation requires a non-empty operation id")
-    _check_claims(claims)
+    _check_claims(kind, claims)
     return dict(format=ALLOCATION_FORMAT, kind=kind, run_id=run_id, operation_id=operation_id,
                 claims=dict(sorted(claims.items())))
 
@@ -278,6 +297,47 @@ def reservation_record(kind, run_id, operation_id, claims):
 def reservation_payload(kind, run_id, operation_id, claims):
     """The canonical reservation bytes the writer publishes; a reader requires exact equality."""
     return _opf_emit.emit_checked(reservation_record(kind, run_id, operation_id, claims)).encode("utf-8")
+
+
+def _existing_reservation(pfd, name, kind, run_id, payload):
+    """Judge the entry already at the reservation's final name against the payload THIS call would
+    publish, through a non-blocking, regular-file-checked read beneath the same parent handle.
+    Byte-equal content is the completed reservation of an earlier attempt of this very call: the
+    containing directory is fsynced again (the earlier attempt may have been killed after its link
+    but before its directory flush, so presence alone does not establish durability) and the
+    payload returned. Different bytes, a non-regular entry, and an unreadable entry each refuse
+    with their own message. A refusal is NEVER evidence that the run holds its numbers; only the
+    read-back reservation bytes are."""
+    try:
+        # O_NONBLOCK so a non-regular entry (e.g. a FIFO) returns at once instead of blocking on a
+        # writer-less open; the fstat below then refuses it (mirrors _journal._read_at).
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=pfd)
+    except OSError as exc:
+        raise _journal.JournalError("cannot read back the existing {} id reservation for {} "
+                                    "({})".format(kind, run_id, exc))
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise _journal.JournalError("the {} id reservation name for {} is bound to a "
+                                        "non-regular entry; refusing (manual intervention "
+                                        "required)".format(kind, run_id))
+        try:
+            existing = _journal._read_fd(fd, cap=_journal._MAX_PRODUCT_READ_BYTES)
+        except _journal.JournalError as exc:
+            raise _journal.JournalError("cannot read back the existing {} id reservation for {} "
+                                        "({})".format(kind, run_id, exc))
+    finally:
+        _journal._close_fd_quietly(fd)
+    if existing != payload:
+        raise _journal.JournalError(
+            "the {} id reservation for {} already exists with different content; a reservation is "
+            "irrevocable and never rewritten, and this refusal does not establish that the run "
+            "holds the requested numbers (spec 8.2)".format(kind, run_id))
+    try:
+        os.fsync(pfd)
+    except OSError as exc:
+        raise _journal.JournalError("cannot fsync the directory of the existing {} id reservation "
+                                    "for {} ({})".format(kind, run_id, exc))
+    return payload
 
 
 def reserve_allocation(cap, kind, run_id, claims):
@@ -288,11 +348,13 @@ def reserve_allocation(cap, kind, run_id, claims):
     staging name, linked exclusively to the final name, the staging name retired and the directory
     fsynced, so a process killed at ANY point leaves either no reservation or the complete durable
     one, plus at most a staging leftover the next attempt removes as garbage under the held
-    capability before judging the final name. Any existing entry at the reservation path, the prior
-    complete reservation included, refuses: a reservation is irrevocable, so a refused retry means
-    the run already holds its numbers. Returns the published payload bytes."""
+    capability before judging the final name. An entry already at the reservation path is judged by
+    _existing_reservation: the byte-identical payload of an earlier attempt of this call is answered
+    idempotently (the directory fsynced again, the payload returned); different bytes, a non-regular
+    entry, or an unreadable entry refuses, naming which. A refusal is NEVER evidence that the run
+    holds its numbers; only the returned payload bytes are. Returns the published payload bytes."""
     _validate_identity(kind, run_id)
-    _check_claims(claims)
+    _check_claims(kind, claims)
     rel = _opf_store.allocation_record(kind, run_id)
     with _held_root(cap) as root_fd:
         payload = reservation_payload(kind, run_id, cap.op_id, claims)
@@ -305,16 +367,22 @@ def reserve_allocation(cap, kind, run_id, claims):
                 raise _journal.JournalError("cannot open store journal: {}".format(exc))
             try:
                 # Garbage first, so a leftover killed after its os.link (link count 2, the complete
-                # record's second name) is retired before the final name is judged; the refusal
-                # below then reads the surviving reservation like any other existing one.
+                # record's second name) is retired before the final name is judged; the read-back
+                # below then judges the surviving reservation like any other existing one.
                 _opf_oplock._remove_staging_garbage(pfd, name, "id reservation")
                 if _journal._lstat_at(pfd, name) is not None:
-                    raise _journal.JournalError("the {} id reservation for {} already exists; a "
-                                                "reservation is irrevocable and never rewritten "
-                                                "(spec 8.2)".format(kind, run_id))
+                    return _existing_reservation(pfd, name, kind, run_id, payload)
                 fd, _ident = _opf_oplock._create_control_file(pfd, name, payload, "id reservation")
                 os.close(fd)
             except _opf_oplock.OpLockError as exc:
+                if isinstance(exc.__cause__, FileExistsError):
+                    # The final name appeared between the existence check and the exclusive link,
+                    # unreachable under the held capability's single-writer discipline: refuse with
+                    # the reservation's own meaning, never the oplock anchor-recovery advice, and
+                    # leave judging the entry to a retry's read-back.
+                    raise _journal.JournalError(
+                        "the {} id reservation for {} appeared during publication; a retry judges "
+                        "the existing entry against its own payload (spec 8.2)".format(kind, run_id))
                 raise _journal.JournalError(str(exc))
             except OSError as exc:
                 raise _journal.JournalError("store journal operation failed: {}".format(exc))
