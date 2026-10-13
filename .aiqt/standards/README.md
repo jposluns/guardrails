@@ -53,7 +53,10 @@ residual are in the docstring of `tools/check_cited_standards.py`.
   fails if that corpus stops covering the rule files or a member `opf/prompt-pack/pack.toml` lists (the
   pack manifest is validated by its owning validator, `opf/tools/check_opf_prompt_pack.py`), or if either
   runner's gate line is not exactly `--config .aiqt/cited-standards.toml` with nothing added; without
-  `--config` the gate scans the rule files alone. It prints
+  `--config` the gate scans the rule files alone. The config and the two repository-only `.github`
+  contract scripts (`check_cited_standards_contract.py` and `check_newtab_contract.py`) are tracked, not
+  shipped: in a tree without them the cited-standards gate line and the two contract gate lines exit 2
+  (cannot evaluate) and the shipped `tools/run_all_checks.sh` then ends `RESULT: FAIL`. The gate prints
   its residual on every run, the self-test and a usage error included; a clean result is not a complete
   enumeration of the standards the prose names.
 

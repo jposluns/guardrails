@@ -675,7 +675,10 @@ jobs:
       # run without --config keeps the built-in default (the rule files alone). The config and the two .github
       # contract scripts are not shipped, so in a tree without them this gate, the newtab contract and the
       # cited-standards contract gate lines all exit 2 (cannot evaluate), and the shipped tools/run_all_checks.sh
-      # there ends RESULT: FAIL.
+      # there ends RESULT: FAIL. The repository contract above pins the whole invocation of this gate line
+      # (--config .aiqt/cited-standards.toml and nothing else, so an appended --root or any other extra
+      # argument is a finding even when both runners carry the same drifted line) and validates pack.toml
+      # with its owning validator, opf/tools/check_opf_prompt_pack.py, imported and never re-implemented.
       - name: Cited standards
         run: python3 -I -B tools/check_cited_standards.py --config .aiqt/cited-standards.toml
 

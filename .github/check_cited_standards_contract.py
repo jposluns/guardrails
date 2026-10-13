@@ -12,19 +12,32 @@ grammar already pins the launcher words), is exactly the one permitted invocatio
 tools/check_cited_standards.py --config .aiqt/cited-standards.toml, with nothing added, so an appended
 --root or any other extra argument is a finding even when both runners carry the same drifted line.
 pack.toml is validated by its owning validator (opf/tools/check_opf_prompt_pack.py, imported, never
-re-implemented); a pack that validator refuses, a missing or malformed config or runner, or a corpus glob
-the gate cannot expand, is cannot-evaluate (exit 2). The no-corpus-line finding is a clearer-message
+re-implemented); a pack that validator refuses, a missing or malformed config or runner, a corpus glob
+the gate cannot expand, a pack.toml re-read that fails after validation, an argument list other than
+none or --self-test alone (a usage error), an unexpected exception while the check runs, or an import
+failure of a collaborator module (guarded at module level, so a renamed collaborator symbol exits 2,
+never a traceback exit 1), is cannot-evaluate (exit 2). The no-corpus-line finding is a clearer-message
 duplicate: with that check removed, the member reconciliation below still fails on the built-in default
 corpus; it is kept because its message names the fallback.
 
---self-test (registered in both runners) runs fixture vectors for every finding and every cannot-evaluate
-path above, including the --root redirect regression, so an edit that disables one of these checks is red.
+--self-test (registered in both runners) drives the real entry point, main, over fixture vectors and
+asserts main's exit code and its diagnostics for every finding and every cannot-evaluate path above:
+among them the --root redirect regression, the mixed cases (the permitted line plus a forbidden one, in
+each runner alone and in both), a self-test line with extra arguments (live, never excluded), the
+workflow-side extraction diagnostic, the post-validation pack.toml re-read failure (the owning validator
+stubbed to accept: in production both reads see the same bytes, so only a race reaches that handler),
+the usage error, the unexpected-exception backstop and, in a fresh process over a scratch copy whose
+stub collaborators rename validate_pack away, the import-time guard; an edit that disables one of these
+checks, or routes a failing branch of main to exit 0, is red.
 This guards declaration and wiring drift, not environment overrides, a member the gate scans and reads
 short, or the content of recorded exclusions. Removing this contract (or its self-test, or the newtab
 contract) from both runners together is a missing-mandatory finding in tools/check_ci_parity.py.
 """
+import contextlib
 import hashlib
+import io
 import os
+import subprocess
 import sys
 import tempfile
 import tomllib
@@ -33,10 +46,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(1, str(ROOT / "opf" / "tools"))
-from check_cited_standards import CannotEvaluate, expand_corpus, load_config  # noqa: E402
-from check_ci_parity import (  # noqa: E402
-    EXPECTED_RUN_GATE_BODY, extract_ci, extract_local, read_runner_text)
-from check_opf_prompt_pack import PACK_FORMAT, VALID, compute_digest, validate_pack  # noqa: E402
+try:
+    from check_cited_standards import CannotEvaluate, expand_corpus, load_config  # noqa: E402
+    from check_ci_parity import (  # noqa: E402
+        EXPECTED_RUN_GATE_BODY, extract_ci, extract_local, read_runner_text)
+    from check_opf_prompt_pack import PACK_FORMAT, VALID, compute_digest, validate_pack  # noqa: E402
+except Exception as exc:  # noqa: BLE001  an unimportable collaborator is cannot-evaluate, never a finding
+    print("error: cited-standards repository contract: cannot evaluate: cannot import a collaborator "
+          "module ({!r})".format(exc), file=sys.stderr)
+    sys.exit(2)
 
 CONFIG = ".aiqt/cited-standards.toml"
 PACK = "opf/prompt-pack"
@@ -203,8 +221,58 @@ def _decoy_redirect(root):
     _both_runners("--config {} --root decoy".format(CONFIG))(root)
 
 
+def _mixed_runners(local_mixed, ci_mixed):
+    """codex PR #520 round 3 MEDIUM: the permitted line PLUS a forbidden --root line, in one runner
+    alone or in both; a loop that checks only the first extracted member accepts these."""
+    forbidden = "--config {} --root decoy".format(CONFIG)
+
+    def build(root):
+        local_lines = ['run_gate "cited-standards-selftest" python3 -I -B {} --self-test'.format(GATE),
+                       'run_gate "cited-standards" python3 -I -B {} --config {}'.format(GATE, CONFIG)]
+        if local_mixed:
+            local_lines.append(
+                'run_gate "cited-standards-decoy" python3 -I -B {} {}'.format(GATE, forbidden))
+        ci_lines = ["      - name: Cited standards self-test",
+                    "        run: python3 -I -B {} --self-test".format(GATE),
+                    "      - name: Cited standards",
+                    "        run: python3 -I -B {} --config {}".format(GATE, CONFIG)]
+        if ci_mixed:
+            ci_lines += ["      - name: Cited standards decoy",
+                         "        run: python3 -I -B {} {}".format(GATE, forbidden)]
+        _write(root / "tools/run_all_checks.sh", _local_runner(gate_lines=tuple(local_lines)))
+        _write(root / ".github/workflows/quality.yml", _ci_runner(gate_lines=tuple(ci_lines)))
+    return build
+
+
+def _selftest_line_with_extras(root):
+    """claude PR #520 round 3 MINOR: only the EXACT self-test line is excluded; a line that merely
+    carries --self-test plus more arguments is live, compared, and found not permitted, so widening
+    the exclusion to any line carrying --self-test goes red."""
+    extras = "--self-test --root decoy"
+    _write(root / "tools/run_all_checks.sh", _local_runner(gate_lines=(
+        'run_gate "cited-standards-selftest" python3 -I -B {} --self-test'.format(GATE),
+        'run_gate "cited-standards" python3 -I -B {} --config {}'.format(GATE, CONFIG),
+        'run_gate "cited-standards-decoy" python3 -I -B {} {}'.format(GATE, extras))))
+    _write(root / ".github/workflows/quality.yml", _ci_runner(gate_lines=(
+        "      - name: Cited standards self-test",
+        "        run: python3 -I -B {} --self-test".format(GATE),
+        "      - name: Cited standards",
+        "        run: python3 -I -B {} --config {}".format(GATE, CONFIG),
+        "      - name: Cited standards decoy",
+        "        run: python3 -I -B {} {}".format(GATE, extras))))
+
+
+def _workflow_extraction_diagnostic(root):
+    """claude PR #520 round 3 MINOR: an extraction diagnostic on the WORKFLOW side alone (the
+    local-runner vector cannot discriminate a workflow-only disable): an unsupported step key."""
+    _write(root / ".github/workflows/quality.yml", _ci_runner(gate_lines=(
+        "      - name: Cited standards",
+        "        run: python3 -I -B {} --config {}".format(GATE, CONFIG),
+        "        working-directory: decoy")))
+
+
 def _vectors():
-    """(name, mutate(root), want code, needle in the findings and errors, wanted needle hits)."""
+    """(name, mutate(root), want exit code of main, needle in main's stderr, wanted needle hits)."""
     return (
         ("valid corpus and wiring", lambda root: None, 0, None, None),
         ("config missing", lambda root: os.remove(root / CONFIG), 2,
@@ -249,11 +317,22 @@ def _vectors():
          1, "permitted invocation", 2),
         ("--root opf appended in both runners", _both_runners("--config {} --root opf".format(CONFIG)),
          1, "permitted invocation", 2),
+        ("workflow-side extraction diagnostic", _workflow_extraction_diagnostic,
+         2, "cannot extract the gates of .github/workflows/quality.yml", None),
+        ("self-test line with extra arguments is live, not excluded", _selftest_line_with_extras,
+         1, "permitted invocation", 2),
+        # codex PR #520 round 3 MEDIUM: the permitted line plus a forbidden one, per runner and both.
+        ("permitted line plus a forbidden --root line in the local runner alone",
+         _mixed_runners(True, False), 1, "permitted invocation", 1),
+        ("permitted line plus a forbidden --root line in the workflow alone",
+         _mixed_runners(False, True), 1, "permitted invocation", 1),
+        ("permitted line plus a forbidden --root line in both runners",
+         _mixed_runners(True, True), 1, "permitted invocation", 2),
     )
 
 
 def self_test():
-    """Fixture vectors for each finding and each cannot-evaluate path; harness errors are exit 2."""
+    """Entry-point fixture vectors for each finding and cannot-evaluate path; harness errors are 2."""
     try:
         return _self_test_vectors()
     except Exception as exc:  # noqa: BLE001  fail-closed backstop, never a false 0
@@ -262,41 +341,172 @@ def self_test():
         return 2
 
 
+def _run_main(root, argv=()):
+    """Run the real entry point, main, capturing its exit code, its stdout and its stderr."""
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        code = main(list(argv), root=root)
+    return code, out.getvalue(), err.getvalue()
+
+
+def _case_problems(code, stdout_text, stderr_text, want_code, needle, want_hits):
+    """The assertions every vector shares: main's exit code, its stderr lines, its PASS line."""
+    lines = stderr_text.splitlines()
+    hits = len([line for line in lines if needle in line]) if needle else 0
+    problems = []
+    if code != want_code:
+        problems.append("main returned {}, expected {}".format(code, want_code))
+    if needle is not None and hits == 0:
+        problems.append("no stderr line carries {!r}".format(needle))
+    if want_hits is not None and hits != want_hits:
+        problems.append("{!r} carried by {} stderr line(s), expected {}".format(needle, hits, want_hits))
+    if want_code == 0 and "PASS: cited-standards repository contract:" not in stdout_text:
+        problems.append("stdout lacks the contract PASS line")
+    if want_code != 0 and "PASS: cited-standards repository contract:" in stdout_text:
+        problems.append("stdout carries the contract PASS line despite exit {}".format(want_code))
+    return problems, lines
+
+
+class _ExplodingRoot:
+    """A root whose first use raises, so main's fail-closed backstop must catch and return 2."""
+
+    def __truediv__(self, other):
+        raise RuntimeError("contract self-test: synthetic unexpected error")
+
+
+def _accept_any_pack(_pack_dir):
+    """The re-read vector's stub owning validator: accept whatever pack.toml is on disk."""
+    return (VALID, "members", "stubbed by the contract self-test")
+
+
+_STUB_CITED = (
+    "class CannotEvaluate(Exception):\n"
+    "    pass\n"
+    "\n"
+    "\n"
+    "def expand_corpus(root, globs):\n"
+    "    return []\n"
+    "\n"
+    "\n"
+    "def load_config(path):\n"
+    "    return (), ()\n")
+
+_STUB_PARITY = (
+    "EXPECTED_RUN_GATE_BODY = ()\n"
+    "\n"
+    "\n"
+    "def extract_ci(text):\n"
+    "    raise AssertionError('unused in the import-failure vector')\n"
+    "\n"
+    "\n"
+    "def extract_local(text):\n"
+    "    raise AssertionError('unused in the import-failure vector')\n"
+    "\n"
+    "\n"
+    "def read_runner_text(path, source, reader=None):\n"
+    "    raise AssertionError('unused in the import-failure vector')\n")
+
+# validate_pack is deliberately renamed away, so importing it from this stub must fail.
+_STUB_PACK = (
+    "PACK_FORMAT = 'opf.prompt-pack/v1'\n"
+    "VALID = 'VALID'\n"
+    "\n"
+    "\n"
+    "def compute_digest(version, rows):\n"
+    "    return ''\n"
+    "\n"
+    "\n"
+    "def validate_pack_renamed(pack_dir):\n"
+    "    raise AssertionError('renamed away by the import-failure vector')\n")
+
+
+def _import_failure_process(root):
+    """claude PR #520 round 3 MINOR: a fresh process over a scratch copy of this script beside stub
+    collaborator modules whose owning validator renames validate_pack away; the copy's module-level
+    import fails, and the import guard must exit 2 with the cannot-evaluate message, never a
+    traceback exit 1."""
+    script = root / ".github" / "check_cited_standards_contract.py"
+    _write(script, Path(__file__).resolve().read_text(encoding="utf-8"))
+    _write(root / "tools" / "check_cited_standards.py", _STUB_CITED)
+    _write(root / "tools" / "check_ci_parity.py", _STUB_PARITY)
+    _write(root / "opf" / "tools" / "check_opf_prompt_pack.py", _STUB_PACK)
+    return subprocess.run([sys.executable, "-I", "-B", str(script)],
+                          capture_output=True, text=True, timeout=120)
+
+
 def _self_test_vectors():
+    global validate_pack
     failures = []
     count = 0
+
+    def record(name, problems, lines):
+        nonlocal count
+        count += 1
+        print("{} {}".format("PASS" if not problems else "FAIL", name))
+        if problems:
+            failures.append("{}: {}; lines: {!r}".format(name, "; ".join(problems), lines))
+
     with tempfile.TemporaryDirectory(prefix="cited-standards-contract-selftest-") as tmp:
         for index, (name, mutate, want_code, needle, want_hits) in enumerate(_vectors()):
             root = Path(tmp) / "case{}".format(index)
             _build_tree(root)
             mutate(root)
-            findings, errors = evaluate_root(root)
-            code = 2 if errors else 1 if findings else 0
-            lines = errors + findings
-            hits = len([line for line in lines if needle in line]) if needle else 0
-            problems = []
-            if code != want_code:
-                problems.append("code {}, expected {}".format(code, want_code))
-            if needle is not None and hits == 0:
-                problems.append("no finding or error carries {!r}".format(needle))
-            if want_hits is not None and hits != want_hits:
-                problems.append("{!r} carried by {} line(s), expected {}".format(
-                    needle, hits, want_hits))
-            count += 1
-            print("{} {}".format("PASS" if not problems else "FAIL", name))
-            if problems:
-                failures.append("{}: {}; lines: {!r}".format(name, "; ".join(problems), lines))
+            code, out_text, err_text = _run_main(root)
+            problems, lines = _case_problems(code, out_text, err_text, want_code, needle, want_hits)
+            record(name, problems, lines)
+
+        # main's usage-error path: any argument list other than none or --self-test alone is 2.
+        for name, argv in (
+                ("usage error: an unknown argument", ("--root", "decoy")),
+                ("usage error: --self-test with an extra argument", ("--self-test", "decoy"))):
+            code, out_text, err_text = _run_main(Path(tmp), argv=argv)
+            problems, lines = _case_problems(code, out_text, err_text, 2, "usage:", None)
+            record(name, problems, lines)
+
+        # main's unexpected-exception backstop: the first use of the root raises.
+        code, out_text, err_text = _run_main(_ExplodingRoot())
+        problems, lines = _case_problems(code, out_text, err_text, 2, "unexpected error", None)
+        record("unexpected exception inside the check is caught and returned as 2", problems, lines)
+
+        # The post-validation pack.toml re-read failure: in production the owning validator and the
+        # re-read see the same bytes, so only a race reaches that handler; the vector stubs the
+        # module-level validate_pack to accept while pack.toml is unparseable, restoring it always.
+        root = Path(tmp) / "case-pack-reread"
+        _build_tree(root)
+        _write(root / PACK / "pack.toml", "members = [\n")
+        real_validate_pack = validate_pack
+        validate_pack = _accept_any_pack
+        try:
+            code, out_text, err_text = _run_main(root)
+        finally:
+            validate_pack = real_validate_pack
+        problems, lines = _case_problems(
+            code, out_text, err_text, 2, "cannot read {}/pack.toml".format(PACK), None)
+        record("pack.toml re-read fails after the owning validator accepted it", problems, lines)
+
+        # The import-time guard, in a fresh process over a scratch copy (a renamed collaborator
+        # symbol is cannot-evaluate, never a traceback exit 1).
+        completed = _import_failure_process(Path(tmp) / "case-import-failure")
+        problems = []
+        if completed.returncode != 2:
+            problems.append("fresh process exited {}, expected 2".format(completed.returncode))
+        if "cannot import a collaborator module" not in completed.stderr:
+            problems.append("stderr lacks the cannot-import diagnostic")
+        record("import-time failure of a collaborator is cannot-evaluate (exit 2)",
+               problems, completed.stderr.splitlines())
+
     if failures:
         print("SELF-TEST FAIL ({} of {} contract vector(s)):".format(len(failures), count))
         for failure in failures:
             print("  - " + failure)
         return 1
-    print("SELF-TEST PASS: {} contract vector(s), including the --root redirect "
-          "regression, passed".format(count))
+    print("SELF-TEST PASS: {} contract vector(s), every one driven through main, including the "
+          "--root redirect regression, the mixed permitted-plus-forbidden lines and the usage, "
+          "backstop, re-read and import-failure paths, passed".format(count))
     return 0
 
 
-def main(argv=None):
+def main(argv=None, root=ROOT):
     args = list(sys.argv[1:] if argv is None else argv)
     if args == ["--self-test"]:
         return self_test()
@@ -304,7 +514,7 @@ def main(argv=None):
         print("usage: check_cited_standards_contract.py [--self-test]", file=sys.stderr)
         return 2
     try:
-        findings, errors = evaluate_root(ROOT)
+        findings, errors = evaluate_root(root)
     except Exception as exc:  # noqa: BLE001  fail-closed backstop, never a false 0
         print("error: cited-standards repository contract: unexpected error ({!r}); cannot "
               "evaluate".format(exc), file=sys.stderr)
