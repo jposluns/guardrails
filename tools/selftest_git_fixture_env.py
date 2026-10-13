@@ -1496,15 +1496,28 @@ def _config_injection_lane(base):
 # lane's injected configuration, rebuilt by a copy of that lane's setup code (NOT a call to
 # _config_injection_lane itself), over opf.py, check_opf_record.py --red-on-revert,
 # _opf_adopt_observe.py, check_release_delta.py and check_opf_init.py --self-test plus six shorter
-# opf/tools self-tests, twice (load5 24.02 to 29.29, then 29.29 to 33.68); once over the whole
-# combined roster, 101 members (load5 27.35 to 32.99); and once under the malformed lane's
-# configuration over the same members less its exclusion (load5 30.01 to 32.14). The system lane
-# was NOT measured; these bounds govern its reruns all the same. Every member exited 0 with no
-# hook, fsmonitor or exposure record in every run. Each entry below gives its lane time per run.
-# ESTIMATED: bound = the slowest measured lane time * 20 / 3, rounded up to a multiple of 300 s,
-# applied to every member with a measured or reported time: each member whose formula value
-# exceeds the 1200 s default carries an explicit entry below at that value, and every member
-# without an entry has a measured or reported time whose formula value is at most the default.
+# opf/tools self-tests (_opf_adopt.py, _opf_oplock.py, _opf_init_operation.py,
+# check_opf_upgrade.py, check_opf_homes.py and check_opf_doctor.py), eleven members, twice (load5
+# 24.02 to 29.29, then 29.29 to 33.68); once over the whole combined roster, 101 members (load5
+# 27.35 to 32.99); and once under the malformed lane's configuration over those eleven members
+# less its exclusion, ten members (load5 30.01 to 32.14). Every member exited 0 with no hook,
+# fsmonitor or exposure record in every run. Each entry below gives its lane time per run.
+# NOT MEASURED, though these bounds govern those reruns all the same: the system lane; the
+# malformed lane's configuration for the 89 of its 99 members outside those ten; and the fsmonitor
+# pass's own configuration (fsmonitor set in both config files, ignore and attributes files
+# removed, its four members run one at a time).
+# ESTIMATED: bound = the slowest MEASURED lane time * 20 / 3, rounded up to a multiple of 300 s;
+# the formula value exceeds the 1200 s default exactly when that time exceeds 180 s. REPORTED times
+# (opf.py's 1192 s lane run, and the opf.py and check_opf_record.py lane runs that reached a 1200 s
+# bound) are not fed to the formula; the factor's headroom covers them (below).
+# Roster coverage: the account of the whole-roster run gives a time for 89 of the 101 members.
+# Five took over 180 s and carry the entries below. The other 84 took 180 s or less: nine named
+# here (the six shorter opf/tools self-tests, check_python_floor.py, check_release_cut.py
+# --self-test --red-on-revert and check_selftest_execution.py --suite orch-behaviour-selftest),
+# the slowest 142.55 s; and 75 REPORTED by that account as each 62.42 s or less, with no
+# per-member time and no names given. The remaining 12 roster members have no recorded time (the
+# account does not say which 12 they are), so their default bound is NOT sized from a measurement.
+# For every member, reaching its bound is cannot-evaluate, never a pass.
 # The factor is 40 / 24 * 4. 40 / 24 covers load5 40 under the model that wall time grows in
 # proportion to load5 once load5 exceeds the 24 CPUs, and not below (every measured run had load5
 # above 24 throughout, so this overstates the growth from where it was measured). 4 is headroom for
@@ -1525,14 +1538,14 @@ CONFIG_MEMBER_BOUNDS = {
     # 467.16 s wall and 255.64 s CPU and passed; lane runs of 730 s and 1192 s, and four lane
     # reruns that reached the 1200 s default in config/opf/rc or config/opf/malformed.
     ("opf/tools/opf.py", "--self-test"): 3600,
-    # MEASURED slowest lane time (see SIZING): 265.55 s. ESTIMATED: 265.55 * 20 / 3 = 1770.3, so
-    # 1800 s.
+    # MEASURED lane times (see SIZING): 265.55 s, 259.96 s, 257.71 s (whole roster) and 261.91 s
+    # (malformed). ESTIMATED: 265.55 * 20 / 3 = 1770.3, so 1800 s.
     ("opf/tools/_opf_adopt_observe.py", "--self-test"): 1800,
-    # MEASURED slowest lane time (see SIZING): 243.45 s. ESTIMATED: 243.45 * 20 / 3 = 1623.0, so
-    # 1800 s.
+    # MEASURED lane times (see SIZING): 214.08 s, 243.45 s and 189.62 s (whole roster); the
+    # malformed lane excludes this member. ESTIMATED: 243.45 * 20 / 3 = 1623.0, so 1800 s.
     ("tools/check_release_delta.py", "--self-test"): 1800,
-    # MEASURED slowest lane time (see SIZING): 229.02 s. ESTIMATED: 229.02 * 20 / 3 = 1526.8, so
-    # 1800 s.
+    # MEASURED lane times (see SIZING): 207.87 s, 220.76 s, 229.02 s (whole roster) and 219.70 s
+    # (malformed). ESTIMATED: 229.02 * 20 / 3 = 1526.8, so 1800 s.
     ("opf/tools/check_opf_init.py", "--self-test"): 1800,
 }
 # After the process-group kill: the bounded drain of output still held by a descendant that left
