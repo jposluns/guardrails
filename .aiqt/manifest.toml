@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "9dcba121157bcde6a3140610cae40bb11bb46d935ef1c8340be4880f7bcd5786"
+tree-sha256 = "ff0939763bfe7cb8b61436c486b3f2ee33c26e0dbaa7d2fe20ff17f56db4b136"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3311,8 +3311,8 @@ sha256 = "7c39892ff85304722c9b8f613f6e588d54e1bd33dd96d8b007887bae52b74921"
 
 [[sources]]
 path = "tools/check_entry_guard.py"
-bytes = 140189
-sha256 = "020c8dc5f6916e2fc398cca2239939e1fb05796d8689531a24effc87c7b59596"
+bytes = 147393
+sha256 = "6f2b460910a7eb9e1c71f88f0f0f866930d0a0fc49e01de816faf3bd38bbd5c3"
 
 [[sources]]
 path = "tools/check_footer.py"
