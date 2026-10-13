@@ -54,21 +54,29 @@ complete):
      detector keeps `public` and `path` in the metadata set and stays silent on those two names; CI still
      catches such a secret. A disclosed divergence, not a silent one.
   R5 secrets split across lines, concatenated, encoded, or carried in a binary file (a suffix outside
-     TEXT_SUFFIXES is never read; a suffixless file that is not valid UTF-8 is treated as binary and
-     skipped): unchanged, gitleaks-or-nothing territory. A dotenv or TEXT_SUFFIXES file that is not valid
+     TEXT_SUFFIXES is never read; a suffixless file that is not valid UTF-8 and takes no wide view is
+     treated as binary and skipped): unchanged, gitleaks-or-nothing territory. A dotenv or TEXT_SUFFIXES file that is not valid
      UTF-8 is NOT skipped: it is decoded losslessly and scanned (_read_scan_text). A scan candidate that
-     starts with a UTF-32 byte-order mark and decodes as UTF-32, or that starts with a UTF-16 byte-order
-     mark and has EVEN length, is scanned BOTH through that wide decode AND through the lossless byte
-     view, the findings merged: the UTF-32 marks are tested first because each embeds a UTF-16 one, and
-     the UTF-16 decode uses errors="surrogatepass", so an unpaired surrogate never costs the wide view
-     (PR #530 QA round-3 claude MEDIUM-1 / MINOR-1); almost any even-length byte string takes the UTF-16
-     wide view, so a BOM-prefixed file that actually holds 8-bit or ASCII text keeps the lossless-view
-     coverage it had before the wide views. The merge drops exact duplicates PER REPORTED LINE AND
+     starts with a UTF-32 byte-order mark is ALWAYS scanned through a UTF-32 wide view AND through
+     the lossless byte view, the findings merged: the decode uses errors="surrogatepass", and when
+     that still raises (a scalar above U+10FFFF, or a length that is not a multiple of four) the
+     REPLACE policy decodes the view with errors="replace", each invalid unit a U+FFFD that is
+     neither a word character nor a line break, so a well-formed token elsewhere in the file is
+     still matched (PR #530 QA round-4: the round-3 strict decode lost the whole wide view to one
+     bad unit, and an even-length suffixless UTF-32-BE file fell through to a binary SKIP). The
+     UTF-32 marks are tested before the UTF-16 ones because the little-endian UTF-32 mark begins
+     with the UTF-16-LE mark bytes. A candidate that starts with a UTF-16 byte-order mark and has
+     EVEN length is scanned through the UTF-16 wide view AND the lossless byte view (the decode
+     uses errors="surrogatepass", so an unpaired surrogate never costs that view; round-3 claude
+     MEDIUM-1 / MINOR-1); almost any even-length byte string takes the UTF-16 wide view, so a
+     BOM-prefixed file that actually holds 8-bit or ASCII text keeps the lossless-view coverage it
+     had before the wide views. The merge drops exact duplicates PER REPORTED LINE AND
      LABEL, never per secret: two DIFFERENT tokens that share a path, view-relative line number and
      label (one per view) are ONE reported finding, so the FAIL total counts reported findings, not an
-     inventory of distinct credentials (round-3 claude MINOR-2). Only an odd-length BOM-marked file
+     inventory of distinct credentials (round-3 claude MINOR-2). Only an odd-length UTF-16-marked file
      takes no wide view: with a declared-text suffix it falls back to the lossless byte view, and
-     suffixless it stays binary and is skipped. Two or more stray
+     suffixless it stays binary and is skipped (a UTF-32-marked file keeps its wide view at every
+     length). Two or more stray
      non-ASCII bytes that together form a valid UTF-8 letter decode as that letter, so beside a token they
      break its word boundary and can hide it (the same word-boundary behaviour as in valid UTF-8 text);
      UTF-16 or UTF-32 without a byte-order mark and other non-UTF-8 encodings are not decoded as such, so
@@ -373,16 +381,21 @@ def _read_scan_text(path):
     and 0x85 into a line break). A candidate that is not valid UTF-8 but starts with a byte-order mark
     gets a WIDE view BESIDE the lossless surrogateescape view (a byte view of real UTF-16 or UTF-32
     carries NULs between the ASCII characters, which defeat every pattern); the wide attempt only ever
-    ADDS a view (PR #530 QA round-2 claude MEDIUM-1). The UTF-32 marks are tested FIRST, decided by a
-    successful decode, because each embeds a UTF-16 one (BOM_UTF32_LE begins with the BOM_UTF16_LE
-    bytes), so a UTF-32-LE file is scanned as UTF-32, never mistaken for UTF-16 with a NUL between every
-    two code units in BOTH views (round-3 claude MINOR-1). The UTF-16 decode uses errors="surrogatepass",
-    so a BOM-marked file of EVEN length ALWAYS gets the wide view: an unpaired surrogate decodes to its
-    lone code point (neither a word character nor a line break) instead of costing the whole view and
-    hiding a well-formed UTF-16 token elsewhere in the file (round-3 claude MEDIUM-1). Only an ODD-length
-    UTF-16-marked file yields no wide view; it is judged as any other non-UTF-8 file: a SUFFIXLESS one is
-    treated as binary and skipped, as the existing rule (_is_scan_candidate) defines, and a declared-text
-    one keeps the lossless view."""
+    ADDS a view (PR #530 QA round-2 claude MEDIUM-1). The UTF-32 marks are tested FIRST, decided by the
+    MARK alone, because the little-endian UTF-32 mark BEGINS with the UTF-16-LE mark bytes (the
+    big-endian marks do not overlap), so a UTF-32-marked file is scanned as UTF-32, never as UTF-16
+    with a NUL between every two code units in BOTH views (round-3 claude MINOR-1). The UTF-32 decode
+    uses errors="surrogatepass" (an unpaired surrogate decodes to its lone code point, neither a
+    word character nor a line break); when that still raises, on a scalar above U+10FFFF or a length
+    that is not a multiple of four, the REPLACE policy decodes the view with errors="replace"
+    (round-4: the round-3 strict decode lost the whole wide view to one bad unit, and an even-length
+    suffixless UTF-32-BE file fell through to a binary SKIP), so a UTF-32-marked file ALWAYS keeps
+    its wide view. The UTF-16 decode uses errors="surrogatepass", so a UTF-16-marked file of EVEN
+    length ALWAYS gets the wide view: an unpaired surrogate decodes to its lone code point instead
+    of costing the whole view and hiding a well-formed UTF-16 token elsewhere in the file (round-3
+    claude MEDIUM-1). Only an ODD-length UTF-16-marked file yields no wide view; it is judged as any
+    other non-UTF-8 file: a SUFFIXLESS one is treated as binary and skipped, as the existing rule
+    (_is_scan_candidate) defines, and a declared-text one keeps the lossless view."""
     data = path.read_bytes()
     try:
         return (data.decode("utf-8"),), None
@@ -390,12 +403,16 @@ def _read_scan_text(path):
         pass
     if data[:4] in (codecs.BOM_UTF32_LE, codecs.BOM_UTF32_BE):
         try:
-            return ((data.decode("utf-32"), data.decode("utf-8", errors="surrogateescape")),
-                    "NOTE (UTF-32 byte-order mark: decoded as UTF-32 and also scanned losslessly as "
-                    "bytes; findings merged)")
+            wide32 = data.decode("utf-32", errors="surrogatepass")
         except UnicodeDecodeError:
-            pass  # a length not a multiple of four, or an invalid code point: judged as UTF-16 (the
-            # embedded mark, LE only) or as any other non-UTF-8 file below
+            # surrogatepass still refuses a scalar above U+10FFFF and a length that is not a multiple
+            # of four; REPLACE policy (round-4): each invalid unit becomes U+FFFD, neither a word
+            # character nor a line break, so a well-formed token elsewhere in the file still matches,
+            # where a longest-valid-prefix policy would lose every token after the first bad unit.
+            wide32 = data.decode("utf-32", errors="replace")
+        return ((wide32, data.decode("utf-8", errors="surrogateescape")),
+                "NOTE (UTF-32 byte-order mark: decoded as UTF-32 and also scanned losslessly as "
+                "bytes; findings merged)")
     if data[:2] in (codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE):
         try:
             return ((data.decode("utf-16", errors="surrogatepass"),
@@ -416,8 +433,9 @@ def _is_scan_candidate(path):
     as `.env.local` or `.env.production`, which hold real credentials), has a suffix in TEXT_SUFFIXES, or
     has no suffix at all (an extensionless PEM key like id_rsa). Suffix matching is case-insensitive, so a
     `.PEM` or `.TXT` file scans too. A file whose suffix is NOT in TEXT_SUFFIXES is skipped up front; a
-    suffixless file that is NOT valid UTF-8 (and not UTF-16 with a byte-order mark) is binary: it is read
-    and skipped later (a UTF-8-decodable suffixless file is scanned). A dotenv or TEXT_SUFFIXES file is
+    suffixless file that is NOT valid UTF-8 and takes no wide view (no UTF-32 byte-order mark, and
+    no even-length UTF-16 one) is binary: it is read and skipped later (a UTF-8-decodable suffixless
+    file is scanned). A dotenv or TEXT_SUFFIXES file is
     text by declaration and is scanned even when it is not valid UTF-8 (_read_scan_text). TEXT_SUFFIXES is
     a curated allow-list, so a text format not on it is skipped here and left to gitleaks; add it to
     TEXT_SUFFIXES to cover it."""
@@ -440,8 +458,8 @@ def main(root=None) -> int:
             if not _is_scan_candidate(path):
                 continue
             # A text-by-declaration file with a stray non-UTF-8 byte is scanned (lossless decode); only
-            # a suffixless non-UTF-8 file that did not take the UTF-16 views is binary and skipped
-            # (gitleaks scans binaries).
+            # a suffixless non-UTF-8 file that took no wide view (no UTF-32 mark, no even-length
+            # UTF-16 one) is binary and skipped (gitleaks scans binaries).
             texts, note = _read_scan_text(path)
             if note is not None:
                 print(f"{note}: {path.relative_to(root)}")
@@ -751,6 +769,29 @@ def _self_test() -> int:
         # tested as UTF-32 FIRST (decided by a successful decode), the token is a finding.
         (troot / "u32le.txt").write_bytes(codecs.BOM_UTF32_LE + (_tok.decode("ascii")
                                                                  + "\n").encode("utf-32-le"))
+        # Round-4 UTF-32 vectors (claude MEDIUM-1 / codex MINOR-2; the BE mark pin is round-3
+        # claude MINOR-1). u32be.txt pins the big-endian mark on its own, so an LE-only revert of
+        # the mark test is red. The *_sur* files put a lone surrogate (U+D800) after a well-formed
+        # token: the round-3 STRICT decode dropped the whole wide view on it (the LE file fell
+        # through to the UTF-16 branch, whose views carry a NUL between the characters; the BE file
+        # fell to the lossless byte view; the suffixless BE file became a binary SKIP despite its
+        # EVEN length). u32be_bad.txt ends in a scalar above U+10FFFF and u32le_trunc.txt in a
+        # truncated final unit: surrogatepass still refuses both, so each pins the
+        # errors="replace" fallback.
+        _t32 = _tok.decode("ascii") + "\n"
+        (troot / "u32be.txt").write_bytes(codecs.BOM_UTF32_BE + _t32.encode("utf-32-be"))
+        (troot / "u32le_sur.txt").write_bytes(
+            codecs.BOM_UTF32_LE + _t32.encode("utf-32-le") + b"\x00\xd8\x00\x00")
+        (troot / "u32le_sur_bin").write_bytes(
+            codecs.BOM_UTF32_LE + _t32.encode("utf-32-le") + b"\x00\xd8\x00\x00")
+        (troot / "u32be_sur.md").write_bytes(
+            codecs.BOM_UTF32_BE + _t32.encode("utf-32-be") + b"\x00\x00\xd8\x00")
+        (troot / "u32be_sur_bin").write_bytes(
+            codecs.BOM_UTF32_BE + _t32.encode("utf-32-be") + b"\x00\x00\xd8\x00")
+        (troot / "u32be_bad.txt").write_bytes(
+            codecs.BOM_UTF32_BE + _t32.encode("utf-32-be") + b"\x00\x11\x00\x00")
+        (troot / "u32le_trunc.txt").write_bytes(
+            codecs.BOM_UTF32_LE + _t32.encode("utf-32-le") + b"\x41\x00")
         out = io.StringIO()
         with redirect_stdout(out):
             scan_rc = main(troot)
@@ -794,9 +835,24 @@ def _self_test() -> int:
                                                          # embeds (round-3 claude MINOR-1)
         ("NOTE (UTF-32 byte-order mark: decoded as UTF-32 and also scanned losslessly as bytes; "
          "findings merged): u32le.txt", True),
+        ("  u32be.txt:1: GitHub token", True),          # the UTF-32-BE mark, pinned on its own
+                                                         # (round-3 claude MINOR-1)
+        ("  u32le_sur.txt:1: GitHub token", True),      # lone surrogate after the token:
+                                                         # surrogatepass keeps the UTF-32 wide view
+                                                         # (round-4)
+        ("  u32le_sur_bin:1: GitHub token", True),      # the same, suffixless: text, never a SKIP
+        ("  u32be_sur.md:1: GitHub token", True),       # the same, big-endian, declared text
+        ("  u32be_sur_bin:1: GitHub token", True),      # EVEN length, suffixless, big-endian:
+                                                         # round-3 judged this a binary SKIP
+        ("SKIP (not utf-8, no suffix: treated as binary): u32le_sur_bin", False),
+        ("SKIP (not utf-8, no suffix: treated as binary): u32be_sur_bin", False),
+        ("  u32be_bad.txt:1: GitHub token", True),      # a scalar above U+10FFFF: the replace
+                                                         # fallback keeps the view (round-4)
+        ("  u32le_trunc.txt:1: GitHub token", True),    # a truncated final unit: the replace
+                                                         # fallback keeps the view (round-4)
     ]
-    if "FAIL: 13 possible hardcoded secret(s)" not in scan_out:
-        failures.append("non-UTF-8 scan: expected exactly 13 merged findings (dup16.txt counted once, "
+    if "FAIL: 20 possible hardcoded secret(s)" not in scan_out:
+        failures.append("non-UTF-8 scan: expected exactly 20 merged findings (dup16.txt counted once, "
                         "never per view); output was {!r}".format(scan_out))
     if scan_rc != 1:
         failures.append("non-UTF-8 scan: main() over the fixture root must exit 1, got {}".format(scan_rc))

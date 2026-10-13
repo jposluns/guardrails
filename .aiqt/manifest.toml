@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "f65a98544cff6279301a8800c49cfd5a2ff4c1845f89dc0e1835234c847970e8"
+tree-sha256 = "98a3681b3b65ab45e7686fb0c338527ca4fad3a4a4d756c1dfcb08b4f80fdc56"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -61,8 +61,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 279614
-sha256 = "f99d79d92647b13d3e1caae4dc38c5ec16ba0f88805eb1c7508aa4ba0d10ddbd"
+bytes = 280264
+sha256 = "f5bcee5823faa1151d7948cfba6dd74f725d71b1710a1f2d8a0484fe581ac580"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -801,8 +801,8 @@ sha256 = "c24eca7f5f6af796c69a0796d6f99586bbce90c6b9a11d2e60232f1942440c8c"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 460635
-sha256 = "21637af82bb1028d621d254b3a228b73ac95860bba6603d1d6c55313cee1a295"
+bytes = 461285
+sha256 = "91dc23a8eb3a41d719ec2dab2e52185b83fc321bce3064c78efe7506e865576d"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -2336,8 +2336,8 @@ sha256 = "001c5c3f13e7a7b0bc8c283ca1770545d7ba27cb734eff6517b6c03a868225ee"
 
 [[sources]]
 path = "ENFORCEMENT.md"
-bytes = 266508
-sha256 = "ea2514e47009718f482c1b086c291646cc1364a5c8d1c4e6135fe049dc63835c"
+bytes = 267158
+sha256 = "72247ba8057259366301f3a151c5ef7d7463db476c8a5a09c9e5f561fb9a5979"
 
 [[sources]]
 path = "GEMINI.md"
@@ -3126,8 +3126,8 @@ sha256 = "e5760448ade9fc0d5f59b9a6761e07f5e0e122157379ae7fcc0aa1fc59f0d0c2"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 319224
-sha256 = "7be45e46e69d95439f182f24278f6d577fd3e7e275ec65bd570ea8163612433b"
+bytes = 319874
+sha256 = "57726fb5afaac8616cb9d131cda8b1c02f3e1866b9e317a84349c6ef063e64e1"
 
 [[sources]]
 path = "site/evidence.html"
@@ -3451,8 +3451,8 @@ sha256 = "81b082419ed38e94edb9a8d748b97eeeef31da11fa9b095ecf2468b19b18411e"
 
 [[sources]]
 path = "tools/check_release_delta.py"
-bytes = 492756
-sha256 = "1da6f1eb43870190ef4a86d13184e195a18232413a676987f203a5ae161d6d93"
+bytes = 502047
+sha256 = "dabe1379a4596cf40aa49d7a4b411a5bc3fe0d1ea64a11f7df1c7d082fbb5bc5"
 
 [[sources]]
 path = "tools/check_rule_placement.py"
@@ -3461,8 +3461,8 @@ sha256 = "75ea3e78df3957d87339c2eb3af4d5b614e095f15d9ea2577c840ccf8c70e6b8"
 
 [[sources]]
 path = "tools/check_secrets.py"
-bytes = 54945
-sha256 = "a78ac4a8f8aa02f8f78dcbe7fd1c92a77ebe0d7e3d36e296dc886b8efe8de6a8"
+bytes = 59627
+sha256 = "dfb0a0e0e090e50740c414df86305f3aa60d0c4b59fc898e165dbf697ea002a8"
 
 [[sources]]
 path = "tools/check_selftest_execution.py"
