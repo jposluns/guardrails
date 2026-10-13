@@ -933,85 +933,118 @@ def _proc_is_own():
     return None if link == str(os.getpid()) else "/proc/self reads {!r}, not this pid".format(link)
 
 
-def _descendants(names):
-    """The live descendants of this process among names (the numeric entries of one /proc listing), read as bytes
-    from each /proc/<pid>/stat (the comm field may hold any byte): (found, unknown). found holds every pid whose
-    recorded parent chain reaches this process. unknown names, as (pid, reason), every pid whose ancestry could
-    not be established: its stat was unreadable (as under a restricted /proc) or malformed, or its chain passes
-    through such a pid or loops; such a process may be a descendant, so the scan treats it as a candidate, never
-    as absent. One that exited between the listing and the read holds nothing and is skipped. A pid whose chain
-    ends at a readable pid outside this process (it was reparented away) is neither found nor unknown."""
-    parents, unknown = {}, {}
-    for name in names:
+# The descendant walk is repeated until two consecutive walks return the same set; one still unsettled after
+# this many walks is cannot-evaluate (named), never a partial candidate list.
+SCAN_WALKS = 8
+
+
+def _walk_once(own):
+    """One top-down walk from the process own over /proc/<pid>/task/<tid>/children: (found, problem). found
+    holds every pid reachable from own's tasks through recorded children. problem names, as one reason, a read
+    the walk could not complete: own's task directory unlistable, a discovered pid's task directory unlistable
+    other than by having exited, a children file unreadable or missing while its task directory is still
+    present (a kernel without the children interface included), or a task or children entry that is not a pid;
+    the walk is then no candidate list and the caller treats it as cannot-evaluate, never as a silent skip. A
+    discovered pid whose task directory is gone exited after it was recorded: a live child it had has been
+    reparented (to this child-subreaper process, or to a subreaper below it, itself discovered), so a later
+    walk finds that child; the exited pid stays in found and holds nothing."""
+    found, queue = set(), collections.deque((own,))
+    while queue:
+        pid = queue.popleft()
         try:
-            with open("/proc/{}/stat".format(name), "rb") as handle:
-                data = handle.read()
-            parents[int(name)] = int(data[data.rfind(b")") + 1:].split()[1])
-        except (FileNotFoundError, ProcessLookupError):
+            tasks = os.listdir("/proc/{}/task".format(pid))
+        except (FileNotFoundError, ProcessLookupError) as exc:
+            if pid == own:
+                return found, "/proc/{}/task of this process unlistable ({})".format(pid, exc)
             continue
-        except (OSError, ValueError, IndexError) as exc:
-            unknown[int(name)] = "/proc/{}/stat unreadable or malformed ({!r})".format(name, exc)
-    own, found = os.getpid(), set()
-    for pid in parents:
-        chain, walked = [], pid
-        while (walked in parents and walked not in found and walked not in unknown and walked != own
-               and walked not in chain):
-            chain.append(walked)
-            walked = parents[walked]
-        if walked == own or walked in found:
-            found.update(chain)
-        elif walked in unknown or walked in chain:
-            reason = unknown.get(walked, "parent chain loops at pid {}".format(walked))
-            for linked in chain:
-                unknown.setdefault(linked, "ancestry unresolved through pid {} ({})".format(walked, reason))
-    found.discard(own)
-    return found, sorted(unknown.items())
+        except OSError as exc:
+            return found, "/proc/{}/task unlistable ({})".format(pid, exc)
+        for tid in tasks:
+            if not str(tid).isdigit():
+                return found, "/proc/{}/task holds a non-pid entry {!r}".format(pid, tid)
+            name = "/proc/{}/task/{}/children".format(pid, tid)
+            try:
+                with open(name, "rb") as handle:
+                    data = handle.read()
+            except (FileNotFoundError, ProcessLookupError) as exc:
+                # the task exited, or the children interface is missing: told apart by its directory
+                try:
+                    os.listdir("/proc/{}/task/{}".format(pid, tid))
+                except OSError:
+                    continue
+                return found, "{} missing with its task directory present ({})".format(name, exc)
+            except OSError as exc:
+                return found, "{} unreadable ({})".format(name, exc)
+            for part in data.split():
+                if not part.isdigit():
+                    return found, "{} holds a non-pid entry {!r}".format(name, part)
+                child = int(part)
+                if child != own and child not in found:
+                    found.add(child)
+                    queue.append(child)
+    return found, None
 
 
-def _pipe_writers(dev, ino):
-    """Every process that holds a descriptor linking to the pipe (dev, ino), from a scan of /proc: the candidates
-    _kill_holder binds before it signals, found from the kernel's descriptor tables, never from what any process
-    reported. Returns (holders, unlisted, problem): problem names why the scan could not be made (/proc/self is
-    not this pid, or /proc cannot be listed), and holders and unlisted are then empty. unlisted names, as (pid,
-    reason), every candidate the scan could not complete: a pid whose ancestry could not be established
-    (_descendants), and a live descendant, or such a pid, whose /proc/<pid>/fd could not be listed (a non-dumpable
-    one included) or one of whose descriptor links could not be read for any reason other than the descriptor
-    having closed: such a process may hold the pipe unseen, so the cleanup must evaluate or name it, never clear
-    it; one that exited between the listing and the read is skipped, as it holds nothing. A readable process
-    outside this process's descendants whose descriptors cannot be listed or read is beyond the scan: it is
-    neither found nor reported."""
+def _descendants():
+    """The live descendants of this process, discovered top-down from this process alone (_walk_once), never
+    from a scan of other pids: (found, problem). The walk is repeated until two consecutive walks return the
+    same set, so a descendant whose parent exits mid-walk is still found: this process is a child subreaper
+    while the fixtures run, so such a child is reparented to it (or to a discovered subreaper below it), and
+    the next walk, which re-reads every children file from this process down, records it; the two walks then
+    differ and the walk repeats. problem names, once, a walk that could not be completed (_walk_once) or one
+    still unsettled after SCAN_WALKS walks; found is then empty and the caller treats the scan as
+    cannot-evaluate, never as a candidate list. No pid outside this process and its discovered descendants is
+    read. Residual: a pid reused between two walks can make them agree while the set moved; and a process
+    reparented past this process before the walk, or given a descriptor another way, is not a descendant and
+    is beyond the walk."""
+    own, previous = os.getpid(), None
+    for _walk in range(SCAN_WALKS):
+        found, problem = _walk_once(own)
+        if problem is not None:
+            return set(), problem
+        if found == previous:
+            return found, None
+        previous = found
+    return set(), "descendant walk unsettled after {} walks".format(SCAN_WALKS)
+
+
+def _pipe_writers(dev, ino, extra=()):
+    """Every process among this process's descendants (_descendants), and the pids in extra, that holds a
+    descriptor linking to the pipe (dev, ino): the candidates _kill_holder binds before it signals, found from
+    the kernel's descriptor tables, never from what any process reported. Returns (holders, unlisted, problem):
+    problem names, once, why the scan could not be made (/proc/self is not this pid, or the descendant walk
+    could not be completed or settled), and holders and unlisted are then empty, never one candidate per
+    unreadable pid. unlisted names, as (pid, reason), every candidate whose /proc/<pid>/fd could not be listed
+    (a non-dumpable descendant included) or one of whose descriptor links could not be read for any reason
+    other than the descriptor having closed: such a process may hold the pipe unseen, so the cleanup must
+    evaluate or name it, never clear it; one that exited between the walk and the read is skipped, as it holds
+    nothing. No pid outside the walked descendants and extra is read. Residual, stated: a holder that is not a
+    descendant of this process (reparented past it before the walk, or given a descriptor another way) is
+    beyond the walk and is found only when the caller names it in extra."""
     target = "pipe:[{}]".format(ino)
     problem = _proc_is_own()
     if problem is not None:
         return [], [], problem
-    try:
-        names = os.listdir("/proc")
-    except OSError as exc:
-        return [], [], "/proc unreadable ({})".format(exc)
-    numeric = [name for name in names if name.isdigit()]
-    own, unknown = _descendants(numeric)
-    scoped = own.union(pid for pid, _reason in unknown)
-    holders, unlisted = [], list(unknown)
-    for name in numeric:
-        pid = int(name)
+    found, problem = _descendants()
+    if problem is not None:
+        return [], [], problem
+    holders, unlisted = [], []
+    for pid in sorted(found.union(int(named) for named in extra)):
         try:
-            descriptors = os.listdir("/proc/{}/fd".format(name))
+            descriptors = os.listdir("/proc/{}/fd".format(pid))
         except FileNotFoundError:
             continue
         except OSError as exc:
-            if pid in scoped:
-                unlisted.append((pid, "/proc/{}/fd unlistable ({})".format(name, exc)))
+            unlisted.append((pid, "/proc/{}/fd unlistable ({})".format(pid, exc)))
             continue
         for fd in descriptors:
             try:
-                link = os.readlink("/proc/{}/fd/{}".format(name, fd))
+                link = os.readlink("/proc/{}/fd/{}".format(pid, fd))
             except (FileNotFoundError, ProcessLookupError):
                 continue
             except (OSError, ValueError) as exc:
-                if pid in scoped:
-                    unlisted.append((pid, "/proc/{}/fd/{} link unreadable ({})".format(name, fd, exc)))
-                    break
-                continue
+                unlisted.append((pid, "/proc/{}/fd/{} link unreadable ({})".format(pid, fd, exc)))
+                break
             if link == target:
                 holders.append(pid)
                 break
@@ -1110,16 +1143,17 @@ def _witnessed(launch, known=(), wait=None):
     """Call launch(witness write end) while this process holds a witness pipe, then close the write end; returns
     (what launch returned, {role: pid} the processes reported, whether every holder of the witness died within
     wait seconds, WITNESS_WAIT by default, and unevaluated). If one did not, witness cleanup takes each pid in known
-    first (a list launch fills, as with the pid of a child it forked), then each holder a scan of /proc finds
-    and each candidate that scan could not complete (a live descendant whose descriptors it could not list or
-    read, and a pid whose ancestry it could not read: _pipe_writers), and
+    first (a list launch fills, as with the pid of a child it forked), then each holder a top-down walk of this
+    process's descendants finds among them and the known pids, and each candidate that scan could not complete
+    (a walked descendant, or a known pid, whose descriptors it could not list or read: _pipe_writers), and
     kills each that is alive and held the witness write end at the binding, observed through
     its pidfd (_kill_holder): a failing vector leaves behind no writer it could bind at the scan (a holder that
     forks after it can leave its child, and a process that drops its write end after the binding is still
     signalled). unevaluated names, as (pid, reason), every candidate the cleanup could not evaluate (a binding
     refused, an unreadable /proc/<pid>/fd or descriptor link, a failed pidfd_open or pidfd send), which survives
-    and is never read as cleared, and as
-    ("/proc scan", reason) a scan that could not be made; the witness read has already read such a holder as live.
+    and is never read as cleared, and as ("/proc scan", reason) a walk that could not be made or settled, named
+    once, never one candidate per unreadable pid; the witness read has already read such a holder as live. A
+    holder outside this process's descendants and known is beyond the walk (_pipe_writers states the residual).
     What a process reports on the witness never chooses a target: a report can name any pid, this process's own
     included, and this process, which by then holds only the read end, is never signalled (_kill_holder)."""
     read_end, write_end = os.pipe()
@@ -1135,7 +1169,7 @@ def _witnessed(launch, known=(), wait=None):
         try:
             if not ended:
                 witness = os.fstat(read_end)
-                holders, unlisted, problem = _pipe_writers(witness.st_dev, witness.st_ino)
+                holders, unlisted, problem = _pipe_writers(witness.st_dev, witness.st_ino, known)
                 if problem is not None:
                     unevaluated.append(("/proc scan", problem))
                 candidates = itertools.chain(known, holders, (named for named, _why in unlisted))
@@ -1400,10 +1434,66 @@ def _subreaper_restored():
     return all(ok for ok, _detail in outcomes.values()), outcomes
 
 
+def _restore_surfaced():
+    """Whether self_test names a recorded restore problem on stderr when its run unwinds with an exception at
+    any point up to and including the final report, and the exception then continues unchanged, driven over a
+    stand-in run that records a problem and then raises (self_test's _surfaced wrapper encloses the entire
+    run, so one raise stands for an exception at any instruction of it, the report included): (verdict,
+    detail)."""
+    this, mark = sys.modules[__name__], "injected restore problem"
+    note = "raised by the self-test after the problem was recorded"
+
+    def stand_in(problems, report_path):
+        problems.append(mark)
+        raise RuntimeError(note)
+    captured, raised = io.StringIO(), []
+    try:
+        with _patched(this, "_self_test", stand_in), contextlib.redirect_stderr(captured):
+            self_test()
+    except RuntimeError as exc:
+        raised.append(str(exc))
+    named = "subreaper/restore: {!r}".format(mark) in captured.getvalue()
+    return raised == [note] and named, dict(raised=raised, named=named, stderr=captured.getvalue())
+
+
 def _pidfd_pid(pidfd):
     """The pid a pidfd of this process names, from its fdinfo; 0 when it names none."""
     with open("/proc/self/fdinfo/{}".format(pidfd), encoding="ascii") as info:
         return int(next((line.split()[1] for line in info if line.startswith("Pid:")), "0"))
+
+
+def _bindable(pid):
+    """Whether this process can bind a descriptor of the process pid: /proc/<pid>/fd is listable, a descriptor
+    link is readable, and pidfd_getfd duplicates that descriptor (the duplicate is closed at once). False when
+    any of those reads is refused: the holder can then only be found through the descendant walk and named.
+    None when the probe could not be made (no verified syscall number for this machine, no descriptor to
+    probe, or pidfd_open failed): a fixture setup failure, read as cannot-evaluate, never as either branch."""
+    numbers = _SYSCALLS.get(_MACHINE)
+    if numbers is None:
+        return None
+    try:
+        names = os.listdir("/proc/{}/fd".format(pid))
+    except OSError:
+        return False
+    if not names:
+        return None
+    try:
+        pidfd = os.pidfd_open(pid)
+    except OSError:
+        return None
+    try:
+        try:
+            os.readlink("/proc/{}/fd/{}".format(pid, names[0]))
+        except OSError:
+            return False
+        taken = _syscall(ctypes.c_long(numbers["pidfd_getfd"]), ctypes.c_int(pidfd),
+                         ctypes.c_int(int(names[0])), ctypes.c_uint(0))
+        if taken < 0:
+            return False
+        os.close(taken)
+        return True
+    finally:
+        os.close(pidfd)
 
 
 def _refused_named(adopted):
@@ -1420,10 +1510,13 @@ def _refused_named(adopted):
     only by the scan, whose /proc/<pid>/fd listing (scanfd) or descriptor readlink (scanlink) is refused by an
     injected refusal, verified to have fired: each such holder must be named through the scan, never left unnamed
     and alive. Legs unlisted and comm: a non-dumpable holder outside known (comm also bears a process name that
-    is not ASCII, verified from its stat bytes), found only as a live descendant; each reads its preconditions
-    (the PR_SET_DUMPABLE result, and whether this process can list the holder's fd directory) and requires the
-    branch they imply: with the directory unlistable from here the holder must be named, and with it listable (a
-    privileged run) the holder must be bound and killed. Leg orphan: the holder is a grandchild whose parent has
+    is not ASCII, verified from its stat bytes, and has its fd listing refused by an injected refusal, verified
+    to have fired, so only the descendant walk can make it a candidate, on every host), found only as a walked
+    descendant; each reads its preconditions (the PR_SET_DUMPABLE result, and whether this process can bind the
+    holder's descriptors: _bindable) and requires the branch they imply: with the descriptors not bindable from
+    here the holder must be named, and with them bindable (a privileged run) the holder must be bound and
+    killed; a fixture whose setup did not succeed, or whose probe could not be made, is cannot-evaluate, never
+    read as either branch. Leg orphan: the holder is a grandchild whose parent has
     exited, found only by the scan; with this process a child subreaper (adopted is True) it is reparented here
     and stays a descendant, so it is bound and killed; otherwise it is named or killed, never left unnamed."""
     this, detail = sys.modules[__name__], {}
@@ -1470,11 +1563,7 @@ def _refused_named(adopted):
             finally:
                 os.close(pid_r)
             for pid in (holder if undumpable else ()):
-                try:
-                    os.listdir("/proc/{}/fd".format(pid))
-                    listable.append(True)
-                except OSError:
-                    listable.append(False)
+                listable.append(_bindable(pid))
             for pid in (holder if name_bytes is not None else ()):
                 with open("/proc/{}/stat".format(pid), "rb") as handle:
                     renamed.append(name_bytes in handle.read())
@@ -1562,9 +1651,11 @@ def _refused_named(adopted):
         detail[name] = leg(False, patches)
     detail["send"] = leg(False, lambda holder: [],
                          breaks=PermissionError(errno.EPERM, "refused by the self-test"))
+    scan_hits = dict(comm=[], scanfd=[], scanlink=[])
     detail["unlisted"] = leg(False, lambda holder: [], known=False, undumpable=True)
-    detail["comm"] = leg(False, lambda holder: [], known=False, undumpable=True, name_bytes=b"qa-\xff\xf0")
-    scan_hits = dict(scanfd=[], scanlink=[])
+    detail["comm"] = leg(False, lambda holder: failing(os, "listdir", lambda path=".": str(path) in [
+        "/proc/{}/fd".format(pid) for pid in holder], scan_hits["comm"]), known=False, undumpable=True,
+        name_bytes=b"qa-\xff\xf0")
     detail["scanfd"] = leg(False, lambda holder: failing(os, "listdir", lambda path=".": str(path) in [
         "/proc/{}/fd".format(pid) for pid in holder], scan_hits["scanfd"]), known=False)
     detail["scanlink"] = leg(False, lambda holder: failing(os, "readlink", lambda path: str(path).startswith(
@@ -1579,25 +1670,195 @@ def _refused_named(adopted):
                and send["died"] is False and send["verdicts"] == [False, False, True])
 
     def hidden_ok(record):
-        # the branch the read preconditions imply, never just the branch the outcome happened to take
-        if record["listable"] == [False] and record["setup"] == [0]:
+        # the branch the read preconditions imply, never just the branch the outcome happened to take; a
+        # fixture whose PR_SET_DUMPABLE setup did not succeed, or whose bindability probe could not be made,
+        # is cannot-evaluate, never read as either branch
+        if record["setup"] != [0] or record["listable"] not in ([True], [False]):
+            return None
+        if record["listable"] == [False]:
             return (bool(record["reasons"]) and not record["sent"] and record["died"] is False
                     and record["verdicts"] == [False, False, True])
-        if record["listable"] == [True]:
-            return record["died"] is True and record["sent"] == [record["holder"]] and not record["reasons"]
-        return False
-    scoped = hidden_ok(detail["unlisted"]) and hidden_ok(detail["comm"]) and detail["comm"]["renamed"] == [True]
+        return record["died"] is True and record["sent"] == [record["holder"]] and not record["reasons"]
+    scoped = _combined([hidden_ok(detail["unlisted"]), hidden_ok(detail["comm"]),
+                        detail["comm"]["renamed"] == [True], bool(scan_hits["comm"])])
     injected = all(bool(scan_hits[name]) and mark in "".join(detail[name]["reasons"])
                    and not detail[name]["sent"] and detail[name]["died"] is False
                    and detail[name]["verdicts"] == [False, False, True]
-                   for name, mark in (("scanfd", "fd unreadable"), ("scanlink", "link unreadable")))
+                   for name, mark in (("comm", "fd unreadable"), ("scanfd", "fd unreadable"),
+                                      ("scanlink", "link unreadable")))
     orphan = detail["orphan"]
     if adopted is True:
         reaped = orphan["died"] is True and not orphan["reasons"] and orphan["sent"] == [orphan["holder"]]
     else:
         reaped = orphan["died"] is True or bool(orphan["reasons"])
-    return (named and all(marks) and sending and scoped and injected and reaped,
+    return (_combined([named, all(marks), sending, scoped, injected, reaped]),
             dict(detail, adopted=adopted, scan_hits=scan_hits))
+
+
+_WALK_ABSENT = object()
+
+
+def _walk_stub(table, own):
+    """os.listdir and open stand-ins for one scripted /proc subtree: table maps a walk ordinal (counted at each
+    listing of the process own's task directory; later walks reuse the last entry) to {path: a list to return,
+    bytes to read, or an exception to raise}; every other path reaches the real call. Returns (listing,
+    opened)."""
+    state = dict(walk=0)
+    real_listdir, real_open = os.listdir, builtins.open
+
+    def lookup(path):
+        if str(path) == "/proc/{}/task".format(own):
+            state["walk"] += 1
+        return table[max(1, min(state["walk"], max(table)))].get(str(path), _WALK_ABSENT)
+
+    def listing(path="."):
+        got = lookup(path)
+        if got is _WALK_ABSENT:
+            return real_listdir(path)
+        if isinstance(got, BaseException):
+            raise got
+        return list(got)
+
+    def opened(path, *args, **kwargs):
+        got = lookup(path)
+        if got is _WALK_ABSENT:
+            return real_open(path, *args, **kwargs)
+        if isinstance(got, BaseException):
+            raise got
+        return io.BytesIO(got)
+    return listing, opened
+
+
+def _walk_scripted(table):
+    """_descendants run over the scripted /proc subtree table (_walk_stub) for this process."""
+    listing, opened = _walk_stub(table, os.getpid())
+    with _patched(os, "listdir", listing), _patched(builtins, "open", opened):
+        return _descendants()
+
+
+def _unrelated_unread():
+    """Whether cleanup of a real holder reads no unrelated pid (the refused-init-stat shape): with /proc/1/stat
+    refused by an injected refusal, every /proc/<pid>/stat open and every /proc/<pid>/fd listing recorded, the
+    holder is still found through the descendant walk and killed, nothing is named, the injection never fires
+    (no stat is opened at all), and every recorded descriptor listing is of a walked descendant, so one
+    unreadable pid outside them can never become candidates: (verdict, detail)."""
+    this = sys.modules[__name__]
+    stat_opens, fd_lists, walks = [], [], []
+    real_open, real_listdir, real_walk = builtins.open, os.listdir, _descendants
+
+    def names(path, last):
+        parts = str(path).split("/")
+        return len(parts) == 4 and parts[1] == "proc" and parts[2].isdigit() and parts[3] == last
+
+    def opened(path, *args, **kwargs):
+        if names(path, "stat"):
+            stat_opens.append(str(path))
+            if str(path) == "/proc/1/stat":
+                raise PermissionError(errno.EACCES, "refused by the self-test")
+        return real_open(path, *args, **kwargs)
+
+    def listing(path="."):
+        if names(path, "fd"):
+            fd_lists.append(int(str(path).split("/")[2]))
+        return real_listdir(path)
+
+    def walking():
+        walks.append(real_walk())
+        return walks[-1]
+    forked = []
+
+    def launch(witness):
+        ready_r, ready_w = os.pipe()
+        forked.append(os.fork())
+        if forked == [0]:
+            try:
+                os.write(witness, "child {}\n".format(os.getpid()).encode("ascii"))
+                os.write(ready_w, b"1")
+                time.sleep(HANG_SECONDS)
+            finally:
+                os._exit(0)
+        os.close(ready_w)
+        os.read(ready_r, 1)
+        os.close(ready_r)
+        return forked[0]
+    status = result = None
+    try:
+        with (_patched(builtins, "open", opened), _patched(os, "listdir", listing),
+              _patched(this, "_descendants", walking)):
+            result = _witnessed(launch, wait=WITNESS_TIMEOUT)
+    finally:
+        if forked:
+            status = _reap_within(forked[0], WITNESS_WAIT)
+    killed = status is not None and os.WIFSIGNALED(status) and os.WTERMSIG(status) == signal.SIGKILL
+    scope = set().union(*(found for found, _problem in walks)) if walks else set()
+    ok = (result is not None and result[2] is False and result[3] == [] and killed and stat_opens == []
+          and bool(walks) and all(problem is None for _found, problem in walks)
+          and set(fd_lists) <= scope and bool(forked) and forked[0] in set(fd_lists))
+    return ok, dict(child=forked, reported=result and result[1], ended=result and result[2],
+                    unevaluated=result and result[3], killed=killed, status=status, stat_opens=stat_opens,
+                    fd_lists=sorted(set(fd_lists)), scope=sorted(scope))
+
+
+def _walk_tables(own):
+    """The scripted /proc subtrees of the walk legs (_descendant_walk_held), keyed by leg: each value is
+    (table for _walk_scripted, expected (found, problem) or a problem mark). The fake pids sit past this
+    host's pid_max; every path of theirs is scripted, so none is ever opened."""
+    base = 5000000
+    first, second, third = base + 1, base + 2, base + 3
+    task = "/proc/{}/task".format
+    directory = "/proc/{}/task/{}".format
+    children = "/proc/{}/task/{}/children".format
+    refusal = PermissionError(errno.EACCES, "refused by the self-test")
+    gone = FileNotFoundError(errno.ENOENT, "exited")
+    legs = dict(
+        reparented=({1: {task(own): [str(own)], children(own, own): str(first).encode("ascii"),
+                         task(first): gone},
+                     2: {task(own): [str(own)], children(own, own): str(second).encode("ascii"),
+                         task(second): [str(second)], children(second, second): b""}},
+                    ({second}, None)),
+        exited=({1: {task(own): [str(own)],
+                     children(own, own): "{} {}".format(first, second).encode("ascii"),
+                     task(first): [str(first)], children(first, first): gone,
+                     directory(first, first): gone,
+                     task(second): [str(second)], children(second, second): b""}},
+                ({first, second}, None)))
+    problems = dict(
+        refused=({1: {task(own): [str(own)], children(own, own): str(first).encode("ascii"),
+                      task(first): [str(first)], children(first, first): refusal}}, "unreadable"),
+        malformed=({1: {task(own): [str(own)], children(own, own): b"not-a-pid"}}, "non-pid"),
+        missing=({1: {task(own): [str(own)],
+                      children(own, own): FileNotFoundError(errno.ENOENT, "absent"),
+                      directory(own, own): ["cwd"]}}, "task directory present"),
+        unsettled=(dict((walk, {task(own): [str(own)],
+                                children(own, own): str(third + walk).encode("ascii"),
+                                task(third + walk): [str(third + walk)],
+                                children(third + walk, third + walk): b""})
+                        for walk in range(1, SCAN_WALKS + 2)), "unsettled"))
+    return legs, problems
+
+
+def _descendant_walk_held():
+    """Whether the descendant walk is held at class width: a stand-in /proc (_walk_stub: os.listdir and open
+    patched for the scripted paths only, every other path reaching the real call) drives each walk shape of
+    _walk_tables through _walk_scripted, and a live leg (_unrelated_unread) reruns the owner cleanup with every
+    stat open and descriptor listing recorded: (verdict, {leg: (ok, ...)}). Leg reparented: an intermediate
+    parent exits mid-walk; its child, reparented to this subreaper, is found by the repeated walk. Leg exited:
+    a recorded child whose task directory is gone is skipped as exited and its sibling is still found. Leg
+    refused: a children read refused with the task still present is a named problem. Leg malformed: a children
+    entry that is not a pid is a named problem. Leg missing: a children file absent with its task directory
+    present (a kernel without the interface) is a named problem. Leg unsettled: a walk that never returns the
+    same set twice is a named problem after SCAN_WALKS walks, never a partial candidate list. Leg unrelated:
+    _unrelated_unread."""
+    legs, problems = _walk_tables(os.getpid())
+    outcomes = {}
+    for name, (table, want) in legs.items():
+        got = _walk_scripted(table)
+        outcomes[name] = (got == want, got, want)
+    for name, (table, mark) in problems.items():
+        found, problem = _walk_scripted(table)
+        outcomes[name] = (found == set() and problem is not None and mark in problem, found, problem)
+    outcomes["unrelated"] = _unrelated_unread()
+    return all(entry[0] for entry in outcomes.values()), outcomes
 
 
 def _reaped(pid):
@@ -2131,6 +2392,45 @@ def _mutation_verdicts(records, all_vectors):
     return caught, discriminates, dict(missed=missed, never=never, unresolved=unresolved)
 
 
+def _credit_verdict(detail):
+    """The hung-credit verdict over detail as _hang_credit fills it: False when any case that needs no reading
+    from the FIFO subject does not hold, the undeclared pair's stall (outside) among them, decided before the
+    evidence gate; else None (cannot evaluate) when that subject never showed its wait; else whether the
+    evidence case credits the block."""
+    unresolved = (None, (None, None))
+    settled = ([detail[name][:2] for name in ("held", "outside", "no-evidence", "finite-delay")]
+               == [(True, (False, False)), unresolved, unresolved, unresolved]
+               and detail["held"][2] == [GATE_TIMEOUT, BLOCK_CONFIRM] and detail["this-gate"][0] is False
+               and detail["this-gate"][2] == [GATE_TIMEOUT] and detail["subjects"][1][0] is False
+               and detail["halves"][0] is True
+               and detail["all-hung"][0] == [False] and True not in detail["all-hung"][1])
+    if not settled:
+        return False
+    if detail["subjects"][0][0] is not True:
+        return None
+    return detail["evidence"][:2] == ("blocked", (True, True))
+
+
+def _stall_decided():
+    """Whether _credit_verdict decides every case that needs no reading from the FIFO subject before the
+    evidence gate, driven over injected details: with the undeclared pair's stall (outside) definitively not
+    unresolved and the FIFO subject never showing its wait, the verdict is False, never cannot-evaluate; with
+    outside unresolved and the same unshown wait it is None; and with every case holding and the wait shown it
+    is True: (verdict, detail)."""
+    unresolved = (None, (None, None))
+    clean = {"held": (True, (False, False), [GATE_TIMEOUT, BLOCK_CONFIRM]),
+             "outside": unresolved, "no-evidence": unresolved, "finite-delay": unresolved,
+             "this-gate": (False, (False, False), [GATE_TIMEOUT]),
+             "subjects": [(True, "waiting on the FIFO open"), (False, "sleeping")],
+             "halves": (True, {}), "all-hung": ([False], (False, False)),
+             "evidence": ("blocked", (True, True), [GATE_TIMEOUT, BLOCK_CONFIRM])}
+    unshown = [(False, "never showed its wait"), (False, "sleeping")]
+    stalled = dict(clean, outside=("blocked", (True, True)), subjects=unshown)
+    undecided = dict(clean, subjects=unshown)
+    verdicts = [_credit_verdict(stalled), _credit_verdict(undecided), _credit_verdict(clean)]
+    return verdicts == [False, None, True], dict(stalled=verdicts[0], undecided=verdicts[1], clean=verdicts[2])
+
+
 def _hang_credit(vectors, base):
     """Whether a hang earns mutation credit only as a declared FIFO-open block with evidence, driven through
     _vector_outcome, _run_vectors and _mutation_verdicts with injected _gate result sequences: (verdict, detail).
@@ -2142,7 +2442,7 @@ def _hang_credit(vectors, base):
     and neither aggregate passes. Each half of the evidence is necessary on its own (_evidence_halves). The cases
     that need no reading from the FIFO subject, the undeclared pair's stall among them, are decided first and
     fail as False; only when every one of them holds and that subject never showed its wait is the verdict None
-    (cannot evaluate)."""
+    (cannot evaluate). The decision is _credit_verdict, held over injected details by _stall_decided."""
     this, twin, detail = sys.modules[__name__], next(iter(UNMUTATED)), {}
     by_id = dict((vector[0], vector) for vector in vectors)
     fifo = Path(base) / "hang-credit-fifo"
@@ -2202,19 +2502,7 @@ def _hang_credit(vectors, base):
                 os.kill(pid, signal.SIGKILL)
                 os.waitpid(pid, 0)
     detail["halves"] = _evidence_halves()
-    unresolved = (None, (None, None))
-    settled = ([detail[name][:2] for name in ("held", "outside", "no-evidence", "finite-delay")]
-               == [(True, (False, False)), unresolved, unresolved, unresolved]
-               and detail["held"][2] == [GATE_TIMEOUT, BLOCK_CONFIRM] and detail["this-gate"][0] is False
-               and detail["this-gate"][2] == [GATE_TIMEOUT] and detail["subjects"][1][0] is False
-               and detail["halves"][0] is True
-               and detail["all-hung"][0] == [False] and True not in detail["all-hung"][1])
-    if not settled:
-        return False, detail
-    if detail["subjects"][0][0] is not True:
-        return None, detail
-    verdict = detail["evidence"][:2] == ("blocked", (True, True))
-    return verdict, detail
+    return _credit_verdict(detail), detail
 
 
 # Each mutant removes one check (or one fail-closed path) from the gate half of this file's source, the
@@ -2289,6 +2577,15 @@ def _load_mutant(source, directory, number):
 
 
 def self_test(report_path=None):
+    # Problems recorded while the fixtures ran (a failed subreaper restore) are named on stderr whenever the
+    # run unwinds with an exception at any point up to and including its final report (_surfaced encloses the
+    # entire run); on a normal exit the report itself names them.
+    restore_problems = []
+    with _surfaced(restore_problems):
+        return _self_test(restore_problems, report_path)
+
+
+def _self_test(restore_problems, report_path):
     results = []
     executed = []
     if report_path is not None:
@@ -2303,12 +2600,12 @@ def self_test(report_path=None):
 
     this = sys.modules[__name__]
     # While the fixtures run this process is a child subreaper (restored after, with the restore's result
-    # checked: one that fails is surfaced below as a named failure, and named on stderr by _surfaced when the
-    # run unwinds with an exception before its report), so an orphaned witness holder stays its descendant and
-    # may be bound; when that is refused, such a holder is named, never cleared
-    restore_problems = []
+    # checked: one that fails is surfaced below as a named failure, and named on stderr by self_test's
+    # _surfaced wrapper when the run unwinds with an exception at any point up to and including this report),
+    # so an orphaned witness holder stays its descendant and may be bound; when that is refused, such a holder
+    # is named, never cleared
     with (tempfile.TemporaryDirectory(prefix="entry-guard-selftest-") as base,
-          _surfaced(restore_problems), _subreaper(restore_problems) as adopted):
+          _subreaper(restore_problems) as adopted):
         vectors = _fixtures(base)
         # 1. every vector holds against this gate (its gate run is never re-run: a hang is a failure)
         outcomes = _run_vectors(this, vectors)
@@ -2368,6 +2665,9 @@ def self_test(report_path=None):
         # with a FIFO-blocked process's), this gate never re-run, and an all-hung run that passes neither
         # aggregate
         check("mutant/hung-earns-no-credit", *_hang_credit(vectors, base))
+        # the cases needing no reading from the FIFO subject, the undeclared pair's stall among them, are
+        # decided before the evidence gate: a definite failure there is False, never cannot-evaluate
+        check("mutant/stall-decided-before-evidence", *_stall_decided())
 
         # 5. the gate runner borrows no process timer: an armed caller ITIMER_REAL keeps its interval, its SIGALRM
         # handler, its signal mask and its expiry instant through a paced gate run, to the precision of its stamps
@@ -2475,7 +2775,9 @@ def self_test(report_path=None):
         check("gate/witness-cleanup-spares-owner", *_owner_spared())
         check("gate/witness-cleanup-binds-write-end", *_reuse_bound())
         check("gate/witness-refusal-named", *_refused_named(adopted))
+        check("gate/descendant-walk", *_descendant_walk_held())
         check("gate/subreaper-restored", *_subreaper_restored())
+        check("gate/restore-named-on-unwind", *_restore_surfaced())
 
         def sequence(*verdicts):
             queue = list(verdicts)
@@ -2556,12 +2858,14 @@ def self_test(report_path=None):
           "be seen) and a delayed timer read is no failure; an overrun is bounded as hung; an expired gate child, "
           "one that left its group, its descendants (an audit hook refusing the kills included) and an orphaned "
           "one are killed, and a run its bound overtook, or that overran its elapsed bound with its cleanup "
-          "proven, is no failure, and a failure is never retried or masked; witness cleanup never signals this "
-          "process and signals only a live process that held the witness write end at the binding, observed "
-          "through its pidfd (a write end dropped after the binding is a residual), and names every candidate it "
-          "cannot evaluate (a known pid, a scanned holder, a live descendant whose descriptors it cannot list "
-          "or read, or a pid whose ancestry it cannot read; a readable process outside its descendants that "
-          "hides its descriptors is beyond the scan); the subreaper flag is restored to the prior value read, "
+          "proven, is no failure, and a failure is never retried or masked; witness cleanup finds its candidates "
+          "top-down from this process's own task children alone, repeated until two walks agree, reads no "
+          "unrelated pid, and names a walk it cannot complete or settle once as a /proc-scan problem, never as "
+          "candidates; it never signals this process and signals only a live process that held the witness "
+          "write end at the binding, observed through its pidfd (a write end dropped after the binding is a "
+          "residual), and names every candidate it cannot evaluate (a known pid, or a walked descendant whose "
+          "descriptors it cannot list or read; a holder outside its descendants and the known pids is beyond "
+          "the walk, a stated residual); the subreaper flag is restored to the prior value read, "
           "the restore checked and never attempted after a refused set; orphaned holders {}; an exception at "
           "any point of the fork window leaves no child or "
           "descriptor and never unwinds a child into its caller; live surface {} scripts)".format(
