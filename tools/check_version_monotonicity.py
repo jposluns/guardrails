@@ -77,7 +77,9 @@ if tuple(sys.version_info[:2]) < (3, 14):
     os._exit(2)
 
 import io
+import os
 import subprocess
+import tempfile
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
@@ -571,30 +573,75 @@ def _not_run(failures, case, cause):
 
 _GIT_CASES = ("the git-level history, tag, release-order/id-history append-only, genesis-exemption, and "
               "tag-preservation cases over real repositories")
+_EVERY_CASE = "every self-test case"
+_SUPPRESS_VECTORS_ENV = "AIQT_SELFTEST_SUPPRESS_VECTORS"
+
+
+class _SetupAllocationError(OSError):
+    """An OSError raised by the entry scrub's temp-directory ALLOCATION, re-raised (chained) at
+    the allocation call itself by _mark_setup_allocations. The public entry's handler catches
+    ONLY this type, so the catch is bound to the allocation: any other OSError out of the setup
+    propagates unchanged."""
+
+
+def _mark_setup_allocations():
+    """Type the setup's temp-directory allocation at the call: until the returned restore
+    callable runs, an OSError raised by tempfile.mkdtemp is re-raised as _SetupAllocationError.
+    The entry scrub's scratch HOME is the only temp-directory allocation in that setup, so this
+    binds the public entry's handler to exactly the allocation call. The restore is idempotent
+    and runs before any case, so an in-run allocation stays a plain OSError (guarded in-run, or
+    propagating)."""
+    real_mkdtemp = tempfile.mkdtemp
+
+    def marked_mkdtemp(*args, **kwargs):
+        try:
+            return real_mkdtemp(*args, **kwargs)
+        except OSError as exc:
+            raise _SetupAllocationError(str(exc)) from exc
+
+    def restore():
+        if tempfile.mkdtemp is marked_mkdtemp:
+            tempfile.mkdtemp = real_mkdtemp
+
+    tempfile.mkdtemp = marked_mkdtemp
+    return restore
 
 
 def _not_run_vectors(failures):
-    """Red-on-revert vectors for the skips that printed SELF-TEST PASS (PARTIAL) and exited 0.
+    """Red-on-revert vectors for the skips that printed SELF-TEST PASS (PARTIAL) and exited 0,
+    plus the narrowness of the public entry's setup handler.
 
-    Scoped layer: a nested self-test run with git unavailable (the git probe raises OSError), and
-    one with an unavailable temp directory (mkdtemp raises OSError; the git probe is ALSO injected
-    to succeed, so a host where git is genuinely absent still reaches the mkdtemp branch and the
-    nested run records ONLY the no-tempdir line), must each exit nonzero AND name the git-level
-    cases on a NOT RUN line. Both enter self_test_main AFTER its entry scrub already succeeded.
+    Scoped layer: a nested self-test run with git unavailable (the git probe raises OSError),
+    and one with an unavailable temp directory (mkdtemp raises OSError; the git probe is ALSO
+    injected to succeed, so a host where git is genuinely absent still reaches the mkdtemp
+    branch and the nested run records ONLY the no-tempdir line), must each exit nonzero AND name
+    the git-level cases on a NOT RUN line. A third arm re-runs the no-tempdir entry on a
+    SIMULATED git-less host (the real probe launch is patched to raise), so the
+    only-the-no-tempdir-line property is asserted on every host, with or without git. All enter
+    self_test_main AFTER its entry scrub already succeeded.
+
+    Entry-narrowness layer (in-process): the public entry catches ONLY the scrub's
+    temp-directory ALLOCATION failure (typed at the allocation call by _mark_setup_allocations);
+    an injected PermissionError out of the scrub that is NOT the allocation must PROPAGATE,
+    never be reported as the setup NOT RUN.
 
     Fresh-process public-entry layer: the scoped injections cannot reach a failure of the entry
     scrub itself (scrub_git_environment allocates its scratch HOME with tempfile.mkdtemp before
     any case runs), so a child runs this tool as __main__ --self-test with tempfile.mkdtemp
-    raising OSError process-wide, before the scrub, and must exit 1 with the same named NOT RUN
-    line on stdout, never a bare traceback."""
+    raising OSError process-wide, before the scrub, and must exit 1 with the entry's whole-run
+    NOT RUN line on stdout, never a bare traceback. Every child environment carries
+    _SUPPRESS_VECTORS_ENV, so a child never spawns children of its own; the last child proves
+    that suppression with a subprocess spy that fails it loudly on any launch."""
     def _unavailable(*_args, **_kwargs):
         raise OSError("injected: unavailable")
 
-    for label, kwargs, want in (
-            ("git-absent", {"_git_probe": _unavailable},
-             "NOT RUN: {}: git is unavailable".format(_GIT_CASES)),
-            ("no-tempdir", {"_git_probe": lambda: 0, "_mkdtemp": _unavailable},
-             "NOT RUN: {}: no writable temp directory".format(_GIT_CASES))):
+    scoped = (
+        ("git-absent", {"_git_probe": _unavailable},
+         "NOT RUN: {}: git is unavailable".format(_GIT_CASES)),
+        ("no-tempdir", {"_git_probe": lambda: 0, "_mkdtemp": _unavailable},
+         "NOT RUN: {}: no writable temp directory".format(_GIT_CASES)),
+    )
+    for label, kwargs, want in scoped:
         out = io.StringIO()
         with redirect_stdout(out), redirect_stderr(io.StringIO()):
             rc = self_test_main(_vectors=False, **kwargs)
@@ -602,7 +649,56 @@ def _not_run_vectors(failures):
             failures.append("(NOT RUN vector {}) must exit nonzero AND record {!r}, never a PASS "
                             "(PARTIAL) exit 0 (got exit {})".format(label, want, rc))
 
+    # The SAME no-tempdir entry under a simulated git-less host: were its successful-probe
+    # injection ever dropped, the nested run would probe for real, fail, and record the
+    # misleading extra git-unavailable line; this asserts the single-line outcome on every host.
+    label, kwargs, want = scoped[1]
+    real_run = subprocess.run
+
+    def _gitless_run(args, *more, **kw):
+        if list(args[:2]) == ["git", "--version"]:
+            raise OSError("simulated: git absent")
+        return real_run(args, *more, **kw)
+
+    subprocess.run = _gitless_run
+    out = io.StringIO()
+    try:
+        with redirect_stdout(out), redirect_stderr(io.StringIO()):
+            rc = self_test_main(_vectors=False, **kwargs)
+    finally:
+        subprocess.run = real_run
+    text = out.getvalue()
+    if rc == 0 or want not in text or "git is unavailable" in text:
+        failures.append("(NOT RUN vector {}, git-less host) must record ONLY {!r} and never an "
+                        "extra git-unavailable line, with or without a real git (got exit "
+                        "{})".format(label, want, rc))
+
+    # Entry narrowness: an OSError out of the scrub that is NOT the temp-directory allocation
+    # must PROPAGATE out of the public entry (red when the entry catches plain OSError instead
+    # of the typed allocation error).
+    import _git_fixture_env as _fixture_env
+    real_scrub = _fixture_env.scrub_git_environment
+
+    def _denying_scrub():
+        raise PermissionError("injected: non-allocation scrub failure")
+
+    _fixture_env.scrub_git_environment = _denying_scrub
+    propagated = False
+    try:
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            self_test_main(_vectors=False)
+    except PermissionError as exc:
+        propagated = "injected: non-allocation scrub failure" in str(exc)
+    finally:
+        _fixture_env.scrub_git_environment = real_scrub
+    if not propagated:
+        failures.append("(entry vector non-allocation scrub OSError) an OSError out of the "
+                        "scrub that is not the temp-directory allocation must PROPAGATE out of "
+                        "the public entry, never be reported as the setup NOT RUN")
+
     tool = str(Path(__file__).resolve())
+    entry_env = dict(os.environ)
+    entry_env[_SUPPRESS_VECTORS_ENV] = "1"  # a child never runs vectors of its own
     inject = ("import runpy, sys, tempfile\n"
               "def _unavailable(*_args, **_kwargs):\n"
               "    raise OSError('injected: unavailable')\n"
@@ -610,13 +706,36 @@ def _not_run_vectors(failures):
               "tool = sys.argv[1]\n"
               "sys.argv[:] = [tool, '--self-test']\n"
               "runpy.run_path(tool, run_name='__main__')\n")
-    want = "NOT RUN: {}: no writable temp directory".format(_GIT_CASES)
+    want = "NOT RUN: {}: fixture setup failed: no writable temp directory".format(_EVERY_CASE)
     proc = subprocess.run([sys.executable, "-I", "-B", "-c", inject, tool],
-                          capture_output=True, text=True)
+                          capture_output=True, text=True, env=entry_env)
     if proc.returncode != 1 or want not in proc.stdout:
         failures.append("(NOT RUN vector public-entry no-tempdir) must exit 1 AND record {!r} "
                         "through the real --self-test entry, never a bare traceback (got exit "
                         "{})".format(want, proc.returncode))
+
+    # _SUPPRESS_VECTORS_ENV guard: a fresh child that carries the marker runs its cases but
+    # never spawns vector children of its own; the spy fails the child loudly on any launch.
+    spy = ("import importlib.util, subprocess, sys\n"
+           "spec = importlib.util.spec_from_file_location("
+           "'aiqt_monotonicity_vector_child', sys.argv[1])\n"
+           "mod = importlib.util.module_from_spec(spec)\n"
+           "sys.modules[spec.name] = mod\n"
+           "spec.loader.exec_module(mod)\n"
+           "def _spy(*_args, **_kwargs):\n"
+           "    print('VECTOR-CHILD-SPAWNED', file=sys.stderr)\n"
+           "    raise RuntimeError('vector child spawned despite the suppress marker')\n"
+           "subprocess.run = _spy\n"
+           "def _deny(*_args, **_kwargs):\n"
+           "    raise OSError('injected: unavailable')\n"
+           "sys.exit(mod.self_test_main(_git_probe=_deny, _mkdtemp=_deny))\n")
+    proc = subprocess.run([sys.executable, "-I", "-B", "-c", spy, tool],
+                          capture_output=True, text=True, env=entry_env)
+    spawned = "vector child spawned" in proc.stderr or "VECTOR-CHILD-SPAWNED" in proc.stderr
+    if proc.returncode != 1 or "SELF-TEST FAIL" not in proc.stdout or spawned:
+        failures.append("(vector suppress-marker) a child carrying {} must run its cases to its "
+                        "own named SELF-TEST FAIL without spawning vector children (got exit {}, "
+                        "spawned: {})".format(_SUPPRESS_VECTORS_ENV, proc.returncode, spawned))
 
 
 def self_test_main(_git_probe=None, _mkdtemp=None, _vectors=True):
@@ -626,18 +745,24 @@ def self_test_main(_git_probe=None, _mkdtemp=None, _vectors=True):
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from _git_fixture_env import scrub_git_environment
     failures = []
+    restore_mkdtemp = _mark_setup_allocations()
     try:
         # The scrub allocates its scratch HOME with tempfile.mkdtemp BEFORE any case runs, so a
-        # host with no writable temp directory fails here first: report the same named NOT RUN
-        # failure (exit 1) the in-run guard records, never a bare traceback. Only OSError is
-        # caught; any other exception still propagates.
+        # host with no writable temp directory fails here first: report ONE named NOT RUN
+        # failure covering the whole run (exit 1; nothing ran), never a bare traceback. Only the
+        # ALLOCATION failure is caught, typed at the allocation call itself
+        # (_mark_setup_allocations); any other exception, including any other OSError out of the
+        # scrub, still propagates.
         scrub_git_environment()
-    except OSError as exc:
-        _not_run(failures, _GIT_CASES, "no writable temp directory ({})".format(exc))
+    except _SetupAllocationError as exc:
+        _not_run(failures, _EVERY_CASE,
+                 "fixture setup failed: no writable temp directory ({})".format(exc))
         print("SELF-TEST FAIL:")
         for failure in failures:
             print("  - " + failure)
         return 1
+    finally:
+        restore_mkdtemp()
 
     # F-TOML-BARE-VALUEERROR-CLASS: a parser overflow makes tomllib raise RecursionError (a RuntimeError, not
     # a ValueError); the baseline parse must still fail closed as GateError carrying the overflow.
@@ -1064,7 +1189,9 @@ def self_test_main(_git_probe=None, _mkdtemp=None, _vectors=True):
         finally:
             shutil.rmtree(base_tmp, ignore_errors=True)
 
-    if _vectors:
+    if _vectors and os.environ.get(_SUPPRESS_VECTORS_ENV) != "1":
+        # A fresh-process vector child carries _SUPPRESS_VECTORS_ENV, so a child whose injected
+        # setup failure ever stopped failing still could not spawn children of its own.
         _not_run_vectors(failures)
 
     if failures:

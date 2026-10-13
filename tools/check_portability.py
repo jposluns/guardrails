@@ -86,6 +86,7 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 
 try:
@@ -832,36 +833,92 @@ def _not_run(failures, case, cause):
 _E2E_SURFACE_CASES = "every end-to-end surface case over a real synthetic shippable tree"
 _DISK_KIND_CASES = "the _disk_kind ancestor-symlink and root-boundary real-filesystem cases"
 _REAL_GIT_CASE = "the real-git tracked/untracked GD-130 pair"
+_EVERY_CASE = "every self-test case"
+_SUPPRESS_VECTORS_ENV = "AIQT_SELFTEST_SUPPRESS_VECTORS"
+
+
+class _SetupAllocationError(OSError):
+    """An OSError raised by the fixture setup's temp-directory ALLOCATION, re-raised (chained) at
+    the allocation call itself by _mark_setup_allocations. The public entry's handler catches
+    ONLY this type, so the catch is bound to the allocation: an OSError from the lifecycle
+    wrapper's write_text or chmod, or from anywhere else in the setup, propagates unchanged."""
+
+
+def _mark_setup_allocations():
+    """Type the setup's temp-directory allocations at the call: until the returned restore
+    callable runs, an OSError raised by tempfile.mkdtemp is re-raised as _SetupAllocationError.
+    The entry scrub's scratch HOME and the lifecycle's wrapper directory both allocate through
+    tempfile.mkdtemp (TemporaryDirectory calls it) and nothing else in that setup allocates a
+    temp directory, so this binds the public entry's handler to exactly the allocation calls.
+    The restore is idempotent and runs before the isolated cases, whose own allocations stay
+    plain OSError (guarded in-run, or propagating)."""
+    real_mkdtemp = tempfile.mkdtemp
+
+    def marked_mkdtemp(*args, **kwargs):
+        try:
+            return real_mkdtemp(*args, **kwargs)
+        except OSError as exc:
+            raise _SetupAllocationError(str(exc)) from exc
+
+    def restore():
+        if tempfile.mkdtemp is marked_mkdtemp:
+            tempfile.mkdtemp = real_mkdtemp
+
+    tempfile.mkdtemp = marked_mkdtemp
+    return restore
 
 
 def _not_run_vectors(failures):
-    """Red-on-revert vectors for the skips that printed SELF-TEST PASS (PARTIAL) and exited 0.
+    """Red-on-revert vectors for the skips that printed SELF-TEST PASS (PARTIAL) and exited 0,
+    plus the narrowness of the public entry's setup handlers.
 
     Scoped layer: a nested self-test run with an unavailable temp directory (mkdtemp raises
-    OSError), one with no symlink support (symlink creation raises OSError), and one with git
-    absent (the lookup returns None), must each exit nonzero AND name the unrun cases on a NOT
-    RUN line. These enter through _self_test_main_isolated, AFTER self_test_main's entry scrub
-    and lifecycle setup already succeeded.
+    OSError, blanket or scoped to the bigint fixture allocation so the run continues PAST it),
+    one with no symlink support (symlink creation raises OSError), and one with git absent (the
+    lookup returns None), must each exit nonzero AND name the unrun cases on a NOT RUN line.
+    These enter through _self_test_main_isolated, AFTER self_test_main's entry scrub and
+    lifecycle setup already succeeded.
 
-    Fresh-process public-entry layer: the scoped injections cannot reach a failure of that setup
-    itself (fixture_git_lifecycle raises RuntimeError before any case when git is absent, and the
-    scrub's scratch HOME or the lifecycle's wrapper directory raises OSError first when no temp
-    directory is writable), so each child below runs this tool as __main__ --self-test with the
-    failure injected BEFORE the scrub or the lifecycle can run (a PATH with no git, or a
-    process-wide tempfile.mkdtemp that raises OSError) and must exit 1 with the same named NOT
-    RUN line on stdout, never a bare traceback."""
+    Entry-narrowness layer (in-process nested public entries; git resolves through THIS run's
+    lifecycle wrapper on any host that reached the vectors, and the scrub's scratch HOME is
+    already cached, so only the lifecycle's wrapper directory still allocates at the nested
+    entry): an OSError scoped to that allocation must be the entry's whole-run NOT RUN failure,
+    while an injected PermissionError at the lifecycle wrapper's write_text or at its chmod, an
+    unrelated pre-entry RuntimeError, and an exception raised AFTER entry (OSError-typed or
+    carrying the git message) must each PROPAGATE out of self_test_main, never be reported as
+    the setup NOT RUN.
+
+    Fresh-process public-entry layer: the in-process injections cannot reach a FRESH process's
+    setup (a new scrub allocation, a PATH with no git resolvable), so each child below runs this
+    tool as __main__ --self-test with the failure injected BEFORE the scrub or the lifecycle can
+    run, and must exit 1 with the entry's whole-run NOT RUN line on stdout, never a bare
+    traceback. Every child environment carries _SUPPRESS_VECTORS_ENV, so a child never spawns
+    children of its own; the last child proves that suppression with a subprocess spy that fails
+    it loudly on any launch."""
     import io
+    import pathlib
     import shutil
-    import tempfile
     from contextlib import redirect_stderr, redirect_stdout
     from _git_fixture_env import fixture_git_lifecycle
 
     def _unavailable(*_args, **_kwargs):
         raise OSError("injected: unavailable")
 
+    def _mkdtemp_prefix(args, kwargs):
+        if kwargs.get("prefix"):
+            return str(kwargs["prefix"])
+        return str(args[1]) if len(args) > 1 and args[1] else ""
+
+    def _bigint_unavailable(*args, **kwargs):
+        if "aiqt-portability-bigint-" in _mkdtemp_prefix(args, kwargs):
+            raise OSError("injected: unavailable")
+        return tempfile.mkdtemp(*args, **kwargs)
+
     for label, kwargs, want in (
             ("no-tempdir", {"_mkdtemp": _unavailable},
              "NOT RUN: {}: no writable temp directory".format(_E2E_SURFACE_CASES)),
+            ("no-tempdir-bigint", {"_mkdtemp": _bigint_unavailable},
+             "NOT RUN: the over-long integer identity source case: no writable temp directory"),
             ("no-symlink", {"_symlink": _unavailable},
              "NOT RUN: {}: no symlink support".format(_DISK_KIND_CASES)),
             ("git-absent", {"_which": lambda _name: None},
@@ -873,7 +930,136 @@ def _not_run_vectors(failures):
             failures.append("(NOT RUN vector {}) must exit nonzero AND record {!r}, never a PASS "
                             "(PARTIAL) exit 0 (got exit {})".format(label, want, rc))
 
+    # Symlink-guard scope (plain-file setup): an OSError injected into the moved mkdir, into the
+    # moved write_text, or into the _fresh surface build must PROPAGATE out of the isolated run,
+    # never be recorded as the no-symlink NOT RUN (only the three symlink creations sit inside
+    # that guard; red when the plain-file setup is moved back inside it).
+    for label, attr, needle in (
+            ("disk-kind mkdir", "mkdir", "disk-kind"),
+            ("disk-kind write_text", "write_text", "disk-kind"),
+            ("rootlink-real _fresh build", "write_text", "rootlink-real")):
+        real_method = getattr(pathlib.Path, attr)
+        denial = "injected: plain-file setup denied ({})".format(label)
+
+        def _deny_in(self, *args, _real=real_method, _denial=denial, _needle=needle, **kwargs):
+            if _needle in str(self):
+                raise PermissionError(_denial)
+            return _real(self, *args, **kwargs)
+
+        setattr(pathlib.Path, attr, _deny_in)
+        propagated = False
+        try:
+            with fixture_git_lifecycle(), redirect_stdout(io.StringIO()), \
+                    redirect_stderr(io.StringIO()):
+                _self_test_main_isolated(_vectors=False)
+        except PermissionError as exc:
+            propagated = denial in str(exc)
+        finally:
+            setattr(pathlib.Path, attr, real_method)
+        if not propagated:
+            failures.append("(propagation vector {}) an injected PermissionError in the "
+                            "plain-file disk-kind/root-link setup must PROPAGATE, never be "
+                            "recorded as the no-symlink NOT RUN".format(label))
+
+    # Entry positive: an OSError scoped to the lifecycle's wrapper-directory allocation is the
+    # named whole-run NOT RUN failure (the typed marker binds the handler at the allocation).
+    real_entry_mkdtemp = tempfile.mkdtemp
+
+    def _lifecycle_alloc_unavailable(*args, **kwargs):
+        if "aiqt-fixture-git-bin-" in _mkdtemp_prefix(args, kwargs):
+            raise OSError("injected: unavailable")
+        return real_entry_mkdtemp(*args, **kwargs)
+
+    tempfile.mkdtemp = _lifecycle_alloc_unavailable
+    out = io.StringIO()
+    try:
+        with redirect_stdout(out), redirect_stderr(io.StringIO()):
+            rc = self_test_main()
+    finally:
+        tempfile.mkdtemp = real_entry_mkdtemp
+    want = "NOT RUN: {}: fixture setup failed: no writable temp directory".format(_EVERY_CASE)
+    if rc != 1 or want not in out.getvalue():
+        failures.append("(entry vector lifecycle-allocation) an OSError scoped to the "
+                        "lifecycle's wrapper-directory allocation must be the whole-run NOT RUN "
+                        "failure {!r} (exit 1), never a traceback or a smaller scope (got exit "
+                        "{})".format(want, rc))
+
+    # Entry negatives: a PermissionError injected at the lifecycle wrapper's write_text or at
+    # its chmod is NOT an allocation failure and must PROPAGATE (red when the entry catches
+    # plain OSError instead of the typed allocation error).
+    for attr in ("write_text", "chmod"):
+        real_method = getattr(pathlib.Path, attr)
+        denial = "injected: wrapper {} denied".format(attr)
+
+        def _denying(self, *args, _real=real_method, _denial=denial, **kwargs):
+            if self.name == "git" and "aiqt-fixture-git-bin-" in str(self):
+                raise PermissionError(_denial)
+            return _real(self, *args, **kwargs)
+
+        setattr(pathlib.Path, attr, _denying)
+        propagated = False
+        try:
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                self_test_main()
+        except PermissionError as exc:
+            propagated = denial in str(exc)
+        finally:
+            setattr(pathlib.Path, attr, real_method)
+        if not propagated:
+            failures.append("(entry vector wrapper-{0}) an injected PermissionError at the "
+                            "lifecycle wrapper's {0} must PROPAGATE out of the public entry, "
+                            "never be reported as the setup NOT RUN".format(attr))
+
+    # Entry negatives: anything raised AFTER the setup entered must propagate (the entered
+    # guards), and a pre-entry RuntimeError WITHOUT the lifecycle's git message must propagate
+    # (the message filter).
+    _mod = sys.modules[__name__]
+    real_isolated = _mod._self_test_main_isolated
+
+    def _post_entry_oserror():
+        raise _SetupAllocationError("injected: post-entry failure")
+
+    def _post_entry_runtime():
+        raise RuntimeError("self-test requires git (injected: post-entry failure)")
+
+    for label, raiser in (("post-entry typed OSError", _post_entry_oserror),
+                          ("post-entry git-message RuntimeError", _post_entry_runtime)):
+        _mod._self_test_main_isolated = lambda *_args, _raiser=raiser, **_kwargs: _raiser()
+        propagated = False
+        try:
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                self_test_main()
+        except (OSError, RuntimeError) as exc:
+            propagated = "injected: post-entry failure" in str(exc)
+        finally:
+            _mod._self_test_main_isolated = real_isolated
+        if not propagated:
+            failures.append("(entry vector {}) an exception raised AFTER the setup entered must "
+                            "PROPAGATE out of the public entry, never be reported as the setup "
+                            "NOT RUN".format(label))
+
+    real_which = shutil.which
+
+    def _raising_which(_name):
+        raise RuntimeError("injected: unrelated pre-entry failure")
+
+    shutil.which = _raising_which
+    propagated = False
+    try:
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            self_test_main()
+    except RuntimeError as exc:
+        propagated = "injected: unrelated pre-entry failure" in str(exc)
+    finally:
+        shutil.which = real_which
+    if not propagated:
+        failures.append("(entry vector pre-entry unrelated RuntimeError) a setup RuntimeError "
+                        "WITHOUT the lifecycle's git message must PROPAGATE out of the public "
+                        "entry, never be reported as the git-absent NOT RUN")
+
     tool = str(Path(__file__).resolve())
+    entry_env = dict(os.environ)
+    entry_env[_SUPPRESS_VECTORS_ENV] = "1"  # a child never runs vectors of its own
     children = []
     try:
         no_git_dir = tempfile.mkdtemp(prefix="aiqt-portability-selftest-nogit-")
@@ -882,12 +1068,13 @@ def _not_run_vectors(failures):
                  "no writable temp directory ({})".format(exc))
     else:
         try:
-            child_env = dict(os.environ)
+            child_env = dict(entry_env)
             child_env["PATH"] = no_git_dir  # an empty directory: no git resolvable on PATH
             children.append(("public-entry git-absent",
                              subprocess.run([sys.executable, "-I", "-B", tool, "--self-test"],
                                             capture_output=True, text=True, env=child_env),
-                             "NOT RUN: {}: git is unavailable".format(_REAL_GIT_CASE)))
+                             "NOT RUN: {}: fixture setup failed: git is unavailable".format(
+                                 _EVERY_CASE)))
         finally:
             shutil.rmtree(no_git_dir, ignore_errors=True)
     inject = ("import runpy, sys, tempfile\n"
@@ -899,38 +1086,72 @@ def _not_run_vectors(failures):
               "runpy.run_path(tool, run_name='__main__')\n")
     children.append(("public-entry no-tempdir",
                      subprocess.run([sys.executable, "-I", "-B", "-c", inject, tool],
-                                    capture_output=True, text=True),
-                     "NOT RUN: {}: no writable temp directory".format(_E2E_SURFACE_CASES)))
+                                    capture_output=True, text=True, env=entry_env),
+                     "NOT RUN: {}: fixture setup failed: no writable temp directory".format(
+                         _EVERY_CASE)))
     for label, proc, want in children:
         if proc.returncode != 1 or want not in proc.stdout:
             failures.append("(NOT RUN vector {}) must exit 1 AND record {!r} through the real "
                             "--self-test entry, never a bare traceback (got exit {})".format(
                                 label, want, proc.returncode))
 
+    # _SUPPRESS_VECTORS_ENV guard: a fresh child that carries the marker runs its cases but
+    # never spawns vector children of its own; the spy fails the child loudly on any launch its
+    # vectors would make.
+    spy = ("import importlib.util, subprocess, sys\n"
+           "spec = importlib.util.spec_from_file_location("
+           "'aiqt_portability_vector_child', sys.argv[1])\n"
+           "mod = importlib.util.module_from_spec(spec)\n"
+           "sys.modules[spec.name] = mod\n"
+           "spec.loader.exec_module(mod)\n"
+           "def _spy(*_args, **_kwargs):\n"
+           "    print('VECTOR-CHILD-SPAWNED', file=sys.stderr)\n"
+           "    raise RuntimeError('vector child spawned despite the suppress marker')\n"
+           "subprocess.run = _spy\n"
+           "def _deny(*_args, **_kwargs):\n"
+           "    raise OSError('injected: unavailable')\n"
+           "sys.exit(mod._self_test_main_isolated(_mkdtemp=_deny, _which=lambda _n: None))\n")
+    proc = subprocess.run([sys.executable, "-I", "-B", "-c", spy, tool],
+                          capture_output=True, text=True, env=entry_env)
+    spawned = "vector child spawned" in proc.stderr or "VECTOR-CHILD-SPAWNED" in proc.stderr
+    if proc.returncode != 1 or "SELF-TEST FAIL" not in proc.stdout or spawned:
+        failures.append("(vector suppress-marker) a child carrying {} must run its cases to its "
+                        "own named SELF-TEST FAIL without spawning vector children (got exit {}, "
+                        "spawned: {})".format(_SUPPRESS_VECTORS_ENV, proc.returncode, spawned))
+
 
 def self_test_main():
-    """The public --self-test entry. A dependency the SETUP itself needs is reported as the same
-    named NOT RUN failure (exit 1) the in-run guards record, never a bare traceback:
-    fixture_git_lifecycle raises RuntimeError("self-test requires git") when git is absent, and
-    the scrub's scratch HOME or the lifecycle's wrapper directory raises OSError when no temp
-    directory is writable. Both are caught narrowly, only when raised by that setup (never from
-    inside the isolated run); any other exception still propagates."""
+    """The public --self-test entry. A dependency the SETUP itself needs is reported as ONE named
+    NOT RUN failure covering the whole run (exit 1; nothing ran, so no smaller case group may be
+    named as the only thing skipped), never a bare traceback: fixture_git_lifecycle raises
+    RuntimeError("self-test requires git") when git is absent, and the scrub's scratch HOME or
+    the lifecycle's wrapper directory ALLOCATION raises OSError when no temp directory is
+    writable. Each catch is narrow: the RuntimeError must carry the lifecycle's message, and the
+    allocation failure is typed at the allocation call itself (_mark_setup_allocations), so an
+    OSError from the lifecycle wrapper's write_text or chmod, and anything raised after entry
+    (entered), still propagates."""
     from _git_fixture_env import fixture_git_lifecycle, scrub_git_environment
     failures = []
     entered = False
+    restore_mkdtemp = _mark_setup_allocations()
     try:
         scrub_git_environment()
         with fixture_git_lifecycle():
+            restore_mkdtemp()
             entered = True
             return _self_test_main_isolated()
     except RuntimeError as exc:
         if entered or "self-test requires git" not in str(exc):
             raise
-        _not_run(failures, _REAL_GIT_CASE, "git is unavailable ({})".format(exc))
-    except OSError as exc:
+        _not_run(failures, _EVERY_CASE,
+                 "fixture setup failed: git is unavailable ({})".format(exc))
+    except _SetupAllocationError as exc:
         if entered:
             raise
-        _not_run(failures, _E2E_SURFACE_CASES, "no writable temp directory ({})".format(exc))
+        _not_run(failures, _EVERY_CASE,
+                 "fixture setup failed: no writable temp directory ({})".format(exc))
+    finally:
+        restore_mkdtemp()
     print("SELF-TEST FAIL:")
     for failure in failures:
         print("  - " + failure)
@@ -1207,6 +1428,7 @@ def _self_test_main_isolated(_mkdtemp=None, _symlink=None, _which=None, _vectors
     # input) rather than provoked by a deeply nested body: the depth at which tomllib overflows is an
     # interpreter limit, so a fixed body overflows under one recursion limit and parses (or trips an unrelated
     # refusal) under another.
+    import shutil as _shutil
     import tempfile as _tempfile
     _prev_digits = sys.get_int_max_str_digits()
     sys.set_int_max_str_digits(4300)
@@ -1226,12 +1448,22 @@ def _self_test_main_isolated(_mkdtemp=None, _symlink=None, _which=None, _vectors
             big_toml = "[plugin]\nover-long = " + big_value + "\n"
             _expect_gate_error(big_label + " attribution source",
                                lambda: _mask_manifest_identity(big_toml), big_needle)
-            with _tempfile.TemporaryDirectory(prefix="aiqt-portability-bigint-") as big_root:
+            # Guarded like every other in-run allocation: a temp directory lost MID-RUN is a
+            # named NOT RUN failure for the identity-source half of this case, never a traceback.
+            try:
+                big_root = (_mkdtemp or _tempfile.mkdtemp)(prefix="aiqt-portability-bigint-")
+            except OSError as exc:
+                _not_run(failures, "the {} identity source case".format(big_label),
+                         "no writable temp directory ({})".format(exc))
+                continue
+            try:
                 big_path = Path(big_root) / IDENTITY_MANIFEST
                 big_path.parent.mkdir(parents=True)
                 big_path.write_text(big_toml, encoding="utf-8")
                 _expect_gate_error(big_label + " identity source",
                                    lambda: load_identity(Path(big_root)), big_needle)
+            finally:
+                _shutil.rmtree(big_root, ignore_errors=True)
     finally:
         tomllib.loads, tomllib.load = real_loads, real_load
         sys.set_int_max_str_digits(_prev_digits)
@@ -1637,7 +1869,9 @@ def _self_test_main_isolated(_mkdtemp=None, _symlink=None, _which=None, _vectors
         finally:
             shutil.rmtree(base_tmp, ignore_errors=True)
 
-    if _vectors:
+    if _vectors and os.environ.get(_SUPPRESS_VECTORS_ENV) != "1":
+        # A fresh-process vector child carries _SUPPRESS_VECTORS_ENV, so a child whose injected
+        # setup failure ever stopped failing still could not spawn children of its own.
         _not_run_vectors(failures)
 
     if failures:
