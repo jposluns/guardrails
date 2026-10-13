@@ -1860,11 +1860,14 @@ def _member_timeout_controls(base):
 
     roster = set(_registered_selftests())
     record = ("opf/tools/check_opf_record.py", "--self-test", "--red-on-revert")
+    closure = ("tools/check_opf_standalone_closure.py", "--self-test")
     check("config/member-bound-table",
           (sorted(key for key in CONFIG_MEMBER_BOUNDS if key not in roster),
-           _config_member_bound(record), CONFIG_MEMBER_BOUND_DEFAULT,
-           sorted({_config_member_bound(argv) for argv in roster if argv != record})),
-          ([], 3600, 1200, [1200]))
+           _config_member_bound(record), _config_member_bound(closure),
+           CONFIG_MEMBER_BOUND_DEFAULT,
+           sorted({_config_member_bound(argv) for argv in roster
+                   if argv not in (record, closure)})),
+          ([], 3600, 3600, 1200, [1200]))
 
 
 def _manifest_setup_failures(base):

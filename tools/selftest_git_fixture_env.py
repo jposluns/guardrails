@@ -906,7 +906,7 @@ def _config_poison_fixture(base):
 
 # Per-member time bounds (seconds) for _run_config_member. A member absent here keeps
 # CONFIG_MEMBER_BOUND_DEFAULT. config/member-bound-table pins this table (every key an exact
-# registered roster argv, the one override, the default); it does not test any sizing.
+# registered roster argv, the two overrides, the default); it does not test any sizing.
 #
 # CONFIG_MEMBER_BOUND_DEFAULT is a DELIBERATE SHORTER DEADLINE, not a bound sized above every
 # member's own end-to-end budget. Budgets the members grant themselves, READ FROM SOURCE (not
@@ -937,6 +937,12 @@ CONFIG_MEMBER_BOUNDS = {
     # count): 3600 s, about 6.2 times the measured run, covers load5 up to about 80; it also
     # exceeds the command's own T75 wait chain (540 s per call, 4 calls: 2160 s).
     ("opf/tools/check_opf_record.py", "--self-test", "--red-on-revert"): 3600,
+    # MEASURED (2026-10-13, load5 about 29 to 36 on a 24-CPU host): one complete run took 1313 s
+    # wall on the pre-fix tree and 1345 s with its leg bounds, both passed; the 1200 s default was
+    # reached in all three config lanes on three consecutive runs at that load.
+    # ESTIMATED (the same load-proportional assumption): 3600 s, about 2.7 times the longest
+    # measured run, covers load5 up to about 95.
+    ("tools/check_opf_standalone_closure.py", "--self-test"): 3600,
 }
 # After the process-group kill: the bounded drain of output still held by a descendant that left
 # the group (setsid or setpgid), the bounded reap of the leader, and the bounded wait for the group

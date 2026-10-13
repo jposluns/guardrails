@@ -348,6 +348,10 @@ jobs:
         with:
           python-version: '3.14'
 
+      - name: OPF standalone-closure gate self-test
+        shell: bash
+        run: python3 -I -B tools/check_opf_standalone_closure.py --self-test
+
       - name: OPF standalone-closure gate
         shell: bash
         run: python3 -I -B tools/check_opf_standalone_closure.py

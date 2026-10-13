@@ -46,6 +46,7 @@ import math
 import os
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
@@ -87,61 +88,66 @@ _SUBSET = [
 ]
 
 # Per-leg wall-clock bounds (rule kill-timeout-exceeds-callee-wait). A bound exists to cut off a hung leg,
-# so it must sit ABOVE the work the leg is sanctioned to do; one flat constant below the work of a leg kills a
-# correctly-running leg. The former flat 600 s did exactly that on a loaded host (the opf-adopt-apply
-# self-test took 651 to 672 s and opf.py --self-test 894 s), and it sat below the 1800 s the adopt-apply
-# self-test itself waits on its class-sweep child. Each leg bound is the LARGEST of:
-#   * _LOAD_HEADROOM times the slowest known run of that leg (_LEG_CEILING_S);
-#   * the largest single child wait the leg declares in its own sources (a numeric timeout= argument or
-#     `timeout` parameter default, read from the copied sources on every run by _declared_wait_s) plus
-#     _LAUNCH_MARGIN_S, so the gate never kills a leg inside a wait the leg itself sanctions;
+# so it must sit ABOVE the work the leg is sanctioned to do: one flat constant below a leg's real work
+# kills a correctly-running leg. Each leg bound is the LARGEST of:
+#   * _LOAD_HEADROOM times the slowest run of that leg recorded on this tree (_LEG_CEILING_S);
+#   * the SUM of the child waits the leg declares in its own sources (numeric literals in timeout=
+#     arguments and `timeout` parameter defaults, read from the copied sources on every run by
+#     _declared_wait_s), plus _LAUNCH_MARGIN_S: sequential waits add up, so the sum, not the largest
+#     single wait, is the leg's declared end-to-end budget, and the gate never kills a leg inside work
+#     the leg itself sanctions;
 #   * _MIN_LEG_BOUND_S, the floor for the legs that finish in seconds.
-# The legs run one after another, so the worst case is the SUM of the bounds; the self-test requires that sum
-# plus _CI_SETUP_ALLOWANCE_S to fit inside the time limit of this gate CI job.
-# The literal scan does not see computed waits. opf.py --self-test sizes its watchdog cases at run time (one
-# alone, blocked-isolation, is 31 fixture calls of about 186 s each), and their sum approaches the CI job limit
-# on its own, so no bound on that leg can honour it and still fit the job. Its bound is therefore a deliberate
-# deadline sized from its known runs; when it trips, _report names the bound, never a failure of the leg.
-# Each ceiling below is whole seconds, rounded up, from one of three sources, named on its row: a serial
-# isolated run on 2026-10-11 (1-minute load average 8.8 to 12.9 on 24 CPUs, under nice -n 10); the
-# 2026-10-11 loaded-host record of the two legs the former bound killed; or, for a leg that run could not
-# measure (its fixtures refuse a scratch directory below an unreadable ancestor), the former 600 s bound,
-# which that record shows the leg finishing under (an inference, not a measurement: re-measure and tighten).
+# The wait scan reads only literals: a wait computed at run time (opf.py sizes its watchdog case budgets
+# at run time, for one) is missed, and arithmetic contributes only its literal operands (timeout=600 * 3
+# reads as 600), so the scan can only UNDER-read; an under-read bound kills the leg at its bound and the
+# gate exits 2, a loud refusal to evaluate, never a clean pass, and the measured-ceiling term is what
+# keeps such legs runnable. The legs run one after another, so the worst case of one gate run is the SUM
+# of the bounds; the self-test requires the whole opf-closure CI job's worst case (its self-test step
+# plus its live gate step) to fit that job's time limit, and refuses BY NAME any single leg bound that
+# exceeds the limit rather than shrinking it. A change that adds or lengthens a leg's wait updates this
+# table in the same change.
+# Every ceiling below is whole seconds, rounded up, from ONE source: a serial isolated run of every leg
+# at this revision on 2026-10-13, under nice -n 10 on an otherwise busy 24-CPU host, with the 5-minute
+# load average at the leg's start named on its row. _LOAD_HEADROOM is the allowance for a slower or more
+# loaded host than that run's; the multiplier is an INFERENCE (a saturated host can slow a leg
+# several-fold), not a measurement, and a leg that outgrows it trips its bound (exit 2, fail-closed),
+# never passes clean.
 _LEG_CEILING_S = {
-    "opf-homes-selftest": 600,  # not measured 2026-10-11; under the former 600 s bound (inferred)
-    "opf-homes-contract": 1,  # measured 2026-10-11: 0.3 s
-    "opf-tooling-selftest": 894,  # recorded 2026-10-11, loaded host
-    "opf-drift-selftest": 3,  # measured 2026-10-11: 2.9 s
-    "opf-doctor-selftest": 72,  # measured 2026-10-11: 71.5 s
-    "opf-init-selftest": 600,  # not measured 2026-10-11; under the former 600 s bound (inferred)
-    "opf-init-contract-validator-selftest": 1,  # measured 2026-10-11: under 0.1 s
-    "opf-init-contract-check-selftest": 1,  # measured 2026-10-11: under 0.1 s
-    "opf-upgrade-selftest": 600,  # not measured 2026-10-11; under the former 600 s bound (inferred)
-    "opf-adopt-selftest": 600,  # not measured 2026-10-11; under the former 600 s bound (inferred)
-    "opf-adopt-apply-selftest": 672,  # recorded 2026-10-11, loaded host (651 to 672 s)
-    "opf-adopt-hook-selftest": 2,  # measured 2026-10-11: 1.3 s
-    "opf-pack-manifest-selftest": 18,  # measured 2026-10-11: 17.3 s
-    "opf-adopt-observe-selftest": 600,  # not measured 2026-10-11; under the former 600 s bound (inferred)
-    "opf-adopt-discover-selftest": 1,  # measured 2026-10-12: 0.4 s at load5 about 25
-    "opf-prompt-pack-selftest": 1,  # measured 2026-10-11: 0.7 s
-    "opf-prompt-pack": 1,  # measured 2026-10-11: 0.1 s
-    "opf-oplock-selftest": 600,  # not measured 2026-10-11; under the former 600 s bound (inferred)
-    "opf-init-substrate-selftest": 600,  # not measured 2026-10-11; under the former 600 s bound (inferred)
-    "opf-init-builders-selftest": 1,  # measured 2026-10-11: 0.2 s
-    "opf-init-operation-selftest": 600,  # not measured 2026-10-11; under the former 600 s bound (inferred)
-    "opf-init-p0-selftest": 40,  # measured 2026-10-11: 39.8 s
-    "opf-init-observe-selftest": 1,  # measured 2026-10-11: 1.0 s
-    "commonmark-headings-selftest": 14,  # measured 2026-10-11: 13.3 s
-    "commonmark-conformance": 1,  # measured 2026-10-11: 0.2 s
+    "opf-homes-selftest": 53,  # measured 2026-10-13: 52.7 s at load5 13.1
+    "opf-homes-contract": 1,  # measured 2026-10-13: 0.2 s at load5 13.0
+    "opf-tooling-selftest": 334,  # measured 2026-10-13: 333.5 s at load5 13.0
+    "opf-drift-selftest": 2,  # measured 2026-10-13: 1.6 s at load5 9.1
+    "opf-doctor-selftest": 44,  # measured 2026-10-13: 43.8 s at load5 9.1
+    "opf-init-selftest": 153,  # measured 2026-10-13: 152.3 s at load5 8.8
+    "opf-init-contract-validator-selftest": 1,  # measured 2026-10-13: 0.0 s at load5 8.0
+    "opf-init-contract-check-selftest": 1,  # measured 2026-10-13: 0.0 s at load5 8.0
+    "opf-upgrade-selftest": 60,  # measured 2026-10-13: 59.7 s at load5 8.0
+    "opf-adopt-selftest": 128,  # measured 2026-10-13: 127.4 s at load5 7.5
+    "opf-adopt-apply-selftest": 5,  # measured 2026-10-13: 4.6 s at load5 6.6
+    "opf-adopt-hook-selftest": 1,  # measured 2026-10-13: 0.7 s at load5 6.6
+    "opf-pack-manifest-selftest": 12,  # measured 2026-10-13: 11.8 s at load5 6.6
+    "opf-adopt-observe-selftest": 246,  # measured 2026-10-13: 245.3 s at load5 6.6
+    "opf-adopt-discover-selftest": 1,  # measured 2026-10-13: 0.3 s at load5 6.0
+    "opf-prompt-pack-selftest": 1,  # measured 2026-10-13: 0.5 s at load5 6.0
+    "opf-prompt-pack": 1,  # measured 2026-10-13: 0.1 s at load5 6.0
+    "opf-oplock-selftest": 75,  # measured 2026-10-13: 74.2 s at load5 6.0
+    "opf-init-substrate-selftest": 3,  # measured 2026-10-13: 2.6 s at load5 5.5
+    "opf-init-builders-selftest": 1,  # measured 2026-10-13: 0.1 s at load5 5.5
+    "opf-init-operation-selftest": 71,  # measured 2026-10-13: 70.8 s at load5 5.5
+    "opf-init-p0-selftest": 24,  # measured 2026-10-13: 23.3 s at load5 5.0
+    "opf-init-observe-selftest": 1,  # measured 2026-10-13: 0.7 s at load5 4.7
+    "commonmark-headings-selftest": 8,  # measured 2026-10-13: 7.5 s at load5 4.7
+    "commonmark-conformance": 1,  # measured 2026-10-13: 0.1 s at load5 4.7
 }
-_LOAD_HEADROOM = 2
+_LOAD_HEADROOM = 4
 _LAUNCH_MARGIN_S = 60
 _MIN_LEG_BOUND_S = 120
 
 _CI_WORKFLOW = Path(".github") / "workflows" / "quality.yml"
 _CI_JOB = "opf-closure"
 _CI_DEFAULT_JOB_MINUTES = 360  # the GitHub Actions limit for a hosted-runner job that sets no timeout-minutes
-_CI_SETUP_ALLOWANCE_S = 600    # checkout with full history and setup-python, before the gate step starts
+_CI_SETUP_ALLOWANCE_S = 600    # checkout with full history and setup-python, before the gate steps start
+_VECTOR_ALLOWANCE_S = 120      # the registration, table, scan and time-scaled stub checks of the self-test step
 
 
 class _BoundError(Exception):
@@ -161,24 +167,40 @@ def _parse(path):
         raise _BoundError("cannot read the declared waits of {}: {}".format(path, exc))
 
 
-def _declared_wait_s(paths):
-    """The largest single wait, in seconds, that the given sources declare: a numeric literal in a `timeout=`
-    keyword argument (both arms of a conditional count) or in the default of a parameter named `timeout`. A
-    wait computed at run time (a name, a call, arithmetic) is not seen; 0 when none is declared. Raises
-    _BoundError when a source cannot be read or parsed (fail-closed)."""
-    found = [0]
+def _declared_wait_sites(paths):
+    """Each declared wait, in seconds, that the given sources carry, one entry per site: a `timeout=`
+    keyword argument or the default of a parameter named `timeout`, counting only numeric literals (a
+    conditional site counts once, at its largest literal arm). The scan is literal-only: a wait computed
+    at run time contributes only the literals it contains, or nothing, so it can only UNDER-read
+    (`timeout=600 * 3` reads as 600, `timeout=limit` as nothing); an under-read bound kills the leg at
+    its bound and the gate exits 2, a loud refusal to evaluate, never a clean pass. Raises _BoundError
+    when a source cannot be read or parsed (fail-closed)."""
+    sites = []
     for path in paths:
         for node in ast.walk(_parse(path)):
+            values = None
             if isinstance(node, ast.keyword) and node.arg == "timeout":
-                found.extend(_numbers(node.value))
+                values = _numbers(node.value)
             elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
                 spec = node.args
                 positional = spec.posonlyargs + spec.args
                 pairs = list(zip(positional[len(positional) - len(spec.defaults):], spec.defaults))
                 pairs.extend((arg, default) for arg, default in zip(spec.kwonlyargs, spec.kw_defaults)
                              if default is not None)
-                found.extend(n for arg, default in pairs if arg.arg == "timeout" for n in _numbers(default))
-    return max(found)
+                values = [n for arg, default in pairs if arg.arg == "timeout"
+                          for n in _numbers(default)]
+            if values:
+                sites.append(max(values))
+    return sites
+
+
+def _declared_wait_s(paths):
+    """The leg's declared end-to-end wait budget, in seconds: the SUM of every declared wait site in
+    the given sources (rule kill-timeout-exceeds-callee-wait: a leg's waits can run one after another,
+    so the bound must sit above their sum, not only the largest single wait). 0 when none is declared.
+    Summing can over-count a site that never runs, which only raises the bound; the under-read
+    direction is disclosed on _declared_wait_sites and fails closed."""
+    return sum(_declared_wait_sites(paths))
 
 
 def _self_test_modules(opf_py):
@@ -197,7 +219,7 @@ def _self_test_modules(opf_py):
 
 
 def _leg_bounds(tools_dir, ceilings=None):
-    """{leg name: (bound_s, ceiling_s, declared wait_s)} for every subset leg, derived from the
+    """{leg name: (bound_s, ceiling_s, declared waits sum_s)} for every subset leg, derived from the
     sources under tools_dir. Raises _BoundError (fail-closed) for a leg with no ceiling."""
     ceilings = _LEG_CEILING_S if ceilings is None else ceilings
     tools_dir = Path(tools_dir)
@@ -215,12 +237,13 @@ def _leg_bounds(tools_dir, ceilings=None):
     return bounds
 
 
-def _bound_faults(bounds, required):
+def _bound_faults(bounds, needs):
     """Each leg whose bound is missing, not a finite positive number, or below the bound its own work
-    requires (required is the _leg_bounds result)."""
+    requires (needs maps each leg name to that requirement in seconds, derived independently of the
+    bounds under test)."""
     faults = []
     for name, _script, _args in _SUBSET:
-        have, need = bounds.get(name), required[name][0]
+        have, need = bounds.get(name), needs[name]
         if type(have) not in (int, float) or not math.isfinite(have) or have <= 0:
             faults.append("{}: bound {!r} is not a finite positive number".format(name, have))
         elif have < need:
@@ -228,26 +251,45 @@ def _bound_faults(bounds, required):
     return faults
 
 
+def _oversize_legs(bounds, limit_s):
+    """Each leg whose own bound exceeds the CI job limit. Such a bound is refused BY NAME (the ceiling
+    table or the leg's declared waits must change under review), never silently shrunk to fit the job."""
+    return ["{}: bound {}s alone exceeds the {}s job limit".format(name, bounds[name], limit_s)
+            for name, _script, _args in _SUBSET if bounds[name] > limit_s]
+
+
 def _ci_job_limit_s(workflow_text, job=_CI_JOB):
-    """The time limit, in seconds, of `job` in the workflow text: the smallest timeout-minutes set on the
-    job or on any of its steps, capped at _CI_DEFAULT_JOB_MINUTES. None when the job is absent or a
-    timeout-minutes value is not a plain integer (cannot evaluate)."""
+    """The time limit, in seconds, of `job` in the workflow text, as (seconds, None), or (None, reason)
+    naming what could not be evaluated. The limit is the smallest timeout-minutes found at job level or
+    at ANY key position of any of the job's steps (including as the first key of a step's `- ` line),
+    capped at _CI_DEFAULT_JOB_MINUTES, the GitHub Actions limit for a hosted-runner job that sets no
+    timeout-minutes. Fail-closed: an absent or duplicated job header, a timeout-minutes value that is
+    not a plain integer literal, and any other job line carrying the token timeout-minutes in a form
+    this line parser does not evaluate (a quoted or flow-mapping key, an expression value) each refuse
+    by name rather than returning a limit the workflow might not enforce."""
     lines = workflow_text.splitlines()
-    try:
-        start = lines.index("  {}:".format(job))
-    except ValueError:
-        return None
+    header = "  {}:".format(job)
+    if lines.count(header) != 1:
+        return None, "job {} appears {} times in the workflow (need exactly one)".format(
+            job, lines.count(header))
     minutes = [_CI_DEFAULT_JOB_MINUTES]
-    for line in lines[start + 1:]:
+    for line in lines[lines.index(header) + 1:]:
         stripped = line.strip()
-        if stripped and not stripped.startswith("#") and len(line) - len(line.lstrip(" ")) <= 2:
+        if not stripped or stripped.startswith("#"):
+            continue
+        if len(line) - len(line.lstrip(" ")) <= 2:
             break  # the next job, or a top-level key, ends this job
-        if stripped.startswith("timeout-minutes:"):
-            value = stripped[len("timeout-minutes:"):].split("#")[0].strip()
+        key_line = stripped[2:].lstrip() if stripped.startswith("- ") else stripped
+        if key_line.startswith("timeout-minutes:"):
+            value = key_line[len("timeout-minutes:"):].split("#")[0].strip()
             if not re.fullmatch(r"[0-9]+", value):
-                return None
+                return None, ("timeout-minutes value {!r} in the {} job is not a plain integer "
+                              "(cannot evaluate)".format(value, job))
             minutes.append(int(value))
-    return 60 * min(minutes)
+        elif "timeout-minutes" in key_line:
+            return None, ("unrecognized timeout-minutes form {!r} in the {} job "
+                          "(cannot evaluate)".format(stripped, job))
+    return 60 * min(minutes), None
 
 
 def _check_pack_manifest_registration(subset):
@@ -329,30 +371,54 @@ def _materialize(opf_src, dest):
     return dest / "opf"
 
 
-def _tail(output):
-    return "\n".join((output or b"").decode("utf-8", "replace").splitlines()[-3:])
+def _tail(output, keep=3):
+    return "\n".join((output or b"").decode("utf-8", "replace").splitlines()[-keep:])
 
 
-def _run_one(opf_root, script, args, run_dir, env, bound_s):
+def _kill_and_reap(proc):
+    """Kill the timed-out leg's WHOLE process group (the leg was started as its own session leader, so
+    every descendant that did not itself change session shares its group), then reap the leg and drain
+    what it wrote. Disclosed residual: a descendant that called setsid() itself has left the group and
+    escapes this kill; it can also keep the output pipe open, so the drain is bounded and gives up with
+    what it has rather than hanging the gate."""
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except OSError:
+        proc.kill()
+    try:
+        out, _err = proc.communicate(timeout=_LAUNCH_MARGIN_S)
+    except subprocess.TimeoutExpired:
+        out = b""
+    return out
+
+
+def _run_one(opf_root, script, args, run_dir, env, bound_s, keep=3):
     """Run one subset member isolated against the copied opf/tools/<script>, killed once it has run for
-    bound_s seconds. Returns (rc, tail_of_output, elapsed_s); rc is None when the leg was killed at its bound
-    (the bound tripped; the leg itself reported nothing). cwd is run_dir, which is OUTSIDE any git repository
-    and does not contain the tools/ tree, so only the copied opf/tools/ is reachable to `python3 -I`."""
+    bound_s seconds. The leg runs as its own session leader (start_new_session), so a timeout kills and
+    reaps its whole process group, not only the immediate child: work a hung leg forked does not
+    continue past the kill (a descendant that itself starts a new session is the disclosed residual on
+    _kill_and_reap). Returns (rc, tail_of_output, elapsed_s); rc is None when the leg was killed at its
+    bound (the bound tripped; the leg itself reported nothing). cwd is run_dir, which is OUTSIDE any git
+    repository and does not contain the tools/ tree, so only the copied opf/tools/ is reachable to
+    `python3 -I`."""
     target = opf_root / "tools" / script
     if not target.is_file():
         return 2, "missing subset script in the copy: {}".format(target), 0.0
     start = time.monotonic()
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             [sys.executable, "-I", "-B", str(target), *args],
             cwd=str(run_dir), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            timeout=bound_s,
+            start_new_session=True,
         )
-    except subprocess.TimeoutExpired as exc:
-        return None, _tail(exc.output), time.monotonic() - start
     except OSError as exc:
         return 2, "could not launch the interpreter: {}".format(exc), time.monotonic() - start
-    return proc.returncode, _tail(proc.stdout), time.monotonic() - start
+    try:
+        stdout, _err = proc.communicate(timeout=bound_s)
+    except subprocess.TimeoutExpired:
+        stdout = _kill_and_reap(proc)
+        return None, _tail(stdout, keep), time.monotonic() - start
+    return proc.returncode, _tail(stdout, keep), time.monotonic() - start
 
 
 def _run_subset(opf_root, run_dir, bounds):
@@ -432,36 +498,72 @@ def run(root):
 
 
 def _bounds_self_test(root):
-    """The per-leg bounds hold the rule on the real tree, fit the CI job, and the rule is discriminating.
-    Returns the derived bounds; raises AssertionError naming the first broken property."""
+    """The per-leg bounds hold the rule on the real tree, fit the CI job, and every rule here is
+    discriminating (each has a RED case beside its PASS). Returns the derived bounds; raises
+    AssertionError naming the first broken property."""
     names = [name for name, _script, _args in _SUBSET]
     if sorted(_LEG_CEILING_S) != sorted(names):
         raise AssertionError("closure/leg-ceilings-match-the-subset")
-    required = _leg_bounds(Path(root) / "opf" / "tools")
+    tools_dir = Path(root) / "opf" / "tools"
+    required = _leg_bounds(tools_dir)
     live = dict((name, row[0]) for name, row in required.items())
-    faults = _bound_faults(live, required)
+    # The expectation is recombined here from the ceiling table and the wait scan, independently of
+    # _leg_bounds, so a _leg_bounds that drops a term (the headroom, the wait sum, the floor) is a
+    # named fault, not a tautology.
+    needs = {}
+    for name, script, _args in _SUBSET:
+        sources = [tools_dir / script]
+        if script == "opf.py":
+            sources.extend(tools_dir / module for module in _self_test_modules(tools_dir / script))
+        needs[name] = max(_MIN_LEG_BOUND_S, _LOAD_HEADROOM * _LEG_CEILING_S[name],
+                          math.ceil(sum(_declared_wait_sites(sources))) + _LAUNCH_MARGIN_S)
+    faults = _bound_faults(live, needs)
     if faults:
         raise AssertionError("closure/leg-bounds-cover-their-work: " + "; ".join(faults))
     for name in names:
         bound, ceiling, declared = required[name]
-        print("  bound {:38s} {}s (ceiling {}s x {}; declared wait {}s + {}s)".format(
+        print("  bound {:38s} {}s (ceiling {}s x {}; declared waits sum {}s + {}s)".format(
             name, bound, ceiling, _LOAD_HEADROOM, declared, _LAUNCH_MARGIN_S))
-    print("PASS closure/leg-bounds-cover-their-work")
-    # The former flat 600 s on every leg is refused, naming the legs whose work it under-covers.
-    refused = "; ".join(_bound_faults(dict((name, 600) for name in names), required))
-    for name in ("opf-tooling-selftest", "opf-adopt-apply-selftest"):
-        if name + ": bound 600s below" not in refused:
-            raise AssertionError("closure/flat-600-not-refused: " + name)
-    print("RED flat-600 -> " + refused)
+    print("PASS closure/leg-bounds-cover-their-work (expectation recombined from the table and the "
+          "wait scan, independently of _leg_bounds)")
+    # Mutant: a bounds table standing in for a broken _leg_bounds. One second below the independent
+    # need is a fault naming the leg; at the need and one above are clean (each side of the have < need
+    # comparison is tested at and beside its boundary).
+    leg = max(needs, key=lambda name: (needs[name], name))
+    for delta, expected in (
+            (-1, ["{}: bound {}s below the {}s its work requires".format(
+                leg, needs[leg] - 1, needs[leg])]),
+            (0, []),
+            (1, [])):
+        mutated = dict(live)
+        mutated[leg] = needs[leg] + delta
+        got = _bound_faults(mutated, needs)
+        if got != expected:
+            raise AssertionError("closure/leg-bounds-mutant (need{:+d}): {!r}".format(delta, got))
+    print("RED mutant bound (one second below the independent need of {}) -> named fault; at and one "
+          "above the need -> clean".format(leg))
+    # The former flat 600 s bound is refused for exactly the legs whose table-derived need exceeds it,
+    # an expectation derived from the live table, never from a recorded constant.
+    under = sorted(name for name in names if needs[name] > 600)
+    flat_faults = _bound_faults(dict((name, 600) for name in names), needs)
+    flat_named = sorted(fault.split(":", 1)[0] for fault in flat_faults)
+    if flat_named != under:
+        raise AssertionError("closure/flat-600-refusals-do-not-match-the-table: named {!r}, "
+                             "table-derived {!r}".format(flat_named, under))
+    if under:
+        print("RED flat-600 -> " + "; ".join(flat_faults))
+    else:
+        print("PASS closure/flat-600-covers-every-leg (no table-derived need exceeds 600s)")
     ceilings = dict(_LEG_CEILING_S)
-    del ceilings["opf-adopt-apply-selftest"]
+    del ceilings[leg]
     try:
-        _leg_bounds(Path(root) / "opf" / "tools", ceilings)
+        _leg_bounds(tools_dir, ceilings)
     except _BoundError:
         print("RED missing-ceiling -> cannot derive the bound (fail-closed)")
     else:
         raise AssertionError("closure/missing-ceiling-not-refused")
-    # The declared-wait scan reads what it says it reads.
+    # The declared-wait scan reads what it says it reads: sequential sites SUM; a conditional site
+    # counts once at its largest arm; arithmetic and computed waits are under-read, never over-trusted.
     tmp = Path(tempfile.mkdtemp(prefix="opf-closure-scan-"))
     try:
         probe = tmp / "probe.py"
@@ -470,6 +572,9 @@ def _bounds_self_test(root):
                 ("def f(timeout=2400):\n    pass\n", 2400),
                 ("def f(*, timeout=7.5):\n    pass\n", 7.5),
                 ("p.communicate(timeout=120 if quick else 600)\n", 600),
+                ("subprocess.run(a, timeout=200)\nsubprocess.run(b, timeout=200)\n", 400),
+                ("subprocess.run(a, timeout=30)\ndef f(timeout=60):\n    pass\n", 90),
+                ("subprocess.run(a, timeout=600 * 3)\n", 600),
                 ("subprocess.run(a, timeout=limit)\nx = 9999\n", 0),
                 ("subprocess.run(a, timeout=True)\n", 0)):
             probe.write_text(source, encoding="utf-8")
@@ -486,39 +591,83 @@ def _bounds_self_test(root):
             raise AssertionError("closure/declared-wait-scan-unparseable-not-refused")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-    print("PASS closure/declared-wait-scan")
-    # The worst case (every leg killed at its bound, one after another) fits the CI job.
+    print("PASS closure/declared-wait-scan (sequential sites sum; literal-only, so arithmetic and "
+          "computed waits are under-read, which fails closed)")
+    # The worst case of the whole opf-closure CI job must fit its time limit: the job runs the
+    # --self-test step (one full subset sweep in its positive leg, a negative leg bounded by the
+    # opf-tooling bound, and the fast vectors) and then the live gate step (one more subset sweep).
     text = (Path(root) / _CI_WORKFLOW).read_text(encoding="utf-8")
-    limit = _ci_job_limit_s(text)
-    total = sum(live.values()) + _CI_SETUP_ALLOWANCE_S
-    if limit is None or total > limit:
-        raise AssertionError("closure/bounds-fit-the-ci-job: {}s of bounds and setup, job limit {!r}s".format(
-            total, limit))
-    print("PASS closure/bounds-fit-the-ci-job: {}s of leg bounds + {}s setup = {}s <= {}s ({} job)".format(
-        sum(live.values()), _CI_SETUP_ALLOWANCE_S, total, limit, _CI_JOB))
+    limit, reason = _ci_job_limit_s(text)
+    if limit is None:
+        raise AssertionError("closure/ci-job-limit-cannot-evaluate: " + reason)
+    oversize = _oversize_legs(live, limit)
+    if oversize:
+        raise AssertionError("closure/leg-bound-exceeds-the-ci-job: " + "; ".join(oversize))
+    subset_sum = sum(live.values())
+    total = (2 * subset_sum + required["opf-tooling-selftest"][0]
+             + _VECTOR_ALLOWANCE_S + _CI_SETUP_ALLOWANCE_S)
+    if total > limit:
+        raise AssertionError("closure/bounds-fit-the-ci-job: {}s of worst-case job work, job limit "
+                             "{}s".format(total, limit))
+    print("PASS closure/bounds-fit-the-ci-job: 2 subset sweeps {}s + negative leg {}s + vectors {}s + "
+          "setup {}s = {}s <= {}s ({} job)".format(
+              2 * subset_sum, required["opf-tooling-selftest"][0], _VECTOR_ALLOWANCE_S,
+              _CI_SETUP_ALLOWANCE_S, total, limit, _CI_JOB))
+    # A single leg bound over the job limit is refused by name, never shrunk: one second over is named,
+    # at and one under the limit are not (each side of its boundary tested).
+    for delta, want_named in ((-1, False), (0, False), (1, True)):
+        probe_bounds = dict(live)
+        probe_bounds[leg] = limit + delta
+        named = [entry for entry in _oversize_legs(probe_bounds, limit)
+                 if entry.startswith(leg + ":")]
+        if bool(named) != want_named:
+            raise AssertionError("closure/oversize-leg-refusal (limit{:+d}): {!r}".format(delta, named))
+    print("RED a leg bound one second over the job limit -> refused by name, never shrunk; at and one "
+          "under the limit -> not oversize")
     header = "  {}:\n".format(_CI_JOB)
     tight = text.replace(header, header + "    timeout-minutes: 30\n", 1)
-    if tight == text or _ci_job_limit_s(tight) != 1800 or total <= 1800:
+    if tight == text or _ci_job_limit_s(tight) != (1800, None) or total <= 1800:
         raise AssertionError("closure/ci-job-30-minutes-not-refused")
-    if _ci_job_limit_s(text.replace(header, "  renamed-job:\n", 1)) is not None:
-        raise AssertionError("closure/ci-job-absent-not-refused")
-    if _ci_job_limit_s(text.replace(header, header + "    timeout-minutes: thirty\n", 1)) is not None:
-        raise AssertionError("closure/ci-job-non-integer-not-refused")
-    print("RED ci-job-30-minutes -> does not fit; RED ci-job-absent and non-integer -> cannot evaluate")
+    absent_limit, absent_reason = _ci_job_limit_s(text.replace(header, "  renamed-job:\n", 1))
+    if absent_limit is not None or _CI_JOB not in (absent_reason or ""):
+        raise AssertionError("closure/ci-job-absent-not-refused-by-name")
+    bad_limit, bad_reason = _ci_job_limit_s(
+        text.replace(header, header + "    timeout-minutes: thirty\n", 1))
+    if bad_limit is not None or "thirty" not in (bad_reason or ""):
+        raise AssertionError("closure/ci-job-non-integer-not-refused-by-name")
+    step = "      - name: OPF standalone-closure gate\n"
+    reordered = text.replace(
+        step, "      - timeout-minutes: 1\n        name: OPF standalone-closure gate\n", 1)
+    if reordered == text or _ci_job_limit_s(reordered) != (60, None):
+        raise AssertionError("closure/ci-step-timeout-as-first-key-not-found")
+    quoted = text.replace(header, header + '    "timeout-minutes": 1\n', 1)
+    quoted_limit, quoted_reason = _ci_job_limit_s(quoted)
+    if quoted_limit is not None or "timeout-minutes" not in (quoted_reason or ""):
+        raise AssertionError("closure/ci-unevaluable-timeout-form-not-refused-by-name")
+    print("RED ci-job-30-minutes -> does not fit; ci-job-absent, a non-integer value and a quoted-key "
+          "timeout form -> refused by name; a step whose FIRST key is timeout-minutes: 1 -> 60s limit "
+          "found")
     return required
 
 
-_TIME_SCALE = 300  # the bound vectors run the real _run_one and _report at 1/300 of real time
+_STUB_CEILING_SLEEP_S = 2.0  # the slowest leg's recorded ceiling maps to this many real stub seconds
 
 
 def _timeout_vectors_self_test(required):
-    """Time-scaled stub legs through the real runner: the slowest recorded correct opf-adopt-apply run
-    (672 s) is killed by the former flat 600 s bound and finishes inside its derived bound, and a genuine
-    hang is still cut off at that bound and reported as the bound tripping, not as a leg failure."""
-    leg = "opf-adopt-apply-selftest"
+    """Time-scaled stub legs through the real runner, derived from the live ceiling table (never from a
+    recorded constant): a run exactly as slow as the slowest recorded ceiling finishes inside that leg's
+    derived bound but is killed by a bound of half its ceiling (any flat constant below a leg's recorded
+    work kills a correct run); a genuine hang is cut off at the bound and reported as the bound
+    tripping, never as a leg failure; and a timed-out leg's WHOLE process group is killed, so work a
+    hung leg forked does not run on past the kill."""
+    leg = max(_LEG_CEILING_S, key=lambda name: (_LEG_CEILING_S[name], name))
+    ceiling = _LEG_CEILING_S[leg]
     bound = required[leg][0]
-    scaled = bound / _TIME_SCALE
-    slow = repr(672 / _TIME_SCALE)
+    scale = ceiling / _STUB_CEILING_SLEEP_S
+    slow = repr(ceiling / scale)       # the ceiling-long correct run, scaled
+    undersized = (ceiling / 2) / scale  # a flat bound at half the recorded ceiling, scaled
+    scaled_bound = bound / scale        # at least 2 x _STUB_CEILING_SLEEP_S, since bound >= _LOAD_HEADROOM x ceiling
+    hang = repr(max(3600, 2 * bound) / scale)
     tmp = Path(tempfile.mkdtemp(prefix="opf-closure-bound-"))
     try:
         stub_root = tmp / "opf"
@@ -526,16 +675,19 @@ def _timeout_vectors_self_test(required):
         (stub_root / "tools" / "stub_sleep.py").write_text(
             "import sys, time\ntime.sleep(float(sys.argv[1]))\n", encoding="utf-8")
         env = _isolated_env()
-        rc, _tail_text, _elapsed = _run_one(stub_root, "stub_sleep.py", [slow], tmp, env, 600 / _TIME_SCALE)
+        rc, _tail_text, _elapsed = _run_one(stub_root, "stub_sleep.py", [slow], tmp, env, undersized)
         if rc is not None:
-            raise AssertionError("closure/flat-600-did-not-kill-the-672s-leg (rc={!r})".format(rc))
-        print("RED flat-600 -> the recorded 672 s {} run is killed (time-scaled 1:{})".format(leg, _TIME_SCALE))
-        rc, _tail_text, _elapsed = _run_one(stub_root, "stub_sleep.py", [slow], tmp, env, scaled)
+            raise AssertionError(
+                "closure/half-ceiling-bound-did-not-kill-the-ceiling-run (rc={!r})".format(rc))
+        print("RED half-ceiling flat bound -> a correct run at the recorded {}s {} ceiling is killed "
+              "(time-scaled 1:{:g})".format(ceiling, leg, scale))
+        rc, _tail_text, _elapsed = _run_one(stub_root, "stub_sleep.py", [slow], tmp, env, scaled_bound)
         if rc != 0:
-            raise AssertionError("closure/derived-bound-killed-the-672s-leg (rc={!r})".format(rc))
-        print("PASS closure/derived-bound-lets-the-672s-leg-finish ({}s bound)".format(bound))
-        rc, tail, elapsed = _run_one(stub_root, "stub_sleep.py", ["3600"], tmp, env, scaled)
-        if rc is not None or not scaled <= elapsed < scaled + 30:
+            raise AssertionError("closure/derived-bound-killed-the-ceiling-run (rc={!r})".format(rc))
+        print("PASS closure/derived-bound-lets-the-ceiling-run-finish ({}s bound over the {}s "
+              "ceiling)".format(bound, ceiling))
+        rc, tail, elapsed = _run_one(stub_root, "stub_sleep.py", [hang], tmp, env, scaled_bound)
+        if rc is not None or not scaled_bound <= elapsed < scaled_bound + 30:
             raise AssertionError("closure/hang-not-cut-off (rc={!r}, {:.1f}s)".format(rc, elapsed))
         for rows, want_code, want, refused in (
                 ([(leg, None, tail, elapsed, bound)], 2,
@@ -543,7 +695,8 @@ def _timeout_vectors_self_test(required):
                   "{}: killed at its {}s bound".format(leg, bound), "not a failure the leg reported"),
                  ("BROKEN", "CLOSURE: OK")),
                 ([(leg, None, tail, elapsed, bound), ("opf-homes-contract", 1, "boom", 1.0, 120)], 1,
-                 ("BROKEN", "opf-homes-contract (rc=1): boom", "{}: killed at its {}s bound".format(leg, bound)),
+                 ("BROKEN", "opf-homes-contract (rc=1): boom",
+                  "{}: killed at its {}s bound".format(leg, bound)),
                  ("CLOSURE: OK",))):
             out = io.StringIO()
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
@@ -551,25 +704,91 @@ def _timeout_vectors_self_test(required):
             said = out.getvalue()
             if code != want_code or not all(w in said for w in want) or any(r in said for r in refused):
                 raise AssertionError("closure/timeout-report (exit {}): {!r}".format(code, said))
-        print("RED hang -> cut off at its bound and reported as LEG BOUND EXCEEDED (exit 2; exit 1 beside a "
-              "real failure)")
+        print("RED hang -> cut off at its bound and reported as LEG BOUND EXCEEDED (exit 2; exit 1 "
+              "beside a real failure)")
+        # Descendant-bearing hang: the hung leg forks a child that would write a marker AFTER the kill.
+        # The runner kills the leg's whole process group at the bound, so the marker never appears; a
+        # runner that killed only the immediate child would let the descendant write it (red on revert).
+        marker = tmp / "descendant-marker.txt"
+        (stub_root / "tools" / "stub_tree.py").write_text(
+            "import subprocess, sys, time\n"
+            "subprocess.Popen([sys.executable, '-I', '-c',\n"
+            "    'import sys, time; time.sleep(float(sys.argv[1])); '\n"
+            "    'open(sys.argv[2], \"w\").write(\"leaked\")', sys.argv[1], sys.argv[2]])\n"
+            "time.sleep(3600)\n", encoding="utf-8")
+        start = time.monotonic()
+        rc, _tail_text, elapsed = _run_one(stub_root, "stub_tree.py", ["2.5", str(marker)], tmp, env, 1.0)
+        if rc is not None or not 1.0 <= elapsed < 31.0:
+            raise AssertionError(
+                "closure/descendant-hang-not-cut-off (rc={!r}, {:.1f}s)".format(rc, elapsed))
+        time.sleep(max(0.0, start + 4.0 - time.monotonic()))
+        if marker.exists():
+            raise AssertionError("closure/descendant-survived-the-kill: a process the hung leg forked "
+                                 "wrote its marker after the leg was killed at its bound")
+        print("RED descendant-bearing hang -> the leg's process group is killed whole; the forked "
+              "descendant's marker never appears")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+_INJECTED_EDGE = "check_versions"
+
+
+def _negative_verdict(rc, tail, bound):
+    """The negative leg's verdict: None when the re-introduced upward edge was caught, else the failure
+    text. Caught requires BOTH a failure the leg itself reported (rc None is the bound tripping, rc 0 is
+    a pass, and a launch error never evaluated the flip at all) AND output naming the injected upward
+    import, so the rc 2 that _run_one returns for a missing script or an interpreter launch failure, or
+    any unrelated failure, is a self-test failure, never silent coverage credit."""
+    if rc is None:
+        return ("negative: the flipped opf.py --self-test was killed at its {}s bound "
+                "(the bound tripped; the flip was not evaluated)".format(bound))
+    if rc == 0:
+        return ("negative: a re-introduced upward edge (import check_versions) was NOT "
+                "caught in isolation (the gate would give no coverage)")
+    if _INJECTED_EDGE not in (tail or ""):
+        return ("negative: the leg exited rc={} without naming the injected upward import {!r} (a "
+                "launch error or an unrelated failure is not coverage): {}".format(
+                    rc, _INJECTED_EDGE, (tail or "").replace("\n", " | ") or "(no output)"))
+    return None
+
+
+def _negative_verdict_self_test():
+    """The negative-leg verdict is discriminating: only a leg-reported failure naming the injected
+    import counts as caught; a bound kill, a clean pass, an interpreter launch error (the rc 2 branch)
+    and an unrelated failure are each a self-test failure."""
+    caught = _negative_verdict(2, "opf: cannot bootstrap: check_versions (cannot evaluate)", 600)
+    if caught is not None:
+        raise AssertionError("closure/negative-verdict-rejects-a-genuine-catch: " + caught)
+    print("PASS closure/negative-verdict-accepts-a-leg-naming-the-injected-import")
+    for rc, tail, label in (
+            (None, "", "bound-kill"),
+            (0, "SELF-TEST PASS", "clean-pass"),
+            (2, "could not launch the interpreter: [Errno 2] No such file or directory",
+             "launch-error"),
+            (1, "SELF-TEST FAIL: unrelated", "unrelated-failure")):
+        if _negative_verdict(rc, tail, 600) is None:
+            raise AssertionError("closure/negative-verdict-not-red: {} (rc={!r})".format(label, rc))
+    print("RED negative-leg bound-kill, clean-pass, launch-error and unrelated-failure -> each is a "
+          "self-test failure, never coverage credit")
+
+
 def self_test_main():
-    """Prove the gate fails without the self-containment property (change-carries-check). The bound legs
-    run first and fast: the per-leg bounds cover the work of each leg and fit the CI job, and time-scaled stub
-    legs show the former flat bound killing a correct leg while a hang is still cut off and named. The
-    positive leg runs run() over the real opf/ and requires 0. The negative leg materializes opf/ alone, then
-    RE-INTRODUCES the pre-move upward edge (opf/tools/_opf_store.py importing `_parse` from AIQT
-    `check_versions` instead of the extracted `_semver`); with no AIQT tree reachable that import fails, so
-    the subset must exit non-zero (a leg killed at its bound does not count as caught). A gate that passed
-    the deliberately-broken copy would provide no coverage."""
+    """Prove the gate fails without the self-containment property (change-carries-check). The bound and
+    verdict legs run first and fast: the per-leg bounds cover each leg's table-derived need and fit the
+    CI job, time-scaled stub legs show a flat bound below the recorded work killing a correct leg while
+    a hang (descendants included) is still cut off and named, and the negative-leg verdict is shown
+    discriminating. The positive leg runs run() over the real opf/ and requires 0. The negative leg
+    materializes opf/ alone, then RE-INTRODUCES the pre-move upward edge (opf/tools/_opf_store.py
+    importing `_parse` from AIQT `check_versions` instead of the extracted `_semver`); with no AIQT tree
+    reachable that import fails, so the leg must itself report a failure NAMING the injected import (a
+    leg killed at its bound, a launch error, or an unrelated failure does not count as caught; see
+    _negative_verdict). A gate that passed the deliberately-broken copy would provide no coverage."""
     root = repo_root()
     try:
         _pack_manifest_registration_self_test()
         _adopt_observe_registration_self_test()
+        _negative_verdict_self_test()
         required = _bounds_self_test(root)
         _timeout_vectors_self_test(required)
     except (AssertionError, _BoundError, OSError) as exc:
@@ -596,13 +815,11 @@ def self_test_main():
             store.write_text(flipped, encoding="utf-8")
             env = _isolated_env()
             bound = required["opf-tooling-selftest"][0]
-            rc, _tail_text, _elapsed = _run_one(opf_root, "opf.py", ["--self-test"], tmp, env, bound)
-            if rc is None:
-                failures.append("negative: the flipped opf.py --self-test was killed at its {}s bound "
-                                "(the bound tripped; the flip was not evaluated)".format(bound))
-            elif rc == 0:
-                failures.append("negative: a re-introduced upward edge (import check_versions) was NOT "
-                                "caught in isolation (the gate would give no coverage)")
+            rc, tail, _elapsed = _run_one(opf_root, "opf.py", ["--self-test"], tmp, env, bound,
+                                          keep=40)
+            verdict = _negative_verdict(rc, tail, bound)
+            if verdict is not None:
+                failures.append(verdict)
     except OSError as exc:
         failures.append("negative: harness error building the broken copy: {}".format(exc))
     finally:
