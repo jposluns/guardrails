@@ -594,6 +594,12 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_instruction_budget.py
 
+      # A brief addressed to a worker family that cannot execute must not ask it to run anything. The gate
+      # runs on briefs before they are sent; here only its self-test runs, since the repository holds none.
+      - name: Brief capability self-test
+        shell: bash
+        run: python3 -I -B tools/check_brief_capability.py --self-test
+
       - name: NOTICE drift
         shell: bash
         run: python3 -I -B tools/gen_notice.py --check
@@ -684,6 +690,10 @@ jobs:
       - name: Instruction-budget self-test (execution-reconciled)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite instruction-budget-selftest
+
+      - name: Brief-capability self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite brief-capability-selftest
 
       - name: Entry-guard self-test (execution-reconciled)
         shell: bash
