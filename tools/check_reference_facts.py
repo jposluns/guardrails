@@ -15,7 +15,12 @@ generator alone cannot assert:
     manifest is rendered: the registry row (name and coverage in one <tr>), the reverse view (name in a
     <summary>, coverage in a later <p> of the same <details>), AND the machine-readable JSON export (a
     subset framework must not carry an ids_total edition denominator). The gen_mappings branch is the
-    primary control; this is defence in depth against a hand-edited page or export.
+    primary control; this is defence in depth against a hand-edited page or export;
+  - the landing-page counts (rules, gates, hooks with their blocking/warning split, frameworks, and
+    the enforced-rules figure): each recomputed from the rule corpus, the gates and hooks manifests,
+    the standards manifests, and the enforcement register's summary, then compared with README.md's
+    anchored wordings (a missing anchored wording is itself a finding, so a reworded count fails loud,
+    never silently unchecked).
 
 BEST-EFFORT RESIDUAL (disclosed per the pack's own rule): this gate checks the specific fact copies
 enumerated above; it is not a semantic-equivalence prover for arbitrary prose, and `catalogue = "full"` is
@@ -221,6 +226,70 @@ def check_json_subset_denominator(root, manifests, findings):
                                 man.name, entry["ids_total"]))
 
 
+# The landing page's anchored count wordings (label, pattern, expected-count keys). Each pattern is
+# REQUIRED to match at least once in README.md, and every match must carry the recomputed figures, so a
+# stale count and a silently reworded count sentence both fail loud. Every wording sits on a single line
+# of the page (a proof line or a table row), so no pattern spans a line break; each is start-anchored or
+# word-bounded and ends in a literal unique to its wording, so no end-of-line anchor is needed.
+README_COUNT_FACTS = (
+    ("proof line",
+     r"(?m)^\*\*(\d+) rules\. (\d+) CI gates that check this repository\. (\d+) Claude Code hooks "
+     r"shipped with the pack\. Mapped to (\d+) frameworks\.\*\*",
+     ("rules", "gates", "hooks", "frameworks")),
+    ("rules row", r"\b(\d+) clear, single-behaviour rules\b", ("rules",)),
+    ("controls row",
+     r"\b(\d+) CI gates that check this repository and (\d+) Claude Code hooks shipped with the pack "
+     r"\((\d+) blocking, (\d+) warning\)",
+     ("gates", "hooks", "blocking", "warning")),
+    ("enforcement figure", r"\b(\d+) of the (\d+) rules have automated enforcement\b",
+     ("enforced", "rules")),
+    ("crosswalk row", r"\b(\d+) pinned external control catalogues\b", ("frameworks",)),
+)
+
+
+def expected_counts(root, manifests):
+    """Recompute the landing page's counts from the surfaces that define them, fail-closed on a missing or
+    malformed one: rules = the .md files directly under .aiqt/core/rules/ (the corpus layout gen_rules
+    validates), gates = the [[gate]] entries of .aiqt/core/gates/manifest.toml, hooks (with the
+    blocking/warning split from `default`) = the [[hook]] entries of .aiqt/core/hooks/manifest.toml,
+    frameworks = the loaded standards manifests, and enforced = the enforcement register's summary row
+    (ENFORCEMENT.md is generated and drift-gated against its sources by gen_enforcement_register)."""
+    rules_dir = root / ".aiqt" / "core" / "rules"
+    if not rules_dir.is_dir():
+        raise OSError("required surface missing: {}".format(rules_dir))
+    rules = sum(1 for p in rules_dir.iterdir() if p.is_file() and p.suffix == ".md")
+    gates = load_toml(root / ".aiqt" / "core" / "gates" / "manifest.toml").get("gate", [])
+    hooks = load_toml(root / ".aiqt" / "core" / "hooks" / "manifest.toml").get("hook", [])
+    if not rules or not gates or not hooks:
+        raise OSError("empty rule corpus, gates manifest, or hooks manifest; fail-closed")
+    enforced = re.search(r"(?m)^\| Enforced \| (\d+) \|", _read(root / "ENFORCEMENT.md"))
+    if not enforced:
+        raise OSError("ENFORCEMENT.md: no '| Enforced | N |' summary row")
+    return {"rules": rules, "gates": len(gates), "hooks": len(hooks),
+            "blocking": sum(1 for h in hooks if h.get("default") == "block"),
+            "warning": sum(1 for h in hooks if h.get("default") == "warn"),
+            "frameworks": len(manifests), "enforced": int(enforced.group(1))}
+
+
+def check_readme_counts(root, manifests, findings):
+    """The landing page's count claims against the manifests they summarize. Anchored, not fuzzy: each
+    README_COUNT_FACTS wording must be present, and every occurrence must carry the recomputed figures."""
+    exp = expected_counts(root, manifests)
+    text = _read(root / "README.md")
+    for label, pattern, keys in README_COUNT_FACTS:
+        hits = re.findall(pattern, text)
+        if not hits:
+            findings.append("README.md: anchored count wording not found ({}); if the page was reworded, "
+                            "update README_COUNT_FACTS so the counts stay checked".format(label))
+            continue
+        want = tuple(str(exp[k]) for k in keys)
+        for hit in hits:
+            got = (hit,) if isinstance(hit, str) else tuple(hit)
+            if got != want:
+                findings.append("README.md: {} states {} for ({}); the manifests give {}".format(
+                    label, "/".join(got), ", ".join(keys), "/".join(want)))
+
+
 def run(root):
     findings = []
     try:
@@ -236,6 +305,7 @@ def run(root):
         check_deferred(root, manifests, findings)
         check_subset_denominator(root, manifests, findings)
         check_json_subset_denominator(root, manifests, findings)
+        check_readme_counts(root, manifests, findings)
     except (ManifestError, OSError, ValueError, KeyError) as exc:
         print("error: {}; fail-closed".format(exc), file=sys.stderr)
         return 2
@@ -273,8 +343,13 @@ def main():
 #  12. a subset reverse-view <p> coverage mutated to "N of M" -> finding (the structure-aware case: the
 #      name is in the <summary>, the denominator in a later <p>, so a same-line scan would miss it),
 #  13. a subset framework carrying ids_total in the JSON export -> finding (the export invariant),
-#  14. a missing site/downloads/mappings.json -> exit 2 (fail-closed, not a skip).
-# (1, 7, 12, 13 are the invariant-bearing cases; the rest complete the fail-closed contract.)
+#  14. a missing site/downloads/mappings.json -> exit 2 (fail-closed, not a skip),
+#  15. a README landing-page count changed -> finding (the page's counts are recomputed from their
+#      manifests, so a stale count cannot ship),
+#  16. a reworded anchored count wording -> finding (its absence is itself a finding, so a reword
+#      cannot silently drop a count from coverage).
+# (1, 7, 12, 13, 15, and 16 are the invariant-bearing cases; the rest complete the fail-closed
+# contract.)
 
 _MANIFEST = (
     'map-key = "map-{k}"\nname = "{name}"\npublisher = "{pub}"\nedition = "{ed}"\n'
@@ -341,9 +416,44 @@ _DISCLOSURE = (
 )
 
 
-def _write_fixture(base, manifests=None, readme=None, page=None, disclosure=None, json_export=None):
+# The landing-page fixture components: three rules, two gates, two hooks (one blocking, one warning),
+# two framework manifests (the default `manifests`), and one enforced rule. _LANDING carries every
+# README_COUNT_FACTS wording with exactly those figures.
+_GATES_TOML = (
+    '[[gate]]\nid = "fixture-gate-one"\nscript = "tools/one.py"\nrules = []\nplatform = "ci"\n'
+    'default = "block"\nclass = "a"\nresidue = "fixture"\n\n'
+    '[[gate]]\nid = "fixture-gate-two"\nscript = "tools/two.py"\nrules = []\nplatform = "ci"\n'
+    'default = "block"\nclass = "a"\nresidue = "fixture"\n'
+)
+
+_HOOKS_TOML = (
+    '[[hook]]\nid = "fixture-hook-block"\nrules = []\nplatform = "claude-code"\ndefault = "block"\n\n'
+    '[[hook]]\nid = "fixture-hook-warn"\nrules = []\nplatform = "claude-code"\ndefault = "warn"\n'
+)
+
+_ENFORCEMENT_MD = (
+    "# Fixture Enforcement Register\n\n## Summary\n\n| Status | Rules |\n|---|---:|\n"
+    "| Enforced | 1 |\n| Preview only | 0 |\n| Pending | 0 |\n| None | 2 |\n"
+)
+
+_LANDING = (
+    "# Fixture Landing\n\n"
+    "**3 rules. 2 CI gates that check this repository. 2 Claude Code hooks shipped with the pack. "
+    "Mapped to 2 frameworks.**\n\n"
+    "| **The standard** | 3 clear, single-behaviour rules across the fixture facets. | Rules |\n"
+    "| **Technical controls** | 2 CI gates that check this repository and 2 Claude Code hooks shipped "
+    "with the pack (1 blocking, 1 warning). Today 1 of the 3 rules have automated enforcement. "
+    "| Controls |\n"
+    "| **A standards crosswalk** | Mappings from the rules to 2 pinned external control catalogues. "
+    "| Mappings |\n"
+)
+
+
+def _write_fixture(base, manifests=None, readme=None, page=None, disclosure=None, json_export=None,
+                   landing=None):
     """Write a complete clean fixture tree, overridable per component for a case's single mutation.
-    `manifests` is a list of (stem, name, publisher, edition, kind, catalogue)."""
+    `manifests` is a list of (stem, name, publisher, edition, kind, catalogue); `landing` overrides the
+    README.md the counts leg reads."""
     if manifests is None:
         manifests = [("full", "Fixture Full Framework", "OWASP Foundation", "1.0", "control", "full"),
                      ("subset", "Fixture Subset Framework", "ISO/IEC", "2023", "guidance", "subset")]
@@ -362,6 +472,18 @@ def _write_fixture(base, manifests=None, readme=None, page=None, disclosure=None
         json_export if json_export is not None else _JSON, encoding="utf-8")
     (base / "disclosure.toml").write_text(
         disclosure if disclosure is not None else _DISCLOSURE, encoding="utf-8")
+    core = base / ".aiqt" / "core"
+    rules_dir = core / "rules"
+    rules_dir.mkdir(parents=True)
+    for stem in ("one", "two", "three"):
+        (rules_dir / ("fixture-rule-" + stem + ".md")).write_text(
+            "# fixture rule " + stem + "\n", encoding="utf-8")
+    (core / "gates").mkdir()
+    (core / "gates" / "manifest.toml").write_text(_GATES_TOML, encoding="utf-8")
+    (core / "hooks").mkdir()
+    (core / "hooks" / "manifest.toml").write_text(_HOOKS_TOML, encoding="utf-8")
+    (base / "ENFORCEMENT.md").write_text(_ENFORCEMENT_MD, encoding="utf-8")
+    (base / "README.md").write_text(landing if landing is not None else _LANDING, encoding="utf-8")
 
 
 def self_test_main():
@@ -528,6 +650,22 @@ def self_test_main():
         (nojson / "site" / "downloads" / "mappings.json").unlink()
         if run_quiet(nojson) != 2:
             failures.append("a missing mappings.json expected exit 2 (fail-closed)")
+
+        # 15. a README landing-page count changed (the proof line now claims 999 rules) -> finding.
+        #     MUTATION: removing the check_readme_counts call from run() makes this case pass clean
+        #     and the test fails.
+        badcount = tmp / "badcount"
+        _write_fixture(badcount, landing=_LANDING.replace("**3 rules.", "**999 rules.", 1))
+        if run_quiet(badcount) != 1:
+            failures.append("a README proof-line count mismatch expected exit 1")
+
+        # 16. a reworded anchored count wording (both lines carrying it) -> finding: the wording is
+        #     REQUIRED, so a reword cannot silently drop a count from coverage.
+        reword = tmp / "reword"
+        _write_fixture(reword, landing=_LANDING.replace("CI gates that check this repository",
+                                                        "CI gates that verify this repository"))
+        if run_quiet(reword) != 1:
+            failures.append("a reworded anchored count wording expected exit 1")
     finally:
         if unreadable_std is not None:
             os.chmod(unreadable_std, 0o755)  # restore even on an unexpected early exit
@@ -543,8 +681,9 @@ def self_test_main():
             .format(len(skipped), ", ".join(skipped)))
     print("SELF-TEST PASS: a clean fixture passes; a meta/disclosure parenthetical mismatch, a schema-enum "
           "gap, a closed-set parity break, a vendored name in the deferred paragraph, a subset manifest "
-          "rendered with an edition denominator in the registry row or the reverse-view <p>, and a subset "
-          "framework carrying ids_total in the JSON export each report a finding (exit 1); and a missing "
+          "rendered with an edition denominator in the registry row or the reverse-view <p>, a subset "
+          "framework carrying ids_total in the JSON export, a landing-page count that disagrees with its "
+          "manifests, and a missing anchored count wording each report a finding (exit 1); and a missing "
           "page, a missing JSON export, an unreadable standards dir, a missing/invalid catalogue, and an "
           "unaliased publisher all fail closed (exit 2)" + note)
     return 0

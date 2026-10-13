@@ -5,19 +5,19 @@ under `.claude/rules/` and the AIQT block in `CLAUDE.md`, plus `.claude/CLAUDE.m
 gate, `tools/check_instruction_budget.py`, measures that text, with the header line Claude Code writes
 before each file, and fails if the pack's share grows. The enforced figure lives in
 `.aiqt/core/instruction-budget.toml` (`ratchet`), lowered as the pack shrinks and raised only with a
-reviewed reason.
+reviewed reason; the `ceiling` in that file is a separate figure, a target for the pack's own share
+alone, reported, not enforced.
 
-Treat 150,000 characters as the target ceiling for everything Claude Code loads at the start of a session.
-The project's research reproduced Claude Code's own limits as 150,000 characters in total when a model
-with a 1M-token context window is selected, and, on 200k-context models, as 40,000 characters per file and
-120,000 in total; these figures are observed Claude Code behaviour, not a pack guarantee, so on a
-200k-context model budget to 120,000, not 150,000. The gate prints two totals: PACK, the pack's own share,
-and SESSION, which adds the rest of your `CLAUDE.md` and its imports. Both count `.claude/CLAUDE.md` and
-its imports, and a header for each loaded file with its resolved path relative to the repository root (not
-the absolute part, which depends on where the repository sits). Compare SESSION, not PACK, plus your own
-files under `~/.claude/`, such as `~/.claude/CLAUDE.md` and any rules there, against the ceiling when you
-check your setup; Claude Code's own limit counts file contents only, so the headers make SESSION read a
-little high.
+Treat 150,000 characters as this project's target for everything Claude Code loads at the start of a
+session. One caveat: on models with a 200k-token context window, Claude Code applies a lower total limit,
+observed by this project at 120,000 characters (Claude Code behaviour, which can change, not a pack
+guarantee), so on those models budget to 120,000, not 150,000. The gate prints two totals: PACK, the
+pack's own share, and SESSION, which adds the rest of your `CLAUDE.md` and its imports. Both count
+`.claude/CLAUDE.md` and its imports, and a header for each loaded file with its resolved path relative to
+the repository root (not the absolute part, which depends on where the repository sits). Compare SESSION,
+not PACK, plus your own files under `~/.claude/`, such as `~/.claude/CLAUDE.md` and any rules there,
+against the target when you check your setup; the observed Claude Code limit counts file contents only, so
+the headers make SESSION read a little high.
 The gate reads only an enumerated grammar and exits 2, naming the file and line, on anything outside it: a
 control, format, or Unicode whitespace character other than tab and a line ending; frontmatter that is not
 plain ASCII keys and one-line string values; a plain `paths:` value with no `/`, `*`, `?`, `[`, `{` or

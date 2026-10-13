@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "2da7aaadb943b7635631825af7060dcb3c123a36644c3496bb4649c243e13dfc"
+tree-sha256 = "560ee3c79b84e1340d6b97bf2e1da04cd7da3679616ebf00051ab871c8834ecb"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -61,8 +61,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 285313
-sha256 = "bd3d96ff54f9e908cd9a6467cc724b41c7c65f24d70973249d5ef0ff0a28c6bf"
+bytes = 285674
+sha256 = "8ef340b81ffe81f9bb71191187c45bedf72efbf9eb1c5ddbe79bf482cbf358c8"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -2346,8 +2346,8 @@ sha256 = "e74907144039f7e02ff6535ae5da718a21c0ec24733ab430e0f2fe62b94c10b1"
 
 [[sources]]
 path = "INSTRUCTION-BUDGET.md"
-bytes = 3440
-sha256 = "1c3a85719160648d177c24821b24d1a6295d3b7c0a976ec6ae1c9dbfbcf23b0b"
+bytes = 3464
+sha256 = "8585f60a60bbb47ded56bc710a830a4f4b0a5e5624157d7e5dd6930d19ead07d"
 
 [[sources]]
 path = "LICENSE"
@@ -2361,8 +2361,8 @@ sha256 = "aaf972bbdd8b8520076c1bb6f9d701fab580ed6fd34a91c2ba125d39d463aa11"
 
 [[sources]]
 path = "README.md"
-bytes = 4369
-sha256 = "8e81f550dd710ac769cb8397d3cb9319483ae4ff02bf1ef3a3c129c85051d1ab"
+bytes = 4674
+sha256 = "5e64678e0b7aee732d7e3fcb630f4bfbac677e7e0f742efd304f565ef885089d"
 
 [[sources]]
 path = "RELEASING.md"
@@ -3416,8 +3416,8 @@ sha256 = "305b18a28974d74b2378dc56774c4f6e961a74b8da6b8fe802b1c33865674651"
 
 [[sources]]
 path = "tools/check_overclaim.py"
-bytes = 275138
-sha256 = "263bbd21620fc34d3dc0388ab6c8f4be33037e3f22e66152e56364ad2ea45f58"
+bytes = 276083
+sha256 = "f202612e66ab6831418dc11a8e8bfb86c1d386ff7a0dc042caddc13fd8c95dbf"
 
 [[sources]]
 path = "tools/check_portability.py"
@@ -3446,8 +3446,8 @@ sha256 = "d04be78bc38e93932e0f2830a4bf293e991f2d4955db773629fffc2575269586"
 
 [[sources]]
 path = "tools/check_reference_facts.py"
-bytes = 28775
-sha256 = "ff666fa06f876de24576383f990f04d16964b40fa32c5272a3e327cb6e31dd54"
+bytes = 37053
+sha256 = "2367df1d306d31a2d5f12a480948fd6e6135008447e3b7e8c32e5d39fe7ac11e"
 
 [[sources]]
 path = "tools/check_release_build.py"
