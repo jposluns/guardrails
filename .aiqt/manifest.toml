@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "4f582e18a14429d72bc940ab646f604ad446caab540dcaf1ca74ab596444279c"
+tree-sha256 = "acbed1c9768f138ffd8383fdf82a8d349eeba019245f8eb8c3696d37ff49a476"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3611,8 +3611,8 @@ sha256 = "26ead77672a53c0477ef6f4ed11c459c3a41a9278f64b381c4e258b965c92e14"
 
 [[sources]]
 path = "tools/gen_renderers.py"
-bytes = 61485
-sha256 = "4fb16af93ef34c9a6d78b859a7f5dc2aa3a68c92f8e8ed2fb5250f3d0e8f1c65"
+bytes = 61991
+sha256 = "8a5cfb747801d6e68117ffaabbe2a6ba6a6d789e28f71ae8436602a81ae8b2f1"
 
 [[sources]]
 path = "tools/gen_roadmap.py"

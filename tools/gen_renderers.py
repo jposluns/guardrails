@@ -236,25 +236,28 @@ def _folded_strings(tree):
 
 def _unsupported_binding(tree):
     """The description of the first use of RENDERER_DECL in `tree` other than ONE single-target top-level
-    Assign or AnnAssign to the bare name, or None when there is none. Modelled on gen_gensrc's
-    _read_declaration walk: a Store/Del-context Name covers tuple/list/starred unpacking, a conditional or
-    try/with/loop-nested assignment, an augmented assignment, del, a walrus, a type alias, and a
-    for/with/comprehension target; the string-name binders (import alias incl. a dotted root, a wildcard
-    import, def/class, except-as, match capture, a parameter, a type parameter, global/nonlocal) are matched
-    by their str field; and a store or delete through the module object is matched by its literal name (an
-    attribute such as sys.modules[__name__].RENDERER_DECL, a subscript such as vars()["RENDERER_DECL"] or
-    globals()["RENDERER_DECL"], or a setattr/delattr call naming it).
+    Assign or AnnAssign to the bare name, or None when there is none. The identifier scan is bounded by
+    construction, never node shape by node shape: for EVERY walked node, EVERY string-valued or
+    list-of-string field it carries (ast.iter_fields) is refused when the reserved name is one of its
+    dot-separated components. One rule therefore covers a def/class name, a parameter, a type parameter, an
+    except-as, a match capture, MatchMapping.rest, MatchClass.kwd_attrs, a global/nonlocal name, an
+    attribute, a keyword-argument name, an import alias or module in any dotted position (import-as,
+    import RENDERER_DECL.sub, from RENDERER_DECL import x), and any string field a later Python adds. A
+    Name is the one node the rule routes around, because the declaration itself is one: the allowed
+    top-level targets pass, any other Store/Del is refused naming its binder form, and a Load of the bare
+    name is refused because RENDERER_DECL[...] = ... or RENDERER_DECL.update(...) changes in place the
+    value the reader recovered; a chained assignment is refused because its other target is an alias.
 
-    The value Python runs must be the value read, so each way to reach the declared dict that spells its
-    name, and through which it could be changed in place, is refused too: a Load of the bare name
-    (RENDERER_DECL[...] = ... or RENDERER_DECL.update(...)), a chained assignment (its other target is an
-    alias), an attribute read such as sys.modules[__name__].RENDERER_DECL or other_module.RENDERER_DECL, and
-    an import naming it. A literal-name store made through any other call (globals().setdefault,
-    __setitem__, __setattr__, builtins.setattr, an aliased setattr, operator.setitem, dict.__setitem__), a
-    dict key, a keyword argument or a variable holding the name is caught by refusing the spelled name
-    itself: a keyword argument named RENDERER_DECL, and any expression _folded_strings computes to the string
-    'RENDERER_DECL' other than a comparison operand or a third or later positional argument of a call (_inert),
-    so a reader such as this file, which spells it only there, passes."""
+    A string CONSTANT is governed by the bounded fold, never the identifier rule: any expression
+    _folded_strings computes to exactly 'RENDERER_DECL' is refused unless _inert allows it as one of
+    the TWO EXEMPT USES, a comparison operand or a third or later positional argument of a call with no
+    starred argument before it. Both exemptions are required by this file's own scan (self-test case (q)):
+    the walk compares folded values and str fields against the literal name, and _parse_module takes it as
+    the third positional argument (purpose). The exemptions are allowed uses, NOT proof of inertness: an
+    overloaded comparison method (an __eq__ or __contains__ receives the spelled name as its operand) and a
+    helper taking it as a third or later argument (functools.partial(setattr, module, 'RENDERER_DECL'))
+    each consume the literal name at run time and can store or read through it; both routes are part of the
+    residual _declared_renderer_stems discloses."""
     allowed = {id(t) for t, _ in _top_level_bindings(tree)}
     parents = {}
     for node in ast.walk(tree):
@@ -323,49 +326,24 @@ def _unsupported_binding(tree):
             if kind in ("comprehension", "withitem"):
                 binder = parents.get(id(binder))
             return form + _where(binder)
-        if isinstance(node, ast.alias):
-            bound = node.asname if node.asname is not None else node.name.partition(".")[0]
-            if bound == "RENDERER_DECL" or (node.asname is None and node.name == "*"):
-                return ("a wildcard import" if node.name == "*" else "an import") + _where(node)
-            if "RENDERER_DECL" in node.name.split("."):
-                return "an import naming RENDERER_DECL (an alias of another module's value)" + _where(node)
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            if node.name == "RENDERER_DECL":
-                return "a def/class" + _where(node)
-        elif isinstance(node, ast.ExceptHandler):
-            if node.name == "RENDERER_DECL":
-                return "an except-as" + _where(node)
-        elif isinstance(node, (ast.MatchAs, ast.MatchStar)):
-            if node.name == "RENDERER_DECL":
-                return "a match capture" + _where(node)
-        elif isinstance(node, ast.MatchMapping):
-            if node.rest == "RENDERER_DECL":
-                return "a match capture" + _where(node)
-        elif isinstance(node, ast.arg):
-            if node.arg == "RENDERER_DECL":
-                return "a def or lambda parameter" + _where(node)
-        elif isinstance(node, (ast.TypeVar, ast.ParamSpec, ast.TypeVarTuple)):
-            if node.name == "RENDERER_DECL":
-                return "a type parameter" + _where(node)
-        elif isinstance(node, (ast.Global, ast.Nonlocal)):
-            if "RENDERER_DECL" in node.names:
-                return "a global/nonlocal declaration" + _where(node)
-        elif isinstance(node, ast.Attribute):
-            if node.attr == "RENDERER_DECL":
-                return ("an attribute {} (such as sys.modules[__name__].RENDERER_DECL)".format(
-                    "store or delete" if _stores(node) else "read") + _where(node))
-        elif isinstance(node, ast.Subscript):
+        if isinstance(node, ast.Constant):
+            continue  # a string constant is judged by the fold rule above, never by the identifier rule
+        if isinstance(node, ast.alias) and node.asname is None and node.name == "*":
+            return "a wildcard import" + _where(node)
+        if isinstance(node, ast.Subscript):
             if _stores(node) and _names_decl(node.slice):
                 return ("a subscript store or delete keyed 'RENDERER_DECL' (such as vars() or globals())"
-                        + _where(node))
-        elif isinstance(node, ast.keyword):
-            if node.arg == "RENDERER_DECL":
-                return ("a keyword argument named RENDERER_DECL (such as globals().update(RENDERER_DECL=...))"
                         + _where(node))
         elif isinstance(node, ast.Call):
             if (isinstance(node.func, ast.Name) and node.func.id in ("setattr", "delattr")
                     and len(node.args) >= 2 and _names_decl(node.args[1])):
                 return "a {} call naming RENDERER_DECL".format(node.func.id) + _where(node)
+        for field, value in ast.iter_fields(node):
+            for item in (value if isinstance(value, list) else (value,)):
+                if isinstance(item, str) and "RENDERER_DECL" in item.split("."):
+                    return ("the identifier RENDERER_DECL in the {} field of an ast.{} node (every "
+                            "string-valued or list-of-string AST field is refused, whatever the node "
+                            "shape)".format(field, type(node).__name__) + _where(node))
     return None
 
 
@@ -386,14 +364,17 @@ def _declared_renderer_stems(tools_dir):
     function-local reuse of it, or the string anywhere but a comparison or a third or later call argument,
     which fails in the safe direction.
 
-    DISCLOSED RESIDUAL (disclose-guard-residuals): the walk sees the name only where the source spells it, as
-    an identifier, an attribute, an import name, a keyword-argument name, or a string the bounded fold of
-    _folded_strings computes. A REFLECTIVE write or read that never spells it so is beyond static analysis,
-    and this function does not detect it and does not claim to: a name computed any other way (a join,
-    %-formatting, str.format, a case change, bytes.decode, chr, an f-string format spec) and then stored
-    through setattr(module, name, ...), globals()[name] = ..., globals().update({name: ...}) or any other
-    namespace write; the literal name handed to a helper as a third or later positional argument that the
-    helper then stores, such as functools.partial(setattr, module, 'RENDERER_DECL'); a bulk copy that never
+    DISCLOSED RESIDUAL (disclose-guard-residuals): the walk sees the name only where the source spells it, in
+    a string-valued or list-of-string AST field (an identifier, an attribute, an import name, a
+    keyword-argument name, a pattern or parameter name, or any such field a later Python adds), or as a
+    string the bounded fold of _folded_strings computes. What remains is beyond this static scan, which does
+    not detect it and does not claim to: a name computed any other way (a join, %-formatting, str.format, a
+    case change, bytes.decode, chr, an f-string format spec) and then stored through
+    setattr(module, name, ...), globals()[name] = ..., globals().update({name: ...}) or any other namespace
+    write; the literal name consumed through one of the two EXEMPT USES, by a comparison operand (an
+    overloaded __eq__, __ne__ or __contains__ receives the spelled name and can store or read through it) or
+    by a helper taking it as a third or later positional argument that then stores or reads, such as
+    functools.partial(setattr, module, 'RENDERER_DECL'); a bulk copy that never
     names it, such as globals().update(vars(other)); exec, eval or compile of source text; an import-time
     side effect of another module; a module-level __getattr__ that answers the name without binding it; and
     an in-place change to the declared dict reached without spelling the name (by iterating
@@ -580,8 +561,9 @@ def main():
 #       type alias, a store through the module object by attribute, vars()/globals() subscript or
 #       setattr, a literal-name store through any other call (qualified or aliased setattr, __setattr__,
 #       setdefault, __setitem__, dict.__setitem__, operator.setitem), a dict-display or keyword update, a
-#       variable holding the name, an f-string, split f-string or concatenated key, an import naming it, and
-#       a later argument that a starred argument before it can shift to the key position)
+#       variable holding the name, an f-string, split f-string or concatenated key, an import naming it, an
+#       import from it (the module position), and a later argument that a starred argument before it can
+#       shift to the key position)
 #       fails --check (exit 2) instead of reading as "no declaration".
 #   (i) a *.py entry that is a dangling symlink, a looping symlink, a symlink to a directory, a directory,
 #       or a FIFO fails --check (exit 2) instead of being skipped.
@@ -589,8 +571,9 @@ def main():
 #       an annotated assignment alone renders that declaration, while an ordinary declaration followed by an
 #       annotated (or a second plain) rebinding, or a bare annotation, fails closed (exit 2), and the reader
 #       alone also refuses two bindings; each _MUTATED in-place change to the declared dict (a subscript
-#       store, an update call, a chained-assignment alias, a module attribute read) also fails closed, so
-#       none of these routes can make the value Python runs differ from the value read.
+#       store, an update call, a chained-assignment alias, a module attribute read, a class-pattern keyword
+#       read) also fails closed, so none of these routes can make the value Python runs differ from the
+#       value read.
 #   (k) a PEP 263 cookie cannot hide a declaration: a UTF-7 cookie that makes a UTF-8 comment a declaration,
 #       and any other non-UTF-8 cookie, fail --check (exit 2); a UTF-8 BOM is parsed as Python parses it.
 #   (l) a parser or compiler stack overflow (RecursionError or MemoryError) while parsing a tools/*.py, or
@@ -601,9 +584,11 @@ def main():
 #       that overflows on one interpreter parses cleanly on another and the case would flip.
 #   (m) the refusal names where a binder runs: a walrus in a decorator, a default or a class base runs in
 #       the enclosing scope, so it is not reported as inside the def or class; one in a body is.
-#   (n) an unreadable *.py is reported as "cannot read", an unparsable one as "cannot parse".
+#   (n) an unreadable *.py is reported as "cannot read it to scan for", an unparsable one as "cannot parse
+#       it to scan for"; the FULL prefix is asserted, so an older or shorter wording fails the case.
 #   (o) a comparison against the string RENDERER_DECL, a third positional argument (where no direct namespace
-#       write takes its key), or a longer string mentioning it, stays allowed.
+#       write takes its key), a longer string mentioning it, or an f-string whose !r conversion or format
+#       spec renders a different string at run time (the fold must not over-match either), stays allowed.
 #   (p) the bounded string fold keeps no value longer than _FOLD_CAP.
 #   (q) this file passes its own scan (a renderer-free tools/*.py that discovery reads like any other).
 
@@ -698,6 +683,7 @@ _UNSUPPORTED_BINDINGS = (
     ("split f-string subscript key", "vars()[f'RENDERER_{{({!r})}}'] = {}\n".format("DECL", _DECL_LITERAL)),
     ("concatenated subscript key", "globals()['RENDERER_' + 'DECL'] = {}\n".format(_DECL_LITERAL)),
     ("import naming it", "from gen_alpha import RENDERER_DECL as other\nother['semantics-revision'] = 99\n"),
+    ("import from it", "from RENDERER_DECL import x\n"),
     ("later argument after a starred one", "import sys\n"
                                            "setattr(*[], *[sys.modules[__name__]], 'RENDERER_DECL', {})\n"
                                            .format(_DECL_LITERAL)),
@@ -722,6 +708,10 @@ _MUTATED = (
      + 'ALIAS["semantics-revision"] = 99\n'),
     ("a module attribute read", _ENTRY_GOOD
      + 'sys.modules[__name__].RENDERER_DECL["semantics-revision"] = 99\n'),
+    ("a class-pattern keyword read", _ENTRY_GOOD
+     + 'match sys.modules[__name__]:\n'
+       '    case object(RENDERER_DECL=alias):\n'
+       '        alias["semantics-revision"] = 99\n'),
 )
 
 # (k) unlisted tools/gen_beta.py bodies (bytes) a coding cookie must not hide; '+AAo-' is UTF-7 for a newline.
@@ -751,12 +741,17 @@ _WHERE_MESSAGES = (
     ("def g():\n    def f(x=(RENDERER_DECL := 1)):\n        pass\n", _WALRUS + " inside a def block"),
 )
 
-# (o) unlisted tools/gen_beta.py bodies that only compare against or mention the name; each must stay allowed.
+# (o) unlisted tools/gen_beta.py bodies whose only use of the name is inert: a comparison, a longer-string
+# mention, a third or later positional argument, and two f-strings the bounded fold must not over-match into
+# the name (a !r conversion and a format spec each render a DIFFERENT string at run time, so folding either
+# as if it were the plain value would refuse a harmless mention); each must stay allowed.
 _ALLOWED_USES = (
     ("comparison", "def is_decl(name):\n    return name == 'RENDERER_DECL' or 'RENDERER_DECL' != name\n"),
     ("mention in a longer string", "NOTE = 'this module carries no RENDERER_DECL'\n"),
     ("third positional argument", "def scan(path, where, purpose):\n    return purpose\n"
                                   "scan(None, None, 'RENDERER_DECL')\n"),
+    ("f-string !r mention", "NOTE = f\"RENDERER_{'DECL'!r}\"\n"),
+    ("f-string format-spec mention", "NOTE = f\"RENDERER_{'DECL':.2}\"\n"),
 )
 
 
@@ -972,7 +967,9 @@ def self_test_main():
 
         # (n) a file that cannot be read is reported as a read failure, an unparsable one as a parse failure. A
         # directory is a read failure on every platform and uid (a mode-0 file is readable by root); the
-        # MemoryError read is injected through an object whose read_bytes raises it.
+        # MemoryError read is injected through an object whose read_bytes raises it. The FULL diagnostic
+        # prefix ("cannot read it to scan for", "cannot parse it to scan for") is asserted, so an older or
+        # shorter wording fails the case.
         class _Unreadable:
             def read_bytes(self):
                 raise MemoryError("injected read overflow")
@@ -980,8 +977,9 @@ def self_test_main():
         messages = tmp / "messages"
         (messages / "unreadable.py").mkdir(parents=True)
         (messages / "unparsable.py").write_bytes(b"(\n")
-        for name, expected in (("unreadable.py", "cannot read"), ("oversized.py", "cannot read"),
-                               ("unparsable.py", "cannot parse")):
+        for name, expected in (("unreadable.py", "cannot read it to scan for"),
+                               ("oversized.py", "cannot read it to scan for"),
+                               ("unparsable.py", "cannot parse it to scan for")):
             path = _Unreadable() if name == "oversized.py" else messages / name
             try:
                 _parse_module(path, "tools/" + name, "RENDERER_DECL")
@@ -1036,8 +1034,9 @@ def self_test_main():
           "or bare annotations, {} in-place changes to a listed declaration, {} non-UTF-8 coding cookies and "
           "{} injected parser or literal stack overflows each fail closed (exit 2), while an annotated "
           "declaration alone renders, a UTF-8 BOM parses, {} refusal messages name where the binder runs, an "
-          "unreadable file is reported as a read failure, {} uses that only compare against, pass later or "
-          "mention the name pass, the string fold stays bounded, and this file passes its own scan".format(
+          "unreadable file is reported as a read failure, {} uses that only compare against, pass later, "
+          "mention or safely format the name pass, the string fold stays bounded, and this file passes its "
+          "own scan".format(
               len(_UNSUPPORTED_BINDINGS), len(_REBOUND), len(_MUTATED), len(_COOKIES), len(_DEEP),
               len(_WHERE_MESSAGES), len(_ALLOWED_USES)))
     return 0
