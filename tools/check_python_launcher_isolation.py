@@ -46,28 +46,38 @@ never credited.
 
 WORKFLOW run: GRAMMAR. A workflow `run:` value is read line-lexically, under a CLOSED grammar: the
 only key spelling read is the bare word ``run`` (optionally under a ``- `` sequence dash) with no
-whitespace before its colon, and the only VALUE forms accepted are a plain unquoted scalar, a block
-scalar under the full header grammar below, and a single-quoted scalar with no ``''`` escape (decoded
-to its body, exactly PyYAML's reading). Every other spelling that could carry or hide a run key or
-value is cannot-evaluate (exit 2, naming the file and line), never a misread: a double-quoted scalar
-(its backslash escapes are not decoded here, so its shell text cannot be proven), a single-quoted
-scalar with a ``''`` escape or no closing quote, a quoted scalar followed by anything (a trailing
-comment included), a flow mapping or flow sequence step, value or line, a run key inside a flow
-collection, a quoted run key (``"run":``), an explicit-key marker (``? run``), and a run key with
-whitespace before its colon (``run :``). A block-scalar header is read under the
-full YAML block-header grammar: the ``|`` or ``>`` indicator, an optional indentation digit (1-9) and an
-optional chomping indicator (``+``/``-``) in either order, and an optional trailing comment (``run: | # x``,
-``run: |2``, ``run: >-2``); every content line of that block is scanned. An EMPTY same-line value is
+whitespace before its colon, and the only VALUE forms accepted are a plain unquoted scalar, a
+LITERAL (``|``) block scalar under the full header grammar below, and a single-quoted scalar with no
+``''`` escape (decoded to its body, exactly PyYAML's reading). Every other spelling that could carry
+or hide a run key or value is cannot-evaluate (exit 2, naming the file and line), never a misread: a
+double-quoted scalar (its backslash escapes are not decoded here, so its shell text cannot be
+proven), a single-quoted scalar with a ``''`` escape or no closing quote, a quoted scalar followed
+by anything (a trailing comment included), a flow mapping or flow sequence step, value or line, a
+run key inside a flow collection, ANY quoted key (an escaped spelling YAML decodes to ``run``
+included), an explicit-key marker (``? run``), a key with whitespace before its colon (``run :``),
+and any line opening with a YAML node property, tag, anchor or alias (``&k run:``, ``!!str run:``,
+``*k :``). A FOLDED (``>``) block scalar is cannot-evaluate until folding is implemented (YAML folds
+its content into one command, so a line-by-line reading can disagree with the decoded value); a
+LITERAL block-scalar header is read under the full YAML block-header grammar: the ``|`` indicator,
+an optional indentation digit (1-9) and an optional chomping indicator (``+``/``-``) in either
+order, and an optional trailing comment (``run: | # x``, ``run: |2``); every content line of that
+block is scanned. STEP GRAMMAR: inside a ``steps:`` block (a plain bare ``steps:`` key; one with a
+same-line value is cannot-evaluate), the first entry must be a ``- `` item, and every line at the
+item or step-key indentation must be a plain unquoted identifier key from the closed step-key set
+(name, run, uses, with, env, if, id, shell, working-directory, continue-on-error, timeout-minutes),
+optionally after the dash; a plain key outside that set, a non-key line, and a line at an
+indentation the step model cannot place are each cannot-evaluate, and deeper lines (``with:``/
+``env:`` values) keep the line-form handling above. An EMPTY same-line value is
 read ONLY in the two proven shapes: the next non-blank, NON-COMMENT line, when deeper than the key, is
-either the plain-scalar command itself or a block header whose content is deeper than both the header
-and the key (its content lines, bounded by the key column, are scanned); the value is null (no command
-text) only when that next non-blank, non-comment line is not deeper than the key, or the file ends. Any
-other arrangement after an empty ``run:`` (a comment line before a deeper value, a header with no
-content deeper than the key, block content at or above the header's column, a comment line inside the
-block before its content), any other ``run:`` value that starts with ``|`` or ``>`` (on the key line or
-on the deeper line), a value that opens with a node property or alias (``&``, ``!``, ``*``), and a
-plain scalar continued onto a further deeper-indented line are cannot-evaluate (exit 2), never
-skipped.
+either the plain-scalar command itself or a LITERAL block header whose content is deeper than both the
+header and the key (its content lines, bounded by the key column, are scanned); the value is null (no
+command text) only when that next non-blank, non-comment line is not deeper than the key, or the file
+ends. Any other arrangement after an empty ``run:`` (a comment line before a deeper value, a header
+with no content deeper than the key, block content at or above the header's column, a comment line
+inside the block before its content), any other ``run:`` value that starts with ``|`` or ``>`` (on
+the key line or on the deeper line), a value that opens with a node property or alias (``&``, ``!``,
+``*``), and a plain scalar continued onto a further deeper-indented line are cannot-evaluate (exit
+2), never skipped.
 
 EXIT CONVENTION: 0 every recognized launcher is isolated; 1 at least one recognized launcher is not
 isolated; 2 cannot-evaluate (a required input missing, unreadable, non-regular, or malformed; a JSON
@@ -83,8 +93,10 @@ programmatic ``subprocess`` children in the tools and the ``regenerate`` strings
 three enumerated QA-suite sources (a ``sys.path[0:0]`` slice, a computed index, a runtime-assembled
 insertion, or one in another source is not caught, and even for those three ``-I`` cannot prevent a
 runtime mutation the source performs), an unrecognized interpreter name, launcher configuration outside the enumerated surfaces,
-YAML or shell constructs beyond the supported line grammar (each known run-key or run-value spelling
-outside it is refused, exit 2; a spelling this line reader does not see at all remains unscanned),
+YAML or shell constructs beyond the supported line grammar (a run key or value spelling outside it,
+every non-plain key spelling, a folded block scalar and an off-allowlist step key are refused, exit
+2; a plain non-run key outside a steps: block remains unscanned, and the steps tracker is
+single-level, so a nested plain steps: key ends the outer block's allowlist check early),
 and the PATH provenance of ``python3``
 itself. A ``python3 tools/*.py`` token embedded in a quoted argument or a heredoc may be miscounted,
 mirroring the roster-scan limit the enforceability ledger discloses.
@@ -183,31 +195,51 @@ RUN_RE = re.compile(r"^(?P<indent>\s*)(?:-\s+)?(?P<key>run):(?:[ \t]+(?P<val>.*)
 # A YAML block-scalar header, read under the full block-header grammar: the `|` or `>` indicator, then an
 # optional indentation digit (1-9) and an optional chomping indicator (`+` or `-`) in either order, then an
 # optional comment (whitespace, then `#`). Any other `run:` value that starts with `|` or `>` is outside the
-# supported grammar and is a cannot-evaluate, never an inline scalar whose block content goes unread.
+# supported grammar and is a cannot-evaluate, never an inline scalar whose block content goes unread. A
+# header carrying the FOLDED `>` indicator matches this grammar but is refused before any content is read
+# (folding is not implemented); only the literal `|` form is read as a block.
 BLOCK_HEADER_RE = re.compile(r"^[|>](?:[1-9][+-]?|[+-][1-9]?)?(?:[ \t]+#.*)?$")
 # A `run:` value that opens with a YAML node property or alias (an `&anchor`, a `!tag`, a `*alias`) does not
 # carry its shell text where this line grammar reads it, so it is a cannot-evaluate too.
 NODE_PROPERTY_LEADS = ("&", "!", "*")
-# Line spellings OUTSIDE the one supported `run:` key form (RUN_RE: an optional `- ` dash, the bare
-# word `run`, a colon with no whitespace before it) under which YAML could still read a run key or
-# value: each is REFUSED (cannot-evaluate, exit 2, naming the file and line), never silently skipped.
-# A flow mapping or flow sequence -- as a sequence step, as a line of its own, or carrying a `run:`
-# key inline -- an explicit-key marker, a quoted `run` key, and a `run` key with whitespace before
-# its colon are all spellings this line reader does not decode, so none may pass unread.
+# Line spellings OUTSIDE the plain-key grammar under which YAML could still read a key (a run key
+# included) or value where this line reader sees none: each is REFUSED (cannot-evaluate, exit 2,
+# naming the file and line), never silently skipped, at EVERY depth. A flow mapping or flow sequence
+# -- as a sequence step, as a line of its own, or carrying a `run:` key inline -- an explicit-key
+# marker, ANY quoted key (so an escaped spelling that YAML decodes to a run key is refused rather
+# than missed), a `run` key with whitespace before its colon, and any line opening with a YAML node
+# property, tag, anchor or alias are all spellings this line reader does not decode, so none may
+# pass unread.
 UNSUPPORTED_LINE_FORMS = (
     (re.compile(r"^\s*-\s*[\[{]"),
      "a flow mapping or flow sequence step, outside the supported line grammar"),
     (re.compile(r"^\s*[\[{]"),
      "a line opening a flow collection, outside the supported line grammar"),
-    (re.compile(r"""^\s*(?:-\s+)?(['"])run\1\s*:"""),
-     "a quoted run key, outside the supported line grammar"),
+    (re.compile(r"""^\s*(?:-\s+)?(['"]).*?\1\s*:"""),
+     "a quoted key (escaped spellings included), outside the supported line grammar"),
     (re.compile(r"^\s*(?:-\s+)?\?(?:[ \t]|$)"),
      "an explicit-key marker ('? '), outside the supported line grammar"),
     (re.compile(r"^\s*(?:-\s+)?run[ \t]+:(?:[ \t]|$)"),
      "a run key with whitespace before its colon, outside the supported line grammar"),
     (re.compile(r"""[\[{,][ \t]*(['"]?)run\1[ \t]*:"""),
      "a run key inside a flow collection, outside the supported line grammar"),
+    (re.compile(r"^\s*(?:-\s+)?[&!*]"),
+     "a line opening with a YAML node property, tag, anchor or alias, outside the supported "
+     "line grammar"),
 )
+# GitHub-workflow STEP grammar: inside a `steps:` block (a plain, bare `steps:` key with no
+# same-line value), every line at the step-item or step-key indentation must be a PLAIN, unquoted
+# identifier key from this closed set (optionally after a `- ` item dash). A plain key outside the
+# set, a key spelling that is not a plain identifier, a step entry that is not a `- key:` mapping
+# line, and a line at an indentation the step model cannot place are each cannot-evaluate (exit 2,
+# naming the file and line): the reader accepts only the step shapes it can prove it reads, instead
+# of skipping what it does not recognize (an escaped or tagged run key used to be skipped exactly
+# there).
+STEP_KEYS = frozenset({"name", "run", "uses", "with", "env", "if", "id", "shell",
+                       "working-directory", "continue-on-error", "timeout-minutes"})
+STEPS_KEY_RE = re.compile(r"^(?P<indent> *)steps:[ \t]*(?:#.*)?$")
+STEPS_VALUE_RE = re.compile(r"^ *steps:[ \t]+\S")
+PLAIN_STEP_KEY_RE = re.compile(r"^(?P<indent> *)(?P<dash>- +)?(?P<key>[A-Za-z][A-Za-z0-9-]*):(?:[ \t]|$)")
 # Shell separators (as whole tokens after shlex) that end one simple command and begin the next.
 SEPARATORS = {";", ";;", "|", "||", "&&", "&"}
 # Unquoted shell operators separated from adjacent words before tokenizing, longest first so `;;`,
@@ -512,44 +544,111 @@ def _decode_scalar(val):
 
 def _yaml_run_lines(text):
     """Return (lines, unsupported): lines is a (lineno, shell_line) for every YAML `run:` scalar and every
-    line inside a `run:` block scalar; unsupported is a (lineno, message) for every `run:` value this line
-    grammar cannot read, which the caller reports as a cannot-evaluate. A line-lexical extraction (no YAML
-    library). A block header is read under the full block-header grammar (BLOCK_HEADER_RE: indicator,
-    optional indentation digit and chomping indicator in either order, optional comment); the block's
-    content is the run of lines indented deeper than the `run:` key, ending at the first non-blank line
-    indented no deeper. An EMPTY same-line value -- a bare `run:`, or a `run:` whose only same-line
-    text is a YAML comment (`run: # note`), which YAML strips to the SAME empty value (proven against
-    PyYAML) -- is read ONLY in the two shapes proven against PyYAML:
-    the next non-blank, NON-COMMENT line, when deeper than the key, is either the plain-scalar command
-    itself or a block header whose content is deeper than both the header and the key (its content
-    lines, bounded by the key column, are yielded). The value is null (nothing is yielded) only when
-    that next non-blank, non-comment line is not deeper than the key, or the text ends. Unsupported
-    (cannot-evaluate, never a silent null): a comment line between an empty `run:` and a deeper value
-    line, a next-line block header with no content deeper than the key, block content at or above that
-    header's column, a line opening with `#` directly after that next-line header (YAML reads it as
-    block CONTENT, not a comment; this line reader refuses rather than reads it, a disclosed
-    over-refusal), any other value starting with
-    `|` or `>` (on the key line or the deeper line), a value opening with a node property or alias, and
-    a plain scalar continued onto a further deeper-indented line (YAML folds it into the command, so a
+    line inside a `run:` LITERAL block scalar; unsupported is a (lineno, message) for every line this
+    grammar cannot read, which the caller reports as a cannot-evaluate. A line-lexical extraction (no
+    YAML library), with three layers.
+
+    STEP LAYER (the positive step grammar). A plain, bare `steps:` key (no same-line value; a `steps:`
+    carrying one is cannot-evaluate) opens a step block that runs until the first non-blank,
+    non-comment line at or above its indentation (a `- ` item at exactly the `steps:` indentation
+    stays inside, the YAML same-indent sequence form). The block's first entry must be a `- ` item;
+    its dash fixes the item indentation and its key column fixes the step-key column. Every line AT
+    those columns is accepted ONLY as a plain unquoted identifier key from STEP_KEYS (optionally
+    after the item dash): a plain key outside that closed set, a non-key line, a nested `- -` entry,
+    and a line at an indentation the step model cannot place are each cannot-evaluate, never
+    skipped. Deeper lines (`with:`/`env:` values) keep the line-form handling below. DISCLOSED
+    RESIDUAL: the tracker is single-level, so a deeper plain `steps:` key (an action input named
+    steps) opens a new block and the outer block's remaining non-run keys are no longer
+    allowlist-checked after it closes; a run key is still read or refused at every depth and every
+    non-plain key spelling is refused by the line forms, so no launcher hides behind that residual.
+
+    LINE-FORM LAYER (every depth, UNSUPPORTED_LINE_FORMS). Every line spelling a key outside the
+    plain grammar is cannot-evaluate: a flow mapping or flow sequence step or line, a run key inside
+    a flow collection, ANY quoted key (an escaped spelling YAML decodes to `run` included), an
+    explicit-key marker, a run key with whitespace before its colon, and any line opening with a
+    YAML node property, tag, anchor or alias.
+
+    VALUE LAYER. A block header is read under the full block-header grammar (BLOCK_HEADER_RE:
+    indicator, optional indentation digit and chomping indicator in either order, optional comment),
+    but ONLY the literal `|` indicator is read as a block (its content is the run of lines indented
+    deeper than the `run:` key, ending at the first non-blank line indented no deeper); a FOLDED
+    (`>`) header is cannot-evaluate until folding is implemented, because YAML folds the content
+    lines into ONE command (a content line opening with `#` folds into mid-command text, not a
+    comment, and the line before a launcher can comment it out), so a line-by-line reading can
+    disagree with the decoded value the shell sees; the folded block's content is skipped as
+    consumed, never scanned as free-standing lines. An EMPTY same-line value -- a bare `run:`, or a
+    `run:` whose only same-line text is a YAML comment (`run: # note`), which YAML strips to the
+    SAME empty value (proven against PyYAML) -- is read ONLY in the two shapes proven against
+    PyYAML: the next non-blank, NON-COMMENT line, when deeper than the key, is either the
+    plain-scalar command itself or a LITERAL block header whose content is deeper than both the
+    header and the key (its content lines, bounded by the key column, are yielded). The value is
+    null (nothing is yielded) only when that next non-blank, non-comment line is not deeper than the
+    key, or the text ends. Unsupported (cannot-evaluate, never a silent null): a comment line
+    between an empty `run:` and a deeper value line, a next-line block header with no content deeper
+    than the key, block content at or above that header's column, a line opening with `#` directly
+    after that next-line header (YAML reads it as block CONTENT, not a comment; this line reader
+    refuses rather than reads it, a disclosed over-refusal), any other value starting with `|` or
+    `>` (on the key line or the deeper line), a value opening with a node property or alias, and a
+    plain scalar continued onto a further deeper-indented line (YAML folds it into the command, so a
     launcher there would otherwise go unread). The VALUE grammar is CLOSED: a same-line or next-line
     scalar is accepted only as a plain unquoted scalar or a single-quoted scalar with no `''` escape
     (decoded by _decode_scalar); a double-quoted scalar, a single-quoted scalar with an escape or no
     closing quote, a quoted scalar followed by anything (a trailing comment included), and a flow
-    mapping or flow sequence value are unsupported (cannot-evaluate). So is every line spelling a run
-    key outside RUN_RE (UNSUPPORTED_LINE_FORMS): a flow mapping or flow sequence step or line, a run
-    key inside a flow collection, a quoted run key, an explicit-key marker, and a run key with
-    whitespace before its colon. Only `run:` payloads are yielded, so `uses:`/`with:`
-    lines (setup-python and the like) are never scanned."""
+    mapping or flow sequence value are unsupported (cannot-evaluate). Only `run:` payloads are
+    yielded, so `uses:`/`with:` lines (setup-python and the like) are never scanned."""
     lines = text.splitlines()
     out, unsupported = [], []
+    in_steps, steps_indent, item_indent, key_col = False, -1, None, None
     i, n = 0, len(lines)
     while i < n:
-        m = RUN_RE.match(lines[i])
+        raw = lines[i]
+        bare = raw.strip()
+        is_plain_line = bool(bare) and not bare.startswith("#")
+        d = len(raw) - len(raw.lstrip(" "))
+        if in_steps and is_plain_line:
+            # The step tracker: leave the block at its parent indentation (a `- ` item at exactly
+            # the steps: indentation stays inside, the YAML same-indent sequence form), and fix the
+            # item and key columns from the block's first entry.
+            if d < steps_indent or (d == steps_indent and not raw.lstrip(" ").startswith("- ")):
+                in_steps, item_indent, key_col = False, None, None
+            elif item_indent is None:
+                dm = re.match(r"^( *)(- +)\S", raw)
+                if dm is None:
+                    unsupported.append((i + 1, "a steps: block whose first entry is not a '- ' "
+                                               "item, outside the supported step grammar"))
+                    i += 1
+                    continue
+                item_indent, key_col = d, len(dm.group(1)) + len(dm.group(2))
+        m = RUN_RE.match(raw)
         if not m:
+            matched = False
             for pattern, message in UNSUPPORTED_LINE_FORMS:
-                if pattern.search(lines[i]):
+                if pattern.search(raw):
                     unsupported.append((i + 1, message))
+                    matched = True
                     break
+            if not matched and is_plain_line:
+                sm = STEPS_KEY_RE.match(raw)
+                if sm:
+                    in_steps, steps_indent = True, len(sm.group("indent"))
+                    item_indent, key_col = None, None
+                elif STEPS_VALUE_RE.match(raw):
+                    unsupported.append((i + 1, "a steps: key with a same-line value, outside the "
+                                               "supported step grammar"))
+                elif in_steps and item_indent is not None and d <= key_col:
+                    km = PLAIN_STEP_KEY_RE.match(raw)
+                    accepted = False
+                    if km and km.group("key") in STEP_KEYS:
+                        if km.group("dash"):
+                            accepted = (d == item_indent and
+                                        len(km.group("indent")) + len(km.group("dash")) == key_col)
+                        else:
+                            accepted = (d == key_col)
+                    if not accepted:
+                        unsupported.append((i + 1, "a step line outside the supported step grammar "
+                                                   "(only a plain step key from the supported set, "
+                                                   "optionally after a '- ' item dash, is read at "
+                                                   "the step indentation)"))
             i += 1
             continue
         val = (m.group("val") or "").strip()
@@ -564,14 +663,14 @@ def _yaml_run_lines(text):
             # An empty same-line value (a bare `run:`, or one whose only same-line text was a YAML
             # comment): YAML reads the run: value from a following deeper-indented
             # line. FAIL-CLOSED BOUNDS: the value is read ONLY in the two shapes proven against
-            # PyYAML (a next-line plain scalar; a next-line block header whose content is deeper
-            # than both the header and the key, the content run bounded by the key column). The
-            # null decision skips comment lines (a YAML comment carries no value): the value is
+            # PyYAML (a next-line plain scalar; a next-line LITERAL block header whose content is
+            # deeper than both the header and the key, the content run bounded by the key column).
+            # The null decision skips comment lines (a YAML comment carries no value): the value is
             # null ONLY when the next non-blank, NON-COMMENT line is not deeper than the key, or
             # the text ends. Any other arrangement (a comment line before a deeper value, a header
             # with no content deeper than the key, block content at or above the header's column,
             # a line opening with '#' directly after the header, which YAML reads as block content
-            # but this reader refuses) is a cannot-evaluate, never a
+            # but this reader refuses, and every folded header) is a cannot-evaluate, never a
             # silent null and never a partial read.
             j = i + 1
             saw_comment = False
@@ -594,6 +693,23 @@ def _yaml_run_lines(text):
                 continue
             nval = nxt.strip()
             if BLOCK_HEADER_RE.match(nval):
+                if nval[:1] == ">":
+                    # A folded header: consume its would-be content (bounded by the key column) so
+                    # the lines are never misread as free-standing keys, and refuse the header.
+                    k = j + 1
+                    while k < n:
+                        content = lines[k]
+                        if content.strip() == "":
+                            k += 1
+                            continue
+                        if len(content) - len(content.lstrip(" ")) <= m.start("key"):
+                            break
+                        k += 1
+                    unsupported.append((j + 1, "a folded (>) run: block scalar (YAML folds its "
+                                              "content into one command; folding is not implemented "
+                                              "here), outside the supported line grammar"))
+                    i = k
+                    continue
                 k = j + 1
                 while k < n and lines[k].strip() == "":
                     k += 1
@@ -660,6 +776,23 @@ def _yaml_run_lines(text):
             i = j + 1
             continue
         if BLOCK_HEADER_RE.match(val):
+            if val[:1] == ">":
+                # A folded header: consume its would-be content (bounded by the key column) so the
+                # lines are never misread as free-standing keys, and refuse the header.
+                j = i + 1
+                while j < n:
+                    content = lines[j]
+                    if content.strip() == "":
+                        j += 1
+                        continue
+                    if len(content) - len(content.lstrip(" ")) <= key_indent:
+                        break
+                    j += 1
+                unsupported.append((i + 1, "a folded (>) run: block scalar (YAML folds its content "
+                                          "into one command; folding is not implemented here), "
+                                          "outside the supported line grammar"))
+                i = j
+                continue
             j = i + 1
             while j < n:
                 content = lines[j]
@@ -991,10 +1124,14 @@ def main():
 #  32. real bash confirms the obfuscated names `pyt\hon3`, `pyt"hon"3`, `py'thon'3` all resolve to the
 #      token `python3` (the fail-to-pass witness for the decode-then-decide shell-line fix).
 #  33. a QA-suite Python source reintroducing a sys.path index-0 insertion is a finding (exit 1).
-#  34. a `run:` block header in the full block-header grammar (`| # comment`, `|2`, `|2-`, `>+9`,
-#      `>-2 # note`), each with the content indentation its indicator requires, is read as a block: a
-#      bare launcher in its content fails (exit 1), and the isolated forms under `| # comment` and
-#      `>+9` pass (exit 0),
+#  34. a `run:` LITERAL block header in the full block-header grammar (`| # comment`, `|2`, `|2-`),
+#      each with the content indentation its indicator requires, is read as a block: a bare launcher
+#      in its content fails (exit 1) and the isolated form under `| # comment` passes (exit 0);
+#      34b. EVERY folded (`>`) header (`>`, `>+9`, `>-2 # note`, and one on the line after an empty
+#      run:) is cannot-evaluate (exit 2, naming the header line): YAML folds the content into one
+#      command (a `# note` content line folds into mid-command text, not a comment), so a
+#      line-by-line read can disagree with the decoded value; the `>+9` and `>-2 # note` forms were
+#      read line-by-line before this rule,
 #  35. any other `run:` value starting with `|` or `>` (`|0`, `|#x`, `|2x`, `|-+`, `>>`), a value opening
 #      with a node property or alias (`&a |`, `!!str |`, `*a`), and a plain scalar continued onto a
 #      deeper-indented line are cannot-evaluate (exit 2), while a sibling key at the run: key column after
@@ -1015,14 +1152,21 @@ def main():
 #      .github/workflows/quality.yml and the line; a null run: (next non-blank, non-comment line not
 #      deeper than the key) carries no command text (exit 0), a comment line alone never making it
 #      one,
-#  38. the run: VALUE grammar is closed: a single-quoted scalar with no escape decodes to its body
-#      (a bare launcher there fails, an isolated one passes); a quoted scalar followed by a trailing
-#      comment, a double-quoted scalar (escapes undecoded: `\n`, `\x70`, `\u0074`, `\t`), a
-#      single-quoted scalar with a `''` escape or no closing quote, a flow mapping or flow sequence
-#      step or value, a run key inside a flow collection, a quoted run key, an explicit-key marker,
-#      and a run key with whitespace before its colon are each cannot-evaluate (exit 2), naming
-#      .github/workflows/quality.yml and the line; before this rule the quoted/escaped forms passed
-#      with their launcher unread and the off-grammar key spellings were silently skipped.
+#  38. the run: VALUE grammar is closed and the key/step grammar is POSITIVE: a single-quoted scalar
+#      with no escape decodes to its body (a bare launcher there fails, an isolated one passes); a
+#      quoted scalar followed by a trailing comment, a double-quoted scalar (escapes undecoded:
+#      `\n`, `\x70`, `\u0074`, `\t`), a single-quoted scalar with a `''` escape or no closing
+#      quote, a flow mapping or flow sequence step or value, a run key inside a flow collection, a
+#      quoted run key (escaped spellings that YAML decodes to `run` included), a tagged, anchored
+#      or aliased run key, an explicit-key marker, a run key with whitespace before its colon, a
+#      plain step key outside the closed step-key set, and a flow line under `with:` are each
+#      cannot-evaluate (exit 2), naming .github/workflows/quality.yml and the line; the
+#      single-quoted-escape, unterminated-quote and flow-value rows also assert the YAML value
+#      reader's own diagnostic (the parent reader exited 2 there through the downstream shell
+#      parse, with a different message), the flow-line and next-line-flow-value rows pin
+#      UNSUPPORTED_LINE_FORMS[1] and the empty-run flow branch, and a step whose keys are all on
+#      the allowlist stays clean (exit 0); before this rule the quoted/escaped forms passed with
+#      their launcher unread and the off-grammar key spellings were silently skipped.
 
 SCRIPT = "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py"
 
@@ -1493,11 +1637,11 @@ def self_test_main():
             failures.append("a missing required QA-suite Python source expected exit 2 (fail-closed, "
                             "finding-6)")
 
-        # 34. A block header in the full block-header grammar is read as a block: a bare launcher in its
-        #     content fails (exit 1). The `| # comment` and `|2` forms passed unread before this case.
+        # 34. A LITERAL block header in the full block-header grammar is read as a block: a bare
+        #     launcher in its content fails (exit 1). The `| # comment` and `|2` forms passed unread
+        #     before this case.
         for label, header, pad in (("comment", "| # comment", 10), ("indent", "|2", 10),
-                                   ("indent-chomp", "|2-", 10), ("keep-indent", ">+9", 17),
-                                   ("strip-indent-comment", ">-2 # note", 10)):
+                                   ("indent-chomp", "|2-", 10)):
             wf_text = ("name: Q\njobs:\n  q:\n    steps:\n      - run: " + header +
                        "\n" + " " * pad + "set -e\n" + " " * pad + "python3 tools/alpha.py\n")
             if run_quiet(_build(tmp / ("header-" + label), workflow=wf_text)) != 1:
@@ -1506,10 +1650,34 @@ def self_test_main():
                        "          python3 -I -B tools/alpha.py\n")
         if run_quiet(_build(tmp / "header-comment-iso", workflow=iso_comment)) != 0:
             failures.append("an isolated launcher under the block header '| # comment' expected exit 0")
-        iso_indent9 = ("name: Q\njobs:\n  q:\n    steps:\n      - run: >+9\n" +
-                       " " * 17 + "python3 -I -B tools/alpha.py\n")
-        if run_quiet(_build(tmp / "header-indent9-iso", workflow=iso_indent9)) != 0:
-            failures.append("an isolated launcher under the block header '>+9' expected exit 0")
+
+        # 34b. A FOLDED (>) header, inside the block-header grammar but never read: YAML folds the
+        #     content lines into ONE command (a content line opening with '#' folds into mid-command
+        #     text, not a comment, and the line before a launcher can comment it out), so a
+        #     line-by-line scan can disagree with the decoded value. Until folding is implemented
+        #     every folded run: header is cannot-evaluate (exit 2, naming the header line), on the
+        #     key line and on the line after an empty run: alike. Before this rule a bare launcher
+        #     under `>+9` was read line-by-line (exit 1 here), and the `# note` form handed the
+        #     comment line to the shell scan, where it is a comment only to the shell, not to YAML.
+        for label, wf_text, named_line in (
+                ("note",
+                 "name: Q\njobs:\n  q:\n    steps:\n      - run: >\n          # note\n"
+                 "          python3 tools/alpha.py\n", 5),
+                ("indent9",
+                 "name: Q\njobs:\n  q:\n    steps:\n      - run: >+9\n" + " " * 17 +
+                 "python3 tools/alpha.py\n", 5),
+                ("strip-comment",
+                 "name: Q\njobs:\n  q:\n    steps:\n      - run: >-2 # note\n"
+                 "          python3 tools/alpha.py\n", 5),
+                ("next-line",
+                 "name: Q\njobs:\n  q:\n    steps:\n      - run:\n          >\n"
+                 "            python3 tools/alpha.py\n", 6)):
+            rc, out = run_capture(_build(tmp / ("folded-" + label), workflow=wf_text))
+            if rc != 2 or ("cannot-evaluate: .github/workflows/quality.yml:{}: a folded (>) run: "
+                           "block scalar".format(named_line) not in out):
+                failures.append("a folded run: header ({}) expected exit 2 naming quality.yml:{} as "
+                                "a folded block scalar (got {}: {!r})".format(
+                                    label, named_line, rc, out))
 
         # 35. A run: value outside the supported grammar is cannot-evaluate (exit 2), never skipped: a
         #     malformed block header, a node property or alias, and a plain scalar continued onto a deeper
@@ -1653,52 +1821,78 @@ def self_test_main():
                 failures.append("the {} cannot-evaluate expected to name quality.yml:{} "
                                 "(got {!r})".format(label, named_line, out))
 
-        # 38. The run: VALUE grammar is CLOSED: a plain unquoted scalar, a block scalar (case 34),
-        #     and a single-quoted scalar with no escape are the only accepted forms (the two
-        #     single-quoted controls decode to their body, exactly PyYAML's reading); everything
-        #     else that could carry or hide a run key or value is cannot-evaluate (exit 2, naming
-        #     .github/workflows/quality.yml and the line), never a misread: a quoted scalar followed
-        #     by a trailing comment (naive quote-stripping left the quotes in the shell text, one
-        #     opaque token), a double-quoted scalar (its backslash escapes, `\n`, `\x70`, `\u0074`,
-        #     `\t`, are not decoded here, so PyYAML's command differs from any undecoded reading),
-        #     a single-quoted scalar with a `''` escape or no closing quote, a flow mapping or flow
-        #     sequence step or value, a run key inside a flow collection, a quoted run key, an
-        #     explicit-key marker, and a run key with whitespace before its colon (each a spelling
-        #     PyYAML reads as a run key where the line reader saw none). Before this rule the
-        #     quoted-with-comment and escaped forms passed with their launcher unread, and the
-        #     off-grammar key spellings were silently skipped.
+        # 38. The run: VALUE grammar is CLOSED and the key/step grammar is POSITIVE (the roster
+        #     comment above lists every row): a refused row asserts exit 2 naming quality.yml and
+        #     the line, and a row carrying an expected MESSAGE also asserts that named diagnostic,
+        #     so the sq-escape, sq-unterminated and flow-value rows are red on a reader whose
+        #     refusal came from the downstream shell parse instead of the YAML value grammar, and
+        #     the flow-line-under-with / flow-value-next-line rows pin UNSUPPORTED_LINE_FORMS[1]
+        #     and the empty-run flow branch.
         sbase = "name: Q\njobs:\n  q:\n    steps:\n"
-        for label, wf_text, want, named_line in (
-                ("sq-plain-iso", sbase + "      - run: 'python3 -I -B tools/alpha.py'\n", 0, None),
-                ("sq-plain-bare", sbase + "      - run: 'python3 tools/alpha.py'\n", 1, None),
+        for label, wf_text, want, named_line, message in (
+                ("sq-plain-iso", sbase + "      - run: 'python3 -I -B tools/alpha.py'\n", 0, None,
+                 None),
+                ("sq-plain-bare", sbase + "      - run: 'python3 tools/alpha.py'\n", 1, None,
+                 None),
                 ("sq-then-comment",
-                 sbase + "      - run: 'python3 tools/alpha.py' # note\n", 2, 5),
+                 sbase + "      - run: 'python3 tools/alpha.py' # note\n", 2, 5, None),
                 ("dq-then-comment",
-                 sbase + '      - run: "python3 tools/alpha.py" # note\n', 2, 5),
+                 sbase + '      - run: "python3 tools/alpha.py" # note\n', 2, 5, None),
                 ("dq-backslash-n",
-                 sbase + '      - run: "echo a\\npython3 tools/alpha.py"\n', 2, 5),
+                 sbase + '      - run: "echo a\\npython3 tools/alpha.py"\n', 2, 5, None),
                 ("dq-escape-x",
-                 sbase + '      - run: "\\x70ython3 tools/alpha.py"\n', 2, 5),
+                 sbase + '      - run: "\\x70ython3 tools/alpha.py"\n', 2, 5, None),
                 ("dq-escape-u",
-                 sbase + '      - run: "py\\u0074hon3 tools/alpha.py"\n', 2, 5),
+                 sbase + '      - run: "py\\u0074hon3 tools/alpha.py"\n', 2, 5, None),
                 ("dq-escape-tab",
-                 sbase + '      - run: "echo a;\\tpython3 tools/alpha.py"\n', 2, 5),
-                ("dq-plain", sbase + '      - run: "python3 -I -B tools/alpha.py"\n', 2, 5),
+                 sbase + '      - run: "echo a;\\tpython3 tools/alpha.py"\n', 2, 5, None),
+                ("dq-plain", sbase + '      - run: "python3 -I -B tools/alpha.py"\n', 2, 5, None),
                 ("sq-escape",
-                 sbase + "      - run: 'it''s python3 tools/alpha.py'\n", 2, 5),
-                ("sq-unterminated", sbase + "      - run: 'python3 tools/alpha.py\n", 2, 5),
-                ("flow-map-step", sbase + "      - {run: python3 tools/alpha.py}\n", 2, 5),
-                ("flow-seq-step", sbase + "      - [run, python3 tools/alpha.py]\n", 2, 5),
+                 sbase + "      - run: 'it''s python3 tools/alpha.py'\n", 2, 5,
+                 "a single-quoted run: value with a quote escape"),
+                ("sq-unterminated", sbase + "      - run: 'python3 tools/alpha.py\n", 2, 5,
+                 "a single-quoted run: value with a quote escape"),
+                ("flow-map-step", sbase + "      - {run: python3 tools/alpha.py}\n", 2, 5, None),
+                ("flow-seq-step", sbase + "      - [run, python3 tools/alpha.py]\n", 2, 5, None),
                 ("flow-steps-value",
-                 "name: Q\njobs:\n  q:\n    steps: [{run: python3 tools/alpha.py}]\n", 2, 4),
-                ("quoted-key", sbase + '      - "run": python3 tools/alpha.py\n', 2, 5),
-                ("quoted-key-sq", sbase + "      - 'run': python3 tools/alpha.py\n", 2, 5),
+                 "name: Q\njobs:\n  q:\n    steps: [{run: python3 tools/alpha.py}]\n", 2, 4, None),
+                ("quoted-key", sbase + '      - "run": python3 tools/alpha.py\n', 2, 5, None),
+                ("quoted-key-sq", sbase + "      - 'run': python3 tools/alpha.py\n", 2, 5, None),
+                ("escaped-key-x", sbase + '      - "r\\x75n": python3 tools/alpha.py\n', 2, 5,
+                 "a quoted key"),
+                ("escaped-key-u", sbase + '      - "\\u0072un": python3 tools/alpha.py\n', 2, 5,
+                 "a quoted key"),
+                ("tagged-key", sbase + "      - !!str run: python3 tools/alpha.py\n", 2, 5,
+                 "a YAML node property, tag, anchor or alias"),
+                ("anchored-key", sbase + "      - &k run: python3 tools/alpha.py\n", 2, 5,
+                 "a YAML node property, tag, anchor or alias"),
+                ("alias-key",
+                 "name: Q\nenv:\n  K: &k run\njobs:\n  q:\n    steps:\n"
+                 "      - *k : python3 tools/alpha.py\n", 2, 7,
+                 "a YAML node property, tag, anchor or alias"),
+                ("plain-key-outside-set",
+                 sbase + "      - timeout: 5\n        run: python3 -I -B tools/alpha.py\n", 2, 5,
+                 "a step line outside the supported step grammar"),
+                ("step-keys-allowlisted",
+                 sbase + "      - name: a\n        id: x\n        if: always()\n"
+                         "        continue-on-error: false\n        timeout-minutes: 5\n"
+                         "        working-directory: docs\n        shell: bash\n        env:\n"
+                         "          A: b\n        run: python3 -I -B tools/alpha.py\n", 0, None,
+                 None),
+                ("flow-line-under-with",
+                 sbase + "      - uses: x\n        with:\n          [python3 tools/alpha.py]\n",
+                 2, 7, "a line opening a flow collection"),
+                ("flow-value-next-line",
+                 sbase + "      - run:\n          {a: python3 tools/alpha.py}\n", 2, 6,
+                 "on the line after an empty run: is a flow collection"),
                 ("explicit-key",
-                 sbase + "      - ? run\n        : python3 tools/alpha.py\n", 2, 5),
-                ("spaced-key", sbase + "      - run : python3 tools/alpha.py\n", 2, 5),
-                ("flow-value", sbase + "      - run: {a: python3 tools/alpha.py}\n", 2, 5),
+                 sbase + "      - ? run\n        : python3 tools/alpha.py\n", 2, 5, None),
+                ("spaced-key", sbase + "      - run : python3 tools/alpha.py\n", 2, 5, None),
+                ("flow-value", sbase + "      - run: {a: python3 tools/alpha.py}\n", 2, 5,
+                 "run: value is a flow collection"),
                 ("comment-val-dq-next",
-                 sbase + '      - run: # c\n          "echo a\\npython3 tools/alpha.py"\n', 2, 6)):
+                 sbase + '      - run: # c\n          "echo a\\npython3 tools/alpha.py"\n', 2, 6,
+                 None)):
             rc, out = run_capture(_build(tmp / ("value-grammar-" + label), workflow=wf_text))
             if rc != want:
                 failures.append("a run: value-grammar {} form expected exit {} (got {})".format(
@@ -1708,6 +1902,9 @@ def self_test_main():
                     not in out):
                 failures.append("the {} cannot-evaluate expected to name quality.yml:{} "
                                 "(got {!r})".format(label, named_line, out))
+            elif message is not None and message not in out:
+                failures.append("the {} cannot-evaluate expected the diagnostic {!r} "
+                                "(got {!r})".format(label, message, out))
 
         # 10. The gate REFUSES (exit 2) when its own interpreter is not isolated (a real subprocess: no
         #     -I, so the bootstrap self-guard fires before any scan or sibling import).
@@ -1768,23 +1965,29 @@ def self_test_main():
           "string (exit 1) with its isolated form passing (exit 0), confirmed against real bash; a "
           "QA-suite Python source that reintroduces a sys.path index-0 insertion is a finding (exit 1) "
           "while the sanctioned sys.path.append form is clean (exit 0) and a missing required QA source "
-          "fails closed (exit 2); a run: block header in the full block-header grammar (a trailing "
-          "comment, an indentation digit, a chomping indicator in either order) is read as a block; an "
+          "fails closed (exit 2); a run: LITERAL block header in the full block-header grammar (a "
+          "trailing comment, an indentation digit, a chomping indicator in either order) is read as a "
+          "block and EVERY folded (>) header, on the key line or after an empty run:, is "
+          "cannot-evaluate (exit 2) naming the header line; an "
           "empty run: (a bare `run:` or a comment-only same-line value, the same empty value) is read only "
           "in the two proven shapes (a next-line plain scalar, or a next-line "
-          "block header with content deeper than both the header and the key; a bare launcher there "
-          "fails, an isolated one passes) while a null run: (next non-blank, non-comment line not "
+          "LITERAL block header with content deeper than both the header and the key; a bare launcher "
+          "there fails, an isolated one passes) while a null run: (next non-blank, non-comment line not "
           "deeper than the key) stays clean; a comment line before a deeper value, a header without "
           "content deeper than the key (a header at the end of the text included) or with content at "
           "or above its own column, and a '#' line directly after the header (YAML block content this "
           "reader refuses) are cannot-evaluate (exit 2), each naming the file and line; any other run: value "
           "starting with | or > on either line, a node property or alias, and a further-continued plain "
           "scalar are cannot-evaluate (exit 2); the run: value grammar is closed (a plain scalar, a "
-          "block scalar, a single-quoted scalar with no escape decoded to its body): a double-quoted "
-          "scalar, a quoted scalar followed by a trailing comment or text, a single-quoted escape or "
-          "unterminated quote, a flow mapping or sequence step or value, a run key in a flow "
-          "collection, a quoted or explicit run key, and a run key with whitespace before its colon "
-          "are each cannot-evaluate (exit 2) naming the file and line; "
+          "LITERAL block scalar, a single-quoted scalar with no escape decoded to its body): a "
+          "double-quoted scalar, a quoted scalar followed by a trailing comment or text, a "
+          "single-quoted escape or unterminated quote (each asserting the value reader's own "
+          "diagnostic), a flow mapping or sequence step, value or line, a run key in a flow "
+          "collection, ANY quoted key (escaped spellings included), a tagged, anchored or aliased key "
+          "line, an explicit key, a run key with whitespace before its colon, a plain step key "
+          "outside the closed step-key set, a steps: key with a same-line value, and a step line the "
+          "step model cannot place are each cannot-evaluate (exit 2) naming the file and line, while "
+          "a step whose keys are all on the allowlist stays clean; "
           "every *.yml workflow candidate that is not a regular "
           "file (a symlink of any kind, a directory, or another non-regular entry) is a named "
           "cannot-evaluate (exit 2); and "

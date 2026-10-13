@@ -190,9 +190,12 @@ def _read_bytes(path):
 # The wide views scanned for every decodable BOM-marked file, beside the declared decode and the
 # lossless byte view: UTF-16 LE and BE at byte offsets 0 and 1 (every phase of a 2-byte unit) and
 # UTF-32 LE and BE at byte offsets 0 to 3 (every phase of a 4-byte unit), so UTF-16 or UTF-32 text at
-# ANY byte alignment behind a mismatched-endian or misaligned mark is decoded by at least one view.
-# The self-test asserts this enumeration DIRECTLY (case 3v): several arrangements match in more than
-# one view, so no single planted file can discriminate every entry.
+# ANY byte alignment behind a mismatched-endian or misaligned mark is decoded by at least one view
+# (the guaranteed bound is AT LEAST ONE view: an ASCII arrangement typically also reads in a second,
+# endian-swapped or phase-shifted view, but a non-ASCII wide text can show in exactly one).
+# The self-test asserts this enumeration DIRECTLY and the views read_scan_text returns (case 3v):
+# several arrangements match in more than one view, so no single planted file can discriminate
+# every entry.
 WIDE_VIEWS = (("utf-16-le", 0), ("utf-16-le", 1), ("utf-16-be", 0), ("utf-16-be", 1),
               ("utf-32-le", 0), ("utf-32-le", 1), ("utf-32-le", 2), ("utf-32-le", 3),
               ("utf-32-be", 0), ("utf-32-be", 1), ("utf-32-be", 2), ("utf-32-be", 3))
@@ -339,7 +342,9 @@ def main():
 #      misaligned by one, two or three bytes) is found in a UTF-32 view at offsets 0 to 3; 3v. the
 #      WIDE_VIEWS enumeration (each unit size at every byte phase) is asserted DIRECTLY, because
 #      several arrangements match in more than one view and no single planted file discriminates
-#      every entry,
+#      every entry, and the views read_scan_text RETURNS are asserted too (count, order and decoder
+#      per view, against a planted BOM-marked stream: the constant assertion alone cannot catch a
+#      reader that stops using an entry),
 #   4. a codename in a Latin-1 .txt matches the hash layer (exit 1); 4b. the denylist file itself is
 #      scanned (a private IP in one of its comment lines is a finding); 4c. a suffixless Latin-1 file is
 #      decoded losslessly and its host path found,
@@ -360,9 +365,10 @@ def main():
 # regression fail rather than pass. Against the round-3 revision this replaces, 3i pins the
 # decode-decided (never prefix-decided) BOM classification and 3j and 3k pin the every-wide-view
 # scan (a mismatched-endian and a misaligned mark), while 3e, 3f and 3h now also assert the file is
-# named. Against the round-4 revision this replaces, 3l-3p pin the UTF-32 views at byte offsets 0 to
-# 3 (each planted text hid from every then-scanned view) and 3v asserts the WIDE_VIEWS enumeration
-# itself. The planted host path and private IP are assembled from pieces so
+# named. Against the round-4 revision this replaces, 3l-3o pin the UTF-32 views at byte offsets 0 to
+# 3 (each of those four planted texts hid from every then-scanned view; 3p was already found by that
+# revision and stays as the phase-3 control) and 3v asserts the WIDE_VIEWS enumeration itself and the
+# views read_scan_text returns. The planted host path and private IP are assembled from pieces so
 # this source stays clean under its own scan.
 _HOST_PATH = "/" + "opt/" + "fixture-host/private/path"
 _PRIVATE_IP = "10." + "20.30.40"
@@ -529,9 +535,11 @@ def self_test_main():
         # 3l-3p. UTF-32 text behind a mismatched or misaligned mark: a UTF-16 LE mark over UTF-32 LE
         #     text (3l; the stream sits at byte offset 2) and a UTF-16 BE mark over UTF-32 BE text
         #     (3m) -- each declared decode succeeds as garbled UTF-16 -- and a UTF-32 LE mark with
-        #     one byte (3n) or two bytes (3o) inserted after it (padded so the declared UTF-32 decode
-        #     still succeeds garbled), and a UTF-16 LE mark with one byte inserted over a UTF-32 LE
-        #     stream (3p; the stream sits at byte offset 3). Each host path is visible only in
+        #     one byte (3n; padded so the declared UTF-32 decode still succeeds garbled) or two bytes
+        #     (3o; its whole-stream UTF-32 decode fails on an out-of-range unit, so the declared decode
+        #     is the UTF-16 fallback, succeeding garbled) inserted after it, and a UTF-16 LE mark with
+        #     one byte inserted over a UTF-32 LE stream (3p; the stream sits at byte offset 3). Each
+        #     host path is visible only in
         #     UTF-32 views; 3l-3o hid from every view the previous revision scanned (each passed
         #     clean before the offset-1..3 views existed), while 3p is the phase-3 control (an LE
         #     stream at offset 3 also reads in the UTF-32-BE offset-0 view, so no planted file
@@ -570,6 +578,35 @@ def self_test_main():
             failures.append("WIDE_VIEWS must enumerate UTF-16 LE/BE at byte offsets 0-1 and UTF-32 "
                             "LE/BE at byte offsets 0-3 (got {!r})".format(
                                 sys.modules[__name__].WIDE_VIEWS))
+        #     The constant assertion alone cannot catch a reader that stops USING an entry (a loop
+        #     over WIDE_VIEWS[1:] leaves the constant intact), so the views read_scan_text actually
+        #     RETURNS are asserted too: a planted BOM-marked stream is read through the real
+        #     function, and the returned views are compared by position against the decodes the
+        #     enumeration requires (count, order and decoder per view; the declared decode and the
+        #     lossless byte view lead; the probe bytes make every expected view distinct, so a
+        #     swapped, dropped or re-decoded view cannot compare equal).
+        probe_dir = tmp / "views-probe"
+        probe_dir.mkdir()
+        probe_path = probe_dir / "probe.md"
+        probe_bytes = b"\xff\xfe" + bytes([  # a UTF-16-LE, a UTF-16-BE, a UTF-32-LE and a
+            0x41, 0, 0x42, 0, 0x43, 0, 0x44, 0,    # UTF-32-BE quadrant, so all fourteen expected
+            0, 0x45, 0, 0x46, 0, 0x47, 0, 0x48,    # views decode to distinct texts and a swapped
+            0x49, 0, 0, 0, 0x4a, 0, 0, 0,          # view can never compare equal
+            0, 0, 0, 0x4b, 0, 0, 0, 0x4c])
+        probe_path.write_bytes(probe_bytes)
+        probe_texts, probe_lossless, probe_reason = read_scan_text(probe_path)
+        want_views = [probe_bytes.decode("utf-16"),
+                      probe_bytes.decode("utf-8", errors="surrogateescape")]
+        for enc, off in expected_views:
+            want_views.append(probe_bytes[off:].decode(enc, errors="replace"))
+        if (probe_reason is not None or probe_lossless is not True
+                or not isinstance(probe_texts, tuple) or list(probe_texts) != want_views):
+            failures.append("read_scan_text must return the declared decode, the lossless byte "
+                            "view, then every WIDE_VIEWS decode in order ({} view(s) returned; "
+                            "views equal by position: {!r})".format(
+                                0 if probe_texts is None else len(probe_texts),
+                                None if probe_texts is None else
+                                [t == w for t, w in zip(probe_texts, want_views)]))
 
         # 4. a codename in a .txt holding a Latin-1 byte matches the hash layer.
         rc, out = run_capture(tree("codename", dict(clean_files, **{
@@ -703,7 +740,8 @@ def self_test_main():
           "byte view is scanned beside the wide views), big-endian or misaligned text behind a UTF-16 "
           "mark, UTF-32 text behind a mismatched or misaligned mark (the wide views cover UTF-16 LE "
           "and BE at byte offsets 0-1 and UTF-32 LE and BE at byte offsets 0-3, the enumeration "
-          "itself asserted), a suffixless Latin-1 file or a symlinked regular "
+          "itself and the views read_scan_text returns, count, order and decoder per view, both "
+          "asserted), a suffixless Latin-1 file or a symlinked regular "
           "file's target, "
           "a codename in a Latin-1 .txt, and a private IP inside the denylist file are each a finding "
           "(exit 1); an undecodable .zip (in either suffix case) and an injected non-regular file are "
