@@ -575,9 +575,17 @@ _GIT_CASES = ("the git-level history, tag, release-order/id-history append-only,
               "tag-preservation cases over real repositories")
 _EVERY_CASE = "every self-test case"
 _SUPPRESS_VECTORS_ENV = "AIQT_SELFTEST_SUPPRESS_VECTORS"
-# ONE constant ties the git probe's exact argv to the git-less arm's launch match, so the arm
-# cannot silently drift off the probe and turn trivially green on hosts where git exists.
+# ONE constant ties the git probe's exact argv to the git-less arm's launch match, and the
+# probe-argv vector asserts the default probe launches exactly this argv, so the arm cannot
+# silently drift off the probe and turn trivially green on hosts where git exists.
 _GIT_PROBE_ARGV = ("git", "--version")
+_NO_VECTORS_PASS_NOTE = "SELF-TEST PASS (vectors not run in this nested call)"
+
+
+def _default_git_probe():
+    """The real git probe: launches exactly list(_GIT_PROBE_ARGV), the same constant the
+    simulated git-less arm matches on; the probe-argv vector asserts that identity."""
+    return subprocess.run(list(_GIT_PROBE_ARGV), capture_output=True, text=True).returncode
 
 
 class _SetupAllocationError(OSError):
@@ -626,7 +634,10 @@ def _not_run_vectors(failures):
     Entry-narrowness layer (in-process): the public entry catches ONLY the scrub's
     temp-directory ALLOCATION failure (typed at the allocation call by _mark_setup_allocations);
     an injected PermissionError out of the scrub that is NOT the allocation must PROPAGATE,
-    never be reported as the setup NOT RUN.
+    never be reported as the setup NOT RUN. The probe-argv vector asserts the default git
+    probe launches exactly list(_GIT_PROBE_ARGV) (the argv the simulated git-less arm matches
+    on), and the no-vectors-pass-text vector asserts a clean nested no-vectors entry exits 0
+    printing only the distinct no-vectors PASS note.
 
     Fresh-process public-entry layer: the scoped injections cannot reach a failure of the entry
     scrub itself (scrub_git_environment allocates its scratch HOME with tempfile.mkdtemp before
@@ -702,6 +713,43 @@ def _not_run_vectors(failures):
                         "scrub that is not the temp-directory allocation must PROPAGATE out of "
                         "the public entry, never be reported as the setup NOT RUN")
 
+    # Probe-argv identity: the default probe must launch exactly list(_GIT_PROBE_ARGV), once,
+    # the same constant the simulated git-less arm matches on (red when either side moves to
+    # a literal of its own, so the arm cannot silently drift off the probe); the recording
+    # stub launches nothing, so this holds on hosts with or without git.
+    launched = []
+
+    class _ProbeResult:
+        returncode = 0
+
+    def _recording_run(args, *_more, **_kw):
+        launched.append(tuple(args))
+        return _ProbeResult()
+
+    real_probe_run = subprocess.run
+    subprocess.run = _recording_run
+    try:
+        _default_git_probe()
+    finally:
+        subprocess.run = real_probe_run
+    if launched != [tuple(_GIT_PROBE_ARGV)]:
+        failures.append("(vector probe-argv) the default git probe must launch exactly "
+                        "list(_GIT_PROBE_ARGV) once, the argv the simulated git-less arm "
+                        "matches on (got {!r})".format(launched))
+
+    # No-vectors PASS text: a clean nested no-vectors entry must complete with exit 0 and
+    # print the DISTINCT no-vectors PASS line, never the full-run "SELF-TEST PASS:" text, so
+    # the full PASS line is only ever printed by a run whose vectors ran.
+    out = io.StringIO()
+    with redirect_stdout(out), redirect_stderr(io.StringIO()):
+        rc = self_test_main(_vectors=False)
+    text = out.getvalue()
+    if rc != 0 or _NO_VECTORS_PASS_NOTE + ":" not in text or "SELF-TEST PASS:" in text:
+        failures.append("(vector no-vectors-pass-text) a clean nested no-vectors entry must "
+                        "exit 0 and print the distinct no-vectors PASS line {!r}, never the "
+                        "full-run SELF-TEST PASS line (got exit {})".format(
+                            _NO_VECTORS_PASS_NOTE + ":", rc))
+
     tool = str(Path(__file__).resolve())
     entry_env = dict(os.environ)
     entry_env[_SUPPRESS_VECTORS_ENV] = "1"  # a child never runs vectors of its own
@@ -721,17 +769,30 @@ def _not_run_vectors(failures):
                         "{})".format(want, proc.returncode))
 
     # Inherited-marker guard: a FULL public-entry run that inherits _SUPPRESS_VECTORS_ENV (the
-    # scrub keeps it: it is not GIT_-prefixed) must record the named suppression NOT RUN and
-    # exit 1, never print the unchanged PASS over silently skipped vectors.
-    suppressed_want = ("NOT RUN: the red-on-revert NOT RUN and entry vectors: suppressed by "
-                       "{} (a vector child, never a full run)".format(_SUPPRESS_VECTORS_ENV))
-    proc = subprocess.run([sys.executable, "-I", "-B", tool, "--self-test"],
-                          capture_output=True, text=True, env=entry_env)
-    if proc.returncode != 1 or suppressed_want not in proc.stdout:
+    # scrub keeps it: it is not GIT_-prefixed) must exit 1 and print the complete named
+    # suppression NOT RUN line exactly once, with no PASS text of either form, never the
+    # unchanged PASS over silently skipped vectors; the child is bounded by a timeout so a
+    # hang is this vector's named failure, never a stall of the whole self-test.
+    marked_expect = []
+    _not_run(marked_expect, "the red-on-revert NOT RUN and entry vectors",
+             "suppressed by {} (a vector child, never a full run)".format(_SUPPRESS_VECTORS_ENV))
+    suppressed_line = "  - " + marked_expect[0] + "\n"
+    try:
+        proc = subprocess.run([sys.executable, "-I", "-B", tool, "--self-test"],
+                              capture_output=True, text=True, env=entry_env, timeout=120)
+        marked_ok = (proc.returncode == 1 and proc.stdout.count(suppressed_line) == 1
+                     and "SELF-TEST PASS" not in proc.stdout)
+        got = "exit {} (complete-line count {}, PASS text printed: {})".format(
+            proc.returncode, proc.stdout.count(suppressed_line),
+            "SELF-TEST PASS" in proc.stdout)
+    except subprocess.TimeoutExpired:
+        marked_ok = False
+        got = "a timeout: the marked child hung instead of failing named"
+    if not marked_ok:
         failures.append("(vector inherited-marker) a full public-entry run inheriting {} must "
-                        "exit 1 AND record {!r}, never the unchanged PASS over silently skipped "
-                        "vectors (got exit {})".format(
-                            _SUPPRESS_VECTORS_ENV, suppressed_want, proc.returncode))
+                        "exit 1 AND print the complete line {!r} exactly once with no PASS "
+                        "text, never the unchanged PASS over silently skipped vectors (got "
+                        "{})".format(_SUPPRESS_VECTORS_ENV, suppressed_line, got))
 
     # _SUPPRESS_VECTORS_ENV guard: the spy child proves ONLY that a marker-carrying child
     # reaches its own named SELF-TEST FAIL without launching any subprocess (subprocess.run is
@@ -908,8 +969,7 @@ def self_test_main(_git_probe=None, _mkdtemp=None, _vectors=True):
     git_ok = True
     git_why = "the git probe exited nonzero"
     try:
-        probe_rc = _git_probe() if _git_probe is not None else subprocess.run(
-            list(_GIT_PROBE_ARGV), capture_output=True, text=True).returncode
+        probe_rc = _git_probe() if _git_probe is not None else _default_git_probe()
         if probe_rc != 0:
             git_ok = False
     except OSError as exc:
@@ -1213,13 +1273,16 @@ def self_test_main(_git_probe=None, _mkdtemp=None, _vectors=True):
     if _vectors and os.environ.get(_SUPPRESS_VECTORS_ENV) == "1":
         # An inherited marker must never skip the vectors silently: record ONE named NOT RUN
         # failure so a marked run exits 1 (a vector child carries the marker and expects its own
-        # injected failure; only an unmarked full run may print the unchanged PASS).
+        # injected failure); the full "SELF-TEST PASS:" line below is printed only by an
+        # unmarked run whose vectors RAN, and a no-vectors nested run prints the distinct
+        # no-vectors note instead.
         _not_run(failures, "the red-on-revert NOT RUN and entry vectors",
                  "suppressed by {} (a vector child, never a full run)".format(
                      _SUPPRESS_VECTORS_ENV))
     elif _vectors:
         # A fresh-process vector child carries _SUPPRESS_VECTORS_ENV, so a child whose injected
-        # setup failure ever stopped failing still could not spawn children of its own.
+        # setup failure ever stopped failing still could not spawn children of its own (the
+        # marked gate above fails it first).
         _not_run_vectors(failures)
 
     if failures:
@@ -1227,12 +1290,13 @@ def self_test_main(_git_probe=None, _mkdtemp=None, _vectors=True):
         for f in failures:
             print("  - " + f)
         return 1
-    print("SELF-TEST PASS: prefix identity (M1), no-decrease (M2), tag name/ceiling logic, the "
+    pass_head = "SELF-TEST PASS:" if _vectors else _NO_VECTORS_PASS_NOTE + ":"
+    print("{} prefix identity (M1), no-decrease (M2), tag name/ceiling logic, the "
           "genesis predicate and tag-preservation logic, the _parse fullmatch regression (4e), the "
           "full-row register prefix logic (append/edit/delete/empty/identical), and the git-level "
           "history, tag, release-order/id-history append-only, genesis-exemption, and "
           "tag-preservation cases all hold; an unavailable git or temp directory is a NOT RUN failure "
-          "(nonzero exit), never a PASS (PARTIAL)")
+          "(nonzero exit), never a PASS (PARTIAL)".format(pass_head))
     return 0
 
 
