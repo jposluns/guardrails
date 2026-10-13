@@ -6,9 +6,12 @@ on:
     # no `edited`: it fires on a PR title/body edit AND on a base-branch retarget, and would re-run
     # every job here. The title/body side matters only to the message/metadata leak scan
     # (check_msg_leaks), which runs in msg-leaks.yml, triggered on `edited`. A retarget alone
-    # therefore schedules no fresh Quality run; the merge tooling closes that gap: ci-status.sh
-    # --require-base refuses a run whose recorded pull_request base is not the merge target, so a
-    # pre-retarget run is never trusted and a refresh push (or reopen) must earn a new one.
+    # therefore schedules no fresh Quality run; ci-status.sh --require-base closes that gap. That
+    # invocation is the merge lane's own tooling: no file in this repository passes the option. It
+    # refuses a run whose recorded pull_request base is not the merge target AND requires a
+    # conforming run of this workflow, so a pre-retarget run is never trusted and a lone msg-leaks
+    # run cannot stand in. Recovery needs a refresh push: only a NEW head SHA earns a trusted run
+    # set (a reopen adds a run on the same head, but the retained pre-retarget run still refuses).
     types: [opened, synchronize, reopened]
   push:
     branches: [main]

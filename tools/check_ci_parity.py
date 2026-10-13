@@ -99,12 +99,18 @@ workflow on a metadata-only change. Each departure is a trigger finding (exit
 value reads as GitHub's default types (opened, synchronize, reopened); types:
 at indent 4 is a one-line flow list, one plain scalar, or a block list at
 indent 6; and a one-line on: value naming events gives each its default types.
-Under an EDIT_EVENTS key any other shape (a flow mapping, a line at an
-unexpected indent, a repeated event or types: key, an item that is not a plain
-name, a quoted key or one with whitespace before its colon, a sequence item at
-indent 4, which YAML reads as an indentless sequence, or a line with no colon)
-is cannot-evaluate (exit 2), as are a quoted key or one with whitespace before
-its colon at indent 2 and a line at indent 1 or 3 anywhere in on:. NOT READ
+Every key this rule reads must be a PLAIN name whose colon is followed by a
+space or ends the line: a quoted key, a key with whitespace before its colon,
+a non-name spelling (an explicit '?' key, a tag such as !!str, or any other
+character outside a plain name), and a colon directly followed by its value
+(types:[...], which YAML reads as one plain scalar, never as a key) are each
+cannot-evaluate (exit 2), at indent 2 and under an edit event alike, as are a
+line at indent 2 with no colon, a first line under on: at any indent other
+than 2, a line under an edit event before any indent-4 property (an event's
+properties are read only at indent 4), a line at indent 1 or 3 anywhere in
+on:, and under an EDIT_EVENTS key any other shape (a flow mapping, a repeated
+event or types: key, an item that is not a plain name, or a sequence item at
+indent 4, which YAML reads as an indentless sequence). NOT READ
 (disclosed): the push trigger, and every filter or condition that can keep a
 listed event from scheduling the workflow or a job: branches:,
 branches-ignore:, paths:, paths-ignore:, and a job- or step-level if:. Any of
@@ -2049,6 +2055,8 @@ def _edit_event_types(lines, source, diagnostics):
         return events
     event = None
     in_types = False
+    seen_child = False
+    property_seen = False
     for index in range(start + 1, len(lines)):
         code = _strip_comment(lines[index])
         if not code.strip():
@@ -2057,31 +2065,57 @@ def _edit_event_types(lines, source, diagnostics):
         if indent == 0:
             break
         stripped = code.strip()
-        key, colon, rest = stripped.partition(":")
-        rest = rest.strip()
+        key, colon, raw_rest = stripped.partition(":")
+        # YAML reads a colon as a mapping indicator only when a space follows
+        # it or it ends the line; types:[...] is one plain scalar, not a key.
+        spaced = not raw_rest or raw_rest.startswith(" ")
+        rest = raw_rest.strip()
+        if not seen_child:
+            seen_child = True
+            if indent != 2:
+                refuse(index + 1, "the first line under on: is at indent "
+                       "{}; the on: block's events are read only at indent "
+                       "2".format(indent))
         if indent in (1, 3):
             refuse(index + 1, "line {!r} under on: is at indent {}; events "
                    "are read only at indent 2".format(stripped, indent))
         elif indent == 2:
             in_types = False
-            event = key if key in EDIT_EVENTS else None
-            if _unquote(key) != key:
+            property_seen = False
+            event = None
+            if not colon:
+                refuse(index + 1, "line {!r} at indent 2 under on: has no "
+                       "colon, so YAML does not read it as an event "
+                       "key".format(stripped))
+            elif _unquote(key) != key:
                 refuse(index + 1, "quoted on: key {!r}".format(key))
             elif key != key.rstrip():
                 refuse(index + 1, "on: key {!r} holds whitespace before its "
                        "colon".format(key))
-            elif event is not None:
-                if event in events:
-                    refuse(index + 1,
-                           "on: declares {} more than once".format(event))
-                elif rest:
-                    refuse(index + 1, "{}: value {!r} is outside the "
-                           "recognized trigger shapes".format(event, rest))
-                events[event] = DEFAULT_PULL_REQUEST_TYPES
+            elif not JOB_ID_RE.fullmatch(key):
+                refuse(index + 1, "on: key {!r} is not a plain name (an "
+                       "explicit '?' key, a tag such as !!str, and every "
+                       "other non-plain spelling are refused)".format(key))
+            elif not spaced:
+                refuse(index + 1, "on: key {!r} has no space after its "
+                       "colon; YAML reads the line as one plain scalar, not "
+                       "a key".format(key))
+            else:
+                event = key if key in EDIT_EVENTS else None
+                if event is not None:
+                    if event in events:
+                        refuse(index + 1, "on: declares {} more than "
+                               "once".format(event))
+                    elif rest:
+                        refuse(index + 1, "{}: value {!r} is outside the "
+                               "recognized trigger shapes".format(
+                                   event, rest))
+                    events[event] = DEFAULT_PULL_REQUEST_TYPES
         elif event is None:
             continue
         elif indent == 4:
             in_types = False
+            property_seen = True
             if stripped.startswith("- "):
                 refuse(index + 1, "sequence item {!r} at indent 4 under {} "
                        "(an indentless sequence); block-list items are read "
@@ -2095,6 +2129,15 @@ def _edit_event_types(lines, source, diagnostics):
             elif key != key.rstrip():
                 refuse(index + 1, "key {!r} under {} holds whitespace before "
                        "its colon".format(key, event))
+            elif not JOB_ID_RE.fullmatch(key):
+                refuse(index + 1, "key {!r} under {} is not a plain name (an "
+                       "explicit '?' key, a tag such as !!str, and every "
+                       "other non-plain spelling are refused)".format(
+                           key, event))
+            elif not spaced:
+                refuse(index + 1, "key {!r} under {} has no space after its "
+                       "colon; YAML reads the line as one plain scalar, not "
+                       "a key".format(key, event))
             else:
                 in_types = key == "types"
                 if in_types:
@@ -2106,7 +2149,7 @@ def _edit_event_types(lines, source, diagnostics):
                     in_types = not rest
         elif indent == 6 and in_types and stripped.startswith("- "):
             events[event] += names(index + 1, stripped[2:].strip())
-        elif not in_types and indent > 4:
+        elif not in_types and indent > 4 and property_seen:
             continue
         else:
             refuse(index + 1, "line {!r} under {} is outside the recognized "
@@ -5605,9 +5648,11 @@ def self_test():
 
     # FIX-551: quoted keys, whitespace before a colon, indentless sequences
     # and keyless lines under an edit event are refused (exit 2), on the
-    # workflow that runs the scan and on the one that does not alike; each
-    # spelling formerly read as a key it is not, so GitHub saw a types: list
-    # this rule did not.
+    # workflow that runs the scan and on the one that does not alike. The
+    # first three spellings formerly read as a key they are not, so GitHub
+    # saw a types: list this rule did not; a keyless line is refused because
+    # YAML reads it as a scalar or rejects the document, never as a key, so
+    # this rule cannot know what GitHub would run there.
     edited_flow = "[opened, synchronize, reopened, edited]"
     for label, shape in (
             ("a quoted types: key",
@@ -5626,6 +5671,51 @@ def self_test():
         scan_case("34p msg-leaks.yml trigger shape is cannot-evaluate: "
                   + label, quality_side,
                   ((MSG_LEAKS_CI_SOURCE, with_on(scan_text, shape)),), 2)
+
+    # FIX-551-R2: shapes the round-1 strict parsing still read permissively,
+    # each hiding or inventing a types: list. A colon-less event key and an
+    # explicit '?' key are not read as keys by this rule while YAML reads the
+    # block differently; a tagged key and a colon with no space after it are
+    # read by YAML as a key and a plain scalar this rule formerly classified
+    # the other way around; and a non-standard indent for the on: block or an
+    # event's properties hid the whole block from this rule while GitHub
+    # still reads it. Each is now cannot-evaluate on both workflows.
+    for label, shape in (
+            ("a colon-less event key at indent 2",
+             "  pull_request\n    types: " + edited_flow + "\n"),
+            ("the on: block's children at indent 4",
+             "    pull_request:\n      types: " + edited_flow + "\n"),
+            ("event properties at indent 6",
+             "  pull_request:\n      branches: [main]\n      types: "
+             + edited_flow + "\n"),
+            ("an explicit '?' key",
+             "  ? pull_request\n  : types: " + edited_flow + "\n"),
+            ("a !!str tag on the types: key",
+             "  pull_request:\n    !!str types: " + edited_flow + "\n"),
+            ("types: with no space after its colon",
+             "  pull_request:\n    types:" + edited_flow + "\n")):
+        scan_case("34r quality.yml trigger shape is cannot-evaluate: " + label,
+                  with_on(ci_fixture(common), shape), msg_side, 2)
+        scan_case("34r msg-leaks.yml trigger shape is cannot-evaluate: "
+                  + label, quality_side,
+                  ((MSG_LEAKS_CI_SOURCE, with_on(scan_text, shape)),), 2)
+
+    # FIX-551-R2: the indent-4 sequence branch is pinned on its own named
+    # diagnostic. Dropping the branch still refuses the line (it has no
+    # colon), so the 34p exit code alone cannot tell the two refusals apart;
+    # the message can.
+    indentless = evaluate(
+        local_msg,
+        with_on(ci_fixture(common),
+                "  pull_request:\n    types:\n    - edited\n"),
+        msg_waiver, msg_side)
+    count += 1
+    if not any(item.code == "trigger-shape"
+               and "indentless sequence" in item.message
+               for item in indentless.diagnostics):
+        failures.append(
+            "34s the indent-4 sequence item is not refused by the named "
+            "indentless-sequence branch: {!r}".format(indentless.diagnostics))
 
     # FIX-551 (D-551-MERGE-LANE-GUARD): a gate moved from quality.yml into
     # msg-leaks.yml is a relocation finding (the CI side is the union of both
