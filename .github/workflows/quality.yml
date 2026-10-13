@@ -291,6 +291,10 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/_opf_adopt_observe.py --self-test
 
+      - name: OPF adoption source-discovery self-test
+        shell: bash
+        run: python3 -I -B opf/tools/_opf_adopt_discover.py --self-test
+
       - name: OPF prompt-pack manifest drift gate self-test (PR7 slice 1)
         shell: bash
         run: python3 -I -B opf/tools/check_opf_prompt_pack.py --self-test
