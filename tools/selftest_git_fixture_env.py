@@ -1452,37 +1452,103 @@ def _config_injection_lane(base):
 
 # Per-member time bounds (seconds) for _run_config_member. A member absent here keeps
 # CONFIG_MEMBER_BOUND_DEFAULT. config/member-bound-table pins this table (every key an exact
-# registered roster argv, the one override, the default); it does not test any sizing.
+# registered roster argv, each override, the default), config/member-bound-opf-selftest pins
+# the opf.py --self-test entry, and config/member-bound-reaches-run pins that _run_config_member
+# hands the looked-up bound to _run_bounded (_member_bound_checks); none of them tests any sizing.
+# Figures in this comment carry one of four labels: MEASURED (run for SIZING below), ESTIMATED
+# (derived by the SIZING formula), REPORTED (an earlier account, not reproduced here) or
+# READ FROM SOURCE (read from the member's own code, not measured).
 #
 # CONFIG_MEMBER_BOUND_DEFAULT is a DELIBERATE SHORTER DEADLINE, not a bound sized above every
 # member's own end-to-end budget. Budgets the members grant themselves, READ FROM SOURCE (not
-# measured): opf/tools/opf.py --self-test grants its blocked-isolation case 31 * 180 + 30 = 5610 s
-# (the isolation matrix's 31 cases at 180 s each plus a 30 s launch margin), above this default;
-# the tools/check_selftest_execution.py members set no internal bound of their own (the CI job
-# timeout is their outer bound). The kill-timeout rule ("A kill timeout outlives the wait it
-# bounds", AGENTS.md) allows a deadline below a callee's budget only where cutting the work short
-# is the explicit intent, and only when reaching it is attributed to the deadline rather than
-# reported as the callee's failure.
-# CHOICE: the default is NOT raised above 5610 s; it stays a deliberate shorter deadline, and
-# cutting a member short is the explicit intent here because this lane owns no member's verdict.
+# measured): opf/tools/opf.py --self-test grants its blocked-isolation leg alone
+# 31 * _deadline_case_budget(180) = 31 * (180 + 5 + 1) = 5766 s (the isolation matrix's 31 cases,
+# each its 180 s timeout plus the 5 s fixture cleanup grace and the 1 s receipt allowance), and its
+# regression runner bounds that leg at 5766 + 30 = 5796 s (the 30 s launch margin); that is one leg,
+# so the whole self-test grants itself more. The tools/check_selftest_execution.py members set no
+# internal bound of their own (the CI job timeout is their outer bound). The kill-timeout rule
+# ("A kill timeout outlives the wait it bounds", AGENTS.md) asks that a bound meant to let a command
+# finish be sized above the budget the command grants itself; it allows a deliberately shorter
+# deadline where cutting the work short is the explicit intent, provided reaching it is attributed
+# to the deadline rather than reported as a failure of the callee. Every bound in this table takes
+# that exception: none is offered as a bound above its member's whole self-granted budget.
+# CHOICE: the default is NOT raised above 5766 s, and neither is any entry below (each is sized
+# from config-lane runs MEASURED on this host; see SIZING); each stays a deliberate shorter
+# deadline relative to the member's self-granted budget, yet each is sized above the member's
+# measured lane runs so that the member finishes under the load the SIZING factor covers;
+# reaching a bound stays cannot-evaluate, attributed to the bound, never a FAIL of that member
+# and never a pass, because this lane owns no member's verdict.
 # Every roster member is a registered step or the runner behind a registered --suite step
 # (_registered_selftests reads the CI workflow, both standalone runners and the suite manifest),
 # and that step runs the member to completion under no deadline from this suite, so no member's
 # pass or fail depends on this bound. This lane asks a different question (does the
-# member stay clean under injected caller hooks, ignore files, attributes and fsmonitor), it
-# reruns each member in three config lanes (combined, malformed, system), and the bound caps how
-# long one stalled rerun can hold that answer back. Cutting a rerun short leaves the question
-# unanswered, never answered wrongly: reaching the bound is cannot-evaluate (exit 2 when nothing
-# definite was found), never a FAIL of that member and never a pass.
+# member stay clean under injected caller hooks, ignore files, attributes and fsmonitor). The
+# roster is every registered self-test except CONFIG_EXCLUSIONS["all"] (this suite's own runner);
+# the combined and system lanes rerun every roster member, the malformed lane every one outside
+# CONFIG_EXCLUSIONS["malformed"], the fsmonitor pass four of them under --self-test (its
+# _run_config_member calls), and the bound caps how long one stalled rerun can hold that
+# answer back. Cutting a rerun short leaves the question unanswered, never answered wrongly:
+# reaching the bound is cannot-evaluate (exit 2 when nothing definite was found), never a FAIL of
+# that member and never a pass.
+#
+# SIZING. MEASURED (2026-10-12, 24-CPU host, nice 10, every bound lifted to 10800 s): the suite's
+# own _config_results (four workers, run through main() with its lanes replaced) under the combined
+# lane's injected configuration, rebuilt by a copy of that lane's setup code (NOT a call to
+# _config_injection_lane itself), over opf.py, check_opf_record.py --red-on-revert,
+# _opf_adopt_observe.py, check_release_delta.py and check_opf_init.py --self-test plus six shorter
+# opf/tools self-tests (_opf_adopt.py, _opf_oplock.py, _opf_init_operation.py,
+# check_opf_upgrade.py, check_opf_homes.py and check_opf_doctor.py), eleven members, twice (load5
+# 24.02 to 29.29, then 29.29 to 33.68); once over the whole combined roster, 101 members (load5
+# 27.35 to 32.99); and once under the malformed lane's configuration over those eleven members
+# less its exclusion, ten members (load5 30.01 to 32.14). Every member exited 0 with no hook,
+# fsmonitor or exposure record in every run. Each entry below gives its lane time per run.
+# NOT MEASURED, though these bounds govern those reruns all the same: the system lane; the
+# malformed lane's configuration for the 89 of its 99 members outside those ten; and the fsmonitor
+# pass's own configuration (fsmonitor set in both config files, ignore and attributes files
+# removed, its four members run one at a time).
+# ESTIMATED: bound = the slowest MEASURED lane time * 20 / 3, rounded up to a multiple of 300 s;
+# the formula value exceeds the 1200 s default exactly when that time exceeds 180 s. REPORTED times
+# (opf.py's 1192 s lane run, and the opf.py and check_opf_record.py lane runs that reached a 1200 s
+# bound) are not fed to the formula; the factor's headroom is meant to allow for them, but a run
+# that reached a bound has no known length, so no bound here is shown to cover it (below).
+# Roster coverage: the account of the whole-roster run gives a time or an upper bound for 89 of
+# the 101 members.
+# Five took over 180 s and carry the entries below. The other 84 took 180 s or less: nine named
+# here (the six shorter opf/tools self-tests, check_python_floor.py, check_release_cut.py
+# --self-test --red-on-revert and check_selftest_execution.py --suite orch-behaviour-selftest),
+# the slowest 142.55 s; and 75 REPORTED by that account as each 62.42 s or less, with no
+# per-member time and no names given. The remaining 12 roster members have no recorded time (the
+# account does not say which 12 they are), so their default bound is NOT sized from a measurement.
+# For every member, reaching its bound is cannot-evaluate, never a pass.
+# The factor is 40 / 24 * 4. 40 / 24 covers load5 40 under the model that wall time grows in
+# proportion to load5 once load5 exceeds the 24 CPUs, and not below (every measured run had load5
+# above 24 throughout, so this overstates the growth from where it was measured). 4 is headroom for
+# what that model does not explain: the REPORTED (not reproduced here) opf.py --self-test lane runs
+# of 1192 s and the four that reached the then 1200 s default, at least 2.2 times its slowest
+# measured lane time. Each bound stays below 5766 s (see CHOICE).
 CONFIG_MEMBER_BOUND_DEFAULT = 1200
 CONFIG_MEMBER_BOUNDS = {
-    # MEASURED (2026-10-07, nice 10, load5 about 12 to 14 on a 16-CPU host): one complete run took
-    # 582.30 s wall and 425.55 s CPU and passed; two plain runs were still running at 585 s and
-    # 590 s. The previous 1200 s default was reached twice at load5 above 20 (2026-10-07).
-    # ESTIMATED (assumes wall time grows roughly in proportion to load once load exceeds the CPU
-    # count): 3600 s, about 6.2 times the measured run, covers load5 up to about 80; it also
-    # exceeds the command's own T75 wait chain (540 s per call, 4 calls: 2160 s).
-    ("opf/tools/check_opf_record.py", "--self-test", "--red-on-revert"): 3600,
+    # MEASURED lane times (see SIZING): 650.49 s, 709.77 s, 734.81 s (whole roster) and 683.69 s
+    # (malformed). ESTIMATED: 734.81 * 20 / 3 = 4898.7, so 5100 s. REPORTED by the earlier sizing,
+    # not reproduced here (2026-10-07, load5 about 12 to 14 on a 16-CPU host): one standalone
+    # nice 10 run took 582.30 s wall and passed; a 1200 s bound was reached twice in the lanes at
+    # load5 above 20.
+    ("opf/tools/check_opf_record.py", "--self-test", "--red-on-revert"): 5100,
+    # MEASURED lane times (see SIZING): 482.53 s, 529.80 s, 510.39 s (whole roster) and 493.53 s
+    # (malformed). ESTIMATED: 529.80 * 20 / 3 = 3532.0, so 3600 s. REPORTED by the earlier sizing,
+    # not reproduced here (2026-10-12, load5 about 18 to 21): one standalone nice 10 run took
+    # 467.16 s wall and 255.64 s CPU and passed; lane runs of 730 s and 1192 s, and four lane
+    # reruns that reached the 1200 s default in config/opf/rc or config/opf/malformed.
+    ("opf/tools/opf.py", "--self-test"): 3600,
+    # MEASURED lane times (see SIZING): 265.55 s, 259.96 s, 257.71 s (whole roster) and 261.91 s
+    # (malformed). ESTIMATED: 265.55 * 20 / 3 = 1770.3, so 1800 s.
+    ("opf/tools/_opf_adopt_observe.py", "--self-test"): 1800,
+    # MEASURED lane times (see SIZING): 214.08 s, 243.45 s and 189.62 s (whole roster); the
+    # malformed lane excludes this member. ESTIMATED: 243.45 * 20 / 3 = 1623.0, so 1800 s.
+    ("tools/check_release_delta.py", "--self-test"): 1800,
+    # MEASURED lane times (see SIZING): 207.87 s, 220.76 s, 229.02 s (whole roster) and 219.70 s
+    # (malformed). ESTIMATED: 229.02 * 20 / 3 = 1526.8, so 1800 s.
+    ("opf/tools/check_opf_init.py", "--self-test"): 1800,
 }
 # After the process-group kill: the bounded drain of output still held by a descendant that left
 # the group (setsid or setpgid), the bounded reap of the leader, and the bounded wait for the group
@@ -5530,8 +5596,10 @@ def _member_timeout_controls(base):
     wait are pinned by _timeout_cleanup_order_controls; the member thread, the registry, the
     group kill after a normal return and the suite's close under a real SIGINT by
     _member_close_controls.
-    config/member-bound-table pins the per-member bound table against the registered roster. A
-    fixture that never got going inside its bound is attributed to that timeout, never a red."""
+    config/member-bound-table and config/member-bound-opf-selftest pin the per-member bound table
+    against the registered roster, and config/member-bound-reaches-run pins that the looked-up
+    bound is the one handed to _run_bounded (_member_bound_checks). A fixture that never got going
+    inside its bound is attributed to that timeout, never a red."""
     import contextlib
     import io
     import time
@@ -5685,13 +5753,51 @@ def _member_timeout_controls(base):
     _timeout_cleanup_order_controls(sleeper)
     _member_close_controls(fixture)
 
-    roster = set(_registered_selftests())
+    _member_bound_checks(set(_registered_selftests()))
+
+
+def _member_bound_checks(roster):
+    """config/member-bound-table: no CONFIG_MEMBER_BOUNDS key outside the registered roster, the
+    bound applied to each key is exactly the override pinned here, the default is 1200 s, and
+    every other roster member gets the default. config/member-bound-opf-selftest:
+    opf/tools/opf.py --self-test is registered and the bound applied to it is its own 3600 s
+    entry, not the default (red when that entry is removed or changed).
+    config/member-bound-reaches-run: _run_config_member hands the bound it looks up to
+    _run_bounded (a stub records it; nothing is launched), for every override and for one
+    non-member argv that keeps the default (red when the lookup is bypassed)."""
+    from unittest.mock import patch
+
     record = ("opf/tools/check_opf_record.py", "--self-test", "--red-on-revert")
+    opf_selftest = ("opf/tools/opf.py", "--self-test")
+    adopt_observe = ("opf/tools/_opf_adopt_observe.py", "--self-test")
+    release_delta = ("tools/check_release_delta.py", "--self-test")
+    opf_init = ("opf/tools/check_opf_init.py", "--self-test")
+    overrides = {record: 5100, opf_selftest: 3600, adopt_observe: 1800, release_delta: 1800,
+                 opf_init: 1800}
     check("config/member-bound-table",
           (sorted(key for key in CONFIG_MEMBER_BOUNDS if key not in roster),
-           _config_member_bound(record), CONFIG_MEMBER_BOUND_DEFAULT,
-           sorted({_config_member_bound(argv) for argv in roster if argv != record})),
-          ([], 3600, 1200, [1200]))
+           {key: _config_member_bound(key) for key in CONFIG_MEMBER_BOUNDS},
+           CONFIG_MEMBER_BOUND_DEFAULT,
+           sorted({_config_member_bound(argv) for argv in roster if argv not in overrides})),
+          ([], overrides, 1200, [1200]))
+    check("config/member-bound-opf-selftest",
+          (opf_selftest in roster, CONFIG_MEMBER_BOUNDS.get(opf_selftest),
+           _config_member_bound(opf_selftest)),
+          (True, 3600, 3600))
+    handed = []
+
+    def recording(argv, cwd, env, bound, label, banner, cannot_evaluate=None, report=None):
+        handed.append((label, bound))
+        return 0, "", ""
+
+    with patch.object(sys.modules[__name__], "_run_bounded", recording):
+        for member in (record, opf_selftest, adopt_observe, release_delta, opf_init,
+                       ("opf/tools/opf.py",)):
+            _run_config_member(member, {})
+    check("config/member-bound-reaches-run", handed,
+          [(" ".join(record), 5100), (" ".join(opf_selftest), 3600),
+           (" ".join(adopt_observe), 1800), (" ".join(release_delta), 1800),
+           (" ".join(opf_init), 1800), ("opf/tools/opf.py", 1200)])
 
 
 def _verdict(failures, cannot_evaluate, caused):
