@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """OPF import batch parser (OPF-SPEC 1.3.0 sections 8.3 and 8.8): pure, canonical and INERT. No command,
 gate leg or writer calls parse_batch in this release; it ships ahead of the import write mode (`opf record
-import --batch`), and it writes nothing: the module performs no I/O at all (no file, clock, environment,
-network or process; the self-test builds byte vectors in memory).
+import --batch`), and it writes nothing: parse_batch performs no I/O (no file, clock, environment,
+network or process; importing the module resolves its own file path to reach its sibling modules, and the
+self-test and CLI print their verdicts; the self-test builds its byte vectors in memory).
 
 parse_batch(data) parses ONE `opf.record.import-batch/v1` document, the batch the spec 8.8 import surface
 takes: "`import --batch FILE [--root DIR]`: the primary import surface", where "One invocation covers one
@@ -32,27 +33,35 @@ blank line before each table header. A comment, another key order, another quoti
 re-spelling is NOT canonical and the batch is refused, so one source history has one byte form.
 batch_digest is the SHA-256 of the canonical bytes, the batch half of the spec 8.8 replay identity:
 "Replay identity is `(source_sha256, batch content digest)`." The value grammar is deliberately small
-(strings, integers, booleans, arrays, tables, nested at most MAX_CANON_DEPTH deep): a float or a native
-TOML date-time has no canonical batch form in v1 (timestamps are RFC 3339 UTC strings, as the imported
-envelope requires), and a batch over MAX_BATCH_BYTES is refused unread.
+(strings, integers in TOML's signed 64-bit range, booleans, arrays, tables, nested at most
+MAX_CANON_DEPTH deep): a float, a native TOML date-time or an out-of-range integer has no canonical batch
+form in v1 (timestamps are RFC 3339 UTC strings, as the imported envelope requires), and a batch over
+MAX_BATCH_BYTES is refused unread. An ITERATIVE preflight enforces the depth and integer bounds on the
+parsed document before any copy, row validation or emission, so no recursive helper and no value
+formatting ever sees a value past the bounds.
 
 VALIDATION. Each row is built into an imported record and checked with _opf_schema.validate_imported_record
 (IS-0): the builder assigns per-namespace PLACEHOLDER ids (`imported:<NS>-<n>` in batch order; they are
 never allocations, spec 8.8 keeps the one allocation seam in the writer), the placeholder importer actor,
 and a placeholder `import` table whose `source` is the preserved-original path the record's own run will
 hold. A `links` row targets either another row by its batch-local `key`, which the builder resolves to that
-row's placeholder id (dangling and duplicate keys are refused), or an existing imported-series id verbatim;
-a clean-series id is refused by the validator ("Imported-to-clean links MUST be refused by both writer and
-doctor", spec 8.6). The importer-only legacy_fragment type is refused (spec 8.1/8.2: new imports use the
-imported series, never LF quarantine), and a module-tier type is refused in this release (decision
+row's placeholder id (dangling and duplicate keys are refused), or an existing imported-series id verbatim
+(never an id this batch itself mints: a link to this batch's own row must use its local key, so a key link
+and a verbatim link can never resolve to the same id); a clean-series id is refused by the validator
+("Imported-to-clean links MUST be refused by both writer and doctor", spec 8.6). The importer-only
+legacy_fragment type is refused (spec 8.1/8.2: new imports use the imported series, never LF
+quarantine), and a module-tier type is refused in this release (decision
 D-OPF-PLAN-BATCH-ACCEPT D6: the first imported-series release supports baseline types only).
 
 Outcome model (single-sourced from _opf_store): CANNOT-EVALUATE for an input this unit cannot read under
-v1 assumptions (not exactly bytes, over the byte bound, not UTF-8, not TOML, another or absent `schema`,
-nesting past the canonical depth bound, or a validator control failure), never a pass; INVALID for a parsed
-batch that violates the format (every finding is collected, each naming its row); VALID otherwise, and only
-then does the result carry a Batch. batch_digest(data) returns the digest only for a VALID batch, so no
-replay key is ever minted from a batch the writer would refuse.
+v1 assumptions (not exactly bytes, over the byte bound, not UTF-8, not TOML, an over-long integer
+literal, another or absent `schema`, nesting past the canonical depth bound, or a validator control
+failure), never a pass; INVALID for a parsed batch that violates the format (a row finding names its row,
+and collection stops early in three places: a preflight refusal is reported alone, a batch refused for its
+source skips row validation, and a row refused at staging, for its key or type, is not built); VALID
+otherwise, and only then does the result carry a Batch. batch_digest(data) returns the digest only for a
+VALID batch, so no replay key is ever minted from a batch THIS PARSER refuses; the writer re-validates
+every built record and can still refuse a parser-VALID batch (e.g. against its own run clock, spec 8.8).
 
 NOT CHECKED HERE (the writer and the doctor own these): everything validate_imported_record discloses it
 does not check; the run-level spec 8.8 refusals (the adoption receipt, plan scope, bound-item drift, the
@@ -106,6 +115,11 @@ MAX_BATCH_BYTES = 4 * 1024 * 1024
 # depth 1). tomllib parses far deeper, so the bound is the format's, not the parser's: past it the
 # canonical emission refuses fail-closed rather than rendering by unbounded recursion.
 MAX_CANON_DEPTH = 100
+# TOML's integer value range (signed 64-bit): tomllib parses arbitrary precision, so the bound is the
+# format's, not the parser's. The preflight refuses an out-of-range value before any copy, validation or
+# emission (CPython's integer-string digit limit would otherwise surface as a bare ValueError).
+INT64_MIN = -(2 ** 63)
+INT64_MAX = 2 ** 63 - 1
 # The closed top-level keyset, in canonical emission order.
 TOP_KEYS = ("schema", "source", "record", "worklog")
 SOURCE_KEYS = frozenset({"path"})
@@ -120,9 +134,16 @@ WRITER_KEYS = ("actor", "id", "import")
 PROVENANCE_CONTENT_KEYS = ("history", "span", "unparsed")
 # The batch-local key grammar: short, lower-case and link-safe.
 LOCAL_KEY_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,63}\Z")
-# Control areas no import source may name (the store's own control roots; a legacy source lives in the
-# product tree, never under version control's or the store's own machinery).
-_CONTROL_ROOTS = frozenset({".git", ".aiqt", store.WORKING_DIRNAME})
+# Control areas no import source may name (a legacy source lives in the product tree, never under
+# version control's or the store's own machinery), derived from the store's own constants so the two
+# lists cannot drift. Components compare CASEFOLDED: on a case-insensitive filesystem an aliased
+# spelling such as .GIT names the same directory, and an aliased spelling is a refused input, never a
+# different destination. Root-anchored: the store-root control dirs and the working directory name.
+_CONTROL_ROOTS = frozenset(n.casefold() for n in store.STORE_ROOT_CONTROL_DIRS + (store.WORKING_DIRNAME,))
+# Refused at ANY depth: version control's fixed `.git` (a nested repository is machinery too), the
+# store working directory (a store root need not be the product root), and the store pointer names.
+_CONTROL_COMPONENTS = frozenset(n.casefold() for n in (
+    ".git", store.WORKING_DIRNAME, store.POINTER_REL, store.LOCAL_POINTER_REL))
 
 # PLACEHOLDERS: the fixed stand-ins validation runs under. None is an allocation or a clock read; the
 # writer replaces every one of them inside its journaled transaction and re-validates there.
@@ -190,18 +211,24 @@ class _CanonError(Exception):
 # --- canonical emission --------------------------------------------------------------------------------
 
 _BARE_KEY_RE = re.compile(r"[A-Za-z0-9_-]+\Z")
-# Code points escaped beyond the named short escapes: DEL and the non-LF line boundaries splitlines
-# knows (NEL, LS, PS), each emitted as a backslash-u escape so no emitted line is split by a data
-# character and no invisible control lands raw in a canonical batch.
-_EXTRA_ESCAPED = frozenset((0x7F, 0x85, 0x2028, 0x2029))
+# Code points escaped beyond the named short escapes: DEL, every C1 control (NEL among them), the
+# non-LF line boundaries splitlines knows (LS, PS) and the bidirectional format characters (ALM, LRM,
+# RLM, the embedding/override set and the isolate set), each emitted as a backslash-u escape so no
+# emitted line is split by a data character and no invisible control or direction-spoofing character
+# lands raw in a canonical batch.
+_EXTRA_ESCAPED = (frozenset((0x7F, 0x2028, 0x2029, 0x061C, 0x200E, 0x200F))
+                  | frozenset(range(0x80, 0xA0))       # the C1 controls, NEL included
+                  | frozenset(range(0x202A, 0x202F))   # LRE, RLE, PDF, LRO, RLO
+                  | frozenset(range(0x2066, 0x206A)))  # LRI, RLI, FSI, PDI
 
 _STR_ESCAPES = {"\\": "\\\\", '"': '\\"', "\b": "\\b", "\t": "\\t", "\n": "\\n", "\f": "\\f", "\r": "\\r"}
 
 
 def _canon_string(s):
     """The one canonical TOML basic-string spelling: the named short escapes, backslash-u (upper-case hex)
-    for every other control character and for the non-LF line boundaries splitlines knows (NEL, LS, PS, so
-    no emitted line is ever split by a data character), and every other code point raw UTF-8."""
+    for every other C0 and C1 control character, for the non-LF line boundaries splitlines knows (NEL, LS,
+    PS, so no emitted line is ever split by a data character) and for the bidirectional format characters,
+    and every other code point raw UTF-8."""
     out = ['"']
     for ch in s:
         esc = _STR_ESCAPES.get(ch)
@@ -232,6 +259,11 @@ def _canon_value(value, depth):
     if t is bool:
         return "true" if value else "false"
     if t is int:
+        if value < INT64_MIN or value > INT64_MAX:
+            # The preflight already refused this; a backstop for a direct caller. The message never
+            # formats the value (an over-long str() is itself refused by CPython's digit limit).
+            raise _CanonError(INVALID, "an integer outside TOML's signed 64-bit range has no canonical "
+                              "batch form (fail-closed)")
         return str(value)
     if t is list:
         return "[" + ", ".join(_canon_value(m, depth + 1) for m in value) + "]"
@@ -274,7 +306,9 @@ def canonical_batch_bytes(doc):
 def _source_path_error(path):
     """None when `path` is a legal source path, else the finding: the store's canonical file-operand
     grammar (no absolute, drive or backslash form, no empty, '.' or '..' component, no control
-    character), spelled from the product root and outside every control area."""
+    character), spelled from the product root and outside every control area (the root-anchored control
+    dirs, plus `.git`, the working directory name and the store pointer names at ANY depth, every
+    component compared casefolded)."""
     if type(path) is not str:
         return "source.path must be a string (the legacy file's product-relative path)"
     try:
@@ -283,9 +317,12 @@ def _source_path_error(path):
         return ("source.path {} is not a canonical product-relative file path (no absolute, drive or "
                 "backslash form, no empty, '.' or '..' component, no control character)".format(
                     schema._bounded_display(path)))
-    if path.split("/", 1)[0] in _CONTROL_ROOTS:
-        return ("source.path {} lies inside a control area ({}): a legacy source lives in the product "
-                "tree".format(schema._bounded_display(path), ", ".join(sorted(_CONTROL_ROOTS))))
+    comps = [c.casefold() for c in path.split("/")]
+    if comps[0] in _CONTROL_ROOTS or any(c in _CONTROL_COMPONENTS for c in comps):
+        return ("source.path {} lies inside a control area ({} at the root; {} at any depth): a legacy "
+                "source lives in the product tree".format(
+                    schema._bounded_display(path), ", ".join(sorted(_CONTROL_ROOTS)),
+                    ", ".join(sorted(_CONTROL_COMPONENTS))))
     return None
 
 
@@ -296,6 +333,44 @@ def _first_difference(a, b):
         if a[i] != b[i]:
             return i
     return n
+
+
+def _preflight_error(doc):
+    """The ITERATIVE depth and integer-range preflight over the whole parsed document, run before any
+    copy, row validation or canonical emission, so no recursive helper (deepcopy, the validator, the
+    emitter) and no value formatting ever sees a value past the bounds. Depth counts exactly as the
+    emitter counts it (a member of the top level, of [source] or of a row sits at depth 1, and the bound
+    refuses a value AT a depth past MAX_CANON_DEPTH, scalar or container alike); a shape the emitter
+    refuses without walking is still walked here, strict side, so a refusal can only move earlier, never
+    later. Returns the refusing BatchValidation, or None for a document within both bounds."""
+    stack = []
+    for key, value in doc.items():
+        if key == "source" and type(value) is dict:
+            stack.extend((v, 1) for v in value.values())
+        elif key in ("record", "worklog") and type(value) is list:
+            for row in value:
+                if type(row) is dict:
+                    stack.extend((v, 1) for v in row.values())
+                else:
+                    stack.append((row, 1))
+        else:
+            stack.append((value, 1))
+    while stack:
+        value, depth = stack.pop()
+        if depth > MAX_CANON_DEPTH:
+            return BatchValidation(CANNOT_EVALUATE, [
+                "the batch nests values deeper than {} levels, past the canonical v1 grammar "
+                "(fail-closed)".format(MAX_CANON_DEPTH)])
+        t = type(value)
+        if t is int and (value < INT64_MIN or value > INT64_MAX):
+            return BatchValidation(INVALID, [
+                "an integer outside TOML's signed 64-bit range ({} to {}) has no canonical batch form "
+                "(fail-closed)".format(INT64_MIN, INT64_MAX)])
+        if t is list:
+            stack.extend((m, depth + 1) for m in value)
+        elif t is dict:
+            stack.extend((m, depth + 1) for m in value.values())
+    return None
 
 
 def _closed_keys(table, where, allowed, findings):
@@ -312,14 +387,16 @@ def _closed_keys(table, where, allowed, findings):
                 where, schema._bounded_display(key)))
 
 
-def _resolve_links(content, where, local_ids, findings):
+def _resolve_links(content, where, local_ids, minted, findings):
     """Resolve each {rel, key} link in a FRESH copy of a row's links to {rel, id} through the batch-local
     key table (spec 8.8: the writer resolves local keys to claimed imported IDs; here they resolve to the
     same rows' placeholder ids, so the validator judges the real link shape). A {rel, id} link passes
-    through verbatim for the validator's own imported-series judgement (a clean-series id is ITS
-    refusal). A link with both members, with neither, or with a dangling or non-string key is a
-    finding. A links member that is not a list, or a link that is not a table, passes through for the
-    validator's own shape findings."""
+    through verbatim for the validator's own imported-series judgement (a clean-series id is ITS refusal),
+    EXCEPT an id this batch itself mints (`minted` holds every staged placeholder id): that one is refused
+    by name, since a link to this batch's own row must use its local key, so a key link and a verbatim
+    link can never resolve to the same id in the result. A link with both members, with neither, or with
+    a dangling or non-string key is a finding. A links member that is not a list, or a link that is not a
+    table, passes through for the validator's own shape findings."""
     links = content.get("links")
     if not isinstance(links, list):
         return
@@ -336,6 +413,14 @@ def _resolve_links(content, where, local_ids, findings):
             resolved.append({k: v for k, v in link.items() if k != "key"})
             continue
         if not has_key:
+            vid = link.get("id")
+            if type(vid) is str and vid in minted:
+                findings.append("{} links[{}].id {} is a placeholder this batch itself mints: a link "
+                                "to this batch's own row must use its local key (a verbatim id names a "
+                                "row that already exists in the store, spec 8.8)".format(
+                                    where, i, schema._bounded_display(vid)))
+                resolved.append({k: v for k, v in link.items() if k != "id"})
+                continue
             resolved.append(link)
             continue
         lk = link.get("key")
@@ -369,13 +454,18 @@ def parse_batch(data):
         return BatchValidation(CANNOT_EVALUATE, ["import batch is not UTF-8 (fail-closed): {}".format(exc)])
     try:
         doc = tomllib.loads(text)
-    except (tomllib.TOMLDecodeError, RecursionError) as exc:
+    except (ValueError, RecursionError) as exc:
+        # TOMLDecodeError is a ValueError; the bare ValueError also covers tomllib refusing an
+        # over-long integer literal at CPython's digit limit, graded the same way (fail-closed).
         return BatchValidation(CANNOT_EVALUATE, ["import batch is not parseable TOML (fail-closed): "
                                                  "{}".format(schema._bounded_display(str(exc)))])
     if doc.get("schema") != BATCH_SCHEMA:
         return BatchValidation(CANNOT_EVALUATE, [
             "import batch schema {} is not {!r}: another format is never parsed under v1 assumptions "
             "(fail-closed)".format(schema._bounded_display(doc.get("schema")), BATCH_SCHEMA)])
+    refused = _preflight_error(doc)
+    if refused is not None:
+        return refused
 
     findings = []
     _closed_keys(doc, "batch", frozenset(TOP_KEYS), findings)
@@ -470,6 +560,7 @@ def parse_batch(data):
     # an imported record under the placeholders and judge it with validate_imported_record (IS-0).
     cannot = []
     batch_rows = []
+    minted = frozenset(p for _kind, _where, _row, _key, _rtype, p in staged if p is not None)
     import_source = None if source_path is None else PLACEHOLDER_ORIGINALS + source_path
     for kind, where, row, key, rtype, placeholder in staged:
         for k in sorted(row, key=schema._bounded_display):
@@ -484,7 +575,7 @@ def parse_batch(data):
         content = {k: copy.deepcopy(v) for k, v in row.items()
                    if k not in ("key", "type") and k not in WRITER_KEYS
                    and k not in MEASUREMENT_KEYS and k not in PROVENANCE_CONTENT_KEYS}
-        _resolve_links(content, where, local_ids, findings)
+        _resolve_links(content, where, local_ids, minted, findings)
         record = {"id": placeholder, "type": rtype}
         record.update(content)
         record["actor"] = {"kind": "importer", "id": PLACEHOLDER_ACTOR_ID}
@@ -527,8 +618,8 @@ def parse_batch(data):
 
 def batch_digest(data):
     """The SHA-256 hex digest of a VALID batch's canonical bytes (the batch half of the spec 8.8 replay
-    identity), or None for any batch parse_batch refuses: no replay key is ever minted from a batch the
-    writer would refuse."""
+    identity), or None for any batch parse_batch refuses: no replay key is ever minted from a batch
+    THIS PARSER refuses (the writer re-validates and can still refuse a parser-VALID batch, spec 8.8)."""
     result = parse_batch(data)
     return result.batch.digest if result.status == VALID else None
 
@@ -558,6 +649,24 @@ status = "recorded"
 summary = "Imported the old item note"
 title = "Imported worklog entry"
 unrecorded = [{field = "date", reason = "not_recorded_in_source"}, {field = "detail", reason = "not_recorded_in_source"}, {field = "kind", reason = "not_recorded_in_source"}]
+""".encode("utf-8")
+
+# A second hand-pinned fixture for the EMITTER rules the acceptance fixture does not reach: the
+# backslash-u escape set with UPPER-CASE hex (ESC, DEL, NEL, another C1 control, LS, PS and a bidi
+# override), both boolean spellings, and quoted keys (a non-bare row key and a non-bare inline-table
+# key). BYTE-EXACT on purpose, like _FIXTURE (a raw string, so the TOML escapes stay literal):
+# re-emitting its own parse must reproduce these bytes, so an emitter re-spelling (a raw control,
+# True/False, lower-case hex, an unquoted key) turns red.
+_EMITTER_FIXTURE = r"""schema = "opf.record.import-batch/v1"
+
+[source]
+path = "notes/old.md"
+
+[[record]]
+key = "r1"
+type = "backlog_item"
+flag = true
+"odd key" = {"a.b" = "\u001B\u007F\u0085\u009B\u2028\u2029\u202E", on = false}
 """.encode("utf-8")
 
 
@@ -711,6 +820,16 @@ def self_test():
         check("link-imported-id-verbatim-valid", verbatim.status == VALID
               and verbatim.batch.rows[0].record["links"] == [{"id": "imported:" + bi + "-9",
                                                               "rel": "relates"}])
+        # A verbatim id this batch itself MINTS is refused by name, for the linking row's own
+        # placeholder and for a sibling row's alike, so a key link and a verbatim link can never
+        # resolve to the same id (the imported:<NS>-9 vector above is the just-outside case: an id
+        # the batch does not mint still passes through verbatim).
+        got = parse_batch(_edited('{key = "w1", rel = "relates"}',
+                                  '{id = "imported:' + bi + '-1", rel = "relates"}'))
+        check("link-own-placeholder-refused", _refuses(got, INVALID, "must use its local key"))
+        got = parse_batch(_edited('{key = "w1", rel = "relates"}',
+                                  '{id = "imported:' + wl + '-1", rel = "relates"}'))
+        check("link-sibling-placeholder-refused", _refuses(got, INVALID, "must use its local key"))
 
         # Row types: the LF quarantine, a module-tier type (decision D6), an unknown type, and the two
         # worklog placements.
@@ -726,17 +845,31 @@ def self_test():
         got = parse_batch(_edited('key = "w1"\n', 'key = "w1"\ntype = "worklog"\n'))
         check("worklog-row-type-key-refused", _refuses(got, INVALID, "fixed by its array"))
 
-        # The source table: a non-canonical path, a control-area path, the absent table, and no
-        # worklog row (one source per batch, and a source outside every control area).
+        # The source table and the batch shape: non-canonical paths; control-area paths (root-anchored,
+        # any-depth, case-aliased and pointer-file spellings alike); the just-outside names that stay
+        # plain product paths; the absent path; the absent table; and the empty batch.
         for name, bad, text in (
                 ("dotdot", "../x", "not a canonical product-relative file path"),
                 ("absolute", "/etc/x", "not a canonical product-relative file path"),
                 ("control-area", ".working/x", "lies inside a control area"),
                 ("store-area", ".aiqt/x", "lies inside a control area"),
-                (".git-area", ".git/x", "lies inside a control area")):
+                (".git-area", ".git/x", "lies inside a control area"),
+                ("git-case", ".GIT/config", "lies inside a control area"),
+                ("git-mixed-case", ".Git/x", "lies inside a control area"),
+                ("store-area-case", ".AIQT/x", "lies inside a control area"),
+                ("working-case", ".Working/x", "lies inside a control area"),
+                ("pointer", ".opf.toml", "lies inside a control area"),
+                ("local-pointer", ".opf.local.toml", "lies inside a control area"),
+                ("nested-git", "sub/.git/config", "lies inside a control area"),
+                ("nested-working", "docs/store/.working/imported/x.md", "lies inside a control area"),
+                ("nested-pointer-case", "docs/.OPF.TOML", "lies inside a control area")):
             got = parse_batch(_edited('path = "notes/old.md"', 'path = "{}"'.format(bad)))
             check("source-path-" + name + "-refused", got.status == INVALID
                   and any(text in f for f in got.findings))
+        for name, good in (("github-root", ".github/workflows/ci.yml"), ("git-substring", "my.git/x"),
+                           ("gitlike-dir", "git/x")):
+            got = parse_batch(_edited('path = "notes/old.md"', 'path = "{}"'.format(good)))
+            check("source-path-" + name + "-valid", got.status == VALID)
         got = parse_batch(_edited('path = "notes/old.md"\n', ''))
         check("missing-source-path-refused", _refuses(got, INVALID, "missing required field: source.path"))
         got = parse_batch(_edited('\n[source]\npath = "notes/old.md"\n', '\n'))
@@ -793,13 +926,58 @@ def self_test():
         check("datetime-value-refused", got.status == INVALID
               and any("no canonical batch form" in f for f in got.findings))
 
-        # The canonical depth bound refuses fail-closed past MAX_CANON_DEPTH nested containers;
-        # the validator also reports the unknown key, and CANNOT-EVALUATE wins (fail-closed).
+        # The canonical depth bound refuses fail-closed past MAX_CANON_DEPTH: the ITERATIVE preflight
+        # returns the one depth finding before any copy, row validation or emission.
         deep_value = "{d = " * (MAX_CANON_DEPTH + 1) + "1" + "}" * (MAX_CANON_DEPTH + 1)
         got = parse_batch(_edited('key = "r1"\ntype = "backlog_item"\n',
                                   'key = "r1"\ntype = "backlog_item"\nd = ' + deep_value + '\n'))
         check("depth-over-bound-cannot", got.status == CANNOT_EVALUATE and got.batch is None
               and any("deeper than {} levels".format(MAX_CANON_DEPTH) in f for f in got.findings))
+        # Both ends of the bound: MAX_CANON_DEPTH - 1 nested containers put the innermost SCALAR at
+        # depth MAX_CANON_DEPTH exactly (inside: the unknown row key is the only finding), and one
+        # more container pushes that scalar just past it (refused, as the pinned emitter graded it).
+        inside_value = "{d = " * (MAX_CANON_DEPTH - 1) + "1" + "}" * (MAX_CANON_DEPTH - 1)
+        got = parse_batch(_edited('key = "r1"\ntype = "backlog_item"\n',
+                                  'key = "r1"\ntype = "backlog_item"\nd = ' + inside_value + '\n'))
+        check("depth-inside-bound-not-depth-refused", got.status == INVALID
+              and not any("deeper than" in f for f in got.findings))
+        at_value = "{d = " * MAX_CANON_DEPTH + "1" + "}" * MAX_CANON_DEPTH
+        got = parse_batch(_edited('key = "r1"\ntype = "backlog_item"\n',
+                                  'key = "r1"\ntype = "backlog_item"\nd = ' + at_value + '\n'))
+        check("depth-scalar-past-bound-cannot", got.status == CANNOT_EVALUATE
+              and any("deeper than" in f for f in got.findings))
+        # The ITERATIVE preflight refuses a dotted-key structure deep enough to exhaust recursive
+        # copying, in ordinary content and in provenance content alike, BEFORE any copy or recursion:
+        # a structured refusal, never an exception (on a reverted preflight these raise RecursionError
+        # out of deepcopy, which this harness fails closed to exit 2).
+        for name, extra in (("content", "d." * 1200 + "leaf = 1\n"),
+                            ("provenance", "history." + "d." * 1200 + "leaf = 1\n")):
+            got = parse_batch(_edited('type = "backlog_item"\n', 'type = "backlog_item"\n' + extra))
+            check("deep-dotted-" + name + "-cannot", got.status == CANNOT_EVALUATE and got.batch is None
+                  and any("deeper than" in f for f in got.findings))
+        # tomllib's own recursion limit (nested inline arrays) is caught and graded, never an escape.
+        brackets = b"x = " + b"[" * 20000 + b"]" * 20000 + b"\n"
+        check("toml-recursion-cannot", _refuses(parse_batch(brackets), CANNOT_EVALUATE, "not parseable"))
+
+        # TOML integers are signed 64-bit: both ends of the range parse (INT64_MAX inside a valid span;
+        # INT64_MIN under an unknown key, so the only finding is the key's, never a range refusal), one
+        # past either end is a structured range refusal, an over-long decimal literal is refused at
+        # parse time, and a huge non-decimal literal is refused before any emission or formatting.
+        got = parse_batch(_edited('status = "done"\n',
+                                  'span = [0, {}]\nstatus = "done"\n'.format(INT64_MAX)))
+        check("int-at-max-valid", got.status == VALID)
+        got = parse_batch(_edited('status = "done"\n',
+                                  'span = [0, {}]\nstatus = "done"\n'.format(INT64_MAX + 1)))
+        check("int-over-max-refused", _refuses(got, INVALID, "signed 64-bit"))
+        got = parse_batch(_edited('status = "done"\n', 'n = {}\nstatus = "done"\n'.format(INT64_MIN)))
+        check("int-at-min-not-range-refused", got.status == INVALID
+              and not any("signed 64-bit" in f for f in got.findings))
+        got = parse_batch(_edited('status = "done"\n', 'n = {}\nstatus = "done"\n'.format(INT64_MIN - 1)))
+        check("int-under-min-refused", _refuses(got, INVALID, "signed 64-bit"))
+        got = parse_batch(_edited('status = "done"\n', "n = " + "9" * 5000 + '\nstatus = "done"\n'))
+        check("int-overlong-decimal-cannot", _refuses(got, CANNOT_EVALUATE, "not parseable"))
+        got = parse_batch(_edited('status = "done"\n', "n = 0x" + "f" * 4000 + '\nstatus = "done"\n'))
+        check("int-huge-hex-refused", _refuses(got, INVALID, "signed 64-bit"))
 
         # The emitter refuses a non-document directly, never emitting a best effort.
         try:
@@ -808,6 +986,34 @@ def self_test():
         except _CanonError as exc:
             direct = exc.status == INVALID
         check("canonical-direct-gate", direct)
+        # The emitter backstop refuses an out-of-range integer for a direct caller too, by name.
+        try:
+            canonical_batch_bytes({"schema": BATCH_SCHEMA, "source": {"path": "notes/old.md"},
+                                   "record": [{"key": "r1", "n": INT64_MAX + 1}]})
+            direct_int = False
+        except _CanonError as exc:
+            direct_int = exc.status == INVALID and "signed 64-bit" in str(exc)
+        check("canonical-direct-int-gate", direct_int)
+
+        # The emitter rules are pinned BYTE-EXACT by the second fixture: the backslash-u escape set and
+        # its upper-case hex, the boolean spellings, and the quoted-key rule, both at a row key and
+        # inside an inline table (red on an emitter re-spelling of any of them).
+        check("emitter-rules-pinned",
+              canonical_batch_bytes(tomllib.loads(_EMITTER_FIXTURE.decode("utf-8"))) == _EMITTER_FIXTURE)
+        got = parse_batch(_EMITTER_FIXTURE)
+        check("emitter-fixture-canonical-on-acceptance-path", got.status == INVALID
+              and not any("not canonical" in f for f in got.findings)
+              and any("unknown key" in f for f in got.findings))
+
+        # Raw invisible characters: a raw C1 control and a raw bidirectional override are refused
+        # non-canonical (their canonical spelling is the escape), and the escaped spelling is the one
+        # accepted form.
+        got = parse_batch(_edited('title = "Old backlog item"', 'title = "Old\u009b backlog item"'))
+        check("raw-c1-refused", _refuses(got, INVALID, "not canonical"))
+        got = parse_batch(_edited('title = "Old backlog item"', 'title = "Old\u202e backlog item"'))
+        check("raw-bidi-refused", _refuses(got, INVALID, "not canonical"))
+        got = parse_batch(_edited('title = "Old backlog item"', 'title = "Old\\u009B backlog item"'))
+        check("escaped-c1-valid", got.status == VALID)
 
     except Exception as exc:  # noqa: BLE001  fail-closed backstop, never an uncaught exit-1 escape
         print("OPF-IMPORT-BATCH SELF-TEST: harness error ({!r}); failing closed to exit 2".format(exc),
@@ -821,7 +1027,7 @@ def self_test():
 
 
 def main():
-    if sys.argv[1:] == ["--selftest"]:
+    if sys.argv[1:] == ["--self-test"]:
         return self_test()
     print("usage: _opf_import_batch.py --self-test (a library module: parse_batch(data), "
           "batch_digest(data))", file=sys.stderr)
