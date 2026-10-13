@@ -8,8 +8,9 @@ from ci-status.sh and exercises it directly against crafted JSON. Verdicts use t
 and complete captured output, never a success token. The fixture repository's origin remote names the
 repository the script must read; the gh fixture records every argv it receives and answers only for the
 repository a case serves, so a case can pin which repository was queried, or that gh was never run. A
-case that needs origin output real git cannot be configured to give puts a fixture git first on PATH,
-which answers only that query and runs the real git for every other command. No case reaches the real
+recording git fixture is always first on PATH: it logs every git argv, then runs the real git, so a
+case can pin that option validation refused BEFORE any git read; a case that needs origin output real
+git cannot be configured to give has the same fixture answer exactly that query instead. No case reaches the real
 GitHub API: gh resolves to the fixture first on a controlled PATH, and the child environment is built
 from nothing, so it carries no GH_TOKEN, GITHUB_TOKEN, or gh configuration.
 
@@ -227,16 +228,21 @@ except (IndexError, OSError, ValueError) as exc:
     sys.exit(1)
 """
 
-FAKE_GIT = r"""import os
+FAKE_GIT = r"""import json
+import os
 import subprocess
 import sys
 
-# On PATH only for a case that passes git_remote to invoke(). It answers exactly
+# Always first on PATH through invoke(): every git argv the script runs is recorded, so a case can
+# assert that option validation refused BEFORE any git read, exactly as the gh argv log pins the API
+# side. For a case that passes git_remote to invoke() it also answers exactly
 # `git remote get-url --all origin` with the bytes and exit status the case sets, which real git cannot be
 # configured to produce; every other git command runs the real git with the same arguments, standard
 # streams, and exit status.
 args = sys.argv[1:]
-if args == ["remote", "get-url", "--all", "origin"]:
+with open(os.environ["MOCK_GIT_ARGV_LOG"], "a", encoding="utf-8") as handle:
+    handle.write(json.dumps(args) + "\n")
+if args == ["remote", "get-url", "--all", "origin"] and "MOCK_GIT_REMOTE_STDOUT" in os.environ:
     sys.stdout.write(os.environ["MOCK_GIT_REMOTE_STDOUT"])
     sys.exit(int(os.environ["MOCK_GIT_REMOTE_RC"]))
 sys.exit(subprocess.run([os.environ["MOCK_GIT_REAL"]] + args).returncode)
@@ -309,9 +315,9 @@ def iso(epoch):
 
 
 def workflow_run(run_id, status, conclusion, name, head_sha, created=COMMIT_TIME + 600,
-                 event=None, pull_requests=None):
-    # event and pull_requests appear only when given: without --require-base the script never reads
-    # them, and the pre-option fixtures prove that by omitting them entirely.
+                 event=None, pull_requests=None, path=None):
+    # event, pull_requests and path appear only when given: without --require-base the script never
+    # reads them, and the pre-option fixtures prove that by omitting them entirely.
     run = {
         "created_at": iso(created),
         "id": run_id,
@@ -325,6 +331,8 @@ def workflow_run(run_id, status, conclusion, name, head_sha, created=COMMIT_TIME
         run["event"] = event
     if pull_requests is not None:
         run["pull_requests"] = pull_requests
+    if path is not None:
+        run["path"] = path
     return run
 
 
@@ -413,6 +421,8 @@ class Fixture:
         self.scan_pages = []
         self.argv_log = base / "gh-argv.txt"
         self.gh_argv = []
+        self.git_argv_log = base / "git-argv.txt"
+        self.git_argv = []
         for directory, name, body in ((self.bin, "gh", FAKE_GH), (self.bin, "date", FAKE_DATE),
                                       (self.bin, "sleep", FAKE_SLEEP), (self.git_bin, "git", FAKE_GIT)):
             executable = directory / name
@@ -447,9 +457,13 @@ class Fixture:
         self.counter.write_text("0\n", encoding="utf-8")
         self.scan_log.write_text("", encoding="utf-8")
         self.argv_log.write_text("", encoding="utf-8")
+        self.git_argv_log.write_text("", encoding="utf-8")
         self.clock.write_text("{}\n".format(clock), encoding="utf-8")
         env = dict(self.base_env)
-        env["PATH"] = str(self.bin) + os.pathsep + SYSTEM_PATH
+        env["PATH"] = (str(self.git_bin) + os.pathsep + str(self.bin)
+                       + os.pathsep + SYSTEM_PATH)
+        env["MOCK_GIT_REAL"] = GIT
+        env["MOCK_GIT_ARGV_LOG"] = str(self.git_argv_log)
         env["MOCK_GH_RESPONSE"] = str(self.response)
         env["MOCK_GH_COUNTER"] = str(self.counter)
         env["MOCK_CLOCK"] = str(self.clock)
@@ -457,8 +471,6 @@ class Fixture:
         env["MOCK_GH_ARGV_LOG"] = str(self.argv_log)
         env["MOCK_GH_REPO"] = served
         if git_remote is not None:
-            env["PATH"] = str(self.git_bin) + os.pathsep + env["PATH"]
-            env["MOCK_GIT_REAL"] = GIT
             env["MOCK_GIT_REMOTE_STDOUT"] = git_remote[0]
             env["MOCK_GIT_REMOTE_RC"] = str(git_remote[1])
         if override is not None:
@@ -473,6 +485,8 @@ class Fixture:
         calls = int(self.counter.read_text(encoding="utf-8").strip())
         self.scan_pages = [int(line) for line in self.scan_log.read_text(encoding="utf-8").split()]
         self.gh_argv = [json.loads(line) for line in self.argv_log.read_text(encoding="utf-8").splitlines()]
+        self.git_argv = [json.loads(line)
+                         for line in self.git_argv_log.read_text(encoding="utf-8").splitlines()]
         return result.returncode, result.stdout + result.stderr, calls
 
 
@@ -537,7 +551,7 @@ def _run_checks():
                                 [page(other_commits, 101), page([success_a], 101)])
             scan_short = run_jq(program, [page([])], head_sha, [page(other_commits, 101)])
             expected_rows = "\n".join(
-                "completed\tsuccess\t-\t-\t{}\t{}\t{}".format(
+                "completed\tsuccess\t-\t-\t-\t{}\t{}\t{}".format(
                     run["id"], run["name"], run["html_url"])
                 for run in (success_a, success_b)
             ) + "\n"
@@ -554,7 +568,7 @@ def _run_checks():
                 wrong_target.returncode != 0
                 and "malformed workflow run record" in wrong_target.stderr,
                 (scan_found.returncode, scan_found.stdout)
-                == (0, "completed\tsuccess\t-\t-\t101\tWeb generator health\t"
+                == (0, "completed\tsuccess\t-\t-\t-\t101\tWeb generator health\t"
                     "https://example.invalid/runs/101\n"),
                 scan_short.returncode != 0
                 and "incomplete unfiltered workflow-runs listing" in scan_short.stderr,
@@ -1011,12 +1025,18 @@ def _run_checks():
         # against another base still passes a plain check.
         require = ("--require-base", "main")
         on_main = [{"base": {"ref": "main"}}]
+        quality_path = ".github/workflows/quality.yml"
+        leaks_path = ".github/workflows/msg-leaks.yml"
         pr_quality = workflow_run(901, "completed", "success", "Quality", head_sha,
-                                  event="pull_request", pull_requests=on_main)
+                                  event="pull_request", pull_requests=on_main,
+                                  path=quality_path)
         pr_leaks = workflow_run(902, "completed", "success", "Message leaks", head_sha,
-                                event="pull_request", pull_requests=on_main)
+                                event="pull_request", pull_requests=on_main,
+                                path=leaks_path)
         stale_base = workflow_run(903, "completed", "success", "Quality", head_sha,
-                                  event="pull_request", pull_requests=[{"base": {"ref": "dev"}}])
+                                  event="pull_request",
+                                  pull_requests=[{"base": {"ref": "dev"}}],
+                                  path=quality_path)
         met = []
         rc, output, _calls = fixture.invoke([[page([pr_quality, pr_leaks])]], extra_args=require)
         met.append((rc, "Quality" in output and "Message leaks" in output))
@@ -1039,11 +1059,12 @@ def _run_checks():
         # A push run is not pull_request evidence, and a run with no (or a baseless) recorded pull
         # request has no establishable base: each is refused by name, never a pass.
         push_main = workflow_run(904, "completed", "success", "Quality", head_sha,
-                                 event="push", pull_requests=[])
+                                 event="push", pull_requests=[], path=quality_path)
         orphaned = workflow_run(905, "completed", "success", "Quality", head_sha,
-                                event="pull_request", pull_requests=[])
+                                event="pull_request", pull_requests=[], path=quality_path)
         baseless = workflow_run(906, "completed", "success", "Quality", head_sha,
-                                event="pull_request", pull_requests=[{"base": {"ref": ""}}])
+                                event="pull_request", pull_requests=[{"base": {"ref": ""}}],
+                                path=quality_path)
         unproven = []
         for run, named in ((push_main, "not pull_request"),
                            (orphaned, "cannot be established"),
@@ -1065,22 +1086,25 @@ def _run_checks():
         value_refused = []
         for extra in (("--require-base",), ("--require-base", ""), ("--require-base", "--wait")):
             rc, output, _calls = fixture.invoke([[page([pr_quality])]], extra_args=extra)
-            value_refused.append((rc, fixture.gh_argv, "needs a branch name" in output))
-        check("ci/require-base-value-refused", value_refused, [(2, [], True)] * 3)
+            value_refused.append((rc, fixture.gh_argv, fixture.git_argv,
+                                  "needs a branch name" in output))
+        check("ci/require-base-value-refused", value_refused, [(2, [], [], True)] * 3)
 
         # Under the option a record of this commit without a usable event or pull_requests field is
         # a malformed run record (API error, exit 2), never a verdict; mixed recorded bases on one
         # run are unmet (exit 1), not green.
         no_event = workflow_run(907, "completed", "success", "Quality", head_sha,
-                                pull_requests=on_main)
+                                pull_requests=on_main, path=quality_path)
         not_array = workflow_run(908, "completed", "success", "Quality", head_sha,
-                                 event="pull_request", pull_requests=7)
+                                 event="pull_request", pull_requests=7, path=quality_path)
         no_base_obj = workflow_run(909, "completed", "success", "Quality", head_sha,
-                                   event="pull_request", pull_requests=[{"number": 5}])
+                                   event="pull_request", pull_requests=[{"number": 5}],
+                                   path=quality_path)
         mixed = workflow_run(910, "completed", "success", "Quality", head_sha,
                              event="pull_request",
                              pull_requests=[{"base": {"ref": "main"}},
-                                            {"base": {"ref": "dev"}}])
+                                            {"base": {"ref": "dev"}}],
+                             path=quality_path)
         shapes = []
         for run in (no_event, not_array, no_base_obj):
             rc, output, _calls = fixture.invoke([[page([run])]], extra_args=require)
@@ -1093,55 +1117,65 @@ def _run_checks():
         # evidence. After a retarget to main the only run on the head can be the msg-leaks run
         # (quality.yml filters pull_request on branches: [main] and does not list edited), so a
         # lone conforming sibling formerly read green with no Quality run at all. Under
-        # --require-base at least one completed successful conforming run of the workflow named
-        # Quality (--require-workflow's default) is required; its absence is unmet (exit 1,
-        # naming the missing workflow) in one-shot and --wait mode alike: the retarget schedules
-        # no fresh Quality run on this head SHA, so waiting cannot add one, and only a refresh
-        # push under a NEW head SHA earns it.
+        # --require-base at least one completed successful conforming run of the workflow file
+        # .github/workflows/quality.yml (--require-workflow's default) is required; its absence
+        # is unmet (exit 1, naming the missing workflow file) in one-shot and --wait mode alike.
+        # FIX-551-R4: report-once refuses on its single snapshot; --wait keeps polling through
+        # the settle window first (a qualifying run can be registered late on this same head; a
+        # reopen schedules one), so the refusal comes only once the run set has been stable for
+        # five observations and still holds no qualifying run.
+        missing_quality = ("no completed successful run of the workflow file "
+                           + quality_path)
         leaks_only = []
         for wait in (False, True):
             rc, output, calls = fixture.invoke([[page([pr_leaks])]],
                                                wait=wait, extra_args=require)
-            leaks_only.append(
-                (rc, calls,
-                 "no completed successful run of workflow Quality" in output))
-        check("ci/require-base-quality-run-required", leaks_only, [(1, 1, True)] * 2)
+            leaks_only.append((rc, calls, missing_quality in output))
+        check("ci/require-base-quality-run-required", leaks_only,
+              [(1, 1, True), (1, 5, True)])
 
-        # --require-workflow NAME overrides the default: the named workflow's conforming run is
-        # then the required evidence, and its absence names NAME, never Quality.
+        # --require-workflow PATH overrides the default: a conforming run of the workflow FILE
+        # at PATH is then the required evidence, and its absence names PATH, never quality.yml.
+        other_path = ".github/workflows/other.yml"
         pr_other = workflow_run(911, "completed", "success", "Other gate", head_sha,
-                                event="pull_request", pull_requests=on_main)
+                                event="pull_request", pull_requests=on_main, path=other_path)
         override = []
         rc, _output, _calls = fixture.invoke(
             [[page([pr_other, pr_leaks])]],
-            extra_args=require + ("--require-workflow", "Other gate"))
+            extra_args=require + ("--require-workflow", other_path))
         override.append((rc, True))
         rc, output, _calls = fixture.invoke(
             [[page([pr_quality, pr_leaks])]],
-            extra_args=require + ("--require-workflow", "Other gate"))
-        override.append((rc, "run of workflow Other gate" in output))
+            extra_args=require + ("--require-workflow", other_path))
+        override.append((rc, "run of the workflow file " + other_path in output))
         check("ci/require-workflow-override", override, [(0, True), (1, True)])
 
-        # --require-workflow is validated like --require-base, as each value is consumed, before
-        # any git or API read; alone (without --require-base) it is refused rather than silently
-        # ignored, and a repeated option is refused, never last-wins.
+        # --require-workflow is validated like --require-base, as each value is consumed (an
+        # invalid FIRST value is refused although a valid one follows), before any git or API
+        # read, and the git and gh argv logs both pin that order; alone (without
+        # --require-base) it is refused rather than silently ignored, and a repeated option is
+        # refused, never last-wins.
         wf_refused = []
         for extra, needle in (
-                (require + ("--require-workflow",), "needs a workflow name"),
-                (require + ("--require-workflow", ""), "needs a workflow name"),
-                (require + ("--require-workflow", " "), "needs a workflow name"),
-                (require + ("--require-workflow", "--wait"), "needs a workflow name"),
-                (require + ("--require-workflow", "Quality",
-                            "--require-workflow", "Quality"), "more than once"),
-                (("--require-workflow", "Quality"), "only under --require-base")):
+                (require + ("--require-workflow",), "needs a workflow path"),
+                (require + ("--require-workflow", ""), "needs a workflow path"),
+                (require + ("--require-workflow", " "), "needs a workflow path"),
+                (require + ("--require-workflow", "--wait"), "needs a workflow path"),
+                (require + ("--require-workflow", "",
+                            "--require-workflow", quality_path), "needs a workflow path"),
+                (require + ("--require-workflow", quality_path,
+                            "--require-workflow", quality_path), "more than once"),
+                (("--require-workflow", quality_path), "only under --require-base")):
             rc, output, _calls = fixture.invoke([[page([pr_quality])]], extra_args=extra)
-            wf_refused.append((rc, fixture.gh_argv == [], needle in output))
-        check("ci/require-workflow-value-refused", wf_refused, [(2, True, True)] * 6)
+            wf_refused.append((rc, fixture.gh_argv == [], fixture.git_argv == [],
+                               needle in output))
+        check("ci/require-workflow-value-refused", wf_refused, [(2, True, True, True)] * 7)
 
         # FIX-551-R2 MEDIUM (PR 551 round-2 reviews): each --require-base value is validated AS
         # IT IS CONSUMED (a later value cannot repair or replace an earlier one), a
         # whitespace-only value is refused before any git or API read, and a repeated
-        # --require-base is refused (exit 2), never last-wins.
+        # --require-base is refused (exit 2), never last-wins. FIX-551-R4: the git argv log is
+        # asserted too, so validation moved behind a git read turns these red.
         consumed = []
         for extra, needle in (
                 (("--require-base", "", "--require-base", "main"), "needs a branch name"),
@@ -1151,8 +1185,9 @@ def _run_checks():
                 (("--require-base", " \t "), "needs a branch name"),
                 (("--require-base", "main", "--require-base", "main"), "more than once")):
             rc, output, _calls = fixture.invoke([[page([pr_quality])]], extra_args=extra)
-            consumed.append((rc, fixture.gh_argv == [], needle in output))
-        check("ci/require-base-value-consumed", consumed, [(2, True, True)] * 5)
+            consumed.append((rc, fixture.gh_argv == [], fixture.git_argv == [],
+                             needle in output))
+        check("ci/require-base-value-consumed", consumed, [(2, True, True, True)] * 5)
 
         # FIX-551-R2 MEDIUM (PR 551 round-2 reviews): a malformed run record is a property of the
         # stored evidence, not a retryable API condition, so it exits 2 under --wait too (one
@@ -1169,27 +1204,87 @@ def _run_checks():
 
         # FIX-551-R2 MEDIUM (PR 551 round-2 reviews): the two sources disagreeing about a run's
         # recorded base or event is a conflicting duplicate record (exit 2 after the one-shot
-        # re-read), never a pass: dropping event and pull_requests from the cross-source
+        # re-read), never a pass: dropping event, path or pull_requests from the cross-source
         # projection would let the filtered record's conforming base win while the scan recorded
         # another.
         scan_dev = workflow_run(912, "completed", "success", "Quality", head_sha,
                                 event="pull_request",
-                                pull_requests=[{"base": {"ref": "dev"}}])
+                                pull_requests=[{"base": {"ref": "dev"}}],
+                                path=quality_path)
         filt_main = workflow_run(912, "completed", "success", "Quality", head_sha,
-                                 event="pull_request", pull_requests=on_main)
+                                 event="pull_request", pull_requests=on_main,
+                                 path=quality_path)
         filt_push = workflow_run(912, "completed", "success", "Quality", head_sha,
-                                 event="push", pull_requests=on_main)
+                                 event="push", pull_requests=on_main, path=quality_path)
+        filt_other = dict(filt_main, path=other_path)
         conflicts = []
         for filtered_run, scanned_run in ((filt_main, scan_dev),
                                           (scan_dev, filt_main),
-                                          (filt_push, filt_main)):
+                                          (filt_push, filt_main),
+                                          (filt_main, filt_other)):
             rc, output, calls = fixture.invoke(
                 [{"filtered": [page([filtered_run])], "scan": [page([scanned_run])]}],
                 extra_args=require)
             conflicts.append(
                 (rc, calls,
                  "conflicting duplicate workflow-run records" in output))
-        check("ci/require-base-cross-source-conflict", conflicts, [(2, 2, True)] * 3)
+        check("ci/require-base-cross-source-conflict", conflicts, [(2, 2, True)] * 4)
+
+        # FIX-551-R4 BLOCKER (PR 551 round-3 reviews): the required run is bound to its
+        # workflow FILE (the run's recorded path), never its display name: any workflow can
+        # carry name: Quality, so a conforming same-named run from another file must never
+        # satisfy the requirement, in one-shot and --wait mode alike (exit 1, never 0), while
+        # the correct file does (exit 0).
+        impostor = workflow_run(913, "completed", "success", "Quality", head_sha,
+                                event="pull_request", pull_requests=on_main,
+                                path=".github/workflows/unrelated.yml")
+        bound = []
+        rc, output, calls = fixture.invoke([[page([impostor, pr_leaks])]], extra_args=require)
+        bound.append((rc, calls, missing_quality in output))
+        rc, output, calls = fixture.invoke([[page([impostor, pr_leaks])]], wait=True,
+                                           extra_args=require)
+        bound.append((rc, calls, missing_quality in output))
+        rc, output, calls = fixture.invoke([[page([pr_quality, pr_leaks])]], wait=True,
+                                           extra_args=require)
+        bound.append((rc, calls, missing_quality in output))
+        check("ci/require-workflow-file-binding", bound,
+              [(1, 1, True), (1, 5, True), (0, 5, False)])
+
+        # FIX-551-R4: under --require-base a run record whose workflow path is missing, empty
+        # or not a string is a malformed run record (exit 2), in one-shot and --wait mode
+        # alike: without a usable path the required-workflow match cannot be evaluated, and
+        # reading such a run as some other file would be the name-collision fail-open again.
+        no_path = workflow_run(914, "completed", "success", "Quality", head_sha,
+                               event="pull_request", pull_requests=on_main)
+        pathless = []
+        for run in (no_path,
+                    workflow_run(915, "completed", "success", "Quality", head_sha,
+                                 event="pull_request", pull_requests=on_main, path=""),
+                    workflow_run(916, "completed", "success", "Quality", head_sha,
+                                 event="pull_request", pull_requests=on_main, path=7)):
+            rc, output, _calls = fixture.invoke([[page([run])]], extra_args=require)
+            pathless.append((rc, "malformed workflow run record" in output))
+        rc, output, calls = fixture.invoke([[page([no_path])]], wait=True, extra_args=require)
+        pathless.append((rc, calls, "malformed workflow run record" in output,
+                         "TIMEOUT" in output))
+        check("ci/require-base-path-missing-fail-closed", pathless,
+              [(2, True)] * 3 + [(2, 1, True, False)])
+
+        # FIX-551-R4 (PR 551 round-3 reviews): a required-workflow run REGISTERED LATE must not
+        # end the wait at once: the first poll holds only the conforming msg-leaks run, the
+        # qualifying Quality run appears from the second poll on (the shape a reopen produces
+        # on the SAME head), and the wait settles green instead of refusing on poll one.
+        polls = [[page([pr_leaks])]] + [[page([pr_leaks, pr_quality])]] * 5
+        rc, _output, calls = fixture.invoke(polls, wait=True, extra_args=require)
+        check("ci/require-base-wait-late-quality-run", (rc, calls), (0, 6))
+
+        # FIX-551-R4 MINOR: a second positional rev is refused (exit 2) before any git or API
+        # read, never read last-wins: a stray positional that resolves (a branch name, say)
+        # would silently change which commit is checked.
+        rc, output, _calls = fixture.invoke([[page([pr_quality])]], extra_args=("HEAD",))
+        check("ci/rev-repeated-refused",
+              (rc, fixture.gh_argv == [], fixture.git_argv == [],
+               "a repeated rev is refused" in output), (2, True, True, True))
 
         if program is None:
             harness_error("ci/jq-step-direct-cases", "no jq program was extracted")

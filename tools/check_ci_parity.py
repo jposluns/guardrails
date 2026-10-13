@@ -103,8 +103,11 @@ Every key this rule reads must be a PLAIN name whose colon is followed by a
 space or ends the line: a quoted key, a key with whitespace before its colon,
 a non-name spelling (an explicit '?' key, a tag such as !!str, or any other
 character outside a plain name), and a colon directly followed by its value
-(types:[...], which YAML reads as one plain scalar, never as a key) are each
-cannot-evaluate (exit 2), at indent 2 and under an edit event alike, as are a
+(types:[...] or on:[...], which YAML reads as one plain scalar, never as a
+key) are each cannot-evaluate (exit 2), on the top-level on: line itself, at
+indent 2 and under an edit event alike (a bare on with no colon too; a plain
+on: followed by a scalar, a one-line flow list, or a block of events stays
+read), as are a
 line at indent 2 with no colon, a first line under on: at any indent other
 than 2, a line under an edit event before any indent-4 property (an event's
 properties are read only at indent 4), a line at indent 1 or 3 anywhere in
@@ -2039,12 +2042,49 @@ def _edit_event_types(lines, source, diagnostics):
             return ()
         return tuple(parts)
 
+    def is_on_spelling(key):
+        # Every spelling YAML can read as the top-level on key: plain, quoted,
+        # tagged (!!str on), an explicit '?' key, or one with whitespace
+        # around it. Each non-plain spelling is refused below, never read.
+        candidate = key.strip()
+        if candidate[:1] == "?" and candidate[1:2] in ("", " "):
+            candidate = candidate[1:].strip()
+        if candidate[:1] == "!":
+            candidate = candidate.partition(" ")[2].strip()
+        return _unquote(candidate) == "on"
+
     start = None
     for index, raw in enumerate(lines):
         code = _strip_comment(raw)
-        if code[:1] not in ("", " ") and code.split(":", 1)[0] == "on":
-            start = index
-            break
+        if code[:1] in ("", " "):
+            continue
+        stripped = code.strip()
+        key, colon, raw_rest = stripped.partition(":")
+        if not is_on_spelling(key):
+            continue
+        # FIX-551-R4: the top-level on: header is held to the same strict key
+        # rule as every key below it, BEFORE its value is read: a bare on (no
+        # colon anywhere on the line), a non-plain spelling, and a colon with
+        # no space after it each hide or change the trigger block YAML and
+        # GitHub read, so each is cannot-evaluate, never a pass and never an
+        # IndexError.
+        if not colon:
+            refuse(index + 1, "top-level line {!r} names on without a colon "
+                   "(a bare scalar or an explicit '?' key), so this rule "
+                   "cannot read the on: block".format(stripped))
+            return events
+        if key != "on":
+            refuse(index + 1, "top-level on: key {!r} is not the plain "
+                   "spelling on (a quoted key, a tag such as !!str, an "
+                   "explicit '?' key, and whitespace before the colon are "
+                   "refused)".format(key))
+            return events
+        if raw_rest and not raw_rest.startswith(" "):
+            refuse(index + 1, "on: has no space after its colon; YAML reads "
+                   "the line as one plain scalar, not a key")
+            return events
+        start = index
+        break
     if start is None:
         return events
     value = _strip_comment(lines[start]).split(":", 1)[1].strip()
@@ -5551,6 +5591,11 @@ def self_test():
     def with_on(text, on_block):
         return text.replace("name: Test\n", "name: Test\non:\n" + on_block, 1)
 
+    def with_on_header(text, header):
+        # Insert a raw top-level header (no on: line is added), for vectors
+        # that exercise the on: header spelling itself.
+        return text.replace("name: Test\n", "name: Test\n" + header, 1)
+
     def pr_types(types):
         return ("  pull_request:\n    branches: [main]\n    types: " + types
                 + "\n  push:\n    branches: [main]\n")
@@ -5561,9 +5606,18 @@ def self_test():
     scan_text = ci_fixture((msg_selftest, msg_scan))
     msg_side = ((MSG_LEAKS_CI_SOURCE, with_on(scan_text, edited)),)
 
-    def scan_case(name, quality, scan, want_code, kinds=(), local_only=None):
-        case(name, evaluate(local_msg, quality, msg_waiver, scan), want_code,
-             kinds, local_only)
+    def scan_case(name, quality, scan, want_code, kinds=(), local_only=None,
+                  diagnostic=None):
+        # diagnostic pins the refusal BRANCH, not just the exit code: a shape
+        # two branches can refuse stays red when its own branch is disabled.
+        report = evaluate(local_msg, quality, msg_waiver, scan)
+        case(name, report, want_code, kinds, local_only)
+        if diagnostic is not None and not any(
+                item.code == "trigger-shape" and diagnostic in item.message
+                for item in report.diagnostics):
+            failures.append(
+                "{}: no trigger-shape diagnostic holds {!r}: {!r}".format(
+                    name, diagnostic, report.diagnostics))
 
     case("34a two workflows: the scan alone in msg-leaks.yml, with edited",
          evaluate(local_msg, quality_side, msg_waiver, msg_side), 0,
@@ -5651,8 +5705,10 @@ def self_test():
     # workflow that runs the scan and on the one that does not alike. The
     # first three spellings formerly read as a key they are not, so GitHub
     # saw a types: list this rule did not; a keyless line is refused because
-    # YAML reads it as a scalar or rejects the document, never as a key, so
-    # this rule cannot know what GitHub would run there.
+    # YAML reads it as a scalar, as an explicit '?' key entry (the one
+    # keyless form YAML does read as a key, exercised under 34r), or as a
+    # document error, never as a plain key this rule could follow, so this
+    # rule cannot know what GitHub would run there.
     edited_flow = "[opened, synchronize, reopened, edited]"
     for label, shape in (
             ("a quoted types: key",
@@ -5680,25 +5736,37 @@ def self_test():
     # the other way around; and a non-standard indent for the on: block or an
     # event's properties hid the whole block from this rule while GitHub
     # still reads it. Each is now cannot-evaluate on both workflows.
-    for label, shape in (
+    # FIX-551-R4: each 34r vector also requires its OWN branch's diagnostic,
+    # as 34s does: the exit code alone cannot tell two refusal branches
+    # apart, so a branch whose removal re-routes its shape to another refusal
+    # formerly stayed green.
+    for label, shape, named in (
             ("a colon-less event key at indent 2",
-             "  pull_request\n    types: " + edited_flow + "\n"),
+             "  pull_request\n    types: " + edited_flow + "\n",
+             "has no colon"),
             ("the on: block's children at indent 4",
-             "    pull_request:\n      types: " + edited_flow + "\n"),
+             "    pull_request:\n      types: " + edited_flow + "\n",
+             "the first line under on: is at indent 4"),
             ("event properties at indent 6",
              "  pull_request:\n      branches: [main]\n      types: "
-             + edited_flow + "\n"),
+             + edited_flow + "\n",
+             "outside the recognized trigger shapes"),
             ("an explicit '?' key",
-             "  ? pull_request\n  : types: " + edited_flow + "\n"),
+             "  ? pull_request\n  : types: " + edited_flow + "\n",
+             "has no colon"),
             ("a !!str tag on the types: key",
-             "  pull_request:\n    !!str types: " + edited_flow + "\n"),
+             "  pull_request:\n    !!str types: " + edited_flow + "\n",
+             "key '!!str types' under pull_request is not a plain name"),
             ("types: with no space after its colon",
-             "  pull_request:\n    types:" + edited_flow + "\n")):
+             "  pull_request:\n    types:" + edited_flow + "\n",
+             "key 'types' under pull_request has no space after its colon")):
         scan_case("34r quality.yml trigger shape is cannot-evaluate: " + label,
-                  with_on(ci_fixture(common), shape), msg_side, 2)
+                  with_on(ci_fixture(common), shape), msg_side, 2,
+                  diagnostic=named)
         scan_case("34r msg-leaks.yml trigger shape is cannot-evaluate: "
                   + label, quality_side,
-                  ((MSG_LEAKS_CI_SOURCE, with_on(scan_text, shape)),), 2)
+                  ((MSG_LEAKS_CI_SOURCE, with_on(scan_text, shape)),), 2,
+                  diagnostic=named)
 
     # FIX-551-R2: the indent-4 sequence branch is pinned on its own named
     # diagnostic. Dropping the branch still refuses the line (it has no
@@ -5716,6 +5784,73 @@ def self_test():
         failures.append(
             "34s the indent-4 sequence item is not refused by the named "
             "indentless-sequence branch: {!r}".format(indentless.diagnostics))
+
+    # FIX-551-R4 (PR 551 round-3 reviews): the top-level on: header itself is
+    # held to the strict key rule BEFORE its value is read: on:[...] with no
+    # space after the colon formerly passed clean (YAML reads that line as
+    # one plain scalar, so GitHub sees no such trigger block), and a bare on
+    # raised an IndexError. Each is a trigger-shape cannot-evaluate on both
+    # workflows, pinned to the header branch's own diagnostic; the plain
+    # scalar, one-line flow list and block spellings stay read.
+    for label, header, named in (
+            ("a flow list with no space after on:",
+             "on:[pull_request]\n",
+             "on: has no space after its colon"),
+            ("a bare on with no colon",
+             "on\n",
+             "names on without a colon"),
+            ("a !!str tag on the on: key",
+             "!!str on:\n" + edited,
+             "is not the plain spelling on"),
+            ("a quoted on: key",
+             '"on":\n' + edited,
+             "is not the plain spelling on"),
+            ("whitespace before the on: colon",
+             "on :\n" + edited,
+             "is not the plain spelling on"),
+            ("an explicit '?' on key",
+             "? on\n: [pull_request]\n",
+             "names on without a colon")):
+        scan_case("34t quality.yml on: header is cannot-evaluate: " + label,
+                  with_on_header(ci_fixture(common), header), msg_side, 2,
+                  diagnostic=named)
+        scan_case("34t msg-leaks.yml on: header is cannot-evaluate: " + label,
+                  quality_side,
+                  ((MSG_LEAKS_CI_SOURCE, with_on_header(scan_text, header)),),
+                  2, diagnostic=named)
+    scan_case("34t a plain scalar on: value stays read (no edited: pass)",
+              with_on_header(ci_fixture(common), "on: push\n"), msg_side, 0)
+    scan_case("34t a one-line flow list after on: stays read (no edited: "
+              "pass)",
+              with_on_header(ci_fixture(common), "on: [push, pull_request]\n"),
+              msg_side, 0)
+    scan_case("34t a block on: value stays read (edited on quality.yml is "
+              "still a trigger finding)",
+              with_on(ci_fixture(common), edited), msg_side, 1, ("trigger",))
+
+    # FIX-551-R4: the indent-2 on-key refusal branches are discriminated by
+    # their own diagnostics (dropping one re-routes its shape to another
+    # refusal branch, so the exit code alone stayed green).
+    for label, shape, named in (
+            ("a !!str tag on the event key",
+             "  !!str pull_request:\n    types: " + edited_flow + "\n",
+             "on: key '!!str pull_request' is not a plain name"),
+            ("an event key with no space after its colon",
+             "  pull_request:{types: [edited]}\n",
+             "on: key 'pull_request' has no space after its colon"),
+            ("a quoted event key",
+             '  "pull_request":\n    types: ' + edited_flow + "\n",
+             "quoted on: key"),
+            ("whitespace before the event colon",
+             "  pull_request :\n    types: " + edited_flow + "\n",
+             "on: key 'pull_request ' holds whitespace before its colon")):
+        scan_case("34u quality.yml indent-2 on: key is cannot-evaluate: "
+                  + label, with_on(ci_fixture(common), shape), msg_side, 2,
+                  diagnostic=named)
+        scan_case("34u msg-leaks.yml indent-2 on: key is cannot-evaluate: "
+                  + label, quality_side,
+                  ((MSG_LEAKS_CI_SOURCE, with_on(scan_text, shape)),), 2,
+                  diagnostic=named)
 
     # FIX-551 (D-551-MERGE-LANE-GUARD): a gate moved from quality.yml into
     # msg-leaks.yml is a relocation finding (the CI side is the union of both
