@@ -46,8 +46,10 @@ overlap, an extra id, or a missing or repeated args list is cannot-evaluate. Mem
 resolving EVERY row's runner strictly (os.path.realpath(strict=True)), so a missing path, a
 non-directory component, a symlink loop or a permission error in any row's runner leaves membership
 undecidable and is cannot-evaluate before any report directory is allocated, never an assumed
-non-member; a runner path carrying a control character is refused by the schema. A single-row group
-is held, as before, to expected set == static set, with the same diagnostics. The runtime layer then
+non-member; a runner path carrying a control or format character (Unicode category Cc or Cf, so C0,
+DEL, C1 and the bidi controls, plus the line and paragraph separators U+2028 and U+2029) is refused
+by the schema, through the one predicate every schema string shares. A single-row group is held, as
+before, to expected set == static set, with the same diagnostics. The runtime layer then
 reconciles the launched row's executed set against that row's own expected set, so a runner that
 ignores its arguments and runs every check is an extra-id finding (exit 1).
 
@@ -56,8 +58,14 @@ have its launch line (tools/check_selftest_execution.py --suite <id>) in BOTH la
 local roster tools/run_all_checks.sh and the CI workflow .github/workflows/quality.yml. Each is read
 only, as a regular non-symlink file, through the parity gate's own validated loader
 (check_ci_parity.read_runner_text with extract_local or extract_ci, never a second parser), so a
-commented-out line is no launch line; a roster that is missing, not a regular file, unreadable, or
-drawing a loader diagnostic is cannot-evaluate, and so is a row with no launch line in either. The
+commented-out line is no launch line; and a roster member counts as a row's launch line only when
+it is EXACTLY that two-argument form, the one argv shape this gate's CLI accepts, so a member
+carrying any further argument, or a near-miss id, launches nothing. A suite id itself must match a
+CLOSED grammar (SUITE_ID_RE: a letter or digit first, then letters, digits, '.', '_' and '-'
+only), refused by name otherwise, so a space-joined roster identity can never stand for a
+registered suite. A roster that is missing, not a regular file, unreadable, or drawing a loader
+diagnostic is cannot-evaluate, and so is a row whose launch line is missing from at least one of
+the two rosters. The
 check is LEXICAL: it proves each line is present, not that it runs or passes (a CI job or step
 condition, or a local run stopped early, is outside it).
 The child runs with
@@ -143,10 +151,12 @@ absent, non-regular, a symlink, or escapes the repo; runner source that does not
 unresolvable, aliased (a non-call check reference), comprehension-bound, or duplicate check id; a
 static source-to-manifest set mismatch (for rows that share a runner, a group whose expected sets do
 not partition the static set, or whose args are missing or repeated); a malformed args list, or one
-naming the report option; a runner path carrying a control character; any row's runner path that
+naming the report option; a suite id outside the closed suite-id grammar; a runner path carrying
+a control or format character; any row's runner path that
 does not resolve strictly (a missing path, a non-directory component, a symlink loop or a permission
-error); a registered row with no launch line in either launch roster, or a launch roster that is
-missing, not a regular file, unreadable or rejected by its loader; an unconfirmable repo root;
+error); a registered row whose launch line is missing from at least one launch roster, or a launch
+roster that is missing, not a regular file, unreadable or rejected by its loader; an unconfirmable
+repo root;
 unavailable temp storage; a launch failure; a child return code outside {0, 1}; a child error
 stream that differs by any byte from the suite's declared bytes; or an invalid, unfinalized, or
 exit-status-mismatched report).
@@ -239,6 +249,7 @@ import stat
 import subprocess
 import tempfile
 import types
+import unicodedata
 from pathlib import Path
 
 try:
@@ -281,7 +292,13 @@ REPORT_OPTION = "--execution-report"
 # both before any suite is launched.
 LAUNCH_ROSTERS = (("tools/run_all_checks.sh", "extract_local"),
                   (".github/workflows/quality.yml", "extract_ci"))
-SUITE_LAUNCH = "tools/check_selftest_execution.py --suite {}"
+GATE_REL = "tools/check_selftest_execution.py"
+SUITE_LAUNCH = GATE_REL + " --suite {}"
+# A suite id is one launch-line argument in both rosters and the one CLI argument after --suite, so
+# it comes from a CLOSED grammar: a letter or digit first, then letters, digits, '.', '_' and '-'
+# only. An id outside it is refused BY NAME, so a space-joined roster identity can never tokenize a
+# registered id as more than one argument, and an id can never spell an option (no leading '-').
+SUITE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 REPORT_KEYS = {"format_version", "suite", "check_ids", "exit_code", "finalized"}
 REPORT_FORMAT_VERSION = 2
 # Per suite id, the exact bytes (a bytes value) the child's WHOLE error stream must equal on a run that
@@ -301,7 +318,10 @@ def _cannot(msg):
 
 
 def _has_ctrl(text):
-    return any(ord(ch) < 32 or ord(ch) == 127 for ch in text)
+    """True when text carries a control or format character, decided by this one shared predicate:
+    Unicode category Cc (C0, DEL and C1), Cf (the format characters, the bidi controls among them),
+    Zl (U+2028) or Zp (U+2029)."""
+    return any(unicodedata.category(ch) in ("Cc", "Cf", "Zl", "Zp") for ch in text)
 
 
 def _manifest_suites(manifest_path):
@@ -356,8 +376,10 @@ def _manifest_rows(data, manifest_path):
                 where, sorted(SUITE_ROW_KEYS), sorted(SUITE_ROW_OPTIONAL_KEYS)))
             return None
         sid = row["id"]
-        if not isinstance(sid, str) or not sid or _has_ctrl(sid):
-            _cannot("{}: id must be a non-empty control-character-free string".format(where))
+        if not isinstance(sid, str) or not SUITE_ID_RE.fullmatch(sid):
+            _cannot("{}: id {!r} must match the closed suite-id grammar (a letter or digit first, "
+                    "then letters, digits, '.', '_' and '-' only); the id is a single "
+                    "launch-line argument, so any other name is refused".format(where, sid))
             return None
         if sid in seen_ids:
             _cannot("{}: duplicate suite id {!r}".format(where, sid))
@@ -366,8 +388,8 @@ def _manifest_rows(data, manifest_path):
         runner = row["runner"]
         if (not isinstance(runner, str) or not runner or _has_ctrl(runner) or os.path.isabs(runner)
                 or ".." in Path(runner).parts):
-            _cannot("{}: runner must be a control-character-free repo-relative path with no '..'"
-                    .format(where))
+            _cannot("{}: runner must be a repo-relative path with no '..' and no control or "
+                    "format character".format(where))
             return None
         ids = row["expected-check-ids"]
         if not isinstance(ids, list) or not ids:
@@ -376,8 +398,8 @@ def _manifest_rows(data, manifest_path):
         row_seen = set()
         for cid in ids:
             if not isinstance(cid, str) or not cid or _has_ctrl(cid):
-                _cannot("{}: check id {!r} must be a non-empty control-character-free string"
-                        .format(where, cid))
+                _cannot("{}: check id {!r} must be a non-empty string with no control or format "
+                        "character".format(where, cid))
                 return None
             if cid in row_seen:
                 _cannot("{}: duplicate expected check id {!r}".format(where, cid))
@@ -457,11 +479,13 @@ def _runner_group(root, suites, row):
 
 
 def _unlaunched_rows(root, suites):
-    """The diagnostic lines naming each registered row with no launch member in a launch roster (none
-    when every row is launched from both), or None after printing (the caller exits 2 and NEVER
-    launches) when a roster is not a regular non-symlink file, cannot be read, or draws a diagnostic
-    from the parity gate's loader. Read-only and LEXICAL: it proves each row's launch line is present
-    in each roster, not that the line runs or passes."""
+    """The diagnostic lines naming each registered row whose launch line is missing from a launch
+    roster (none when every row is launched from both), or None after printing (the caller exits 2
+    and NEVER launches) when a roster is not a regular non-symlink file, cannot be read, or draws a
+    diagnostic from the parity gate's loader. A roster member counts as a row's launch line only
+    when it is EXACTLY [GATE_REL, "--suite", <id>], the one argv shape main() accepts, so a member
+    carrying any further token, or a near-miss id, launches nothing. Read-only and LEXICAL: it
+    proves each row's launch line is present in each roster, not that the line runs or passes."""
     if check_ci_parity is None:
         _cannot("the parity gate's roster loaders (check_ci_parity.py beside this gate) cannot be "
                 "imported, so the launch rosters cannot be read: {}".format(PARITY_IMPORT_ERROR))
@@ -486,8 +510,15 @@ def _unlaunched_rows(root, suites):
             _cannot("launch roster {} cannot be evaluated: line {}: {}".format(
                 rel, diagnostic.line, diagnostic.message))
             return None
+        launched_ids = set()
+        for member in extraction.members:
+            argv = member.split(" ")
+            # Exactly the command main() accepts (["--suite", <id>] after the script): a member
+            # carrying any further token is some other command, never a launch of <id>.
+            if len(argv) == 3 and argv[0] == GATE_REL and argv[1] == "--suite" and argv[2]:
+                launched_ids.add(argv[2])
         for other in suites:
-            if SUITE_LAUNCH.format(other["id"]) not in extraction.members:
+            if other["id"] not in launched_ids:
                 lines.append("  suite {} has no launch line ({}) in {}".format(
                     other["id"], SUITE_LAUNCH.format(other["id"]), rel))
     return lines
@@ -2066,6 +2097,14 @@ def self_test():
             os.lstat(probe / "inner" / "file")
         except PermissionError:
             unresolvable.append(("unsearchable-directory", "tools/denied/runner.py", "denied"))
+        else:
+            # Never a silent skip: where permissions do not bind (root, CAP_DAC_OVERRIDE), the
+            # unsearchable-directory vectors cannot run, and that is a named failure of this run.
+            failures.append(
+                "st/strict-member-unsearchable-directory-not-run: the chmod-0 probe did not raise "
+                "PermissionError, so permissions do not bind for this uid and the "
+                "unsearchable-directory vectors cannot run here; run the self-test as a uid "
+                "directory permissions bind for")
         finally:
             probe.chmod(0o700)
         for label, other_runner, setup in unresolvable:
@@ -2090,10 +2129,14 @@ def self_test():
                    (True, True))
             expect("st/strict-member-{}-no-allocation".format(label), allocated, [])
             expect("st/strict-member-{}-no-launch".format(label), launched(root), False)
-        # a runner path carrying a control character is refused by the schema, in the requested row or
-        # in an unrelated one, so no cross-row resolution message names a row that shares nothing
+        # a runner path carrying a control or format character (C0, DEL, C1, a bidi control, U+2028,
+        # U+2029) is refused by the schema, in the requested row or in an unrelated one, so no
+        # cross-row resolution message names a row that shares nothing
         for label, value, index in (("nul", "\\u0000", 1), ("soh", "\\u0001", 1), ("tab", "\\t", 1),
-                                    ("del", "\\u007f", 1), ("requested-row", "\\u0001", 0)):
+                                    ("del", "\\u007f", 1), ("c1-nel", "\\u0085", 1),
+                                    ("c1-csi", "\\u009b", 1), ("line-separator", "\\u2028", 1),
+                                    ("paragraph-separator", "\\u2029", 1),
+                                    ("bidi-rlo", "\\u202e", 1), ("requested-row", "\\u0001", 0)):
             rows = [("demo", GOOD_IDS, None), ("other", ["b/one"], None, "tools/other_runner.py")]
             text = _group_text(rows).replace(
                 '"tools/{}"'.format("fake_runner.py" if index == 0 else "other_runner.py"),
@@ -2103,14 +2146,45 @@ def self_test():
             code, _out, err = run_counted(root)
             expect("st/runner-ctrl-{}-2".format(label), code, 2)
             expect("st/runner-ctrl-{}-named".format(label),
-                   ("suite[{}]: runner must be a control-character-free".format(index) in err,
+                   ("suite[{}]: runner must be a repo-relative path with no '..' and no control "
+                    "or format character".format(index) in err,
                     "cannot decide which rows share" in err), (True, False))
             expect("st/runner-ctrl-{}-no-launch".format(label), (launched(root), allocated),
                    (False, []))
+        # a suite id outside the closed grammar is refused BY NAME before any resolution, report
+        # allocation or launch: the id is one launch-line argument in both rosters and the one CLI
+        # argument after --suite, so a name the grammar excludes could never be launched as written
+        for label, bad in (("space", "demo two"), ("leading-dash", "-demo"), ("slash", "a/b"),
+                           ("empty", ""), ("control", "demo\u0001"), ("non-ascii", "caf\u00e9")):
+            text = _manifest_text().replace('id = "demo"', "id = " + json.dumps(bad))
+            root = build(text, _report_body(GOOD_IDS, 0))
+            code, _out, err = run_counted(root)
+            expect("st/suite-id-{}-2".format(label), code, 2)
+            expect("st/suite-id-{}-named".format(label),
+                   "suite[0]: id {!r} must match the closed suite-id grammar".format(bad) in err,
+                   True)
+            expect("st/suite-id-{}-no-launch".format(label), (launched(root), allocated),
+                   (False, []))
+        # the round-2 reviewer's reproduction: a sibling row whose id carries a space, with the
+        # space-joined launch line in BOTH rosters, is refused by the schema naming that id (the
+        # CLI accepts exactly ["--suite", <id>], so that line could never launch the row), and
+        # nothing is resolved, allocated or launched
+        spaced = [("demo-one", ["a/one"], one), ("demo-two extra", ["a/two", "a/three"], two)]
+        spaced_rosters = {rel: text.replace("--suite demo-two", "--suite demo-two extra")
+                          for rel, text in _roster_texts(["demo-one", "demo-two"]).items()}
+        root = build(_group_text(spaced), _lane_body(lanes), rosters=spaced_rosters)
+        code, _out, err = run_counted(root, "demo-one")
+        expect("st/suite-id-spaced-sibling-2", code, 2)
+        expect("st/suite-id-spaced-sibling-named",
+               "suite[1]: id 'demo-two extra' must match the closed suite-id grammar" in err,
+               True)
+        expect("st/suite-id-spaced-sibling-no-launch", (launched(root), allocated), (False, []))
         # launch coverage: every registered row, a split group's included, must have its launch line in
         # both launch rosters, each read as a regular file through the parity gate's loader; a group row
         # never launched from either roster (absent, or only commented out), an unrelated row never
-        # launched, and a roster that is missing, a directory, a symlink, rejected by its loader, or
+        # launched, a launch line that is not exactly the two-argument CLI form (a near-miss id, an
+        # extra argument), and a roster that is missing, a directory, a symlink, rejected by its
+        # loader (a CI-side diagnostic included), carrying a byte outside the loader's alphabet, or
         # unreadable for want of the loader module are each refused 2 before any allocation or launch
         local_rel, ci_rel = LAUNCH_ROSTERS[0][0], LAUNCH_ROSTERS[1][0]
         both = _roster_texts(["demo-one", "demo-two"])
@@ -2138,6 +2212,21 @@ def self_test():
                  unlaunched_named.format(ci_rel)),
                 ("unrelated-row-not-in-ci", unrelated, {ci_rel: _roster_texts(["demo-one"])[ci_rel]},
                  unlaunched_named.format(ci_rel)),
+                ("near-miss-id-in-ci", split,
+                 {ci_rel: _roster_texts(["demo-one", "demo-two-x"])[ci_rel]},
+                 unlaunched_named.format(ci_rel)),
+                ("extra-argument-in-local", split,
+                 {local_rel: both[local_rel].replace(
+                     "--suite demo-two", "--suite demo-two --verbose")},
+                 unlaunched_named.format(local_rel)),
+                ("extra-argument-in-ci", split,
+                 {ci_rel: both[ci_rel].replace(
+                     "--suite demo-two", "--suite demo-two --verbose")},
+                 unlaunched_named.format(ci_rel)),
+                ("ci-loader-diagnostic", split, {ci_rel: both[ci_rel] + "stray: 1\n"},
+                 "top-level line 'stray: 1' is outside the recognized workflow keys"),
+                ("local-cr-byte", split, {local_rel: None},
+                 "byte b'\\r' is outside printable ASCII"),
                 ("local-missing", split, {local_rel: None}, "{} unreadable: ".format(local_rel)),
                 ("ci-missing", split, {ci_rel: None}, "{} unreadable: ".format(ci_rel)),
                 ("local-directory", split, {local_rel: None},
@@ -2153,6 +2242,10 @@ def self_test():
             (root / "tools" / "other_runner.py").write_text("print('other')\n", encoding="utf-8")
             if label == "local-directory":
                 (root / local_rel).mkdir()
+            elif label == "local-cr-byte":
+                # one CR byte: read_runner_text screens RAW BYTES, so the roster is refused before
+                # universal-newline translation could erase the byte ahead of a text-level screen
+                (root / local_rel).write_bytes(both[local_rel].encode("ascii") + b"# tail\r\n")
             elif label == "ci-symlink":
                 (root / "elsewhere.yml").write_text(both[ci_rel], encoding="ascii")
                 (root / ci_rel).parent.mkdir(parents=True)
@@ -2278,10 +2371,17 @@ def self_test():
           "option, a singleton row behaving byte-identically beside a split group, refuses before any "
           "report directory or launch a row whose runner does not resolve strictly (a missing file, a "
           "file used as a directory, a symlink loop, and an unsearchable directory where permissions "
-          "bind) and a runner path carrying a control character, and refuses before any launch a "
-          "registered row, of a split group or not, with no launch line in either launch roster (a "
-          "commented-out line included) and a launch roster that is missing, a directory, a symlink, "
-          "rejected by the parity gate's loader, or unreadable for want of that loader")
+          "bind, a not-run failure named where they do not) and a runner path carrying a control or "
+          "format character (C1, U+2028, U+2029 and a bidi control included), refuses by name a "
+          "suite id outside the closed suite-id grammar (a space-carrying sibling id, its "
+          "space-joined launch line in both rosters, included) with nothing resolved, allocated or "
+          "launched, and refuses before any launch a "
+          "registered row, of a split group or not, whose launch line is missing from at least one "
+          "launch roster (a commented-out line, a near-miss id, and a launch line carrying any "
+          "extra argument included) and a launch roster that is missing, a directory, a symlink, "
+          "rejected by the parity gate's loader (a CI-side diagnostic included), carrying a byte "
+          "outside the loader's alphabet (a carriage return included), or unreadable for want of "
+          "that loader")
     return 0
 
 
