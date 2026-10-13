@@ -46,25 +46,34 @@ VALIDATION. Each row is built into an imported record and checked with _opf_sche
 (IS-0): the builder assigns per-namespace PLACEHOLDER ids (`imported:<NS>-0<n>` in batch order: a spelling
 the spec 8.2 id grammar refuses outright, since `[1-9][0-9]*` admits no leading zero, so NO real imported
 id, an earlier import run's included, can ever spell a placeholder; placeholders are never allocations,
-spec 8.8 keeps the one allocation seam in the writer, which replaces every placeholder occurrence with a
-freshly allocated `imported:<NS>-<n>` inside its journaled transaction and re-validates, and the
-unspellable spelling is what lets it find every occurrence structurally while leaving every verbatim id
-alone), the placeholder importer actor, and a placeholder `import` table whose `source` is the
+spec 8.8 keeps the one allocation seam in the writer, whose FUTURE obligation, once the import write mode
+lands, is to replace each placeholder with a freshly allocated `imported:<NS>-<n>` inside its journaled
+transaction and re-validate there; that contract is POSITIONAL: the writer replaces placeholders only at
+the GENERATED REFERENCE POSITIONS, the row's own `id` and each key-resolved `links[].id`, located
+structurally from the parsed rows, never by scanning text for the spelling, and preserves every other
+string verbatim, so a title, a history row's `value`, a refs locator or note, or an `unparsed` entry may
+carry placeholder-LOOKING text and the batch stays VALID with those bytes returned byte-identical (a
+`scopes` entry spelling a minted placeholder is refused, so no third position ever holds
+one)), the placeholder importer actor, and a placeholder `import` table whose `source` is the
 preserved-original path the record's own run will hold. The validator judges each record under its
 placeholder's well-formed MASK (`imported:<NS>-<n>`, the placeholder minus its leading zero, substituted
 at exactly the record-id-bearing positions), so it sees the real envelope, link and scope shape while the
-returned Batch carries only placeholder spellings. A `links` row targets either another row by its
-batch-local `key`, which the builder resolves to that row's placeholder id (dangling and duplicate keys
-are refused), or an existing imported-series id verbatim, which ALWAYS passes through: a well-formed id
-can never spell a placeholder, so a key link and a verbatim link can never resolve to the same id in the
-result, and a verbatim link to an id an earlier import run allocated is never refused for colliding with
-a placeholder. A verbatim id that SPELLS a placeholder this batch itself mints is a genuine alias of a
-batch row and is refused by name, with no second finding (a link to this batch's own row must use its
+returned Batch carries only placeholder spellings; each returned validator finding is re-labelled under
+the row's placeholder, so no finding names a row by a spelling a real store record could carry. A
+`links` row targets either another row by its batch-local `key`, which the builder resolves to that
+row's placeholder id (dangling and duplicate keys are refused), or an existing imported-series id
+verbatim, which ALWAYS passes through: a well-formed id can never spell a placeholder, so a key link
+and a verbatim link can never resolve to the same id in the result, and a verbatim link to an id an
+earlier import run allocated is never refused for colliding with a placeholder. A verbatim id that
+SPELLS a placeholder this batch itself mints is a genuine alias of a batch row and is refused by
+name, with no second finding (a link to this batch's own row must use its
 local key); a clean-series id is refused by the validator ("Imported-to-clean links MUST be refused by
 both writer and doctor", spec 8.6). The same aliasing rule covers every record-id-bearing row member, and
 `links[].id` and a block row's `scopes` entries are the ONLY two, enumerated against the schema: the
 record's own `id` is writer-authored and refused in a row, `refs` rows carry {kind, locator, note}
-locators, `unrecorded` and `history` rows carry schema FIELD names, `actor.id` names an actor, and no
+locators and notes (free text, never typed record references), `unrecorded` rows carry schema FIELD
+names, a `history` row carries a schema field name and a verbatim source `value` string (preserved
+source text, never a typed record reference, spec 8.3), `actor.id` names an actor, and no
 other baseline member holds a record id. A `scopes` entry spelling a minted placeholder is refused by
 name (scopes resolve no batch-local key: a scope names a record that already exists in the store, never a
 row of its own batch). The importer-only
@@ -76,9 +85,11 @@ Outcome model (single-sourced from _opf_store): CANNOT-EVALUATE for an input thi
 v1 assumptions (not exactly bytes, over the byte bound, not UTF-8, not TOML, an over-long integer
 literal, another or absent `schema`, nesting past the canonical depth bound, or a validator control
 failure), never a pass; INVALID for a parsed batch that violates the format (a row finding names its row,
-and collection stops early in three places: a preflight refusal is reported alone, a batch refused for its
-source builds and validates no row (staging still grades every row's key and type, and the
-writer-authored and measurement refusals still fire), and a row whose TYPE is refused at staging is not
+and collection stops early in three places: a preflight refusal is reported alone, a missing or unusable
+source path prevents row building, so such a batch builds and validates no row (staging still grades
+every row's key and type, the writer-authored and measurement refusals still fire, and any other source
+finding, a caller-supplied measurement in [source] included, leaves row building intact), and a row whose
+TYPE is refused at staging is not
 built, while a row refused for its KEY alone is still built under its placeholder and validated, so its
 remaining findings are still collected); VALID
 otherwise, and only then does the result carry a Batch. batch_digest(data) returns the digest only for a
@@ -173,15 +184,21 @@ _CONTROL_COMPONENTS = frozenset(n.casefold() for n in store.STORE_ROOT_CONTROL_D
 #   - NTFS: an alternate-data-stream suffix (`.git::` U+0024 `INDEX_ALLOCATION` opens the directory
 #     itself, so everything from the first colon is cut), trailing dots and spaces (`.git.` and
 #     `.git ` resolve to `.git`), and the 8.3 short name (`GIT~1`; matched as the control name's DOS
-#     stem, dots dropped and cut to six characters, `~` with any digit run, and the three-character
-#     extension where the name carries one, e.g. `OPF~1.TOM` for `.opf.toml`);
+#     stem, dots dropped and cut to six characters, `~` with a digit run, and the three-character
+#     extension where the name carries one, e.g. `OPF~1.TOM` for `.opf.toml`; a LONGER digit run cuts
+#     the stem further, so the numeric-tail name keeps 8.3's eight characters: `WORKIN~1`,
+#     `WORKI~10`, `WORK~100` and so on down to a one-character stem);
 #   - HFS+: the ignorable code points an HFS+ name lookup skips (U+200C..U+200F, U+202A..U+202E,
 #     U+206A..U+206F and U+FEFF), dropped before the compare.
 # DISCLOSED, deliberately left open beside this check: it closes the git-documented LEXICAL alias set,
 # not every filesystem equivalence. Unicode NFC/NFD normalization and single-script confusables (a
 # dotless U+0131 in place of the i of .git) are not folded; NTFS hash-mangled short names (the
 # `GI7EBA~1` style) are not enumerated; a trailing-dot, trailing-space or stream alias of a
-# NON-control name stays a plain (odd) product path, the store file-operand grammar's business; and
+# NON-control name stays a plain (odd) product path, the store file-operand grammar's business (a
+# RESIDUAL of that grammar, recorded here, not changed here: a `..` or `...` component with a
+# trailing space, `.. /x`, passes that grammar as an odd plain name although Win32 normalization
+# strips the trailing space and can resolve it as a parent reference; the control-area refusal
+# still applies at any depth); and
 # filesystem-level aliasing (links, mounts, case-insensitive lookups of whole trees) is no lexical
 # check's to close. The writer re-judges the real path against its own plan scope and store root
 # (spec 8.8).
@@ -193,14 +210,24 @@ _HFS_IGNORABLE = frozenset(chr(c) for c in (
 def _dos_short_pattern(name):
     """The NTFS 8.3 short-name pattern of one control name: the DOS stem (the name before its last
     dot, or the whole name when nothing precedes that dot, dots and other non-alphanumerics dropped,
-    cut to six), `~` with any digit run, and the cut extension where the name carries one (`.git` to
-    `git~N`, `.opf.toml` to `opf~N.tom`)."""
+    cut to six), `~` with a digit run, and the cut extension where the name carries one (`.git` to
+    `git~N`, `.opf.toml` to `opf~N.tom`). A digit run of d digits cuts the stem to 7 - d characters,
+    so the numeric-tail name keeps 8.3's eight before the extension (`WORKIN~1`, `WORKI~10`,
+    `WORK~100`, down to a one-character stem); the full-stem arm keeps ANY digit run, fail-closed,
+    since an over-long spelling such as `git~12345` aliases nothing real but gains nothing as a
+    source path either."""
     base, dot, ext = name.rpartition(".")
     if not dot or not base:
         base, ext = name, ""
     stem = re.sub(r"[^a-z0-9]", "", base.casefold())[:6]
     tail = re.sub(r"[^a-z0-9]", "", ext.casefold())[:3]
-    return re.escape(stem) + "~[0-9]+" + ("\\." + re.escape(tail) if tail else "")
+    ext_re = "\\." + re.escape(tail) if tail else ""
+    arms = [re.escape(stem) + "~[0-9]+"]
+    for run in range(2, 7):
+        cut = 7 - run
+        if 0 < cut < len(stem):
+            arms.append("{}~{}{{{}}}".format(re.escape(stem[:cut]), "[0-9]", run))
+    return "(?:{})".format("|".join(arms)) + ext_re
 
 
 _CONTROL_SHORT_RE = re.compile(
@@ -241,12 +268,16 @@ PLACEHOLDER_ORIGINALS = store.evidence_run("import", PLACEHOLDER_RUN) + "/origin
 # `imported:<NS>-<n>` with n drawn from `[1-9][0-9]*` (spec 8.2, _opf_schema.parse_series_id), which
 # admits NO leading zero, so no allocated id, this run's or any earlier run's, can ever spell a
 # placeholder, and a verbatim id in a row can never alias a batch row by accident. The writer still
-# allocates the real id: a placeholder cannot be written to the store at all (the store's own
-# validators refuse the spelling), so the writer replaces every placeholder occurrence with a freshly
-# allocated `imported:<NS>-<n>` inside its journaled transaction (the one allocation seam, spec 8.8)
-# and re-validates there, finding each occurrence structurally by this spelling alone. Validation in
+# allocates the real id. Its FUTURE obligation (the spec 8.8 allocation seam; no writer ships in this
+# release, and THIS parser performs no replacement) is POSITIONAL: replace each placeholder with a
+# freshly allocated `imported:<NS>-<n>` inside its journaled transaction and re-validate there, only
+# at the GENERATED REFERENCE POSITIONS the parsed rows locate structurally, the row's own `id` and
+# each key-resolved `links[].id` (a minted spelling in `scopes` is refused, so no third position
+# holds one), NEVER by scanning strings for the spelling: the spelling is refused only at
+# record-id positions, and a title, a history row's `value`, a refs locator or note, or an
+# `unparsed` entry carrying placeholder-LOOKING text is preserved verbatim. Validation in
 # THIS parser runs under _validation_mask's well-formed mask, so the validator never sees the
-# unspellable form.
+# placeholder spelling at an id position.
 _PLACEHOLDER_RE = re.compile(r"imported:([A-Z]{2})-0([1-9][0-9]*)\Z")
 
 
@@ -319,12 +350,18 @@ _BARE_KEY_RE = re.compile(r"[A-Za-z0-9_-]+\Z")
 # Code points escaped beyond the named short escapes: DEL, every C1 control (NEL among them), the
 # non-LF line boundaries splitlines knows (LS, PS), the bidirectional format characters (ALM, LRM,
 # RLM, the embedding/override set and the isolate set) and the zero-width set, each emitted as a
-# backslash-u escape so no emitted line is split by a data character and no invisible control or
-# direction-spoofing character lands raw in a canonical batch. DECIDED, not merely disclosed: U+200B
+# backslash-u escape so no emitted line is split by a data character and no code point of THIS
+# decided set lands raw in a canonical batch. DECIDED, not merely disclosed: U+200B
 # (ZWSP), U+200C (ZWNJ), U+200D (ZWJ) and U+FEFF (ZWNBSP/BOM) are ESCAPED, since an invisible
 # zero-width character spoofs a reader exactly as a bidirectional control does and a mid-string BOM
 # survives a naive re-decode; the self-test enumerates the whole required set independently of this
 # table, so shrinking it turns a vector red.
+# DISCLOSED, deliberately NOT escaped in this release (each stays raw, canonical data): the other
+# invisible or format code points with the same spoofing character, U+00AD (SOFT HYPHEN), U+180E
+# (MONGOLIAN VOWEL SEPARATOR), U+2060 (WORD JOINER), the invisible operators U+2061..U+2064, the
+# interlinear annotation controls U+FFF9..U+FFFB and the tag block U+E0001..U+E007F. Widening the
+# escape set re-spells every canonical batch that carries one of them (the replay digest moves), so
+# that widening is a decided format revision, never a quiet table edit.
 _EXTRA_ESCAPED = (frozenset((0x7F, 0x2028, 0x2029, 0x061C, 0x200E, 0x200F))
                   | frozenset((0x200B, 0x200C, 0x200D, 0xFEFF))  # zero-width: ZWSP, ZWNJ, ZWJ, BOM
                   | frozenset(range(0x80, 0xA0))       # the C1 controls, NEL included
@@ -576,7 +613,8 @@ def _masked_for_validation(record, minted):
     _validation_mask, at exactly the record-id-bearing positions (the record's own `id`, each
     `links[].id` and each `scopes` entry), so validate_imported_record judges the real envelope, link
     and scope shape without ever seeing the unspellable placeholder form; the stored BatchRow keeps
-    the placeholder spelling, which the writer replaces (spec 8.8)."""
+    the placeholder spelling, which the writer's future obligation replaces at these same generated
+    reference positions (spec 8.8), preserving every other string verbatim."""
     masked = copy.deepcopy(record)
     if type(masked.get("id")) is str and masked.get("id") in minted:
         masked["id"] = _validation_mask(masked["id"])
@@ -746,12 +784,20 @@ def parse_batch(data):
         record["import"] = provenance
         verdict = schema.validate_imported_record(_masked_for_validation(record, minted),
                                                    expected_type=rtype)
+        # The validator labels a finding by the id it judged, the MASK, which is exactly a spelling
+        # a real store record could carry; re-label it under the row's placeholder (a spelling
+        # outside the id grammar), so no returned finding names a row by a real-id spelling.
+        mask_label = "imported record {}".format(
+            schema._bounded_display(_validation_mask(placeholder)))
+        row_label = "imported record {}".format(schema._bounded_display(placeholder))
+        relabelled = [row_label + f[len(mask_label):] if f.startswith(mask_label) else f
+                      for f in verdict.findings]
         if verdict.status == CANNOT_EVALUATE:
             # Unreachable for a tomllib model under the default controls, but a validator that cannot
             # evaluate a built record must never read as a mere finding (fail-closed).
-            cannot.extend("{}: {}".format(where, f) for f in verdict.findings)
+            cannot.extend("{}: {}".format(where, f) for f in relabelled)
             continue
-        findings.extend("{}: {}".format(where, f) for f in verdict.findings)
+        findings.extend("{}: {}".format(where, f) for f in relabelled)
         batch_rows.append(BatchRow(key, kind, rtype, placeholder, record))
 
     canonical = None
@@ -1110,6 +1156,33 @@ def self_test():
                            ("store-area-prefix", ".aiqtx/x")):
             got = parse_batch(_edited('path = "notes/old.md"', 'path = "{}"'.format(good)))
             check("source-path-" + name + "-valid", got.status == VALID)
+        # NTFS numeric tails past one digit cut the stem (8.3 keeps eight characters before the
+        # extension), so WORKI~10, WORK~100 and OPFLO~10.TOM alias .working and .opf.local.toml;
+        # worki~1 is the just-outside positive (a one-digit tail keeps the full six-character stem,
+        # WORKIN~1, so this five-character spelling aliases nothing), red when the cut-stem arms
+        # admit a shorter run than their cut implies.
+        for name, bad in (("working-shortname-two-digit", "WORKI~10/x"),
+                          ("working-shortname-three-digit", "WORK~100/x"),
+                          ("local-pointer-shortname-two-digit", "OPFLO~10.TOM")):
+            got = parse_batch(_edited('path = "notes/old.md"', 'path = "{}"'.format(bad)))
+            check("source-path-" + name + "-refused",
+                  _refuses(got, INVALID, "lies inside a control area"))
+        got = parse_batch(_edited('path = "notes/old.md"', 'path = "worki~1/x"'))
+        check("source-path-working-short-prefix-one-digit-valid", got.status == VALID)
+        # Every declared HFS+-ignorable code point, enumerated INDEPENDENTLY of _HFS_IGNORABLE (the
+        # expected set is never re-derived from the implementation): U+200C..U+200F, U+202A..U+202E,
+        # U+206A..U+206F and U+FEFF, each dropped by an HFS+ name lookup, so .g<cp>it/x names .git.
+        # The raw code point rides each vector: where the emitter escapes it the document is also
+        # non-canonical, but the control-area finding is asserted by name, so removing any ONE
+        # member from the fold loses that finding and turns exactly its vector red.
+        hfs_declared = ([0xFEFF] + list(range(0x200C, 0x2010))
+                        + list(range(0x202A, 0x202F)) + list(range(0x206A, 0x2070)))
+        for cp in hfs_declared:
+            tag = "U+{:04X}".format(cp)
+            got = parse_batch(_edited('path = "notes/old.md"',
+                                      'path = ".g' + chr(cp) + 'it/x"'))
+            check("source-path-hfs-ignorable-" + tag + "-refused", got.status == INVALID
+                  and any("lies inside a control area" in f for f in got.findings))
         got = parse_batch(_edited('path = "notes/old.md"\n', ''))
         check("missing-source-path-refused", _refuses(got, INVALID, "missing required field: source.path"))
         got = parse_batch(_edited('\n[source]\npath = "notes/old.md"\n', '\n'))
@@ -1184,6 +1257,47 @@ def self_test():
               _refuses(got, INVALID, "spells a placeholder this batch itself mints")
               and len(got.findings) == 1 and "scopes[0]" in got.findings[0]
               and not any("not a record id" in f for f in got.findings))
+
+        # The placeholder contract is POSITIONAL (the writer's future obligation, the spec 8.8
+        # allocation seam): placeholders are replaced only at the generated reference positions
+        # located structurally from the parsed rows (the row's own id and each key-resolved
+        # links[].id), and the spelling is refused only at record-id positions, so
+        # placeholder-LOOKING text in a title, a history row's value, a refs locator or a refs
+        # note stays VALID, rides the batch BYTE-IDENTICAL beside the real reference positions
+        # that carry the placeholder, and is never re-spelled (red when a spelling scan refuses
+        # or rewrites preserved text).
+        bi_ph, wl_ph = "imported:{}-01".format(bi), "imported:{}-01".format(wl)
+        titled = _edited('title = "Old backlog item"', 'title = "{}"'.format(bi_ph))
+        got = parse_batch(titled)
+        check("placeholder-text-title-preserved", got.status == VALID
+              and got.batch.canonical == titled
+              and got.batch.rows[0].record["title"] == bi_ph
+              and got.batch.rows[0].record["id"] == bi_ph
+              and got.batch.rows[0].record["links"] == [{"id": wl_ph, "rel": "relates"}])
+        histed_ph = _edited("links = [{key",
+                            'history = [{field = "title", value = "' + bi_ph + '"}]\nlinks = [{key')
+        got = parse_batch(histed_ph)
+        check("placeholder-text-history-value-preserved", got.status == VALID
+              and got.batch.canonical == histed_ph
+              and got.batch.rows[0].record["import"]["history"]
+              == [{"field": "title", "value": bi_ph}])
+        refed = _edited('status = "done"\n',
+                        'refs = [{kind = "path", locator = "' + bi_ph + '", note = "' + wl_ph
+                        + '"}]\nstatus = "done"\n')
+        got = parse_batch(refed)
+        check("placeholder-text-refs-preserved", got.status == VALID
+              and got.batch.canonical == refed
+              and got.batch.rows[0].record["refs"]
+              == [{"kind": "path", "locator": bi_ph, "note": wl_ph}])
+        # A returned validator finding labels its row by the PLACEHOLDER spelling, never by the
+        # well-formed mask it was judged under: the mask is exactly a spelling a real store
+        # record could carry (red when the re-label is dropped).
+        got = parse_batch(_edited('{key = "w1", rel = "relates"}',
+                                  '{id = "imported:' + bi + '-02", rel = "relates"}'))
+        check("finding-labels-row-by-placeholder", got.status == INVALID
+              and any("imported record '" + bi_ph + "'" in f for f in got.findings)
+              and not any("imported record 'imported:" + bi + "-1'" in f
+                          for f in got.findings))
 
         # A value outside the v1 grammar has no canonical form: refused, never re-spelled.
         got = parse_batch(_edited('status = "done"\n', 'num = 1.5\nstatus = "done"\n'))
