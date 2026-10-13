@@ -1342,6 +1342,12 @@ def _self_test_main_isolated():
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             return sweep(root)
 
+    def sweep_captured(root):
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = sweep(root)
+        return rc, out.getvalue(), err.getvalue()
+
     try:
         tmp = Path(tempfile.mkdtemp(prefix="aiqt-gensrc-failclose-selftest-"))
     except OSError as exc:
@@ -1556,7 +1562,7 @@ def _self_test_main_isolated():
             rc_idle = sweep_quiet(slow)
             rc_leaky = sweep_quiet(leaky)
             rc_leaky_reject = sweep_quiet(leaky_reject)
-            rc_leaky_reject_escape = sweep_quiet(leaky_reject_escape)
+            rc_leaky_reject_escape, escape_out, escape_err = sweep_captured(leaky_reject_escape)
         finally:
             _load_factor, PROBE_TIMEOUT, PROBE_STALL_S = saved_bounds
             _now = saved_now
@@ -1572,6 +1578,13 @@ def _self_test_main_isolated():
                             "(0, 2, 2, ['stall'], 1, 0, 2), got {!r}"
                             .format((rc_slow, rc_hang, rc_idle, sorted(set(stops)), rc_leaky,
                                      rc_leaky_reject, rc_leaky_reject_escape)))
+        # The escaping fixture's exit 2 must come from the stopped-path CONTAINMENT validation, not
+        # from any other cannot-evaluate condition that shares the exit code: require the
+        # containment diagnostic itself (printed in the sweep's CANNOT-EVALUATE report).
+        if "left the target uncontained" not in escape_out:
+            failures.append("escaping stopped rejection (leaky_reject_escape): expected the "
+                            "containment diagnostic ('left the target uncontained') in the sweep "
+                            "output, got stdout {!r} stderr {!r}".format(escape_out, escape_err))
         failures.extend(_load_bound.vector_failures(sys.executable))
 
         # (l) A sandbox-setup mkdtemp failure (injected OSError) returns cannot-evaluate (exit 2), not an
@@ -1746,7 +1759,10 @@ def _self_test_main_isolated():
           "2; a generator slower than the per-probe bound passes under host load while a silently sleeping "
           "generator (stopped by the heuristic stall bound, not the budget) and the same slow generator on an "
           "idle host each return exit 2, while one exiting 0 on a corrupt target beside a leaked descendant "
-          "returns exit 1 (load-tolerant bounds, shared vectors included); a sandbox-setup mkdtemp failure "
+          "(the leaky fixture) returns exit 1, one rejecting the corrupt target beside the same leak (the "
+          "leaky_reject fixture) returns exit 0, and a stopped rejection that swapped its target for an "
+          "escaping symlink (the leaky_reject_escape fixture) returns exit 2 with the containment "
+          "diagnostic asserted (load-tolerant bounds, shared vectors included); a sandbox-setup mkdtemp failure "
           "returns exit 2; a block-kind generator that fail-closes "
           "on invalid UTF-8 passes (exit 0), exercising the invalid-UTF-8-only block probe path; a "
           "git-reading generator passes (exit 0) because the D6 template materializes a real git "

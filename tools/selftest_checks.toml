@@ -981,10 +981,12 @@ expected-check-ids = [
   "leak/imported-gitdir-poison-fixture-green",
   "leak/imported-gitdir-poison-caller-unchanged",
   # ---------- the load-tolerant child bound: a slowed run passes, a clean stop is cannot-evaluate, ----------
-  # ---------- and failure evidence beside a stop stays a failure ----------
+  # ---------- failure evidence beside a stop stays a failure, and failing progress already written ----------
+  # ---------- when the stop lands is a failure, never cannot-evaluate ----------
   "bound/slowed-run-passes",
   "bound/hang-is-cannot-evaluate",
   "bound/stop-keeps-failure-evidence",
+  "bound/failing-progress-is-failure",
 ]
 
 [[suite]]

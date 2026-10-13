@@ -110,9 +110,12 @@ SUITE_ID = "git-fixture-env-selftest"
 # files as cannot-evaluate (the suite exits 2) only when nothing else is wrong. Failure evidence beside a
 # stop is a failure (exit 1): a nonzero exit the child reached before the stop (Hung.returncode), a
 # hook, monitor or exposure marker recorded for a stopped member (_stop_or), a wrong value in the same
-# result (_judge), and captured stderr carrying a failure marker (_stderr_failure_evidence). The
-# members' own unittest PROGRESS on stderr (dots, "Ran N tests", "OK", written by passing runs too) is
-# NOT failure evidence: a stop beside progress-only stderr stays a BoundStop, never a false failure.
+# result (_judge), and a captured stream (stderr or stdout) carrying a failure marker
+# (_failure_evidence): a line-start Traceback, FAIL, ERROR or SELF-TEST FAIL, a verbose
+# "... FAIL"/"... ERROR" result ending, or unittest's F/E progress characters, which only failing or
+# erroring tests write. The members' own PASSING unittest progress on stderr (dots, "Ran N tests",
+# "OK", written by passing runs too) is NOT failure evidence: a stop beside passing-progress-only
+# streams stays a BoundStop, never a false failure.
 # Longest silent wait a member legitimately makes: a bounded hold of a worker thread or a child while
 # the member works on (at most 120 s, the Event hold in opf/tools/_opf_adopt_observe.py, released at once
 # in a passing run); a child a member waits on counts its CPU as the member's progress. 300 s exceeds it.
@@ -176,19 +179,30 @@ def _bound_stop(what, exc):
     return stop
 
 
-# Failure markers a member's completed path would also fail on, at the start of a stderr line: a
-# Python traceback, or a unittest FAIL/FAILED/ERROR line. unittest's TextTestRunner writes its
-# PROGRESS to stderr too (dots, "Ran N tests", "OK"), in passing runs as much as failing ones, so mere
-# progress beside a stop is never failure evidence: without a marker the stop stays a BoundStop
-# (cannot-evaluate), exactly like a silent one (the _load_bound contract).
-_STDERR_FAILURE_RE = re.compile(r"^(Traceback|FAIL|ERROR)", re.MULTILINE)
+# Failure markers in a stream captured beside a stop, each one written only by a run that has
+# already failed or errored: a line-start Python Traceback, a unittest FAIL/FAILED/ERROR summary
+# line, a member's own "SELF-TEST FAIL" line, a verbose-mode "... FAIL"/"... ERROR" result ending,
+# or verbosity-1 progress characters that include F or E (unittest writes F and E only for failing
+# or erroring tests). unittest's PASSING progress (dots, "Ran N tests", "OK") lands on stderr in
+# passing runs too, so it is never failure evidence: without a marker the stop stays a BoundStop
+# (cannot-evaluate), exactly like a silent one (the _load_bound contract). The line-start words are
+# matched as spelled, so unrelated output that begins a line with one of them also counts as
+# failure evidence: that files a would-be cannot-evaluate (exit 2) as a failure (exit 1), the
+# direction that never hides a defect; the completed path judges the exit code, not this text.
+_FAILURE_EVIDENCE_RE = re.compile(
+    r"^(Traceback|FAIL|ERROR|SELF-TEST FAIL)"  # line-start failure markers
+    r"|\.\.\. (FAIL|ERROR)$"                   # verbose unittest result line endings
+    r"|^[.Esxu]*[FE][.FEsxu]*$",               # verbosity-1 progress carrying an F or an E
+    re.MULTILINE)
 
 
-def _stderr_failure_evidence(stderr):
-    """stderr captured beside a stop when it carries a failure marker the completed path would also
-    judge a failure; None for empty or progress-only stderr (unittest dots, "Ran N tests", "OK")."""
-    if stderr and _STDERR_FAILURE_RE.search(stderr):
-        return stderr
+def _failure_evidence(stdout, stderr):
+    """The captured stream that carries a failure marker beside a stop (stderr first, where
+    unittest writes, then stdout, where members print their diagnostics); None when both streams
+    are empty or carry only passing progress (unittest dots, "Ran N tests", "OK")."""
+    for text in (stderr, stdout):
+        if text and _FAILURE_EVIDENCE_RE.search(text):
+            return text
     return None
 
 
@@ -1473,8 +1487,8 @@ def _config_injection_lane(base):
 
 def _run_config_member(member, env):
     """The exit code of the member; a clean bound stop as a BoundStop; failure evidence beside a stop
-    (a nonzero own exit, or captured stderr carrying a failure marker; a member's own progress on
-    stderr is not failure evidence, _stderr_failure_evidence) as a plain failing value, never a
+    (a nonzero own exit, or a captured stream carrying a failure marker; a member's own passing
+    progress on stderr is not failure evidence, _failure_evidence) as a plain failing value, never a
     BoundStop. Every member
     diagnostic prints to STDOUT: the execution reconciler forwards stdout and treats any byte on the
     suite error stream as a fault, so a real member failure reaches CI as exit 1 (FAIL), never as
@@ -1492,15 +1506,15 @@ def _run_config_member(member, env):
             print("CONFIG-INJECTION {} (exited {} before its bound fired: {}):\n{}".format(
                 member, exc.returncode, exc.reason, (exc.output or "") + (exc.stderr or "")))
             return exc.returncode
-        if _stderr_failure_evidence(exc.stderr):
-            # A failure marker on the captured stderr is failure evidence beside the stop (the
+        if _failure_evidence(exc.output, exc.stderr):
+            # A failure marker on a captured stream is failure evidence beside the stop (the
             # _load_bound contract): a plain failing value, never a BoundStop, and the evidence prints
-            # with the verdict. Progress-only stderr instead stays a BoundStop below, never a false
-            # failure.
-            print("CONFIG-INJECTION {} (stopped by its bound beside captured stderr: {}):\n{}".format(
-                member, exc.reason, (exc.output or "") + (exc.stderr or "")))
-            return "member {} was stopped by its load-tolerant bound beside captured stderr".format(
-                " ".join(member))
+            # with the verdict. Passing-progress-only streams instead stay a BoundStop below, never a
+            # false failure.
+            print("CONFIG-INJECTION {} (stopped by its bound beside captured failure evidence: {}):\n{}"
+                  .format(member, exc.reason, (exc.output or "") + (exc.stderr or "")))
+            return ("member {} was stopped by its load-tolerant bound beside captured failure "
+                    "evidence".format(" ".join(member)))
         return _bound_stop("member {}".format(" ".join(member)), exc)
     except (OSError, subprocess.SubprocessError) as exc:
         return str(exc)
@@ -1902,11 +1916,12 @@ def _run_corpus(poison_key, poison_value, cwd):
     except _load_bound.Hung as exc:
         if exc.returncode:  # it exited nonzero before the stop: its own failure, whatever bound fired
             return exc.returncode
-        # A failure marker on the captured stderr is failure evidence beside the stop (the _load_bound
-        # contract); the suite's own unittest progress there is not (_stderr_failure_evidence).
-        if _stderr_failure_evidence(exc.stderr):
+        # A failure marker on a captured stream is failure evidence beside the stop (the _load_bound
+        # contract); the suite's own passing unittest progress there is not (_failure_evidence).
+        evidence = _failure_evidence(exc.output, exc.stderr)
+        if evidence:
             return ("corpus self-test ({} poison) was stopped by its load-tolerant bound beside "
-                    "captured stderr: {!r}".format(poison_key, exc.stderr))
+                    "captured failure evidence: {!r}".format(poison_key, evidence))
         return _bound_stop("corpus self-test ({} poison)".format(poison_key), exc)
     except (OSError, subprocess.SubprocessError) as exc:
         return "corpus launch failed: {}".format(exc)
@@ -1936,11 +1951,12 @@ def _run_corpus_imported(poison_key, poison_value, cwd):
     except _load_bound.Hung as exc:
         if exc.returncode:  # it exited nonzero before the stop: its own failure, whatever bound fired
             return exc.returncode
-        # A failure marker on the captured stderr is failure evidence beside the stop (the _load_bound
-        # contract); the suite's own unittest progress there is not (_stderr_failure_evidence).
-        if _stderr_failure_evidence(exc.stderr):
+        # A failure marker on a captured stream is failure evidence beside the stop (the _load_bound
+        # contract); the suite's own passing unittest progress there is not (_failure_evidence).
+        evidence = _failure_evidence(exc.output, exc.stderr)
+        if evidence:
             return ("imported corpus self-test ({} poison) was stopped by its load-tolerant bound "
-                    "beside captured stderr: {!r}".format(poison_key, exc.stderr))
+                    "beside captured failure evidence: {!r}".format(poison_key, evidence))
         return _bound_stop("imported corpus self-test ({} poison)".format(poison_key), exc)
     except (OSError, subprocess.SubprocessError) as exc:
         return "imported corpus launch failed: {}".format(exc)
@@ -4684,13 +4700,17 @@ def _bound_stop_lane(base):
     member printing progress for about 2 s passes a 1 s budget under an injected 16x load and is stopped
     under none (the pass is owed to the load adjustment). bound/hang-is-cannot-evaluate: a silent member and
     a silent corpus run are each stopped by the heuristic stall bound and filed as cannot-evaluate, never
-    as a failure; a member and a corpus run that wrote only unittest-style PROGRESS to stderr before the
-    stop are cannot-evaluate too, never failures (the stderr branch needs a failure marker, which the
-    noisy member's Traceback supplies); a real difference beside a stop stays a failure; the suite exits
-    1 for any failure, else
-    2 for a stop. bound/stop-keeps-failure-evidence: a stopped member whose hook, monitor or exposure log
+    as a failure; a member and a corpus run that wrote only PASSING unittest-style progress to stderr
+    before the stop are cannot-evaluate too, never failures (the stream branch needs a failure marker,
+    which the noisy member's Traceback supplies); a real difference beside a stop stays a failure; the
+    suite exits 1 for any failure, else
+    2 for a stop. bound/failing-progress-is-failure: failure evidence a stopped run had already
+    written files as a FAILURE, never cannot-evaluate: a corpus run whose stderr carries unittest's
+    F progress character, a member whose stderr ends a verbose result line with "... FAIL", a member
+    whose stderr carries its own "SELF-TEST FAIL:" line, and a member whose marker lands on STDOUT
+    only, while the passing-progress controls above stay BoundStops. bound/stop-keeps-failure-evidence: a stopped member whose hook, monitor or exposure log
     recorded a marker is a failure in the registered lists and the OPF lifecycle roster, a wrong value in
-    a tuple beside a stop is a failure, a member stopped beside captured stderr is a failure (a plain
+    a tuple beside a stop is a failure, a member stopped beside captured failure evidence is a failure (a plain
     failing value, never a BoundStop), and a member that exited nonzero while a leaked descendant held
     its output keeps that exit code. The stops the lane itself makes are expected, so they leave
     BOUND_STOPS as they found it. Each element of that check is a plain value (the exit code as its
@@ -4719,6 +4739,18 @@ def _bound_stop_lane(base):
     progress = base / "bound-progress.py"
     progress.write_text("import sys, time\nsys.stderr.write(\"...\\nRan 3 tests in 0.001s\\n\\nOK\\n\")\n"
                         "sys.stderr.flush()\ntime.sleep(3600)\n", encoding="utf-8")
+    failing_progress = base / "bound-failing-progress.py"
+    failing_progress.write_text("import sys, time\nsys.stderr.write(\".F\")\nsys.stderr.flush()\n"
+                                "time.sleep(3600)\n", encoding="utf-8")
+    verbose_fail = base / "bound-verbose-fail.py"
+    verbose_fail.write_text("import sys, time\nsys.stderr.write(\"test_x (suite.Case) ... FAIL\\n\")\n"
+                            "sys.stderr.flush()\ntime.sleep(3600)\n", encoding="utf-8")
+    selftest_fail = base / "bound-selftest-fail.py"
+    selftest_fail.write_text("import sys, time\nsys.stderr.write(\"SELF-TEST FAIL:\\n  - injected\\n\")\n"
+                             "sys.stderr.flush()\ntime.sleep(3600)\n", encoding="utf-8")
+    stdout_marker = base / "bound-stdout-marker.py"
+    stdout_marker.write_text("import time\nprint(\"SELF-TEST FAIL:\", flush=True)\ntime.sleep(3600)\n",
+                             encoding="utf-8")
     saved = (MEMBER_BUDGET_S, MEMBER_STALL_S, CORPUS_BUDGET_S, CORPUS_STALL_S, CORPUS_SELFTEST, _LOAD_FACTOR)
     kept = len(BOUND_STOPS)
     env = _git_fixture_env.git_fixture_env()
@@ -4751,13 +4783,23 @@ def _bound_stop_lane(base):
         # Prints real stderr then sleeps: the stall stop carries that captured stderr, failure evidence
         # (a plain failing value, never a BoundStop), and its diagnostic lands on stdout.
         noisy_rc = quiet("noisy", _run_config_member, (str(noisy),), env)
-        # Writes only unittest-style PROGRESS to stderr then stalls: progress is not failure evidence,
+        # Writes only unittest-style PASSING progress to stderr then stalls: not failure evidence,
         # so the stop stays a BoundStop (cannot-evaluate), unlike the noisy member's Traceback.
         progress_rc = quiet("progress", _run_config_member, (str(progress),), env)
+        # Failure evidence already written when the stop lands files as a failure: a verbose
+        # "... FAIL" result ending, a member's own SELF-TEST FAIL line, and the same marker on
+        # STDOUT alone (members print their diagnostics there).
+        verbose_rc = quiet("verbose-fail", _run_config_member, (str(verbose_fail),), env)
+        selftest_rc = quiet("selftest-fail", _run_config_member, (str(selftest_fail),), env)
+        stdout_rc = quiet("stdout-marker", _run_config_member, (str(stdout_marker),), env)
         CORPUS_BUDGET_S, CORPUS_STALL_S, CORPUS_SELFTEST = 20, 1.5, silent
         corpus_stop = quiet("corpus", _run_corpus, "GIT_DIR", "/decoy/.git", base)
         CORPUS_SELFTEST = progress
         corpus_progress = quiet("corpus-progress", _run_corpus, "GIT_DIR", "/decoy/.git", base)
+        # unittest's F progress character is written only once a test has failed: a corpus run
+        # stopped right after it files as a failure, never cannot-evaluate.
+        CORPUS_SELFTEST = failing_progress
+        corpus_failing = quiet("corpus-failing-progress", _run_corpus, "GIT_DIR", "/decoy/.git", base)
     finally:
         MEMBER_BUDGET_S, MEMBER_STALL_S, CORPUS_BUDGET_S, CORPUS_STALL_S, CORPUS_SELFTEST, _LOAD_FACTOR = saved
         del BOUND_STOPS[kept:]
@@ -4784,13 +4826,15 @@ def _bound_stop_lane(base):
                 _judge((sorted({_stop_or(member[0], value)}), []), ([], [])))
     leaky_out, leaky_err = written.pop("leaky", ("", ""))
     noisy_out, noisy_err = written.pop("noisy", ("", ""))
+    verbose_out, verbose_err = written.pop("verbose-fail", ("", ""))
+    selftest_out, selftest_err = written.pop("selftest-fail", ("", ""))
+    stdout_out, stdout_err = written.pop("stdout-marker", ("", ""))
     # The full expected leaky diagnostic, on stdout: only the stall idle seconds are free.
     frame = "CONFIG-INJECTION {} (exited 3 before its bound fired: \x00):\n\n".format((str(leaky),))
     head, tail = frame.split("\x00")
     reason_re = (r"heuristic stall bound fired: no CPU or output progress for \d+\.\d s \(stall bound "
                  r"1\.5 s\); silence is not proof of a hang; the child itself had already exited with "
-                 r"status 3 before the stop \(a descendant still held its output open\), and that "
-                 r"status stands")
+                 r"status 3 before the stop, and that status stands")
     leaky_full = re.search(r"\A" + re.escape(head) + reason_re + re.escape(tail) + r"\Z",
                            leaky_out) is not None
     check("bound/stop-keeps-failure-evidence",
@@ -4800,13 +4844,23 @@ def _bound_stop_lane(base):
            _judge([member_stop, 1], 0), _judge([member_stop, 0], 0), repr(leaky_rc),
            (leaky_full, leaky_err),
            (isinstance(noisy_rc, BoundStop), _judge(noisy_rc, 0),
-            noisy_out.startswith("CONFIG-INJECTION {} (stopped by its bound beside captured stderr: "
-                                 .format((str(noisy),))),
+            noisy_out.startswith("CONFIG-INJECTION {} (stopped by its bound beside captured failure "
+                                 "evidence: ".format((str(noisy),))),
             "Traceback: real failure" in noisy_out, noisy_err),
            sorted(item for item in written.items() if item[1] != ("", ""))),
           (("fail", "fail"), ("fail", "fail"), ("fail", "fail"), ("cannot-evaluate", "cannot-evaluate"),
            "fail", "cannot-evaluate", "fail", "cannot-evaluate", "3", (True, ""),
            (False, "fail", True, True, ""), []))
+    check("bound/failing-progress-is-failure",
+          ((isinstance(verbose_rc, BoundStop), _judge(verbose_rc, 0), "... FAIL" in verbose_out,
+            verbose_err),
+           (isinstance(selftest_rc, BoundStop), _judge(selftest_rc, 0),
+            "SELF-TEST FAIL:" in selftest_out, selftest_err),
+           (isinstance(stdout_rc, BoundStop), _judge(stdout_rc, 0),
+            "SELF-TEST FAIL:" in stdout_out, stdout_err),
+           (isinstance(corpus_failing, BoundStop), _judge(corpus_failing, 0))),
+          ((False, "fail", True, ""), (False, "fail", True, ""), (False, "fail", True, ""),
+           (False, "fail")))
 
 
 def main(report_path=None):

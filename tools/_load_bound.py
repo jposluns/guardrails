@@ -25,8 +25,9 @@ on, I/O blocked under memory or disk pressure) is stopped exactly like a hung on
 caller reports a Hung that carries no failure evidence as the bound firing, CANNOT-EVALUATE (exit 2), never
 as a proven hang; and each call site sizes stall_s above the longest silent wait its callee legitimately
 makes, and states that wait at the call site. A Hung is not a licence to drop failure evidence: when the
-child had already exited on its own before the stop (a descendant still held its output open),
-Hung.returncode carries that exit status. A NONZERO status there is judged exactly as the nonzero exit
+child had already exited on its own before the stop (a descendant still held its output open, or a
+fault such as a decode failure arrived only after the wait had completed), Hung.returncode carries
+that exit status. A NONZERO status there is judged exactly as the nonzero exit
 of a completed run, whatever bound fired, never filed as cannot-evaluate: a failure where the caller
 wanted success, and in the tools/check_gensrc_failclose.py probes, where a nonzero --check exit is the
 wanted rejection of a corrupt target, that status stands as the rejection (after the same post-probe
@@ -39,26 +40,37 @@ stop when no stderr was captured, ending cannot-evaluate; only the tools/check_g
 probes let it stand as a completed 0, because exit 0 on a corrupt target is the F-154 violation there,
 so cannot-evaluate would be the lenient direction. The other evidence captured beside a stop is judged
 by the contract of each caller: tools/selftest_git_fixture_env.py treats a hook, monitor or exposure
-marker or a wrong value beside a stop as a FAILURE (exit 1), and captured stderr as failure evidence
-only when it carries a failure marker the completed path would also fail on (a Traceback, FAIL or
-ERROR line), never the unittest progress (dots, "Ran N tests") its suites write to stderr in passing
-runs too; the pl239 cases of tools/selftest_aiqt_hooks.py treat captured stderr or a nonzero own exit
+marker or a wrong value beside a stop as a FAILURE (exit 1), and a captured stream (stderr or stdout)
+as failure evidence when it carries a failure marker (a line-start Traceback, FAIL, ERROR or
+SELF-TEST FAIL, a verbose "... FAIL"/"... ERROR" result ending, or unittest's F/E progress
+characters, which only failing or erroring tests write), never the passing progress (dots,
+"Ran N tests", "OK") its suites write to stderr in passing runs too; the pl239 cases of tools/selftest_aiqt_hooks.py treat captured stderr or a nonzero own exit
 beside a stop as a FAILURE (exit 1) and do not consult stdout beside a stop (a wrong verdict held
 there ends cannot-evaluate after the retries); tools/check_gensrc_failclose.py and
 tools/check_hooks_preview.py judge the exit status of a member alone (a generator prints its rejection
 to stderr, a hook self-test its progress), so captured stderr beside a stop is not failure evidence in
 those two and a stop with no exit status stays cannot-evaluate there. Failure evidence survives every
 stop and every monitoring fault: the watch keeps the bytes captured so far on every poll, in state
-independent of any exception, every Hung (kind monitor included) is built from that state, and text
-decoding happens only AFTER capture, so a fault in a later communicate call, or a decode failure
-itself, cannot lose them: the Hung carries the captured streams (under text=True decoded with the
-requested errors, falling back to errors="replace" where that decode raises), judged the same way. Where tree CPU time cannot be read (no /proc, or a process-table scan cut short at SCAN_S), or once
-it becomes unreadable during a run, the stall test is off for the rest of that run and only the
-load-adjusted budget applies.
+independent of any exception; a fault INSIDE a communicate call recovers into that state the bytes
+the very call had already read (Popen holds each stream's chunks until communicate returns, and the
+watch copies them out before the fault leaves, _recover_partial); every Hung (kind monitor
+included) is built from that state, and text decoding happens only AFTER capture, so a fault in a
+later communicate call, a fault between two reads of the current one, or a decode failure itself,
+cannot lose them: the Hung carries the captured streams (under text=True decoded with the requested
+errors, falling back to errors="replace" where that decode raises), judged the same way. An
+interrupt (KeyboardInterrupt, SystemExit) leaves as itself, not as a Hung, and so carries no
+streams: the one exit from the watch that failure evidence does not ride (the stop stages still run
+first). Where tree CPU time cannot be read (no /proc, or a process-table scan cut short at SCAN_S),
+or once it becomes unreadable during a run, the stall test is off for the rest of that run and only
+the load-adjusted budget applies.
 
 Cleanup. run() launches the child as the LEADER OF A NEW SESSION and process group
 (start_new_session) and binds a pidfd to it at the spawn, while it is an unreaped child of this
-process. Once the watch has begun (Popen has returned), any exception that leaves the watch (a bound
+process. The spawn also arms a parent-death signal in the child (prctl PR_SET_PDEATHSIG with
+SIGKILL, through a preexec call prebound at import; libc prctl hosts only), so an OUTER stop of
+this process (GNU timeout's group signal, a SIGTERM or SIGKILL of this process itself) still ends
+the direct child, which its own new session would otherwise shield from the outer group signal;
+the limits of that mechanism are in the not-covered list below. Once the watch has begun (Popen has returned), any exception that leaves the watch (a bound
 firing, a fault in the monitoring itself, an interrupt) runs the stop before run() leaves: read whether
 the child already exited on its own, kill the child's own process group, kill the child directly, then
 reap it waiting at most REAP_S. No process-table scan selects victims and no stage signals a numeric
@@ -83,7 +95,13 @@ in uninterruptible sleep (left unreaped after REAP_S, not waited on without boun
 read that blocks in the kernel (the stall test's scan is bounded between entries, not inside one
 read), and a descendant that left the child's process group before the stop: that one is not signalled
 and is left running (no scan hunts it; the stall test's bounded process-table scan only ever reads
-CPU, never selects victims).
+CPU, never selects victims). The parent-death signal has its own limits: it reaches the DIRECT
+child only, so when this process is killed outright (no stop stage runs then) the child's group
+members survive it, orphaned; it is armed only where libc prctl is available (elsewhere the child
+itself survives this process's death, as before); an exec of a set-user-id or set-group-id program
+clears it; it fires on the death of the SPAWNING THREAD, so run() must be called from a thread
+that outlives the child (every caller in this repository calls it on the main thread); and a
+parent killed between the fork and the child's prctl leaves the child unarmed.
 
 git. run() does not knowingly launch git (ValueError before any launch). It resolves the program the
 exec in the child would run, the way that exec looks it up: a head with a directory part relative to cwd,
@@ -112,7 +130,10 @@ leaves the CPU sum) is not killed, and while
 the child waits on such a descendant the child looks silent; without /proc (macOS, Windows) the stall
 test is off; without POSIX process groups (Windows, where start_new_session is ignored) only the
 direct child is killed, and without the pidfd group signal a stop that comes after Popen reaped the
-leader kills no group member (disclosed in the Hung reason); without os.waitid the exit status a child reached
+leader kills no group member (disclosed in the Hung reason); the unreaped-leader premise behind
+the numeric killpg fallback assumes this process has no other reaper of the leader (no thread of
+it calling os.wait or os.waitpid(-1), and SIGCHLD not set to SIG_IGN): another reaper could free
+the leader's pid, and with it the group id, while Popen still shows the leader unreaped; without os.waitid the exit status a child reached
 before the stop is not read (Hung.returncode stays None); the program lookup mirrors POSIX exec and is
 unverified on Windows; the file at the resolved real path swapped between the lookup and the exec runs
 as swapped (the path itself is resolved once, so only that one path can be run).
@@ -124,6 +145,7 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 import time
 
 MAX_LOAD_FACTOR = 16.0
@@ -132,10 +154,18 @@ REAP_S = 10.0  # seconds run() waits to reap a SIGKILLed child before leaving it
 SCAN_S = 5.0  # wall seconds one process-table scan may take; a scan cut short reads as unreadable CPU
 _TICKS = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
 _KILL = getattr(signal, "SIGKILL", signal.SIGTERM)  # Windows has no SIGKILL
+PR_SET_PDEATHSIG = 1  # linux/prctl.h: deliver the given signal to this child when its parent thread dies
+try:
+    import ctypes
+    # Prebound at import, BEFORE any fork: the preexec call in the child must not import or resolve
+    # anything (post-fork context). A host without libc prctl (non-Linux) leaves this None and the
+    # parent-death signal off: the child then survives this process's death, the disclosed residual.
+    _PRCTL = ctypes.CDLL(None, use_errno=True).prctl
+except Exception:  # noqa: BLE001  any failure to bind libc prctl only disables the parent-death signal
+    _PRCTL = None
 # Linux's PIDFD_SIGNAL_PROCESS_GROUP (include/uapi/linux/pidfd.h, Linux 6.9 and later): a
-# pidfd_send_signal flag that signals the process group the pidfd's process leads, the same mechanism
-# tools/selftest_git_fixture_env.py uses for its member groups; a kernel without it refuses the flag
-# with EINVAL and the stop falls back as _kill_group states.
+# pidfd_send_signal flag that signals the process group the pidfd's process leads; a kernel without
+# it refuses the flag with EINVAL and the stop falls back as _kill_group states.
 PIDFD_SIGNAL_PROCESS_GROUP = getattr(signal, "PIDFD_SIGNAL_PROCESS_GROUP", 1 << 2)
 # Known spellings of heads run() refuses outright: each runs a program its arguments name, so git could
 # hide behind it. A list of spellings, not a proof: an interpreter head or an unlisted launcher can still
@@ -147,6 +177,19 @@ _LAUNCHERS = frozenset((
     "busybox", "script", "watch", "parallel", "sh", "bash", "dash", "zsh", "ksh", "mksh", "fish", "csh",
     "tcsh", "cmd", "powershell", "pwsh", "setarch", "linux32", "linux64", "i386", "x86_64", "numactl",
     "pkexec", "cgexec", "fakeroot", "eatmydata", "faketime", "find", "scalar"))
+
+
+def _pdeathsig_preexec():
+    """Runs in the forked child, between the fork and the exec: arm PR_SET_PDEATHSIG so the kernel
+    SIGKILLs this child when the thread that spawned it dies, covering an outer stop of the parent
+    (GNU timeout's group signal, a plain SIGTERM or SIGKILL of the parent) that the child's own new
+    session would otherwise shield it from. Direct child only; the limits are in the module
+    docstring. Best-effort: a prctl failure must not break the spawn, and nothing here imports or
+    resolves a symbol (the libc call is prebound at module import)."""
+    try:
+        _PRCTL(PR_SET_PDEATHSIG, int(_KILL), 0, 0, 0)
+    except Exception:  # noqa: BLE001  the spawn must not fail on an unarmed parent-death signal
+        pass
 
 
 def _real(value):
@@ -266,12 +309,13 @@ class Hung(subprocess.TimeoutExpired):
     a correct silent wait also trips), "budget" (the load-adjusted budget was spent) or "monitor" (the
     monitoring itself failed). The stop is attributed to the bound, never proven a hang. returncode is the
     exit status the child had already reached on its own before the stop (a descendant still held its
-    output open), or None when the stop ended it or the status could not be read: the caller judges a
+    output open, or the fault arrived only after a completed wait), or None when the stop ended it or
+    the status could not be read: the caller judges a
     NONZERO returncode exactly as it judges the exit status of a completed run, never filing it as
     cannot-evaluate; an own exit of 0 beside a stop is judged by each caller's stated contract (module
     docstring), conservatively. output and stderr hold what was captured before the stop, kept in state
-    independent of any exception (a Hung of kind monitor keeps them even when a later communicate call
-    faulted or the text decode itself failed), as str when run() was given text=True or errors (decoded
+    independent of any exception (a Hung of kind monitor keeps them even when a communicate call
+    faulted between two reads, recovered by _recover_partial, or the text decode itself failed), as str when run() was given text=True or errors (decoded
     AFTER capture with the requested errors, falling back to errors="replace" where that raises)."""
 
     def __init__(self, cmd, timeout, kind, reason, output=None, stderr=None, returncode=None):
@@ -310,6 +354,12 @@ def _kill_group(proc, pidfd):
         return ("the leader was already reaped and no pidfd group signal was available, so its group "
                 "was not signalled by number (a reused group id must never be signalled); a "
                 "descendant still in that group survives the stop")
+    # DIVERGENCE from the "never a numeric os.killpg" policy stated in opf/tools/_opf_emit.py (a
+    # freed pgid can name an unrelated group): this numeric fallback runs ONLY while Popen shows
+    # the leader unreaped (the check above), so the leader's pid, and with it the group id, is
+    # still allocated to it and cannot have been reused. That premise holds only while nothing
+    # else in this process reaps the leader behind Popen's back: no thread calling os.wait or
+    # os.waitpid(-1), and SIGCHLD not set to SIG_IGN (module docstring).
     killpg = getattr(os, "killpg", None)
     if killpg is None:
         return "os.killpg is unavailable on this platform; only the direct kill stage runs"
@@ -320,6 +370,32 @@ def _kill_group(proc, pidfd):
     except OSError as exc:
         return "killpg failed ({}: {})".format(type(exc).__name__, exc)
     return ""
+
+
+def _group_signal_supported():
+    """True where this kernel accepts the pidfd group-signal flag, probed with signal 0 against
+    this process's own pid record: EINVAL is the one refusal that means the flag itself is
+    unsupported (Linux before 6.9); any other outcome (delivered, ESRCH where this pid leads no
+    group, EPERM) shows the flag was understood. A probe that cannot run counts as unsupported.
+    The shared vectors use this to require the exact pidfd path wherever the kernel offers it."""
+    sender = getattr(signal, "pidfd_send_signal", None)
+    opener = getattr(os, "pidfd_open", None)
+    if sender is None or opener is None:
+        return False
+    try:
+        fd = opener(os.getpid())
+    except OSError:
+        return False
+    try:
+        sender(fd, 0, None, PIDFD_SIGNAL_PROCESS_GROUP)
+        return True
+    except OSError as exc:
+        return exc.errno != errno.EINVAL
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 def _own_exit(proc):
@@ -440,11 +516,32 @@ def _refused_head(argv, env, cwd, program=None, real=None):
     return None
 
 
+def _recover_partial(proc, held):
+    """Recover into held the bytes a FAULTING communicate call had already read: CPython's Popen
+    appends each stream's chunks (cumulative across polls) to proc._fileobj2output as every read
+    returns, and clears that state only when communicate completes, so a fault between two reads
+    cannot lose the chunks earlier reads captured. Best-effort by design: a Popen without that
+    state (another implementation, a fault before any read) leaves held exactly as the last
+    completed poll kept it, and held is only ever grown, never shrunk."""
+    chunks = getattr(proc, "_fileobj2output", None)
+    if not isinstance(chunks, dict):
+        return
+    for index, stream in ((0, proc.stdout), (1, proc.stderr)):
+        parts = chunks.get(stream)
+        if not parts:
+            continue
+        data = b"".join(part for part in parts if part)
+        if data and len(data) >= len(held[index] or b""):
+            held[index] = data
+
+
 def _watch(proc, argv, pending, budget_s, stall_s, clock, start, wall_start, poll_s, cpu_seconds, held):
     """Wait for proc under both bounds; return (stdout, stderr) bytes, or raise Hung (kind stall or
     budget) carrying the bytes captured so far. Every poll also keeps those bytes in held (a two-slot
-    list run() owns), state independent of any exception, so a fault in a LATER communicate call or in
-    the monitoring itself can never lose evidence an earlier poll had already captured."""
+    list run() owns), state independent of any exception, and a fault INSIDE a communicate call first
+    recovers into held the bytes that call had already read (_recover_partial), so neither a fault in
+    a LATER communicate call, nor one between two reads of the current call, nor a fault in the
+    monitoring itself, can lose evidence a read had already captured."""
     seen_cpu, seen_output, cpu_readable = None, -1, True
     last_progress = wall_start
     while True:
@@ -478,6 +575,12 @@ def _watch(proc, argv, pending, budget_s, stall_s, clock, start, wall_start, pol
                            "load-adjusted budget of {} s spent after {:.1f} s of wall time (load factor now "
                            "{:.1f})".format(budget_s, time.monotonic() - wall_start, load_factor()),
                            held[0], held[1]) from None
+        except BaseException:
+            # A fault INSIDE communicate (not its timeout): the bytes it had already read are in
+            # Popen's own buffers, not on any exception; copy them into held before leaving, so the
+            # monitor Hung run() builds from held still carries them.
+            _recover_partial(proc, held)
+            raise
         else:
             if stdout is not None:
                 held[0] = stdout
@@ -489,7 +592,8 @@ def _watch(proc, argv, pending, budget_s, stall_s, clock, start, wall_start, pol
 def run(argv, *, budget_s, stall_s, input=None, cwd=None, env=None, text=False, errors=None, clock=None,
         poll_s=POLL_S, cpu_seconds=None):
     """subprocess.run(argv, capture_output=True, input=, cwd=, env=, text=, errors=) bounded by progress.
-    The child is launched as the leader of a new session and process group, and that group (the child and
+    The child is launched as the leader of a new session and process group, armed where libc prctl
+    exists with a parent-death signal (module docstring), and that group (the child and
     every descendant that has not left it) is killed and Hung raised when its tree CPU time and output
     have not grown for stall_s wall seconds (a heuristic, off once tree CPU time is unreadable), or when
     budget_s seconds of load-adjusted time (clock, a fresh LoadClock by default) have passed. Any other
@@ -527,11 +631,14 @@ def run(argv, *, budget_s, stall_s, input=None, cwd=None, env=None, text=False, 
     # and no other; only the file at it swapped afterwards runs as swapped (module docstring). The pipes
     # stay BINARY: text decoding happens after capture, never inside communicate, so a decode failure
     # cannot lose the captured bytes. start_new_session makes the child the leader of its own process
-    # group, the group the stop kills.
+    # group, the group the stop kills; the preexec arms the parent-death signal in the child, so an
+    # outer stop of THIS process still ends the direct child its new session would otherwise shield
+    # (where libc prctl exists; limits in the module docstring).
     proc = subprocess.Popen(argv, executable=real,
                             stdin=subprocess.DEVNULL if input is None else subprocess.PIPE,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd, env=env,
-                            start_new_session=True)
+                            start_new_session=True,
+                            preexec_fn=_pdeathsig_preexec if _PRCTL is not None else None)
     try:
         group_fd = os.pidfd_open(proc.pid)  # bound at the spawn, while the leader is unreaped
     except (AttributeError, OSError):
@@ -563,8 +670,8 @@ def run(argv, *, budget_s, stall_s, input=None, cwd=None, env=None, text=False, 
             hung.stderr = _decode_replace(hung.stderr, encoding, decode_errors)
         if own_exit is not None:
             hung.returncode = own_exit
-            hung.reason += ("; the child itself had already exited with status {} before the stop (a "
-                            "descendant still held its output open), and that status stands".format(own_exit))
+            hung.reason += ("; the child itself had already exited with status {} before the stop, "
+                            "and that status stands".format(own_exit))
         if hung is exc:
             raise
         raise hung from exc
@@ -638,7 +745,21 @@ def vector_failures(python):
     budget; each stop vector allows a fixed wall limit (25 s, 10 s or 5 + REAP_S s) that a host starved
     past it would overrun. A load that extreme shows here as a failure, never as a pass. A non-terminating
     child is also killed by a watchdog after 30 s, so a regression shows as a failure here, never as a hung
-    self-test."""
+    self-test.
+
+    Added vectors: a fault INSIDE a communicate call, in the first poll and in a later one, keeps
+    the bytes that call had already read (recovered from Popen's own buffers, never from an
+    exception); the kill path a stop takes is OBSERVED, and the pidfd group kill is required
+    wherever the kernel accepts the group flag (probed, never assumed); a crafted ancestor table
+    cannot redirect a signal at a bystander (no stop stage selects victims from a process table,
+    so a regression to a table-driven kill turns that vector red); the pidfd group kill stays
+    exact AFTER Popen reaped the leader (the group member still dies), while the forced-EINVAL leg
+    observes the disclosed residual (the member survives, nothing is signalled by number, and the
+    EINVAL itself is recorded) and one bystander stays alive through the numeric-fallback stop
+    too; and an outer stop of this process (timeout 2 around an outer run() caller, allowed 30 s
+    plus an 8 s marker wait) reaches the direct child through its parent-death signal, so the
+    child never lives on to write its marker (libc prctl hosts only; elsewhere that survival is
+    the disclosed residual)."""
     import tempfile
     import threading
 
@@ -892,6 +1013,73 @@ def vector_failures(python):
         failures.append("_load_bound vector (a fault in a later communicate keeps the earlier captured "
                         "streams): got {!r}".format(got))
 
+    # A fault INSIDE a communicate call (no TimeoutExpired snapshots these bytes) keeps what that
+    # very call had already read: run() recovers Popen's partial buffers into held, so the monitor
+    # Hung carries evidence read during the faulting call itself. The injected os.read fault fires
+    # on the first read attempt AFTER every marker was read; the stream that carried the last
+    # marker still has its EOF queued then (the child closed both streams), so the fault lands in
+    # the same communicate call that read the markers.
+    def mid_read_fault(label, code, markers, want_out, want_err, poll_s):
+        class MidReadFault(subprocess.Popen):
+            def communicate(self, input=None, timeout=None):
+                saved_read = os.read
+                seen = getattr(self, "_vector_seen", set())
+                self._vector_seen = seen
+
+                def faulting_read(fd, size):
+                    if len(seen) == len(markers):
+                        raise OSError("injected mid-communicate fault")
+                    data = saved_read(fd, size)
+                    for marker in markers:
+                        if marker in data:
+                            seen.add(marker)
+                    return data
+                os.read = faulting_read
+                try:
+                    return super().communicate(input, timeout)
+                finally:
+                    os.read = saved_read
+
+        saved_cls = subprocess.Popen
+        subprocess.Popen = MidReadFault
+        try:
+            try:
+                run([python, "-I", "-B", "-c", code, token], budget_s=3600, stall_s=3600,
+                    poll_s=poll_s)
+                got = "returned"
+            except Hung as exc:
+                got = (exc.kind, exc.output or b"", exc.stderr or b"")
+            except Exception as exc:  # noqa: BLE001  any escape is this vector failing
+                got = "{}: {}".format(type(exc).__name__, exc)
+        finally:
+            subprocess.Popen = saved_cls
+        for pid in _alive_with(token):
+            _kill_pid(pid)
+        if got != ("monitor", want_out, want_err):
+            failures.append("_load_bound vector ({}): expected (monitor, {!r}, {!r}), got {!r}"
+                            .format(label, want_out, want_err, got))
+
+    mid_read_fault("a fault inside the first communicate call keeps the bytes it had read",
+                   "import os, sys, time\n"
+                   "sys.stderr.write(\"FAIL: early diagnostic\\n\")\nsys.stderr.flush()\n"
+                   "os.close(2)\n"
+                   "sys.stdout.write(\"OUT: early evidence\\n\")\nsys.stdout.flush()\n"
+                   "os.close(1)\n"
+                   "time.sleep(3600)\n",
+                   (b"early diagnostic", b"early evidence"),
+                   b"OUT: early evidence\n", b"FAIL: early diagnostic\n", 1.0)
+    # Later poll: the first marker rides earlier TimeoutExpired snapshots into held; the second is
+    # read only inside the later, faulting call, whose recovery must merge the two.
+    mid_read_fault("a fault inside a later communicate call keeps its own bytes and the earlier ones",
+                   "import os, sys, time\n"
+                   "sys.stdout.write(\"OUT: first-poll evidence\\n\")\nsys.stdout.flush()\n"
+                   "time.sleep(1.0)\n"
+                   "sys.stderr.write(\"FAIL: later diagnostic\\n\")\nsys.stderr.flush()\n"
+                   "os.close(2)\nos.close(1)\n"
+                   "time.sleep(3600)\n",
+                   (b"first-poll evidence", b"later diagnostic"),
+                   b"OUT: first-poll evidence\n", b"FAIL: later diagnostic\n", 0.25)
+
     # A child Popen has already reaped (here a text decode that fails after a clean exit) is never
     # signalled by number (neither os.kill nor os.killpg: its pid, and with it its group id, may
     # already be reused). The monitor Hung keeps the clean exit status AND the streams captured before
@@ -930,35 +1118,259 @@ def vector_failures(python):
     if tree_cpu_seconds(os.getpid()) is not None:
         # A live descendant of a stopped child is killed with it: the stop signals the child's own
         # process group (which the descendant inherited), never a scanned pid list, and a bystander
-        # this process launched (outside that group) survives every stop: with no process-table scan
-        # there is no injected ancestry that could redirect a signal at it.
+        # this process launched (outside that group) survives every stop, the forced numeric
+        # fallback below included: with no process-table scan there is no injected ancestry that
+        # could redirect a signal at it.
         descendant_code = ("import subprocess, sys, time\n"
                            "subprocess.Popen([sys.executable, \"-I\", \"-c\","
                            " \"import time; time.sleep(3600)\", sys.argv[1]])\ntime.sleep(3600)\n")
+        try:
+            probe_fd = os.pidfd_open(os.getpid()) if hasattr(os, "pidfd_open") else None
+        except OSError:
+            probe_fd = None
+        if probe_fd is not None:
+            os.close(probe_fd)
+        sender_available = (probe_fd is not None
+                            and getattr(signal, "pidfd_send_signal", None) is not None)
         bystander = subprocess.Popen(["sleep", "3600"])
+        einval_flags, fallback_pgids = [], []
         try:
             bounded("a live descendant is killed with the tree, through the child's process group",
                     descendant_code, "hung: stall", 25, budget_s=3600, stall_s=1.5, poll_s=0.2)
             survived = bystander.poll()
+            # A kernel refusing the pidfd group flag (EINVAL, forced here with a flag no kernel
+            # accepts) falls back to the numeric group id while the leader is unreaped, so the
+            # descendant still dies with the group; the EINVAL refusal and the numeric fallback
+            # are both OBSERVED through recorders (where the sender exists), never assumed from
+            # the flag alone, and the SAME bystander lives through this stop too; after a reap
+            # that fallback sends nothing (the reaped-leader vectors below).
+            saved_flag = PIDFD_SIGNAL_PROCESS_GROUP
+            saved_sender = getattr(signal, "pidfd_send_signal", None)
+            saved_fallback_killpg = getattr(os, "killpg", None)
+
+            def einval_recorder(pidfd, sig, info=None, flags=0):
+                try:
+                    return saved_sender(pidfd, sig, info, flags)
+                except OSError as exc:
+                    if exc.errno == errno.EINVAL:
+                        einval_flags.append(flags)
+                    raise
+
+            def fallback_killpg_recorder(pgid, sig):
+                fallback_pgids.append(pgid)
+                return saved_fallback_killpg(pgid, sig)
+            globals()["PIDFD_SIGNAL_PROCESS_GROUP"] = 1 << 30
+            if saved_sender is not None:
+                signal.pidfd_send_signal = einval_recorder
+            if saved_fallback_killpg is not None:
+                os.killpg = fallback_killpg_recorder
+            try:
+                bounded("the killpg fallback kills the group while the leader is unreaped",
+                        descendant_code, "hung: stall", 25, budget_s=3600, stall_s=1.5, poll_s=0.2)
+            finally:
+                globals()["PIDFD_SIGNAL_PROCESS_GROUP"] = saved_flag
+                if saved_sender is not None:
+                    signal.pidfd_send_signal = saved_sender
+                if saved_fallback_killpg is not None:
+                    os.killpg = saved_fallback_killpg
+            survived_fallback = bystander.poll()
         finally:
             bystander.kill()
             try:
                 bystander.wait(timeout=REAP_S)
             except subprocess.TimeoutExpired:
                 pass
-        if survived is not None:
-            failures.append("_load_bound vector (a bystander outside the child's group survives the "
-                            "stop): it was signalled (poll {!r})".format(survived))
-        # A kernel refusing the pidfd group flag (EINVAL, forced here with a flag no kernel accepts)
-        # falls back to the numeric group id while the leader is unreaped, so the descendant still
-        # dies with the group; after a reap that fallback sends nothing (the reaped-child vector).
-        saved_flag = PIDFD_SIGNAL_PROCESS_GROUP
+        if survived is not None or survived_fallback is not None:
+            failures.append("_load_bound vector (a bystander outside the child's group survives "
+                            "every stop, the killpg fallback included): it was signalled (poll "
+                            "{!r}, fallback poll {!r})".format(survived, survived_fallback))
+        if sender_available and (einval_flags != [1 << 30] or len(fallback_pgids) != 1):
+            failures.append("_load_bound vector (the forced-EINVAL fallback is observed, never "
+                            "assumed): expected exactly one EINVAL refusal of flag {} and one "
+                            "numeric killpg, got refusals {!r} and killpg of {!r}"
+                            .format(1 << 30, einval_flags, fallback_pgids))
+
+        # The kill path a stop takes is OBSERVED: where the kernel accepts the pidfd group-signal
+        # flag (probed on this process's own pid record), the stop must take the exact pidfd path
+        # and never the numeric fallback; without that support the numeric fallback must run while
+        # the leader is unreaped. A stop that silently trades the exact path for the numeric one
+        # turns this vector red on every group-flag kernel.
+        paths_taken = []
+        saved_sender2 = getattr(signal, "pidfd_send_signal", None)
+        saved_killpg2 = getattr(os, "killpg", None)
+
+        def path_recording_sender(pidfd, sig, info=None, flags=0):
+            paths_taken.append(("pidfd", flags))
+            return saved_sender2(pidfd, sig, info, flags)
+
+        def path_recording_killpg(pgid, sig):
+            paths_taken.append(("killpg",))
+            return saved_killpg2(pgid, sig)
+        if saved_sender2 is not None:
+            signal.pidfd_send_signal = path_recording_sender
+        if saved_killpg2 is not None:
+            os.killpg = path_recording_killpg
+        try:
+            bounded("the kill path taken by the stop is recorded", "import time\ntime.sleep(3600)\n",
+                    "hung: stall", 25, budget_s=3600, stall_s=1.5, poll_s=0.2)
+        finally:
+            if saved_sender2 is not None:
+                signal.pidfd_send_signal = saved_sender2
+            if saved_killpg2 is not None:
+                os.killpg = saved_killpg2
+        if _group_signal_supported():
+            if ("pidfd", PIDFD_SIGNAL_PROCESS_GROUP) not in paths_taken or ("killpg",) in paths_taken:
+                failures.append("_load_bound vector (the pidfd group kill runs wherever the kernel "
+                                "offers it): kill path ran {!r}".format(paths_taken))
+        elif saved_killpg2 is not None and ("killpg",) not in paths_taken:
+            failures.append("_load_bound vector (the numeric fallback runs, while the leader is "
+                            "unreaped, where the kernel lacks the group flag): kill path ran {!r}"
+                            .format(paths_taken))
+
+        # A crafted ancestor table cannot redirect a signal: no stop stage selects victims from a
+        # process table (the removed table-driven kill did), so a _proc_table that names this live
+        # bystander as the stopped child's descendant must leave it unsignalled. A regression to
+        # table-driven victim selection kills the bystander here and turns this vector red.
+        table_bystander = subprocess.Popen(["sleep", "3600"])
+        spawned_pids = []
+        saved_popen_cls2 = subprocess.Popen
+
+        class RecordingPopen(saved_popen_cls2):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                spawned_pids.append(self.pid)
+
+        saved_proc_table = _proc_table
+
+        def crafted_table(limit_s=None, names=None, clock=None, opener=None):
+            table, complete = saved_proc_table(limit_s, names, clock, opener)
+            if table is not None and spawned_pids:
+                table = dict(table)
+                table[table_bystander.pid] = (spawned_pids[-1], 0, 0)  # the lie: "a descendant"
+            return table, complete
+        subprocess.Popen = RecordingPopen
+        globals()["_proc_table"] = crafted_table
+        try:
+            bounded("a crafted ancestor table cannot redirect a signal at a bystander",
+                    "import time\ntime.sleep(3600)\n", "hung: stall", 25,
+                    budget_s=3600, stall_s=1.5, poll_s=0.2)
+            table_survived = table_bystander.poll()
+        finally:
+            subprocess.Popen = saved_popen_cls2
+            globals()["_proc_table"] = saved_proc_table
+            table_bystander.kill()
+            try:
+                table_bystander.wait(timeout=REAP_S)
+            except subprocess.TimeoutExpired:
+                pass
+        if table_survived is not None:
+            failures.append("_load_bound vector (a crafted ancestor table cannot redirect a "
+                            "signal): the bystander was signalled (poll {!r})"
+                            .format(table_survived))
+
+        # The pidfd group kill stays exact AFTER Popen has reaped the leader: a child that spawns
+        # a group member on devnull, prints an undecodable byte and exits 0 is reaped by
+        # communicate before the strict decode fails, so the stop runs with the leader's status
+        # already read; where the kernel offers the group flag the member must still die with the
+        # group (through the leader's own pid record, which its reap does not free).
+        reap_code = ("import subprocess, sys\n"
+                     "subprocess.Popen([sys.executable, \"-I\", \"-c\","
+                     " \"import time; time.sleep(3600)\", sys.argv[1]],"
+                     " stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+                     "sys.stdout.buffer.write(bytes([255]))\nsys.exit(0)\n")
+        if _group_signal_supported():
+            reaped_member = "load-bound-reaped-member-{}".format(os.getpid())
+            try:
+                run([python, "-I", "-B", "-c", reap_code, reaped_member], budget_s=60, stall_s=60,
+                    text=True)
+                got = "returned"
+            except Hung as exc:
+                got = (exc.kind, exc.returncode, exc.output)
+            except Exception as exc:  # noqa: BLE001  any escape is this vector failing
+                got = "{}: {}".format(type(exc).__name__, exc)
+            left = _alive_with(reaped_member)
+            for _ in range(50):  # a SIGKILLed member can take a moment to leave the process table
+                if not left:
+                    break
+                time.sleep(0.1)
+                left = _alive_with(reaped_member)
+            for pid in left:
+                _kill_pid(pid)
+            if got != ("monitor", 0, "\ufffd") or left:
+                failures.append("_load_bound vector (the pidfd group kill is exact after the "
+                                "leader reap): expected (monitor, 0, the replacement character) "
+                                "and no group member left, got {!r}, left alive {!r}"
+                                .format(got, left))
+        # Without the group flag the same stop after a reap signals NOTHING by number: the member
+        # SURVIVES, the disclosed fail-closed residual, and the Hung reason says so. Forced with a
+        # flag no kernel accepts, so this leg runs on every kernel.
+        residual_member = "load-bound-residual-member-{}".format(os.getpid())
+        saved_flag2 = PIDFD_SIGNAL_PROCESS_GROUP
         globals()["PIDFD_SIGNAL_PROCESS_GROUP"] = 1 << 30
         try:
-            bounded("the killpg fallback kills the group while the leader is unreaped",
-                    descendant_code, "hung: stall", 25, budget_s=3600, stall_s=1.5, poll_s=0.2)
+            try:
+                run([python, "-I", "-B", "-c", reap_code, residual_member], budget_s=60, stall_s=60,
+                    text=True)
+                got = "returned"
+            except Hung as exc:
+                got = (exc.kind, exc.returncode,
+                       "a descendant still in that group survives the stop" in exc.reason)
+            except Exception as exc:  # noqa: BLE001  any escape is this vector failing
+                got = "{}: {}".format(type(exc).__name__, exc)
         finally:
-            globals()["PIDFD_SIGNAL_PROCESS_GROUP"] = saved_flag
+            globals()["PIDFD_SIGNAL_PROCESS_GROUP"] = saved_flag2
+        survivors = _alive_with(residual_member)
+        for pid in survivors:
+            _kill_pid(pid)
+        if got != ("monitor", 0, True) or not survivors:
+            failures.append("_load_bound vector (after a reaped leader without the group flag, "
+                            "the member survives as the disclosed residual and the reason says "
+                            "so): got {!r}, survivors {!r}".format(got, survivors))
+
+    # An outer stop of THIS process reaches the child: the spawn arms a parent-death signal, so a
+    # child whose parent is killed from outside (GNU timeout's group signal here, or a plain
+    # SIGTERM of the parent where no timeout binary exists) is SIGKILLed with it and never lives
+    # on to write its marker. Skipped without libc prctl: there the survival is the disclosed
+    # residual.
+    if _PRCTL is not None:
+        outer_dir = tempfile.mkdtemp(prefix="load-bound-vector-outer-")
+        try:
+            marker = os.path.join(outer_dir, "marker")
+            outer = os.path.join(outer_dir, "outer.py")
+            inner = ("import sys, time\ntime.sleep(6)\n"
+                     "open(sys.argv[1], \"w\").write(\"survived\")\n")
+            with open(outer, "w", encoding="utf-8") as handle:
+                handle.write("import sys\n"
+                             "sys.path.insert(0, sys.argv[1])\n"
+                             "import _load_bound\n"
+                             "_load_bound.run([sys.executable, \"-I\", \"-c\", " + repr(inner) +
+                             ", sys.argv[2], sys.argv[3]], budget_s=3600, stall_s=3600)\n")
+            libdir = os.path.dirname(os.path.abspath(__file__))
+            timeout_bin = shutil.which("timeout")
+            if timeout_bin is not None:
+                subprocess.run([timeout_bin, "2", python, "-I", "-B", outer, libdir, marker, token],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+            else:
+                outer_proc = subprocess.Popen([sys.executable, "-I", "-B", outer, libdir, marker,
+                                               token],
+                                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                time.sleep(2.0)
+                outer_proc.terminate()
+                outer_proc.wait(timeout=30)
+            has_proc = os.path.isdir("/proc")
+            wait_until = time.monotonic() + 8.0
+            while (time.monotonic() < wait_until and not os.path.exists(marker)
+                   and (not has_proc or _alive_with(token))):
+                time.sleep(0.25)
+            survivors = _alive_with(token)
+            for pid in survivors:
+                _kill_pid(pid)
+            if os.path.exists(marker) or survivors:
+                failures.append("_load_bound vector (an outer stop of the parent reaches the child "
+                                "through its parent-death signal): marker written {!r}, left alive "
+                                "{!r}".format(os.path.exists(marker), survivors))
+        finally:
+            shutil.rmtree(outer_dir)
 
     # A child that exits nonzero while a leaked descendant still holds its output keeps its exit status.
     if hasattr(os, "waitid") and tree_cpu_seconds(os.getpid()) is not None:
