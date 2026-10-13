@@ -575,6 +575,9 @@ _GIT_CASES = ("the git-level history, tag, release-order/id-history append-only,
               "tag-preservation cases over real repositories")
 _EVERY_CASE = "every self-test case"
 _SUPPRESS_VECTORS_ENV = "AIQT_SELFTEST_SUPPRESS_VECTORS"
+# ONE constant ties the git probe's exact argv to the git-less arm's launch match, so the arm
+# cannot silently drift off the probe and turn trivially green on hosts where git exists.
+_GIT_PROBE_ARGV = ("git", "--version")
 
 
 class _SetupAllocationError(OSError):
@@ -630,8 +633,11 @@ def _not_run_vectors(failures):
     any case runs), so a child runs this tool as __main__ --self-test with tempfile.mkdtemp
     raising OSError process-wide, before the scrub, and must exit 1 with the entry's whole-run
     NOT RUN line on stdout, never a bare traceback. Every child environment carries
-    _SUPPRESS_VECTORS_ENV, so a child never spawns children of its own; the last child proves
-    that suppression with a subprocess spy that fails it loudly on any launch."""
+    _SUPPRESS_VECTORS_ENV, so a child never spawns children of its own and never prints the
+    full PASS (the marked gate records a named NOT RUN failure). The spy child proves ONLY
+    that a marker-carrying child reaches its own named SELF-TEST FAIL without launching any
+    subprocess; its injections leave the git-level cases NOT RUN inside it, so it does not
+    prove those cases complete."""
     def _unavailable(*_args, **_kwargs):
         raise OSError("injected: unavailable")
 
@@ -656,7 +662,7 @@ def _not_run_vectors(failures):
     real_run = subprocess.run
 
     def _gitless_run(args, *more, **kw):
-        if list(args[:2]) == ["git", "--version"]:
+        if tuple(args[:len(_GIT_PROBE_ARGV)]) == _GIT_PROBE_ARGV:
             raise OSError("simulated: git absent")
         return real_run(args, *more, **kw)
 
@@ -714,8 +720,23 @@ def _not_run_vectors(failures):
                         "through the real --self-test entry, never a bare traceback (got exit "
                         "{})".format(want, proc.returncode))
 
-    # _SUPPRESS_VECTORS_ENV guard: a fresh child that carries the marker runs its cases but
-    # never spawns vector children of its own; the spy fails the child loudly on any launch.
+    # Inherited-marker guard: a FULL public-entry run that inherits _SUPPRESS_VECTORS_ENV (the
+    # scrub keeps it: it is not GIT_-prefixed) must record the named suppression NOT RUN and
+    # exit 1, never print the unchanged PASS over silently skipped vectors.
+    suppressed_want = ("NOT RUN: the red-on-revert NOT RUN and entry vectors: suppressed by "
+                       "{} (a vector child, never a full run)".format(_SUPPRESS_VECTORS_ENV))
+    proc = subprocess.run([sys.executable, "-I", "-B", tool, "--self-test"],
+                          capture_output=True, text=True, env=entry_env)
+    if proc.returncode != 1 or suppressed_want not in proc.stdout:
+        failures.append("(vector inherited-marker) a full public-entry run inheriting {} must "
+                        "exit 1 AND record {!r}, never the unchanged PASS over silently skipped "
+                        "vectors (got exit {})".format(
+                            _SUPPRESS_VECTORS_ENV, suppressed_want, proc.returncode))
+
+    # _SUPPRESS_VECTORS_ENV guard: the spy child proves ONLY that a marker-carrying child
+    # reaches its own named SELF-TEST FAIL without launching any subprocess (subprocess.run is
+    # replaced); its denied probe and mkdtemp leave the git-level cases NOT RUN inside it, so
+    # it does not prove those cases complete.
     spy = ("import importlib.util, subprocess, sys\n"
            "spec = importlib.util.spec_from_file_location("
            "'aiqt_monotonicity_vector_child', sys.argv[1])\n"
@@ -888,7 +909,7 @@ def self_test_main(_git_probe=None, _mkdtemp=None, _vectors=True):
     git_why = "the git probe exited nonzero"
     try:
         probe_rc = _git_probe() if _git_probe is not None else subprocess.run(
-            ["git", "--version"], capture_output=True, text=True).returncode
+            list(_GIT_PROBE_ARGV), capture_output=True, text=True).returncode
         if probe_rc != 0:
             git_ok = False
     except OSError as exc:
@@ -1189,7 +1210,14 @@ def self_test_main(_git_probe=None, _mkdtemp=None, _vectors=True):
         finally:
             shutil.rmtree(base_tmp, ignore_errors=True)
 
-    if _vectors and os.environ.get(_SUPPRESS_VECTORS_ENV) != "1":
+    if _vectors and os.environ.get(_SUPPRESS_VECTORS_ENV) == "1":
+        # An inherited marker must never skip the vectors silently: record ONE named NOT RUN
+        # failure so a marked run exits 1 (a vector child carries the marker and expects its own
+        # injected failure; only an unmarked full run may print the unchanged PASS).
+        _not_run(failures, "the red-on-revert NOT RUN and entry vectors",
+                 "suppressed by {} (a vector child, never a full run)".format(
+                     _SUPPRESS_VECTORS_ENV))
+    elif _vectors:
         # A fresh-process vector child carries _SUPPRESS_VECTORS_ENV, so a child whose injected
         # setup failure ever stopped failing still could not spawn children of its own.
         _not_run_vectors(failures)

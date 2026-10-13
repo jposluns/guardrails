@@ -893,8 +893,11 @@ def _not_run_vectors(failures):
     tool as __main__ --self-test with the failure injected BEFORE the scrub or the lifecycle can
     run, and must exit 1 with the entry's whole-run NOT RUN line on stdout, never a bare
     traceback. Every child environment carries _SUPPRESS_VECTORS_ENV, so a child never spawns
-    children of its own; the last child proves that suppression with a subprocess spy that fails
-    it loudly on any launch."""
+    children of its own and never prints the full PASS (the marked gate records a named NOT RUN
+    failure). The spy child proves ONLY that a marker-carrying child reaches its own named
+    SELF-TEST FAIL without launching any subprocess; its injections leave the end-to-end,
+    disk-kind and real-git groups NOT RUN inside it, so it does not prove those groups
+    complete."""
     import io
     import pathlib
     import shutil
@@ -963,6 +966,8 @@ def _not_run_vectors(failures):
 
     # Entry positive: an OSError scoped to the lifecycle's wrapper-directory allocation is the
     # named whole-run NOT RUN failure (the typed marker binds the handler at the allocation).
+    # An OSError that ESCAPES the nested entry instead (the allocation marking removed) is this
+    # vector's own NAMED failure, never an abort of the whole self-test.
     real_entry_mkdtemp = tempfile.mkdtemp
 
     def _lifecycle_alloc_unavailable(*args, **kwargs):
@@ -972,17 +977,22 @@ def _not_run_vectors(failures):
 
     tempfile.mkdtemp = _lifecycle_alloc_unavailable
     out = io.StringIO()
+    rc, escaped = None, None
     try:
         with redirect_stdout(out), redirect_stderr(io.StringIO()):
-            rc = self_test_main()
+            rc = _nested_entry_no_vectors()
+    except OSError as exc:
+        escaped = exc
     finally:
         tempfile.mkdtemp = real_entry_mkdtemp
     want = "NOT RUN: {}: fixture setup failed: no writable temp directory".format(_EVERY_CASE)
     if rc != 1 or want not in out.getvalue():
+        got = ("an escaped {}: {}".format(type(escaped).__name__, escaped)
+               if escaped is not None else "exit {}".format(rc))
         failures.append("(entry vector lifecycle-allocation) an OSError scoped to the "
                         "lifecycle's wrapper-directory allocation must be the whole-run NOT RUN "
-                        "failure {!r} (exit 1), never a traceback or a smaller scope (got exit "
-                        "{})".format(want, rc))
+                        "failure {!r} (exit 1), never a traceback or a smaller scope (got "
+                        "{})".format(want, got))
 
     # Entry negatives: a PermissionError injected at the lifecycle wrapper's write_text or at
     # its chmod is NOT an allocation failure and must PROPAGATE (red when the entry catches
@@ -1000,7 +1010,7 @@ def _not_run_vectors(failures):
         propagated = False
         try:
             with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-                self_test_main()
+                _nested_entry_no_vectors()
         except PermissionError as exc:
             propagated = denial in str(exc)
         finally:
@@ -1028,7 +1038,7 @@ def _not_run_vectors(failures):
         propagated = False
         try:
             with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-                self_test_main()
+                _nested_entry_no_vectors()
         except (OSError, RuntimeError) as exc:
             propagated = "injected: post-entry failure" in str(exc)
         finally:
@@ -1047,7 +1057,7 @@ def _not_run_vectors(failures):
     propagated = False
     try:
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-            self_test_main()
+            _nested_entry_no_vectors()
     except RuntimeError as exc:
         propagated = "injected: unrelated pre-entry failure" in str(exc)
     finally:
@@ -1095,9 +1105,23 @@ def _not_run_vectors(failures):
                             "--self-test entry, never a bare traceback (got exit {})".format(
                                 label, want, proc.returncode))
 
-    # _SUPPRESS_VECTORS_ENV guard: a fresh child that carries the marker runs its cases but
-    # never spawns vector children of its own; the spy fails the child loudly on any launch its
-    # vectors would make.
+    # Inherited-marker guard: a FULL public-entry run that inherits _SUPPRESS_VECTORS_ENV (the
+    # scrub keeps it: it is not GIT_-prefixed) must record the named suppression NOT RUN and
+    # exit 1, never print the unchanged PASS over silently skipped vectors.
+    suppressed_want = ("NOT RUN: the red-on-revert NOT RUN and entry vectors: suppressed by "
+                       "{} (a vector child, never a full run)".format(_SUPPRESS_VECTORS_ENV))
+    proc = subprocess.run([sys.executable, "-I", "-B", tool, "--self-test"],
+                          capture_output=True, text=True, env=entry_env)
+    if proc.returncode != 1 or suppressed_want not in proc.stdout:
+        failures.append("(vector inherited-marker) a full public-entry run inheriting {} must "
+                        "exit 1 AND record {!r}, never the unchanged PASS over silently skipped "
+                        "vectors (got exit {})".format(
+                            _SUPPRESS_VECTORS_ENV, suppressed_want, proc.returncode))
+
+    # _SUPPRESS_VECTORS_ENV guard: the spy child proves ONLY that a marker-carrying child
+    # reaches its own named SELF-TEST FAIL without launching any subprocess (subprocess.run is
+    # replaced); its denied mkdtemp and absent git leave the end-to-end, disk-kind and real-git
+    # groups NOT RUN inside it, so it does not prove those groups complete.
     spy = ("import importlib.util, subprocess, sys\n"
            "spec = importlib.util.spec_from_file_location("
            "'aiqt_portability_vector_child', sys.argv[1])\n"
@@ -1119,8 +1143,49 @@ def _not_run_vectors(failures):
                         "own named SELF-TEST FAIL without spawning vector children (got exit {}, "
                         "spawned: {})".format(_SUPPRESS_VECTORS_ENV, proc.returncode, spawned))
 
+    # Nested no-vectors guard: every in-process nested public entry above goes through
+    # _nested_entry_no_vectors, whose EXPLICIT no-vectors argument (never the environment) is
+    # what keeps a DRIFTED injection (its scoping no longer matching anything) from recursing
+    # into vectors of its own. The probe drifts on purpose (its injection can never match), so
+    # the nested entry must COMPLETE with exit 0, which the calling vector's predicate turns
+    # into its NAMED failure; the child is bounded by a timeout so a recursing revert is a
+    # named failure here, never a hang.
+    drift = ("import importlib.util, io, sys, tempfile\n"
+             "from contextlib import redirect_stderr, redirect_stdout\n"
+             "spec = importlib.util.spec_from_file_location("
+             "'aiqt_portability_drift_probe', sys.argv[1])\n"
+             "mod = importlib.util.module_from_spec(spec)\n"
+             "sys.modules[spec.name] = mod\n"
+             "spec.loader.exec_module(mod)\n"
+             "real_mkdtemp = tempfile.mkdtemp\n"
+             "def _drifted(*args, **kwargs):\n"
+             "    vals = [str(v) for v in args] + [str(v) for v in kwargs.values()]\n"
+             "    if any('aiqt-fixture-git-bin-DRIFTED-' in v for v in vals):\n"
+             "        raise OSError('injected: unavailable')\n"
+             "    return real_mkdtemp(*args, **kwargs)\n"
+             "tempfile.mkdtemp = _drifted\n"
+             "out = io.StringIO()\n"
+             "with redirect_stdout(out), redirect_stderr(io.StringIO()):\n"
+             "    rc = mod._nested_entry_no_vectors()\n"
+             "named = rc != 1 or 'fixture setup failed' not in out.getvalue()\n"
+             "print('DRIFT-PROBE rc={} named={}'.format(rc, named))\n"
+             "sys.exit(0 if rc == 0 and named else 1)\n")
+    try:
+        proc = subprocess.run([sys.executable, "-I", "-B", "-c", drift, tool],
+                              capture_output=True, text=True, env=entry_env, timeout=120)
+        got = "exit {} ({})".format(proc.returncode, proc.stdout.strip() or "no probe line")
+        drift_ok = proc.returncode == 0
+    except subprocess.TimeoutExpired:
+        got = "a timeout: the nested entry recursed instead of completing"
+        drift_ok = False
+    if not drift_ok:
+        failures.append("(vector drifted-injection) a DRIFTED lifecycle-allocation injection "
+                        "must let the no-vectors nested entry COMPLETE (exit 0) so the calling "
+                        "vector fails NAMED, never recurse into vectors of its own (got "
+                        "{})".format(got))
 
-def self_test_main():
+
+def self_test_main(_vectors=True):
     """The public --self-test entry. A dependency the SETUP itself needs is reported as ONE named
     NOT RUN failure covering the whole run (exit 1; nothing ran, so no smaller case group may be
     named as the only thing skipped), never a bare traceback: fixture_git_lifecycle raises
@@ -1139,7 +1204,7 @@ def self_test_main():
         with fixture_git_lifecycle():
             restore_mkdtemp()
             entered = True
-            return _self_test_main_isolated()
+            return _self_test_main_isolated(_vectors=_vectors)
     except RuntimeError as exc:
         if entered or "self-test requires git" not in str(exc):
             raise
@@ -1156,6 +1221,15 @@ def self_test_main():
     for failure in failures:
         print("  - " + failure)
     return 1
+
+
+def _nested_entry_no_vectors():
+    """Every IN-PROCESS nested public-entry call in _not_run_vectors goes through this seam:
+    the EXPLICIT no-vectors argument (never the environment, which the in-process nesting
+    shares with this run) is what keeps a nested entry whose injection's scoping has DRIFTED
+    from recursing into vectors of its own; the drifted-injection vector calls this seam
+    directly."""
+    return self_test_main(_vectors=False)
 
 
 def _self_test_main_isolated(_mkdtemp=None, _symlink=None, _which=None, _vectors=True):
@@ -1869,7 +1943,14 @@ def _self_test_main_isolated(_mkdtemp=None, _symlink=None, _which=None, _vectors
         finally:
             shutil.rmtree(base_tmp, ignore_errors=True)
 
-    if _vectors and os.environ.get(_SUPPRESS_VECTORS_ENV) != "1":
+    if _vectors and os.environ.get(_SUPPRESS_VECTORS_ENV) == "1":
+        # An inherited marker must never skip the vectors silently: record ONE named NOT RUN
+        # failure so a marked run exits 1 (a vector child carries the marker and expects its own
+        # injected failure; only an unmarked full run may print the unchanged PASS).
+        _not_run(failures, "the red-on-revert NOT RUN and entry vectors",
+                 "suppressed by {} (a vector child, never a full run)".format(
+                     _SUPPRESS_VECTORS_ENV))
+    elif _vectors:
         # A fresh-process vector child carries _SUPPRESS_VECTORS_ENV, so a child whose injected
         # setup failure ever stopped failing still could not spawn children of its own.
         _not_run_vectors(failures)
