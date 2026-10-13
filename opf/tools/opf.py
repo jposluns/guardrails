@@ -1074,27 +1074,53 @@ def _self_test_floor_probe(registry, directory, elsewhere):
 # *.py module here with each refused form and judges only its behaviour, is the authority.
 _DISPATCH_LIBRARY = (("--self-test",),)
 _DISPATCH_LIVE = ((), ("--self-test",))
-_DISPATCH_FORMS = dict(
-    {name: _DISPATCH_LIBRARY for name in (
-        "_child_contract.py",
-        "_journal.py", "_opf_adopt.py", "_opf_adopt_apply.py", "_opf_adopt_hook.py", "_opf_adopt_plan.py",
-        "_opf_check.py", "_opf_emit.py", "_opf_fuzz.py", "_opf_init.py",
-        "_opf_init_contract.py", "_opf_init_operation.py", "_opf_init_substrate.py", "_opf_observe.py",
-        "_opf_oplock.py", "_opf_record.py", "_opf_release.py", "_opf_schema.py", "_opf_store.py",
-        "_opf_worklog.py", "_opf_worklog_regressions.py", "check_opf_init_qa.py",
-        "selftest_commonmark_headings.py", "opf.py")},
-    **{name: _DISPATCH_LIVE for name in (
-        "check_opf_doctor.py", "check_opf_drift.py", "check_opf_homes.py", "check_opf_init.py",
-        "check_opf_init_contract.py", "check_opf_prompt_pack.py", "check_opf_upgrade.py")},
-    **{"_opf_views.py": ((), ("--check",)), "_opf_absorb.py": ((), ("--freeze-digest",)),
-       "_opf_changelog.py": ((),)},
-    **{"selftest_commonmark_conformance.py": ((), ("--interpreters", "python3"))},
-    **{"_opf_adopt_observe.py": (("--self-test",), ("--self-test", "--vectors-only")),
-       "_opf_pack_manifest.py": (("--self-test",), ("--self-test", "--vectors-only")),
-       "check_opf_init_observe.py": (("--self-test",), ("--self-test", "--red-on-revert")),
-       "check_opf_record.py": (("--self-test",), ("--self-test", "--red-on-revert")),
-       "check_opf_init_p0.py": (("--self-test",), ("--self-test", "--red-on-revert"),
-                                ("--self-test", "--vectors-only"))})
+# This table is one dict display with literal keys: the dispatch scan's
+# file-suffix carve-out holds only for a string constant whose every
+# enclosing node up to the module is a container display of a
+# module-level assignment, so a dict(...) call or a comprehension here
+# would read "opf.py" as a module route.
+_DISPATCH_FORMS = {
+    "_child_contract.py": _DISPATCH_LIBRARY,
+    "_journal.py": _DISPATCH_LIBRARY,
+    "_opf_adopt.py": _DISPATCH_LIBRARY,
+    "_opf_adopt_apply.py": _DISPATCH_LIBRARY,
+    "_opf_adopt_hook.py": _DISPATCH_LIBRARY,
+    "_opf_adopt_plan.py": _DISPATCH_LIBRARY,
+    "_opf_check.py": _DISPATCH_LIBRARY,
+    "_opf_emit.py": _DISPATCH_LIBRARY,
+    "_opf_fuzz.py": _DISPATCH_LIBRARY,
+    "_opf_init.py": _DISPATCH_LIBRARY,
+    "_opf_init_contract.py": _DISPATCH_LIBRARY,
+    "_opf_init_operation.py": _DISPATCH_LIBRARY,
+    "_opf_init_substrate.py": _DISPATCH_LIBRARY,
+    "_opf_observe.py": _DISPATCH_LIBRARY,
+    "_opf_oplock.py": _DISPATCH_LIBRARY,
+    "_opf_record.py": _DISPATCH_LIBRARY,
+    "_opf_release.py": _DISPATCH_LIBRARY,
+    "_opf_schema.py": _DISPATCH_LIBRARY,
+    "_opf_store.py": _DISPATCH_LIBRARY,
+    "_opf_worklog.py": _DISPATCH_LIBRARY,
+    "_opf_worklog_regressions.py": _DISPATCH_LIBRARY,
+    "check_opf_init_qa.py": _DISPATCH_LIBRARY,
+    "selftest_commonmark_headings.py": _DISPATCH_LIBRARY,
+    "opf.py": _DISPATCH_LIBRARY,
+    "check_opf_doctor.py": _DISPATCH_LIVE,
+    "check_opf_drift.py": _DISPATCH_LIVE,
+    "check_opf_homes.py": _DISPATCH_LIVE,
+    "check_opf_init.py": _DISPATCH_LIVE,
+    "check_opf_init_contract.py": _DISPATCH_LIVE,
+    "check_opf_prompt_pack.py": _DISPATCH_LIVE,
+    "check_opf_upgrade.py": _DISPATCH_LIVE,
+    "_opf_views.py": ((), ("--check",)),
+    "_opf_absorb.py": ((), ("--freeze-digest",)),
+    "_opf_changelog.py": ((),),
+    "selftest_commonmark_conformance.py": ((), ("--interpreters", "python3")),
+    "_opf_adopt_observe.py": (("--self-test",), ("--self-test", "--vectors-only")),
+    "_opf_pack_manifest.py": (("--self-test",), ("--self-test", "--vectors-only")),
+    "check_opf_init_observe.py": (("--self-test",), ("--self-test", "--red-on-revert")),
+    "check_opf_record.py": (("--self-test",), ("--self-test", "--red-on-revert")),
+    "check_opf_init_p0.py": (("--self-test",),
+                             ("--self-test", "--red-on-revert"), ("--self-test", "--vectors-only"))}
 # Declared forms no runner calls, each with its reason. The exact `--self-test` needs no entry: the entry scan
 # requires it of every module that binds self_test, and this host runs most of those suites in process.
 _DISPATCH_UNRUN = {
@@ -5655,7 +5681,11 @@ _WATCHDOG_MODULE_ROUTES = _WATCHDOG_MODULE_NAMES + (
     "PyEval_GetGlobals", "PyEval_GetFrameGlobals")
 _WATCHDOG_MODULE_ROUTE_PREFIXES = ("PyImport_",)
 # The spellings a fixture launch source may not hold at all, besides the
-# module routes: code compiled from a string (exec, eval, compile) and the
+# module routes: the string-compiling spellings exec, eval and compile
+# (those three spellings only, not string-compiled reach in general: a
+# helper that compiles a string itself, such as timeit, code's
+# InteractiveInterpreter, pdb.run, cProfile.run or a subprocess running
+# python -c, is a residual the inventory docstring names for review) and the
 # namespaces and heap from which a function can be read without its name
 # being written (vars, globals, locals, gc, __dict__).
 # _watchdog_launched_functions refuses each anywhere in a launch source, and
@@ -5665,12 +5695,15 @@ _WATCHDOG_MODULE_ROUTE_PREFIXES = ("PyImport_",)
 _WATCHDOG_LAUNCH_INTROSPECTION = ("exec", "eval", "compile", "vars", "globals", "locals", "gc",
                                   "__dict__")
 # A dotted string whose last part is one of these suffixes names a file
-# ("opf.py") in a top-level table of file names, so where no def, async def,
-# class or lambda encloses it at any depth its module-name parts are not read
-# as routes. This is decided for each string by its own chain of enclosing
-# nodes: under a def, class or lambda, one nested in a top-level if, try,
-# with, for or while included, they are read, since there patch("opf.py",
-# create=True) targets this module's attribute py and so holds this module.
+# ("opf.py") written as a literal in a top-level data table, so there its
+# module-name parts are not read as routes. The carve-out holds ONLY for a
+# string constant whose every enclosing node up to the module is a Tuple,
+# List, Set or Dict display or a module-level Assign or AnnAssign
+# statement: this is decided for each string by its own chain of enclosing
+# nodes, and under any call, comprehension, generator expression, type
+# alias, compound statement, def, async def, class or lambda the parts are
+# read, since there patch("opf.py", create=True) can target this module's
+# attribute py and so hold this module.
 _WATCHDOG_FILE_SUFFIXES = ("py", "pyc", "pyi", "pyw")
 # The functions through which a scanned case may read the module table, each
 # with its reason: a gate's own def is exempt from the module-route reach seed
@@ -5872,9 +5905,11 @@ def _watchdog_dispatch_faults(budgets, module=None, cases=None, scanned=None):
     level, by its def, is a fault, and so is a case or gate def that carries a
     decorator (the function a call runs need not be the def the scan reads,
     and a decorator can map one mode to another), an attribute of a case or
-    gate assigned or deleted anywhere in `module` (its __code__,
-    __defaults__, __kwdefaults__, __wrapped__ or any other, directly or
-    through an item of one, for the same reason), and a case def whose first
+    gate assigned or deleted by a store or delete written on the case or
+    gate name itself, anywhere in `module` (its __code__, __defaults__,
+    __kwdefaults__, __wrapped__ or any other, directly or through an item
+    of one, for the same reason; residual (e) names the store roots the
+    scan does not see), and a case def whose first
     positional parameter is not mode or has a default (the scan prices a call
     by its first argument, and a default or an earlier parameter lets the mode
     that runs differ from it). With `cases` (every module function a
@@ -5907,14 +5942,20 @@ def _watchdog_dispatch_faults(budgets, module=None, cases=None, scanned=None):
     (e) through a rebinding made at run time by code outside the case bodies
     (a global statement, setattr, delattr or patch.object, in this module or
     another; only an attribute or item store or delete written on a case or
-    gate name is refused); (f) through
+    gate name is refused, so a store rooted elsewhere, through an alias
+    bound to the case, a walrus, a conditional expression or a globals()
+    item, is not seen); (f) through
     a module gate's body: a gate def is exempt from the route seed, so what
     it returns or holds is checked against its stated reason by review, not
     by this scan; or (g) through any route, binding form or
     library helper the lists above do not name, or through a file-suffixed
-    name of this module ("opf.py") written where no def, class or lambda
-    encloses it (a top-level data table) that a case hands to patch(...,
-    create=True). Each of (a) to (g) is open to
+    name of this module ("opf.py") written as a literal in a top-level data
+    table (a string constant whose every enclosing node up to the module is
+    a Tuple, List, Set or Dict display or a module-level Assign or AnnAssign
+    statement; under any call, comprehension, generator expression, type
+    alias, compound statement, def, async def, class or lambda the carve-out
+    does not hold) that a case hands to patch(..., create=True). Each of (a)
+    to (g) is open to
     code written to reach a case unseen: deliberate evasion of a static scan
     is the residual this guard leaves to review. Returns the faults."""
     import ast
@@ -5934,8 +5975,10 @@ def _watchdog_dispatch_faults(budgets, module=None, cases=None, scanned=None):
         # Every identifier a node spells, from all of its fields: no
         # identifier-bearing field is skipped. A string spells its value and,
         # as a dotted or colon-joined path, each part, its module-name parts
-        # excepted only when `filed` (no def, async def, class or lambda
-        # encloses the node) and the path ends in a file suffix ("opf.py").
+        # excepted only when `filed` (every enclosing node up to the module
+        # is a Tuple, List, Set or Dict display or a module-level Assign or
+        # AnnAssign statement, the top-level data table) and the path ends
+        # in a file suffix ("opf.py").
         if isinstance(node, ast.Constant):
             if not isinstance(node.value, str):
                 return set()
@@ -6002,16 +6045,21 @@ def _watchdog_dispatch_faults(budgets, module=None, cases=None, scanned=None):
     # capture or declaration inside a compound statement) and every name its
     # statement spells, with the route seed when it spells a module route and
     # is not a gate's own def. In the walk of each statement a node is
-    # `filed` while no def, class or lambda encloses it, and an attribute or
-    # item stored or deleted on a case or gate name is a fault.
+    # `filed` only while every node above it is a Tuple, List, Set or Dict
+    # display of a module-level Assign or AnnAssign statement (a def, async
+    # def, class, lambda, call, comprehension, generator expression, type
+    # alias or compound statement ends it), and an attribute or item stored
+    # or deleted on a case or gate name is a fault.
     defs = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+    tables = (ast.Assign, ast.AnnAssign)
+    displays = tables + (ast.Tuple, ast.List, ast.Set, ast.Dict)
     spells, bindings, altered = {}, {}, []
     for statement in tree.body:
         if isinstance(statement, defs):
             bound = [statement.name]
         else:
             bound = [name for node in ast.walk(statement) for name in binds(node)]
-        names, stack = set(), [(statement, True)]
+        names, stack = set(), [(statement, isinstance(statement, tables))]
         while stack:
             node, filed = stack.pop()
             names.update(spelled(node, filed))
@@ -6024,7 +6072,7 @@ def _watchdog_dispatch_faults(budgets, module=None, cases=None, scanned=None):
                     altered.append("%s: line %d assigns or deletes %s, so a call need not run "
                                    "the def the scan reads; a case or gate is not altered "
                                    "after its def" % (root.id, node.lineno, ast.unparse(node)))
-            filed = filed and not isinstance(node, defs + (ast.Lambda,))
+            filed = filed and isinstance(node, displays)
             stack.extend((child, filed) for child in ast.iter_child_nodes(node))
         if routed(names) and not (isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
                                   and statement.name in gates):
@@ -6192,10 +6240,15 @@ def _watchdog_launched_functions(sources, module_name="opf"):
     way to reach a function. What remains outside it is a module or
     function reached through a name computed at run time (assembled, decoded
     or read from elsewhere), through a route or helper the lists do not
-    hold, by predicate selection over objects (an object picked by its type
-    or by an attribute it holds, not by a written name), and by key through
-    an exempt helper such as _self_tests (dict(opf._self_tests())[key] runs
-    whatever that table holds under the key). Returns (names, faults)."""
+    hold (a helper that compiles a string itself included: timeit, code's
+    InteractiveInterpreter, pdb.run, cProfile.run, a subprocess running
+    python -c), a store made through a helper the lists do not hold
+    (functools.update_wrapper, operator.setitem, a dict method called on a
+    function's __kwdefaults__), by predicate selection over objects (an
+    object picked by its type or by an attribute it holds, not by a written
+    name), and by key through an exempt helper such as _self_tests
+    (dict(opf._self_tests())[key] runs whatever that table holds under the
+    key). Returns (names, faults)."""
     import ast
     import re
     routes = set(_WATCHDOG_MODULE_ROUTES) | set([module_name])
@@ -20965,7 +21018,8 @@ def _watchdog_regression_self_test():
     # fixture's code (the entries, the ledger vectors and blocked-isolation
     # alike), and the dispatch scan reconciled against that set: a source the
     # inventory cannot read, or one that reaches the module other than by
-    # `import opf` and attribute reads, is a fault, never a smaller set.
+    # `import opf` with attribute reads or by `from opf import <name>`, is a
+    # fault, never a smaller set.
     launch_sources = [(label, code) for label, code, _timeout in cases]
 
     def reconciled(sources):
@@ -21051,7 +21105,23 @@ def _watchdog_regression_self_test():
         hidden_patch=("        found = _watchdog_hidden_patch()\n"
                       "        found.start()\n"
                       "        return getattr(found.target, " + computed
-                      + ")(\"no-signal-echild\")\n"))
+                      + ")(\"no-signal-echild\")\n"),
+        table_patch=("        found = _watchdog_hidden_patcher\n"
+                     "        found.start()\n"
+                     "        return getattr(found.target, " + computed
+                     + ")(\"no-signal-echild\")\n"),
+        gen_patch=("        found = next(_watchdog_hidden_gens)\n"
+                   "        found.start()\n"
+                   "        return getattr(found.target, " + computed
+                   + ")(\"no-signal-echild\")\n"),
+        list_patch=("        found = _watchdog_hidden_list[0]\n"
+                    "        found.start()\n"
+                    "        return getattr(found.target, " + computed
+                    + ")(\"no-signal-echild\")\n"),
+        alias_patch=("        found = _watchdog_hidden_alias.__value__\n"
+                     "        found.start()\n"
+                     "        return getattr(found.target, " + computed
+                     + ")(\"no-signal-echild\")\n"))
     helper_def = ("\n\ndef _watchdog_hidden_dispatch():\n"
                   "    return _watchdog_completion_case(\"no-signal-echild\")\n")
     module_helper_def = ("\n\ndef _watchdog_hidden_module():\n"
@@ -21075,6 +21145,27 @@ def _watchdog_regression_self_test():
         lambda_form=("\n\nfrom unittest.mock import patch as _watchdog_hidden_mock\n"
                      "_watchdog_hidden_patch = lambda: _watchdog_hidden_mock(\n"
                      "    \"opf.py\", create=True)\n"))
+    # The same target made with no def at all: a top-level patch(...) call,
+    # the same call under if True:, a generator expression, a list
+    # comprehension and a type alias are not data tables (their strings are
+    # not literals whose every enclosing node is a container display of a
+    # module-level assignment), so the carve-out must not reach the string
+    # inside any of them.
+    patch_import = "\n\nfrom unittest.mock import patch as _watchdog_hidden_mock\n"
+    patch_table_defs = dict(
+        top_call=(patch_import
+                  + "_watchdog_hidden_patcher = _watchdog_hidden_mock(\n"
+                  "    \"opf.py\", create=True)\n"),
+        under_if=(patch_import + "if True:\n"
+                  "    _watchdog_hidden_patcher = _watchdog_hidden_mock(\n"
+                  "        \"opf.py\", create=True)\n"),
+        generator=(patch_import + "_watchdog_hidden_gens = (\n"
+                   "    _watchdog_hidden_mock(\"opf.py\", create=True) for _ in (0,))\n"),
+        list_comp=(patch_import + "_watchdog_hidden_list = [\n"
+                   "    _watchdog_hidden_mock(\"opf.py\", create=True) for _ in (0,)]\n"),
+        type_alias=(patch_import
+                    + "type _watchdog_hidden_alias = _watchdog_hidden_mock(\n"
+                    "    \"opf.py\", create=True)\n"))
     # A decorator mapping audit-ignore to no-signal-echild: the scan would
     # price the call by the mode it names, not the mode that runs.
     case_def = "def _watchdog_completion_case(mode):\n"
@@ -21154,6 +21245,21 @@ def _watchdog_regression_self_test():
             ("file-suffixed patch target in a top-level lambda helper", budgets,
              hidden("hidden_patch", patch_helper_defs["lambda_form"]), launched_cases,
              "spells _watchdog_hidden_patch, which can reach a case function"),
+            ("file-suffixed patch target in a top-level patch call", budgets,
+             hidden("table_patch", patch_table_defs["top_call"]), launched_cases,
+             "spells _watchdog_hidden_patcher, which can reach a case function"),
+            ("file-suffixed patch target in a top-level call under if True", budgets,
+             hidden("table_patch", patch_table_defs["under_if"]), launched_cases,
+             "spells _watchdog_hidden_patcher, which can reach a case function"),
+            ("file-suffixed patch target in a top-level generator expression", budgets,
+             hidden("gen_patch", patch_table_defs["generator"]), launched_cases,
+             "spells _watchdog_hidden_gens, which can reach a case function"),
+            ("file-suffixed patch target in a top-level list comprehension", budgets,
+             hidden("list_patch", patch_table_defs["list_comp"]), launched_cases,
+             "spells _watchdog_hidden_list, which can reach a case function"),
+            ("file-suffixed patch target in a top-level type alias", budgets,
+             hidden("alias_patch", patch_table_defs["type_alias"]), launched_cases,
+             "spells _watchdog_hidden_alias, which can reach a case function"),
             ("case def carrying a decorator", budgets,
              module_source.replace(case_def, "@_watchdog_remap\n" + case_def) + remap_def,
              launched_cases, "_watchdog_completion_case: a case def carrying 1 decorator(s)"),
