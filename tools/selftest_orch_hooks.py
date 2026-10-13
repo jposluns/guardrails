@@ -5527,7 +5527,9 @@ def _main_isolated(report_path=None):
         check("stop-hook-active/true-yields-with-findings", _verdict(aiqt_hooks.orch_stop_guard(
             _sha.payload("Stop", extra={"stop_hook_active": True}))), "warn")
         _sha_rows, _sha_bad = aiqt_hooks._orch_read_jsonl(str(_sha_sd / "forced-exit.jsonl"))
-        check("stop-hook-active/forced-exit-recorded", [r.get("open_ids") for r in _sha_rows], [["SHA-1"]])
+        # the artefact must hold exactly the expected row and parse whole: a malformed row is a failure
+        check("stop-hook-active/forced-exit-recorded",
+              ([r.get("open_ids") for r in _sha_rows], _sha_bad), ([["SHA-1"]], 0))
 
         # ROUND 21, A FAILED GUARD-EVENTS APPEND ON A DENY IS WARNED ABOUT AND THE DENY HOLDS: with
         # guard-events.jsonl a directory (a real failed append, no patched seam), the shared Stop and

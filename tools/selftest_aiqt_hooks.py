@@ -771,9 +771,12 @@ def _ask_label_failures(source_path=None):
 
 
 # (stop-field-claim) The hooks reference (Stop input) documents stop_hook_active on the Stop and SubagentStop
-# payloads: true when Claude Code is already continuing as a result of a stop hook. These patterns match the
-# CLAIM that the field is absent or undocumented, not the word: "absent from the payload" or "omits the field"
-# describes a test scenario and passes; "no stop_hook_active" and "none is documented on Stop" are refused.
+# payloads: true when Claude Code is already continuing as a result of a stop hook. This is a BOUNDED
+# regression check for the absence phrasings this repository carried (including the "no documented loop
+# bound" wording the diff_wall_stop docstring once used), not a semantic claim detector: a phrasing outside
+# this list, or one with markup between the words, is residual and passes. A legitimate sentence that
+# matches (a test scenario such as "This test sends no stop_hook_active field.") is reported too, and is
+# admitted only by a path-scoped _STOP_FIELD_CLAIM_PENDING allowance for its own file.
 _STOP_FIELD_CLAIM_RES = tuple(re.compile(p, re.IGNORECASE) for p in (
     r"\bno\s+[`'\"]?stop_hook_active\b",
     r"\bnone\s+is\s+documented\s+on\s+(?:subagent)?stop\b",
@@ -781,6 +784,7 @@ _STOP_FIELD_CLAIM_RES = tuple(re.compile(p, re.IGNORECASE) for p in (
     r"\bstop_hook_active\b[^.;]{0,40}?\b(?:is|are)\s+(?:not|never)\s+(?:documented|sent|provided|present)\b",
     r"\bstop_hook_active\b[^.;]{0,30}?\bundocumented\b",
     r"\bundocumented\b[^.;]{0,30}?\bstop_hook_active\b",
+    r"\bno\s+documented\s+loop\s+bound\b",
 ))
 # The files that carry hook prose about the Stop payload: the hook sources, their manifests and docs, the
 # preview hooks, and the residue renderings generated from the manifest.
@@ -795,24 +799,53 @@ _STOP_FIELD_CLAIM_FILES = (
     "site/enforcement.html",
 )
 _STOP_FIELD_CLAIM_GLOBS = (".preview/*.py", ".preview/*.md")
-# A sentence another change is rewriting, tolerated verbatim until it lands (a (path, sentence) pair). Each
-# entry must still occur in its source file (the first path): once the rewrite lands the entry goes stale and
-# this check fails until it is removed, so the allowance cannot outlive the sentence. Empty today: the last
-# pending rewrite (the orch-stop-guard residue) landed with PR 473.
+# A sentence another change is rewriting, tolerated verbatim until it lands (a (path, sentence) pair). The
+# allowance removes the sentence only from its named path; an entry whose path is not scanned, or whose
+# sentence no longer occurs in that path, is a stale-allowance failure until the entry is removed, so the
+# allowance can neither outlive the sentence nor suppress the same sentence elsewhere. Empty today: the
+# last pending rewrite (the orch-stop-guard residue) landed with PR 473.
 _STOP_FIELD_CLAIM_PENDING = ()
 
 
 def _stop_field_claim_failures(root=None, pending=_STOP_FIELD_CLAIM_PENDING):
-    """(stop-field-claim) No hook source comment, docstring or residue claims that the Stop payload has no
-    stop_hook_active field (or that none is documented on Stop). Comment markers and line breaks are folded
-    to single spaces first, so a claim wrapped across comment lines is still seen. A missing file in the
-    fixed list is a failure (a renamed file must be renamed here too), and so is a pending allowance whose
-    sentence no longer occurs in its source file."""
+    """(stop-field-claim) A bounded regression check: no hook source comment, docstring or residue carries
+    one of the absence phrasings about stop_hook_active (or the "no documented loop bound" wording) that
+    this repository carried. It matches the fixed _STOP_FIELD_CLAIM_RES list, so other phrasings, or markup
+    between the words, are residual and pass; a finding reports the phrasing, not a proof about the payload.
+    Comment markers and line breaks are folded to single spaces first, so a phrasing wrapped across comment
+    lines is still seen. Coverage fails closed: a missing file in the fixed list, a glob that matches
+    nothing, a missing or unreadable .preview/SHA256SUMS inventory, or an inventory .py the scan did not
+    find is a recorded failure, never a clean result. A pending allowance is scoped to its named path: it
+    removes its sentence only there, and an allowance whose path is not scanned, or whose sentence is
+    absent from that path, is a stale-allowance failure."""
     base = Path(root) if root is not None else repo_root()
-    paths = [base / rel for rel in _STOP_FIELD_CLAIM_FILES]
-    for pattern in _STOP_FIELD_CLAIM_GLOBS:
-        paths.extend(sorted(base.glob(pattern)))
     out = []
+    paths = [base / rel for rel in _STOP_FIELD_CLAIM_FILES]
+    globbed = []
+    for pattern in _STOP_FIELD_CLAIM_GLOBS:
+        found = sorted(base.glob(pattern))
+        if not found:
+            out.append("(stop-field-claim-glob) the glob {} matched nothing under {}; missing preview "
+                       "coverage is a failure, not a clean result".format(pattern, base))
+        globbed.extend(found)
+    paths.extend(globbed)
+    # Reconcile the scanned preview hooks against the authoritative inventory: every .py named in
+    # .preview/SHA256SUMS must be found by the glob (hash agreement is check_hooks_preview's job).
+    try:
+        inventory = (base / ".preview" / "SHA256SUMS").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        out.append("(stop-field-claim-inventory) cannot read .preview/SHA256SUMS: {}; without the inventory "
+                   "the preview scan cannot be reconciled, so this is a failure".format(exc))
+    else:
+        scanned = {path.relative_to(base).as_posix() for path in globbed if path.suffix == ".py"}
+        for line in inventory.splitlines():
+            fields = line.split()
+            if not fields or fields[0].startswith("#") or len(fields) != 2 or not fields[1].endswith(".py"):
+                continue
+            rel = ".preview/" + fields[1]
+            if rel not in scanned:
+                out.append("(stop-field-claim-inventory-gap) {} is named in .preview/SHA256SUMS but the scan did "
+                           "not find it; a missing inventory entry is a failure".format(rel))
     folded = {}
     for path in paths:
         rel = path.relative_to(base).as_posix()
@@ -823,59 +856,141 @@ def _stop_field_claim_failures(root=None, pending=_STOP_FIELD_CLAIM_PENDING):
             continue
         folded[rel] = " ".join(re.sub(r"\n[ \t]*#+", " ", raw).split())
     for rel, sentence in pending:
-        if rel in folded and sentence not in folded[rel]:
+        if rel not in folded:
+            out.append("(stop-field-claim-pending-unscanned) the pending allowance for {} names a path this check does "
+                       "not scan (or could not read); point the entry at a scanned path or remove it".format(rel))
+        elif sentence not in folded[rel]:
             out.append("(stop-field-claim-pending) the pending allowance for {} no longer matches that file; the rewrite "
                        "it waited for has landed, so remove the entry from _STOP_FIELD_CLAIM_PENDING".format(rel))
     for rel, text in folded.items():
-        for _rel, sentence in pending:
-            text = text.replace(sentence, " ")
+        for pending_rel, sentence in pending:
+            if pending_rel == rel:
+                text = text.replace(sentence, " ")
         for regex in _STOP_FIELD_CLAIM_RES:
             for match in regex.finditer(text):
-                out.append("(stop-field-claim) {} claims the Stop payload lacks stop_hook_active ({!r}); the hooks "
-                           "reference documents the field on Stop and SubagentStop (true when Claude Code is "
-                           "already continuing as a result of a stop hook)".format(rel, match.group(0)))
+                out.append("(stop-field-claim) {} carries an absence phrasing about stop_hook_active or the "
+                           "loop bound ({!r}); the hooks reference documents stop_hook_active on Stop and "
+                           "SubagentStop, and a legitimate matching sentence needs a path-scoped "
+                           "_STOP_FIELD_CLAIM_PENDING allowance".format(rel, match.group(0)))
     return out
 
 
 def _test_stop_field_claim_check(failures, tmp):
-    """(stop-field-claim-pin) The claim check itself: each phrasing the repository carried before the correction
-    is caught, also wrapped across comment lines; a scenario phrasing and the documented fact pass; a stale
-    pending allowance is reported."""
+    """(stop-field-claim-pin) The claim check itself. Each phrasing the repository carried is caught with a
+    pinned match count, so every pattern (both undocumented orders and the "no documented loop bound"
+    wording from the base diff_wall_stop docstring included) is exercised and dropping any one is red; a
+    scenario phrasing and the documented fact pass; a legitimate scenario sentence that matches a pattern
+    is reported, is admitted only by a pending allowance scoped to its own path, and neither a cross-file
+    nor an unscanned-path allowance suppresses it (the unscanned path is itself reported); missing preview
+    coverage (no .preview directory, a missing or unreadable SHA256SUMS, an inventory entry the scan did
+    not find, a glob that matches nothing) is reported, never clean."""
     base = tmp / "stop-field-claim"
+
+    def build(name, files, sums=True):
+        root = base / name
+        (root / ".preview").mkdir(parents=True)
+        for rel, text in files.items():
+            (root / rel).write_text(text, encoding="utf-8")
+        if sums and ".preview/SHA256SUMS" not in files:
+            listed = sorted(rel.split("/", 1)[1] for rel in files
+                            if rel.startswith(".preview/") and rel.endswith(".py"))
+            (root / ".preview" / "SHA256SUMS").write_text(
+                "".join("{}  {}\n".format("0" * 64, hook) for hook in listed), encoding="utf-8")
+        if ".preview/README.md" not in files:
+            (root / ".preview" / "README.md").write_text("fixture\n", encoding="utf-8")
+        return root
+
+    def claim_findings(root, pending=()):
+        return [f for f in _stop_field_claim_failures(root, pending=pending)
+                if "(stop-field-claim) " in f]
+
     claims = (
-        "as last_assistant_message (there is NO stop_hook_active field in the current Stop payload).",
-        "because there is no stop_hook_active field and no documented built-in loop bound, a hard exit-2 Stop",
-        "# re-fire on the forced continuation and wedge the session (no stop_hook_active field, no documented loop\n"
-        "# bound), so on ANY error",
-        "and with no\n    # stop_hook_active field and no documented loop bound a hard block could wedge the session",
-        "independent of any platform loop field (none is documented on Stop; a loop-ish field is honoured)",
-        "the Stop payload carries no loop field",
-        "stop_hook_active is not documented on the Stop event",
+        ("as last_assistant_message (there is NO stop_hook_active field in the current Stop payload).", 1),
+        ("because there is no stop_hook_active field and no documented built-in loop bound, a hard exit-2 Stop", 1),
+        ("# re-fire on the forced continuation and wedge the session (no stop_hook_active field, no documented loop\n"
+         "# bound), so on ANY error", 2),
+        ("and with no\n    # stop_hook_active field and no documented loop bound a hard block could wedge the session", 2),
+        ("independent of any platform loop field (none is documented on Stop; a loop-ish field is honoured)", 1),
+        ("the Stop payload carries no loop field", 1),
+        ("stop_hook_active is not documented on the Stop event", 1),
+        # the base diff_wall_stop docstring: the "no documented loop bound" pattern guards its correction
+        ("already rendered, and a hard Stop block could wedge the session with no documented loop bound). It", 1),
+        # one fixture per undocumented order, so dropping either undocumented pattern is red
+        ("the stop_hook_active field stays undocumented for Stop", 1),
+        ("an undocumented stop_hook_active value on Stop", 1),
     )
+    for index, (claim, want) in enumerate(claims):
+        root = build("claim-{}".format(index), {".preview/hook.py": claim + "\n"})
+        got = claim_findings(root)
+        if len(got) != want or any(".preview/hook.py" not in f for f in got):
+            failures.append("(stop-field-claim-pin) the claim check found {} finding(s) in {!r}; want {} in "
+                            ".preview/hook.py: {}".format(len(got), claim, want, got))
     clean = (
         "Stop hooks receive stop_hook_active, true when Claude Code is already continuing as a result of a stop "
         "hook. With the stop_hook_active field absent from the payload the count was reset; the payload omits "
         "the stop_hook_active field; without a `stop_hook_active` field in the input the count stays at the cap.")
-    for index, claim in enumerate(claims):
-        root = base / "claim-{}".format(index)
-        (root / ".preview").mkdir(parents=True)
-        (root / ".preview" / "hook.py").write_text(claim + "\n", encoding="utf-8")
-        got = [f for f in _stop_field_claim_failures(root, pending=()) if ".preview/hook.py claims" in f]
-        if len(got) != 1:
-            failures.append("(stop-field-claim-pin) the claim check found {} claim(s) in {!r}; want exactly 1"
-                            .format(len(got), claim))
-    root = base / "clean"
-    (root / ".preview").mkdir(parents=True)
-    (root / ".preview" / "hook.py").write_text(clean + "\n", encoding="utf-8")
-    got = [f for f in _stop_field_claim_failures(root, pending=()) if ".preview/hook.py" in f]
+    root = build("clean", {".preview/hook.py": clean + "\n"})
+    got = [f for f in _stop_field_claim_failures(root, pending=())
+           if "(stop-field-claim-read)" not in f]
     if got:
-        failures.append("(stop-field-claim-clean) the claim check refused a scenario or the documented fact: {}"
-                        .format(got))
+        failures.append("(stop-field-claim-clean) a clean, reconciled fixture must yield only the fixed-list "
+                        "read failures: {}".format(got))
     stale = [f for f in _stop_field_claim_failures(root, pending=((".preview/hook.py", "no such sentence"),))
              if "pending allowance" in f]
     if len(stale) != 1:
         failures.append("(stop-field-claim-stale) a pending allowance that no longer matches was not reported: {}"
                         .format(stale))
+    # a legitimate scenario sentence that matches a pattern is reported, and only its own path's allowance
+    # admits it: a cross-file allowance leaves the other file's finding, and an unscanned path is reported
+    # stale and suppresses nothing
+    scenario = "This test sends no stop_hook_active field."
+    root = build("scenario", {".preview/hook.py": scenario + "\n"})
+    if len(claim_findings(root)) != 1:
+        failures.append("(stop-field-claim-scenario) the scenario sentence {!r} must be reported once: {}"
+                        .format(scenario, claim_findings(root)))
+    if claim_findings(root, pending=((".preview/hook.py", scenario),)):
+        failures.append("(stop-field-claim-scenario-allow) the path-scoped allowance did not admit the "
+                        "scenario sentence in its own file")
+    root = build("cross-file", {".preview/a.py": scenario + "\n", ".preview/b.py": scenario + "\n"})
+    got = claim_findings(root, pending=((".preview/a.py", scenario),))
+    if [f for f in got if ".preview/a.py" in f] or len([f for f in got if ".preview/b.py" in f]) != 1:
+        failures.append("(stop-field-claim-cross-file) the allowance for .preview/a.py must suppress only "
+                        "that file, leaving .preview/b.py reported: {}".format(got))
+    root = build("unscanned", {".preview/hook.py": scenario + "\n"})
+    got = _stop_field_claim_failures(root, pending=(("docs/typo.md", scenario),))
+    if (len([f for f in got if "(stop-field-claim-pending-unscanned)" in f and "docs/typo.md" in f]) != 1
+            or len([f for f in got if "(stop-field-claim) " in f]) != 1):
+        failures.append("(stop-field-claim-unscanned) an allowance naming an unscanned path must be reported "
+                        "stale and must suppress nothing: {}".format(got))
+    # missing preview coverage is reported, never clean
+    (base / "no-preview").mkdir(parents=True)
+    got = _stop_field_claim_failures(base / "no-preview", pending=())
+    if (len([f for f in got if "(stop-field-claim-glob)" in f]) != len(_STOP_FIELD_CLAIM_GLOBS)
+            or len([f for f in got if "(stop-field-claim-inventory" in f]) != 1):
+        failures.append("(stop-field-claim-no-preview) a missing .preview directory must report each empty "
+                        "glob and the unreadable inventory: {}".format(got))
+    root = build("no-sums", {".preview/hook.py": clean + "\n"}, sums=False)
+    if len([f for f in _stop_field_claim_failures(root, pending=())
+            if "(stop-field-claim-inventory" in f]) != 1:
+        failures.append("(stop-field-claim-no-sums) a missing .preview/SHA256SUMS must be reported")
+    root = build("bad-sums", {".preview/hook.py": clean + "\n"})
+    (root / ".preview" / "SHA256SUMS").write_bytes(b"\xff\xfe not utf-8\n")
+    if len([f for f in _stop_field_claim_failures(root, pending=())
+            if "(stop-field-claim-inventory" in f]) != 1:
+        failures.append("(stop-field-claim-bad-sums) an unreadable .preview/SHA256SUMS must be reported")
+    root = build("ghost", {".preview/hook.py": clean + "\n",
+                           ".preview/SHA256SUMS": "{}  ghost.py\n{}  hook.py\n".format("0" * 64, "0" * 64)})
+    got = [f for f in _stop_field_claim_failures(root, pending=())
+           if "(stop-field-claim-inventory" in f]
+    if len(got) != 1 or ".preview/ghost.py" not in got[0]:
+        failures.append("(stop-field-claim-ghost) an inventory entry the scan did not find must be reported: {}"
+                        .format(got))
+    root = build("empty-glob", {".preview/SHA256SUMS": "# no hooks\n"})
+    got = _stop_field_claim_failures(root, pending=())
+    if (len([f for f in got if "(stop-field-claim-glob)" in f and ".preview/*.py" in f]) != 1
+            or [f for f in got if "(stop-field-claim-inventory" in f]):
+        failures.append("(stop-field-claim-empty-glob) a .py glob that matches nothing must be reported (and "
+                        "a comment-only inventory reconciles): {}".format(got))
     shutil.rmtree(str(base), ignore_errors=True)
 
 

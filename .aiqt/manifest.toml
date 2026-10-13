@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "98392cbe754c031af4f2ad4dd439d041334b70c3a05b62aa24b54f18a44d80f5"
+tree-sha256 = "117475176e2e992386db1f78a82d0b0fc2de69409809065cceb0f588d2470118"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2262,12 +2262,12 @@ sha256 = "9680deed2fc7abee3153a70196ffc01ecb74b1a9a25bcd69a08060b5c7739b38"
 [[sources]]
 path = ".preview/README.md"
 bytes = 62206
-sha256 = "446bec17e1ca397941d8a37ff4a4746fb3489d017bc81d6cfdaaf3875abd0e04"
+sha256 = "802998714ad3c254add837b8f1529d1bea05719f5a2a1f1b8f07485d2f3fc22d"
 
 [[sources]]
 path = ".preview/SHA256SUMS"
 bytes = 984
-sha256 = "1e6df3e25314bf9456d995902cda37e2dc9e2baaf4142a3193ce31dc2ea5f3ad"
+sha256 = "aacf4e1ecad9e65e7023cf9b671c084bb71b0107e798454f783ae73805013a3a"
 
 [[sources]]
 path = ".preview/char-policy-write.py"
@@ -2301,8 +2301,8 @@ sha256 = "9ad3454daf7ea104a62ef022957f06e2584cdaff8d2d595dbcf2a0a8cfc9c366"
 
 [[sources]]
 path = ".preview/rerun-pass-check.py"
-bytes = 174695
-sha256 = "bbe544b524a843ba6f59b9a3481a640a0940718a2a580e15d33d7d708472fca2"
+bytes = 174793
+sha256 = "ab5fe8567f34444474d5e58acd61fde9490254e86d38578dae4b5ade7a21da86"
 
 [[sources]]
 path = ".preview/stamp-truth-stop.py"
@@ -3706,8 +3706,8 @@ sha256 = "5a3e5f98d9e3ecd5ecb430c756b32878cf742defbdc2410169b234fabe39a6c3"
 
 [[sources]]
 path = "tools/selftest_aiqt_hooks.py"
-bytes = 766013
-sha256 = "b5d907334f47fbcd5395f72f6bc67464e97750e502b6d453d03badf678cb6ca2"
+bytes = 774590
+sha256 = "ca3cf9ccaca35872de234725d756622fc790e15dc236b3855d42dd7bed691177"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
@@ -3731,8 +3731,8 @@ sha256 = "f2b4a1d96b8a1e9a1976fccefd9e8f61ceb47286c5dce259b88fc32177be5731"
 
 [[sources]]
 path = "tools/selftest_orch_hooks.py"
-bytes = 447038
-sha256 = "9f221b46d8b619488d3ee94376cff9d0523eb135311c86f3d63a8eed0e13d9bc"
+bytes = 447173
+sha256 = "155f43200e493ba50a1cfc44aef40933777eaa299a59d04aef761da157aa6348"
 
 [[sources]]
 path = "tools/sized-instructions-source.sha256"
