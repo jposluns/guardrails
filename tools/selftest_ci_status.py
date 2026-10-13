@@ -308,8 +308,11 @@ def iso(epoch):
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
 
 
-def workflow_run(run_id, status, conclusion, name, head_sha, created=COMMIT_TIME + 600):
-    return {
+def workflow_run(run_id, status, conclusion, name, head_sha, created=COMMIT_TIME + 600,
+                 event=None, pull_requests=None):
+    # event and pull_requests appear only when given: without --require-base the script never reads
+    # them, and the pre-option fixtures prove that by omitting them entirely.
+    run = {
         "created_at": iso(created),
         "id": run_id,
         "head_sha": head_sha,
@@ -318,6 +321,11 @@ def workflow_run(run_id, status, conclusion, name, head_sha, created=COMMIT_TIME
         "name": name,
         "html_url": "https://example.invalid/runs/{}".format(run_id),
     }
+    if event is not None:
+        run["event"] = event
+    if pull_requests is not None:
+        run["pull_requests"] = pull_requests
+    return run
 
 
 def page(runs, total_count=None):
@@ -352,6 +360,7 @@ def run_jq(program, pages, requested_sha, scan_pages=None, mode="verdict"):
     return subprocess.run(
         [JQ, "-s", "-r", "--arg", "mode", mode, "--arg", "requested_sha", requested_sha,
          "--argjson", "lower_bound", str(LOWER_BOUND), "--argjson", "max_pages", str(MAX_PAGES),
+         "--arg", "require_base", "",
          program],
         input=stdin, text=True,
         capture_output=True, timeout=10,
@@ -431,7 +440,7 @@ class Fixture:
             any(arg.startswith(prefix) for arg in argv) for argv in self.gh_argv)
 
     def invoke(self, polls, wait=False, timeout="900", clock=NOW, override=FIXTURE_REPO,
-               served=FIXTURE_REPO, git_remote=None):
+               served=FIXTURE_REPO, git_remote=None, extra_args=()):
         # override is CI_STATUS_REPO (None leaves it unset); served is the only repository gh answers for;
         # git_remote, when given, is the (stdout, exit status) the fixture git gives for the origin's URLs.
         self.response.write_text(json.dumps({"polls": polls}), encoding="utf-8")
@@ -458,6 +467,7 @@ class Fixture:
         command = [str(SCRIPT), "HEAD"]
         if wait:
             command.append("--wait")
+        command.extend(extra_args)
         result = subprocess.run(command, cwd=self.repo, env=env, text=True,
                                 capture_output=True, timeout=30)
         calls = int(self.counter.read_text(encoding="utf-8").strip())
@@ -527,7 +537,7 @@ def _run_checks():
                                 [page(other_commits, 101), page([success_a], 101)])
             scan_short = run_jq(program, [page([])], head_sha, [page(other_commits, 101)])
             expected_rows = "\n".join(
-                "completed\tsuccess\t{}\t{}\t{}".format(
+                "completed\tsuccess\t-\t-\t{}\t{}\t{}".format(
                     run["id"], run["name"], run["html_url"])
                 for run in (success_a, success_b)
             ) + "\n"
@@ -544,7 +554,7 @@ def _run_checks():
                 wrong_target.returncode != 0
                 and "malformed workflow run record" in wrong_target.stderr,
                 (scan_found.returncode, scan_found.stdout)
-                == (0, "completed\tsuccess\t101\tWeb generator health\t"
+                == (0, "completed\tsuccess\t-\t-\t101\tWeb generator health\t"
                     "https://example.invalid/runs/101\n"),
                 scan_short.returncode != 0
                 and "incomplete unfiltered workflow-runs listing" in scan_short.stderr,
@@ -993,6 +1003,91 @@ def _run_checks():
             "filtered": [page([success_a, failed_b])], "scan": [page([success_a])]}])
         check("ci/filtered-only-failure-reported",
               (rc, "Repository quality checks" in output and "failure" in output), (1, True))
+
+        # FIX-551 (D-551-MERGE-LANE-GUARD): under --require-base BRANCH a run counts only when its
+        # event is pull_request and the pull request GitHub recorded on the run at its creation
+        # names BRANCH as its base (pull_requests[].base.ref). Both runs conform here, so the
+        # verdict stays green; without the option the same fields go unread, so a run recorded
+        # against another base still passes a plain check.
+        require = ("--require-base", "main")
+        on_main = [{"base": {"ref": "main"}}]
+        pr_quality = workflow_run(901, "completed", "success", "Quality run", head_sha,
+                                  event="pull_request", pull_requests=on_main)
+        pr_leaks = workflow_run(902, "completed", "success", "Message leaks run", head_sha,
+                                event="pull_request", pull_requests=on_main)
+        stale_base = workflow_run(903, "completed", "success", "Quality run", head_sha,
+                                  event="pull_request", pull_requests=[{"base": {"ref": "dev"}}])
+        met = []
+        rc, output, _calls = fixture.invoke([[page([pr_quality, pr_leaks])]], extra_args=require)
+        met.append((rc, "Quality run" in output and "Message leaks run" in output))
+        rc, _output, _calls = fixture.invoke([[page([stale_base])]])
+        met.append((rc, True))
+        check("ci/require-base-met-green", met, [(0, True)] * 2)
+
+        # A green run recorded against another base (a pre-retarget run) is refused by name in
+        # one-shot and --wait mode alike: a run's recorded base never changes, so the refusal is
+        # immediate (one read), never a settle or a timeout.
+        unmet_note = "do not satisfy --require-base main"
+        retargeted = []
+        for wait in (False, True):
+            rc, output, calls = fixture.invoke([[page([stale_base, pr_leaks])]],
+                                               wait=wait, extra_args=require)
+            retargeted.append((rc, calls, unmet_note in output,
+                               "its recorded base is dev" in output))
+        check("ci/require-base-retargeted-run-refused", retargeted, [(1, 1, True, True)] * 2)
+
+        # A push run is not pull_request evidence, and a run with no (or a baseless) recorded pull
+        # request has no establishable base: each is refused by name, never a pass.
+        push_main = workflow_run(904, "completed", "success", "Quality run", head_sha,
+                                 event="push", pull_requests=[])
+        orphaned = workflow_run(905, "completed", "success", "Quality run", head_sha,
+                                event="pull_request", pull_requests=[])
+        baseless = workflow_run(906, "completed", "success", "Quality run", head_sha,
+                                event="pull_request", pull_requests=[{"base": {"ref": ""}}])
+        unproven = []
+        for run, named in ((push_main, "not pull_request"),
+                           (orphaned, "cannot be established"),
+                           (baseless, "cannot be established")):
+            rc, output, _calls = fixture.invoke([[page([run])]], extra_args=require)
+            unproven.append((rc, unmet_note in output, named in output))
+        check("ci/require-base-unproven-run-refused", unproven, [(1, True, True)] * 3)
+
+        # EVERY run of the commit must satisfy the requirement: a conforming green sibling must not
+        # stand in for a pre-retarget run (skipping nonconforming runs would pass this read).
+        rc, output, _calls = fixture.invoke([[page([stale_base, pr_quality, pr_leaks])]],
+                                            extra_args=require)
+        check("ci/require-base-sibling-cannot-stand-in",
+              (rc, "its recorded base is dev" in output), (1, True))
+
+        # The option needs a usable branch name, refused before any git or API read: an empty value
+        # would silently mean "no requirement" (the fail-open boundary), and a hyphen-led one is a
+        # swallowed flag, not a branch.
+        value_refused = []
+        for extra in (("--require-base",), ("--require-base", ""), ("--require-base", "--wait")):
+            rc, output, _calls = fixture.invoke([[page([pr_quality])]], extra_args=extra)
+            value_refused.append((rc, fixture.gh_argv, "needs a branch name" in output))
+        check("ci/require-base-value-refused", value_refused, [(2, [], True)] * 3)
+
+        # Under the option a record of this commit without a usable event or pull_requests field is
+        # a malformed run record (API error, exit 2), never a verdict; mixed recorded bases on one
+        # run are unmet (exit 1), not green.
+        no_event = workflow_run(907, "completed", "success", "Quality run", head_sha,
+                                pull_requests=on_main)
+        not_array = workflow_run(908, "completed", "success", "Quality run", head_sha,
+                                 event="pull_request", pull_requests=7)
+        no_base_obj = workflow_run(909, "completed", "success", "Quality run", head_sha,
+                                   event="pull_request", pull_requests=[{"number": 5}])
+        mixed = workflow_run(910, "completed", "success", "Quality run", head_sha,
+                             event="pull_request",
+                             pull_requests=[{"base": {"ref": "main"}},
+                                            {"base": {"ref": "dev"}}])
+        shapes = []
+        for run in (no_event, not_array, no_base_obj):
+            rc, output, _calls = fixture.invoke([[page([run])]], extra_args=require)
+            shapes.append((rc, "malformed workflow run record" in output))
+        rc, output, _calls = fixture.invoke([[page([mixed])]], extra_args=require)
+        shapes.append((rc, unmet_note in output))
+        check("ci/require-base-malformed-fail-closed", shapes, [(2, True)] * 3 + [(1, True)])
 
         if program is None:
             harness_error("ci/jq-step-direct-cases", "no jq program was extracted")

@@ -80,6 +80,7 @@ SCOPE_RELPATHS = (
     "tools/audit_reference.py",
     "tools/run_all_checks.sh",   # shipped local gate runner (this PR modifies it)
     ".github/workflows/quality.yml",  # shipped CI workflow (this PR modifies it)
+    ".github/workflows/msg-leaks.yml",  # shipped CI workflow (the message/metadata leak scan)
     ".aiqt/assurance.toml",
     ".aiqt/assurance-schema.md",
     ".aiqt/core/qa-skills",      # future QA skill sources (multi-skill generator input)

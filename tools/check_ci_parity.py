@@ -50,7 +50,8 @@ The step-level keys that could (continue-on-error, if:, shell:, timeout-minutes)
 are outside the recognized step keys and stay cannot-evaluate, as does a gate
 command chained with || true.
 Aggregator: a workflow with more than one job must route every job into the one
-status branch protection requires. Exactly one job is named "Quality gates"
+aggregated status that workflow reports (each CI_WORKFLOWS file reports its own
+required status). Exactly one job is named "Quality gates"
 (REQUIRED_STATUS_NAME); its job-level if: is always() (GitHub reads a skipped
 required job as passing, so without always() a failed or cancelled needed job would
 skip it and the status would read green); its needs: lists every other job exactly
@@ -67,10 +68,11 @@ together under review. Each departure is a required-status finding (exit 1). A
 needs: entry outside the recognized spellings (a block list of plain job ids, a
 one-line flow list, or one plain scalar) is cannot-evaluate. A one-job workflow is
 its own status and carries no aggregator rule, only the result-masking rule.
-Not checked: the branch-protection setting itself (that Quality gates is the
-required check, and that no other job reports that name through an expression in
-its name:); GitHub's evaluation of needs.*.result, if: always(), cancellation and
-matrix results, which is documented behaviour this gate does not observe; and the
+Not checked: the branch-protection setting itself (that Quality gates and
+Message/metadata leaks are both required checks, and that no other job reports
+either name through an expression in its name:); GitHub's evaluation of
+needs.*.result, if: always(), cancellation and matrix results, which is
+documented behaviour this gate does not observe; and the
 runner image, runs-on labels, services and environment values (a job or step env:
 can set a variable such as BASH_ENV that changes what an accepted gate command
 does). Inside a run: block the exact line exit 1 is accepted, because it can only
@@ -82,7 +84,11 @@ either file and is still one member. Each named workflow is required: a missing
 or unreadable one is cannot-evaluate (exit 2), never an empty side. The job-set,
 result-masking and aggregator rules above apply to each file on its own, so the
 one-job msg-leaks.yml is its own status; that branch protection requires it
-beside Quality gates is not checked here.
+beside Quality gates is not checked here. msg-leaks.yml may run only that scan
+and its self-test (MSG_LEAKS_WORKFLOW_MEMBERS): any other member there is a
+relocation finding (exit 1), because a gate moved from quality.yml into
+msg-leaks.yml leaves the aggregated Quality gates status silently and re-runs
+on every PR metadata edit.
 TRIGGER. The message/metadata leak scan (MSG_LEAKS_SCAN) reads the PR title and
 body, so the workflow that runs it must list opened, synchronize, reopened and
 edited (MSG_LEAKS_PULL_REQUEST_TYPES) in its pull_request types, and a workflow
@@ -95,9 +101,15 @@ at indent 4 is a one-line flow list, one plain scalar, or a block list at
 indent 6; and a one-line on: value naming events gives each its default types.
 Under an EDIT_EVENTS key any other shape (a flow mapping, a line at an
 unexpected indent, a repeated event or types: key, an item that is not a plain
-name) is cannot-evaluate (exit 2), as are a quoted event key and a line at
-indent 1 or 3 anywhere in on:. The push trigger and branches: filters are not
-checked.
+name, a quoted key or one with whitespace before its colon, a sequence item at
+indent 4, which YAML reads as an indentless sequence, or a line with no colon)
+is cannot-evaluate (exit 2), as are a quoted key or one with whitespace before
+its colon at indent 2 and a line at indent 1 or 3 anywhere in on:. NOT READ
+(disclosed): the push trigger, and every filter or condition that can keep a
+listed event from scheduling the workflow or a job: branches:,
+branches-ignore:, paths:, paths-ignore:, and a job- or step-level if:. Any of
+them can stop the scan workflow on an edited event; reachability is outside
+token-parity scope (the reachability residual below).
 
 Exit convention:
   0  extraction succeeded, every difference has an active exception, no exception is
@@ -404,6 +416,12 @@ REQUIRED_STATUS_JOB = (
 )
 
 MSG_LEAKS_SCAN = "tools/check_msg_leaks.py"  # the live scan (module docstring, TRIGGER)
+# The only members msg-leaks.yml may run (module docstring, TWO WORKFLOWS): its own scan and that
+# scan's self-test. Any other member there is a relocation finding, because that workflow's status
+# is separate from the aggregated Quality gates and re-runs on every PR metadata edit, so a gate
+# moved into it would leave the aggregated required check silently (D-551-MERGE-LANE-GUARD).
+MSG_LEAKS_WORKFLOW_MEMBERS = frozenset(
+    (MSG_LEAKS_SCAN, MSG_LEAKS_SCAN + " --self-test"))
 EDIT_EVENTS = ("pull_request", "pull_request_target")
 DEFAULT_PULL_REQUEST_TYPES = ("opened", "synchronize", "reopened")
 MSG_LEAKS_PULL_REQUEST_TYPES = DEFAULT_PULL_REQUEST_TYPES + ("edited",)
@@ -2039,7 +2057,7 @@ def _edit_event_types(lines, source, diagnostics):
         if indent == 0:
             break
         stripped = code.strip()
-        key, _, rest = stripped.partition(":")
+        key, colon, rest = stripped.partition(":")
         rest = rest.strip()
         if indent in (1, 3):
             refuse(index + 1, "line {!r} under on: is at indent {}; events "
@@ -2049,6 +2067,9 @@ def _edit_event_types(lines, source, diagnostics):
             event = key if key in EDIT_EVENTS else None
             if _unquote(key) != key:
                 refuse(index + 1, "quoted on: key {!r}".format(key))
+            elif key != key.rstrip():
+                refuse(index + 1, "on: key {!r} holds whitespace before its "
+                       "colon".format(key))
             elif event is not None:
                 if event in events:
                     refuse(index + 1,
@@ -2060,14 +2081,29 @@ def _edit_event_types(lines, source, diagnostics):
         elif event is None:
             continue
         elif indent == 4:
-            in_types = key == "types"
-            if in_types:
-                if event in typed:
-                    refuse(index + 1, "{} declares types: more than "
-                           "once".format(event))
-                typed.add(event)
-                events[event] = names(index + 1, rest) if rest else ()
-                in_types = not rest
+            in_types = False
+            if stripped.startswith("- "):
+                refuse(index + 1, "sequence item {!r} at indent 4 under {} "
+                       "(an indentless sequence); block-list items are read "
+                       "only at indent 6 under types:".format(stripped, event))
+            elif not colon:
+                refuse(index + 1, "line {!r} under {} has no key".format(
+                    stripped, event))
+            elif _unquote(key) != key:
+                refuse(index + 1, "quoted key {!r} under {}".format(
+                    key, event))
+            elif key != key.rstrip():
+                refuse(index + 1, "key {!r} under {} holds whitespace before "
+                       "its colon".format(key, event))
+            else:
+                in_types = key == "types"
+                if in_types:
+                    if event in typed:
+                        refuse(index + 1, "{} declares types: more than "
+                               "once".format(event))
+                    typed.add(event)
+                    events[event] = names(index + 1, rest) if rest else ()
+                    in_types = not rest
         elif indent == 6 and in_types and stripped.startswith("- "):
             events[event] += names(index + 1, stripped[2:].strip())
         elif not in_types and indent > 4:
@@ -2103,6 +2139,23 @@ def _trigger_findings(lines, members, source, diagnostics):
         "edit re-runs every job of this workflow; only the workflow that runs "
         "that scan triggers on edited".format(source, event, MSG_LEAKS_SCAN),
     ) for event in EDIT_EVENTS if "edited" in events.get(event, ())]
+
+
+def _relocation_findings(members, source):
+    """msg-leaks.yml may run only the message/metadata leak scan and its
+    self-test (module docstring, TWO WORKFLOWS): its status is separate from
+    the aggregated Quality gates, so any other member there is a gate the
+    aggregated required check silently lost."""
+    if source != MSG_LEAKS_CI_SOURCE:
+        return []
+    return [Finding(
+        "relocation",
+        identity,
+        "{} runs {!r}, which is not the message/metadata leak scan or its "
+        "self-test: a gate moved into this workflow leaves the aggregated "
+        "Quality gates status silently and re-runs on every PR metadata "
+        "edit".format(source, identity),
+    ) for identity in sorted(members - MSG_LEAKS_WORKFLOW_MEMBERS)]
 
 
 def extract_ci(text, source=CI_SOURCE):
@@ -2516,6 +2569,7 @@ def extract_ci(text, source=CI_SOURCE):
     findings = _required_status_findings(
         job_ids, job_fields, lines, source, diagnostics)
     findings.extend(_trigger_findings(lines, members, source, diagnostics))
+    findings.extend(_relocation_findings(members, source))
     diagnostics.extend(_shadow_check(text, source, origins))
     return Extraction(
         frozenset(members),
@@ -5548,6 +5602,44 @@ def self_test():
                for item in labelled.diagnostics):
         failures.append("34o a msg-leaks.yml diagnostic does not carry its own "
                         "source: {!r}".format(labelled.diagnostics))
+
+    # FIX-551: quoted keys, whitespace before a colon, indentless sequences
+    # and keyless lines under an edit event are refused (exit 2), on the
+    # workflow that runs the scan and on the one that does not alike; each
+    # spelling formerly read as a key it is not, so GitHub saw a types: list
+    # this rule did not.
+    edited_flow = "[opened, synchronize, reopened, edited]"
+    for label, shape in (
+            ("a quoted types: key",
+             '  pull_request:\n    "types": ' + edited_flow + "\n"),
+            ("whitespace before the types: colon",
+             "  pull_request:\n    types : " + edited_flow + "\n"),
+            ("whitespace before the event colon",
+             "  pull_request :\n    types: " + edited_flow + "\n"),
+            ("an indentless sequence under types:",
+             "  pull_request:\n    types:\n    - opened\n    - synchronize\n"
+             "    - reopened\n    - edited\n"),
+            ("a keyless line under the event",
+             "  pull_request:\n    frobnicate\n")):
+        scan_case("34p quality.yml trigger shape is cannot-evaluate: " + label,
+                  with_on(ci_fixture(common), shape), msg_side, 2)
+        scan_case("34p msg-leaks.yml trigger shape is cannot-evaluate: "
+                  + label, quality_side,
+                  ((MSG_LEAKS_CI_SOURCE, with_on(scan_text, shape)),), 2)
+
+    # FIX-551 (D-551-MERGE-LANE-GUARD): a gate moved from quality.yml into
+    # msg-leaks.yml is a relocation finding (the CI side is the union of both
+    # files, so set parity alone would stay green while the aggregated
+    # Quality gates status silently lost the gate); the scan itself and its
+    # self-test are the allowed members, which 34a already holds green.
+    moved = "python3 -I -B tools/check_git_option_table.py"
+    scan_case("34q a gate moved from quality.yml into msg-leaks.yml is a "
+              "relocation finding",
+              with_on(ci_fixture(tuple(
+                  item for item in common if item != moved)), defaults),
+              ((MSG_LEAKS_CI_SOURCE, with_on(
+                  ci_fixture((msg_selftest, msg_scan, moved)), edited)),),
+              1, ("relocation",))
 
     if failures:
         print("SELF-TEST FAIL:")

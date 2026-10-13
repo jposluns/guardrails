@@ -3,8 +3,12 @@ name: Quality
 on:
   pull_request:
     branches: [main]
-    # no `edited`: a PR title/body edit would re-run every job here. That edit matters only to the
-    # message/metadata leak scan (check_msg_leaks), which runs in msg-leaks.yml, triggered on `edited`.
+    # no `edited`: it fires on a PR title/body edit AND on a base-branch retarget, and would re-run
+    # every job here. The title/body side matters only to the message/metadata leak scan
+    # (check_msg_leaks), which runs in msg-leaks.yml, triggered on `edited`. A retarget alone
+    # therefore schedules no fresh Quality run; the merge tooling closes that gap: ci-status.sh
+    # --require-base refuses a run whose recorded pull_request base is not the merge target, so a
+    # pre-retarget run is never trusted and a refresh push (or reopen) must earn a new one.
     types: [opened, synchronize, reopened]
   push:
     branches: [main]
