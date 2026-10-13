@@ -416,9 +416,11 @@ def _declared_renderer_stems(tools_dir):
     it and does not claim to: a SPELLED name or path framed by any resolver syntax other than dot- or
     colon-separated components, such as a str.format or string.Formatter replacement-field path, by
     bracket field ('0[RENDERER_DECL]') or by a brace-framed attribute dot ('{0.RENDERER_DECL}', where the
-    braces keep the dot-component rule from matching), each of which string.Formatter().get_field resolves
-    to the declared value, or pickle opcode text (a GLOBAL frame is newline-separated and a STACK_GLOBAL
-    frame length-prefixed, so a spelled pickle reaches a module attribute with no dot or colon in sight);
+    braces keep the dot-component rule from matching): string.Formatter().format resolves the brace-framed
+    template, while string.Formatter().get_field takes the unbraced field name ('0.RENDERER_DECL'), and
+    each route reaches the declared value; or pickle opcode text (a GLOBAL frame is newline-separated and
+    a STACK_GLOBAL frame length-prefixed, so a spelled pickle reaches a module attribute with no dot or
+    colon in sight);
     a name or resolver path computed any other way (a join, %-formatting, str.format, a case change, a
     decode of computed bytes, chr, an f-string format spec), folded to more than _FOLD_CAP characters, or
     spelled as a bytes literal that run-time code decodes with a codec that is not ASCII-compatible
@@ -617,8 +619,9 @@ def main():
 #       type alias, a store through the module object by attribute, vars()/globals() subscript or
 #       setattr, a literal-name store through any other call (qualified or aliased setattr, __setattr__,
 #       setdefault, __setitem__, dict.__setitem__, operator.setitem), a dict-display or keyword update, a
-#       variable holding the name, an f-string, split f-string, concatenated or spelled-bytes key (folded
-#       decoded as latin-1), an import naming it, an
+#       variable holding the name, an f-string, split f-string, a concatenated, spelled-bytes or
+#       split-bytes key (folded decoded as latin-1; a bytes + bytes chain folds before the run-time
+#       decode), an import naming it, an
 #       import from it (the module position), an import of a package rooted at it (the dotted module
 #       position), a match-mapping rest, a match-star name, and a later argument that a starred argument
 #       before it can shift to the key position)
@@ -630,8 +633,8 @@ def main():
 #       annotated (or a second plain) rebinding, or a bare annotation, fails closed (exit 2), and the reader
 #       alone also refuses two bindings; each _MUTATED in-place change to the declared dict (a subscript
 #       store, an update call, a chained-assignment alias, a module attribute read, a class-pattern keyword
-#       read, a pkgutil.resolve_name path string, an operator.attrgetter path string spelled as str or as
-#       bytes decoded at run time) also fails closed, so
+#       read, a pkgutil.resolve_name path string, an operator.attrgetter path string spelled as str, as
+#       bytes decoded at run time or split across a bytes + bytes concatenation) also fails closed, so
 #       none of these routes can make the value Python runs differ from the value read.
 #   (k) a PEP 263 cookie cannot hide a declaration: a UTF-7 cookie that makes a UTF-8 comment a declaration,
 #       and any other non-UTF-8 cookie, fail --check (exit 2); a UTF-8 BOM is parsed as Python parses it.
@@ -648,8 +651,9 @@ def main():
 #   (o) a comparison against the string RENDERER_DECL, a third positional argument (where no direct namespace
 #       write takes its key), a longer string mentioning it, an f-string whose !r or !a conversion or
 #       format spec renders a different string at run time, a bytes-valued replacement field (bare, with
-#       !s, or a bytes + bytes concatenation: each renders b'...' at run time) or a str-plus-bytes +
-#       (a run-time TypeError) stays allowed; the fold must not over-match any of them.
+#       !s, or a bytes + bytes concatenation: each renders b'...' at run time) or a mixed-kind + in
+#       either order (str + bytes and bytes + str, each a run-time TypeError) stays allowed; the fold
+#       must not over-match any of them.
 #   (p) the bounded string fold keeps no value longer than _FOLD_CAP.
 #   (q) this file passes its own scan (a renderer-free tools/*.py that discovery reads like any other).
 
@@ -744,6 +748,7 @@ _UNSUPPORTED_BINDINGS = (
     ("split f-string subscript key", "vars()[f'RENDERER_{{({!r})}}'] = {}\n".format("DECL", _DECL_LITERAL)),
     ("concatenated subscript key", "globals()['RENDERER_' + 'DECL'] = {}\n".format(_DECL_LITERAL)),
     ("bytes subscript key", "vars()[b'RENDERER_DECL'.decode()] = {}\n".format(_DECL_LITERAL)),
+    ("split-bytes subscript key", "vars()[(b'RENDERER_' + b'DECL').decode()] = {}\n".format(_DECL_LITERAL)),
     ("import naming it", "from gen_alpha import RENDERER_DECL as other\nother['semantics-revision'] = 99\n"),
     ("import from it", "from RENDERER_DECL import x\n"),
     ("dotted import root", "import RENDERER_DECL.sub\n"),
@@ -795,6 +800,10 @@ _MUTATED = (
      + "import operator, types\n"
        "operator.attrgetter(b'm.RENDERER_DECL'.decode())"
        "(types.SimpleNamespace(m=sys.modules[__name__]))['semantics-revision'] = 99\n"),
+    ("a split-bytes operator.attrgetter path", _ENTRY_GOOD
+     + "import operator, types\n"
+       "operator.attrgetter((b'm.RENDERER_' + b'DECL').decode())"
+       "(types.SimpleNamespace(m=sys.modules[__name__]))['semantics-revision'] = 99\n"),
 )
 
 # (k) unlisted tools/gen_beta.py bodies (bytes) a coding cookie must not hide; '+AAo-' is UTF-7 for a newline.
@@ -829,9 +838,10 @@ _WHERE_MESSAGES = (
 # mention, a third or later positional argument, three f-strings (a !r conversion, a !a conversion and a
 # format spec each render a DIFFERENT string at run time), three bytes-valued replacement fields (bare,
 # with !s, and a bytes + bytes concatenation: each renders b'...' at run time, never the decoded text)
-# and a str-plus-bytes + (a run-time TypeError, so it never produces the name at all; folding any of
-# these as if it were the plain value would refuse a harmless mention); each must stay allowed, and each
-# bytes control goes red if the bytes fold is extended back into replacement fields or mixed +.
+# and a mixed-kind + in each order (str + bytes and bytes + str, each a run-time TypeError, so neither
+# produces the name at all; folding any of these as if it were the plain value would refuse a harmless
+# mention); each must stay allowed, and each bytes control goes red if the bytes fold is extended back
+# into replacement fields or mixed +.
 _ALLOWED_USES = (
     ("comparison", "def is_decl(name):\n    return name == 'RENDERER_DECL' or 'RENDERER_DECL' != name\n"),
     ("mention in a longer string", "NOTE = 'this module carries no RENDERER_DECL'\n"),
@@ -844,6 +854,7 @@ _ALLOWED_USES = (
     ("f-string bytes !s replacement field", "NOTE = f\"RENDERER_{b'DECL'!s}\"\n"),
     ("f-string concatenated-bytes replacement field", "NOTE = f\"RENDERER_{b'DE' + b'CL'}\"\n"),
     ("str-plus-bytes concatenation", "NOTE = 'RENDERER_' + b'DECL'\n"),
+    ("bytes-plus-str concatenation", "NOTE = b'RENDERER_' + 'DECL'\n"),
 )
 
 
@@ -939,8 +950,11 @@ def self_test_main():
 
         # (b) a helper edit inside the closure changes the framed code-digest, compared over BYTES like
         # (a). The generation must SUCCEED before its output is compared (the same shape as (a) and (c));
-        # the injection control proves that output written by a run that then reports failure is never
-        # accepted, and it exercises the _closure_failure HELPER itself, not its call site.
+        # the two injection controls exercise the _closure_failure HELPER itself, not its call site: one
+        # proves that output written by a run that then reports failure is never accepted, and one proves
+        # that a generation returning 0 after writing the FIRST output back over the edited one fails the
+        # unchanged-code-digest comparison (reverting that comparison to read_text would compare str
+        # against bytes and pass vacuously; this control is what turns that revert red).
         edited = tmp / "edited"
         _fixture(edited, _ENTRY_GOOD, helper_body="VALUE = 2\n")
 
@@ -959,6 +973,11 @@ def self_test_main():
                 "closure completeness: generation expected exit 0, got 2":
             failures.append("closure control: an injected failure after a real generation expected a "
                             "recorded failure, not acceptance of the written output")
+        if _closure_failure(lambda root, check: ((root / RENDERERS_REL).write_bytes(first), 0)[1]) != \
+                "closure completeness: a helper edit did not change the code-digest":
+            failures.append("closure control: a generation that returns 0 after writing the first output "
+                            "back over the edited one expected the unchanged-code-digest failure (the "
+                            "comparison branch itself, not only the rc branch, must be exercised)")
 
         # (c) a mutated renderers.toml is caught by --check. The regeneration prerequisite records its own
         # failure: were it skipped silently, a drift-detection defect could escape whenever regeneration
@@ -1066,8 +1085,9 @@ def self_test_main():
             rc, err = run_refused(case, check=False)
             if rc != 2 or expected not in err:
                 failures.append("a listed generator with {} of RENDERER_DECL expected generation exit 2 "
-                                "naming its refusal ({!r}), got exit {} (fail-closed for its own reason, "
-                                "never an unrelated one)".format(label, expected, rc))
+                                "naming its refusal ({!r}), got exit {} with diagnostic tail {!r} "
+                                "(fail-closed for its own reason, never an unrelated one)"
+                                .format(label, expected, rc, err.strip()[-160:]))
         rebound = tmp / "decl-annotated-rebinding" / "tools" / "gen_alpha.py"
         if not rebound.is_file():
             failures.append("the reader-alone fixture decl-annotated-rebinding/tools/gen_alpha.py is "
@@ -1169,8 +1189,8 @@ def self_test_main():
 
         # (o) every control stays allowed: a comparison against the string, a third positional argument, a
         # longer string mentioning it, the f-string !r, !a and format-spec mentions, the three bytes
-        # replacement fields and the str-plus-bytes +; each is an exempt use or a non-matching string,
-        # never proof of inertness.
+        # replacement fields and the two mixed-kind + orders; each is an exempt use or a non-matching
+        # string, never proof of inertness.
         for label, body in _ALLOWED_USES:
             case = tmp / ("allowed-" + label.replace(" ", "-"))
             _fixture(case, _ENTRY_GOOD)
