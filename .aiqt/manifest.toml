@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "f04c21d0dc154a6104902c80259e6a026ef33badb31f579cac4c507fe0aebcbc"
+tree-sha256 = "22f905f59a514e9a13b731cf10c23f33dd73ede5f50bd5d40c5187526f6813b4"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -116,8 +116,8 @@ sha256 = "8312aa75ab85571b594261fcd6e1a1bea2b3a6949d944df125dfbfce944d5617"
 
 [[sources]]
 path = ".aiqt/core/python-floor.toml"
-bytes = 8297
-sha256 = "c8292c4df19b0a3301bd863ffc90bd4d4edac3052a4db65b5f9bfff17b1d17dc"
+bytes = 8334
+sha256 = "5893247854b5c0a6b1556a68efd8c5989b7ace5c5f532d23887d194f2cc6d314"
 
 [[sources]]
 path = ".aiqt/core/references.toml"
@@ -2796,8 +2796,8 @@ sha256 = "e30a21d7c21e4ba0e71b9b1e68ebeee6fe499f4d7e38c9bd9fc0a29bf1e72d35"
 
 [[sources]]
 path = "opf/tools/_opf_write_guard.py"
-bytes = 115819
-sha256 = "9ff979b6197f4edac096456bd05b1bcf9e00286c956ad189673b7f7012da7f39"
+bytes = 116238
+sha256 = "a13b7d331baff8ee5ba2edb1b44d1fe9c615811ee492967f4bc5142e27680268"
 
 [[sources]]
 path = "opf/tools/_optlevel.py"

@@ -14,13 +14,26 @@ Stdlib only; the sibling _opf_* helpers are imported directly. Every refusal is 
 calling verb maps to exit 2. Nothing here stages or commits anything. `--self-test` runs the
 lease message vectors (self_test), which opf.py --self-test also runs.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    import os
+    try:
+        sys.stderr.write(
+            "error: _opf_write_guard.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
 import datetime
 import errno
 import os
 import re
 import socket
 import stat
-import sys
 import tomllib
 from pathlib import Path
 
