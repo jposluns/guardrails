@@ -1509,8 +1509,10 @@ def _config_injection_lane(base):
 # ESTIMATED: bound = the slowest MEASURED lane time * 20 / 3, rounded up to a multiple of 300 s;
 # the formula value exceeds the 1200 s default exactly when that time exceeds 180 s. REPORTED times
 # (opf.py's 1192 s lane run, and the opf.py and check_opf_record.py lane runs that reached a 1200 s
-# bound) are not fed to the formula; the factor's headroom covers them (below).
-# Roster coverage: the account of the whole-roster run gives a time for 89 of the 101 members.
+# bound) are not fed to the formula; the factor's headroom is meant to allow for them, but a run
+# that reached a bound has no known length, so no bound here is shown to cover it (below).
+# Roster coverage: the account of the whole-roster run gives a time or an upper bound for 89 of
+# the 101 members.
 # Five took over 180 s and carry the entries below. The other 84 took 180 s or less: nine named
 # here (the six shorter opf/tools self-tests, check_python_floor.py, check_release_cut.py
 # --self-test --red-on-revert and check_selftest_execution.py --suite orch-behaviour-selftest),
