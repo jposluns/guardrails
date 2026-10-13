@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "9c2c76532886bc3006d81617ba81a387302c3cf2dd45596837acee4b744bf53e"
+tree-sha256 = "77f4c53af744fa7d9e47c9faaabb37806482100fd3bef7214fcd7bbcf1fe15b4"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -61,8 +61,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 285226
-sha256 = "2ae7233b2b0059db08efe7af5d24db27b25beebd8b64be14b06e525b7c0c5820"
+bytes = 285980
+sha256 = "f07ec7c39ae85f3bd277135510e3839aafc586959cce118174247f5d026ea089"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -3421,8 +3421,8 @@ sha256 = "a9127c88e9ab235919af8b318e393c7e859a5510809e20d5c1145094beb62a33"
 
 [[sources]]
 path = "tools/check_python_host_pin.py"
-bytes = 83814
-sha256 = "4cbcc75d9b55b063bce3a09d8ab9147311cad509c339782a8e34f1bebb1e4b19"
+bytes = 91022
+sha256 = "fa3f008d2dc6baa99282a2f2a9e402dfb2555710c6507bd2d4c899bcd502d937"
 
 [[sources]]
 path = "tools/check_python_launcher_isolation.py"
