@@ -835,6 +835,10 @@ _DISK_KIND_CASES = "the _disk_kind ancestor-symlink and root-boundary real-files
 _REAL_GIT_CASE = "the real-git tracked/untracked GD-130 pair"
 _EVERY_CASE = "every self-test case"
 _SUPPRESS_VECTORS_ENV = "AIQT_SELFTEST_SUPPRESS_VECTORS"
+# The unmarked drift child carries this depth marker: a nested entry that reaches the vectors
+# with it set refuses to run them (a drift child never spawns another drift child), so a
+# reverted no-vectors seam ends at depth 1 with a named failure, never an unbounded chain.
+_DRIFT_DEPTH_ENV = "AIQT_SELFTEST_DRIFT_DEPTH"
 
 
 class _SetupAllocationError(OSError):
@@ -1009,6 +1013,23 @@ def _entry_vector_pre_entry(failures):
                         "entry, never be reported as the git-absent NOT RUN")
 
 
+def _entry_vector_pass_text(failures):
+    import io
+    from contextlib import redirect_stderr, redirect_stdout
+    # No-vectors PASS text: a clean nested no-vectors entry must complete with exit 0 and
+    # print the DISTINCT no-vectors PASS line, never the full-run "SELF-TEST PASS:" text,
+    # so the full PASS line is only ever printed by a run whose vectors ran.
+    out = io.StringIO()
+    with redirect_stdout(out), redirect_stderr(io.StringIO()):
+        rc = _nested_entry_no_vectors()
+    text = out.getvalue()
+    if rc != 0 or _NO_VECTORS_PASS_NOTE + ":" not in text or "SELF-TEST PASS:" in text:
+        failures.append("(vector no-vectors-pass-text) a clean nested no-vectors entry "
+                        "must exit 0 and print the distinct no-vectors PASS line {!r}, "
+                        "never the full-run SELF-TEST PASS line (got exit {})".format(
+                            _NO_VECTORS_PASS_NOTE + ":", rc))
+
+
 def _not_run_vectors(failures):
     """Red-on-revert vectors for the skips that printed SELF-TEST PASS (PARTIAL) and exited 0,
     plus the narrowness of the public entry's setup handlers.
@@ -1027,9 +1048,9 @@ def _not_run_vectors(failures):
     while an injected PermissionError at the lifecycle wrapper's write_text or at its chmod, an
     unrelated pre-entry RuntimeError, and an exception raised AFTER entry (OSError-typed or
     carrying the git message) must each PROPAGATE out of self_test_main, never be reported as
-    the setup NOT RUN. The seam vectors drive each of these four call sites against a recorder
-    to require the explicit no-vectors seam, and the no-vectors-pass-text vector requires a
-    clean nested entry to print only the distinct no-vectors PASS note.
+    the setup NOT RUN. The seam vectors drive each of these call sites, and the
+    no-vectors-pass-text drive, against a recorder to require the explicit no-vectors seam,
+    so every in-process nested public entry goes through _nested_entry_no_vectors.
 
     Fresh-process public-entry layer: the in-process injections cannot reach a FRESH process's
     setup (a new scrub allocation, a PATH with no git resolvable), so each child below runs this
@@ -1039,7 +1060,8 @@ def _not_run_vectors(failures):
     _SUPPRESS_VECTORS_ENV, so a marked child never spawns children of its own and never prints
     any PASS text (a marked FULL entry records the named suppression NOT RUN and exits 1); the
     unmarked child drives only the explicit no-vectors seam, whose nested entry prints the
-    distinct no-vectors note, never the full PASS line, and is bounded by a timeout. The spy
+    distinct no-vectors note, never the full PASS line, and is bounded by the depth marker,
+    its own process group (killed and probed as a group) and a timeout. The spy
     child proves ONLY that a marker-carrying child reaches its own named
     SELF-TEST FAIL without launching any subprocess; its injections leave the end-to-end,
     disk-kind and real-git groups NOT RUN inside it, so it does not prove those groups
@@ -1047,8 +1069,21 @@ def _not_run_vectors(failures):
     import io
     import pathlib
     import shutil
+    import signal
+    import time
     from contextlib import redirect_stderr, redirect_stdout
     from _git_fixture_env import fixture_git_lifecycle
+
+    if os.environ.get(_DRIFT_DEPTH_ENV) == "1":
+        # This entry already runs INSIDE the unmarked drift child, whose only nested entry is
+        # the explicit no-vectors seam, so reaching the vectors at all means that seam was
+        # reverted: refuse with ONE named failure instead of spawning further children (a
+        # drift child never spawns another drift child); the parent then fails named on its
+        # exact-stdout assertion.
+        _not_run(failures, "the red-on-revert NOT RUN and entry vectors",
+                 "refused at drift depth 1 ({} is set): a nested entry reached the vectors, "
+                 "so the explicit no-vectors seam did not hold".format(_DRIFT_DEPTH_ENV))
+        return
 
     def _unavailable(*_args, **_kwargs):
         raise OSError("injected: unavailable")
@@ -1105,13 +1140,15 @@ def _not_run_vectors(failures):
                             "plain-file disk-kind/root-link setup must PROPAGATE, never be "
                             "recorded as the no-symlink NOT RUN".format(label))
 
-    # Nested no-vectors seam (in-process): each of the four entry vectors below must reach its
-    # nested public entry through _nested_entry_no_vectors, and the helper must hand the
-    # EXPLICIT _vectors=False to self_test_main; the environment must play no part, so the
-    # suppress marker is removed from os.environ for the drives and restored after. The
-    # recorder replaces self_test_main (no nested entry body runs, so no drive can recurse),
-    # making this red when the helper's explicit argument is reverted, when the helper derives
-    # _vectors from the environment, and when a call site stops going through the helper.
+    # Nested no-vectors seam (in-process): each of the five entry-vector drives below must
+    # reach its nested public entry through _nested_entry_no_vectors, and the helper must hand
+    # _vectors=False to self_test_main. The drives run with the suppress marker removed from
+    # os.environ (restored after), so what the recorder proves is the HANDED value under an
+    # absent marker: red when the helper's argument is reverted to the default, when the
+    # helper reads the absent marker and passes True, and when a call site stops going through
+    # the helper; a helper that passed False by some other expression under an absent marker
+    # is not distinguished. The recorder replaces self_test_main (no nested entry body runs,
+    # so no drive can recurse).
     _mod = sys.modules[__name__]
     real_entry = _mod.self_test_main
     real_helper = _mod._nested_entry_no_vectors
@@ -1134,7 +1171,8 @@ def _not_run_vectors(failures):
         for site, drive, calls in (("lifecycle", _entry_vector_lifecycle, 1),
                                    ("wrapper", _entry_vector_wrapper, 2),
                                    ("post-entry", _entry_vector_post_entry, 2),
-                                   ("pre-entry", _entry_vector_pre_entry, 1)):
+                                   ("pre-entry", _entry_vector_pre_entry, 1),
+                                   ("pass-text", _entry_vector_pass_text, 1)):
             del recorded[:]
             del through[:]
             drive([])
@@ -1142,8 +1180,8 @@ def _not_run_vectors(failures):
                     or any(v is not False for v in recorded)):
                 seam_ok = False
                 failures.append("(seam vector {}) the {} call site must reach its nested "
-                                "public entry through _nested_entry_no_vectors with the "
-                                "EXPLICIT _vectors=False, never the environment (expected {} "
+                                "public entry through _nested_entry_no_vectors, handing "
+                                "_vectors False under an absent suppress marker (expected {} "
                                 "helper call(s), each recording _vectors False; got {} helper "
                                 "call(s) recording {!r})".format(site, site, calls,
                                                                  len(through), list(recorded)))
@@ -1154,24 +1192,12 @@ def _not_run_vectors(failures):
             os.environ[_SUPPRESS_VECTORS_ENV] = marker
 
     if seam_ok:
-        # The four REAL in-process nested public entries, driven for their own predicates.
+        # The five REAL in-process nested public entries, driven for their own predicates.
         _entry_vector_lifecycle(failures)
         _entry_vector_wrapper(failures)
         _entry_vector_post_entry(failures)
         _entry_vector_pre_entry(failures)
-
-        # No-vectors PASS text: a clean nested no-vectors entry must complete with exit 0 and
-        # print the DISTINCT no-vectors PASS line, never the full-run "SELF-TEST PASS:" text,
-        # so the full PASS line is only ever printed by a run whose vectors ran.
-        out = io.StringIO()
-        with redirect_stdout(out), redirect_stderr(io.StringIO()):
-            rc = _nested_entry_no_vectors()
-        text = out.getvalue()
-        if rc != 0 or _NO_VECTORS_PASS_NOTE + ":" not in text or "SELF-TEST PASS:" in text:
-            failures.append("(vector no-vectors-pass-text) a clean nested no-vectors entry "
-                            "must exit 0 and print the distinct no-vectors PASS line {!r}, "
-                            "never the full-run SELF-TEST PASS line (got exit {})".format(
-                                _NO_VECTORS_PASS_NOTE + ":", rc))
+        _entry_vector_pass_text(failures)
     else:
         # A broken seam could let a nested public entry recurse into vectors of its own with
         # no bounding child process, so the in-process entry drives do not run; the run is
@@ -1219,30 +1245,31 @@ def _not_run_vectors(failures):
                                 label, want, proc.returncode))
 
     # Inherited-marker guard: a FULL public-entry run that inherits _SUPPRESS_VECTORS_ENV (the
-    # scrub keeps it: it is not GIT_-prefixed) must exit 1 and print the complete named
-    # suppression NOT RUN line exactly once, with no PASS text of either form, never the
-    # unchanged PASS over silently skipped vectors; the child is bounded by a timeout so a
-    # hang is this vector's named failure, never a stall of the whole self-test.
+    # scrub keeps it: it is not GIT_-prefixed) must exit 1 and print the named suppression
+    # NOT RUN line as an exact LF-delimited line exactly once (a prefixed or suffixed line
+    # fails), with no PASS text of either form, never the unchanged PASS over silently skipped
+    # vectors; the child is bounded by a timeout so a hang is this vector's named failure,
+    # never a stall of the whole self-test.
     marked_expect = []
     _not_run(marked_expect, "the red-on-revert NOT RUN and entry vectors",
              "suppressed by {} (a vector child, never a full run)".format(_SUPPRESS_VECTORS_ENV))
-    suppressed_line = "  - " + marked_expect[0] + "\n"
+    suppressed_line = "  - " + marked_expect[0]
     try:
         proc = subprocess.run([sys.executable, "-I", "-B", tool, "--self-test"],
                               capture_output=True, text=True, env=entry_env, timeout=120)
-        marked_ok = (proc.returncode == 1 and proc.stdout.count(suppressed_line) == 1
+        exact_lines = proc.stdout.split("\n").count(suppressed_line)
+        marked_ok = (proc.returncode == 1 and exact_lines == 1
                      and "SELF-TEST PASS" not in proc.stdout)
-        got = "exit {} (complete-line count {}, PASS text printed: {})".format(
-            proc.returncode, proc.stdout.count(suppressed_line),
-            "SELF-TEST PASS" in proc.stdout)
+        got = "exit {} (exact-line count {}, PASS text printed: {})".format(
+            proc.returncode, exact_lines, "SELF-TEST PASS" in proc.stdout)
     except subprocess.TimeoutExpired:
         marked_ok = False
         got = "a timeout: the marked child hung instead of failing named"
     if not marked_ok:
         failures.append("(vector inherited-marker) a full public-entry run inheriting {} must "
-                        "exit 1 AND print the complete line {!r} exactly once with no PASS "
-                        "text, never the unchanged PASS over silently skipped vectors (got "
-                        "{})".format(_SUPPRESS_VECTORS_ENV, suppressed_line, got))
+                        "exit 1 AND print the exact LF-delimited line {!r} exactly once with "
+                        "no PASS text, never the unchanged PASS over silently skipped vectors "
+                        "(got {})".format(_SUPPRESS_VECTORS_ENV, suppressed_line, got))
 
     # _SUPPRESS_VECTORS_ENV guard: the spy child proves ONLY that a marker-carrying child
     # reaches its own named SELF-TEST FAIL without launching any subprocess (subprocess.run is
@@ -1272,10 +1299,13 @@ def _not_run_vectors(failures):
     # Unmarked drifted-injection child: the REAL lifecycle entry vector runs in a fresh child
     # WITHOUT the suppress marker, with _LIFECYCLE_ALLOC_PREFIX drifted so its injection can
     # never match. The nested no-vectors entry must COMPLETE, so the vector records exactly
-    # its named exit-0 failure and the child exits 0 without recursing into vectors of its
-    # own: the EXPLICIT no-vectors seam, never the environment, is what stops the recursion.
-    # The child is bounded by a timeout so a recursing revert is a named failure here, never
-    # a hang.
+    # its named exit-0 failure as the child's ENTIRE stdout and the child exits 0 without
+    # recursing into vectors of its own: the EXPLICIT no-vectors seam is what stops the
+    # recursion, and _DRIFT_DEPTH_ENV makes a reverted seam refuse at depth 1 instead of
+    # chaining drift children. The child leads its OWN process group (start_new_session),
+    # which is killed on completion or timeout and then probed, AS A GROUP, until empty: a
+    # recursing revert ends with a named failure and no surviving descendant, never a hang
+    # or an orphaned chain; the probe signals only this group, never a process listing.
     drift = ("import importlib.util, sys\n"
              "spec = importlib.util.spec_from_file_location("
              "'aiqt_portability_drift_child', sys.argv[1])\n"
@@ -1290,20 +1320,45 @@ def _not_run_vectors(failures):
              "sys.exit(0)\n")
     drift_env = dict(os.environ)
     drift_env.pop(_SUPPRESS_VECTORS_ENV, None)
+    drift_env[_DRIFT_DEPTH_ENV] = "1"  # a drift child never spawns another drift child
     drift_want = _lifecycle_alloc_failure("exit 0")
+    proc = subprocess.Popen([sys.executable, "-I", "-B", "-c", drift, tool],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                            env=drift_env, start_new_session=True)
+    timed_out = False
+    drift_out = ""
     try:
-        proc = subprocess.run([sys.executable, "-I", "-B", "-c", drift, tool],
-                              capture_output=True, text=True, env=drift_env, timeout=120)
-        drift_ok = proc.returncode == 0 and proc.stdout.count(drift_want) == 1
-        got = "exit {} (stdout {!r})".format(proc.returncode, proc.stdout.strip()[:120])
+        drift_out, _ = proc.communicate(timeout=120)
     except subprocess.TimeoutExpired:
-        drift_ok = False
-        got = "a timeout: the unmarked nested entry recursed instead of completing"
+        timed_out = True
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)  # the whole group: the leader and any descendant
+    except ProcessLookupError:
+        pass  # the group is already empty
+    if timed_out:
+        proc.communicate()  # drain the pipes and reap the killed leader
+    survivors = True
+    for _ in range(100):  # bounded group probe: up to ~10 s for the kill to empty the group
+        try:
+            os.killpg(proc.pid, 0)
+        except ProcessLookupError:
+            survivors = False
+            break
+        time.sleep(0.1)
+    if timed_out:
+        got = ("a timeout: the unmarked nested entry recursed instead of completing (the "
+               "process group was killed; members surviving the kill: {})".format(survivors))
+    else:
+        got = ("exit {} (stdout is exactly the named failure line: {}, group members "
+               "surviving completion: {})".format(
+                   proc.returncode, drift_out == drift_want + "\n", survivors))
+    drift_ok = (not timed_out and proc.returncode == 0
+                and drift_out == drift_want + "\n" and not survivors)
     if not drift_ok:
         failures.append("(vector unmarked-drifted-lifecycle) the real lifecycle entry vector, "
                         "driven UNMARKED with _LIFECYCLE_ALLOC_PREFIX drifted, must record "
-                        "exactly its named exit-0 failure {!r} and exit 0 without recursing "
-                        "into vectors of its own (got {})".format(drift_want, got))
+                        "exactly its named exit-0 failure {!r} as the ENTIRE stdout of a child "
+                        "whose process group ends empty (got {})".format(drift_want, got))
 
 
 def self_test_main(_vectors=True):
@@ -2078,7 +2133,8 @@ def _self_test_main_isolated(_mkdtemp=None, _symlink=None, _which=None, _vectors
     elif _vectors:
         # A marked fresh-process vector child cannot spawn children of its own even when its
         # injected setup failure stops failing (the marked gate above fails it first); the one
-        # UNMARKED child drives only the explicit no-vectors seam and is bounded by a timeout.
+        # UNMARKED child drives only the explicit no-vectors seam and is bounded by the
+        # depth marker, its own process group and a timeout.
         _not_run_vectors(failures)
 
     if failures:
