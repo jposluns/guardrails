@@ -5141,6 +5141,37 @@ def _main_isolated(report_path=None):
                for _kind, key, limit, ctx in _core_branches],
               [["DENY"] + ["ALLOW_WITH_FINDINGS"] * 3] * len(_core_branches))
 
+        # Load-shed characterization pins (the load-shed mechanism itself was declined): decide_yield
+        # sets no live-worker count floor, and a shed recorded as a fresh external blocker on queued
+        # items exhausts the set and licenses a stop. They pin CURRENT behaviour, not an endorsement of
+        # it; a reword of cntdef.8 or secres.7 should prompt a recheck that the load-shed advice holds.
+        _ls_live = dict(base, waiting=[("A", "tracked-task", "t1")])
+        _ls_queued = dict(_ls_live, actionable=[("B", "t", "no blocker recorded")])
+        _ls_idle = dict(_ls_live, kind="schedule_idle", wake_named=True)
+        v, _r, _d = aiqt_hooks.decide_yield(dict(_ls_live))
+        check("core/one-live-worker-stop-allows", v, "ALLOW")
+        v, _r, _d = aiqt_hooks.decide_yield(dict(_ls_queued))
+        check("core/one-live-plus-queued-denies", (v, "Two legal exits" in _r), ("DENY", True))
+        v, _r, _d = aiqt_hooks.decide_yield(dict(_ls_idle))
+        check("core/one-live-named-idle-allows", v, "ALLOW")
+        v, _r, _d = aiqt_hooks.decide_yield(dict(_ls_idle, actionable=_ls_queued["actionable"]))
+        check("core/one-live-queued-idle-denies", v, "DENY")
+        v, _r, _d = aiqt_hooks.decide_yield(dict(_ls_queued, counter=2))
+        check("core/queued-loop-bound-findings", v, "ALLOW_WITH_FINDINGS")
+        # the hazard: classify_backlog marks the shed item blocked, so decide_yield sees no actionable
+        # item and ALLOWs the stop (a concurrency cap read as whole-set exhaustion)
+        _ls_cls = aiqt_hooks.classify_backlog(
+            [item("A", blocker={"kind": "tracked-task", "ref": "t1"}),
+             item("B", blocker={"kind": "external", "ref": "load-shed",
+                                "evidence": "host load shed to one workstream",
+                                "observed_at_utc": now_iso(0)})],
+            {"t1"}, True, "", {})
+        v, _r, _d = aiqt_hooks.decide_yield(dict(base, **_ls_cls))
+        check("core/external-shed-blocker-exhausts",
+              (_ls_cls["actionable"], _ls_cls["blocked"], v,
+               _r.startswith("no actionable item remains")),
+              ([], [("B", "external", "load-shed")], "ALLOW", True))
+
         # ---------- C.2: the attestation register for blocker evidence ----------
         # The no-register behaviour stays byte-identical and is already covered above by the fixture-f
         # external-evidence legs (stop/proven-blockers-allow, stop/blank-evidence-denies).
