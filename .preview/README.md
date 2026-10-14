@@ -188,7 +188,7 @@ files are served from this repository's main branch; for a raw download, use
 | `pattern-self-match.py` | `9687140625e12fe271c20a876f01642f5cdd374197ad12850f24078cd0eb9660` | [pattern-self-match.py](pattern-self-match.py) |
 | `record-remove-check.py` | `9ad3454daf7ea104a62ef022957f06e2584cdaff8d2d595dbcf2a0a8cfc9c366` | [record-remove-check.py](record-remove-check.py) |
 | `rerun-pass-check.py` | `d4c07f5d45b7d56b30635cb849282375a4ef664820cb26d9f97b5a0e99339431` | [rerun-pass-check.py](rerun-pass-check.py) |
-| `stamp-truth-stop.py` | `393d1c2cf63e466c7194cd0a4ddec8bb4b68f2cb67e64018a8eb117c7d57b556` | [stamp-truth-stop.py](stamp-truth-stop.py) |
+| `stamp-truth-stop.py` | `ab8af4f9546147a704347f1cc10b2bd59e59a3fc75ca6b0325f4260f365a1d7d` | [stamp-truth-stop.py](stamp-truth-stop.py) |
 | `unbounded-wait.py` | `9d2a8f9c26693cc87d058284427d40554e5ff0c3f2eca3df46f4369669a43859` | [unbounded-wait.py](unbounded-wait.py) |
 | `ungated-record.py` | `35c65369b1609683e09b784681a23fab80a05e047c5f36abe5311f100b4f9394` | [ungated-record.py](ungated-record.py) |
 
@@ -500,6 +500,11 @@ section of its opening docstring. Read that section before relying on a hook; in
   natural-language time is not checked. A fabricated time in a code span, a code block, a `>` quote line,
   or just after a scheduling word passes. A genuinely future time mentioned in plain prose without a
   scheduling word before it is blocked; the remedy is to add the word or put the time in a code span.
+  Its refusals are capped: within one continuous run of turn ends with no observed new turn it refuses at
+  most three times, after which each violating stop is allowed with a cap warning. One fault in its own
+  state (an unreadable or externally deleted state file) can put a host that omits `stop_hook_active` into
+  that capped-allow mode for the rest of the transcript, until a stop carries `stop_hook_active` false; a
+  later deletion or pruning of the state file ends it early.
 - **`future-stamp-write.py`** checks only folders you declare, and only ISO-like timestamp literals. A
   time in a quote or code span in a record, a time built from parts, or one just after a scheduling word
   passes, and some table layouts give false positives or misses, which the file lists.

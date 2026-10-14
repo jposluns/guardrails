@@ -147,20 +147,29 @@ distinguishable from an observed truncation, and an ABSENT state under an explic
 since round 26, is unknown HISTORY too, where before the deletion read as CLEARED history and erased a
 recorded reset; a CLEAN Stop that discovers an absent state under an explicit true persists the marker too
 (round 43), on the readable and the unreadable transcript branches alike, so the discovery survives to the
-next Stop. Round 43: the marker FAILS CLOSED, exactly like the recorded reset: while either stands, no
+next Stop, and a clean Stop whose state READ failed persists it the same way, on both transcript branches
+(round 43: before, with the transcript unreadable and no explicit true, neither save predicate held, so the
+one Stop that observed the fault wrote nothing and a later genuine user turn restarted the count). Round
+43: the marker FAILS CLOSED, exactly like the recorded reset: while either stands, no
 transcript-derived user message is a new turn, at ANY offset, and ONLY an explicit-false Stop clears them
 (round 42 cleared the marker at a genuinely new user message past a held NON-trivial boundary, reasoning
 that bytes past a boundary that held were appended after the repair; but the repair cannot see a truncation
 that preceded the state fault, so its boundary can sit on truncated content, and a STAGED restore of the
 old records, one record per Stop, holds every boundary along the way, so restored old content restarted the
 count with no new user input and no fabricated records: a held boundary, trivial or not, is never proof
-that user content is new once the history is unknown). The cost is disclosed: ONE transient state fault (an
-unreadable read, or a deletion met under an explicit true) leaves a host that omits the field in
+that user content is new once the history is unknown). The cost is disclosed: ONE transient state fault
+CAN leave a host that omits the field in
 capped-allow mode for the rest of that transcript, until an explicit false, the same residual a recorded
-reset already carries. A clean explicit-false Stop SAVES whenever a reset or an unknown marker stands,
+reset already carries (for such a host the trigger is the UNREADABLE read, the deletion trigger needing
+the explicit true that host never sends, and a faulting Stop whose persistence is unavailable stores no
+marker); a LATER deletion or prune of the state ends the capped-allow mode early, the next Stop without
+an explicit true reading the absent state as an established 0, the disclosed deletion residual. A clean
+explicit-false Stop SAVES whenever a reset or an unknown marker stands,
 clearing it even at offset 0 and counter 0, where it previously wrote nothing and the flag stuck, and
 (round 42) even when BOTH the state and the transcript are unreadable; there (round 43) it re-reads the
-state under the lock and keeps a stored boundary and pending list that read back, so a transient
+state under the lock and keeps a stored boundary and pending list that read back (every Stop of that
+both-unreadable branch whose state read failed re-reads the same way, the clean faulting Stop above
+included), so a transient
 state-read fault does not overwrite them with 0 and an empty list, while a state still unreadable at the
 re-read is cleared to boundary 0, whose one-time recheck can re-report an already-reported old message
 once, a disclosed residual; the clear is DURABLE only as far as persistence allows: a Stop that finds the
@@ -1556,8 +1565,14 @@ def save_state(sdir, tp, offset, tail, pending, blocks=0, dfd=None, reset=False,
     or absent under an explicit true), recorded until an explicit false clears it (round 43: it fails
     closed, exactly like the reset flag). Returns True only
     when the COMPLETE serialized state was written (round 43: the write loops until every byte is written,
-    and zero progress is a failure) and atomically renamed into place; any failure keeps the previous
-    state file untouched and returns False (never raises). Round 29: with `dfd` the temp file, the rename, and any cleanup are all RELATIVE to that
+    and zero progress is a failure) and atomically renamed into place; the atomic rename is the COMMIT
+    point (round 43): any failure BEFORE it keeps the previous state file byte-identical and returns False,
+    and a failure after it leaves the committed state standing and still returns True (never raises either
+    way). Cleanup is BEST EFFORT, handled apart from that outcome: the temp file of a failed write is
+    unlinked, but a failed unlink only leaves it behind, never shadowing the state file, which only the
+    rename names; and a failed close of an OWNED directory descriptor (a direct call without `dfd`) is
+    suppressed, never raised and never a rollback (before, it escaped a successful rename as an OSError
+    with the state already replaced). Round 29: with `dfd` the temp file, the rename, and any cleanup are all RELATIVE to that
     descriptor (os.replace with src_dir_fd and dst_dir_fd), so the write lands in the directory the caller
     locked; without it the dir is opened and checked for this call. Round 30: `dfd` is the transcript's own
     state SUBDIRECTORY; without it the subdirectory is created when missing."""
@@ -1594,9 +1609,12 @@ def save_state(sdir, tp, offset, tail, pending, blocks=0, dfd=None, reset=False,
             try:
                 os.unlink(tmp, dir_fd=dfd)
             except OSError:
-                pass
+                pass  # best effort: a leftover temp file never shadows the state file (see the contract)
         if own:
-            os.close(dfd)
+            try:
+                os.close(dfd)  # apart from the outcome: the rename above is the commit point
+            except OSError:
+                pass
 
 
 def lock_state(sdir, tp, info=None):
@@ -2139,17 +2157,22 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None):
     # state and the transcript unreadable, none of will_block, had_state (the failed read hid the
     # recorded reset) or cap == "open" held, so the one signal that clears the flags wrote nothing and a
     # recorded reset survived two transient faults, capping later genuine turns (codex round 41). Round
-    # 43: absent_unknown joins it too, so a CLEAN explicit-true Stop that discovered an absent state with
-    # the transcript unreadable still persists the unknown marker
-    elif tp and (blocks is not None or cap == "open" or absent_unknown) and (will_block or had_state
-                                                                             or cap == "open" or new_turn
-                                                                             or absent_unknown):
-        # round 43: an explicit-false Stop whose state read failed loaded 0, None and [] above; re-read
+    # 43: unreadable-state discovery joins BOTH predicates, as reset_unknown (the unreadable read
+    # itself, or the absent state met under an explicit true), so a CLEAN Stop that discovered either,
+    # with the transcript unreadable and the field omitted or explicitly true, still persists the
+    # unknown marker and the capped counter (before, only absent_unknown joined: a clean Stop whose
+    # STATE read failed saved nothing, the fault was forgotten, and the next genuine user turn
+    # restarted the count, codex round 43)
+    elif tp and (blocks is not None or cap == "open" or reset_unknown) and (will_block or had_state
+                                                                            or cap == "open" or new_turn
+                                                                            or reset_unknown):
+        # round 43: a Stop whose state read failed loaded 0, None and [] above (the explicit false, or
+        # the clean faulting Stop persisting its discovery); re-read
         # under the still-held lock and keep a stored boundary and pending list that read back, so a
         # transient fault does not overwrite them with 0 and an empty list (the reset-to-0 rescan
         # re-reported an already-reported old message once); a state still unreadable here is cleared to
         # boundary 0, its one-time recheck a disclosed residual
-        if new_turn and not state_ok and dfd is not None:
+        if not state_ok and dfd is not None:
             cur = {}
             off2, tl2, pend2, ok2 = load_state(None, tp, cur, dfd)
             if ok2 and not cur.get("absent"):
@@ -5975,7 +5998,8 @@ def _self_test():
             # so a SHORT write renamed a truncated JSON prefix into place: the next load was unavailable
             # and neither the cleared state nor the previous stored flag survived, against the clear-
             # durability disclosure. The write now loops until every byte is written, zero progress is a
-            # failure, and any failure keeps the previous state file untouched and returns False
+            # failure, and any failure BEFORE the atomic rename, the commit point, keeps the previous
+            # state file untouched and returns False
             sdir = os.path.join(self.tmp, "state43e")
             self.write([self.user("go")])
             self.assertTrue(save_state(sdir, self.tr, 0, None, [], 2, reset=True))
@@ -6013,7 +6037,8 @@ def _self_test():
                 self.assertEqual((extra["blocks"], extra["reset"]), (2, True), wrapper.__name__)
                 sub = os.path.dirname(self.key(sdir=sdir))
                 left = [n for n in os.listdir(sub) if n.endswith(".tmp")]
-                self.assertEqual(left, [], wrapper.__name__)  # the failed temp file never leaks
+                self.assertEqual(left, [], wrapper.__name__)  # cleaned up here; cleanup itself is best
+                # effort, see test_r43_save_state_failed_unlink_is_best_effort_cleanup
 
             def dribble(fd, data):  # the loop finishes a write the kernel splits into single bytes
                 return real(fd, bytes(data)[:1])
@@ -6033,17 +6058,22 @@ def _self_test():
             # pending list, so the next Stop re-scanned from 0 and re-blocked on an already-reported old
             # message. The Stop now re-reads the state under the lock: a boundary that reads back is kept
             # (no spurious block), and a state still unreadable at the re-read is cleared to boundary 0,
-            # whose ONE-time recheck is the disclosed residual
+            # whose ONE-time recheck is the disclosed residual. Round 43 (codex MEDIUM): the preserved
+            # pending list is seeded NON-empty (a block whose last_assistant_message is not yet in the
+            # transcript), asserted to survive the re-read, and consumed at its late arrival, so a mutant
+            # that keeps the boundary but drops the pending list fails here
             bad = "[2026-09-23T20:00Z] still wrong"
+            missing = "[2026-09-23T21:00Z] reported but not yet in the transcript"
             real_load = load_state
             for i, transient in enumerate((True, False)):
                 sdir = os.path.join(self.tmp, f"state43f{i}")
                 self.write([self.user("go"), self.asst(bad)])
-                self.assertEqual(self.r38_ev(sdir, bad)[0], "block")  # block 1, a boundary past 0
+                self.assertEqual(self.r38_ev(sdir, missing)[0], "block")  # block 1, a boundary past 0
                 extra = {}
                 off0, tl0, pend0, ok0 = load_state(sdir, self.tr, extra)
                 self.assertTrue(ok0, transient)
                 self.assertGreater(off0, 0, transient)
+                self.assertEqual(pend0, [_sha(missing)], transient)  # a NON-empty pending list at stake
                 self.write([self.asst("Done.")], "a")  # the corrected final message
                 with open(self.tr, "rb") as f:
                     content = f.read()
@@ -6074,14 +6104,19 @@ def _self_test():
                 off, tl, pend, ok = load_state(sdir, self.tr, extra)
                 self.assertTrue(ok, transient)
                 self.assertEqual(extra["blocks"], 0, transient)  # the explicit false reset the count
-                if transient:  # ...and the re-read kept the stored boundary and pending list
+                if transient:  # ...and the re-read kept the stored boundary AND pending list
                     self.assertEqual((off, tl, pend), (off0, tl0, pend0))
-                else:
-                    self.assertEqual((off, tl), (0, None))  # both reads failed: the disclosed reset to 0
+                else:  # both reads failed: the disclosed reset to 0 clears the pending list too
+                    self.assertEqual((off, tl, pend), (0, None, []))
                 with open(self.tr, "wb") as f:
                     f.write(content)  # the transcript recovers
                 if transient:
-                    self.assertEqual(self.r38_ev(sdir, "Done.")[0], "pass")  # no spurious block
+                    self.write([self.asst(missing)], "a")  # the reported message ARRIVES late
+                    self.assertEqual(self.r38_ev(sdir, "Done.")[0], "pass")  # consumed, never re-blocked
+                    extra = {}
+                    _o, _t, pend, ok = load_state(sdir, self.tr, extra)
+                    self.assertTrue(ok)
+                    self.assertEqual(pend, [])  # the late arrival consumed the pending hash
                 else:
                     self.assertEqual(self.r38_ev(sdir, "Done.")[0], "block")  # the ONE-time recheck
                     extra = {}
@@ -6142,6 +6177,131 @@ def _self_test():
                 extra = {}
                 self.assertTrue(load_state(sdir, self.tr, extra)[3])
                 self.assertEqual((extra["blocks"], extra["reset"], extra["unknown"]), (1, False, False))
+
+        def test_r43_unreadable_state_clean_stop_persists_unknown(self):
+            # the round-43 MAJOR (codex 1): a CLEAN Stop whose STATE read failed, with the transcript
+            # unreadable and the field omitted (or explicitly true), satisfied neither predicate of the
+            # unreadable-transcript save (blocks None, cap None, no absent state), so the one Stop that
+            # observed the fault persisted nothing: the next genuine user turn read a clear history and
+            # restarted the count, against the disclosed one-fault capped-allow residual. Unreadable-
+            # state discovery (reset_unknown) now joins both predicates: the marker and the capped
+            # counter are stored right at the faulting Stop, and the re-read under the lock keeps the
+            # recoverable boundary and pending list
+            bad = "[2026-09-23T20:00Z] still wrong"
+            real_load = load_state
+            for i, field in enumerate(({}, {"stop_hook_active": True})):
+                sdir = os.path.join(self.tmp, f"state43i{i}")
+                self.write([self.user("go"), self.asst(bad)])
+                self.assertEqual(self.r38_ev(sdir, bad)[0], "block", i)  # block 1, a boundary past 0
+                off0, tl0, pend0, ok0 = load_state(sdir, self.tr, {})
+                self.assertTrue(ok0, i)
+                self.assertGreater(off0, 0, i)
+                with open(self.tr, "rb") as f:
+                    content = f.read()
+                os.remove(self.tr)  # the transcript is unreadable for the faulting Stop
+                fails = []
+
+                def transient_load(*a, **k):  # ONE unavailable read; the re-read under the lock recovers
+                    fails.append(1)
+                    globals()["load_state"] = real_load
+                    return 0, None, [], False
+                payload = {"transcript_path": self.tr, "last_assistant_message": "Done."}
+                payload.update(field)
+                globals()["load_state"] = transient_load
+                try:
+                    r = evaluate(dict(payload), self.now, self.start, sdir)
+                finally:
+                    globals()["load_state"] = real_load
+                self.assertIsNone(r, i)  # the final message is clean: allowed
+                self.assertTrue(fails, i)  # the state load was attempted and actually failed
+                extra = {}
+                off, tl, pend, ok = load_state(sdir, self.tr, extra)
+                self.assertTrue(ok, i)  # the discovery was persisted right at the faulting Stop
+                self.assertEqual((extra["blocks"], extra["reset"], extra["unknown"]),
+                                 (BLOCK_CAP, False, True), i)
+                self.assertEqual((off, tl, pend), (off0, tl0, pend0), i)  # the boundary stays recoverable
+                with open(self.tr, "wb") as f:
+                    f.write(content)  # the transcript recovers
+                # a genuinely NEW violating user turn, field absent: capped, never a restart
+                self.assertEqual(self.r38_ev(sdir, bad, append=[self.user("again"), self.asst(bad)])[0],
+                                 "cap", i)
+                extra = {}
+                self.assertTrue(load_state(sdir, self.tr, extra)[3], i)
+                self.assertEqual((extra["blocks"], extra["unknown"]), (BLOCK_CAP, True), i)
+                payload = {"transcript_path": self.tr, "stop_hook_active": False,
+                           "last_assistant_message": bad}
+                self.assertTrue(evaluate(payload, self.now, self.start, sdir), i)  # the false releases
+                extra = {}
+                self.assertTrue(load_state(sdir, self.tr, extra)[3], i)
+                self.assertEqual((extra["blocks"], extra["reset"], extra["unknown"]), (1, False, False), i)
+
+        def test_r43_save_state_failed_unlink_is_best_effort_cleanup(self):
+            # round-43 MINOR (codex 3): temporary-file CLEANUP is best effort, apart from the outcome: a
+            # zero-progress write followed by a failed unlink still returns False with the previous
+            # state byte-identical, and the one temp file left behind never shadows the state file
+            # (only the atomic rename names it); the round-42 wording claimed every failure unlinked it
+            sdir = os.path.join(self.tmp, "state43j")
+            self.write([self.user("go")])
+            self.assertTrue(save_state(sdir, self.tr, 0, None, [], 2, reset=True))
+            with open(self.key(sdir=sdir), "rb") as f:
+                before = f.read()
+            real_write, real_unlink = os.write, os.unlink
+
+            def zero(fd, data):  # no progress at all: the write fails before the rename
+                return 0
+
+            def fail_unlink(*a, **k):  # ...and the cleanup unlink fails too
+                raise OSError(5, "Input/output error")
+            os.write, os.unlink = zero, fail_unlink
+            try:
+                r = save_state(sdir, self.tr, 0, None, [], 0)
+            finally:
+                os.write, os.unlink = real_write, real_unlink
+            self.assertFalse(r)  # the failed write is never reported as persistence
+            with open(self.key(sdir=sdir), "rb") as f:
+                self.assertEqual(f.read(), before)  # the previous state byte-identical
+            sub = os.path.dirname(self.key(sdir=sdir))
+            left = [n for n in os.listdir(sub) if n.endswith(".tmp")]
+            self.assertEqual(len(left), 1)  # best effort: the one temp file remains, beside the state
+            extra = {}
+            self.assertTrue(load_state(sdir, self.tr, extra)[3])
+            self.assertEqual((extra["blocks"], extra["reset"]), (2, True))
+
+        def test_r43_save_state_owned_close_never_raises_after_commit(self):
+            # round-43 MINOR (codex 4): the atomic rename is the COMMIT point. On a direct call without
+            # `dfd` the state-directory descriptor is OWNED by save_state, and a close failure AFTER a
+            # successful rename escaped as an OSError from a function documented never to raise, with
+            # the state already replaced (no rollback is possible). The owned close is now handled
+            # apart from the outcome: the committed save returns True and the failure is suppressed
+            sdir = os.path.join(self.tmp, "state43k")
+            self.write([self.user("go")])
+            self.assertTrue(save_state(sdir, self.tr, 0, None, [], 1))
+            real_close, real_osd, seen, fails = os.close, _open_state_dir, [], []
+
+            def tracking_osd(*a, **k):  # record the OWNED state-directory descriptor
+                fd = real_osd(*a, **k)
+                seen.append(fd)
+                return fd
+
+            def failing_close(fd):  # the close of exactly that descriptor fails, after the rename
+                if seen and fd == seen[-1]:
+                    seen.pop()
+                    real_close(fd)
+                    fails.append(fd)
+                    raise OSError(5, "Input/output error")
+                return real_close(fd)
+            globals()["_open_state_dir"] = tracking_osd
+            os.close = failing_close
+            try:
+                r = save_state(sdir, self.tr, 9, "b" * 64, [], 2, unknown=True)
+            finally:
+                os.close = real_close
+                globals()["_open_state_dir"] = real_osd
+            self.assertTrue(r)  # the rename committed the state: the outcome stands
+            self.assertTrue(fails)  # the owned close was attempted and actually failed
+            extra = {}
+            self.assertEqual(load_state(sdir, self.tr, extra), (9, "b" * 64, [], True))
+            self.assertEqual((extra["blocks"], extra["reset"], extra["unknown"]), (2, False, True))
 
         # -- no wall-clock verdict (a 2.0 s ceiling failed at 2.53 s on a slower CI runner) --
         HANG_GUARD_TESTS = ()
