@@ -547,6 +547,8 @@ SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
 # row is (repo-relative importing file, repo-relative root directory), a sys.path insertion that file makes.
 # The import-closure rule holds every row live (see the docstring).
 IMPORT_SEARCH_ROOTS = (
+    (".github/check_cited_standards_contract.py", "opf/tools"),
+    (".github/check_cited_standards_contract.py", "tools"),
     ("opf/tools/_commonmark_headings.py", "opf/tools/_vendor"),
     ("tools/check_byte_canon.py", "opf/tools"),
     ("tools/check_crosswalk.py", "opf/tools"),
@@ -560,6 +562,7 @@ IMPORT_SEARCH_ROOTS = (
     ("tools/pin.py", "opf/tools"),
     ("tools/selftest_aiqt_hooks.py", ".aiqt/core/hooks/scripts"),
     ("tools/selftest_git_fixture_env.py", "opf/tools"),
+    ("tools/selftest_git_fixture_env_core.py", "opf/tools"),
     ("tools/selftest_orch_hooks.py", ".aiqt/core/hooks/scripts"),
 )
 
