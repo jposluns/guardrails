@@ -897,6 +897,27 @@ def _refuses(result, status, text):
             and any(text in f for f in result.findings))
 
 
+def _capped_parse(data, kind):
+    """parse_batch and batch_digest of the data while _opf_store._StKeyPartCap injects a counting
+    subclass of kind (RecursionError or MemoryError) for a key past the emulated cap: returns
+    (injections, result, digest). An injected exception escaping parse_batch returns (injections,
+    None, None), a failed vector rather than a suite abort."""
+    fired = []
+
+    class Injected(kind):
+        def __init__(self, *args):
+            super().__init__(*args)
+            fired.append(kind)
+
+    try:
+        with store._StKeyPartCap(Injected):
+            result = parse_batch(data)
+            digest = batch_digest(data)
+    except Injected:
+        return len(fired), None, None
+    return len(fired), result, digest
+
+
 def self_test():
     """Pure byte vectors, judged on returned statuses, findings and bytes: no file, process, network or
     clock. Exit 0 all pass, 1 a failed check, 2 a harness error (fail-closed)."""
@@ -1500,12 +1521,27 @@ def self_test():
         # The ITERATIVE preflight refuses a dotted-key structure deep enough to exhaust recursive
         # copying, in ordinary content and in provenance content alike, BEFORE any copy or recursion:
         # a structured refusal, never an exception (on a reverted preflight these raise RecursionError
-        # out of deepcopy, which this harness fails closed to exit 2).
-        for name, extra in (("content", "d." * 1200 + "leaf = 1\n"),
-                            ("provenance", "history." + "d." * 1200 + "leaf = 1\n")):
-            got = parse_batch(_edited('type = "backlog_item"\n', 'type = "backlog_item"\n' + extra))
-            check("deep-dotted-" + name + "-cannot", got.status == CANNOT_EVALUATE and got.batch is None
-                  and any("deeper than" in f for f in got.findings))
+        # out of deepcopy, which this harness fails closed to exit 2). Each key has 900 parts, past
+        # MAX_CANON_DEPTH yet below the key-part cap tomllib applies from CPython 3.14.8 on (a key of
+        # more than 1000 parts is refused), so the preflight finding is asserted on every interpreter:
+        # the vectors run under _StKeyPartCap, which emulates that cap where the interpreter lacks it.
+        with store._StKeyPartCap():
+            for name, extra in (("content", "d." * 899 + "leaf = 1\n"),
+                                ("provenance", "history." + "d." * 898 + "leaf = 1\n")):
+                got = parse_batch(_edited('type = "backlog_item"\n', 'type = "backlog_item"\n' + extra))
+                check("deep-dotted-" + name + "-cannot", got.status == CANNOT_EVALUATE
+                      and got.batch is None and any("deeper than" in f for f in got.findings))
+        # A key past that cap is the PARSER's refusal, never the preflight's: under _StKeyPartCap a
+        # 1001-part key raises RecursionError (the class CPython 3.14.8 raises) or MemoryError (a
+        # many-part key under a memory limit) inside tomllib, and parse_batch grades either one as
+        # unparseable TOML: CANNOT-EVALUATE, no batch and no digest. Each vector also asserts that its
+        # injection fired (once in parse_batch, once in batch_digest), so a disengaged cap fails it.
+        long_key = _edited('type = "backlog_item"\n',
+                           'type = "backlog_item"\n' + "d." * 1000 + "leaf = 1\n")
+        for name, kind in (("recursion", RecursionError), ("memory", MemoryError)):
+            fired, got, digest = _capped_parse(long_key, kind)
+            check("long-key-capped-" + name + "-cannot", fired == 2 and got is not None
+                  and _refuses(got, CANNOT_EVALUATE, "not parseable") and digest is None)
         # tomllib's own recursion limit (nested inline arrays) is caught and graded, never an escape.
         brackets = b"x = " + b"[" * 20000 + b"]" * 20000 + b"\n"
         check("toml-recursion-cannot", _refuses(parse_batch(brackets), CANNOT_EVALUATE, "not parseable"))
