@@ -5,7 +5,22 @@ is ever executed. Placeholders: {rp} the fixture repository, {scratch} the fixtu
 path the suite never creates; substitute them with str.replace, never str.format. Targets sit inside the fixture repository (src/pkg is tracked and clean), so a
 classifier that wrongly trusts an earlier segment's meaning ALLOWS and the vector discriminates. Authored by
 the maintainer's orchestrator as reviewed defensive test data (D-514-VECTORS-BY-ORCHESTRATOR).
+
+FIX-514-R20 (D-514-DEFN-WHOLE-TAIL): a function definition or a coproc now opens a WHOLE-TAIL word
+judgment over every later segment of its command, so a row whose probe must be judged by the
+DIRECT route spells its uncertainty wrapper AFTER the probe (PROBE; zzf() { ...; }; zzf), and a
+row that spells a definition or coproc ahead of later words exercises the tail judgment itself.
 """
+
+# Named template characters for a newline, a backslash or a quote, as PLAIN string literals and
+# ordinary escapes (FIX-514-R16, codex MINOR: no chr() construction): _NL newline, _BS backslash,
+# _SQ single quote, _DQ double quote, _BT backtick.
+_NL = "\n"
+_BS = "\\"
+_SQ = "'"
+_DQ = '"'
+_BT = "`"
+_SUP2 = "\u00b2"  # a Unicode digit (superscript two) that bash treats as a FILENAME (FIX-514-R14)
 
 # (label, defect class, command template, expected)
 PRIOR_EFFECT_VECTORS = [
@@ -149,9 +164,693 @@ PRIOR_EFFECT_VECTORS = [
     ("pe-unquoted-subst-sql-run", 6, "echo $(psql -c '\\! sh')", "deny"),
     ("pe-case-reserved-procsub-run", 4,
      "cp helper {scratch}/zz; cat <(! case x in x) {scratch}/zz;; esac)", "deny"),
+    # round 9 (FIX-514-R9) BLOCKER: the time reserved word's OPTION words (-p, --) broke the
+    # proved-argument read, so a timed case statement slipped the round-7 refusal; every Q8
+    # reproduction, red on revert (the round-8 hook allows each one; they are also _repro entries).
+    ('pe-time-p-case-procsub-run', 4,
+     'cp helper {scratch}/zz; cat <(time -p case x in x) {scratch}/zz;; esac)', 'deny'),
+    ('pe-time-dashdash-case-procsub-run', 4,
+     'cp helper {scratch}/zz; cat <(time -- case x in x) {scratch}/zz;; esac)', 'deny'),
+    ('pe-time-p-dashdash-case-procsub-run', 4,
+     'cp helper {scratch}/zz; cat <(time -p -- case x in x) {scratch}/zz;; esac)', 'deny'),
+    ('pe-bang-time-p-case-procsub-run', 4,
+     'cp helper {scratch}/zz; cat <(! time -p case x in x) {scratch}/zz;; esac)', 'deny'),
+    ('pe-time-p-case-subst-run', 4,
+     'cp helper {scratch}/zz; echo $(time -p case x in x) {scratch}/zz;; esac)', 'deny'),
+    ('pe-time-p-case-quoted-subst-run', 4,
+     'cp helper {scratch}/zz; echo "$(time -p case x in x) {scratch}/zz;; esac)"', 'deny'),
+    # round 9 MAJOR, REDESIGN: on an uncertain read the writer signal now reads DECODED command words
+    # against a closed creator set and denies REGARDLESS of options; every Q8 spelling, red on revert
+    # (the round-8 per-option raw-text regexes allow each one).
+    ('pe-writer-curl-quoted-name', 4,
+     "c''url -so {scratch}/zz http://127.0.0.1/x; zzf() { {scratch}/zz; }; zzf", 'deny'),
+    ('pe-writer-curl-quoted-mid', 4,
+     "cu''rl -so {scratch}/zz http://127.0.0.1/x; zzf() { {scratch}/zz; }; zzf", 'deny'),
+    ('pe-writer-wget-quoted-name', 4,
+     "w''get -O {scratch}/zz http://127.0.0.1/x; zzf() { {scratch}/zz; }; zzf", 'deny'),
+    ('pe-writer-tar-quoted-name', 4, "t''ar -xf a.tar -C {scratch}; coproc {scratch}/zz", 'deny'),
+    ('pe-writer-unzip-quoted-name', 4, "un''zip a.zip -d {scratch}; coproc {scratch}/zz", 'deny'),
+    ('pe-writer-chmod-quoted-name', 4, "ch''mod +x {scratch}/zz; coproc {scratch}/zz", 'deny'),
+    ('pe-writer-python-quoted-name', 4,
+     'py\'\'thon3 -c \'open("{scratch}/zz","w")\'; zzf() { {scratch}/zz; }; zzf', 'deny'),
+    ('pe-writer-install-quoted-name', 4,
+     "in''stall helper {scratch}/zz; select x in a; do {scratch}/zz; done", 'deny'),
+    ('pe-writer-rsync-quoted-name', 4, "zzgo() { {scratch}/zz; }; rsy''nc helper {scratch}/zz; zzgo", 'deny'),
+    ('pe-writer-curl-sslo', 4, 'curl -sSLo {scratch}/zz http://127.0.0.1/x; zzf() { {scratch}/zz; }; zzf', 'deny'),
+    ('pe-writer-curl-lo', 4, 'curl -Lo {scratch}/zz http://127.0.0.1/x; zzf() { {scratch}/zz; }; zzf', 'deny'),
+    ('pe-writer-curl-fsslo', 4, 'curl -fsSLo {scratch}/zz http://127.0.0.1/x; zzf() { {scratch}/zz; }; zzf', 'deny'),
+    ('pe-writer-curl-remote-name', 4, 'curl --remote-name http://127.0.0.1/x; zzf() { {scratch}/zz; }; zzf', 'deny'),
+    ('pe-writer-curl-quoted-separator-url', 4,
+     "curl 'http://127.0.0.1/x?a=1&b=2' -so {scratch}/zz; zzf() { {scratch}/zz; }; zzf", 'deny'),
+    ('pe-writer-curl-quoted-separator-header', 4,
+     "curl -H 'A: b;c' -so {scratch}/zz http://127.0.0.1/x; zzf() { {scratch}/zz; }; zzf", 'deny'),
+    ('pe-writer-curl-plain-url', 4, 'curl http://127.0.0.1/x; zzf() { {scratch}/zz; }; zzf', 'deny'),
+    ('pe-writer-sudo-curl', 4,
+     'zzf() { {scratch}/zz; }; sudo curl -so {scratch}/zz http://127.0.0.1/x; zzf', 'deny'),
+    ('pe-writer-wget-qo', 4, 'wget -qO {scratch}/zz http://127.0.0.1/x; zzf() { {scratch}/zz; }; zzf', 'deny'),
+    ('pe-writer-wget-prefix-dir', 4, 'wget -P {scratch} http://127.0.0.1/x; zzf() { {scratch}/zz; }; zzf', 'deny'),
+    ('pe-writer-wget-plain-url', 4, 'wget http://127.0.0.1/x; zzf() { {scratch}/zz; }; zzf', 'deny'),
+    ('pe-writer-tar-directory-eq', 4, 'tar -xf a.tar --directory={scratch}; coproc {scratch}/zz', 'deny'),
+    ('pe-writer-tar-xvc', 4, 'tar -xvC {scratch} -f a.tar; coproc {scratch}/zz', 'deny'),
+    ('pe-writer-tar-no-chdir', 4, 'tar -xf a.tar; coproc {scratch}/zz', 'deny'),
+    ('pe-writer-unzip-qd', 4, 'unzip -qd {scratch} a.zip; coproc {scratch}/zz', 'deny'),
+    ('pe-writer-unzip-no-destdir', 4, 'unzip a.zip; coproc {scratch}/zz', 'deny'),
+    ('pe-writer-chmod-755', 4, 'chmod 755 {scratch}/zz; coproc {scratch}/zz', 'deny'),
+    ('pe-writer-chmod-arx', 4, 'chmod a+rx {scratch}/zz; coproc {scratch}/zz', 'deny'),
+    ('pe-writer-chmod-urwx', 4, 'chmod u=rwx {scratch}/zz; coproc {scratch}/zz', 'deny'),
+    ('pe-writer-chmod-600', 4, 'chmod 600 {scratch}/zz; coproc {scratch}/zz', 'deny'),
+    ('pe-writer-python-versioned', 4,
+     'python3.12 -c \'open("{scratch}/zz","w")\'; zzf() { {scratch}/zz; }; zzf', 'deny'),
+    ('pe-writer-python-isolated-c', 4,
+     'python3 -Ic \'open("{scratch}/zz","w")\'; zzf() { {scratch}/zz; }; zzf', 'deny'),
+    ('pe-writer-python-script', 4, 'python3 {scratch}/s.py; zzf() { {scratch}/zz; }; zzf', 'deny'),
+    ('pe-writer-perl-pe', 4, "perl -pe 's/a/b/' {scratch}/x; zzf() { {scratch}/zz; }; zzf", 'deny'),
+    ('pe-writer-perl-cap-e', 4, "perl -E 'say 1'; zzf() { {scratch}/zz; }; zzf", 'deny'),
+    ('pe-writer-node-eval', 4, "node --eval 'x'; zzf() { {scratch}/zz; }; zzf", 'deny'),
+    # round 9 MEDIUM: '>&WORD' with a non-numeric WORD and the 'N<>PATH' read-write open each CREATE
+    # their path; the redirect-write signal now recognizes them (red on revert: round 8 allows both).
+    ('pe-redir-ampersand-word', 4, 'cat <<EOF\nEO\\\nF\nprintf ok >&{scratch}/zz; {scratch}/zz', 'deny'),
+    ('pe-redir-read-write-open', 4, 'cat <<EOF\nEO\\\nF\nprintf ok 1<>{scratch}/zz; {scratch}/zz', 'deny'),
+    # round 9: isolating witnesses for the cmdvar and recover-depth branch mutants, and liveness pins
+    # for the raw-text creator backstop (a creator word the recover read does not place as a command
+    # word, a disclosed over-match toward deny).
+    ('pe-cmdvar-uncertain-assign', 2, 'zzq() { git log; }; GIT_PAGER=less; zzq', 'deny'),
+    ('pe-depth-stop-curl-plain', 4,
+     'curl http://127.0.0.1/x; ' + 'cat ' + '<(cat ' * 10 + '<(printf ok)' + ')' * 10, 'deny'),
+    ('pe-raw-creator-heredoc-swallow', 4,
+     'cat <<EOF\nEO\\\nF\ninstall helper {scratch}/zz; {scratch}/zz', 'deny'),
+    ('pe-raw-creator-argument', 4, 'printf cp; zzf() { {scratch}/zz; }; zzf', 'deny'),
+    # FIX-514-R10 BLOCKER (codex): a STOPPED heredoc read (an unquoted backslash-newline join bash joins
+    # before matching the delimiter) swallows a creator TAIL the recover read never structures as a
+    # command. Since FIX-514-R11 (DECIDED 1) every such stop denies OUTRIGHT through recover-stop,
+    # whatever the tail spells; these four spellings stay pinned in the corpus.
+    ('pe-stopped-heredoc-curl', 4,
+     'cat <<EOF\nEO\\\nF\ncurl -so {scratch}/zz http://127.0.0.1/x; {scratch}/zz', 'deny'),
+    ('pe-stopped-heredoc-wget', 4,
+     'cat <<EOF\nEO\\\nF\nwget -O {scratch}/zz http://127.0.0.1/x; {scratch}/zz', 'deny'),
+    ('pe-stopped-heredoc-python', 4,
+     'cat <<EOF\nEO\\\nF\npython3 -c \'open("{scratch}/zz","w")\'; {scratch}/zz', 'deny'),
+    ('pe-stopped-heredoc-ccurl', 4,
+     'cat <<EOF\nEO\\\nF\nc\'\'url -so {scratch}/zz http://127.0.0.1/x; {scratch}/zz', 'deny'),
+    # FIX-514-R10 MAJOR (claude 1): a creator a coproc runs, in the PLAIN spelling: the raw writer
+    # backstop and the coproc command-position scan (FIX-514-R11, DECIDED 4) both see it; the quoted
+    # spellings that only the decoded scan can see are the pe-coproc-*-quoted-cp vectors below.
+    ('pe-coproc-curl-o', 4, 'coproc curl -o {scratch}/f http://127.0.0.1/x', 'deny'),
+    # FIX-514-R10 MEDIUM (claude 1, DECIDED 5): a liveness witness for every closed-set creator member,
+    # each pinned live by its own per-word mutant. Each uses a spelling no RAW backstop can see (a quoted
+    # name the writer/creator regexes miss, or an interpreter with a SCRIPT arg the writer -c/-e regex
+    # does not match), so only the decoded creator set denies it and dropping that member turns red.
+    ('pe-creator-dd-quoted', 4, "d''d; zzf() { {scratch}/zz; }; zzf", 'deny'),
+    ('pe-creator-tee-quoted', 4, "t''ee; zzf() { {scratch}/zz; }; zzf", 'deny'),
+    ('pe-creator-mkdir-quoted', 4, "mk''dir; zzf() { {scratch}/zz; }; zzf", 'deny'),
+    ('pe-creator-touch-quoted', 4, "tou''ch; zzf() { {scratch}/zz; }; zzf", 'deny'),
+    ('pe-creator-ruby', 4, 'ruby {scratch}/s.rb; zzf() { {scratch}/zz; }; zzf', 'deny'),
+    ('pe-creator-bash', 4, 'bash {scratch}/s.sh; zzf() { {scratch}/zz; }; zzf', 'deny'),
+    ('pe-creator-sh', 4, 'sh {scratch}/s.sh; zzf() { {scratch}/zz; }; zzf', 'deny'),
+    ('pe-creator-zsh', 4, 'zsh {scratch}/s.sh; zzf() { {scratch}/zz; }; zzf', 'deny'),
+    # FIX-514-R10 MAJOR (claude 2, DECIDED 4): interpreters beyond the round-9 list, and a versioned-name
+    # rule per family (perl5.36.0, ruby3.2, pypy3). Each ALLOWS on the delivered hook (red on delivery).
+    ('pe-creator-ksh', 4, 'ksh {scratch}/s.sh; zzf() { {scratch}/zz; }; zzf', 'deny'),
+    ('pe-creator-dash', 4, 'dash {scratch}/s.sh; zzf() { {scratch}/zz; }; zzf', 'deny'),
+    ('pe-creator-fish', 4, 'fish {scratch}/s.fish; zzf() { {scratch}/zz; }; zzf', 'deny'),
+    ('pe-creator-php', 4, 'php {scratch}/s.php; zzf() { {scratch}/zz; }; zzf', 'deny'),
+    ('pe-creator-lua', 4, 'lua {scratch}/s.lua; zzf() { {scratch}/zz; }; zzf', 'deny'),
+    ('pe-creator-awk', 4, 'awk 1 {scratch}/x; zzf() { {scratch}/zz; }; zzf', 'deny'),
+    ('pe-creator-gawk', 4, 'gawk 1 {scratch}/x; zzf() { {scratch}/zz; }; zzf', 'deny'),
+    ('pe-creator-nodejs', 4, 'nodejs {scratch}/s.js; zzf() { {scratch}/zz; }; zzf', 'deny'),
+    ('pe-creator-perl-versioned', 4, 'perl5.36.0 {scratch}/s.pl; zzf() { {scratch}/zz; }; zzf', 'deny'),
+    ('pe-creator-ruby-versioned', 4, 'ruby3.2 {scratch}/s.rb; zzf() { {scratch}/zz; }; zzf', 'deny'),
+    ('pe-creator-pypy3', 4, 'pypy3 {scratch}/s.py; zzf() { {scratch}/zz; }; zzf', 'deny'),
+    # FIX-514-R11 (DECIDED 5): the declaration members the round-10 corpus did not pin (its suite stayed
+    # green with cp, mv, ln, csh, tcsh, pypy and python dropped), each in a spelling no raw signal can
+    # see; the GENERATED liveness loop in the self-test reconciles the rest of the declaration.
+    ('pe-creator-cp-quoted', 4, "zzf() { {scratch}/zz; }; c''p a b; zzf", 'deny'),
+    ('pe-creator-mv-quoted', 4, "zzf() { {scratch}/zz; }; m''v a b; zzf", 'deny'),
+    ('pe-creator-ln-quoted', 4, "zzf() { {scratch}/zz; }; l''n a b; zzf", 'deny'),
+    ('pe-creator-csh-quoted', 4, "c''sh s.csh; zzf() { {scratch}/zz; }; zzf", 'deny'),
+    ('pe-creator-tcsh-quoted', 4, "t''csh s.csh; zzf() { {scratch}/zz; }; zzf", 'deny'),
+    ('pe-creator-pypy-quoted', 4, "p''ypy s.py; zzf() { {scratch}/zz; }; zzf", 'deny'),
+    ('pe-creator-python-quoted', 4, "p''ython s.py; zzf() { {scratch}/zz; }; zzf", 'deny'),
+    ('pe-creator-perl-quoted', 4, "p''erl s.pl; zzf() { {scratch}/zz; }; zzf", 'deny'),
+    ('pe-creator-node-quoted', 4, "n''ode s.js; zzf() { {scratch}/zz; }; zzf", 'deny'),
+    # FIX-514-R11 BLOCKER (DECIDED 1, both round-10 reviews): ANY recover-mode stop that leaves text at
+    # or after the stop point unread is cannot-evaluate and DENIES OUTRIGHT, whatever that text spells
+    # (recover-stop). The round-10 reproductions: a stop INSIDE a swallowed heredoc body (a stray quote
+    # in body data, a descriptor process substitution, a case statement, the nesting limit) and a
+    # depth-limit stop ahead of a quote-concatenated creator tail; each ALLOWS on the delivered round-10
+    # hook (red on delivery) because the body re-read discarded its own failure value.
+    ('pe-stop-body-strayquote', 4,
+     "cat <<EOF\nignored '\nEO\\\nF\nc''p helper {scratch}/zz; {scratch}/zz", 'deny'),
+    ('pe-stop-body-descriptor-procsub', 4,
+     "cat <<EOF\nEO\\\nF\ncat 3<(true); c''p helper {scratch}/zz; {scratch}/zz", 'deny'),
+    ('pe-stop-body-case', 4,
+     "cat <<EOF\nEO\\\nF\ncat <(case x in x) y;; esac); c''p helper {scratch}/zz; {scratch}/zz",
+     'deny'),
+    ('pe-stop-body-depth', 4,
+     "cat <<EOF\nEO\\\nF\n" + "cat " + "<(cat " * 10 + "<(printf ok)" + ")" * 10
+     + "; c''p helper {scratch}/zz; {scratch}/zz", 'deny'),
+    ('pe-stop-depth-quoted-creator', 4,
+     "cat " + "<(cat " * 10 + "<(printf ok)" + ")" * 10
+     + "; t''ouch {scratch}/zz; chmod 700 {scratch}/zz; {scratch}/zz", 'deny'),
+    # DECIDED 1 boundary (the nesting limit, both ends): ONE group past the limit stops the read and
+    # denies even a fully benign command; the just-inside depth is an allow control below.
+    ('pe-stop-depth-benign', 4, "cat " + "<(cat " * 8 + "<(printf ok)" + ")" * 8, 'deny'),
+    # FIX-514-R11 (DECIDED 2): on an UNCERTAIN read, an unmodelled runner's EXECUTED command word and
+    # the word right after a find action are read against the creator set - and ONLY those words. The
+    # certain-read forms (xvfb-run python3, firejail bash, find . -exec bash -n {} +) are allow
+    # controls below, the parent-pin behaviour.
+    ('pe-runner-xargs-quoted-cp', 4, "xargs c''p; zzf() { {scratch}/zz; }; zzf", 'deny'),
+    ('pe-runner-watch-quoted-cp', 4, "watch c''p a b; zzf() { {scratch}/zz; }; zzf", 'deny'),
+    ('pe-find-exec-quoted-cp', 4, "find src -exec c''p {} +; zzf() { {scratch}/zz; }; zzf", 'deny'),
+    # FIX-514-R11 (DECIDED 4): coproc is a COMMAND POSITION; a decoded creator after it denies in the
+    # plain AND the NAME form, quoted spellings included (both allowed on the round-10 delivery).
+    ('pe-coproc-quoted-cp', 4, "coproc c''p a b", 'deny'),
+    ('pe-coproc-named-quoted-cp', 4, "coproc zznm { c''p a b; }", 'deny'),
+    # FIX-514-R11 (DECIDED 3): the versioned-name rule covers EVERY interpreter family in the
+    # declaration (the round-10 hook allowed all three of these; red on delivery).
+    ('pe-creator-bash-versioned', 4, 'bash5 {scratch}/s.sh; zzf() { {scratch}/zz; }; zzf', 'deny'),
+    ('pe-creator-ksh-versioned', 4, 'ksh93 {scratch}/s.sh; zzf() { {scratch}/zz; }; zzf', 'deny'),
+    ('pe-creator-nodejs-versioned', 4, 'nodejs20 {scratch}/s.js; zzf() { {scratch}/zz; }; zzf', 'deny'),
+    # FIX-514-R11 (DECIDED 6): the '>&WORD' rule also covers a WORD of digits then '-' then more
+    # ('>&2-x' writes the file '2-x'); the dup, move and close spellings are allow controls below. The
+    # raw-regex witnesses put the redirect in a DATA argument, which only the raw signal can see, so the
+    # redir-write mutants flip them; the direct '>&2-x' spelling was already denied through the lexed
+    # redirect record at the pin and stays pinned by the corpus.
+    ('pe-redir-fd-minus-word', 4, 'zzf() { {scratch}/zz; }; printf ok >&2-x; zzf', 'deny'),
+    ('pe-redir-raw-word-arg', 4, 'zzf() { {scratch}/zz; }; printf " >&zqfile "; zzf', 'deny'),
+    ('pe-redir-raw-digits-minus-arg', 4, 'zzf() { {scratch}/zz; }; printf " >&2-x "; zzf', 'deny'),
+    # FIX-514-R11: per-pattern liveness witnesses for the raw writer backstop, each a DATA argument only
+    # that one raw pattern sees (printf is a known non-runner, so no decoded check fires), restoring the
+    # per-pattern mutants the round-10 delivery had collapsed into one whole-tuple mutant.
+    ('pe-writer-raw-curl-arg', 4, 'zzf() { {scratch}/zz; }; printf "curl -o f"; zzf', 'deny'),
+    ('pe-writer-raw-wget-arg', 4, 'zzf() { {scratch}/zz; }; printf "wget -O f"; zzf', 'deny'),
+    ('pe-writer-raw-tar-arg', 4, 'zzf() { {scratch}/zz; }; printf "tar -x -C d"; zzf', 'deny'),
+    ('pe-writer-raw-unzip-arg', 4, 'zzf() { {scratch}/zz; }; printf "unzip z -d d"; zzf', 'deny'),
+    ('pe-writer-raw-chmod-arg', 4, 'zzf() { {scratch}/zz; }; printf "chmod +x f"; zzf', 'deny'),
+    ('pe-writer-raw-interp-arg', 4, 'zzf() { {scratch}/zz; }; printf "perl -e x"; zzf', 'deny'),
+    # FIX-514-R12 (DECIDED 1): the recover-stop class closed at FULL WIDTH. A category-0 SYNTAX stop that
+    # leaves text unread denies too (the separator-based category-0 allow is dropped), and a recorded
+    # heredoc-join cannot-evaluate is never downgraded by a LATER unterminated quote or escape. Every
+    # reproduction row from both round-11 reviews: a heredoc join then an unterminated single or double
+    # quote or a trailing backslash, a no-heredoc trailing backslash, and a bare unbalanced quote.
+    ("pe-recover-join-trail-squote", 4,
+     "cat <<EOF"+_NL+"EO"+_BS+_NL+"F"+_NL+"t"+_SQ+_SQ+"ouch {scratch}/zz; chmod 700 {scratch}/zz; {scratch}/zz"+_NL+"EOF"+_NL+"echo "+_SQ+"x", "deny"),
+    ("pe-recover-join-trail-dquote", 4,
+     "cat <<EOF"+_NL+"EO"+_BS+_NL+"F"+_NL+"t"+_SQ+_SQ+"ouch {scratch}/zz; chmod 700 {scratch}/zz; {scratch}/zz"+_NL+"EOF"+_NL+"echo "+_DQ+"x", "deny"),
+    ("pe-recover-join-trail-bs", 4,
+     "cat <<EOF"+_NL+"EO"+_BS+_NL+"F"+_NL+"t"+_SQ+_SQ+"ouch {scratch}/zz; chmod 700 {scratch}/zz; {scratch}/zz"+_NL+"EOF"+_NL+"echo x"+_BS, "deny"),
+    ("pe-recover-trailbs-noheredoc", 4,
+     "printf ok > {scratch}/zz; chmod 700 {scratch}/zz; {scratch}/zz"+_BS, "deny"),
+    ("pe-recover-cp-trailbs", 4, "c"+_SQ+_SQ+"p helper {scratch}/zz; {scratch}/zz"+_BS, "deny"),
+    ("pe-recover-syntax-unbalanced", 4, "ls "+_DQ+"unbalanced", "deny"),
+    # FIX-514-R12 (DECIDED 2, claude MAJOR): coproc behind the time reserved word is a command position;
+    # the reserved prefix (time with -p/--, and a leading bang) is skipped before the uncertain-word and
+    # creator scans, so a coproc and a creator it runs are seen (the round-10 hook allowed all three).
+    ("pe-time-coproc-quoted-cp", 4, "time coproc c"+_SQ+_SQ+"p a b", "deny"),
+    ("pe-time-p-coproc-named-quoted-cp", 4, "time -p coproc zznm { c"+_SQ+_SQ+"p a b; }", "deny"),
+    ("pe-time-coproc-plain-cp", 4, "time coproc cp a b", "deny"),
+    # FIX-514-R12 (DECIDED 2/3, codex MAJOR + MEDIUMs): the executed-word scans consume a runner's OWN
+    # options by arity and recurse when the executed word is itself a runner or wrapper, so an option
+    # VALUE is not mistaken for the command (xargs -I curl printf allows below) and a creator behind a
+    # wrapper is found. Each denies behind an uncertain read.
+    ("pe-runner-xargs-sudo-cp", 4, "xargs sudo c''p a b; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-runner-taskset-c-cp", 4, "taskset -c 0 c''p; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-runner-strace-o-cp", 4, "strace -o log c''p; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-find-exec-env-cp", 4, "find src -exec env c''p {} +; zzf() { {scratch}/zz; }; zzf", "deny"),
+    # FIX-514-R12 (DECIDED 4 boundary): a command-substitution level costs TWO against the recover depth
+    # (its own open group plus the nesting increment), so a benign command denies past FOUR levels, as it
+    # denies past EIGHT process-substitution groups; the just-inside depths are allow controls.
+    ("pe-stop-depth-dollarsub", 4, "echo "+"$(echo "*4+"$(printf ok)"+")"*4, "deny"),
+    # FIX-514-R13 (DECIDED 1, both reviews): option and assignment syntax is parsed on the RAW decoded
+    # token, so an attached or equals-joined option value carrying a slash no longer ends the option
+    # scan ahead of a quote-concatenated creator (each allowed on the round-12 delivery); the same
+    # shapes around benign commands are allow controls below.
+    ("pe-runner-strace-o-attached-cp", 4, "strace -o/tmp/log c''p a b; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-runner-strace-output-eq-cp", 4, "strace --output=/tmp/log c''p a b; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-runner-xargs-a-attached-cp", 4, "xargs -a/tmp/list c''p a b; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-runner-xargs-argfile-eq-cp", 4, "xargs --arg-file=/tmp/list c''p a b; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-runner-xargs-I-attached-cp", 4, "xargs -I/tmp/slot c''p a b; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-runner-xargs-env-assign-cp", 4, "xargs env X=/tmp/a c''p a b; zzf() { {scratch}/zz; }; zzf", "deny"),
+    # FIX-514-R13 (DECIDED 2, both reviews): the FOUR-CLASS option model. A bare optional-argument
+    # long option consumes NO word; ltrace (no entry) and the taskset existing-process mode leave the
+    # executed word UNKNOWN, denying even a benign command behind an uncertain read (fail closed).
+    ("pe-runner-xargs-replace-bare-cp", 4, "xargs --replace c''p a b; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-runner-xargs-sudo-preserve-cp", 4,
+     "xargs sudo --preserve-env=PATH c''p a b; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-runner-ltrace-unmodelled", 4, 'ltrace -f printf ok; zzf() { {scratch}/zz; }; zzf', "deny"),
+    ("pe-runner-taskset-pid-unknown", 4, 'taskset -p 123; zzf() { {scratch}/zz; }; zzf', "deny"),
+    # FIX-514-R13 (DECIDED 3, both reviews): declared wrapper positionals are consumed on recursion,
+    # taskset's mask is a mandatory positional, and a watch string without -x is read as a command.
+    ("pe-runner-xargs-timeout-cp", 4, "xargs timeout 5 c''p a b; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-runner-xargs-chrt-cp", 4, "xargs chrt -f 10 c''p a b; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-runner-taskset-mask-cp", 4, "taskset 1 c''p a b; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-runner-watch-string-python", 4,
+     "watch -n 1 'python3 w.py'; zzf() { {scratch}/zz; }; zzf", "deny"),
+    # FIX-514-R13 (DECIDED 4, both reviews): predicate operands are consumed BEFORE an action is
+    # recognized, so a pattern that spells an action never swallows the real one; an uncertified
+    # predicate ahead of an action denies beside a later creator/runner/wrapper word (a disclosed
+    # over-deny: curl below is a -name OPERAND bash never runs).
+    ("pe-find-name-exec-operand-cp", 4,
+     "find src -name -exec -o -exec c''p a b \\;; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-find-execdir-name-operand-cp", 4,
+     "find src -name -execdir -o -execdir c''p a b \\;; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-find-ok-name-operand-cp", 4,
+     "find src -name -ok -o -ok c''p a b \\;; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-find-okdir-name-operand-cp", 4,
+     "find src -name -okdir -o -okdir c''p a b \\;; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-find-uncertified-pred-overdeny", 4,
+     'find src -zzznewpred -exec true {} \\; -name curl; zzf() { {scratch}/zz; }; zzf', "deny"),
+    # FIX-514-R13 (MINOR): the executed-word recursion bound at both ends - a creator at the deepest
+    # followed depth still denies, and one wrapper deeper is UNKNOWN, denying even a benign command
+    # (fail closed); the just-inside benign form is an allow control below.
+    ("pe-runner-depth-creator-at-bound", 4, "xargs env env env c''p a b; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-runner-depth-past-bound", 4, 'xargs env env env env printf ok; zzf() { {scratch}/zz; }; zzf', "deny"),
+    # FIX-514-R13 (MINOR): the recover depth of the QUOTED dollar form denies past FOUR levels exactly
+    # as the unquoted form, and a backtick holding process substitutions denies past SEVEN groups
+    # (one fewer than the eight a plain command allows); the just-inside depths are controls below.
+    ("pe-stop-depth-dollarsub-quoted", 4,
+     "echo "+_DQ+"$(echo "*4+"$(printf ok)"+")"*4+_DQ, "deny"),
+    ("pe-stop-depth-backtick-procsub", 4,
+     "echo "+_BT+"cat "+"<(cat "*7+"<(printf ok)"+")"*7+_BT, "deny"),
+    # FIX-514-R14 (DECIDED 1, both reviews): a runner whose EXECUTED word is find runs the find action
+    # scan on find's arguments, sharing the unknown handling (each ALLOWED on the round-13 delivery).
+    ("pe-runner-xargs-find-exec-cp", 4, "xargs find src -exec c''p a b \\;; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-runner-xargs-I-find-exec-cp", 4, "xargs -I{} find {} -exec c''p a b \\;; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-runner-strace-find-exec-cp", 4, "strace -f find src -exec c''p a b \\;; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-runner-taskset-find-exec-cp", 4, "taskset 1 find src -exec c''p a b \\;; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-runner-watch-exec-find-cp", 4, "watch -x find src -exec c''p a b \\;; zzf() { {scratch}/zz; }; zzf", "deny"),
+    # FIX-514-R14 (DECIDED 2, codex MAJOR): -- ends env option parsing but NOT assignment parsing, so a
+    # NAME=VALUE after -- stays an assignment and the command word is cp (each ALLOWED on round 13).
+    ("pe-runner-xargs-env-dashdash-assign-cp", 4, "xargs env -- X=/tmp/a c''p a b; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-find-exec-env-dashdash-assign-cp", 4, "find src -exec env -- X=/tmp/a c''p a b \\;; zzf() { {scratch}/zz; }; zzf", "deny"),
+    # FIX-514-R14 (DECIDED 3, claude MAJOR): + ends an action only for -exec/-execdir; -ok/-okdir end
+    # only at ;, so the two-operand -fprintf no longer swallows the real ; and the trailing -exec creator
+    # (each ALLOWED on round 13).
+    ("pe-find-ok-plus-fprintf-cp", 4, "find src ! -ok printf X {} + -fprintf \\; -exec c''p a b \\;; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-find-okdir-plus-fprintf-cp", 4, "find src ! -okdir printf X {} + -fprintf \\; -exec c''p a b \\;; zzf() { {scratch}/zz; }; zzf", "deny"),
+    # FIX-514-R14 (DECIDED 4, claude MAJOR): a shell-string runner (watch without -x, eval, builtin eval,
+    # sg) hands one string to a shell, so its executed word is UNKNOWN and never whitespace-split; a
+    # creator next to a shell separator is now seen (each ALLOWED on round 13). The benign ls -la string
+    # is the disclosed over-deny.
+    ("pe-runner-watch-string-semicolon", 4, "watch -n 1 'true;python3 w.py'; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-runner-watch-string-andand", 4, "watch -n 1 'true&&python3 w.py'; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-runner-watch-string-subshell", 4, "watch -n 1 '(python3 w.py)'; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-runner-watch-string-dollarsub", 4, "watch 'echo $(python3 w.py)'; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-runner-watch-string-pipe", 4, "watch 'ls|python3'; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-runner-xargs-watch-string", 4, "xargs watch -n 1 'true;python3 w.py'; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-runner-eval-string", 4, "eval 'python3 w.py'; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-runner-builtin-eval-string", 4, "builtin eval 'python3 w.py'; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-runner-sg-string", 4, "sg wheel 'python3 w.py'; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-runner-watch-string-benign-overdeny", 4, "watch -n 1 'ls -la'; zzf() { {scratch}/zz; }; zzf", "deny"),
+    # FIX-514-R14 (DECIDED 5, claude MEDIUM), superseded at FIX-514-R16 (DECIDED 1): an opaque word
+    # ANYWHERE in a runner's argument list - these rows spell it at an option, positional, executed and
+    # find action word - is UNKNOWN and denies behind an uncertain read (each ALLOWED on round 13).
+    ("pe-opaque-xargs-Z-cp", 4, "xargs $Z c''p a b; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-opaque-xargs-braceZ-cp", 4, "xargs ${Z} c''p a b; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-opaque-strace-Z-cp", 4, "strace $Z c''p a b; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-opaque-xargs-env-Z-cp", 4, "xargs env $Z c''p a b; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-opaque-xargs-chrt-P-cp", 4, "xargs chrt -f $P c''p a b; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-opaque-find-exec-Z-cp", 4, "find src -exec $Z c''p a b \\;; zzf() { {scratch}/zz; }; zzf", "deny"),
+    # FIX-514-R14 (MINORs): coverage pins - xargs -i/-l optional-attached class, env lone -, and the
+    # ASCII-only digit test in _classify_redirect (a Unicode digit such as the superscript two is NOT a
+    # bash file descriptor, so a >& of one WRITES that file and running ./ of it runs it; a certain
+    # read, untouched by the word-level rule). Since FIX-514-R16 the three runner rows deny through the
+    # word-level creator trigger (cp), so only the ascii-digit row still flips under a single-line
+    # mutant of its own test; the option-class readings they once pinned survive only on the stricter
+    # deny side of the kept arity scan.
+    ("pe-runner-xargs-i-optional-cp", 4, "xargs -i c''p a b; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-runner-xargs-l-optional-cp", 4, "xargs -l c''p a b; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-runner-xargs-env-lone-dash-cp", 4, "xargs env - c''p a b; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-redir-ampersand-ascii-digit", 4, "printf ok >&"+_SUP2+"; ./"+_SUP2, "deny"),
+    # FIX-514-R15 (DECIDED 1, both reviews): an OPAQUE word (an unset or computed expansion) ANYWHERE
+    # before the command - an option value, a runner positional (taskset mask, xargs -n value, strace -e
+    # value) or a find starting path or expression word - changes the word count or position, so the
+    # executed word is UNKNOWN and denies (each ALLOWED on the round-14 delivery).
+    ("pe-opaque-taskset-mask-cp", 4, "taskset $Z 1 c''p a b; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-opaque-xargs-n-value-cp", 4, "xargs -n $Z 1 c''p a b; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-opaque-strace-e-value-cp", 4, "strace -e $Z trace=none c''p a b; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-opaque-find-path-cp", 4, "find src $Z c''p a b \\;; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-opaque-find-bracepath-cp", 4, "find src ${Z} c''p a b \\;; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-opaque-find-env-exec-path-cp", 4, "A=-exec; find src $A c''p a b \\;; zzf() { {scratch}/zz; }; zzf", "deny"),
+    # FIX-514-R15 (DECIDED 2, claude MAJOR), superseded at FIX-514-R16 (DECIDED 1): env's and sudo's
+    # assignment grammars differ between implementations, so they are no longer position-modelled at
+    # all: ANY word containing = after its first character on a line that reaches env or sudo is
+    # UNKNOWN and denies behind an uncertain read (each of these rows ALLOWED on round 14).
+    ("pe-env-assign-leading-digit-cp", 4, 'xargs env 9x=1 python3 w.py; zzf() { {scratch}/zz; }; zzf', "deny"),
+    ("pe-env-assign-dash-name-cp", 4, "find src -exec env a-b=1 c''p a b \\;; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-env-assign-dashdash-digit-cp", 4, "xargs env -- 1=2 c''p a b; zzf() { {scratch}/zz; }; zzf", "deny"),
+    # FIX-514-R15 (DECIDED 3, claude MAJOR): a runner with NO option model and any word before its command
+    # is UNKNOWN; su, runuser and script hand a -c string to a shell (shell-string set) and chroot/ssh take
+    # an operand (DIR/HOST) before the command (each ALLOWED on round 14). The benign ssh is the over-deny.
+    ("pe-runner-su-c-string", 4, "su root -c 'python3 w.py'; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-runner-xargs-su-c-string", 4, "xargs su root -c 'python3 w.py'; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-runner-runuser-c-string", 4, "runuser root -c 'python3 w.py'; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-runner-script-c-string", 4, "script out.txt -c 'python3 w.py'; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-runner-chroot-operand", 4, 'chroot / python3 w.py; zzf() { {scratch}/zz; }; zzf', "deny"),
+    ("pe-runner-ssh-operand", 4, "ssh localhost 'python3 w.py'; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-runner-ssh-benign-overdeny", 4, 'ssh localhost true; zzf() { {scratch}/zz; }; zzf', "deny"),
+    # FIX-514-R15 (DECIDED 4, both reviews): find shares ONE recursion budget - depth is threaded into the
+    # find action scan and its runner call - so a wrapper chain THROUGH find reads past the bound as UNKNOWN
+    # and a deep alternation can never raise RecursionError (the first form ALLOWED on round 14).
+    ("pe-runner-find-shared-budget", 4, 'xargs env env env find src -exec env env env printf ok \\;; zzf() { {scratch}/zz; }; zzf', "deny"),
+    ("pe-runner-find-deep-chain", 4, 'xargs env find src -exec env find src -exec env find src -exec env find src -exec env find src -exec env find src -exec env find src -exec env find src -exec env find src -exec env find src -exec env find src -exec env find src -exec env find src -exec env find src -exec env find src -exec env find src -exec env find src -exec env find src -exec env find src -exec env find src -exec env find src -exec env find src -exec env find src -exec env find src -exec env find src -exec env find src -exec env find src -exec env find src -exec env find src -exec env find src -exec env find src -exec env find src -exec env find src -exec env find src -exec env find src -exec env find src -exec env find src -exec env find src -exec env find src -exec env find src -exec env find src -exec env find src -exec env find src -exec env find src -exec env find src -exec env find src -exec env find src -exec env find src -exec env find src -exec env find src -exec env env env env printf ok \\;; zzf() { {scratch}/zz; }; zzf', "deny"),
+    # FIX-514-R15 (MINORs): the three surviving round-14 single-line mutants get a committed witness - a
+    # runner resolving to find with an opaque action word, a find action whose runner has an opaque word,
+    # and a creator through a wrapper then find (each denies here; the mutant flips it to allow).
+    ("pe-runner-xargs-find-exec-opaque-cp", 4, "xargs find src -exec $Z c''p a b \\;; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-find-exec-env-opaque-cp", 4, "find src -exec env $Z c''p a b \\;; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-runner-xargs-sudo-find-exec-cp", 4, "xargs sudo find src -exec c''p a b \\;; zzf() { {scratch}/zz; }; zzf", "deny"),
+    # FIX-514-R16 (DECIDED 1, both reviews): the WORD-LEVEL rule. Behind an uncertain read EVERY word
+    # of a runner's argument list is read with NO position assigned: any opaque word (an expansion,
+    # quoted or not, a glob, a brace, a leading tilde), any creator, interpreter or shell word, env's
+    # split-string option, and any env/sudo-line word containing = after its first character is
+    # UNKNOWN and denies. Each row below ALLOWED on the round-15 delivery.
+    # (a) find consumed an opaque OPERAND unchecked (-name value, -D value, action operands, -newer
+    # value, both -fprintf values), so word splitting could smuggle a second action past the scan.
+    ("pe-opaque-find-name-operand-cp", 4, "find src -name $Z c''p a b \\;; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-opaque-find-D-value-cp", 4, "find -D $Z c''p a b \\;; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-opaque-find-exec-operand-cp", 4, "find src -exec printf $Z c''p a b \\;; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-opaque-find-newer-operand-cp", 4, "find src -newer $Z c''p a b \\;; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-opaque-find-fprintf-operand-cp", 4, "find src -fprintf $Z x c''p a b \\;; zzf() { {scratch}/zz; }; zzf", "deny"),
+    # (b) env's split-string option re-splits ONE string into new words (-S/--split-string, attached
+    # or separated), and an assignment NAME may contain a newline, so no equals-regex with a dot can
+    # read it: both are now word-level UNKNOWN (the round-15 --split-string rows also regressed
+    # against round 14, which denied them as unmodelled options).
+    ("pe-env-split-string-eq-cp", 4, "xargs env --split-string='c''p a b'; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-env-split-string-attached-cp", 4, "xargs env -S'x=1 c''p a b'; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-find-exec-env-split-string-cp", 4, "find src -exec env --split-string='c''p a b' \\;; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-env-newline-assign-cp", 4, "xargs env 'a\nb=1' c''p a b; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-env-split-string-benign-unknown", 4, "xargs env -S'printf ok'; zzf() { {scratch}/zz; }; zzf", "deny"),
+    # (c) a SHELL reached through a runner or a find action is a creator-or-shell WORD, never a
+    # recursion step that returns its script operand; source, . , mksh and ash (outside the creator
+    # set) deny the same way, directly and behind runners.
+    ("pe-runner-xargs-bash-script", 4, 'xargs bash s.sh; zzf() { {scratch}/zz; }; zzf', "deny"),
+    ("pe-runner-xargs-sh-script", 4, 'xargs sh s.sh; zzf() { {scratch}/zz; }; zzf', "deny"),
+    ("pe-runner-xargs-zsh-script", 4, 'xargs zsh s.sh; zzf() { {scratch}/zz; }; zzf', "deny"),
+    ("pe-find-exec-bash-script", 4, 'find src -exec bash s.sh \\;; zzf() { {scratch}/zz; }; zzf', "deny"),
+    ("pe-runner-xargs-sudo-sh-script", 4, 'xargs sudo sh w.sh; zzf() { {scratch}/zz; }; zzf', "deny"),
+    ("pe-runner-xargs-env-bash-script", 4, 'xargs env bash w.sh; zzf() { {scratch}/zz; }; zzf', "deny"),
+    ("pe-runner-xargs-nice-zsh-script", 4, 'xargs nice zsh w.sh; zzf() { {scratch}/zz; }; zzf', "deny"),
+    ("pe-runner-source-script", 4, 'source ./w.sh; zzf() { {scratch}/zz; }; zzf', "deny"),
+    ("pe-runner-dot-script", 4, '. ./w.sh; zzf() { {scratch}/zz; }; zzf', "deny"),
+    ("pe-runner-mksh-script", 4, 'mksh w.sh; zzf() { {scratch}/zz; }; zzf', "deny"),
+    ("pe-runner-xargs-ash-script", 4, 'xargs ash w.sh; zzf() { {scratch}/zz; }; zzf', "deny"),
+    # (d) sudo's assignment grammar differs from env's AND between sudo implementations (A+=1 and
+    # a-b=1 are read differently by sudo and sudo-rs), so any sudo-line word with = denies.
+    ("pe-sudo-plus-assign-cp", 4, "xargs sudo A+=1 c''p a b; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-sudo-dash-assign-cp", 4, "xargs sudo a-b=1 c''p a b; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-find-exec-sudo-plus-assign-cp", 4, "find src -exec sudo X+=1 c''p a b \\;; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-sudo-plus-assign-benign-unknown", 4, 'xargs sudo A+=1 printf ok; zzf() { {scratch}/zz; }; zzf', "deny"),
+    # FIX-514-R16 (DECIDED 2): the DISCLOSED over-denies of the word-level rule, each named. A word
+    # is read with no position, so a benign creator-or-shell NAME that is only DATA, a quoted
+    # expansion or tilde that bash keeps as exactly ONE word (it cannot move the command position),
+    # and every env/sudo assignment or equals-joined option now deny behind an uncertain read. The
+    # rule accepts these as the bounded cost of assigning NO positions: certifying "exactly one word"
+    # or "only data" would be position grammar again, the class that round upon round reopened.
+    ("pe-word-xargs-grep-sh-overdeny", 4, 'xargs grep -l sh; zzf() { {scratch}/zz; }; zzf', "deny"),
+    ("pe-word-xargs-grep-curl-overdeny", 4, 'xargs grep -l curl; zzf() { {scratch}/zz; }; zzf', "deny"),
+    ("pe-word-xargs-n-quoted-overdeny", 4, 'xargs -n "$N" printf ok; zzf() { {scratch}/zz; }; zzf', "deny"),
+    ("pe-word-find-home-path-overdeny", 4, 'find "$HOME" -name x; zzf() { {scratch}/zz; }; zzf', "deny"),
+    ("pe-word-strace-tilde-overdeny", 4, 'strace -o ~/t.txt printf ok; zzf() { {scratch}/zz; }; zzf', "deny"),
+    ("pe-word-env-assign-overdeny", 4, 'xargs env X=/tmp/a printf; zzf() { {scratch}/zz; }; zzf', "deny"),
+    ("pe-word-env-dashdash-assign-overdeny", 4, 'xargs env -- X=/tmp/a printf ok; zzf() { {scratch}/zz; }; zzf', "deny"),
+    ("pe-word-sudo-preserve-env-overdeny", 4, 'xargs sudo --preserve-env=PATH printf; zzf() { true; }; zzf', "deny"),
+    ("pe-word-xargs-I-curl-overdeny", 4, 'xargs -I curl printf; zzf() { {scratch}/zz; }; zzf', "deny"),
+    ("pe-word-find-name-after-term-overdeny", 4, 'find src -exec true {} + -name curl; zzf() { {scratch}/zz; }; zzf', "deny"),
+    ("pe-word-find-printf-exec-curl-overdeny", 4, 'find src -exec printf -exec curl {} +; zzf() { {scratch}/zz; }; zzf', "deny"),
+    ("pe-word-find-exec-plus-interior-overdeny", 4, 'find src -exec printf + -exec curl {} \\;; zzf() { {scratch}/zz; }; zzf', "deny"),
+    ("pe-word-find-execdir-plus-interior-overdeny", 4, 'find src -execdir printf + -execdir curl {} \\;; zzf() { {scratch}/zz; }; zzf', "deny"),
+    ("pe-word-find-ok-plus-interior-overdeny", 4, 'find src -ok printf + -ok curl {} \\;; zzf() { {scratch}/zz; }; zzf', "deny"),
+    ("pe-word-find-okdir-plus-interior-overdeny", 4, 'find src -okdir printf + -okdir curl {} \\;; zzf() { {scratch}/zz; }; zzf', "deny"),
+    ("pe-word-find-ok-plus-operand-overdeny", 4, "find src -ok printf X {} + -exec c''p a b \\;; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-word-find-okdir-plus-operand-overdeny", 4, "find src -okdir printf X {} + -exec c''p a b \\;; zzf() { {scratch}/zz; }; zzf", "deny"),
+    ("pe-word-find-global-H-overdeny", 4, 'find -H src -name curl -exec printf ok {} \\;; zzf() { {scratch}/zz; }; zzf', "deny"),
+    ("pe-word-find-global-L-overdeny", 4, 'find -L src -name curl -exec printf ok {} \\;; zzf() { {scratch}/zz; }; zzf', "deny"),
+    ("pe-word-find-global-P-overdeny", 4, 'find -P src -name curl -exec printf ok {} \\;; zzf() { {scratch}/zz; }; zzf', "deny"),
+    ("pe-word-find-global-O-overdeny", 4, 'find -O3 src -name curl -exec printf ok {} \\;; zzf() { {scratch}/zz; }; zzf', "deny"),
+    ("pe-word-find-global-D-overdeny", 4, 'find -D tree src -name curl -exec printf ok {} \\;; zzf() { {scratch}/zz; }; zzf', "deny"),
+    ("pe-word-xargs-find-printf-cp-operand-overdeny", 4, "xargs find src -exec printf c''p {} \\;; zzf() { {scratch}/zz; }; zzf", "deny"),
+    # FIX-514-R16 (DECIDED 4, claude MINOR): committed witnesses for the two branches no committed row
+    # pinned - the find action recursion charges the SHARED budget (depth + 1: with the increment
+    # dropped, the fourth wrapper level behind find resolves and this row allows), and the word-level
+    # opacity trigger read at a SEPARATE long-option value (with the trigger dropped, --max-args
+    # consumes the opaque value and the benign tail allows; round 15 denied this row through its
+    # long-option opacity check, which the word-level rule subsumes).
+    ("pe-wit-find-action-depth-edge", 4, 'xargs env env env find src -exec env printf ok \\;; zzf() { {scratch}/zz; }; zzf', "deny"),
+    ("pe-wit-long-value-opaque", 4, 'xargs --max-args $Z 1 printf ok; zzf() { {scratch}/zz; }; zzf', "deny"),
+    # FIX-514-R17 (DECIDED 1, codex MAJOR 1): source and . are shell WORDS for the rule wherever they
+    # appear as an argument of a runner, builtin and command INCLUDED - those two execute shell
+    # builtins, so the first two rows are executable routes - and for xargs the rule stays word-level
+    # with no executability reasoning. Each row ALLOWED on the round-16 delivery, whose argument-word
+    # set held only mksh/ash. At FIX-514-R18 (DECIDED 1) the find starting-path exception is
+    # REMOVED: a literal dot word denies wherever it appears (the pe-word-*find-dot* rows below),
+    # and the uncertain-read find rows in this file spell their starting path src so each keeps
+    # pinning its own trigger.
+    ("pe-word-builtin-source-script", 4, 'builtin source ./w.sh; zzf() { true; }; zzf', "deny"),
+    ("pe-word-command-dot-script", 4, 'command . ./w.sh; zzf() { true; }; zzf', "deny"),
+    ("pe-word-xargs-source-script", 4, 'xargs source ./w.sh; zzf() { true; }; zzf', "deny"),
+    # FIX-514-R17 (DECIDED 2, codex MAJOR 2): the word rule runs on EVERY route into a listed runner.
+    # time is itself a _COMMAND_RUNNERS word the reserved-prefix skip removed before dispatch, and a
+    # coproc (plain and NAME forms) reaches a runner the round-16 helper only creator-scanned. One
+    # row per route and trigger kind - opaque operand, shell word, env split-string - each ALLOWED on
+    # the round-16 delivery.
+    ("pe-word-time-opaque-operand", 4, 'time printf "$Z"; zzf() { true; }; zzf', "deny"),
+    ("pe-word-time-p-shell-word", 4, 'time -p printf ash; zzf() { true; }; zzf', "deny"),
+    ("pe-word-bang-time-shell-word", 4, '! time printf sh; zzf() { true; }; zzf', "deny"),
+    ("pe-word-coproc-xargs-opaque", 4, "coproc xargs printf \"$Z\"", "deny"),
+    ("pe-word-coproc-env-split-string", 4, "coproc env -S'printf ok'", "deny"),
+    ("pe-word-coproc-builtin-source", 4, "coproc builtin source ./w.sh", "deny"),
+    ("pe-word-coproc-named-xargs-opaque", 4, "coproc zznm { xargs printf \"$Z\"; }", "deny"),
+    # FIX-514-R17 (DECIDED 3, codex MEDIUM 3): the literal {} placeholder spellings are the ONLY
+    # opacity exception, accepted by POSITIVE match; the brace and bracket words now deny as runner
+    # argument words (a DISCLOSED over-denial; both rows ALLOWED on the round-16 delivery through its
+    # _DESTRUCT_LITERAL_WORDS carve-out).
+    ("pe-word-xargs-printf-bracket-overdeny", 4, 'xargs printf [; zzf() { true; }; zzf', "deny"),
+    ("pe-word-xargs-printf-brace-overdeny", 4, 'xargs printf {; zzf() { true; }; zzf', "deny"),
+    # FIX-514-R17 (DECIDED 4, codex MEDIUM 4): the retained find grammar refuses an uncertified word
+    # ONLY beside a LATER action flag and a LATER creator, runner or wrapper word (env here, which the
+    # word rule alone does not deny). This row denied on round 16 too (not a flip): it pins the deny
+    # side of the documented CONDITIONAL refusal; the allow side is pe-control-find-unknown-pred-alone
+    # and pe-control-find-unknown-pred-print below.
+    ("pe-word-find-unknown-pred-before-action", 4,
+     'find src -unmodelled -exec env printf ok \\;; zzf() { true; }; zzf', "deny"),
+    # FIX-514-R18 (DECIDED 1, codex MAJOR 1): the find starting-path dot exception is REMOVED. The
+    # round-17 helper located the FIRST argument word spelling find without certifying that find
+    # executes, so a data or option-value find repositioned the exemption (the first four rows, each
+    # ALLOWED on the round-17 delivery). Behind an uncertain read a literal dot word now denies
+    # WHEREVER it appears, a literal find starting path included: the next two rows are the
+    # DISCLOSED over-denial of the removed exception, both ALLOWED on the round-17 delivery; a
+    # non-dot starting path and the spelling ./ keep allowing (pe-control-find-src-path,
+    # pe-control-find-dotslash-path below).
+    ("pe-word-xargs-printf-find-dot-overdeny", 4, 'xargs printf find .; zzf() { true; }; zzf', "deny"),
+    ("pe-word-command-printf-find-dot-overdeny", 4, 'command printf find .; zzf() { true; }; zzf', "deny"),
+    ("pe-word-xargs-I-find-dot-script", 4, 'xargs -I find . ./w.sh; zzf() { true; }; zzf', "deny"),
+    ("pe-word-env-u-find-builtin-dot-script", 4, 'env -u find builtin . ./w.sh; zzf() { true; }; zzf', "deny"),
+    ("pe-word-xargs-find-dot-path-overdeny", 4, 'xargs find . -name x -print; zzf() { true; }; zzf', "deny"),
+    ("pe-word-find-dot-path-overdeny", 4, 'find . -name x -print; zzf() { true; }; zzf', "deny"),
+    # FIX-514-R18 (DECIDED 5, claude MINOR 4): the data-word over-denials the round-17 docstring
+    # disclosed only in prose now carry their own named rows (each DENIED on the round-17 delivery
+    # too: deny-preservation, not flips).
+    ("pe-word-xargs-printf-dot-overdeny", 4, 'xargs printf .; zzf() { true; }; zzf', "deny"),
+    ("pe-word-xargs-grep-source-overdeny", 4, 'xargs grep -l source; zzf() { true; }; zzf', "deny"),
+    # FIX-514-R18 (DECIDED 2, claude MAJOR 1/2): a coproc segment (any form) and a function
+    # NAME { ...; } definition segment are judged word by word with NO runner position code, the
+    # coproc NAME and the first body command included, and a LISTED RUNNER word itself denies there.
+    # The first four rows each ALLOWED on the round-17 delivery (its NAME-form dispatcher read the
+    # NAME as the runner, so a NAME spelling find read the compound words as find starting paths;
+    # its function-keyword segment never reached the scan). The benign coproc xargs printf ok, a
+    # round-17 CONTROL, is the DISCLOSED over-denial of the runner-word trigger. The last row (the
+    # NAME() form) DENIED on round 17 too: that body arrives as its own ordinary segment, judged
+    # like the direct route (deny-preservation, not a flip).
+    ("pe-word-coproc-named-brace-xargs-script", 4, "coproc zznm { xargs ./w.sh; }", "deny"),
+    ("pe-word-coproc-named-plain-xargs-script", 4, "coproc zznm xargs ./w.sh", "deny"),
+    ("pe-word-coproc-name-find-dot-script", 4, "coproc find if . ./w.sh; then true; fi", "deny"),
+    ("pe-word-function-keyword-xargs-script", 4, "zzf() { true; }; function zzg { xargs ./w.sh; }; zzg", "deny"),
+    ("pe-word-coproc-xargs-printf-ok-overdeny", 4, "coproc xargs printf ok", "deny"),
+    ("pe-word-funcdef-source-script", 4, "zzf() { true; }; zzg() { source ./w.sh; }; zzg", "deny"),
+    # FIX-514-R18 (DECIDED 3, codex MEDIUM 2): the env split-string option in EVERY spelling env
+    # accepts - the bundled short group, the abbreviated long form, the minimal --s abbreviation -
+    # at ANY position of a runner argument list on a line that reaches env. The three data-position
+    # rows each ALLOWED on the round-17 delivery (its word scan read only the canonical spellings
+    # and its arity scan examined printf, never env); the option-position row DENIED there through
+    # the arity scan and now also denies through the word rule (deny-preservation).
+    ("pe-word-env-bundled-split-data", 4, 'xargs printf env -iS"printf ok"; zzf() { true; }; zzf', "deny"),
+    ("pe-word-env-abbrev-split-time-data", 4, 'time printf env --split-str "printf ok"; zzf() { true; }; zzf', "deny"),
+    ("pe-word-env-min-abbrev-split-data", 4, 'xargs printf env --s "printf ok"; zzf() { true; }; zzf', "deny"),
+    ("pe-word-env-bundled-split-option", 4, 'xargs env -iS"printf ok"; zzf() { true; }; zzf', "deny"),
+    # FIX-514-R19 (DECIDED 1, both reviews MAJOR): the split-string predicate reads the COMPLETE
+    # lexer-decoded word; the round-18 call sites handed it the word's BASENAME, so an attached or
+    # bundled split string carrying a slash lost its option prefix at the rsplit and escaped the
+    # match (a deny-to-allow regression against round 17). One slash-bearing row per position - a
+    # data word, an option value and a find operand - for the attached and the bundled spelling,
+    # each ALLOWED on the round-18 delivery. The equals-joined slash spelling DENIED there through
+    # the env/sudo-equals rule (every equals-joined word on an env line already denies), so its
+    # row is deny-preservation, never red: the slash bug had no reachable equals-joined form.
+    ("pe-word-env-slash-split-data", 4, 'xargs printf env -S"/usr/bin/printf ok"; zzf() { true; }; zzf', "deny"),
+    ("pe-word-env-slash-split-value", 4, 'xargs -I -S"/usr/bin/printf ok" printf env; zzf() { true; }; zzf', "deny"),
+    ("pe-word-env-slash-bundled-split-data", 4, 'time printf env -iS"/usr/bin/printf ok"; zzf() { true; }; zzf', "deny"),
+    ("pe-word-env-slash-bundled-split-value", 4, 'xargs -I -iS"/usr/bin/printf ok" printf env; zzf() { true; }; zzf', "deny"),
+    ("pe-word-env-slash-split-find-operand", 4, 'find src -name env -printf -S"/usr/bin/printf ok"; zzf() { true; }; zzf', "deny"),
+    ("pe-word-env-slash-split-eq-find-operand", 4, 'find src -name env -newer --split-string=/usr/bin/x; zzf() { true; }; zzf', "deny"),
+    # FIX-514-R19 (DECIDED 2) / FIX-514-R20 (DECIDED 1): a NAME () or function NAME () definition
+    # opens the whole-tail judgment, so the definition header, the WHOLE body and everything
+    # after the definition are judged by the segment word rule across the lexer segment boundary.
+    # A runner-word and an opaque-word witness per spelling, each ALLOWED on the round-18
+    # delivery, whose loop judged those body segments exactly like the direct route.
+    ("pe-word-funcparen-xargs-script", 4, "zzf() { true; }; zzg() { xargs ./w.sh; }; zzg", "deny"),
+    ("pe-word-funcparen-opaque", 4, "zzf() { true; }; zzg() { printf \"$Z\"; }; zzg", "deny"),
+    # FIX-514-R21 (DECIDED 3): each function-keyword OPENER row spells its opener as the FIRST
+    # definition of its command - an earlier zzf() definition had already opened the whole-tail
+    # judgment and masked a broken word == "function" branch - so every such row flips under
+    # the function-branch source mutant (dz-funckw-opener-mutant-*); the already-active-tail
+    # behaviour keeps its own pe-word-funckw-active-tail-* rows below.
+    ("pe-word-funckw-paren-xargs-script", 4, "function zzg() { xargs ./w.sh; }; zzg", "deny"),
+    ("pe-word-funckw-paren-opaque", 4, "function zzg() { printf \"$Z\"; }; zzg", "deny"),
+    ("pe-word-funcparen-subshell-xargs-script", 4, "zzf() { true; }; zzg() ( xargs ./w.sh ); zzg", "deny"),
+    ("pe-word-coproc-paren-xargs-script", 4, "coproc zznm ( xargs ./w.sh )", "deny"),
+    # The over-denials the round-19 carry ADDED, named (FIX-514-R19, DECIDED 4), now produced by
+    # the round-20 whole-tail judgment: a tilde word and a runner-named data word in the first
+    # command of a NAME () body, each ALLOWED on the round-18 delivery; benign printf ok bodies
+    # keep allowing (the pe-control-funcparen-*, pe-control-funckw-paren-* and
+    # pe-control-coproc-paren-* controls).
+    ("pe-word-funcparen-tilde-overdeny", 4, "zzf() { true; }; zzg() { ls ~/x; }; zzg", "deny"),
+    ("pe-word-funcparen-echo-time-overdeny", 4, "zzf() { true; }; zzg() { echo time; }; zzg", "deny"),
+    # FIX-514-R19 (DECIDED 4, claude MEDIUM 4): the over-denials the round-18 segment rule added,
+    # named - a tilde word and a runner-named data word in a function NAME { ...; } body, a glob
+    # operand behind a plain coproc, and the dash data word whose alphanumerics carry an S on an
+    # env line (the round-18 docstring disclosed it in prose only). Each DENIED on the round-18
+    # delivery too: deny-preservation rows, not flips (each ALLOWED at the round-17 delivery).
+    ("pe-word-funckw-tilde-overdeny", 4, "function zzg { ls ~/x; }; zzg", "deny"),
+    ("pe-word-funckw-echo-time-overdeny", 4, "function zzg { echo time; }; zzg", "deny"),
+    ("pe-word-coproc-glob-overdeny", 4, "coproc ls *.txt", "deny"),
+    ("pe-word-env-dash-data-S-overdeny", 4, 'xargs printf env -iSam x; zzf() { true; }; zzf', "deny"),
+    # FIX-514-R19 (DECIDED 5): the shell-word match reads each word's BASENAME (_destruct_word),
+    # so a starting path whose LAST component is the dot word denies too, a disclosed over-denial
+    # (ALLOWED at the round-17 delivery; the ./ and src allow ends stay pinned by
+    # pe-control-find-dotslash-path and pe-control-find-src-path).
+    ("pe-word-find-dot-suffix-path-overdeny", 4, 'find src/. -name x -print; zzf() { true; }; zzf', "deny"),
+    # FIX-514-R19 (DECIDED 4): the pre-round-18 spellings of the EIGHTEEN uncertain-read find
+    # controls whose starting path was re-spelled src at round 18. Each CHANGED VERDICT there
+    # (allowed at round 17, denying since round 18 through the removed starting-path dot
+    # exception), so each over-denial shape carries its own named row beside its re-spelled
+    # control; the dot word is the only difference between each pair.
+    ("pe-word-find-dashdash-dot-overdeny", 4, 'find -- . -exec printf ok {} \\;; zzf() { {scratch}/zz; }; zzf', "deny"),
+    ("pe-word-find-exec-plus-interior-dot-overdeny", 4, 'find . -exec printf + -exec zq {} \\;; zzf() { {scratch}/zz; }; zzf', "deny"),
+    ("pe-word-find-execdir-plus-interior-dot-overdeny", 4, 'find . -execdir printf + -execdir zq {} \\;; zzf() { {scratch}/zz; }; zzf', "deny"),
+    ("pe-word-find-global-D-dot-overdeny", 4, 'find -D tree . -name zq -exec printf ok {} \\;; zzf() { {scratch}/zz; }; zzf', "deny"),
+    ("pe-word-find-global-H-dot-overdeny", 4, 'find -H . -name zq -exec printf ok {} \\;; zzf() { {scratch}/zz; }; zzf', "deny"),
+    ("pe-word-find-global-L-dot-overdeny", 4, 'find -L . -name zq -exec printf ok {} \\;; zzf() { {scratch}/zz; }; zzf', "deny"),
+    ("pe-word-find-global-O-dot-overdeny", 4, 'find -O3 . -name zq -exec printf ok {} \\;; zzf() { {scratch}/zz; }; zzf', "deny"),
+    ("pe-word-find-global-P-dot-overdeny", 4, 'find -P . -name zq -exec printf ok {} \\;; zzf() { {scratch}/zz; }; zzf', "deny"),
+    ("pe-word-find-name-after-term-dot-overdeny", 4, 'find . -exec true {} + -name zq; zzf() { {scratch}/zz; }; zzf', "deny"),
+    ("pe-word-find-ok-plus-interior-dot-overdeny", 4, 'find . -ok printf + -ok zq {} \\;; zzf() { {scratch}/zz; }; zzf', "deny"),
+    ("pe-word-find-ok-plus-operand-dot-overdeny", 4, 'find . -ok printf X {} + -exec zq a b \\;; zzf() { {scratch}/zz; }; zzf', "deny"),
+    ("pe-word-find-okdir-plus-interior-dot-overdeny", 4, 'find . -okdir printf + -okdir zq {} \\;; zzf() { {scratch}/zz; }; zzf', "deny"),
+    ("pe-word-find-okdir-plus-operand-dot-overdeny", 4, 'find . -okdir printf X {} + -exec zq a b \\;; zzf() { {scratch}/zz; }; zzf', "deny"),
+    ("pe-word-find-printf-exec-dot-overdeny", 4, 'find . -exec printf -exec zq {} +; zzf() { {scratch}/zz; }; zzf', "deny"),
+    ("pe-word-find-unknown-pred-alone-dot-overdeny", 4, 'find . -unmodelled; zzf() { true; }; zzf', "deny"),
+    ("pe-word-find-unknown-pred-print-dot-overdeny", 4, 'find . -unmodelled -print; zzf() { true; }; zzf', "deny"),
+    ("pe-word-xargs-find-exec-printf-dot-overdeny", 4, 'xargs find . -exec printf ok {} \\;; zzf() { {scratch}/zz; }; zzf', "deny"),
+    ("pe-word-xargs-find-exec-printf-operand-dot-overdeny", 4, 'xargs find . -exec printf zq {} \\;; zzf() { {scratch}/zz; }; zzf', "deny"),
+    # FIX-514-R20 (D-514-DEFN-WHOLE-TAIL, DECIDED 1, both reviews MAJOR): once a segment opens a
+    # function definition (any spelling, newline-split or not) or a coproc (any form), EVERY later
+    # segment of the command, to its end, is judged WHOLE by the segment word rule; the
+    # rounds-18/19 one-segment carry leaked at a newline-split brace body, a function-keyword
+    # parenthesized body and a second body command. A runner-word and an opaque-word witness per
+    # reviewed shape, each ALLOWED on the round-19 delivery.
+    ('pe-word-funckw-brace-newline-xargs-script', 4, 'function zzg {\nxargs ./w.sh; }; zzg', 'deny'),
+    ('pe-word-funckw-brace-newline-opaque', 4, 'function zzg {\nprintf "$Z"; }; zzg', 'deny'),
+    ('pe-word-funckw-name-newline-brace-xargs-script', 4, 'function zzg\n{\nxargs ./w.sh; }; zzg', 'deny'),
+    ('pe-word-funckw-name-newline-brace-tilde', 4, 'function zzg\n{\nprintf ~/x\n}; zzg', 'deny'),
+    ('pe-word-funckw-brace-blank-line-xargs-script', 4, 'function zzg {\n\nxargs ./w.sh\n}; zzg', 'deny'),
+    ('pe-word-funckw-brace-blank-line-tilde', 4, 'function zzg {\n\nprintf ~/x\n}; zzg', 'deny'),
+    ('pe-word-coproc-brace-newline-xargs-script', 4, 'coproc zznm {\nxargs ./w.sh; }', 'deny'),
+    ('pe-word-coproc-brace-newline-opaque', 4, 'coproc zznm {\nprintf "$Z"; }', 'deny'),
+    ('pe-word-funckw-paren-body-xargs-script', 4, 'function zzg ( xargs ./w.sh ); zzg', 'deny'),
+    ('pe-word-funckw-paren-body-opaque', 4, 'function zzg ( printf "$Z" ); zzg', 'deny'),
+    # The SECOND body command, which the rounds-18/19 segment-local limit left to the direct
+    # route, is judged by the whole-tail rule too; each row ALLOWED on the round-19 delivery.
+    ('pe-word-funcparen-second-xargs-script', 4, 'zzg() { true; xargs ./w.sh; }; zzg', 'deny'),
+    ('pe-word-coproc-brace-second-xargs-script', 4, 'coproc zznm { true; xargs ./w.sh; }', 'deny'),
+    # FIX-514-R20 (DECIDED 2, codex MAJOR 2): a tail segment is judged from its FIRST word, the
+    # leading assignment words WITH their opacity flags included; the rounds-18/19 carry sliced
+    # them off at the command-word index. Each row ALLOWED on the round-19 delivery.
+    ('pe-word-funcparen-newline-assign-opaque', 4, 'zzg() {\nX="$Z" printf ok; }; zzg', 'deny'),
+    ('pe-word-coproc-paren-assign-opaque', 4, 'coproc zznm ( X="$Z" printf ok )', 'deny'),
+    ('pe-word-funcparen-subshell-assign-opaque', 4, 'zzg() ( X="$Z" printf ok ); zzg', 'deny'),
+    # FIX-514-R20 (DECIDED 5, the cost of the design): the over-denial classes the whole-tail
+    # judgment ADDS, each named: a benign runner word, or a reserved or listed runner word (time,
+    # sudo), ANYWHERE in the command after a definition or coproc - in a body, a second body
+    # command, or an unrelated command after a COMPLETED definition. The defn-tail rows and the
+    # second-runner rows ALLOWED on the round-19 delivery (the second-runner rows are the two
+    # round-19 "second-runner allow" controls, now named over-denial rows); the body-runner,
+    # time, sudo and coproc-paren rows DENIED there too, through the round-19 carry
+    # (deny-preservation).
+    ('pe-word-defn-tail-runner-overdeny', 4, 'zzf() { true; }; xargs printf ok; zzf', 'deny'),
+    ('pe-word-defn-tail-find-overdeny', 4, 'zzf() { true; }; find src -name x -print; zzf', 'deny'),
+    ('pe-word-funcparen-body-runner-overdeny', 4, 'zzg() { xargs printf ok; }; zzg', 'deny'),
+    ('pe-word-funcparen-body-time-overdeny', 4, 'zzg() { time printf ok; }; zzg', 'deny'),
+    ('pe-word-funcparen-body-sudo-overdeny', 4, 'zzg() { sudo true; }; zzg', 'deny'),
+    ('pe-word-coproc-paren-runner-overdeny', 4, 'coproc zznm ( xargs printf ok )', 'deny'),
+    ('pe-word-funcparen-second-runner-overdeny', 4, 'zzg() { true; xargs printf ok; }; zzg', 'deny'),
+    ('pe-word-coproc-brace-second-runner-overdeny', 4, 'coproc zznm { true; xargs printf ok; }', 'deny'),
+    # FIX-514-R20 (DECIDED 3): an assignment-only parenthesized coproc body is a coproc all the
+    # same, so the tail judgment reaches the UNRELATED later command, a named over-denial; the
+    # round-19 delivery denied this row too, through its leaked pending flag.
+    ('pe-word-coproc-assign-tail-overdeny', 4, 'coproc ( X=1 ); printf "$Z"', 'deny'),
+    # FIX-514-R21 (DECIDED 3): the already-active-tail rows - a function-keyword definition
+    # BEHIND an earlier completed definition, where the whole-tail judgment (not the opener
+    # branch) denies; the opener-isolated pe-word-funckw-* rows above each spell their opener
+    # as the FIRST definition of the command and flip under the function-branch source mutant
+    # (dz-funckw-opener-mutant-*), while these two stay denied through the already-open tail.
+    ('pe-word-funckw-active-tail-brace-newline-xargs-script', 4,
+     'zzf() { true; }; function zzg {\nxargs ./w.sh; }; zzg', 'deny'),
+    ('pe-word-funckw-active-tail-paren-body-opaque', 4,
+     'zzf() { true; }; function zzg ( printf "$Z" ); zzg', 'deny'),
+    # FIX-514-R21 (DECIDED 1, codex MAJOR 1): a QUOTED definition NAME that merely DECODES to a
+    # reserved word ('if'() { true; }, and every member of _DESTRUCT_KEYWORDS plus time) is a
+    # definition header all the same - bash reads a reserved word only when it is written PLAIN
+    # - so it opens the whole-tail judgment and the trailing runner word denies. Each row
+    # ALLOWED on the round-20 delivery, whose reserved-prefix skip consumed the decoded NAME
+    # before the header test ran; the select wrapper spells the uncertainty AHEAD of the
+    # definition, so each row exercises the header recognition itself, never the
+    # defined-then-called uncertainty.
+    ('pe-word-quoted-defn-bang', 4, "select z in x; do break; done; '!'() { true; }; xargs ./w.sh", 'deny'),
+    ('pe-word-quoted-defn-do', 4, "select z in x; do break; done; 'do'() { true; }; xargs ./w.sh", 'deny'),
+    ('pe-word-quoted-defn-elif', 4, "select z in x; do break; done; 'elif'() { true; }; xargs ./w.sh", 'deny'),
+    ('pe-word-quoted-defn-else', 4, "select z in x; do break; done; 'else'() { true; }; xargs ./w.sh", 'deny'),
+    ('pe-word-quoted-defn-if', 4, "select z in x; do break; done; 'if'() { true; }; xargs ./w.sh", 'deny'),
+    ('pe-word-quoted-defn-then', 4, "select z in x; do break; done; 'then'() { true; }; xargs ./w.sh", 'deny'),
+    ('pe-word-quoted-defn-time', 4, "select z in x; do break; done; 'time'() { true; }; xargs ./w.sh", 'deny'),
+    ('pe-word-quoted-defn-until', 4, "select z in x; do break; done; 'until'() { true; }; xargs ./w.sh", 'deny'),
+    ('pe-word-quoted-defn-while', 4, "select z in x; do break; done; 'while'() { true; }; xargs ./w.sh", 'deny'),
+    ('pe-word-quoted-defn-lbrace', 4, "select z in x; do break; done; '{'() { true; }; xargs ./w.sh", 'deny'),
+    # ... and the same quoted definition inside a brace group and inside a subshell: the
+    # enclosing PLAIN { or ( is an actual group opener the header skip still consumes
+    # (argv_plain tells the plain brace from the quoted NAME), and the runner inside the group
+    # denies through the tail.
+    ('pe-word-quoted-defn-brace-group', 4,
+     "select z in x; do break; done; { 'if'() { true; }; xargs ./w.sh; }", 'deny'),
+    ('pe-word-quoted-defn-subshell', 4,
+     "select z in x; do break; done; ( 'if'() { true; }; xargs ./w.sh )", 'deny'),
+    # FIX-514-R21 (DECIDED 2, codex MEDIUM 2): a function ACTUALLY NAMED declare, local,
+    # readonly, export or typeset is a single-NAME header and still opens the tail, so its
+    # xargs body denies; each row DENIED at the pin too (deny-preservation, the boundary
+    # beside the pe-control-*-then-* declaration controls that now allow).
+    ('pe-word-func-named-declare', 4, 'declare() { xargs ./w.sh; }; declare -p x', 'deny'),
+    ('pe-word-func-named-local', 4, 'local() { xargs ./w.sh; }; local -p x', 'deny'),
+    ('pe-word-func-named-readonly', 4, 'readonly() { xargs ./w.sh; }; readonly -p x', 'deny'),
+    ('pe-word-func-named-export', 4, 'export() { xargs ./w.sh; }; export -p', 'deny'),
+    ('pe-word-func-named-typeset', 4, 'typeset() { xargs ./w.sh; }; typeset -p x', 'deny'),
 ]
 
 # Benign shapes that must keep allowing (false-deny controls; none names a destructive word).
+# FIX-514-R20 (D-514-DEFN-WHOLE-TAIL): a control whose PROBE must stay on the direct route spells
+# its uncertainty wrapper AFTER the probe (PROBE; zzf() { ...; }; zzf), because a definition ahead
+# of the probe now opens the whole-tail word judgment, which denies every benign runner word
+# behind it (the pe-word-defn-tail-*-overdeny rows name that cost); a control that KEEPS the
+# definition-first spelling (the grep, head, echo, perldoc, python-config and redirect rows and
+# the printf ok bodies) pins exactly the benign side of that tail judgment.
 PRIOR_EFFECT_CONTROLS = [
     ("pe-control-export-pager-benign", "export PAGER=less; git log -1", "allow"),
     ("pe-control-function-benign", "greet() { echo hi; }; greet", "allow"),
@@ -166,19 +865,212 @@ PRIOR_EFFECT_CONTROLS = [
     ("pe-control-heredoc-subst", "cat <<EOF > notes.txt\nBuilt $(date)\nEOF", "allow"),
     ("pe-control-procsub-redirect", "while read -r l; do echo $l; done < <(ls)", "allow"),
     ("pe-control-commit-idiom-quotes", "git commit -m \"$(cat <<'EOF'\nFix \"foo's bar\nEOF\n)\"", "allow"),
-    ("pe-control-unbalanced-quote", "ls \"unbalanced", "allow"),
     # round 6 (codex Q6): the uncertain constructs with no effect stay allowed, and codex MEDIUM 4
     # (a data 'case' argument) must not deny.
     ("pe-control-coproc-benign", "coproc sleep 1", "allow"),
     ("pe-control-select-benign", "select x in a b; do echo $x; done", "allow"),
     ("pe-control-case-in-procsub", "cat <(printf case)", "allow"),
     ("pe-control-quoted-heredoc-bs", "cat <<'EOF'\nEO\\\nF\nhello\nEOF", "allow"),
-    ("pe-control-deep-procsub-benign", "cat " + "<(cat " * 10 + "<(printf ok)" + ")" * 10, "allow"),
-    # round 7b: each writer creator with its WRITE option absent stays allowed on the same uncertain read
-    ('pe-control-curl-no-output', 'zzf() { {scratch}/zz; }; curl http://127.0.0.1/x; zzf', 'allow'),
-    ('pe-control-wget-no-output', 'zzf() { {scratch}/zz; }; wget http://127.0.0.1/x; zzf', 'allow'),
-    ('pe-control-tar-no-chdir', 'tar -xf a.tar; coproc {scratch}/zz', 'allow'),
-    ('pe-control-unzip-no-destdir', 'unzip a.zip; coproc {scratch}/zz', 'allow'),
-    ('pe-control-chmod-no-execbit', 'chmod 600 {scratch}/zz; coproc {scratch}/zz', 'allow'),
-    ('pe-control-interp-no-inline', 'zzf() { {scratch}/zz; }; python3 {scratch}/s.py; zzf', 'allow'),
+    # FIX-514-R11 (DECIDED 1): the benign deep nesting sits JUST INSIDE the recover-depth limit (seven
+    # nested groups against _LEX_RECOVER_DEPTH 8); one past it is the pe-stop-depth-benign DENY vector
+    # above, because a recover-mode stop now denies whatever the text spells (recover-stop).
+    ("pe-control-deep-procsub-benign", "cat " + "<(cat " * 6 + "<(printf ok)" + ")" * 6, "allow"),
+    # round 9 (FIX-514-R9): a closed-set creator now denies on an uncertain read REGARDLESS of its
+    # options (the round-7b option-absent creator controls moved to the deny vectors above, a disclosed
+    # bounded over-fire); NON-creator commands on the same uncertain reads stay allowed.
+    ('pe-control-grep-uncertain', 'zzf() { {scratch}/zz; }; grep -c x {scratch}/x; zzf', 'allow'),
+    ('pe-control-head-uncertain', 'zzf() { {scratch}/zz; }; head -c 4 {scratch}/x; zzf', 'allow'),
+    ('pe-control-sort-coproc', 'sort -u {scratch}/x; coproc {scratch}/zz', 'allow'),
+    ('pe-control-cat-coproc', 'cat -n {scratch}/x; coproc {scratch}/zz', 'allow'),
+    ('pe-control-printf-coproc', 'printf ok; coproc {scratch}/zz', 'allow'),
+    ('pe-control-echo-funcdef', 'zzf() { {scratch}/zz; }; echo ok; zzf', 'allow'),
+    # FIX-514-R11 (DECIDED 2): the harmless runner and find forms from the round-10 review's MAJOR 1
+    # list, each a CERTAIN read the creator rules must not deny (the parent pin allows every one; the
+    # round-10 delivery denied every one).
+    ('pe-control-xvfbrun-python', 'xvfb-run python3 -m pytest', 'allow'),
+    ('pe-control-taskset-python', 'taskset -c 0 python3 bench.py', 'allow'),
+    ('pe-control-strace-python', 'strace -f python3 x.py', 'allow'),
+    ('pe-control-unbuffer-python', 'unbuffer python3 app.py', 'allow'),
+    ('pe-control-numactl-node', 'numactl --cpunodebind=0 node server.js', 'allow'),
+    ('pe-control-firejail-bash', 'firejail bash', 'allow'),
+    ('pe-control-xargs-grep-sh', 'xargs grep -l sh', 'allow'),
+    ('pe-control-xargs-grep-install', 'xargs grep -l install', 'allow'),
+    ('pe-control-xargs-echo-dash', 'xargs echo dash', 'allow'),
+    ('pe-control-xargs-tar-list', 'xargs -0 tar -tf', 'allow'),
+    ("pe-control-find-exec-bash-n", "find . -name '*.sh' -exec bash -n {} +", 'allow'),
+    ("pe-control-find-exec-pycompile", "find . -name '*.py' -exec python3 -m py_compile {} +",
+     'allow'),
+    ('pe-control-find-exec-grep-curl', 'find . -exec grep -l curl {} +', 'allow'),
+    ('pe-control-find-exec-chmod-644', 'find . -type f -exec chmod 644 {} +', 'allow'),
+    ("pe-control-find-exec-awk", "find src -name '*.awk' -exec awk 'END{print NR}' {} +", 'allow'),
+    # FIX-514-R11 (DECIDED 2), retargeted at FIX-514-R16 (DECIDED 1/2): under the word-level rule a
+    # creator-NAMED data word now denies behind an uncertain read (the disclosed pe-word-*-overdeny
+    # vectors); a data word that names NO creator, shell or expansion still never fires.
+    ('pe-control-xargs-grep-data', 'xargs grep -l zq; zzf() { {scratch}/zz; }; zzf', 'allow'),
+    ('pe-control-find-name-after-term-data',
+     'find src -exec true {} + -name zq; zzf() { {scratch}/zz; }; zzf', 'allow'),
+    # FIX-514-R11 (DECIDED 3): a non-version tail stays outside the versioned-name rule.
+    ('pe-control-perldoc-uncertain', 'zzf() { {scratch}/zz; }; perldoc x; zzf', 'allow'),
+    ('pe-control-python-config-uncertain', 'zzf() { {scratch}/zz; }; python-config --cflags; zzf',
+     'allow'),
+    # FIX-514-R11 (DECIDED 6): a descriptor dup and a close are not writes, even on an uncertain read.
+    ('pe-control-redir-dup-uncertain', 'zzf() { {scratch}/zz; }; printf ok 2>&1; zzf', 'allow'),
+    ('pe-control-redir-close-uncertain', 'zzf() { {scratch}/zz; }; printf ok >&-; zzf', 'allow'),
+    # FIX-514-R12 (DECIDED 1): a FULLY READ command - the recover read reaches the end, no stop - still
+    # allows; contrast the recover-stop deny vectors above.
+    ("pe-control-recover-fully-read", "cat <<EOF"+_NL+"line hi"+_NL+"EOF"+_NL+"printf ok", "allow"),
+    # FIX-514-R12 (DECIDED 2/3), retargeted at FIX-514-R16 (DECIDED 1/2): an option VALUE or earlier
+    # action OPERAND that happens to NAME a creator now denies by the word-level rule (the disclosed
+    # pe-word-*-overdeny vectors); the same shapes around words that name nothing keep allowing.
+    ("pe-control-xargs-I-value-data", 'xargs -I slot printf; zzf() { {scratch}/zz; }; zzf', "allow"),
+    ("pe-control-find-printf-exec-data", 'find src -exec printf -exec zq {} +; zzf() { {scratch}/zz; }; zzf', "allow"),
+    # FIX-514-R12 (DECIDED 4 boundary): the just-inside recover depths allow (eight process-substitution
+    # groups, four command-substitution levels); one past them denies (the pe-stop-depth-* vectors).
+    ("pe-control-deep-procsub-max", "cat "+"<(cat "*7+"<(printf ok)"+")"*7, "allow"),
+    ("pe-control-deep-dollarsub-max", "echo "+"$(echo "*3+"$(printf ok)"+")"*3, "allow"),
+    # FIX-514-R12 (DECIDED 6): a descriptor MOVE (>&2-, >&12-) is not a write even on an uncertain read.
+    ("pe-control-redir-move-2minus", "zzf() { true; }; printf ok >&2-; zzf", "allow"),
+    ("pe-control-redir-move-12minus", "zzf() { true; }; printf ok >&12-; zzf", "allow"),
+    # FIX-514-R13 (DECIDED 1/2/3), narrowed at FIX-514-R16 (DECIDED 1): benign option shapes with NO
+    # equals sign on an env or sudo line keep allowing - attached and equals-joined values carrying
+    # slashes on other runners, bare and equals-joined optional-argument long options, separate option
+    # values and the declared positionals. env/sudo assignments and sudo --preserve-env=PATH now deny
+    # by the word-level equals rule (the disclosed pe-word-*-overdeny vectors).
+    ("pe-control-strace-o-attached", 'strace -o/tmp/log printf ok; zzf() { {scratch}/zz; }; zzf', "allow"),
+    ("pe-control-strace-output-eq", 'strace --output=/tmp/log printf ok; zzf() { {scratch}/zz; }; zzf', "allow"),
+    ("pe-control-xargs-a-attached", 'xargs -a/tmp/list printf; zzf() { {scratch}/zz; }; zzf', "allow"),
+    ("pe-control-xargs-argfile-eq", 'xargs --arg-file=/tmp/list printf; zzf() { {scratch}/zz; }; zzf', "allow"),
+    ("pe-control-xargs-I-attached", 'xargs -I/tmp/slot printf; zzf() { {scratch}/zz; }; zzf', "allow"),
+    ("pe-control-xargs-env-u-printf", 'xargs env -u X printf ok; zzf() { {scratch}/zz; }; zzf', "allow"),
+    ("pe-control-xargs-replace-bare", 'xargs --replace printf a; zzf() { {scratch}/zz; }; zzf', "allow"),
+    ("pe-control-xargs-replace-eq", 'xargs --replace={} printf; zzf() { {scratch}/zz; }; zzf', "allow"),
+    ("pe-control-xargs-sudo-u-printf",
+     'xargs sudo -u root printf ok; zzf() { true; }; zzf', "allow"),
+    ("pe-control-xargs-timeout-printf", 'xargs timeout 5 printf ok; zzf() { {scratch}/zz; }; zzf', "allow"),
+    ("pe-control-xargs-chrt-printf", 'xargs chrt -f 10 printf ok; zzf() { {scratch}/zz; }; zzf', "allow"),
+    ("pe-control-taskset-mask-printf", 'taskset 1 printf ok; zzf() { {scratch}/zz; }; zzf', "allow"),
+    ("pe-control-watch-exec-printf", 'watch -x printf ok; zzf() { {scratch}/zz; }; zzf', "allow"),
+    # FIX-514-R13 (DECIDED 4), retargeted at FIX-514-R16 (DECIDED 1/2): an interior + stays an operand
+    # of the FIRST action (+ terminates only right after {}); the trailing word is that action's
+    # OPERAND, and under the word-level rule it denies exactly when it NAMES a creator, shell or
+    # expansion (the disclosed pe-word-*-overdeny vectors), whatever position find's grammar gives it.
+    ("pe-control-find-exec-plus-interior-data",
+     'find src -exec printf + -exec zq {} \\;; zzf() { {scratch}/zz; }; zzf', "allow"),
+    ("pe-control-find-execdir-plus-interior-data",
+     'find src -execdir printf + -execdir zq {} \\;; zzf() { {scratch}/zz; }; zzf', "allow"),
+    ("pe-control-find-ok-plus-interior-data",
+     'find src -ok printf + -ok zq {} \\;; zzf() { {scratch}/zz; }; zzf', "allow"),
+    ("pe-control-find-okdir-plus-interior-data",
+     'find src -okdir printf + -okdir zq {} \\;; zzf() { {scratch}/zz; }; zzf', "allow"),
+    # FIX-514-R13 (MINOR): the just-inside depths - three wrapper recursions, four QUOTED
+    # command-substitution levels, seven process-substitution groups inside a backtick.
+    ("pe-control-runner-depth-max", 'xargs env env env printf ok; zzf() { {scratch}/zz; }; zzf', "allow"),
+    ("pe-control-deep-dollarsub-quoted-max",
+     "echo "+_DQ+"$(echo "*3+"$(printf ok)"+")"*3+_DQ, "allow"),
+    ("pe-control-deep-backtick-procsub-max",
+     "echo "+_BT+"cat "+"<(cat "*6+"<(printf ok)"+")"*6+_BT, "allow"),
+    # FIX-514-R14 (DECIDED 1): a runner that resolves to find with a benign action operand allows.
+    ("pe-control-xargs-find-exec-printf", 'xargs find src -exec printf ok {} \\;; zzf() { {scratch}/zz; }; zzf', "allow"),
+    # FIX-514-R14 (DECIDED 3), retargeted at FIX-514-R16 (DECIDED 1/2): -ok/-okdir take no + form, so
+    # the words after an interior + stay OPERANDS of the first action; a creator-named operand now
+    # denies by the word-level rule (the disclosed pe-word-*-overdeny vectors), a benign one allows.
+    ("pe-control-find-ok-plus-operand-data", 'find src -ok printf X {} + -exec zq a b \\;; zzf() { {scratch}/zz; }; zzf', "allow"),
+    ("pe-control-find-okdir-plus-operand-data", 'find src -okdir printf X {} + -exec zq a b \\;; zzf() { {scratch}/zz; }; zzf', "allow"),
+    # FIX-514-R14 (DECIDED 6), retargeted at FIX-514-R16 (DECIDED 1/2): find's global options -H/-L/-P
+    # and the value-taking -O/-D precede the starting paths; with a creator-NAMED predicate operand the
+    # line now denies by the word-level rule (pe-word-find-global-*-overdeny), with a benign operand
+    # the global-option shapes keep allowing.
+    ("pe-control-find-global-H-data", 'find -H src -name zq -exec printf ok {} \\;; zzf() { {scratch}/zz; }; zzf', "allow"),
+    ("pe-control-find-global-L-data", 'find -L src -name zq -exec printf ok {} \\;; zzf() { {scratch}/zz; }; zzf', "allow"),
+    ("pe-control-find-global-P-data", 'find -P src -name zq -exec printf ok {} \\;; zzf() { {scratch}/zz; }; zzf', "allow"),
+    ("pe-control-find-global-O-data", 'find -O3 src -name zq -exec printf ok {} \\;; zzf() { {scratch}/zz; }; zzf', "allow"),
+    ("pe-control-find-global-D-data", 'find -D tree src -name zq -exec printf ok {} \\;; zzf() { {scratch}/zz; }; zzf', "allow"),
+    # FIX-514-R15 (DECIDED 1) / FIX-514-R16 (DECIDED 2): a word that is opaque ONLY for the literal {}
+    # placeholder (the lexer flags its braces) is carved out of the word-level opacity trigger - an
+    # empty {} is NOT a brace expansion, so bash passes {}, -I{} and --replace={} through unchanged -
+    # and a literal mask or option value is no expansion either, so these benign shapes keep allowing.
+    ("pe-control-xargs-I-brace", 'xargs -I{} printf ok; zzf() { {scratch}/zz; }; zzf', "allow"),
+    ("pe-control-xargs-I-brace-operand", 'xargs -I{} printf ok {}; zzf() { {scratch}/zz; }; zzf', "allow"),
+    # FIX-514-R16 (DECIDED 2): the SEPARATED literal placeholder is one literal word too; the round-15
+    # delivery read its opacity flag at the option-value position and falsely denied this shape.
+    ("pe-control-xargs-I-separated-brace", 'xargs -I {} printf ok {}; zzf() { {scratch}/zz; }; zzf', "allow"),
+    # FIX-514-R15 (DECIDED 7, claude MINOR), retargeted at FIX-514-R16 (DECIDED 1/2): a find ACTION
+    # OPERAND now denies exactly when it NAMES a creator, shell or expansion, whatever its position
+    # (pe-word-xargs-find-printf-cp-operand-overdeny); a benign operand keeps allowing, and -- before
+    # the starting paths is consumed so the path . does not read as a runner (round 14 denied these).
+    ("pe-control-xargs-find-exec-printf-operand-data", 'xargs find src -exec printf zq {} \\;; zzf() { {scratch}/zz; }; zzf', "allow"),
+    ("pe-control-find-dashdash-paths", 'find -- src -exec printf ok {} \\;; zzf() { {scratch}/zz; }; zzf', "allow"),
+    # FIX-514-R18 (DECIDED 1): the find starting-path dot exception is REMOVED - a literal dot word
+    # behind an uncertain read denies wherever it appears, a find starting path included (the
+    # pe-word-*find-dot* rows above). The two ALLOW ends of the removed bound stay pinned: a non-dot
+    # literal starting path, and the spelling ./ (not the dot word).
+    ("pe-control-find-src-path", 'find src -name x -print; zzf() { true; }; zzf', "allow"),
+    ("pe-control-find-dotslash-path", 'find ./ -name x -print; zzf() { true; }; zzf', "allow"),
+    # FIX-514-R17 (DECIDED 3): the three {} placeholder spellings accepted by POSITIVE match, with a
+    # bare {} operand beside the equals-joined long form (the attached -I{}, the separated {} and the
+    # bare --replace={} controls sit above, FIX-514-R15/R16).
+    ("pe-control-xargs-replace-eq-operand", 'xargs --replace={} printf ok {}; zzf() { true; }; zzf', "allow"),
+    # FIX-514-R17 (DECIDED 2) / FIX-514-R18 (DECIDED 2): benign commands on the time route keep
+    # allowing - the word rule passes and the kept arity scan is NOT re-run behind the reserved
+    # prefix, so the skip's time -p -- consumption still decides those words. On the coproc and
+    # function routes a benign command with NO runner, creator, shell or opaque word keeps allowing
+    # (the runner-word over-denial row is pe-word-coproc-xargs-printf-ok-overdeny above).
+    ("pe-control-time-printf-ok", 'time printf ok; zzf() { true; }; zzf', "allow"),
+    ("pe-control-time-p-dashdash-printf", 'time -p -- printf ok; zzf() { true; }; zzf', "allow"),
+    ("pe-control-coproc-printf-ok", "coproc printf ok", "allow"),
+    ("pe-control-coproc-named-printf-ok", "coproc zznm { printf ok; }", "allow"),
+    ("pe-control-function-keyword-printf-ok", "zzf() { true; }; function zzg { printf ok; }; zzg", "allow"),
+    # FIX-514-R17 (DECIDED 4): an unknown find predicate ALONE, and one followed by an ordinary
+    # action with no creator, runner or wrapper word behind it, report nothing - the retained find
+    # grammar's refusal is CONDITIONAL (its deny side: pe-word-find-unknown-pred-before-action).
+    ("pe-control-find-unknown-pred-alone", 'find src -unmodelled; zzf() { true; }; zzf', "allow"),
+    ("pe-control-find-unknown-pred-print", 'find src -unmodelled -print; zzf() { true; }; zzf', "allow"),
+    # FIX-514-R18 (DECIDED 3): the ALLOW ends of the split-string predicate - a dash word with no S
+    # and a long option that abbreviates nothing of --split-string, each at a DATA position on an
+    # env line (the deny ends: the pe-word-env-*-split-* rows above).
+    ("pe-control-env-data-dash-no-split", 'xargs printf env -u X; zzf() { true; }; zzf', "allow"),
+    ("pe-control-env-long-not-split-prefix", 'xargs printf env --unset X; zzf() { true; }; zzf', "allow"),
+    # FIX-514-R19 (DECIDED 1): the ALLOW ends of the fixed slash bound - a dash data word whose
+    # alphanumeric run stops at the slash without an S, and a non-dash operand carrying -S inside
+    # it, each on a line that reaches env (the deny ends: the pe-word-env-slash-* rows above).
+    ("pe-control-env-dash-slash-no-split", 'xargs printf env -u/usr/bin/x X; zzf() { true; }; zzf', "allow"),
+    ("pe-control-env-nondash-S-operand", 'find src -name env -printf x-S/usr/bin/y; zzf() { true; }; zzf', "allow"),
+    # FIX-514-R19 (DECIDED 2) / FIX-514-R20 (DECIDED 1): benign printf ok bodies on the definition
+    # and coproc routes keep allowing under the whole-tail judgment: every word of the body, and
+    # of everything after the definition, passes the segment word rule. The two round-19
+    # "second-runner allow" controls that pinned the removed segment-local limit are now the
+    # named over-denial rows pe-word-funcparen-second-runner-overdeny and
+    # pe-word-coproc-brace-second-runner-overdeny above (FIX-514-R20, DECIDED 5).
+    ('pe-control-funcparen-printf-ok', 'zzf() { true; }; zzg() { printf ok; }; zzg', 'allow'),
+    ('pe-control-funckw-paren-printf-ok', 'zzf() { true; }; function zzg() { printf ok; }; zzg', 'allow'),
+    ('pe-control-coproc-paren-printf-ok', 'coproc zznm ( printf ok )', 'allow'),
+    # FIX-514-R20 (DECIDED 3): a declaration builtin with an array assignment (declare -a arr=( ),
+    # and the local, readonly, export and typeset forms) ends at the same ( as a definition header
+    # but is NOT a definition, so NO tail judgment starts there and a benign runner, tilde, time
+    # or find word in an UNRELATED later command keeps allowing. Each of the first five rows
+    # DENIED on the round-19 delivery, whose pending flag leaked through the empty ( ) pair into
+    # the later command. The uncertainty wrapper sits AFTER the probe (a function definition, or
+    # the coproc of the sixth row): spelled ahead of it, the wrapper itself would open the tail.
+    ('pe-control-declare-array-runner', 'declare -a arr=( ); xargs printf ok; zzf() { true; }; zzf', 'allow'),
+    ('pe-control-local-array-tilde', 'local arr=( )\nls ~/x\nzzf() { true; }\nzzf', 'allow'),
+    ('pe-control-readonly-array-runner', 'readonly arr=(); xargs printf ok; zzf() { true; }; zzf', 'allow'),
+    ('pe-control-export-array-time', 'export arr=(); time printf ok; zzf() { true; }; zzf', 'allow'),
+    ('pe-control-typeset-array-find', 'typeset -a arr=()\nfind src -name x -print\nzzf() { true; }\nzzf', 'allow'),
+    ('pe-control-declare-array-coproc-runner', 'declare -a arr=( ); xargs printf ok; coproc printf ok', 'allow'),
+    # FIX-514-R20 (DECIDED 3): an assignment-only parenthesized coproc body with NOTHING after it
+    # stays benign; the deny end of this bound is pe-word-coproc-assign-tail-overdeny above.
+    ('pe-control-coproc-assign-only', 'coproc ( X=1 )', 'allow'),
+    # FIX-514-R21 (DECIDED 2, codex MEDIUM 2): a declaration builtin with an array assignment
+    # followed by a LATER INVOCATION of the same builtin. The round-20 sibling predicate in
+    # _destruct_prior_effects read ANY word count ahead of the empty ( ) pair as a definition,
+    # so it recorded the builtin of declare -a arr=( ) as a defined function and the later
+    # declare -p arr denied as a prior-effect; the shared exact header predicate
+    # (_destruct_defn_header) records nothing here. Each row DENIED on the round-20 delivery
+    # AND at the pin (an intended false-deny fix, so each row sits on the reviewed differential
+    # allow-list in selftest_aiqt_hooks).
+    ('pe-control-declare-then-declare', 'declare -a arr=(); declare -p arr', 'allow'),
+    ('pe-control-local-then-local', 'local arr=(); local -p arr', 'allow'),
+    ('pe-control-readonly-then-readonly', 'readonly arr=(); readonly -p arr', 'allow'),
+    ('pe-control-export-then-export', 'export arr=(); export -p', 'allow'),
+    ('pe-control-typeset-then-typeset', 'typeset -a arr=(); typeset -p arr', 'allow'),
 ]

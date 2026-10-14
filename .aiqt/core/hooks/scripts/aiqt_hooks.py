@@ -405,9 +405,19 @@ _Redirect = collections.namedtuple(
 # This is a STRICTER signal than argv_opaque, which any unquoted expansion/glob/brace ANYWHERE in the token
 # also sets; a quoted leading tilde with an unquoted tail, e.g. "~"/x*, and a leading tilde whose PREFIX
 # carries a quote or escape, e.g. ~"/x" or ~\/x, are correctly NOT read as an expanded '~').
+# argv_plain (FIX-514-R21, DECIDED 1): the per-token flags PARALLEL to argv, True ONLY where THAT word is
+# written PLAIN - its raw spelling is byte-identical to its decoded text, with no quote, escape, expansion
+# or backslash-newline continuation anywhere in the word - which is exactly when bash can read the word as
+# a RESERVED WORD. A quoted spelling such as 'if' or '{' decodes to the same text with argv_plain False, so
+# a consumer can tell a quoted function NAME from an ACTUAL reserved prefix (a continuation-joined spelling
+# is plain to bash but not here; such a word is then read as a NAME, never skipped as a prefix, which is
+# the ALLOWING side for a definition header: a reserved word written across a backslash-newline
+# continuation in front of a function definition, an if spelled i, continuation, f, or a { directly
+# followed by one, hides that definition from the header predicate, so the command can be allowed, a
+# disclosed limit in the destructive_guard docstring).
 _Segment = collections.namedtuple(
     "_Segment", ("argv", "sep_after", "redirects", "raw", "opaque_shell", "argv_opaque",
-                 "argv_leading_tilde"))
+                 "argv_leading_tilde", "argv_plain"))
 
 
 def _read_word(command, i, n, subst=None):
@@ -655,8 +665,15 @@ def _classify_redirect(op, src_fd, target, t_opaque, t_leading_tilde=False):
         return _Redirect(op, src, target, tclass, tclass if src == 1 else "", tilde_abs)
     if op == ">&":
         src = 1 if src_fd is None else src_fd
-        if (not t_opaque) and (target == "-" or target.isdigit()):
-            tclass = "descriptor"  # fd duplication or close, never a proven file
+        if (not t_opaque) and (target == "-" or (target.isdigit() and target.isascii())
+                               or (target[-1:] == "-" and target[:-1].isdigit()
+                                   and target[:-1].isascii() and target[:-1] != "")):
+            tclass = "descriptor"  # fd duplication, close, or a descriptor MOVE (>&2-, >&12-), never a
+            # proven file write (FIX-514-R12, DECIDED 6: agrees with the raw redirect-write regex, which
+            # reads >&N- as a move and only >&N-MORE such as >&2-x as a write of the file 2-x); the
+            # digit test is ASCII-ONLY (str.isdigit also accepts a Unicode digit such as a superscript
+            # two, which bash reads as a FILENAME, so such a target routes to _target_class exactly as
+            # the raw regex, which matches only [0-9], reads it; FIX-514-R13)
         else:
             tclass = _target_class(target, t_opaque)  # csh '>&file' both-streams-to-file form
         return _Redirect(op, src, target, tclass, tclass if src == 1 else "", tilde_abs)
@@ -861,11 +878,28 @@ class _LexUncertain(_LexUnmodelled):
     """A recover-mode read that could not model a construct WITH CERTAINTY (a process or command
     substitution nested beyond the limit, and - recorded without stopping - a backslash-newline inside an
     unquoted heredoc body or delimiter). The read is neither trustworthy nor a plain syntax error: the
-    caller DENIES only when the command is also effectful (it creates, copies, links or writes a path, sets
-    a command-valued variable, or names a destructive word), and otherwise allows."""
+    text at and after the stop point was never read as commands, so the caller DENIES OUTRIGHT whatever it
+    spells (recover-stop, FIX-514-R11 DECIDED 1, closed at full width FIX-514-R12), never clearing it by
+    re-reading heredoc data. (A construct the reader models completely but cannot PLACE - a coproc, select,
+    or a function or alias defined and then called in one command - is the separate uncertain-read case
+    _destruct_uncertain_words reports, which denies only when the command is ALSO effectful.)"""
 
 
-_LEX_RECOVER_DEPTH = 8  # nested substitution groups a recover-mode read follows before it stops
+_LEX_RECOVER_DEPTH = 8  # nested substitution groups a recover-mode read follows before it stops. A
+# process-substitution level (the <( ) form) costs ONE group; a $( ) command-substitution level (quoted
+# or unquoted) costs TWO (its own open group plus the nesting increment); a BACKTICK level measures ONE
+# against the same limit. A BENIGN command thus denies past 8 process-substitution groups, past 4
+# command-substitution levels, and past 7 process-substitution groups inside a backtick (recover-stop,
+# DECIDED 1; a disclosed benign over-deny, FIX-514-R12 DECIDED 4 boundary; the quoted and backtick
+# ends pinned at FIX-514-R13)
+
+# The recorded heredoc-join preservation in _lex_command's except path returns the EARLIER recorded
+# cannot-evaluate (category 2) instead of a LATER exception's category. This flag exists ONLY so the
+# self-test can isolate that return with an attribute mutant; production never changes it. The self-test
+# shows the return is currently REDUNDANT (the full-width category-0 deny covers every known witness,
+# FIX-514-R13): its check turns red if a later change narrows category 0, forcing a vector that only
+# this return catches.
+_LEX_PRESERVE_RECORDED_JOIN = True
 
 
 # A recover-mode group opened for a quoted "$( )" or a backtick substitution carries this
@@ -941,8 +975,10 @@ def _lex_command(command, partial=False, recover=False, _start=0, _close=False, 
     stopped the read began, and the category - 1 (STILL-RUNS, deny wholesale): a NUL, or a 'case' word in
     RESERVED-WORD position inside a nested group, whose pattern ')' would close the group early (a data
     'case' argument such as cat <(printf case) is NOT this), a heredoc delimiter it cannot read, a process
-    substitution after a descriptor number, or any such stop inside a nested group; 0 (SYNTAX, bash runs
-    nothing more): an unbalanced quote or escape, a malformed redirect, an unclosed group; 2 (UNCERTAIN, a
+    substitution after a descriptor number, or any such stop inside a nested group; 0 (SYNTAX, the text
+    from the stop point on is NOT read as commands, though bash may still run commands BEFORE the stop -
+    earlier lines before a last-line syntax error, and a trailing backslash it keeps as a literal): an
+    unbalanced quote or escape, a malformed redirect, an unclosed group; 2 (UNCERTAIN, a
     construct the reader cannot model with certainty though the read did not stop): a process or command
     substitution nested beyond _LEX_RECOVER_DEPTH (every nested group counts toward ONE limit, process
     substitutions included), or a backslash-newline inside an unquoted heredoc body or delimiter (recorded
@@ -953,6 +989,7 @@ def _lex_command(command, partial=False, recover=False, _start=0, _close=False, 
     argv = []
     argv_opaque = []
     argv_leading_tilde = []
+    argv_plain = []
     redirects = []
     opaque = [False]
     seg_start = [_start]
@@ -965,10 +1002,11 @@ def _lex_command(command, partial=False, recover=False, _start=0, _close=False, 
     def end_segment(sep, op_start, next_start):
         segments.append(_Segment(list(argv), sep, list(redirects),
                                   command[seg_start[0]:op_start], opaque[0], list(argv_opaque),
-                                  list(argv_leading_tilde)))
+                                  list(argv_leading_tilde), list(argv_plain)))
         del argv[:]
         del argv_opaque[:]
         del argv_leading_tilde[:]
+        del argv_plain[:]
         del redirects[:]
         opaque[0] = False
         seg_start[0] = next_start
@@ -996,11 +1034,12 @@ def _lex_command(command, partial=False, recover=False, _start=0, _close=False, 
         if _depth + len(groups) >= _LEX_RECOVER_DEPTH:
             raise _LexUncertain("a process or command substitution nested beyond the limit")
         groups.append([0, (list(argv), list(argv_opaque), list(argv_leading_tilde), list(redirects), opaque[0],
-                           seg_start[0])])
-        segments.append(_Segment([], "(", [], command[at:at + 2], False, [], []))
+                           seg_start[0], list(argv_plain))])
+        segments.append(_Segment([], "(", [], command[at:at + 2], False, [], [], []))
         del argv[:]
         del argv_opaque[:]
         del argv_leading_tilde[:]
+        del argv_plain[:]
         del redirects[:]
         opaque[0] = False
         seg_start[0] = at + 2
@@ -1017,9 +1056,9 @@ def _lex_command(command, partial=False, recover=False, _start=0, _close=False, 
         if failure is not None:
             exc = _LexUncertain if failure[1] == 2 else _LexUnmodelled
             raise exc("a nested command list it cannot read ({})".format(failure[2]))
-        closing = [] if close else [_Segment([], ")", [], "", False, [], [])]
+        closing = [] if close else [_Segment([], ")", [], "", False, [], [], [])]
         opener_raw = _LEX_SUBST_RUNPATH_RAW if restrict else ""
-        return [_Segment([], "(", [], opener_raw, False, [], [])] + inner + closing, end
+        return [_Segment([], "(", [], opener_raw, False, [], [], [])] + inner + closing, end
 
     def subst(kind, at, dquote):
         # the _read_word callback for a substitution inside a word: queue its group, return its end
@@ -1072,6 +1111,7 @@ def _lex_command(command, partial=False, recover=False, _start=0, _close=False, 
         argv.append(op)
         argv_opaque.append(True)
         argv_leading_tilde.append(False)
+        argv_plain.append(False)
         opaque[0] = True
         return open_group(at)
 
@@ -1140,6 +1180,7 @@ def _lex_command(command, partial=False, recover=False, _start=0, _close=False, 
                             fail = (uncertain[0][0], 2, uncertain[0][1]) if uncertain[0] else None
                             return segments, fail, i
                         argv[:], argv_opaque[:], argv_leading_tilde[:], redirects[:] = saved[:4]
+                        argv_plain[:] = saved[6]
                         opaque[0], seg_start[0] = saved[4], saved[5]
                         continue
                 if kind == "sep":
@@ -1185,20 +1226,25 @@ def _lex_command(command, partial=False, recover=False, _start=0, _close=False, 
                     i = consume_redirect(op, oplen, j, None)
                     continue
                 raise ValueError("unsupported {fd} redirect")
-            if (groups and text == "case"
-                    and all(w in _DESTRUCT_KEYWORDS or w == "time"
-                            for w in argv[_command_word_index(argv):])):
+            if groups and text == "case" and _lex_case_reserved(argv[_command_word_index(argv):]):
                 # case confuses group counting only as a RESERVED WORD (its pattern ) closes the group
                 # early); as a plain argument (cat <(printf case)) it stays data. case is reserved only in
-                # command-word position: the first word of the simple command once leading assignments and
-                # the reserved words that keep case in command position (then, do, else, !, {, time and kin)
-                # are skipped. A real command word before it proves an argument; if that proof is absent the
-                # read stops (FIX-514 round 7, restoring the round-6 refusal in every non-argument position).
+                # command-word position: the first word of the simple command once leading assignments, the
+                # reserved words that keep case in command position (then, do, else, !, {, and kin), the
+                # time reserved word AND time's option words (-p, --, in any combination; FIX-514 round 9),
+                # and coproc (it takes a compound command; FIX-514-R10) are skipped. A real command word
+                # before it proves an argument; any position that cannot
+                # be proved an argument stops (deny), restoring the round-6 refusal there.
                 raise _LexUnmodelled("a case statement inside a nested group")
             if started:
                 argv.append(text)
                 argv_opaque.append(w_opaque)
                 argv_leading_tilde.append(w_leading_tilde)
+                # the RAW spelling byte-identical to the decoded text is exactly when bash can
+                # read this word as a RESERVED WORD (argv_plain, FIX-514-R21): a quoted or escaped
+                # spelling decodes the same with the flag False, so a quoted definition NAME is
+                # never consumed as a reserved prefix.
+                argv_plain.append(command[i:j] == text)
                 if w_opaque:
                     opaque[0] = True
             i = j
@@ -1209,11 +1255,17 @@ def _lex_command(command, partial=False, recover=False, _start=0, _close=False, 
         if recover:
             if argv or redirects:
                 segments.append(_Segment(list(argv), "", list(redirects), command[seg_start[0]:], opaque[0],
-                                         list(argv_opaque), list(argv_leading_tilde)))
+                                         list(argv_opaque), list(argv_leading_tilde), list(argv_plain)))
             for _count, saved in reversed(groups):
                 if saved is not None:
                     segments.append(_Segment(saved[0], "", saved[3], command[saved[5]:], True, saved[1],
-                                             saved[2]))
+                                             saved[2], saved[6]))
+            if _LEX_PRESERVE_RECORDED_JOIN and uncertain[0] is not None:
+                # DECIDED 1 (FIX-514-R12): a recorded cannot-evaluate condition (a backslash-newline
+                # join inside an unquoted heredoc body) is never downgraded by a LATER exception; it is
+                # returned as category 2, so a subsequent unterminated quote or escape cannot turn the
+                # recover-stop deny back into an allow (round-11 BLOCKER, both reviews).
+                return segments, (uncertain[0][0], 2, uncertain[0][1]), n
             cat = 2 if isinstance(exc, _LexUncertain) else (1 if isinstance(exc, _LexUnmodelled) else 0)
             return segments, (token[0], cat, str(exc)), n
         # partial mode recovers the COMPLETE segments lexed before the unparseable construct AND the
@@ -1226,7 +1278,7 @@ def _lex_command(command, partial=False, recover=False, _start=0, _close=False, 
             if argv or redirects:
                 segments.append(_Segment(list(argv), "", list(redirects),
                                          command[seg_start[0]:], opaque[0], list(argv_opaque),
-                                         list(argv_leading_tilde)))
+                                         list(argv_leading_tilde), list(argv_plain)))
             return segments, False
         raise
     if recover:
@@ -1261,6 +1313,48 @@ def _segments(command):
 # bash would treat that as a command, not an assignment, so recognizing it is a deliberate conservative
 # over-fire (disclosed in the manifest residue), never an under-block.
 _ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\+?=")
+
+
+def _lex_case_reserved(words):
+    """True when every word before a 'case' keeps it in RESERVED-WORD (command) position: the shell
+    keywords, coproc (it takes a compound command), the time reserved word, and time's option words after
+    a time (-p and --, in any combination) are skipped. A word that is none of these is a real command
+    word and proves the 'case' an argument. A word after time that merely LOOKS like a time option is skipped too, never
+    read as that proof: whether bash reads it as an option or as the timed command cannot be decided
+    here, and a position that cannot be PROVED an argument must stop the read (deny), the fail-closed
+    direction (FIX-514 round 9; round 8 read the -p of 'time -p case' as a proving command word and
+    allowed the timed case statement). A module-level predicate so the self-test can isolate this
+    branch with an attribute mutant."""
+    after_time = False
+    after_coproc = False
+    for w in words:
+        if w in _DESTRUCT_KEYWORDS:
+            after_time = False
+            after_coproc = False
+            continue
+        if w == "coproc":
+            # coproc takes a COMPOUND command, so a case right after it is a reserved word, not an
+            # argument (DECIDED 6, claude 2). The coproc NAME form (coproc NAME case ...) keeps case in
+            # reserved position too, so ONE identifier word right after a coproc is skipped as its
+            # possible NAME (FIX-514-R11, DECIDED 4): whether bash reads that word as the NAME or as a
+            # simple-command word cannot be decided here, and a position that cannot be PROVED an
+            # argument must stop the read (deny), the fail-closed direction. A data case behind such a
+            # word (coproc cat case) is an accepted over-deny.
+            after_time = False
+            after_coproc = True
+            continue
+        if w == "time":
+            after_time = True
+            after_coproc = False
+            continue
+        if after_time and w in ("-p", "--"):
+            continue
+        if after_coproc and (w[:1].isalpha() or w[:1] == "_") and all(
+                ch.isalnum() or ch == "_" for ch in w):
+            after_coproc = False
+            continue
+        return False
+    return True
 
 
 def _command_word_index(tokens):
@@ -6850,7 +6944,7 @@ _DESTRUCT_RULES = frozenset((
     "pipe-feed", "heredoc-feed", "cd", "cd-flow", "scope", "cd-dotdot", "cd-exists", "cd-cdpath", "subst",
     "unresolvable", "no-preserve-root", "home", "scratch", "repo-root", "regenerable", "ignored", "embedded",
     "gitlink", "git-admin", "dotdot", "snapshot", "clean", "optout", "raw", "shell-context", "raw-join",
-    "assign", "prose-shadow", "prior-effect"))
+    "assign", "prose-shadow", "prior-effect", "recover-stop"))
 # The leading opt-out, matching GUARDRAIL_ALLOW_DISCARD's convention (bash last-wins, falsy values below).
 _DESTRUCT_OPTOUT_RE = re.compile(r"^GUARDRAIL_ALLOW_DESTRUCTIVE=(.*)$")
 # ONE table of the command words that run another command: privilege, scheduling, tracing, sandbox,
@@ -6871,7 +6965,8 @@ _COMMAND_RUNNERS = frozenset((
 # accepts) or "priority" (the optional decimal chrt priority)). Every option spelling outside an entry is
 # UNMODELLED, including a valid one: env -C/--chdir/-S/--split-string, sudo -D/-R/-i/-s, an abbreviated long
 # option, timeout 1e2. None of the modelled options moves the working directory. env and sudo also take
-# NAME=VALUE assignments ahead of the command.
+# NAME=VALUE assignments ahead of the command, which the word-level rule reads as UNKNOWN wherever they
+# sit (FIX-514-R16, DECIDED 1), never as consumed positions.
 _DESTRUCT_WRAPPER_SPECS = {
     "sudo": ("AbEHknPS", "gu", ("askpass", "background", "non-interactive", "preserve-groups",
                                 "reset-timestamp", "set-home", "stdin"), ("group", "user"), ("preserve-env",),
@@ -6894,11 +6989,114 @@ _DESTRUCT_WRAPPER_SPECS = {
     "busybox": ("", "", (), (), (), None),
     "toybox": ("", "", (), (), (), None),
 }
+# Options of the UNMODELLED command runners, CONSUMED by arity so a creator scan behind an uncertain
+# read does not mistake an option value for the executed command. Each entry keeps the FOUR option
+# classes (FIX-514-R13, DECIDED 2): (boolean short letters, short letters with a MANDATORY
+# separate-or-attached value, short letters with an OPTIONAL ATTACHED-ONLY value, boolean long options,
+# long options with a MANDATORY value attached by an equals sign or in the next word, long options
+# with an OPTIONAL ATTACHED-ONLY value (only behind an equals sign; bare, the option consumes NO
+# word), long options with a MANDATORY ATTACHED-ONLY value, the positional operand ahead of the
+# command or None). Every entry is derived from the tool's own documentation (the GNU findutils xargs,
+# util-linux taskset, strace and procps-ng watch manuals; FIX-514-R13). An option outside its entry's
+# classes, any option of a runner with NO entry (ltrace
+# is deliberately UNMODELLED, with no option model), and the existing-process attach
+# modes (taskset -p/--pid, strace -p/--attach, each omitted from its entry) leave the executed word
+# UNDETERMINABLE, which behind an uncertain read DENIES (fail closed). taskset's mask-or-list operand
+# is a MANDATORY positional ("mask", consumed before the command), and watch without -x/--exec hands
+# its single string to a shell (_destruct_executed_word leaves the executed word UNKNOWN there).
+# FIX-514-R12 DECIDED 2/3, reworked at FIX-514-R13.
+_DESTRUCT_RUNNER_OPT_SPECS = {
+    "xargs": ("0oprtx", "adEILnPs", "eil",
+              ("exit", "help", "interactive", "no-run-if-empty", "null", "open-tty", "show-limits",
+               "verbose", "version"),
+              ("arg-file", "delimiter", "max-args", "max-chars", "max-procs", "process-slot-var"),
+              ("eof", "max-lines", "replace"), (), None),
+    "taskset": ("achV", "", "", ("all-tasks", "cpu-list", "help", "version"), (), (), (), "mask"),
+    "strace": ("ACdDfFhiknNqrtTvVwxyYzZ", "abeEIoOPsSUuX", "",
+               ("always-show-pid", "help", "kill-on-exit", "output-separately", "pidns-translation",
+                "seccomp-bpf", "version"),
+               ("env", "output", "syscall-limit", "trace", "user"),
+               ("absolute-timestamps", "strings-in-hex", "tips"), (), None),
+    "watch": ("bcCeghprtvwx", "nq", "d",
+              ("beep", "chgexit", "color", "errexit", "exec", "help", "no-color", "no-rerun",
+               "no-title", "no-wrap", "precise", "version"),
+              ("equexit", "interval"), ("differences",), (), None),
+}
+# A runner option the model above does not cover leaves the executed command word undeterminable.
+_DESTRUCT_EXEC_UNKNOWN = object()
+# Runners that hand ONE string to a shell: the shell re-parses that string, so this guard cannot resolve
+# the executed word from it and leaves it UNKNOWN, denying behind an uncertain read rather than
+# whitespace-splitting a string whose word boundaries the shell, not whitespace, decides (watch without
+# -x/--exec is handled the same way inside _destruct_executed_word; su, runuser and script join this
+# set too (operand-first runners with no option model), FIX-514-R14/R15, DECIDED 4).
+_DESTRUCT_SHELL_STRING_RUNNERS = frozenset(("eval", "sg", "su", "runuser", "script"))
+# The extra trigger sets of the word-level rule (FIX-514-R16, DECIDED 1; FIX-514-R17/R18, DECIDED 1).
+# _DESTRUCT_WORD_SHELLS: the shell words OUTSIDE the creator set (source and the dot command source
+# a script into the CURRENT shell; mksh and ash are differently NAMED relatives the creator set
+# does not list), read as shells in RUNNER position. The SAME four words trigger as ARGUMENT words
+# (_DESTRUCT_WORD_SHELL_ARGS) wherever they appear in a runner argument list, builtin and command
+# included: builtin and command EXECUTE shell builtins, so builtin source ./w.sh and command . ./w.sh
+# are executable routes, and the rule stays word-level with no per-runner executability reasoning
+# (xargs source ./w.sh denies too, where xargs itself could never exec the builtin), with NO
+# exception: the round-17 find starting-path carve-out (_destruct_find_dot_paths) is REMOVED
+# (FIX-514-R18, DECIDED 1), because it located the first argument word spelling find without
+# certifying that find executes, so a data or option-value find repositioned the exemption (xargs
+# printf find . allowed). A literal find starting-path dot behind an uncertain read now denies,
+# and the match reads each word's BASENAME (_destruct_word), so a path whose LAST component is the
+# dot word denies as well (find . -name x -print, xargs find . -name x -print, find src/. -name x
+# -print: a disclosed over-denial with named vectors); the spelling ./ decodes to an empty
+# basename and src to its own name, so find ./ and find src keep allowing. The shells IN the creator set (bash, sh, zsh, dash, ksh,
+# fish, csh, tcsh) trigger the word scan through _destruct_creator_word instead, which keeps every
+# creator-set witness isolatable: dropping bash, sh or zsh from the creator set still flips its
+# vector. _DESTRUCT_ENV_SUDO: the env and sudo NAME=VALUE grammars differ (and differ between
+# implementations), so they are no longer position-modelled at all: on a line that reaches env or
+# sudo, ANY word containing "=" after its first character is UNKNOWN. The word rule also reads
+# the env split-string option, which re-splits one string into new words, in EVERY spelling env
+# accepts (_destruct_split_string_word on the COMPLETE decoded word, never its basename: -S
+# attached or bare, a bundled short group such as -iS, and --split-string bare, equals-joined or
+# abbreviated), whatever position the word holds (FIX-514-R18, DECIDED 3: the kept arity scan runs
+# only when env IS the resolved runner, so a bundled or abbreviated spelling at a data position
+# needed the word rule to read it; FIX-514-R19, DECIDED 1: the round-18 call sites handed the
+# predicate each word's basename, so an attached split string carrying a slash, -S/usr/bin/x, lost
+# its option prefix at the rsplit and escaped, a deny-to-allow regression against round 17, fixed
+# by passing the whole word).
+_DESTRUCT_WORD_SHELLS = frozenset(("mksh", "ash", "source", "."))
+_DESTRUCT_WORD_SHELL_ARGS = _DESTRUCT_WORD_SHELLS
+_DESTRUCT_ENV_SUDO = frozenset(("env", "sudo"))
+# Shells and interpreters among the no-model runners: their argument is a SCRIPT, not an operand
+# ahead of a command word, and the word-level scan (DECIDED 1) reads every shell AMONG A RUNNER'S
+# WORDS through the creator set or _DESTRUCT_WORD_SHELLS, so the operand-first UNKNOWN rule
+# (DECIDED 3) is NOT applied to them. This exclusion exists SOLELY to keep each creator-set shell
+# witness isolatable; it is not otherwise needed for guard behaviour, since in production every path
+# into one of these shells has already denied before this branch runs (the creator set or the word
+# rule reads the shell word itself, whichever route reached it), so the branch decides nothing on
+# its own. Only under a self-test mutant that drops a shell from the creator set does it matter:
+# that shell's witness (bash {scratch}/s.sh behind a runner or directly) must flip to ALLOW through
+# this branch (its script operand resolves and is no creator) instead of denying as a no-model
+# runner, which would hide the dropped member behind an unrelated deny. FIX-514-R15/R16; stated
+# plainly at FIX-514-R17 (claude MINOR 4).
+_DESTRUCT_NO_MODEL_SHELLS = frozenset(("sh", "bash", "dash", "zsh", "ksh", "mksh", "ash", "fish",
+                                       "csh", "tcsh", "source", "."))
 # Shell reserved words that stand in front of a command and take no options.
 _DESTRUCT_KEYWORDS = frozenset(("!", "{", "if", "then", "elif", "else", "do", "while", "until"))
-# Reserved and builtin words the lexer marks opaque only for their brace or bracket character; as a whole word
-# each is literal, never a command name computed at run time.
-_DESTRUCT_LITERAL_WORDS = frozenset(("{", "}", "[", "[[", "]]"))
+# Reserved and builtin words the lexer marks opaque only for their brace or bracket character; each
+# is literal syntax (the { and } of a brace group, the [ of test and the [[ ]] keywords), never a
+# command name computed at run time. The computed-word rule carves them out at COMMAND-WORD
+# position; the prior-effect runner read (_destruct_prior_runner) carves them out among a runner's
+# ARGUMENT words (stated correctly at FIX-514-R18, DECIDED 5: the round-17 comment claimed
+# command-word position only); and the coproc/function segment word rule
+# (_destruct_segment_word_unknown) carves them out of its opacity trigger as the segment's own
+# group syntax. The word-level RUNNER rule does NOT consult this set (FIX-514-R17, DECIDED 3): there
+# the {} placeholder spellings below are the ONLY opacity exception, so an opaque brace or bracket
+# ARGUMENT word behind an uncertain read denies (xargs printf { and xargs printf [, a disclosed
+# over-denial).
+_DESTRUCT_LITERAL_COMMAND_WORDS = frozenset(("{", "}", "[", "[[", "]]"))
+# The find/xargs {} placeholder spellings the word-level rule accepts by POSITIVE match (FIX-514-R17,
+# DECIDED 3; an empty {} is NOT a brace expansion, so bash passes each through unchanged): the
+# literal word {}, xargs' attached -I{}, and --replace={}. Nothing else: a reject-list over
+# expansion characters must enumerate every character bash rewrites to stay closed, and a missed one
+# fails open, where an unlisted spelling here only over-denies.
+_DESTRUCT_LITERAL_PLACEHOLDERS = frozenset(("{}", "-I{}", "--replace={}"))
 _DESTRUCT_DURATION_RE = re.compile(r"^[0-9]+(?:\.[0-9]+)?[smhd]?$")
 # Command words this guard KNOWS do not run another command from their arguments or their input: a
 # destructive word among their arguments is data (echo rm -rf /, grep -n truncate f, git rm x), never a
@@ -6955,6 +7153,27 @@ _DESTRUCT_CLASSIFIED = (_DESTRUCT_PATH_WORDS | _DESTRUCT_FORMAT_WORDS | _DESTRUC
 _DESTRUCT_KILL_WORDS = frozenset((
     "rm", "rmdir", "unlink", "shred", "truncate", "dd", "dropdb", "mke2fs", "mkswap", "wipefs"))
 _DESTRUCT_FIND_EXEC = frozenset(("-exec", "-execdir", "-ok", "-okdir"))
+# find's expression grammar for the action scan (_destruct_find_creator): the global options, the
+# operators, and the zero-operand tests and actions; the tests and actions that CONSUME one following
+# operand word; and -fprintf, which consumes two. Derived from the GNU findutils documentation; the
+# -newerXY comparison family is matched by prefix in the scan. A word outside these tables leaves the
+# scan's position UNCERTIFIED (fail closed in _destruct_find_creator). FIX-514-R13, DECIDED 4.
+_DESTRUCT_FIND_ZERO = frozenset((
+    "(", ")", "!", ",", "-a", "-and", "-o", "-or", "-not", "-d", "-daystart",
+    "-delete", "-depth", "-empty", "-executable", "-false", "-follow", "-help", "--help",
+    "-ignore_readdir_race", "-ls", "-mount", "-nogroup", "-noignore_readdir_race", "-noleaf",
+    "-nouser", "-print", "-print0", "-prune", "-quit", "-readable", "-true", "-version",
+    "--version", "-writable", "-xdev"))
+_DESTRUCT_FIND_ONE = frozenset((
+    "-D", "-amin", "-anewer", "-atime", "-cmin", "-cnewer", "-context", "-ctime", "-files0-from",
+    "-fls", "-fprint", "-fprint0", "-fstype", "-gid", "-group", "-ilname", "-iname", "-inum",
+    "-ipath", "-iregex", "-iwholename", "-links", "-lname", "-maxdepth", "-mindepth", "-mmin",
+    "-mtime", "-name", "-newer", "-path", "-perm", "-printf", "-regex", "-regextype", "-samefile",
+    "-size", "-type", "-uid", "-used", "-user", "-wholename", "-xtype"))
+_DESTRUCT_FIND_TWO = frozenset(("-fprintf",))
+# find's GLOBAL options, parsed before the starting paths and the expression, so they never start the
+# expression (-D debugopts and -Olevel take a value; FIX-514-R14, DECIDED 6).
+_DESTRUCT_FIND_GLOBAL = frozenset(("-H", "-L", "-P"))
 _DESTRUCT_KUBECTL_RUNS = frozenset(("exec", "run", "debug", "attach", "plugin"))
 _DESTRUCT_DD_SINKS = frozenset(("/dev/null", "/dev/stdout", "/dev/stderr"))
 # Directories a build regenerates from the repository's sources; a recursive delete of one inside a
@@ -7062,9 +7281,14 @@ def _destruct_prior_effects(segments):
             start += 1
         if start < len(argv) and argv[start] == "function" and start + 1 < len(argv):
             names.add(argv[start + 1])
-        if (seg.sep_after == "(" and n + 1 < len(segments) and not segments[n + 1].argv
-                and segments[n + 1].sep_after == ")" and start < len(argv)):
-            names.add(argv[start])
+        # FIX-514-R21 (DECIDED 2): the ONE exact header predicate replaces the inline shape test,
+        # which read ANY word count ahead of the empty ( ) pair as a definition and so recorded
+        # the declaration builtin of declare -a arr=( ) as a defined function (a false
+        # prior-effect on a later declare -p arr); the predicate also records a QUOTED name the
+        # keyword skip above would have consumed ('if'() and kin).
+        header = _destruct_defn_header(segments, n)
+        if header is not None:
+            names.add(argv[header])
         if word == "alias":
             names.update(arg.split("=", 1)[0] for arg in args if "=" in arg)
         env = {}
@@ -7128,7 +7352,7 @@ def _destruct_prior_runner(seg, start, ctx):
     """Computed arguments of a runner, reusing the effective-command predicate. Argument roles of
     unmodelled runners are unknown, so an opaque data/option operand can also cause a false denial."""
     for k in range(start, len(seg.argv)):
-        if seg.argv_opaque[k] and seg.argv[k] not in _DESTRUCT_LITERAL_WORDS | {"{}"}:
+        if seg.argv_opaque[k] and seg.argv[k] not in _DESTRUCT_LITERAL_COMMAND_WORDS | {"{}"}:
             why = _destruct_computed(seg.argv[k], ctx["command"])
             if why:
                 return [("deny", "prior-effect: a runner argument {!r} may be a command because {}"
@@ -7899,7 +8123,7 @@ def _destruct_segment(seg, cwd, deadline, ctx):
                 if hit:
                     return _destruct_unmodelled("prior-effect: git clone sets a command-valued configuration",
                                                 hit)
-    if "computed" in _DESTRUCT_RULES and seg.argv_opaque[idx] and argv[idx] not in _DESTRUCT_LITERAL_WORDS:
+    if "computed" in _DESTRUCT_RULES and seg.argv_opaque[idx] and argv[idx] not in _DESTRUCT_LITERAL_COMMAND_WORDS:
         why = _destruct_computed(argv[idx], ctx["command"])
         if why:
             return [("deny", "the command word {!r} is computed at run time and {}, so this guard cannot tell "
@@ -7924,6 +8148,11 @@ def _destruct_segment(seg, cwd, deadline, ctx):
     hit = _destruct_marker(args)
     if hit:
         return _destruct_unmodelled(what, hit)
+    # A creator in a command runner's argument position is read ONLY behind an uncertain read, by the
+    # effectful test (_destruct_runner_creator via _destruct_creator_segments), where the word-level
+    # rule reads EVERY word of the runner's argument list (FIX-514-R16, DECIDED 1): on a certain read,
+    # a harmless runner form whose executed command or operand shares a creator name (xvfb-run
+    # python3 -m pytest, firejail bash, xargs grep -l sh) stays allowed, the parent-pin behaviour.
     if "pipe-feed" in _DESTRUCT_RULES and ctx["upstream"]:
         hit = _destruct_feed_marker(ctx)
         if hit:
@@ -7952,6 +8181,11 @@ def _destruct_classified(seg, idx, word, cwd, deadline, ctx):
         hit = _destruct_marker(args[k:]) if k is not None and "runner" in _DESTRUCT_RULES else None
         if hit:
             return _destruct_unmodelled("find {} runs another command".format(args[k]), hit)
+        # A creator behind a find action is read ONLY behind an uncertain read, by the effectful test
+        # (_destruct_find_creator via _destruct_creator_segments), where the word-level rule reads
+        # EVERY word of find's argument list (FIX-514-R16, DECIDED 1): on a certain read, find .
+        # -exec bash -n {} + and a predicate operand after an action terminator (find . -exec true
+        # {} + -name curl) stay allowed, the parent-pin behaviour.
         return (_destruct_prior_runner(seg, idx + 2 + k, ctx)
                 if ctx.get("prior") and k is not None else [])
     if (word.startswith("mkfs") or word in _DESTRUCT_FORMAT_WORDS) and "format" in _DESTRUCT_RULES:
@@ -8187,18 +8421,29 @@ _DESTRUCT_CMDVAR_RE = re.compile(
     r"(?<![\w.-])(?:" + "|".join(sorted(_DESTRUCT_COMMAND_ENV)) + r")\+?=")
 
 
-# A redirect that WRITES a path the raw scan can see: the output forms and the numbered forms. A
-# descriptor dup and the input forms are not writes. Over-matches toward DENY (the safe direction for an
-# already-uncertain read): this signal is read only on an uncertain or stopped read.
-_DESTRUCT_REDIR_WRITE_RE = re.compile(r"(?<![0-9<>])(?:[0-9]*>>?|&>>?|>\|)(?!&)")
-# Further creators the effectful predicate knows, each gated on the option that makes it WRITE a path: a
-# download to a file (curl with -o/-O/-sO/--output, wget with -O/--output-document), an extraction
-# to a directory (tar with -C, unzip with -d), an executable bit (chmod +x), and an inline-program
-# interpreter that can write (python3?/perl/ruby/node with -c or -e). A word boundary follows each
-# creator word and the option gap stops at the first separator byte (a newline, ;, &, |, a paren or a
-# backtick), a TEXTUAL bound keeping the option on its own command. Any OTHER creator - a
-# download with an unrecognized flag, a non-shell interpreter writing a path by another route, a computed
-# destination - is NOT seen here (disclosed in the residue); over-match toward DENY is the safe direction.
+# A redirect that WRITES a path the raw scan can see: the output forms and the numbered forms, plus two
+# forms that CREATE their path even though they look like descriptor syntax: '>&WORD' with a WORD that is
+# neither a number nor exactly '-' (bash redirects stdout and stderr to the file WORD; bash CLOSES the
+# descriptor only when WORD is exactly '-', so '>&-' alone is not a write but '>&-f' writes the file
+# '-f'; FIX-514-R10 claude MINOR), '>&WORD' with a WORD of digits then '-' then MORE ('>&2-x' writes
+# the file '2-x'; FIX-514-R11, DECIDED 6), and the 'N<>PATH' read-write open (FIX-514 round 9). A
+# descriptor dup (>&N, N>&M, 2>&1), a descriptor move ('>&2-', '>&12-'), a close ('>&-') and the
+# plain input forms are not writes.
+# Over-matches toward DENY (the safe direction for an already-uncertain read): this signal is read only
+# on an uncertain read (a STOPPED read denies outright first; recover-stop, FIX-514-R11 DECIDED 1).
+_DESTRUCT_REDIR_WRITE_RE = re.compile(
+    r"(?<![0-9<>])(?:[0-9]*>>?|&>>?|>\|)(?!&)"
+    r"|(?<![0-9<>])[0-9]*<>"
+    r"|>&\s*[0-9]*[^0-9\s;&|()<>`-]"
+    r"|>&\s*-[^\s;&|()<>`]"
+    r"|>&\s*[0-9]+-[^\s;&|()<>`]")
+# Further path CREATORS recognized by a RAW-TEXT backstop, each gated on the option that makes it WRITE a
+# path (restored FIX-514-R10, claude MAJOR). Defence in depth BESIDE the decoded closed creator set: the
+# decoded set reads the recovered command WORDS, these read the raw command text, so a creator in a data
+# argument (printf 'curl -o f') is still seen on an uncertain read. A STOPPED read no longer needs them:
+# it denies outright (recover-stop, FIX-514-R11 DECIDED 1) before the effectful test is consulted. Read
+# only on an uncertain read (over-match toward DENY, the safe direction there); a quote-concatenated
+# spelling (c''url) is NOT seen by these and is covered by the decoded checks instead.
 _DESTRUCT_WRITER_RES = (
     re.compile(r"(?<![\w.-])curl(?![\w.-])[^\n;&|()`]*?(?<![\w.-])(?:-[oO]|-s[oO]|--output)(?![\w.-])"),
     re.compile(r"(?<![\w.-])wget(?![\w.-])[^\n;&|()`]*?(?<![\w.-])(?:-O|--output-document)(?![\w.-])"),
@@ -8207,6 +8452,703 @@ _DESTRUCT_WRITER_RES = (
     re.compile(r"(?<![\w.-])chmod(?![\w.-])[^\n;&|()`]*?\+x"),
     re.compile(r"(?<![\w.-])(?:python3?|perl|ruby|node)(?![\w.-])[^\n;&|()`]*?(?<![\w.-])-[ce](?![\w.-])"),
 )
+# Further creators the effectful predicate knows, decided from DECODED command words (the lexer's quote
+# removal applied to each recovered word), never from raw text with per-option regexes: a segment whose
+# decoded command word is in this CLOSED creator set DENIES regardless of its options (FIX-514 round 9;
+# the per-option patterns of rounds 7-8 read raw text, so a quote-concatenated c''url, an unlisted
+# option spelling such as curl -sSLo or wget -qO, and a separator inside an earlier quoted argument each
+# slipped past them). The set: the copy/link/write creators, the downloaders curl and wget, the
+# extractors tar and unzip, chmod, dd, and the inline-program interpreters perl, ruby, node and the
+# shells, each interpreter FAMILY also matched under a trailing numeric version run (the DERIVED
+# _DESTRUCT_EFFECT_CREATOR_VERSIONED below). Over-firing is accepted and
+# BOUNDED to uncertain reads: a benign 'curl URL' or 'chmod 600' beside an uncertain construct denies
+# (disclosed in the residue). A creator behind a modelled wrapper word is found by scanning the
+# wrapper's remaining words, an over-match toward DENY (an option VALUE equal to a creator name also
+# fires); one a coproc runs is found by scanning the words after the coproc (DECIDED 4); a command
+# RUNNER - every _COMMAND_RUNNERS word, and find with its whole command line - is read by the
+# WORD-LEVEL rule (FIX-514-R16, DECIDED 1) on EVERY route that reaches it - directly, behind the
+# reserved-word time prefix, inside a coproc (plain, NAME and parenthesized-body forms), and in a
+# function definition of any spelling, the header and the body's FIRST command included
+# (FIX-514-R17/R18/R19, DECIDED 2):
+# EVERY word of its argument list (option, option value,
+# operand, find path, predicate or action operand) is UNKNOWN, denying, when it is opaque (an
+# expansion, quoted or not, a glob, a brace or a leading tilde; ONLY the literal {} placeholder
+# spellings {}, -I{} and --replace={} are carved out, by positive match, FIX-514-R17 DECIDED 3), a
+# creator or shell word (source, ., mksh and ash through _DESTRUCT_WORD_SHELLS, as the runner and as
+# argument words everywhere, matched on each word's BASENAME, so the dot word denies wherever it
+# appears, a find starting path or a dot-suffixed path such as src/. included: the round-17
+# starting-path exception is REMOVED, FIX-514-R18 DECIDED 1), env's
+# split-string option (on the complete decoded word, never its basename, FIX-514-R19 DECIDED 1),
+# or an env/sudo-line word containing "=", with NO position grammar deciding an
+# allow. The kept arity scan (_destruct_executed_word, FIX-514-R13) and find action scan run only
+# toward deny: an unmodelled option spelling, a runner with no option model (chroot, ssh, flock,
+# parallel, ...) with any argument, a shell-string runner (watch without -x, eval, sg, su, runuser,
+# script), and the ONE shared depth budget each leave the executed word UNKNOWN (FIX-514-R13/R14/R15,
+# DECIDED 1-4). A runner that resolves to find runs the find action scan on its arguments
+# (FIX-514-R14, DECIDED 1). A creator spelled through a computed word or an unlisted program stays
+# unseen.
+_DESTRUCT_EFFECT_TOOLS = frozenset((
+    "cp", "mv", "ln", "tee", "mkdir", "touch", "install", "rsync", "dd",
+    "curl", "wget", "tar", "unzip", "chmod"))
+# interpreters: ANY interpreter can write a path from an inline program or a script (DECIDED 4,
+# claude 2 "any interpreter"). The shells, perl/ruby, the node family, and the scripting languages.
+_DESTRUCT_EFFECT_INTERPRETERS = frozenset((
+    "perl", "ruby", "node", "nodejs", "bash", "sh", "zsh", "ksh", "dash", "fish", "csh", "tcsh",
+    "php", "lua", "awk", "gawk", "pypy", "python"))
+_DESTRUCT_EFFECT_CREATORS = _DESTRUCT_EFFECT_TOOLS | _DESTRUCT_EFFECT_INTERPRETERS
+# Interpreter FAMILIES that also appear under a VERSION suffix (python3, python3.12, perl5.36.0, ruby3.2,
+# pypy3, node18, php8.2, lua5.4, bash5, ksh93, nodejs20): EVERY interpreter family in the declaration,
+# DERIVED from it so the two sets cannot drift (FIX-514-R11, DECIDED 3). A decoded word whose stem - the
+# name with a trailing numeric version run stripped - is one of these is a creator too. The suffix must
+# BEGIN with a digit, so perldoc/python-config keep their non-numeric tail and are not matched by this
+# rule. RESIDUAL: a differently NAMED relative (mawk, nawk, luajit; and the shells mksh and ash, which
+# _COMMAND_RUNNERS lists but this creator set does not) and a name whose version run is
+# separated or followed by a non-digit tail (ruby-3.2, python3-dbg, python3.12-config) stay unmatched.
+_DESTRUCT_EFFECT_CREATOR_VERSIONED = _DESTRUCT_EFFECT_INTERPRETERS
+_DESTRUCT_CREATOR_VERSION_RE = re.compile(r"\d[\d.]*$")
+
+
+def _destruct_runner_option_model(runner):
+    """The FOUR-CLASS option model a creator scan consumes a runner's OWN options with (FIX-514-R13,
+    DECIDED 2): (boolean short letters, mandatory-value short letters, optional-attached-value short
+    letters, boolean long options, mandatory-value long options, optional-attached-value long options,
+    mandatory-attached-value long options, positional operand or None), or None when the runner is not
+    modelled (every option then leaves the executed word undeterminable). Wrappers reuse their
+    _DESTRUCT_WRAPPER_SPECS entry: their attached-only long options take an OPTIONAL value; the
+    unmodelled runners use _DESTRUCT_RUNNER_OPT_SPECS. env/sudo NAME=VALUE assignments are NOT a model
+    field: the word-level rule reads any env/sudo word with "=" as UNKNOWN (FIX-514-R16, DECIDED 1)."""
+    if runner in _DESTRUCT_WRAPPER_SPECS:
+        flags, values, longs, long_values, long_attached, positional = _DESTRUCT_WRAPPER_SPECS[runner]
+        return (flags, values, "", tuple(longs), tuple(long_values), tuple(long_attached), (),
+                positional)
+    if runner in _DESTRUCT_RUNNER_OPT_SPECS:
+        return _DESTRUCT_RUNNER_OPT_SPECS[runner]
+    return None
+
+
+def _destruct_executed_word(runner, args, opaque=None, depth=0):
+    """The decoded command word a runner or wrapper EXECUTES, read ONLY as the STRICTER side of the
+    word-level rule (FIX-514-R16, DECIDED 1): every caller first runs _destruct_runner_word_unknown
+    over the WHOLE argument list, so this scan never decides an ALLOW the word-level rule would deny,
+    and the creator it resolves can only repeat one that scan already saw. Its OWN options are parsed
+    on the RAW decoded token (basename normalization applies ONLY to the final executed word, so an
+    attached or equals-joined option value carrying a slash, such as an output path, never ends the
+    option scan; FIX-514-R13, DECIDED 1) and consumed with their FOUR-CLASS arity (DECIDED 2), the
+    declared positional operands (timeout's duration, chrt's priority, taskset's mask; DECIDED 3) are
+    consumed, and the scan recurses, bounded by ONE shared depth budget, when the executed word is
+    itself a runner or wrapper (sudo, env, xargs, ...); when the executed word is find, the find
+    action scan reads what it runs (FIX-514-R14, DECIDED 1). Returns the decoded executed word, None
+    when none is present, or _DESTRUCT_EXEC_UNKNOWN when the model leaves it undeterminable (fail
+    closed, which DENIES behind an uncertain read): a runner that hands one string to a shell (watch
+    without -x/--exec, eval, sg, su, runuser, script; never whitespace-split, FIX-514-R14, DECIDED 4),
+    a runner with NO option model and ANY argument (chroot, ssh, flock, parallel, ...; an operand may
+    precede its command, FIX-514-R15, DECIDED 3), an option or positional spelling outside the model,
+    or the depth bound."""
+    if depth > 3:
+        return _DESTRUCT_EXEC_UNKNOWN
+    if runner in _DESTRUCT_SHELL_STRING_RUNNERS:
+        return _DESTRUCT_EXEC_UNKNOWN  # a single string handed to a shell (DECIDED 4)
+    opq = opaque if opaque is not None else [False] * len(args)
+    model = _destruct_runner_option_model(runner)
+    if model is None:
+        if runner not in _DESTRUCT_NO_MODEL_SHELLS:
+            # No option model and not a shell/interpreter (whose argument is a SCRIPT; the word-level
+            # scan reads every shell among a runner's words, see _DESTRUCT_NO_MODEL_SHELLS): the
+            # command word cannot be located because an operand may precede it (chroot DIR, ssh HOST,
+            # flock LOCKFILE, parallel operands), so ANY argument leaves it UNKNOWN (fail closed; a
+            # benign command behind such a runner over-denies, disclosed). FIX-514-R15, DECIDED 3.
+            return _DESTRUCT_EXEC_UNKNOWN if args else None
+        (bool_short, value_short, opt_short, bool_long, value_long, opt_long, attached_long,
+         positional) = ("", "", "", (), (), (), (), None)
+    else:
+        (bool_short, value_short, opt_short, bool_long, value_long, opt_long, attached_long,
+         positional) = model
+    i, n = 0, len(args)
+    opts = True
+    seen = set()
+    # env/sudo NAME=VALUE assignments are not consumed here: on a line that reaches env or sudo, ANY
+    # word with "=" after its first character is UNKNOWN in the word-level scan (FIX-514-R16,
+    # DECIDED 1), so no assignment reaches this arity scan.
+    while i < n:
+        tok = args[i]  # the RAW decoded token; _destruct_word only on the EXECUTED word (DECIDED 1)
+        if not opts or not tok.startswith("-") or (tok == "-" and runner != "env"):
+            break
+        if tok == "-":
+            i += 1  # env's lone - is -i, as _destruct_peel_one reads it
+            continue
+        if tok == "--":
+            opts = False
+            i += 1
+            continue
+        if tok.startswith("--"):
+            name, eq, _value = tok[2:].partition("=")
+            if name in bool_long and not eq:
+                seen.add(name)
+                i += 1
+                continue
+            if name in value_long:
+                # an opaque SEPARATE value is already UNKNOWN in the word-level scan (DECIDED 1)
+                i += 1 if eq else 2
+                continue
+            if name in opt_long or (name in attached_long and eq):
+                # an OPTIONAL value is ATTACHED-ONLY: bare, the option consumes NO word (DECIDED 2)
+                seen.add(name)
+                i += 1
+                continue
+            return _DESTRUCT_EXEC_UNKNOWN
+        if runner == "nice" and tok[1:].isdigit() and tok.isascii():
+            i += 1  # the obsolete nice -N adjustment, as _destruct_peel_one reads it
+            continue
+        letters = tok[1:]
+        j = 0
+        took_value = False
+        while j < len(letters):
+            ch = letters[j]
+            if ch in value_short:
+                took_value = j == len(letters) - 1
+                break
+            if ch in opt_short:
+                seen.add(ch)
+                break  # an optional value is attached-only: the remainder, if any, is that value
+            if ch in bool_short:
+                seen.add(ch)
+                j += 1
+                continue
+            return _DESTRUCT_EXEC_UNKNOWN
+        # an opaque SEPARATE short-option value is already UNKNOWN in the word-level scan (DECIDED 1)
+        i += 2 if took_value else 1
+    if positional == "duration" and i < n:
+        if _DESTRUCT_DURATION_RE.match(args[i]):
+            i += 1
+        else:
+            return _DESTRUCT_EXEC_UNKNOWN
+    elif positional == "priority" and i < n and args[i].isdigit() and args[i].isascii():
+        i += 1
+    elif positional == "mask" and i < n:
+        # an opaque mask operand is already UNKNOWN in the word-level scan (DECIDED 1)
+        i += 1  # taskset's mask or cpu-list operand always precedes the command (DECIDED 3)
+    if runner == "watch" and not ("x" in seen or "exec" in seen):
+        return _DESTRUCT_EXEC_UNKNOWN  # watch hands its single string to a shell (DECIDED 4)
+    if i >= n:
+        return None
+    # an opaque executed word is already UNKNOWN in the word-level scan (DECIDED 1/5)
+    word = _destruct_word(args[i])
+    if word == "find":
+        found = _destruct_find_creator(args[i + 1:], opq[i + 1:], depth)  # DECIDED 1; shared budget (DECIDED 4)
+        if found and _destruct_creator_word(found):
+            return found
+        return _DESTRUCT_EXEC_UNKNOWN if found else None
+    if word in _DESTRUCT_WRAPPER_SPECS or word in _COMMAND_RUNNERS:
+        return _destruct_executed_word(word, args[i + 1:], opq[i + 1:], depth + 1)
+    return word
+
+
+def _destruct_skip_reserved_prefix(argv, start):
+    """Advance past the shell keywords and the time reserved word with its option words (-p and --) that
+    keep the NEXT word in command position, so a coproc or a creator behind time (or behind a leading bang
+    and a time -p) is still reached by the uncertain-word and creator scans (FIX-514-R12, DECIDED 2; the
+    same time/-p/-- prefix _lex_case_reserved skips, minus coproc, which these scans must still SEE). The
+    bang keyword is already in the skipped set. time is also a LISTED runner (_COMMAND_RUNNERS), so
+    _destruct_creator_segments additionally applies the word-level rule to the words after a skipped
+    time (FIX-514-R17, DECIDED 2); only the skip itself is this function's job."""
+    n = len(argv)
+    after_time = False
+    while start < n:
+        w = argv[start]
+        if w in _DESTRUCT_KEYWORDS:
+            after_time = False
+        elif w == "time":
+            after_time = True
+        elif after_time and w in ("-p", "--"):
+            pass
+        else:
+            break
+        start += 1
+    return start
+
+
+def _destruct_defn_header(segments, n):
+    """The index in segments[n].argv of the NAME word of a function definition header, or None: the ONE
+    exact header predicate all three definition consumers read (_destruct_creator_segments,
+    _destruct_prior_effects and _destruct_uncertain_words; FIX-514-R21, DECIDED 2). A definition header
+    is the segment whose ( separator opens the EMPTY ( ) pair (the next segment holds no words and
+    closes at the matching )), carrying exactly ONE word past the leading assignments and the ACTUAL
+    reserved prefix words: that word is the NAME, recognized BEFORE any reserved-prefix or assignment
+    skip could consume it (FIX-514-R21, DECIDED 1), so a QUOTED name that merely DECODES to a reserved
+    word - 'if'(), 'while'(), 'time'(), '{'(), '!'() and every keyword kin - opens a definition like
+    any other name. The per-word argv_plain flag tells an ACTUAL reserved prefix (the unquoted { of an
+    enclosing brace group, an if or ! or time ahead of the definition, and the -p and -- option words
+    behind a plain time) from a quoted NAME: bash reads a reserved word ONLY when the word is written
+    plain, and this skip never consumes a word that is not. The skip also never consumes the LAST
+    word: valid bash never puts a reserved word directly against an empty ( ) pair (an empty subshell
+    is a syntax error), so the last word of a header segment is always the NAME; on invalid bash this
+    over-reads toward a definition, the deny-leaning side. A declaration builtin with an array
+    assignment (declare -a arr=( ), and the local, readonly, export and typeset forms; FIX-514-R20,
+    DECIDED 3) ends at the same ( with MORE words ahead of it than the one NAME, and a bare array
+    assignment (arr=( )) with NO word past the assignments, so neither is a definition and neither
+    opens the whole-tail judgment."""
+    seg = segments[n]
+    if not (seg.sep_after == "(" and n + 1 < len(segments) and not segments[n + 1].argv
+            and segments[n + 1].sep_after == ")"):
+        return None
+    argv = seg.argv
+    last = len(argv) - 1
+    start = _command_word_index(argv)
+    if start > last:
+        return None
+    after_time = False
+    while start < last and seg.argv_plain[start]:
+        w = argv[start]
+        if w in _DESTRUCT_KEYWORDS:
+            after_time = False
+        elif w == "time":
+            after_time = True
+        elif after_time and w in ("-p", "--"):
+            pass
+        else:
+            break
+        start += 1
+    return start if start == last else None
+
+
+def _destruct_creator_word(token):
+    """True when a DECODED word names a closed-set creator: its basename, matched CASE-INSENSITIVELY
+    (DECIDED 4; Curl and CURL are curl on a case-insensitive filesystem), is in
+    _DESTRUCT_EFFECT_CREATORS, or is an interpreter FAMILY name under a trailing numeric version run
+    (python3.12, perl5.36.0, ruby3.2, pypy3, bash5, ksh93, nodejs20) whose stem is in
+    _DESTRUCT_EFFECT_CREATOR_VERSIONED, the set DERIVED from the interpreter declaration (DECIDED 3)."""
+    word = _destruct_word(token).lower()
+    if word in _DESTRUCT_EFFECT_CREATORS:
+        return True
+    stem = _DESTRUCT_CREATOR_VERSION_RE.sub("", word)
+    return stem != word and stem in _DESTRUCT_EFFECT_CREATOR_VERSIONED
+
+
+def _destruct_literal_brace_word(word):
+    """True when a word the lexer marked OPAQUE is one of the three literal find/xargs {} placeholder
+    spellings - {}, -I{} and --replace={} - matched POSITIVELY against _DESTRUCT_LITERAL_PLACEHOLDERS
+    (FIX-514-R16, DECIDED 2; narrowed at FIX-514-R17, DECIDED 3: the literal {} placeholder is the
+    ONLY opacity exception of the word-level rule). The earlier reject-list over expansion characters
+    let ANY word carrying a {} pair and none of the listed characters through, and separately carved
+    out the brace and bracket words {, }, [, [[ and ]]; a reject-list must enumerate every character
+    bash rewrites to stay closed, where this positive match cannot fail open. Any other opaque cause
+    keeps the word opaque, an over-match toward deny (xargs printf { and xargs printf [ now deny, a
+    disclosed over-denial). A module-level predicate so the self-test can isolate this branch with an
+    attribute mutant."""
+    return word in _DESTRUCT_LITERAL_PLACEHOLDERS
+
+
+def _destruct_split_string_word(word):
+    """True when a DECODED word spells the env split-string option, the option that re-splits ONE
+    string into new command words, in EVERY spelling env accepts (FIX-514-R18, DECIDED 3): the short
+    -S with the string attached or as the bare option, a BUNDLED short group whose S takes the rest
+    of the word (-iS"printf ok": the alphanumerics ahead of the S are read as bundled option
+    letters), and the long --split-string bare, equals-joined or ABBREVIATED to any prefix of at
+    least --s (env lets an unambiguous prefix name a long option, and no other env long option
+    starts with s). Read at EVERY word of a runner argument list on a line that reaches env,
+    whatever position the word holds, and on the COMPLETE decoded word, never its basename
+    (FIX-514-R19, DECIDED 1: the round-18 call sites handed this predicate each word's basename,
+    so an attached or bundled split string carrying a slash, -S/usr/bin/x or -iS/usr/bin/x, lost
+    its option prefix at the rsplit and escaped the match, a deny-to-allow regression against
+    round 17 pinned by the slash-bearing pe-word-env-slash-* vectors): the round-17 scan read only the canonical -S and
+    --split-string spellings and left the bundled and abbreviated ones to the kept arity scan,
+    which runs only when env IS the resolved runner, so xargs printf env -iS"printf ok" passed
+    both layers (the arity scan resolved printf and never read the later words as env options). A
+    dash data word whose alphanumerics carry an S (-iSam) also matches: an over-match toward deny
+    behind an already uncertain read, disclosed. A module-level predicate so the self-test can
+    isolate this branch with an attribute mutant."""
+    if word.startswith("--"):
+        stem = word.split("=", 1)[0]
+        return len(stem) >= 3 and "--split-string".startswith(stem)
+    if not word.startswith("-"):
+        return False
+    for ch in word[1:]:
+        if ch == "S":
+            return True
+        if not (ch.isascii() and ch.isalnum()):
+            return False
+    return False
+
+
+def _destruct_segment_word_unknown(args, opaque=None):
+    """The truthy reason a list of segment words cannot be certified behind an uncertain read, or
+    None: the word rule applied to EVERY word handed in with NO runner position code (FIX-514-R18,
+    DECIDED 2) - the words of a coproc segment or of a function definition segment (the coproc or
+    function NAME and any in-segment body words included, exactly the words a runner-position
+    dispatch would have consumed or misread), and, through _destruct_tail_segment_unknown, EVERY
+    WHOLE segment of a command after one opened a function definition or a coproc
+    (D-514-DEFN-WHOLE-TAIL, FIX-514-R20, DECIDED 1). A word is UNKNOWN when it is OPAQUE (only the
+    literal {} placeholder spellings, _destruct_literal_brace_word, and the brace-group and bracket
+    words of _DESTRUCT_LITERAL_COMMAND_WORDS are carved out: the lexer marks those five opaque
+    solely for their brace or bracket character, and in these segments they are the OWN group
+    syntax of the body, so a benign coproc zznm { printf ok; } and function zzg { printf ok; }; zzg
+    keep allowing), or is a CREATOR or interpreter word (_destruct_creator_word), or is a SHELL
+    word (_DESTRUCT_WORD_SHELL_ARGS), or NAMES A LISTED RUNNER or find: with no position code,
+    nothing certifies what a runner word inside the segment would execute, so the runner word
+    itself denies (coproc zznm xargs ./w.sh, coproc zznm { xargs ./w.sh; } and function zzg
+    { xargs ./w.sh; }; zzg deny, and so does the formerly allowed benign coproc xargs printf ok, a
+    DISCLOSED over-denial with its named vector), or contains "=" after its first character when a
+    segment word reaches env or sudo.
+    The round-18 env split-string branch is REMOVED from this scan (FIX-514-R20, DECIDED 6): it
+    was VERDICT-DEAD here, because a split-string word fires only on a list that reaches env, and
+    env is itself a LISTED RUNNER word this same scan already denies, so the branch could never
+    change a verdict (_destruct_runner_word_unknown keeps its LIVE split-string branch: a runner
+    argument list does not deny on a data word spelling env). The kept equals branch is shadowed
+    the same way (the env or sudo word itself denies) and is retained only to name the sharper
+    reason when an equals word precedes the env or sudo word. A module-level predicate so the
+    self-test can isolate this branch with an attribute mutant."""
+    opq = opaque if opaque is not None else [False] * len(args)
+    reach = {_destruct_word(word) for word in args}
+    envish = "env" in reach or "sudo" in reach
+    for i, word in enumerate(args):
+        if (opq[i] and not _destruct_literal_brace_word(word)
+                and word not in _DESTRUCT_LITERAL_COMMAND_WORDS):
+            return "an opaque word (an expansion, glob, brace or tilde) in the segment"
+        if _destruct_creator_word(word):
+            return "a creator or interpreter word in the segment"
+        decoded = _destruct_word(word)
+        if decoded in _DESTRUCT_WORD_SHELL_ARGS:
+            return "a shell word in the segment"
+        if decoded == "find" or decoded in _COMMAND_RUNNERS:
+            return "a runner word this scan gives no certified position"
+        if envish and "=" in word[1:]:
+            return "a word containing an equals sign on an env or sudo segment"
+    return None
+
+
+def _destruct_tail_segment_unknown(seg):
+    """The truthy reason a TAIL segment cannot be certified behind an uncertain read, or None. A
+    tail segment is ANY segment of a command after one opened a function definition or a coproc
+    (D-514-DEFN-WHOLE-TAIL, FIX-514-R20, DECIDED 1): the segment word rule
+    (_destruct_segment_word_unknown) reads the WHOLE segment from its FIRST word - the leading
+    assignment words WITH their opacity flags (zzg() { NEWLINE X="$Z" printf ok; }; zzg denies on
+    the opaque assignment word, which the rounds-18/19 carry sliced off at _command_word_index),
+    and a reserved prefix such as time or a leading bang (time is a listed runner, so zzg() { time
+    printf ok; }; zzg denies, a disclosed over-denial with its named vector; a bare ! matches no
+    trigger and reports nothing). A module-level predicate so the self-test can isolate the
+    whole-tail judgment with attribute mutants (a first-tail-segment-only carry, a scan that drops
+    the leading assignment words)."""
+    return _destruct_segment_word_unknown(seg.argv, seg.argv_opaque)
+
+
+def _destruct_runner_word_unknown(runner, args, opaque=None):
+    """The truthy reason a runner argument list cannot be certified behind an uncertain read, or
+    None: the WORD-LEVEL rule (FIX-514-R16, DECIDED 1), which replaces the per-runner position
+    grammar wherever that grammar decided an ALLOW. EVERY word of the runner argument list - an
+    option, an option value, an operand, a find path, predicate, or action operand - is read with NO
+    position assigned, so no grammar edge (a skipped operand, a mis-modelled assignment, a recursion
+    that re-reads the script operand of a shell as a command) can hide a word this guard must not
+    trust. The list is UNKNOWN (deny) when ANY word is OPAQUE (an expansion, quoted or not, a
+    substitution, a glob, a brace or a leading tilde: anything bash may rewrite; ONLY a word that IS
+    one of the three literal {} placeholder spellings {}, -I{} and --replace={} is carved out, by
+    POSITIVE match, _destruct_literal_brace_word; FIX-514-R17, DECIDED 3), or is a CREATOR or
+    interpreter word (_destruct_creator_word), or is a shell word outside the creator set (source,
+    ., mksh and ash, _DESTRUCT_WORD_SHELLS: as the RUNNER with any argument, and as an ARGUMENT word
+    WHEREVER it appears, with NO exception - builtin and command execute shell builtins, so builtin
+    source ./w.sh, command . ./w.sh and xargs source ./w.sh deny. FIX-514-R18, DECIDED 1: the
+    round-17 starting-path exception, _destruct_find_dot_paths, located the first argument word
+    spelling find WITHOUT certifying that find executes, so a data or option-value find repositioned
+    the exemption - xargs printf find ., command printf find ., xargs -I find . ./w.sh and env -u
+    find builtin . ./w.sh each allowed. It is REMOVED, not refined: a literal find starting-path dot
+    behind an uncertain read now denies too, and the shell-word match reads each word's BASENAME
+    (_destruct_word), so a starting path whose LAST component is the dot word denies as well -
+    xargs find . -name x -print, find . -name x -print and find src/. -name x -print, a DISCLOSED
+    over-denial with named vectors - while ./ decodes to an empty basename and src to its own
+    name, so find src -name x -print and find ./ -name x -print keep
+    allowing), or spells the env split-string option in EVERY spelling env accepts
+    (_destruct_split_string_word on the COMPLETE decoded word, never its basename - FIX-514-R19,
+    DECIDED 1: the round-18 call sites passed the basename, so an attached or bundled split string
+    carrying a slash, -S/usr/bin/x or -iS/usr/bin/x, lost its option prefix and escaped - with the
+    spellings -S attached or bare, a bundled short group
+    such as -iS, and --split-string bare, equals-joined or abbreviated; FIX-514-R18, DECIDED 3) on a
+    line that reaches env, or contains "=" after its first character on a line that reaches env
+    or sudo (their NAME=VALUE grammars differ between implementations and are no longer
+    position-modelled). Otherwise None, and the runner ALLOWS unless the kept per-runner arity scan
+    (_destruct_executed_word) is STRICTER. DISCLOSED over-denies: a creator-or-shell name that is
+    only DATA (xargs grep -l sh, xargs grep -l source, xargs printf .), a literal find starting-path
+    dot behind an uncertain read (above), a quoted expansion or tilde that bash keeps as exactly one
+    word (xargs -n "$N" printf ok, find "$HOME" -name x, strace -o ~/t.txt printf ok),
+    an opaque brace or bracket word (xargs printf {, xargs printf [), a dash data word carrying an S
+    or abbreviating --split-string on an env line, and every env or sudo assignment or equals-joined
+    option (xargs env X=1 printf ok, xargs sudo --preserve-env=PATH printf). A module-level
+    predicate so the self-test can isolate this branch with an attribute mutant."""
+    opq = opaque if opaque is not None else [False] * len(args)
+    if runner in _DESTRUCT_WORD_SHELLS and args:
+        # source, . , mksh and ash run or source a script this guard cannot read (DECIDED 1); a
+        # creator-set shell in the same position is read by _destruct_creator_segments directly, so
+        # its witness still flips when only the creator set drops it.
+        return "a shell outside the creator set"
+    reach = {runner} | {_destruct_word(word) for word in args}
+    env_line = "env" in reach
+    envish = env_line or "sudo" in reach
+    for i, word in enumerate(args):
+        if opq[i] and not _destruct_literal_brace_word(word):
+            return "an opaque word (an expansion, glob, brace or tilde) in its argument list"
+        if _destruct_creator_word(word):
+            return "a creator or interpreter word in its argument list"
+        if _destruct_word(word) in _DESTRUCT_WORD_SHELL_ARGS:
+            return "a shell word in its argument list"
+        if env_line and _destruct_split_string_word(word):
+            return "env's split-string option on this line"
+        if envish and "=" in word[1:]:
+            return "a word containing an equals sign on an env or sudo line"
+    return None
+
+
+def _destruct_runner_creator(runner, args, opaque=None):
+    """The reason a command runner is effectful behind an uncertain read (the creator word it
+    executes, or a truthy reason its argument list cannot be certified), or None. The WORD-LEVEL rule
+    runs FIRST (_destruct_runner_word_unknown, FIX-514-R16, DECIDED 1): an opaque, creator, shell,
+    split-string or env/sudo-equals word ANYWHERE in the argument list is UNKNOWN, with no position
+    grammar deciding an allow. Only then does the kept arity scan run (_destruct_executed_word), and
+    only toward DENY: an option outside the four-class model, a runner with no entry (ltrace), a
+    runner with NO option model and any argument (chroot, ssh, flock, parallel, ...), a shell-string
+    runner (watch without -x, eval, sg, su, runuser, script), the existing-process attach modes
+    (taskset -p, strace -p) and the shared depth bound each leave the executed word undeterminable,
+    which behind an uncertain read DENIES; a creator it resolves can only repeat one the word scan
+    already saw. Read only behind an uncertain read. A module-level predicate so the self-test can
+    isolate this branch with an attribute mutant."""
+    why = _destruct_runner_word_unknown(runner, args, opaque)
+    if why:
+        return why
+    executed = _destruct_executed_word(runner, args, opaque)
+    if executed is _DESTRUCT_EXEC_UNKNOWN:
+        return "an option this guard does not model"
+    return executed if executed and _destruct_creator_word(executed) else None
+
+
+def _destruct_find_creator(args, opaque=None, depth=0):
+    """The reason a find command line is effectful behind an uncertain read (the creator word a find
+    ACTION executes, or a truthy reason the scan cannot be certified), or None. The WORD-LEVEL rule
+    runs FIRST (_destruct_runner_word_unknown, FIX-514-R16, DECIDED 1) over find's WHOLE argument
+    list - the global options and their values, the starting paths, every predicate and its operands,
+    and every action operand - so an opaque, creator, shell, split-string or env/sudo-equals word
+    ANYWHERE is UNKNOWN whatever position the find grammar would assign it (a literal dot word is
+    UNKNOWN in the starting-path region too: the round-17 narrow exception is REMOVED, FIX-514-R18,
+    DECIDED 1, a disclosed over-denial behind an uncertain read). The kept expression scan
+    below then runs only toward DENY. The GLOBAL options -H/-L/-P and the value-taking -D debugopts
+    and -Olevel precede the starting paths and the expression, so they are consumed first and never
+    start the expression (FIX-514-R14, DECIDED 6). Predicate operands are consumed by arity BEFORE an
+    action flag is recognized (_DESTRUCT_FIND_ZERO/_ONE/_TWO, the -newerXY family by prefix), so an
+    -exec/-ok spelling that is itself an OPERAND of an earlier test (find . -name -exec ...) is never
+    read as a new action. Each -exec/-execdir/-ok/-okdir flag names a real action whose command word
+    is the word right after it; that action's remaining operands are consumed up to its terminator,
+    where ";" ALWAYS ends the action and "+" ends it only as the word right after "{}" and ONLY for
+    -exec/-execdir (-ok and -okdir take no "+" form, so for them "+" is an ordinary operand;
+    FIX-514-R14, DECIDED 3), so an interior "+" operand (find . -exec printf + -exec curl {} ";")
+    stays an operand of the FIRST action. When the action's command word is itself a runner or wrapper
+    (find . -exec env cp), _destruct_executed_word resolves what it runs under the ONE shared depth
+    budget (FIX-514-R15, DECIDED 4). A word the tables do not certify (an unknown test, a stray
+    operand after the expression started) leaves every LATER position uncertain: the scan then denies
+    when any later word is an action flag AND any later decoded word is a creator, runner or wrapper
+    (a bounded over-deny behind an uncertain read, disclosed), and OTHERWISE REPORTS NOTHING - the
+    refusal is CONDITIONAL, never unconditional (FIX-514-R17, DECIDED 4): find src -unmodelled alone,
+    and find src -unmodelled -print, report nothing here and allow, where find src -unmodelled -exec
+    env printf ok ";" denies, because the word-level rule has already read every find word and an
+    uncertified position matters only ahead of an action it could smuggle. Leading
+    path operands are skipped (the expression starts at the first word beginning with "-" or one of
+    "(", ")", "!", ","). Read only behind an uncertain read. A module-level predicate so the self-test
+    can isolate this branch with an attribute mutant."""
+    why = _destruct_runner_word_unknown("find", args, opaque)
+    if why:
+        return why
+    opq = opaque if opaque is not None else [False] * len(args)
+    i, n = 0, len(args)
+    expression = False
+    while i < n:
+        word = args[i]
+        if not expression and word in _DESTRUCT_FIND_GLOBAL:
+            i += 1  # a global option (-H/-L/-P) ahead of the paths and the expression (DECIDED 6)
+            continue
+        if not expression and word == "-D":
+            i += 2  # -D debugopts takes a following value (DECIDED 6)
+            continue
+        if not expression and word.startswith("-O") and word[2:].isdigit():
+            i += 1  # -Olevel optimisation; find accepts only the ATTACHED form (DECIDED 6, FIX-514-R15)
+            continue
+        if not expression and word == "--":
+            i += 1  # -- ends find's global options; the starting paths follow (FIX-514-R15)
+            continue
+        if word in _DESTRUCT_FIND_EXEC:
+            expression = True
+            if i + 1 >= n:
+                return None
+            # an opaque action command word is already UNKNOWN in the word-level scan (DECIDED 1/5)
+            cmd = _destruct_word(args[i + 1])
+            plus_ends = word in ("-exec", "-execdir")  # only these take the "{} +" form (DECIDED 3)
+            j = i + 2
+            while j < n and not (args[j] == ";"
+                                 or (plus_ends and args[j] == "+" and args[j - 1] == "{}")):
+                j += 1
+            if cmd in _DESTRUCT_WRAPPER_SPECS or cmd in _COMMAND_RUNNERS:
+                found = _destruct_executed_word(cmd, args[i + 2:j], opq[i + 2:j], depth + 1)
+                if found is _DESTRUCT_EXEC_UNKNOWN or (found and _destruct_creator_word(found)):
+                    return args[i + 1]
+            elif _destruct_creator_word(args[i + 1]):
+                return args[i + 1]
+            i = j + 1
+            continue
+        if word in _DESTRUCT_FIND_ZERO:
+            expression = True
+            i += 1
+            continue
+        if word in _DESTRUCT_FIND_ONE or word.startswith("-newer"):
+            expression = True
+            i += 2
+            continue
+        if word in _DESTRUCT_FIND_TWO:
+            expression = True
+            i += 3
+            continue
+        if not expression and not word.startswith("-"):
+            i += 1  # a leading path operand ahead of the expression
+            continue
+        rest = args[i + 1:]
+        if any(w in _DESTRUCT_FIND_EXEC for w in rest) and any(
+                _destruct_creator_word(w) or _destruct_word(w) in _DESTRUCT_WRAPPER_SPECS
+                or _destruct_word(w) in _COMMAND_RUNNERS for w in rest):
+            return "an uncertified find predicate ahead of an action"
+        return None
+    return None
+
+
+def _destruct_coproc_creator(args, opaque=None):
+    """The creator word, or the truthy word-rule reason, behind a coproc, or None: coproc is a COMMAND
+    POSITION (FIX-514-R11, DECIDED 4), so EVERY following word of the segment is judged by the word
+    rule with NO runner position code (_destruct_segment_word_unknown; FIX-514-R18, DECIDED 2), the
+    coproc NAME included. The round-17 helper DISPATCHED from the first runner-or-find word, so a
+    coproc NAME spelling a runner handed the compound command words to the position code of that
+    runner (coproc find if . ./w.sh; then true; fi read the compound words as find starting paths
+    and allowed). Now a creator word anywhere fires (a creator-named operand too, an over-match
+    toward deny on an already uncertain read), and so does a listed runner or find word, a shell
+    word, an opaque word or an env/sudo equals word, with no position certifying any of them:
+    coproc zznm xargs ./w.sh, coproc zznm { xargs ./w.sh; } and the formerly allowed benign coproc
+    xargs printf ok deny, the last a DISCLOSED over-denial with its named vector, while coproc
+    printf ok and coproc zznm { printf ok; } keep allowing.
+    A PARENTHESIZED body (coproc zznm ( xargs ./w.sh )) is the NEXT segment: a coproc in ANY form
+    OPENS the whole-tail judgment in _destruct_creator_segments (D-514-DEFN-WHOLE-TAIL,
+    FIX-514-R20, DECIDED 1), so EVERY later segment of the command - the rest of a brace or
+    parenthesized body AND everything after the coproc, to the end of the command - is judged by
+    this same word rule, and NOTHING after a coproc is on the direct route: coproc zznm { true;
+    xargs ./w.sh; }, whose second body command the rounds-18/19 segment-local limit left to the
+    direct route, now denies, and so do the benign coproc zznm ( xargs printf ok ) and
+    coproc ( X=1 ); printf "$Z", DISCLOSED over-denials with named vectors. Read only behind an
+    uncertain read. A module-level predicate so the self-test can isolate this branch with an
+    attribute mutant."""
+    found = next((arg for arg in args if _destruct_creator_word(arg)), None)
+    if found:
+        return found
+    return _destruct_segment_word_unknown(args, opaque)
+
+
+def _destruct_creator_segments(segments):
+    """True when a recovered segment decoded command word (leading assignments and the shell keywords
+    skipped) is in the closed creator set; or such a word follows a modelled wrapper word in the same
+    segment (an over-match toward deny: an option VALUE equal to a creator name also fires); or the
+    segment is a coproc (_destruct_coproc_creator) or a function definition, whose EVERY following
+    word - the coproc or function NAME and any in-segment body words included - is judged by the
+    word rule with NO runner position code (_destruct_segment_word_unknown, FIX-514-R18, DECIDED 2);
+    or the segment FOLLOWS one that opened a function definition or a coproc (D-514-DEFN-WHOLE-TAIL,
+    FIX-514-R20, DECIDED 1): once ANY segment opens a function definition (function NAME with or
+    without ( ), or a NAME ( ) definition header, with a brace or a parenthesized body,
+    newline-split or not) or a coproc (ANY form), EVERY later segment of the command, to its end,
+    is judged WHOLE by the word rule (_destruct_tail_segment_unknown), from the first word of the
+    segment, the leading assignment words with their opacity flags and a reserved prefix such as
+    time or a leading bang included: NOTHING after a definition or a coproc is on the direct
+    route.
+    The rounds-18/19 one-segment carry (a pending flag reaching only the FIRST body command) is
+    REMOVED: it leaked at every boundary a review probed - a newline-split brace body (function
+    zzg { NEWLINE xargs ./w.sh; }; zzg allowed), a function-keyword parenthesized body (function
+    zzg ( xargs ./w.sh ) allowed), a leading assignment word sliced off with its opacity flag
+    (zzg() { NEWLINE X="$Z" printf ok; }; zzg allowed), a second body command (coproc zznm { true;
+    xargs ./w.sh; } allowed), and an assignment-only parenthesized body whose closing ) left the
+    flag armed into an UNRELATED later command (declare -a arr=( ); xargs printf ok denied). The
+    COST is the over-denial of benign runner words after a definition or coproc in the same
+    command - zzg() { xargs printf ok; }; zzg, zzg() { true; xargs printf ok; }; zzg, a benign
+    runner after a COMPLETED definition (zzf() { true; }; xargs printf ok; zzf), zzg() { time
+    printf ok; }; zzg and zzg() { sudo true; }; zzg (time and sudo are listed runners), coproc
+    zznm ( xargs printf ok ) and coproc ( X=1 ); printf "$Z" - each DISCLOSED with its own named
+    vector.
+    A declaration builtin with an array assignment (declare -a arr=( ), and the local, readonly,
+    export and typeset forms) ends at the same ( but is NOT a definition and opens NO tail
+    judgment (FIX-514-R20, DECIDED 3): the ONE exact header predicate (_destruct_defn_header,
+    FIX-514-R21 DECIDED 2) requires exactly ONE word - the NAME - past the actual reserved
+    prefixes ahead of the EMPTY ( ) pair, where the declaration segment carries the builtin and
+    the arr= word ahead of its ( - while a function actually NAMED declare (declare() ( ... );
+    declare) is a single-word header and still opens the tail, and so is a QUOTED name that
+    decodes to a reserved word ('if'(), 'while'(), 'time'(), '{'(), '!'() and kin; FIX-514-R21,
+    DECIDED 1), recognized BEFORE the reserved-prefix skip reads it. Or an UNMODELLED command
+    runner EXECUTED command word is a creator
+    (_destruct_runner_creator); or a find action command word is one (_destruct_find_creator); or
+    a listed runner reached through the reserved-word time prefix carries a word the word-level
+    rule cannot certify (FIX-514-R17, DECIDED 2). Read only behind an uncertain read, where a
+    creator is effectful REGARDLESS of its options (the bounded fail-closed redesign of the
+    removed per-option writer patterns, FIX-514 round 9). A module-level predicate so the
+    self-test can isolate this branch with an attribute mutant."""
+    tail = False
+    for n, seg in enumerate(segments):
+        argv = seg.argv
+        if tail:
+            # D-514-DEFN-WHOLE-TAIL (FIX-514-R20, DECIDED 1): a definition or coproc opened in an
+            # EARLIER segment of this command, so this WHOLE segment - leading assignment words, a
+            # reserved prefix and all - is judged by the word rule, and no later segment of the
+            # command returns to the direct route.
+            if _destruct_tail_segment_unknown(seg):
+                return True
+            continue
+        first = _command_word_index(argv)
+        # FIX-514-R21 (DECIDED 1): the definition header is recognized BEFORE the reserved-prefix
+        # skip below could read its NAME as a reserved word, so a QUOTED name that decodes to one
+        # ('if'() { ...; }, '{'() { ...; } and every keyword kin, time included) opens the
+        # whole-tail judgment like any other name; argv_plain, read inside the shared predicate
+        # (_destruct_defn_header), tells such a name from an ACTUAL reserved prefix, so a plain
+        # brace group or keyword ahead of the definition is still skipped to the NAME.
+        if _destruct_defn_header(segments, n) is not None:
+            if _destruct_segment_word_unknown(argv[first:], seg.argv_opaque[first:]):
+                return True
+            tail = True
+            continue
+        start = _destruct_skip_reserved_prefix(argv, first)
+        if start >= len(argv):
+            continue  # an EMPTY or all-assignment segment ahead of any definition or coproc
+        # FIX-514-R17 (DECIDED 2): time is a LISTED runner the reserved-prefix skip removes before
+        # dispatch, so the word-level rule still runs over what a skipped time runs (time printf
+        # "$Z", time -p printf ash, ! time printf sh); the kept arity scan is NOT re-run here, so
+        # time -p -- printf ok keeps allowing exactly as the skip semantics decided.
+        if "time" in argv[first:start] and _destruct_runner_word_unknown(
+                "time", argv[start:], seg.argv_opaque[start:]):
+            return True
+        if _destruct_creator_word(argv[start]):
+            return True
+        word = _destruct_word(argv[start])
+        if word == "coproc":
+            if _destruct_coproc_creator(argv[start + 1:], seg.argv_opaque[start + 1:]):
+                return True
+            # FIX-514-R20 (DECIDED 1): a coproc in ANY form (plain, NAME, brace or parenthesized
+            # body) opens the whole-tail judgment; no direct-route check below reads a coproc
+            # segment, so the loop moves on.
+            tail = True
+            continue
+        # FIX-514-R18 (DECIDED 2): a function definition keeps its NAME and any in-segment body
+        # words inside THIS segment, which the round-17 dispatch never read (the command word was
+        # the literal function); the whole rest of the segment is judged by the word rule, and the
+        # function keyword opens the whole-tail judgment WHATEVER the body form - brace or
+        # parenthesized, in this segment or newline-split across later ones (FIX-514-R20).
+        if word == "function":
+            if _destruct_segment_word_unknown(argv[start + 1:], seg.argv_opaque[start + 1:]):
+                return True
+            tail = True
+            continue
+        if (word in _DESTRUCT_WRAPPER_SPECS
+                and any(_destruct_creator_word(w) for w in argv[start + 1:])):
+            return True
+        if word in _COMMAND_RUNNERS and _destruct_runner_creator(
+                word, argv[start + 1:], seg.argv_opaque[start + 1:]):
+            return True
+        if word == "find" and _destruct_find_creator(
+                argv[start + 1:], seg.argv_opaque[start + 1:]):
+            return True
+    return False
 
 
 def _destruct_uncertain_words(segments):
@@ -8216,9 +9158,7 @@ def _destruct_uncertain_words(segments):
     defined = set()
     for n, seg in enumerate(segments):
         argv = seg.argv
-        start = _command_word_index(argv)
-        while start < len(argv) and argv[start] in _DESTRUCT_KEYWORDS:
-            start += 1
+        start = _destruct_skip_reserved_prefix(argv, _command_word_index(argv))
         if start < len(argv):
             word = _destruct_word(argv[start])
             if word in _DESTRUCT_UNCERTAIN_WORDS:
@@ -8228,10 +9168,12 @@ def _destruct_uncertain_words(segments):
         if start < len(argv) and argv[start] == "function" and start + 1 < len(argv):
             if _destruct_word(argv[start + 1]) not in _DESTRUCT_SHADOW_SKIP:
                 defined.add(argv[start + 1])
-        if (seg.sep_after == "(" and n + 1 < len(segments) and not segments[n + 1].argv
-                and segments[n + 1].sep_after == ")" and start < len(argv)
-                and _destruct_word(argv[start]) not in _DESTRUCT_SHADOW_SKIP):
-            defined.add(argv[start])
+        # FIX-514-R21 (DECIDED 2): the ONE exact header predicate, shared with the creator and
+        # prior-effect scans, records a QUOTED name the reserved-prefix skip above would have
+        # consumed ('if'() and kin) and nothing of a declaration builtin array assignment.
+        header = _destruct_defn_header(segments, n)
+        if header is not None and _destruct_word(argv[header]) not in _DESTRUCT_SHADOW_SKIP:
+            defined.add(argv[header])
         if start < len(argv) and _destruct_word(argv[start]) == "alias":
             for tok in argv[start + 1:]:
                 name = tok.split("=", 1)[0]
@@ -8243,8 +9185,11 @@ def _destruct_uncertain_words(segments):
 def _destruct_effectful(command, segments):
     """True when the command creates, copies, links or writes a path, sets a command-valued variable, or
     names an in-scope destructive word. An UNCERTAIN read denies only on an effectful command; otherwise it
-    allows, so an ordinary command carrying a heredoc, a here-string or a benign coproc stays allowed."""
-    if (_destruct_text_marker(command) or _DESTRUCT_CREATOR_RE.search(command)
+    allows, so an ordinary command carrying a heredoc, a here-string or a benign coproc stays allowed. A
+    recover-mode STOP never reaches this test: it denies outright (recover-stop, FIX-514-R11 DECIDED 1),
+    so heredoc data is never re-read as commands to clear a creator."""
+    if (_destruct_text_marker(command) or _destruct_creator_segments(segments)
+            or _DESTRUCT_CREATOR_RE.search(command)
             or _DESTRUCT_CMDVAR_RE.search(command) or _DESTRUCT_REDIR_WRITE_RE.search(command)
             or any(rx.search(command) for rx in _DESTRUCT_WRITER_RES)):
         return True
@@ -8252,12 +9197,6 @@ def _destruct_effectful(command, segments):
         if effect["outputs"] or effect["links"] or effect["env"] or effect["config"]:
             return True
     return False
-
-
-# A recover-mode read that stops before the end is still classifiable only when the text from the stop
-# on cannot start another command: none of these characters (a newline, a list or pipeline operator, a
-# group, a redirect or process substitution, a backtick or $( ) substitution) appears in it.
-_DESTRUCT_RECOVER_STOPS = "\n;&|()<>`"
 
 
 def _destruct_parseable_stillruns(rf):
@@ -8304,16 +9243,21 @@ def destructive_guard(data):
     destructive-word/shadow/runner rules for that text stay with the outer segment text scan), while a plain
     subshell, a function body, a brace group, an unquoted $( ) and a process substitution get the full
     classification; the opt-out is honoured, and a
-    recover read that hits a still-runs or syntax quirk inside a substitution falls back to the plain
-    reading. On the UNPARSEABLE path (the default lexer raised: a here-string, a process substitution, an
+    recover read that hits a SYNTAX quirk inside a substitution falls back to the plain reading, while
+    one that hits a STILL-RUNS stop there is never discarded: it denies wholesale (FIX-514 round 7).
+    On the UNPARSEABLE path (the default lexer raised: a here-string, a process substitution, an
     unquoted heredoc, an unbalanced quote, a '{fd}>' redirect, a NUL) the text scan above runs first, then
     every segment the recover read reaches - before, inside and after those constructs - gets the full
     classification, the prior-effect pass included, with the opt-out NOT honoured, and any deny denies.
 
-    UNCERTAIN READS: a construct OUTSIDE the modelled set that can run a command - a backslash-newline inside
-    an unquoted heredoc body or delimiter, coproc, select, a function or alias defined and then called in
-    one command, a process substitution nested beyond the limit (and a NUL or a case statement inside a
-    substitution, which stop the read) - makes the read UNCERTAIN. An uncertain read DENIES whenever the
+    RECOVER-MODE STOPS AND UNCERTAIN READS: a stop the recover read itself reports - a process or command
+    substitution nested beyond the limit, or a backslash-newline join inside an unquoted heredoc body or
+    delimiter (bash joins it BEFORE matching the delimiter, so the body may end earlier than the reader
+    saw and swallowed body text may be commands bash runs) - leaves the text at and after the stop point
+    unread as commands and DENIES OUTRIGHT, whatever that text spells (recover-stop, FIX-514-R11 DECIDED
+    1); it is never cleared by re-reading heredoc data. A construct the reader models completely but
+    cannot place with certainty - coproc, select, a function or alias defined and then called in one
+    command - makes the read UNCERTAIN: it DENIES whenever the
     command ALSO creates, copies, links or writes a path, sets a command-valued variable, or names a
     destructive word, and OTHERWISE ALLOWS, so an ordinary command carrying a heredoc, a here-string, a
     benign coproc or a data 'case' argument (cat <(printf case)) stays allowed. eval is not on the uncertain
@@ -8321,8 +9265,9 @@ def destructive_guard(data):
     stop categories remain: a STILL-RUNS stop (a NUL, a case statement in RESERVED-WORD position inside a
     substitution, a heredoc delimiter or nested command list the read cannot parse, a process substitution
     after a descriptor number) DENIES WHOLESALE; a SYNTAX stop (an unbalanced quote or escape, a malformed
-    redirect, an unclosed group) is classified up to the stop and then ALLOWS only when the text from the
-    stop holds no newline, ;, &, |, (, ), <, > or backtick (no further command can start in it), else DENIES.
+    redirect, an unclosed group) is classified up to the stop and then DENIES whenever any text at or
+    after the stop was left unread (FULL WIDTH, FIX-514-R12: every such stop leaves at least its stopping
+    character unread, so a syntax stop denies; the former separator-gated allow is gone).
 
     A segment also DENIES when an earlier segment of the same command can change the meaning its
     classification would trust: a function or alias definition, or a cd/pushd/popd redefinition, that
@@ -8371,15 +9316,20 @@ def destructive_guard(data):
 
     The prior-effect rule can also deny benign commands naming no destructive word: a trusted-name helper
     defined then invoked, a literal copy/write-then-run build step, client file-loading meta-commands, and
-    wrapper values built from expansions. Runner argument roles are not fully modelled: opaque data and
-    option operands can be mistaken for computed command words. SQL meta-command matching is lexical and can
+    wrapper values built from expansions. A command runner behind an uncertain read
+    is judged by the WORD-LEVEL rule (FIX-514-R16), word by word with no position grammar: any opaque
+    word, any creator, interpreter or shell word even where it is only DATA (xargs grep -l sh), env's
+    split-string option, and any word containing "=" after its first character on a line that reaches
+    env or sudo (every env or sudo assignment) denies there, a disclosed over-deny with a named vector
+    each. SQL meta-command matching is lexical and can
     over-match quoted SQL data. Taints accumulate across conditionals, function bodies and subshells, and
     are not cleared by overwrites or unsets; a setting can deny a command that would not actually consume
-    it. An unparseable command also denies wholesale on a still-runs stop, and when a syntax stop leaves a
-    separator, group, redirect or substitution character after it (usually a command bash itself rejects). A
-    command the reader cannot model with certainty (a coproc, select, a function or alias defined and called
-    in one command, a process substitution nested beyond the limit, or a backslash-newline inside an
-    unquoted heredoc body) denies when it is ALSO effectful (it creates, copies, links or writes a path,
+    it. An unparseable command also denies wholesale on a still-runs stop, and on a syntax stop that leaves
+    any text at or after it unread (usually a command bash itself rejects; FIX-514-R12, full width). A
+    recover-mode stop (a substitution nested beyond the limit, or a backslash-newline join inside an
+    unquoted heredoc body or delimiter) denies OUTRIGHT, benign or not (recover-stop, DECIDED 1). A
+    command the reader cannot model with certainty (a coproc, select, or a function or alias defined and
+    called in one command) denies when it is ALSO effectful (it creates, copies, links or writes a path,
     sets a command-valued variable, or names a destructive word), even when the uncertain construct and the
     effect are unrelated. These are conservative false denies, not evidence that those benign commands
     destroy data.
@@ -8410,11 +9360,118 @@ def destructive_guard(data):
     forms it reads as certain can still run a written path - brace expansion, a glob, an ANSI-C escaped
     word, a variable command word, a PATH lookup, and an eval, xargs, watch, flock, chroot, find -exec
     or trap of a written path, or a time/eval/trap call of a defined function - and are NOT modelled this
-    round. The effectful test behind an uncertain read knows the creators cp, mv, ln, tee, mkdir, touch,
-    install and rsync, a curl or wget download to a file, a tar -C or unzip -d extraction, chmod +x, a
-    python/perl/ruby/node -c or -e, a redirect that writes a path, and a command-valued assignment, each writer
-    option read in the same command segment as its creator word (a textual bound); any other creator is
-    not seen.
+    round. The effectful test behind an uncertain read reads DECODED command words: a segment whose decoded
+    command word is in the closed creator set cp, mv, ln, tee, mkdir, touch, install, rsync, dd, curl,
+    wget, tar, unzip, chmod or any interpreter (perl, ruby, node/nodejs, the shells bash/sh/zsh/ksh/dash/
+    fish/csh/tcsh, php, lua, awk/gawk, pypy, python), matched case-insensitively and with EVERY
+    interpreter family also matched under a trailing numeric version run (python3.12, perl5.36.0,
+    ruby3.2, pypy3, bash5, ksh93, nodejs20; the versioned set is DERIVED from the interpreter
+    declaration so the two cannot drift, and a differently NAMED relative such as mawk, nawk or luajit,
+    and a non-numeric tail such as ruby-3.2, python3-dbg, perldoc or python-config, stay outside it, a
+    disclosed residual), denies REGARDLESS of its options (a quote-concatenated spelling such as c''url decodes to its creator word and is
+    seen; a creator behind a modelled wrapper word is found by scanning the wrapper's remaining words,
+    over-matching toward deny; a coproc segment, in the plain and the NAME form, and a function
+    definition segment are judged WORD BY WORD with no runner position code, the coproc or function
+    NAME and the in-segment body words included (FIX-514-R18, DECIDED 2): a creator, shell, opaque
+    or env/sudo-equals word there denies, and so does a LISTED RUNNER or find word itself, since no
+    position code certifies what it would execute (coproc zznm xargs ./w.sh, coproc zznm { xargs
+    ./w.sh; }, function zzg { xargs ./w.sh; }; zzg and the formerly allowed benign coproc xargs
+    printf ok deny, the last a disclosed over-denial with its named vector; the split-string branch
+    is REMOVED from this segment scan, FIX-514-R20, DECIDED 6, as VERDICT-DEAD: it could fire only
+    on a segment that reaches env, and the env word itself already denies as a listed runner); once
+    ANY segment opens a function definition (function NAME with or without ( ), or a NAME ( )
+    definition header, with a brace or a parenthesized body, newline-split or not) or a coproc (any
+    form), EVERY later segment of that command, to its end, is judged WHOLE by the same word rule
+    (_destruct_tail_segment_unknown, D-514-DEFN-WHOLE-TAIL, FIX-514-R20, DECIDED 1), from its first
+    word, the leading assignment words with their opacity flags and a reserved time or bang prefix
+    included - NOTHING after a definition or a coproc is on the direct route, the rounds-18/19
+    one-segment carry and its leaks are removed, and the disclosed cost is the over-denial of
+    benign runner words after a definition or coproc in the same command (zzg() { xargs printf
+    ok; }; zzg, zzf() { true; }; xargs printf ok; zzf, time printf ok or sudo true as a body
+    command, coproc zznm ( xargs printf ok ) and coproc ( X=1 ); printf "$Z", each a named
+    vector), while a declaration builtin with an array assignment (declare -a arr=( ) and the
+    local, readonly, export and typeset forms) is NOT a definition and opens no tail judgment
+    (FIX-514-R20, DECIDED 3); a command RUNNER - every
+    _COMMAND_RUNNERS word, and find with its whole command line - is read by the WORD-LEVEL rule
+    (_destruct_runner_word_unknown, FIX-514-R16, DECIDED 1) on the routes its vectors pin - directly
+    and behind the reserved words time, time -p and a leading bang (FIX-514-R17, DECIDED 2;
+    FIX-514-R18, DECIDED 4; FIX-514-R19, DECIDED 3; FIX-514-R20, DECIDED 4: a registry-derived
+    vector matrix, reconciled against an independently recorded required set - the five routes WITH
+    their prefixes, the three trigger kinds WITH their texts, the registry size and the EXPECTED
+    benign verdict of every runner and route - asserts that every listed runner, and find, denies
+    on each of these routes and on the coproc route with an opaque operand, a shell word and an env
+    split-string spelling each, the uncertainty wrapper spelled AFTER the probe so a leading
+    definition cannot swallow the route under the whole-tail judgment; a row PINS its trigger only
+    where its benign printf ok counterpart allows, a row whose counterpart denies is
+    trigger-independent, the runner and route denying by themselves, claiming no trigger coverage,
+    and the measured pinned and independent counts are asserted against the recorded figures) -
+    with NO position grammar deciding an allow:
+    EVERY word of its argument list (an option, an option value, an operand, a find starting path,
+    predicate or action operand) is UNKNOWN and denies when it is opaque (an expansion, quoted or not, a
+    glob, a brace or a leading tilde; ONLY a word that IS one of the literal {} placeholder spellings
+    {}, -I{} and --replace={} is carved out, by POSITIVE match, so an opaque brace or bracket word
+    denies - xargs printf { and xargs printf [, a disclosed over-denial; FIX-514-R17, DECIDED 3), or
+    is a creator, interpreter or shell word (source, the dot command, mksh and ash through
+    _DESTRUCT_WORD_SHELLS, as the runner and as ARGUMENT words everywhere, with NO exception -
+    builtin and command execute shell builtins, so builtin source ./w.sh, command . ./w.sh and xargs
+    source ./w.sh deny, and the round-17 find starting-path carve-out is REMOVED, FIX-514-R18,
+    DECIDED 1: it located a find word without certifying that find executes, so a data word
+    repositioned it and xargs printf find . allowed; a literal find starting-path dot behind an
+    uncertain read now denies too, and the match reads each word's BASENAME, so a dot-suffixed
+    starting path denies as well - find . -name x -print, xargs find . -name x -print and find
+    src/. -name x -print, a DISCLOSED over-denial with named vectors - while ./ decodes to an
+    empty basename and src to its own name, so find src -name x -print and find ./ -name x
+    -print keep allowing), or spells
+    the env split-string option in EVERY spelling env accepts (-S attached or bare, a bundled short
+    group such as -iS, and --split-string bare, equals-joined or abbreviated,
+    _destruct_split_string_word on the COMPLETE decoded word, never its basename, so a slash in the
+    attached or bundled string cannot strip the option prefix; FIX-514-R18, DECIDED 3;
+    FIX-514-R19, DECIDED 1) on a line that reaches env,
+    or contains "=" after its first character on a line that reaches env or sudo (their NAME=VALUE
+    grammars differ between implementations and are no longer position-modelled); otherwise the runner
+    allows unless the KEPT arity scan is STRICTER, toward deny only (_destruct_executed_word,
+    FIX-514-R13): the runner's OWN options consumed on the RAW decoded tokens with a four-class arity
+    model (no argument; a mandatory separate-or-attached value; an optional ATTACHED-ONLY value, which
+    bare consumes no word; a mandatory attached-only value) and its declared positional operands
+    (timeout's duration, chrt's priority, taskset's mask), recursing bounded by ONE shared depth budget
+    when the executed word is itself a runner or wrapper or a find action (DECIDED 4); an option or
+    positional spelling outside those models leaves the executed word unresolvable and DENIES there
+    (fail closed: ltrace and the taskset/strace existing-process attach modes are unmodelled); the
+    retained find grammar's refusal is CONDITIONAL, never unconditional (FIX-514-R17, DECIDED 4): an
+    uncertified find word (an unknown test, a stray operand after the expression started) denies ONLY
+    when an action flag appears among the LATER words AND a later decoded word is a creator, runner
+    or wrapper - find src -unmodelled -exec env printf ok ";" denies, where find src -unmodelled
+    alone, and find src -unmodelled -print, report nothing there and allow, the word-level rule having already
+    read every find word; watch without -x/--exec, eval, sg, su, runuser and script hand their single string to a
+    shell, so the executed word is UNKNOWN and denies, never whitespace-split; a runner with NO option
+    model (chroot, ssh, flock, parallel, pkexec, ...) cannot certify which word is its command (an
+    operand may precede it), so any argument leaves it UNKNOWN too (FIX-514-R15, DECIDED 3); the find
+    action scan keeps its arity reading on the same stricter side (the predicates' operands consumed
+    before an action flag is recognized, ';' always ending an action and '+' only right after '{}' and
+    only for -exec/-execdir, the global options -H/-L/-P and the value-taking -O and -D ahead of the
+    starting paths); a benign creator call, a plain wget URL or a chmod 600, beside an uncertain
+    construct is a deliberate over-fire, bounded to uncertain reads). It also knows a raw
+    creator word the recover read did not structure (the raw writer backstop: curl/wget with a file
+    option, tar -C, unzip -d, chmod +x, an inline interpreter -c/-e), a redirect that
+    writes a path (the output forms, '>&WORD' with a WORD that is neither a number, a close nor a
+    descriptor move, so '>&2-x' writes the file '2-x' while '2>&1', '>&2-' and '>&-' do not, and
+    the 'N<>PATH' read-write open, which create their path), and a command-valued assignment; a creator
+    with a computed or unlisted name, and a program-specific output option on an unlisted program (sed
+    -i, sort -o, git archive --output), are NOT seen (disclosed residual, not a set closed over effects).
+
+    KNOWN READER LIMITS (disclosed, not fixed): the definition-header reading that the whole-tail
+    judgment and the defined-then-called check above rely on does NOT recognize every header, tail or
+    reserved word. Three limits are known. (1) A reserved word written across a backslash-newline
+    continuation in front of a function definition (an if spelled i, continuation, f, or a { directly
+    followed by one) is not read as a reserved prefix: bash joins the continuation and reads the reserved
+    word, but this reader reads it as a NAME, so that definition is not recognized and the command can be
+    ALLOWED. (2) A function whose QUOTED name looks like an assignment ('A=B'() { ... }) is read as an
+    assignment, not a definition, and can be ALLOWED; and a bare array assignment after { or if ({ arr=();
+    ...; } or if arr=(); then ...) is itself read as a definition header, of a function named arr=, where
+    there is none, so the rest of the command falls under the whole-tail judgment, a false denial of a
+    harmless command. (3) A function defined under a QUOTED reserved name (any of !, do, elif, else, if,
+    then, until, while and {) and then called by that quoted name is skipped as a reserved prefix at the
+    call, so the defined-then-called check does not fire and the command can be ALLOWED.
 
     FAIL POSTURE: a missing tool_name or an unreadable command DENIES (fail closed); a non-Bash tool ALLOWS; a
     failed status probe DENIES; one deadline (_DESTRUCT_BUDGET) covers the whole classification: repository
@@ -8482,8 +9539,8 @@ def destructive_guard(data):
                                  command[failure[0]:failure[0] + 60], failure[2], _DESTRUCT_ALTS),
                              "AIQT guardrail: denied an unparseable command whose remainder cannot be "
                              "classified (rules sechau, secrst, fail-closed).")
-            if (failure is not None and failure[1] == 0
-                    and any(ch in command[failure[0]:] for ch in _DESTRUCT_RECOVER_STOPS)):
+            if (failure is not None and failure[1] == 0 and failure[0] < len(command)
+                    and "recover-stop" in _DESTRUCT_RULES):
                 return _deny("AIQT rules sechau/secrst (fail-closed): the shell lexer stopped at {!r} ({}), and "
                              "the text from there on can start a command this guard has not classified, so "
                              "whether a later part reaches what an earlier part created, linked or set cannot "
@@ -8492,6 +9549,21 @@ def destructive_guard(data):
                                  command[failure[0]:failure[0] + 60], failure[2], _DESTRUCT_ALTS),
                              "AIQT guardrail: denied an unparseable command whose remainder cannot be "
                              "classified (rules sechau, secrst, fail-closed).")
+            if failure is not None and failure[1] == 2 and "recover-stop" in _DESTRUCT_RULES:
+                # DECIDED 1 (FIX-514-R11): ANY recover-mode stop - the nesting limit, or a backslash-
+                # newline join inside an unquoted heredoc body or delimiter - leaves the text at and
+                # after the stop point unread as commands (a join can end the body EARLIER than the
+                # reader saw, exposing swallowed body text as commands bash runs), so what runs there
+                # cannot be classified, WHATEVER it spells: cannot-evaluate DENIES. It is never cleared
+                # by re-reading heredoc data (a quote inside body DATA stops such a re-read and hid the
+                # tail, the round-10 stray-quote reproduction).
+                return _deny("AIQT rules sechau/secrst (fail-closed): the reader stopped at {!r} ({}), "
+                             "and the text at and after the stop point was never read as commands, so "
+                             "what it runs cannot be classified; this guard denies rather than run "
+                             "(fail closed). Re-issue it as a parseable command with literal targets. "
+                             "{}".format(command[failure[0]:failure[0] + 60], failure[2], _DESTRUCT_ALTS),
+                             "AIQT guardrail: denied a command whose recover-mode read stopped before "
+                             "classifying the remainder (rules sechau, secrst, fail-closed).")
             uncertain = (failure[2] if failure is not None and failure[1] == 2 else None)
             uncertain = uncertain or _destruct_uncertain_words(segments)
             if uncertain and _destruct_effectful(command, segments):
@@ -8524,6 +9596,17 @@ def destructive_guard(data):
                          "with literal targets. {}".format(rf[2], _DESTRUCT_ALTS),
                          "AIQT guardrail: denied a command whose substitution carries an unclassifiable "
                          "construct (rules sechau, secrst, fail-closed).")
+        if rf is not None and rf[1] == 2 and "recover-stop" in _DESTRUCT_RULES:
+            # DECIDED 1 (FIX-514-R11): a recover-mode stop on the parseable path (substitutions nested
+            # beyond the limit) leaves the rest of that substitution unread as commands; cannot-evaluate
+            # DENIES, whatever it spells, exactly as on the unparseable path.
+            return _deny("AIQT rules sechau/secrst (fail-closed): the reader stopped at {!r} ({}), and "
+                         "the text at and after the stop point was never read as commands, so what it "
+                         "runs cannot be classified; this guard denies rather than run (fail closed). "
+                         "Re-issue it as a parseable command with literal targets. {}".format(
+                             command[rf[0]:rf[0] + 60], rf[2], _DESTRUCT_ALTS),
+                         "AIQT guardrail: denied a command whose recover-mode read stopped before "
+                         "classifying the remainder (rules sechau, secrst, fail-closed).")
         if rf is None or rf[1] == 2:
             segments, rfail, used_groups = rseg, rf, True
         else:
