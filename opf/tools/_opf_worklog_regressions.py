@@ -360,7 +360,8 @@ def _manifest_intake_regressions(check):
         ("parse-value", "parse", ValueError("fixture integer limit"),
          "cannot parse m/manifest.toml (fixture integer limit)"),
         ("parse-recursion", "parse", RecursionError("fixture nesting limit"),
-         "cannot parse m/manifest.toml (input nesting is too deep; present but unparseable): fixture nesting limit"),
+         "cannot parse m/manifest.toml (input nesting is too deep or a dotted key has too many parts; present but "
+         "unparseable): fixture nesting limit"),
         ("top-level-type", "parse", [], "manifest is not a table"),
         ("opf-absent", "read", b"schema = 1\n", identify),
         ("opf-not-table", "read", b"opf = 1\n", identify),

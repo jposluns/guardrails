@@ -1256,7 +1256,7 @@ def load_budget(root):
         data = tomllib.loads(read_text(_budget_file(root), BUDGET_REL))
     # ValueError and RecursionError too: tomllib raises a BARE ValueError on an integer literal past
     # CPython's int-string limit, and a RecursionError on a deeply nested array or inline table.
-    except (tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise GateError("{} is not valid TOML ({})".format(BUDGET_REL, exc))
     if set(data) != BUDGET_KEYS:
         raise GateError("{}: keys must be exactly {} (got {})".format(
@@ -1514,7 +1514,7 @@ def _expected_check_ids():
         with open(CHECKS_MANIFEST, "rb") as handle:
             data = tomllib.load(handle)
     # ValueError and RecursionError too, as in load_budget.
-    except (OSError, tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+    except (OSError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         print("SELF-TEST HARNESS ERROR: cannot read {}: {}".format(CHECKS_MANIFEST, exc),
               file=sys.stderr)
         return None
