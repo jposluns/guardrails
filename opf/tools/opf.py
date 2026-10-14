@@ -20989,11 +20989,14 @@ def _watchdog_regression_self_test():
     # an item under a function read on opf and an attribute of a function
     # imported from it, spelling setattr, delattr, __setattr__, __delattr__,
     # exec, eval, compile, vars, globals, locals, gc and __dict__, and a
-    # completion leg's own launch source dropped. Beside the flips, two
-    # acceptance vectors require a permitted filename table (written with
-    # Assign and with AnnAssign, a tuple inside a list) to scan clean, and
-    # each sibling fixture-consumer pairing runs once in process against
-    # a recording patch stand-in (the executed pairing check).
+    # completion leg's own launch source dropped. Beside the flips, four
+    # acceptance vectors require a permitted filename table (a tuple
+    # inside a list written with Assign and with AnnAssign, a set display
+    # and a dict display) read by a non-dispatching branch to scan clean,
+    # and every sibling fixture-consumer pairing, reconciled against
+    # every sibling_table_defs key, runs once in process against a
+    # recording patch stand-in, as does each acceptance table with its
+    # branch (the executed pairing check).
     runner_source = inspect.getsource(_watchdog_regression_self_test)
     launched = set(live)
     # Assembled, never one literal, so each marker occurs once: in the comment.
@@ -21207,11 +21210,7 @@ def _watchdog_regression_self_test():
                        "        found.start()\n"
                        "        return getattr(found.target, " + computed
                        + ")(\"no-signal-echild\")\n"),
-        accepts=("        found = _watchdog_hidden_mock(\n"
-                 "            _watchdog_hidden_accepts[0][0], create=True)\n"
-                 "        found.start()\n"
-                 "        return getattr(found.target, " + computed
-                 + ")(\"no-signal-echild\")\n"))
+        accepts="        assert _watchdog_hidden_accepts\n")
     helper_def = ("\n\ndef _watchdog_hidden_dispatch():\n"
                   "    return _watchdog_completion_case(\"no-signal-echild\")\n")
     module_helper_def = ("\n\ndef _watchdog_hidden_module():\n"
@@ -21288,9 +21287,10 @@ def _watchdog_regression_self_test():
     # individually pinned, since no row places a string whose only
     # non-display ancestor is one of those, so a scan admitting any or
     # all of them misses no row here. Every fixture and branch in this
-    # table reaches the dispatch scan as text (a scanner flip); each
-    # sibling fixture-consumer pairing ALSO runs once in process against
-    # a recording patch stand-in (the executed pairing check below the
+    # table reaches the dispatch scan as text (a scanner flip); every
+    # sibling fixture-consumer pairing, one per key of this table through
+    # sibling_consumers below, ALSO runs once in process against a
+    # recording patch stand-in (the executed pairing check below the
     # flips), and the executed legs are the separate `cases` roster
     # above.
     sibling_table_defs = dict(
@@ -21319,22 +21319,44 @@ def _watchdog_regression_self_test():
                    + "_watchdog_hidden_sub = (\"opf.py\",)[0]\n"),
         ifexp=(patch_import
                + "_watchdog_hidden_ifexp = (\"opf.py\",) if True else ()\n"))
-    # The acceptance edge of the carve-out: a permitted filename table
-    # written with Assign and with AnnAssign, nesting a tuple inside a
-    # list (representative allowed display nesting), must scan CLEAN
-    # while the planted accepts branch hands its string to patch; the
-    # acceptance checks below the dispatch flips require NO fault. The
+    # Each sibling fixture's consuming branch, named once: the sibling
+    # dispatch flips and the executed pairing check both take the
+    # association from here, and the executed check reconciles the
+    # pairings it ran against every key of sibling_table_defs.
+    sibling_consumers = dict(
+        generator_elt="gen_sibling", list_comp_elt="list_sibling", generator="gen_patch",
+        list_comp="list_patch", for_loop="table_patch", under_if="targets_patch",
+        type_alias="alias_sibling", binop="binop_sibling", starred="star_sibling",
+        subscript="sub_sibling", ifexp="ifexp_sibling")
+    # The acceptance edge of the carve-out: each permitted filename table
+    # must scan CLEAN once the planted accepts branch reads it; the
+    # acceptance checks below the dispatch flips require NO fault. That
+    # branch only asserts the table: it hands nothing to patch and
+    # dispatches nothing, so no vector here needs a planted unpriced
+    # dispatch to scan clean, and a scan that later refuses such a
+    # dispatch (residual (g)) leaves them green. The assign and
+    # ann_assign tables nest a tuple inside a list, so each turns red
+    # when Tuple or List is dropped from `displays`, and when its own
+    # statement type (Assign or AnnAssign) is dropped from `tables`.
+    # The set_display table, {"opf.py"} under Assign, turns red when Set
+    # or Assign is dropped; the dict_display table, {"opf.py": "opf.py"}
+    # under Assign, turns red when Dict or Assign is dropped. The
     # seed-equivalence comment in _watchdog_dispatch_faults says why a
     # False seed [(statement, False)] is NOT equivalent to the True
     # seed: it disables the carve-out for every string in the
     # statement, and under it each vector here turns red while every
-    # rejection row above stays green, so these two vectors pin that
-    # edge.
+    # rejection row above stays green. These vectors pin only those
+    # removals: a permitted table scanning clean cannot show that
+    # nothing wider is accepted, which the rejection rows cover.
     accept_table_defs = dict(
         assign=(patch_import
                 + "_watchdog_hidden_accepts = [(\"opf.py\",)]\n"),
         ann_assign=(patch_import
-                    + "_watchdog_hidden_accepts: list = [(\"opf.py\",)]\n"))
+                    + "_watchdog_hidden_accepts: list = [(\"opf.py\",)]\n"),
+        set_display=(patch_import
+                     + "_watchdog_hidden_accepts = {\"opf.py\"}\n"),
+        dict_display=(patch_import
+                      + "_watchdog_hidden_accepts = {\"opf.py\": \"opf.py\"}\n"))
     # A decorator mapping audit-ignore to no-signal-echild: the scan would
     # price the call by the mode it names, not the mode that runs.
     case_def = "def _watchdog_completion_case(mode):\n"
@@ -21345,6 +21367,9 @@ def _watchdog_regression_self_test():
 
     def hidden(how, extra=""):
         return module_source.replace(branch_head, branch_head + hidden_by[how]) + extra
+
+    def sibling(name):
+        return hidden(sibling_consumers[name], sibling_table_defs[name])
 
     flips_run = budgets["pipe-stall"] * 2 + budgets["transient-census"]
     for flip, flip_budgets, flip_module, flip_cases, needle in (
@@ -21431,49 +21456,49 @@ def _watchdog_regression_self_test():
              "spells _watchdog_hidden_alias, which can reach a case function"),
             ("file-suffixed string in the yielded element of a top-level "
              "generator expression, handed to patch by the planted branch",
-             budgets, hidden("gen_sibling", sibling_table_defs["generator_elt"]),
+             budgets, sibling("generator_elt"),
              launched_cases,
              "spells _watchdog_hidden_gens, which can reach a case function"),
             ("file-suffixed string in the yielded element of a top-level "
              "list comprehension, handed to patch by the planted branch",
-             budgets, hidden("list_sibling", sibling_table_defs["list_comp_elt"]),
+             budgets, sibling("list_comp_elt"),
              launched_cases,
              "spells _watchdog_hidden_list, which can reach a case function"),
             ("file-suffixed string beside its patch call in a top-level "
              "generator expression", budgets,
-             hidden("gen_patch", sibling_table_defs["generator"]), launched_cases,
+             sibling("generator"), launched_cases,
              "spells _watchdog_hidden_gens, which can reach a case function"),
             ("file-suffixed string beside its patch call in a top-level "
              "list comprehension", budgets,
-             hidden("list_patch", sibling_table_defs["list_comp"]), launched_cases,
+             sibling("list_comp"), launched_cases,
              "spells _watchdog_hidden_list, which can reach a case function"),
             ("file-suffixed string in the iterable of a top-level for loop "
              "with the patch call in its body", budgets,
-             hidden("table_patch", sibling_table_defs["for_loop"]), launched_cases,
+             sibling("for_loop"), launched_cases,
              "spells _watchdog_hidden_patcher, which can reach a case function"),
             ("file-suffixed string in a display under a top-level if, handed "
              "to patch by the planted branch", budgets,
-             hidden("targets_patch", sibling_table_defs["under_if"]), launched_cases,
+             sibling("under_if"), launched_cases,
              "spells _watchdog_hidden_targets, which can reach a case function"),
             ("file-suffixed string as a top-level type alias value with no "
              "call around it, handed to patch by the planted branch", budgets,
-             hidden("alias_sibling", sibling_table_defs["type_alias"]), launched_cases,
+             sibling("type_alias"), launched_cases,
              "spells _watchdog_hidden_alias, which can reach a case function"),
             ("file-suffixed string under a top-level binary +, handed to "
              "patch by the planted branch", budgets,
-             hidden("binop_sibling", sibling_table_defs["binop"]), launched_cases,
+             sibling("binop"), launched_cases,
              "spells _watchdog_hidden_binop, which can reach a case function"),
             ("file-suffixed string under a star unpack in a top-level "
              "list, handed to patch by the planted branch", budgets,
-             hidden("star_sibling", sibling_table_defs["starred"]), launched_cases,
+             sibling("starred"), launched_cases,
              "spells _watchdog_hidden_star, which can reach a case function"),
             ("file-suffixed string under a top-level subscript of its "
              "tuple, handed to patch by the planted branch", budgets,
-             hidden("sub_sibling", sibling_table_defs["subscript"]), launched_cases,
+             sibling("subscript"), launched_cases,
              "spells _watchdog_hidden_sub, which can reach a case function"),
             ("file-suffixed string under a top-level conditional "
              "expression, handed to patch by the planted branch", budgets,
-             hidden("ifexp_sibling", sibling_table_defs["ifexp"]), launched_cases,
+             sibling("ifexp"), launched_cases,
              "spells _watchdog_hidden_ifexp, which can reach a case function"),
             ("case def carrying a decorator", budgets,
              module_source.replace(case_def, "@_watchdog_remap\n" + case_def) + remap_def,
@@ -21522,33 +21547,40 @@ def _watchdog_regression_self_test():
         flip_missed.append("dispatch flip anchors not found once in the module")
     # The acceptance edge, checked clean: each permitted table must
     # scan with NO fault at all (the baseline scan is clean) once the
-    # accepts branch is planted; a scan tightened past the display
-    # allowlist (the False seed, or a display dropped from the
-    # allowlist) turns these red where every rejection flip above
-    # stays green.
-    for accept, accept_module in (
-            ("a permitted filename table written with Assign, a tuple "
-             "inside a list, read by the planted branch",
-             hidden("accepts", accept_table_defs["assign"])),
-            ("a permitted filename table written with AnnAssign, a tuple "
-             "inside a list, read by the planted branch",
-             hidden("accepts", accept_table_defs["ann_assign"]))):
+    # non-dispatching accepts branch is planted. Which allowlist
+    # removals turn which table red is listed above accept_table_defs;
+    # under the False seed every table turns red while every rejection
+    # flip above stays green.
+    for accept, accept_module in sorted(
+            (name, hidden("accepts", fixture)) for name, fixture in accept_table_defs.items()):
         accepted = _watchdog_dispatch_faults(budgets, accept_module, launched_cases)
         if accepted:
-            flip_missed.append("dispatch acceptance not clean: %s (%s)"
-                               % (accept, "; ".join(accepted)))
+            flip_missed.append("dispatch acceptance not clean: the permitted %s table, "
+                               "read by the planted branch (%s)" % (accept, "; ".join(accepted)))
     # The executed half of each fixture-consumer pairing: the scanner
     # flips above read these fixtures and branches as text only, so a
-    # pairing whose consumer no longer runs (the type-alias consumer
-    # handing the whole tuple to a patcher that is never constructed,
-    # whose .start() then raises AttributeError) would stay green
-    # there. Here each pairing runs once IN PROCESS: the fixture plus
-    # its consuming branch body, loaded as a scratch module with the
-    # patch stand-in below recording what it is handed, must construct
-    # the stand-in on exactly the string "opf.py" with create=True,
-    # start it, and dispatch exactly the mode no-signal-echild to the
-    # case recorder on the stand-in target.
-    def consumed(how, fixture, path):
+    # pairing whose consumer no longer runs would stay green there (the
+    # type-alias consumer handing the whole tuple to patch, whose
+    # construction raises TypeError, "Need a valid target to patch", or
+    # never handing it to patch at all, so that .start() on the tuple
+    # raises AttributeError). Here every sibling pairing in
+    # sibling_consumers runs once IN PROCESS: the fixture plus its
+    # consuming branch body, loaded as a scratch module with the patch
+    # stand-in below bound to _watchdog_hidden_mock BEFORE the fixture's
+    # first statement runs (the fixture's leading patch import, the one
+    # line not run, would bind the real patch in its place), so the
+    # patchers the list_comp and for_loop fixtures build while the
+    # module loads are recorded too. Each must construct the stand-in on
+    # exactly the string "opf.py" with a create argument that is True
+    # itself (create is True, so neither "False" nor 1 passes), start
+    # it, and dispatch exactly the mode no-signal-echild to the case
+    # recorder on the stand-in target: the recorder catches the
+    # tuple-handed form by its recorded target and the never-handed form
+    # by its AttributeError. Each acceptance table runs with its
+    # non-dispatching accepts branch, which must return None and record
+    # nothing. A sibling_table_defs key with no executed pairing, or a
+    # pairing naming no sibling_table_defs key, is a fault.
+    def consumed(how, fixture, path, dispatches=True):
         received = []
         sentinel = object()
 
@@ -21558,44 +21590,52 @@ def _watchdog_regression_self_test():
 
         class _RecordingPatch:
             def __init__(self, target, create=False):
-                received.append(("target", target, bool(create)))
+                received.append(("target", target, create))
                 self.target = types.SimpleNamespace(
                     _watchdog_completion_case=recorded_case)
 
             def start(self):
                 received.append(("start",))
 
-        path.write_text(fixture + "\n\ndef _watchdog_hidden_consumer():\n"
+        if not fixture.startswith(patch_import):
+            return ["executed consumer pairing %s: the fixture does not open with the "
+                    "patch import the stand-in replaces" % how]
+        path.write_text(fixture[len(patch_import):] + "\n\ndef _watchdog_hidden_consumer():\n"
                         "    if True:\n" + hidden_by[how], encoding="utf-8")
         try:
             consumer_spec = importlib.util.spec_from_file_location(
                 "_watchdog_consumer_fixture", str(path))
             consumer_module = importlib.util.module_from_spec(consumer_spec)
-            consumer_spec.loader.exec_module(consumer_module)
             consumer_module._watchdog_hidden_mock = _RecordingPatch
+            consumer_spec.loader.exec_module(consumer_module)
             result = consumer_module._watchdog_hidden_consumer()
         except Exception as exc:
             return ["executed consumer pairing %s: %r" % (how, exc)]
-        if result is not sentinel or received != [
-                ("target", "opf.py", True), ("start",),
-                ("mode", "no-signal-echild")]:
+        want = ([("target", "opf.py", True), ("start",), ("mode", "no-signal-echild")]
+                if dispatches else [])
+        if (result is not (sentinel if dispatches else None) or received != want
+                or any(entry[2] is not True for entry in received if entry[0] == "target")):
             return ["executed consumer pairing %s: recorded %r"
                     % (how, received)]
         return []
 
+    executed = set()
     with tempfile.TemporaryDirectory() as consumer_dir:
-        for index, (how, fixture) in enumerate((
-                ("alias_sibling", sibling_table_defs["type_alias"]),
-                ("gen_sibling", sibling_table_defs["generator_elt"]),
-                ("list_sibling", sibling_table_defs["list_comp_elt"]),
-                ("binop_sibling", sibling_table_defs["binop"]),
-                ("star_sibling", sibling_table_defs["starred"]),
-                ("sub_sibling", sibling_table_defs["subscript"]),
-                ("ifexp_sibling", sibling_table_defs["ifexp"]),
-                ("accepts", accept_table_defs["assign"]),
-                ("accepts", accept_table_defs["ann_assign"]))):
+        for index, (name, how) in enumerate(sorted(sibling_consumers.items())):
+            if name not in sibling_table_defs:
+                flip_missed.append("executed consumer pairing %s: names no sibling fixture %s"
+                                   % (how, name))
+                continue
             flip_missed.extend(consumed(
-                how, fixture, Path(consumer_dir) / ("consumer_%d.py" % index)))
+                how, sibling_table_defs[name],
+                Path(consumer_dir) / ("consumer_%d.py" % index)))
+            executed.add(name)
+        for index, fixture in enumerate(accept_table_defs.values()):
+            flip_missed.extend(consumed(
+                "accepts", fixture,
+                Path(consumer_dir) / ("accepts_%d.py" % index), dispatches=False))
+    for name in sorted(set(sibling_table_defs) - executed):
+        flip_missed.append("sibling fixture %s: no executed consumer pairing" % name)
     # Each launch flip goes through reconciled(), the verdict terms above;
     # the table name is computed where only the string rule must see "opf".
     unlisted = "._watchdog_unlisted_case()"
