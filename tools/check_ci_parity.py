@@ -2043,9 +2043,18 @@ def _edit_event_types(lines, source, diagnostics):
         return tuple(parts)
 
     def is_on_spelling(key):
-        # Every spelling YAML can read as the top-level on key: plain, quoted,
-        # tagged (!!str on), an explicit '?' key, or one with whitespace
-        # around it. Each non-plain spelling is refused below, never read.
+        # The spellings THIS HELPER recognizes as naming the top-level on
+        # key: plain, quoted with plain quotes around the two literal
+        # characters, a one-line tag such as !!str before it, a one-line
+        # explicit '?' key, or one with whitespace around it. Each
+        # non-plain spelling among these is refused below, never read.
+        # FIX-551-R5: spellings YAML also reads as this key but that this
+        # helper does NOT recognize fall through here (a double-quoted
+        # escape spelling such as "o\x6e", an anchored key such as &a on,
+        # a verbatim-tag form, a multi-line explicit '?' key, and a BOM
+        # before on); the strict top-level parser refuses each of them
+        # (unknown-top-key, yaml-feature or text-format, exit 2), never
+        # reads them. The 34v vectors pin each end to end.
         candidate = key.strip()
         if candidate[:1] == "?" and candidate[1:2] in ("", " "):
             candidate = candidate[1:].strip()
@@ -5790,8 +5799,18 @@ def self_test():
     # space after the colon formerly passed clean (YAML reads that line as
     # one plain scalar, so GitHub sees no such trigger block), and a bare on
     # raised an IndexError. Each is a trigger-shape cannot-evaluate on both
-    # workflows, pinned to the header branch's own diagnostic; the plain
-    # scalar, one-line flow list and block spellings stay read.
+    # workflows, pinned to the header branch's own diagnostic.
+    # FIX-551-R5: EXACTLY SIX compatibility controls follow, three per
+    # workflow. A refusal of a read spelling would turn each control's exit
+    # to 2. Only the msg-leaks.yml block-spelling control ALSO pins that the
+    # value stays read: a silently skipped on: header flips its exit 0 to 1
+    # (its edited goes unread), while every other control reads the same
+    # under a skipped header (on quality.yml the scalar and flow list read
+    # as no edited either way, and the block control keeps exit 1 through
+    # the msg-leaks.yml side's own missing-edited finding; on msg-leaks.yml
+    # the scalar and flow list lack edited either way). So the six controls
+    # establish NOT REFUSED each, and the skip discrimination rests on the
+    # msg-leaks.yml block control (shown red under a skipped-header mutant).
     for label, header, named in (
             ("a flow list with no space after on:",
              "on:[pull_request]\n",
@@ -5818,15 +5837,59 @@ def self_test():
                   quality_side,
                   ((MSG_LEAKS_CI_SOURCE, with_on_header(scan_text, header)),),
                   2, diagnostic=named)
-    scan_case("34t a plain scalar on: value stays read (no edited: pass)",
+    scan_case("34t a plain scalar on: value on quality.yml is not refused "
+              "(no edited: pass)",
               with_on_header(ci_fixture(common), "on: push\n"), msg_side, 0)
-    scan_case("34t a one-line flow list after on: stays read (no edited: "
-              "pass)",
+    scan_case("34t a one-line flow list after on: on quality.yml is not "
+              "refused (no edited: pass)",
               with_on_header(ci_fixture(common), "on: [push, pull_request]\n"),
               msg_side, 0)
-    scan_case("34t a block on: value stays read (edited on quality.yml is "
-              "still a trigger finding)",
+    scan_case("34t a block on: value on quality.yml stays read (edited there "
+              "is still a trigger finding)",
               with_on(ci_fixture(common), edited), msg_side, 1, ("trigger",))
+    scan_case("34t a plain scalar on: value on msg-leaks.yml is not refused "
+              "(missing edited: a trigger finding)",
+              quality_side,
+              ((MSG_LEAKS_CI_SOURCE, with_on_header(scan_text, "on: push\n")),),
+              1, ("trigger",))
+    scan_case("34t a one-line flow list after on: on msg-leaks.yml is not "
+              "refused (default types lack edited: a trigger finding)",
+              quality_side,
+              ((MSG_LEAKS_CI_SOURCE,
+                with_on_header(scan_text, "on: [push, pull_request]\n")),),
+              1, ("trigger",))
+    scan_case("34t a block on: value with edited on msg-leaks.yml stays read "
+              "(pass)", quality_side, msg_side, 0)
+
+    # FIX-551-R5 (PR 551 round-4 reviews): spellings YAML also reads as the
+    # top-level on key but that the trigger rule's is_on_spelling does not
+    # recognize are refused by the strict top-level parser, never read: each
+    # is exit 2 END TO END with the refusing layer's own diagnostic
+    # (unknown-top-key, yaml-feature or text-format) and no trigger-shape
+    # diagnostic, so the trigger rule's narrower recognition opens no route
+    # around the gate.
+    for label, header, named_code in (
+            ("a double-quoted escape spelling of on",
+             "\"o\\x6e\":\n" + edited, "unknown-top-key"),
+            ("an anchored on: key", "&a on:\n" + edited, "yaml-feature"),
+            ("a verbatim-tag on: key",
+             "!<tag:yaml.org,2002:str> on:\n" + edited, "unknown-top-key"),
+            ("a multi-line explicit '?' on key",
+             "?\n  on\n: [pull_request]\n", "unknown-top-key"),
+            ("a byte-order mark before on:",
+             "\ufeffon:\n" + edited, "text-format")):
+        outer = evaluate(local_msg, with_on_header(ci_fixture(common), header),
+                         msg_waiver, msg_side)
+        case("34v quality.yml unrecognized on: spelling refused by the outer "
+             "parser: " + label, outer, 2)
+        count += 1
+        if not any(item.code == named_code for item in outer.diagnostics):
+            failures.append("34v {}: no {} diagnostic: {!r}".format(
+                label, named_code, outer.diagnostics))
+        if any(item.code == "trigger-shape" for item in outer.diagnostics):
+            failures.append("34v {}: refused by the trigger rule instead of "
+                            "the outer parser: {!r}".format(
+                                label, outer.diagnostics))
 
     # FIX-551-R4: the indent-2 on-key refusal branches are discriminated by
     # their own diagnostics (dropping one re-routes its shape to another

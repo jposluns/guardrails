@@ -368,7 +368,7 @@ def run_jq(program, pages, requested_sha, scan_pages=None, mode="verdict"):
     return subprocess.run(
         [JQ, "-s", "-r", "--arg", "mode", mode, "--arg", "requested_sha", requested_sha,
          "--argjson", "lower_bound", str(LOWER_BOUND), "--argjson", "max_pages", str(MAX_PAGES),
-         "--arg", "require_base", "",
+         "--arg", "require_base", "", "--arg", "require_workflow", "",
          program],
         input=stdin, text=True,
         capture_output=True, timeout=10,
@@ -551,7 +551,7 @@ def _run_checks():
                                 [page(other_commits, 101), page([success_a], 101)])
             scan_short = run_jq(program, [page([])], head_sha, [page(other_commits, 101)])
             expected_rows = "\n".join(
-                "completed\tsuccess\t-\t-\t-\t{}\t{}\t{}".format(
+                "completed\tsuccess\t-\t-\t-\t-\t{}\t{}\t{}".format(
                     run["id"], run["name"], run["html_url"])
                 for run in (success_a, success_b)
             ) + "\n"
@@ -568,7 +568,7 @@ def _run_checks():
                 wrong_target.returncode != 0
                 and "malformed workflow run record" in wrong_target.stderr,
                 (scan_found.returncode, scan_found.stdout)
-                == (0, "completed\tsuccess\t-\t-\t-\t101\tWeb generator health\t"
+                == (0, "completed\tsuccess\t-\t-\t-\t-\t101\tWeb generator health\t"
                     "https://example.invalid/runs/101\n"),
                 scan_short.returncode != 0
                 and "incomplete unfiltered workflow-runs listing" in scan_short.stderr,
@@ -1278,6 +1278,71 @@ def _run_checks():
         rc, _output, calls = fixture.invoke(polls, wait=True, extra_args=require)
         check("ci/require-base-wait-late-quality-run", (rc, calls), (0, 6))
 
+        # FIX-551-R5 (PR 551 round-4 reviews, MAJOR): the required-workflow match reads the run's
+        # RAW JSON .path inside jq, never Bash's @tsv-escaped path column. The parent of this fix
+        # compared the escaped column with the unescaped required path, so two DIFFERENT paths
+        # that escape alike (a recorded real tab versus a requested literal backslash-t) read as
+        # equal, and a path holding a tab, newline, carriage return or backslash never equalled
+        # itself. Both directions are pinned, from either listing alone, in one-shot and --wait
+        # mode alike.
+        lookalike = ".github/workflows/a\\tb.yml"  # a literal backslash, then t
+        tab_path = ".github/workflows/a\tb.yml"  # a real tab
+        control_path = ".github/workflows/a\tb\nc\rd\\e.yml"
+        tab_run = workflow_run(917, "completed", "success", "Quality", head_sha,
+                               event="pull_request", pull_requests=on_main, path=tab_path)
+        control_run = workflow_run(918, "completed", "success", "Quality", head_sha,
+                                   event="pull_request", pull_requests=on_main,
+                                   path=control_path)
+        unsatisfied = "no completed successful run of the workflow file"
+        raw_match = []
+        for run, requested in ((tab_run, lookalike), (control_run, control_path)):
+            for polls in ([{"filtered": [page([run])], "scan": [page([])]}],
+                          [{"filtered": [page([])], "scan": [page([run])]}]):
+                for wait in (False, True):
+                    rc, output, _calls = fixture.invoke(
+                        polls, wait=wait,
+                        extra_args=require + ("--require-workflow", requested))
+                    raw_match.append((rc, unsatisfied in output))
+        check("ci/require-workflow-raw-path-match", raw_match,
+              [(1, True)] * 4 + [(0, False)] * 4)
+
+        # FIX-551-R5 (PR 551 round-4 reviews, MEDIUM): under --require-base a malformed record is
+        # refused from EITHER source alone, a malformed sibling beside a valid required run
+        # included, in one-shot and --wait mode alike (exit 2, one read, never a timeout). The
+        # vectors above feed every malformed record through both listings at once, so they alone
+        # would let a broken scan-source (or filtered-source) validation hide behind the other
+        # source's.
+        bad_sibling = workflow_run(919, "completed", "success", "Sibling", head_sha,
+                                   event="pull_request", pull_requests=on_main)
+        single_source = []
+        for polls in (
+                [{"filtered": [page([no_path])], "scan": [page([])]}],
+                [{"filtered": [page([])], "scan": [page([no_path])]}],
+                [{"filtered": [page([pr_quality, bad_sibling])],
+                  "scan": [page([pr_quality])]}],
+                [{"filtered": [page([pr_quality])],
+                  "scan": [page([pr_quality, bad_sibling])]}]):
+            for wait in (False, True):
+                rc, output, calls = fixture.invoke(polls, wait=wait, extra_args=require)
+                single_source.append((rc, calls, "malformed workflow run record" in output,
+                                      "TIMEOUT" in output))
+        check("ci/require-base-single-source-malformed", single_source,
+              [(2, 1, True, False)] * 8)
+
+        # FIX-551-R5 (PR 551 round-4 reviews, MINOR): without --require-base the path column is
+        # display-only and unvalidated, so a path that is not a nonempty string reads as "-"
+        # rather than collapsing the TSV row (IFS=tab folds an empty field, shifting every later
+        # column) or aborting it (@tsv refuses an object). Status, conclusion, name and URL must
+        # all land in their own columns.
+        plain_rows = []
+        for raw_path in ("", {"x": 1}):
+            pathological = workflow_run(920, "completed", "success", "Web generator health",
+                                        head_sha, path=raw_path)
+            rc, output, _calls = fixture.invoke([[page([pathological])]])
+            plain_rows.append((rc, "Web generator health: completed / success" in output,
+                               "  https://example.invalid/runs/920" in output))
+        check("ci/plain-mode-path-column-inert", plain_rows, [(0, True, True)] * 2)
+
         # FIX-551-R4 MINOR: a second positional rev is refused (exit 2) before any git or API
         # read, never read last-wins: a stray positional that resolves (a branch name, say)
         # would silently change which commit is checked.
@@ -1285,6 +1350,18 @@ def _run_checks():
         check("ci/rev-repeated-refused",
               (rc, fixture.gh_argv == [], fixture.git_argv == [],
                "a repeated rev is refused" in output), (2, True, True, True))
+
+        # FIX-551-R5 (PR 551 round-4 reviews, MINOR): the git argv recorder is proven to log real
+        # git reads on a run that does read git, so the fixture.git_argv == [] assertions above
+        # cannot pass vacuously under a recorder that stopped logging (or a script that reached
+        # git around the PATH fixture).
+        rc, _output, _calls = fixture.invoke([[page([pr_quality])]], extra_args=require)
+        check("ci/git-argv-recorder-positive-control",
+              (rc,
+               any(argv[:3] == ["rev-parse", "--verify", "--quiet"]
+                   for argv in fixture.git_argv),
+               any(argv[:3] == ["remote", "get-url", "--all"] for argv in fixture.git_argv)),
+              (0, True, True))
 
         if program is None:
             harness_error("ci/jq-step-direct-cases", "no jq program was extracted")

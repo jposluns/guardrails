@@ -355,6 +355,12 @@ SETTLE_OBSERVATIONS=5
 # RESIDUAL (disclosed, not closed): that the stored array is never rewritten is observed GitHub
 # behaviour, not a documented contract; if GitHub recomputed it from the PR's current state, a
 # pre-retarget run could read as conforming. Server-side branch protection remains the backstop.
+# RESIDUAL (disclosed, not closed): the required-workflow match reads the runs API's .path as the
+# BARE repository-relative workflow file path (observed live 2026-10-13 on this repository's runs:
+# exactly .github/workflows/quality.yml, with no ref suffix); that format is observed GitHub
+# behaviour, not a documented contract. Should GitHub ever return another format (an @ref suffix,
+# say), the exact raw-JSON comparison fails for every run, so every --require-base check exits 1
+# and the merge lane is blocked: fail closed, never a pass.
 # NOT CHECKED (disclosed): only each recorded entry's base.ref is read, never its base.repo or its
 # head.sha, so an entry naming the required branch of another repository reads as conforming;
 # whether GitHub ever records such an entry on a pull_request run is unverified. AVAILABILITY COST
@@ -367,13 +373,19 @@ SETTLE_OBSERVATIONS=5
 # One jq program, two modes. "step" validates ONE raw page of the unfiltered listing, prints "stop" or
 # "more", then the page reduced to the fields used here as one compact JSON line. "verdict" receives the
 # head_sha query's pages and the reduced scan pages, re-checks every completeness condition, and emits
-# the run rows. Status, conclusion and the base-requirement verdict (a fixed token: "-", "met" or
-# "unmet") come FIRST in every TSV row, then the verdict's display detail, then the run's recorded
-# workflow path (the required-workflow gating field; absent reads as "-"), then id, name and URL.
-# jq's @tsv escaping keeps tabs,
+# the run rows. Status, conclusion, the base-requirement verdict (a fixed token: "-", "met" or
+# "unmet") and the required-workflow verdict (a fixed token: "-", "match" or "other") come FIRST
+# in every TSV row, then the base verdict's display detail, then the run's recorded workflow path
+# (display-only; anything but a nonempty string reads as "-", so an empty or non-string path in
+# plain mode can neither shift later columns nor abort the row), then id, name and URL.
+# FIX-551-R5: the required-workflow match is computed INSIDE jq, on the run's raw JSON .path
+# against the required path passed in as --arg require_workflow, and only the fixed token reaches
+# Bash. An earlier revision compared Bash's @tsv-escaped path column with the unescaped required
+# path, so two different paths that escape alike (a recorded real tab versus a requested literal
+# backslash-t) read as equal, and identical paths holding a tab, newline, carriage return or
+# backslash never matched. jq's @tsv escaping keeps tabs,
 # newlines, and backslashes in display fields from becoming record delimiters, so a workflow name cannot
-# move the gating fields, and an escaped path cannot equal the plain required path, which fails
-# closed. Name and URL remain display-only. The no-run case gets an explicit sentinel
+# move the gating fields. Name, URL and the path column remain display-only. The no-run case gets an explicit sentinel
 # rather than a rendered "null", because a real run's .status is nullable in the schema and must not be
 # mistaken for "no run yet".
 #
@@ -478,6 +490,12 @@ def base_requirement:
   else
     ["unmet", "its recorded base is " + ([.pull_requests[].base.ref] | unique | join(", "))]
   end;
+def workflow_requirement:
+  if $require_base == "" then "-"
+  elif .path == $require_workflow then "match"
+  else "other" end;
+def display_path:
+  if ((.path | type) == "string") and ((.path | length) > 0) then .path else "-" end;
 if $mode == "step" then
   if (length != 1) or (.[0] | malformed_page) then
     error("malformed workflow-runs response")
@@ -553,7 +571,8 @@ else
                    | .[0]
                    | [(.status // "-"), (.conclusion // "-")]
                      + base_requirement
-                     + [(.path // "-"), (.id | tostring), .name, .html_url]
+                     + [workflow_requirement, display_path,
+                        (.id | tostring), .name, .html_url]
                    | @tsv)
                 end
             end
@@ -563,7 +582,8 @@ end'
 
 ci_jq() {
   jq -s -r --arg mode "$1" --arg requested_sha "$SHA" --argjson lower_bound "$LOWER_BOUND" \
-    --argjson max_pages "$SCAN_MAX_PAGES" --arg require_base "$REQUIRE_BASE" "$CI_STATUS_JQ"
+    --argjson max_pages "$SCAN_MAX_PAGES" --arg require_base "$REQUIRE_BASE" \
+    --arg require_workflow "$REQUIRE_WORKFLOW" "$CI_STATUS_JQ"
 }
 
 query() {
@@ -680,19 +700,21 @@ while :; do
   nonterminal_names=()
   unknown_statuses=()
   base_unmet=()
-  while IFS=$'\t' read -r status concl base_state base_detail path id name url; do
+  while IFS=$'\t' read -r status concl base_state base_detail wf_state path id name url; do
     report "$status" "$concl" "$name" "$url"
     run_ids+=("$id")
-    # The gating token comes from the jq program's fixed set ("-", "met", "unmet"), never from a
-    # display field; under the requirement anything other than "met" is unmet, so an unexpected
-    # token fails closed. base_detail is display-only (@tsv-escaped); path is the run's recorded
-    # workflow file, the field the required-workflow match reads (validated nonempty under the
-    # requirement); name stays display-only.
+    # The gating tokens come from the jq program's fixed sets ("-", "met", "unmet" for the base
+    # requirement; "-", "match", "other" for the required workflow), never from a display field;
+    # under the requirement anything other than "met" or "match" fails closed, so an unexpected
+    # token never passes. base_detail is display-only (@tsv-escaped); path is display-only too
+    # (FIX-551-R5): the required-workflow match is wf_state, computed in jq on the run's raw JSON
+    # .path (validated nonempty under the requirement), never on this escaped column; name stays
+    # display-only.
     if [ -n "$REQUIRE_BASE" ] && [ "$base_state" != "met" ]; then
       base_unmet+=("${name}: ${base_detail}")
     fi
     if [ -n "$REQUIRE_BASE" ] && [ "$base_state" = "met" ] && [ "$status" = "completed" ] \
-        && [ "$concl" = "success" ] && [ "$path" = "$REQUIRE_WORKFLOW" ]; then
+        && [ "$concl" = "success" ] && [ "$wf_state" = "match" ]; then
       require_workflow_met=1
     fi
     case "$status" in
