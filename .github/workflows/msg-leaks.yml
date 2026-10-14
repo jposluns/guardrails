@@ -25,6 +25,8 @@ jobs:
           python-version: '3.14'
 
       - name: Message/metadata leak self-test
+        shell: bash
         run: python3 -I -B tools/check_msg_leaks.py --self-test
       - name: Message/metadata leak scan
+        shell: bash
         run: python3 -I -B tools/check_msg_leaks.py
