@@ -104,7 +104,7 @@ def document(raw, label):
     require(isinstance(raw, bytes), label + ": expected bytes")
     try:
         return tomllib.loads(raw.decode("utf-8"))
-    except (ValueError, RecursionError) as exc:
+    except (ValueError, RecursionError, MemoryError) as exc:
         raise CannotEvaluate(label + ": invalid UTF-8/TOML: " + str(exc)) from exc
 
 

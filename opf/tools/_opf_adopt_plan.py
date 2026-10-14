@@ -506,7 +506,7 @@ def _investigate(product_root, sources, targets):
         doc, homes, views, manifest = _inventory(root, _roots(sources), _roots(targets))
         observed = AdoptResult(store.VALID, observation=_seal(doc, "observation_digest"))
         return observed, homes, views, manifest
-    except (OSError, ValueError, UnicodeError, RecursionError, EmitError,
+    except (OSError, ValueError, UnicodeError, RecursionError, MemoryError, EmitError,
             store.StoreError, store._journal.JournalError) as exc:
         return AdoptResult(store.CANNOT_EVALUATE, [str(exc)]), 1, None, None
 
@@ -783,7 +783,7 @@ def plan(product_root, *, sources, expected_observation_digest, product, decisio
             return AdoptResult(checked.status, checked.findings, observation=observed.observation)
         return AdoptResult(store.VALID, observation=observed.observation,
                            inventory=inventory_bytes, plan=frozen)
-    except (ValueError, UnicodeError, RecursionError, EmitError) as exc:
+    except (ValueError, UnicodeError, RecursionError, MemoryError, EmitError) as exc:
         return AdoptResult(store.CANNOT_EVALUATE, [str(exc)], observation=observed.observation)
 
 
