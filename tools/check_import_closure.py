@@ -47,10 +47,10 @@ Rules (each self-test vector is caught by exactly its rule, and passes with that
                      an f-string with a placeholder among them) is not read: its site is reviewed (DISCLOSED RESIDUAL).
                      Each IMPORT_SEARCH_ROOTS row is held live: its file is scanned, its root lies beyond the file's own
                      directory, the file makes a sys.path.insert or sys.path.append call whose argument expression,
-                     read in the forms the Search-roots limitation lists, resolves to the row's root, and at
-                     least one of its imports resolves through that root; a row that fails any of these is a finding,
-                     and an insertion argument outside the read forms, where no read insertion resolves the row's
-                     root, is refused (cannot evaluate), never a silent pass.
+                     read in the closed set of shapes the Search-roots limitation lists, resolves to the row's root,
+                     and at least one of its imports resolves through that root; a row that fails any of these is a
+                     finding, and an insertion argument outside those shapes, where no read insertion resolves the
+                     row's root, is refused (cannot evaluate), never a silent pass.
   dynamic-import     dynamic imports are not resolved (a literal name excepted, below); a reference to the
                      dynamic-import machinery is refused unless a reviewed row lists that exact node. The watched names
                      are DYNAMIC_IMPORT_NAMES (__import__, __builtins__, importlib, imp, runpy, zipimport, pkgutil,
@@ -360,16 +360,27 @@ the import system's own modules and help, not every importer by name in the stan
 import system's own functions only those LITERAL_IMPORTERS lists are read as importers. A native library
 loaded through ctypes, and Python source handed to a subprocess or written to a file, are outside the
 surface. Search roots: the own-directory root and the IMPORT_SEARCH_ROOTS rows are the gate's
-model of sys.path; a row is held live by a sys.path.insert or sys.path.append call whose argument expression resolves
-to the row's root in the read forms this tree writes: a string literal (a bare relative one is read against the
-repository root, where these programs run, not the process working directory); os.path.join, os.path.dirname and
-os.path.abspath over read forms and __file__; the pathlib chain Path(__file__), .resolve(), .parent, .parents[N] and
-the / operator with a string literal on its right, under a str() wrapper or not; a module-level name assigned exactly
-once to a read form; and this tree's repo_root() helper, read as the repository root by that helper's contract, not
-executed. A string literal elsewhere in the file (a fixture path, a docstring) holds no row live, and a row file's
-insertion argument outside the read forms is refused (cannot evaluate) where no read insertion resolves the row's
-root. The reading is of spelling, not execution: an insertion executed conditionally, in unreached code, or only after
-the import it serves still counts; and the gate does not evaluate the order of insertions (it refuses a name present in two places instead), it does not model an in-code
+model of sys.path; a row is held live by a sys.path.insert or sys.path.append call whose argument is one of a closed
+set of shapes, the ones this tree's rows write, read by spelling and never evaluated: str() around a pathlib chain;
+os.path.join(os.path.dirname(os.path.abspath(__file__)), LITERAL, ...), in exactly that nesting; or a module-level
+name bound to one of those. A pathlib chain starts at Path(__file__).resolve() followed by .parent (1 to 17 times) or
+by one .parents[N] (N an int literal, 0 to 16), at repo_root(), or at a module-level name bound to a pathlib chain,
+and continues with / and a LITERAL any number of times. Every LITERAL is one path component, [A-Za-z0-9_.-]+ and
+neither . nor .., so an absolute, empty, separator-holding or trailing-slash component never occurs, and a shape
+that climbs above the repository root is not read. A name is read only where the whole file binds it exactly once, by a plain
+module-level NAME = shape statement with one target naming no further name, and nowhere else in any form (annotated,
+augmented, chained or destructuring assignment, for, with, except, match or comprehension target, walrus, del,
+global, nonlocal, import, def, class, parameter or type parameter, in any scope); Path is read only where the file's
+one binding of it is from pathlib import Path, os only where it is import os, and repo_root only where it is from
+_gen_common import repo_root (this tree's helper, read as the repository root by its contract, not executed);
+__file__ and str only where the file binds them nowhere; and a star import anywhere in the file leaves every name
+unread. Every other argument (a bare string literal, an unwrapped pathlib value, another os.path call or nesting) is
+refused (cannot evaluate), naming the file, the row and the argument's spelling, where no read insertion resolves the
+row's root. A string literal elsewhere in the file (a fixture path, a docstring) holds no row live. The reading is of
+spelling, not execution: an insertion executed conditionally, in unreached code, or only after the import it serves
+still counts, a name's binding need not precede the insertion that reads it, and a binding made at runtime (through
+globals(), setattr or exec) is not seen;
+and the gate does not evaluate the order of insertions (it refuses a name present in two places instead), it does not model an in-code
 insertion of a path outside the tree (a site-packages directory, which can then shadow an in-repo name), and it does not
 see a program launched with another path (PYTHONPATH, python3 -m from another directory, or python3 -I without the
 own-directory insertion, under which a sibling import fails or reaches an installed module of that name). Third-party
@@ -574,6 +585,13 @@ IMPORT_SEARCH_ROOTS = (
     ("tools/selftest_git_fixture_env_core.py", "opf/tools"),
     ("tools/selftest_orch_hooks.py", ".aiqt/core/hooks/scripts"),
 )
+# The closed set of insertion-argument shapes the gate reads (see the docstring): the one literal path component,
+# the highest .parents index (17 directories up, at most), and the one binding each name a shape calls must have in
+# the whole file, its exact import.
+INSERT_PART_RE = re.compile(r"[A-Za-z0-9_.-]+")
+MAX_PARENTS_INDEX = 16
+INSERT_IMPORTS = dict(os=("import", "os"), Path=("from", "pathlib", "Path"),
+                      repo_root=("from", "_gen_common", "repo_root"))
 
 # Third-party imports inside byte-exact vendored code (opf/tools/_vendor is not edited here; its provenance
 # record states that no extra is vendored and no extension is loaded on the parse path). Each row is
@@ -1899,77 +1917,166 @@ def _search_roots(rel, file_set, extra):
     return roots
 
 
-def _norm_insert(path):
-    """One sys.path insertion target, normalised repo-relative ('.' is the repository root)."""
-    return os.path.normpath(path).replace(os.sep, "/")
-
-
-def _module_assignments(tree):
-    """Each name a module-level statement assigns exactly once, mapped to its value expression."""
-    assigned = dict()
+def _file_bindings(tree):
+    """Every binding of every name anywhere in the file, in any scope: name -> [binding], a binding being ("assign",
+    value) for a module-level NAME = value statement with one plain target, ("import", module) for import MODULE,
+    ("from", module, name) for from MODULE import NAME, and ("other",) for every other form (an annotated, augmented,
+    chained or destructuring assignment, a for, with, except, match or comprehension target, a walrus, del, global,
+    nonlocal, an aliased import, a def, class, parameter or type parameter name, an assignment in a nested block or
+    scope). A star import binds names the gate cannot list: it is held under "*"."""
+    bindings = dict()
+    plain = set()
     for node in tree.body:
         if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
-            name = node.targets[0].id
-            assigned[name] = None if name in assigned else node.value
-    return assigned
+            plain.add(id(node.targets[0]))
+            bindings.setdefault(node.targets[0].id, []).append(("assign", node.value))
+    for node in ast.walk(tree):
+        names = ()
+        if isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load):
+            if id(node) not in plain:
+                names = (node.id,)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                if alias.name == "*" or alias.asname is not None:
+                    bindings.setdefault(alias.asname or "*", []).append(("other",))
+                elif isinstance(node, ast.Import):
+                    bindings.setdefault(alias.name.split(".")[0], []).append(("import", alias.name))
+                else:
+                    bindings.setdefault(alias.name, []).append(("from", "." * node.level + (node.module or ""),
+                                                                alias.name))
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names = (node.name,)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            names = node.names
+        elif isinstance(node, ast.arg):
+            names = (node.arg,)
+        elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar, ast.TypeVar, ast.ParamSpec,
+                               ast.TypeVarTuple)):
+            names = (node.name,) if node.name else ()
+        elif isinstance(node, ast.MatchMapping):
+            names = (node.rest,) if node.rest else ()
+        for name in names:
+            bindings.setdefault(name, []).append(("other",))
+    return bindings
 
 
-def _insertion_path(node, rel, assigned, depth=0):
-    """The repo-relative path a sys.path insertion argument spells, in the read forms the docstring lists
-    (Search roots), or None for an expression outside them; the file is never executed."""
-    if depth > 20:
-        return None
-    deeper = depth + 1
-    if isinstance(node, ast.Constant) and isinstance(node.value, str):
-        return _norm_insert(node.value)
-    if isinstance(node, ast.Name):
-        if node.id == "__file__":
-            return _norm_insert(rel)
-        value = assigned.get(node.id)
-        return None if value is None else _insertion_path(value, rel, assigned, deeper)
-    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
-        if not (isinstance(node.right, ast.Constant) and isinstance(node.right.value, str)):
-            return None
-        left = _insertion_path(node.left, rel, assigned, deeper)
-        return None if left is None else _norm_insert(left + "/" + node.right.value)
-    if isinstance(node, ast.Attribute) and node.attr == "parent":
-        owner = _insertion_path(node.value, rel, assigned, deeper)
-        return None if owner is None else _norm_insert(owner + "/..")
-    if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Attribute) and \
-            node.value.attr == "parents" and isinstance(node.slice, ast.Constant) and \
-            isinstance(node.slice.value, int) and node.slice.value >= 0:
-        owner = _insertion_path(node.value.value, rel, assigned, deeper)
-        return None if owner is None else _norm_insert(owner + "/.." * (node.slice.value + 1))
-    if not isinstance(node, ast.Call) or node.keywords or any(isinstance(a, ast.Starred) for a in node.args):
-        return None
-    func = node.func
-    if isinstance(func, ast.Name):
-        if func.id in ("str", "Path") and len(node.args) == 1:
-            return _insertion_path(node.args[0], rel, assigned, deeper)
-        if func.id == "repo_root" and not node.args:
-            return "."
-        return None
-    if not isinstance(func, ast.Attribute):
-        return None
-    if func.attr == "resolve" and not node.args:
-        return _insertion_path(func.value, rel, assigned, deeper)
-    os_path = isinstance(func.value, ast.Attribute) and func.value.attr == "path" and \
-        isinstance(func.value.value, ast.Name) and func.value.value.id == "os"
-    if os_path and func.attr == "join" and node.args:
-        parts = [_insertion_path(part, rel, assigned, deeper) for part in node.args]
-        return None if None in parts else _norm_insert("/".join(parts))
-    if os_path and func.attr == "dirname" and len(node.args) == 1:
-        owner = _insertion_path(node.args[0], rel, assigned, deeper)
-        return None if owner is None else _norm_insert(owner + "/..")
-    if os_path and func.attr == "abspath" and len(node.args) == 1:
-        return _insertion_path(node.args[0], rel, assigned, deeper)
+def _bindings_of(bindings, name):
+    """Every binding of name in the file (_file_bindings), or None where a star import may bind it unseen."""
+    return None if "*" in bindings else bindings.get(name, [])
+
+
+def _assigned(bindings, name):
+    """The value of name where its one binding in the whole file is a plain module-level NAME = value, else None."""
+    found = _bindings_of(bindings, name)
+    return found[0][1] if found and len(found) == 1 and found[0][0] == "assign" else None
+
+
+def _imported(bindings, name):
+    """Whether name's one binding in the whole file is the import INSERT_IMPORTS gives it."""
+    found = _bindings_of(bindings, name)
+    return found is not None and len(found) == 1 and found[0] == INSERT_IMPORTS[name]
+
+
+def _unbound(bindings, name):
+    """Whether the file binds name nowhere (__file__, and the builtin str)."""
+    return _bindings_of(bindings, name) == []
+
+
+def _is_call(node, func, count):
+    """Whether node calls exactly func (its spelling) with count positional arguments and no keyword."""
+    return isinstance(node, ast.Call) and not node.keywords and len(node.args) == count and \
+        ast.unparse(node.func) == func
+
+
+def _insert_part(node):
+    """The path component a string literal is when the gate reads it as one (INSERT_PART_RE, neither . nor ..),
+    else None: an absolute, empty, separator-holding or trailing-slash component never occurs."""
+    if isinstance(node, ast.Constant) and type(node.value) is str and node.value not in (".", "..") and \
+            INSERT_PART_RE.fullmatch(node.value):
+        return node.value
     return None
+
+
+def _file_parents(node, rel, bindings):
+    """The repo-relative components of Path(__file__).resolve() followed by .parent (1 to MAX_PARENTS_INDEX + 1
+    times) or by one .parents[N] (N an int literal, 0 to MAX_PARENTS_INDEX), or None for any other shape and for a
+    directory above the repository root; no index is expanded."""
+    if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Attribute) and node.value.attr == "parents":
+        index = node.slice.value if isinstance(node.slice, ast.Constant) else None
+        if type(index) is not int:
+            return None
+        up, node = index + 1, node.value.value
+    else:
+        up = 0
+        while isinstance(node, ast.Attribute) and node.attr == "parent":
+            up, node = up + 1, node.value
+    if not 1 <= up <= MAX_PARENTS_INDEX + 1:
+        return None
+    if not (_is_call(node, "Path(__file__).resolve", 0) and _is_call(node.func.value, "Path", 1) and
+            isinstance(node.func.value.args[0], ast.Name) and _imported(bindings, "Path") and
+            _unbound(bindings, "__file__")):
+        return None
+    parts = rel.split("/")
+    return None if up > len(parts) else parts[:len(parts) - up]
+
+
+def _path_chain(node, rel, bindings, named):
+    """The repo-relative components of a pathlib value in the read shapes (see the docstring), or None: a start
+    (_file_parents; repo_root(), the repository root; or, where named, a name bound to a pathlib chain that starts at
+    no name) then / with a literal component (_insert_part) any number of times."""
+    parts = []
+    while isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        part = _insert_part(node.right)
+        if part is None:
+            return None
+        parts.insert(0, part)
+        node = node.left
+    if isinstance(node, ast.Name) and named:
+        value = _assigned(bindings, node.id)
+        start = None if value is None else _path_chain(value, rel, bindings, False)
+    elif _is_call(node, "repo_root", 0) and _imported(bindings, "repo_root"):
+        start = []
+    else:
+        start = _file_parents(node, rel, bindings)
+    return None if start is None else start + parts
+
+
+def _os_path_join(node, rel, bindings):
+    """The repo-relative components of os.path.join(os.path.dirname(os.path.abspath(__file__)), LITERAL, ...), the
+    one os.path nesting read, or None."""
+    if not (isinstance(node, ast.Call) and not node.keywords and len(node.args) > 1 and
+            ast.unparse(node.func) == "os.path.join" and _imported(bindings, "os")):
+        return None
+    head = node.args[0]
+    if not (_is_call(head, "os.path.dirname", 1) and _is_call(head.args[0], "os.path.abspath", 1) and
+            ast.unparse(head.args[0].args[0]) == "__file__" and _unbound(bindings, "__file__")):
+        return None
+    parts = [_insert_part(part) for part in node.args[1:]]
+    return None if None in parts else rel.split("/")[:-1] + parts
+
+
+def _str_shape(node, rel, bindings, named=True):
+    """The repo-relative components a str-valued insertion argument spells in the read shapes (see the docstring):
+    str() around a pathlib chain (_path_chain), the os.path nesting (_os_path_join), or, where named, a name bound to
+    one of them; None for any other expression, an unwrapped pathlib value among them. Never executed."""
+    if isinstance(node, ast.Name) and named:
+        value = _assigned(bindings, node.id)
+        return None if value is None else _str_shape(value, rel, bindings, False)
+    if _is_call(node, "str", 1) and _unbound(bindings, "str"):
+        return _path_chain(node.args[0], rel, bindings, named)
+    return _os_path_join(node, rel, bindings)
+
+
+def _insertion_path(node, rel, bindings):
+    """The repo-relative path ('.' the repository root) a sys.path insertion argument spells, or None (_str_shape)."""
+    parts = _str_shape(node, rel, bindings)
+    return None if parts is None else "/".join(parts) or "."
 
 
 def _insertion_roots(tree, rel):
     """(roots, unread) over every sys.path.insert or sys.path.append call the file makes: roots the repo-relative
     paths of the argument expressions the gate reads (_insertion_path), unread the spelling of each it cannot."""
-    assigned = _module_assignments(tree)
+    bindings = _file_bindings(tree)
     roots, unread = set(), []
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and \
@@ -1977,7 +2084,7 @@ def _insertion_roots(tree, rel):
                 node.func.value.attr == "path" and isinstance(node.func.value.value, ast.Name) and \
                 node.func.value.value.id == "sys":
             shape = len(node.args) == (2 if node.func.attr == "insert" else 1) and not node.keywords
-            target = _insertion_path(node.args[-1], rel, assigned) if shape else None
+            target = _insertion_path(node.args[-1], rel, bindings) if shape else None
             if target is None:
                 unread.append(ast.unparse(node.args[-1] if node.args else node))
             else:
@@ -2341,8 +2448,9 @@ _PROVENANCE = ('[package]\nname = "pkg"\nversion = "1.0"\npurl = "%s"\n'
 _GOOD_PROVENANCE = _PROVENANCE % ("pkg:pypi/pkg@1.0", "MIT", "lib/_vendor/pkg/")
 _MIT = ("MIT License\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this "
         "software, to deal in the Software without restriction.\n")
-_A_PY = ("import os\nimport sys\nsys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'lib'))\n"
-         "sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'lib', '_vendor'))\n"
+_A_PY = ("import os\nimport sys\nfrom pathlib import Path\n"
+         "sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))\n"
+         "sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib' / '_vendor'))\n"
          "import b\nimport importlib\nimportlib.import_module('json')\nfrom c import d\nimport pkg.mod\n"
          "__import__(os.environ['X'])\n")
 _WORKFLOW = ("on:\n  push:\n    branches: [main]\njobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n"
@@ -2396,7 +2504,35 @@ _T_ROOTS = _FIXTURE_ROOTS + (("tools/t.py", "lib/_vendor"),)
 _FIXTURE_SITES = (("tools/a.py", MODULE_SCOPE, ("#1: import importlib",
                                                 "#1: importlib.import_module('json')",
                                                 "#1: __import__(os.environ['X'])"), "the fixture's own sites"),)
-_T_VENDOR = "import os, sys\nsys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'lib', '_vendor'))\n"
+_T_PATH = "import os, sys\nfrom pathlib import Path\n"
+_T_VENDOR_LINE = "sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib' / '_vendor'))\n"
+_T_VENDOR = _T_PATH + _T_VENDOR_LINE
+_T_OWN = _T_PATH + "sys.path.insert(0, str(Path(__file__).resolve().parent))\n"
+_T_PLANTED = "planted = ('lib', '_vendor', 'lib/_vendor')\n"
+# A file 16 directories deep, whose .parents[16] is the repository root.
+_T_DEEP = "/".join("d%d" % n for n in range(16)) + "/t.py"
+_T_GEN_COMMON = ("tools/_gen_common.py", "from pathlib import Path\ndef repo_root():\n    return Path('.')\n")
+_T_ELSEWHERE = ("tools/elsewhere.py", "from pathlib import Path\ndef repo_root():\n    return Path('elsewhere')\n")
+# A name bound once to a read shape, then (in the rebinding vectors) one statement between it and its insertion.
+_T_NAMED = _T_PATH + "ROOT = str(Path(__file__).resolve().parents[1] / 'lib' / '_vendor')\n" \
+    "%ssys.path.insert(0, ROOT)\nimport pkg\n"
+
+
+def _unread_refusal(argument, rel="tools/t.py", sroot="lib/_vendor"):
+    """The whole refusal of a row whose only insertion argument the gate does not read: the file, the row and the
+    argument's spelling."""
+    return ("%s: IMPORT_SEARCH_ROOTS row (%r, %r): the sys.path insertion argument %s is outside the forms the gate "
+            "reads, and no read insertion resolves to the root" % (rel, rel, sroot, argument))
+
+
+def _unread_vector(name, argument, extra=(), source=None, rel="tools/t.py"):
+    """A cannot-evaluate vector: rel inserting argument (or holding source) beside import pkg, under the row (rel,
+    lib/_vendor), refused by its whole message."""
+    source = source if source is not None else _T_PATH + "sys.path.insert(0, %s)\nimport pkg\n" % argument
+    return (name, ((rel, source),) + tuple(extra), (), dict(search_roots=_FIXTURE_ROOTS + ((rel, "lib/_vendor"),)),
+            None, _unread_refusal(argument, rel))
+
+
 _WF = WORKFLOWS_REL + "/p.yml"
 _REC = "lib/_vendor/pkg-1.0.provenance.toml"
 _MANIFEST = "lib/_vendor/pkg-1.0.manifest.sha256"
@@ -2734,22 +2870,20 @@ _RULE_VECTORS = (
     ("search-root row with no sys.path call", "import-closure", "tools/t.py",
      (("tools/t.py", "import pkg\n_ = ('lib', '_vendor')\n"),), (), dict(search_roots=_T_ROOTS), True),
     ("search-root row whose root no insertion resolves to", "import-closure", "tools/t.py",
-     (("tools/t.py", "import sys\nsys.path.append('lib')\nimport pkg\n"),), (), dict(search_roots=_T_ROOTS),
-     True),
+     (("tools/t.py", _T_PATH + "sys.path.append(str(Path(__file__).resolve().parents[1] / 'lib'))\nimport pkg\n"),),
+     (), dict(search_roots=_T_ROOTS), True),
     ("search-root row beside an own-directory insertion and fixture literals", "import-closure", "tools/t.py",
-     (("tools/t.py", "import os, sys\nsys.path.insert(0, os.path.dirname(__file__))\n"
-                     "planted = ('lib', '_vendor', 'lib/_vendor')\nimport pkg\n"),), (),
-     dict(search_roots=_T_ROOTS), True),
+     (("tools/t.py", _T_OWN + _T_PLANTED + "import pkg\n"),), (), dict(search_roots=_T_ROOTS), True),
     ("stale search-root row", "import-closure", "tools/t.py", (("tools/t.py", _T_VENDOR),), (),
      dict(search_roots=_T_ROOTS), True),
     ("search-root row naming no scanned file", "import-closure", "tools/t.py", (), (),
      dict(search_roots=_T_ROOTS), True),
     ("search-root row whose root is no directory", "import-closure", "tools/t.py",
-     (("tools/t.py", _T_VENDOR.replace("'lib', '_vendor'", "'gone'") + "import os\n"),), (),
+     (("tools/t.py", _T_VENDOR.replace("'lib' / '_vendor'", "'gone'") + "import os\n"),), (),
      dict(search_roots=_FIXTURE_ROOTS + (("tools/t.py", "gone"),)), True),
     ("search-root row naming the file's own directory", "import-closure", "tools/t.py",
-     (("tools/t.py", "import sys\nsys.path.append('tools')\nimport b\n"),), (),
-     dict(search_roots=_FIXTURE_ROOTS + (("tools/t.py", "tools"),)), True),
+     (("tools/t.py", _T_OWN + "import b\n"),), (), dict(search_roots=_FIXTURE_ROOTS + (("tools/t.py", "tools"),)),
+     True),
     ("Python under a nested venv directory", "import-closure", "tools/venv/evil.py",
      (("tools/venv/evil.py", "import requests\n"),), (), {}, True),
     ("relative import escaping the repo", "relative-escape", "tools/t.py",
@@ -3113,12 +3247,27 @@ _GREEN_VECTORS = (
      (("tools/t.py", "def f(record):\n    imp = record.get('import')\n    return lambda: imp.get('run')\n"),),
      dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "f.<lambda>", ("#1: imp.get('run')",), "r"),))),
     # A row is live through the insertion that resolves to its root: the own-directory insertion beside it
-    # changes nothing.
+    # changes nothing. The paired control of the own-directory vector: its fixture plus that insertion only.
     ("own-directory and recorded-root insertions together",
-     (("tools/t.py", "import os, sys\nsys.path.insert(0, os.path.dirname(__file__))\n"
-                     "sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'lib', '_vendor'))\n"
-                     "import pkg\n"),),
+     (("tools/t.py", _T_OWN + _T_PLANTED + _T_VENDOR_LINE + "import pkg\n"),), dict(search_roots=_T_ROOTS)),
+    # Positive controls of the closed set of insertion shapes, one per shape this tree's rows write, each paired
+    # with the cannot-evaluate vectors that change it.
+    ("insertion of a name bound once to a read shape", (("tools/t.py", _T_NAMED % ""),),
      dict(search_roots=_T_ROOTS)),
+    ("insertion through a name bound once to a pathlib chain",
+     (("tools/t.py", _T_PATH + "ROOT = Path(__file__).resolve().parents[1]\n"
+                     "sys.path.insert(0, str(ROOT / 'lib' / '_vendor'))\nimport pkg\n"),), dict(search_roots=_T_ROOTS)),
+    ("insertion through repo_root imported from _gen_common",
+     (("tools/t.py", _T_PATH + "from _gen_common import repo_root\n"
+                     "sys.path.insert(0, str(repo_root() / 'lib' / '_vendor'))\nimport pkg\n"), _T_GEN_COMMON),
+     dict(search_roots=_T_ROOTS)),
+    ("insertion through the os.path nesting",
+     (("tools/t.py", _T_PATH + "sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "
+                     "'sub'))\nimport m\n"), ("tools/sub/m.py", "x = 1\n")),
+     dict(search_roots=_FIXTURE_ROOTS + (("tools/t.py", "tools/sub"),))),
+    ("insertion through .parents at the highest index read",
+     ((_T_DEEP, _T_PATH + "sys.path.insert(0, str(Path(__file__).resolve().parents[16] / 'lib' / '_vendor'))\n"
+                "import pkg\n"),), dict(search_roots=_FIXTURE_ROOTS + ((_T_DEEP, "lib/_vendor"),))),
 )
 
 
@@ -3586,10 +3735,51 @@ _CANNOT_VECTORS = (
     ("in-repo module named like a standard-library module",
      (("tools/json.py", "x = 1\n"), ("tools/t.py", "import json\n")), (), dict(), None,
      "import 'json' is ambiguous: present in the standard library"),
-    ("search-root insertion argument outside the read forms",
-     (("tools/t.py", "import os, sys\nsys.path.insert(0, os.environ['EXTRA_ROOT'])\nimport pkg\n"),), (),
-     dict(search_roots=_T_ROOTS), None,
-     "outside the forms the gate reads"),
+    _unread_vector("search-root insertion argument outside the read forms", "os.environ['EXTRA_ROOT']"),
+    # The closed set of insertion shapes: each shape below, outside it, is refused naming the file, the row and the
+    # argument, never read as the root it seems to spell (Python evaluates each differently, or not at all).
+    _unread_vector("os.path.join with an absolute component", "os.path.join('lib', '/_vendor')"),
+    _unread_vector("absolute component on an unresolved pathlib chain",
+                   "str(Path(__file__).parents[1] / 'lib' / '/_vendor')"),
+    _unread_vector("absolute component on a read pathlib chain",
+                   "str(Path(__file__).resolve().parents[1] / 'lib' / '/_vendor')"),
+    _unread_vector("dot component on a read pathlib chain",
+                   "str(Path(__file__).resolve().parents[1] / 'lib' / '.' / '_vendor')"),
+    _unread_vector("os.path.dirname of a trailing-slash literal", "os.path.dirname('lib/_vendor/child/')"),
+    _unread_vector("a string divided by a string", "'lib' / '_vendor'"),
+    _unread_vector("resolve called on a string", "'lib/_vendor'.resolve()"),
+    _unread_vector("unwrapped unresolved pathlib value", "Path(__file__).parents[1] / 'lib' / '_vendor'"),
+    _unread_vector("unwrapped pathlib value", "Path(__file__).resolve().parents[1] / 'lib' / '_vendor'"),
+    _unread_vector("bare string literal", "'lib/_vendor'"),
+    _unread_vector(".parents index far past the highest read",
+                   "str(Path(__file__).resolve().parents[9223372036854775807] / 'lib' / '_vendor')"),
+    _unread_vector(".parents index one past the highest read",
+                   "str(Path(__file__).resolve().parents[17] / 'lib' / '_vendor')", rel="d16/" + _T_DEEP),
+    _unread_vector("name rebound by an annotated assignment", "ROOT",
+                   source=_T_NAMED % "ROOT: str = 'elsewhere'\n"),
+    _unread_vector("name rebound by an augmented assignment", "ROOT", source=_T_NAMED % "ROOT += '/elsewhere'\n"),
+    _unread_vector("name rebound by a chained assignment", "ROOT", source=_T_NAMED % "ROOT = OTHER = 'elsewhere'\n"),
+    _unread_vector("name rebound as a for target", "ROOT",
+                   source=_T_NAMED % "for ROOT in ('elsewhere',):\n    pass\n"),
+    _unread_vector("name deleted", "ROOT", source=_T_NAMED % "del ROOT\n"),
+    _unread_vector("repo_root defined in the file", "str(repo_root() / 'lib' / '_vendor')",
+                   source=_T_PATH + "def repo_root():\n    return Path('elsewhere')\n"
+                   "sys.path.insert(0, str(repo_root() / 'lib' / '_vendor'))\nimport pkg\n"),
+    _unread_vector("repo_root import shadowed by a def", "str(repo_root() / 'lib' / '_vendor')", (_T_GEN_COMMON,),
+                   source=_T_PATH + "from _gen_common import repo_root\n"
+                   "def repo_root():\n    return Path('elsewhere')\n"
+                   "sys.path.insert(0, str(repo_root() / 'lib' / '_vendor'))\nimport pkg\n"),
+    _unread_vector("repo_root imported from another module", "str(repo_root() / 'lib' / '_vendor')", (_T_ELSEWHERE,),
+                   source=_T_PATH + "from elsewhere import repo_root\n"
+                   "sys.path.insert(0, str(repo_root() / 'lib' / '_vendor'))\nimport pkg\n"),
+    _unread_vector("Path imported from another module", "str(Path(__file__).resolve().parents[1] / 'lib' / '_vendor')",
+                   (("tools/elsewhere.py", "from pathlib import Path\n"),),
+                   source="import os, sys\nfrom elsewhere import Path\n" + _T_VENDOR_LINE + "import pkg\n"),
+    _unread_vector("star import beside a read insertion",
+                   "str(Path(__file__).resolve().parents[1] / 'lib' / '_vendor')", (_T_ELSEWHERE,),
+                   source=_T_PATH + "from elsewhere import *\n" + _T_VENDOR_LINE + "import pkg\n"),
+    _unread_vector("__file__ rebound", "str(Path(__file__).resolve().parents[1] / 'lib' / '_vendor')",
+                   source=_T_PATH + "__file__ = 'elsewhere/x/y.py'\n" + _T_VENDOR_LINE + "import pkg\n"),
     ("uses inside a flow mapping", ((_WF, "steps:\n  - {uses: a/b@v1}\n"),), (), dict(), None,
      "p.yml:2: a line outside the accepted YAML subset"),
     ("uses value in a block scalar", ((_WF, "steps:\n  - uses: >\n      a/b@v1\n"),), (), dict(), None,
@@ -3922,6 +4112,32 @@ MUTANTS = (
     ("row-root-resolved-own-directory", "    if roots and sroot not in roots:\n", "    if False:\n",
      "search-root row beside an own-directory insertion and fixture literals"),
     ("row-live", "    if (rel, sroot) not in used:\n", "    if False:\n", "stale search-root row"),
+    # The closed set of insertion shapes: each check removed in turn reads a shape outside it, caught by its vector.
+    # The refusal naming another argument than the one it read can be caught only by a refusal: its own, whose
+    # whole message the vector requires.
+    ("row-argument-named", "% (rel, rel, sroot, unread[0]))", "% (rel, rel, sroot, 'not-the-argument'))",
+     "search-root insertion argument outside the read forms",
+     ("the insertion-argument refusal itself (row-argument-read), naming another argument",
+      "insertion argument not-the-argument is outside")),
+    ("insert-part-charset", 'INSERT_PART_RE = re.compile(r"[A-Za-z0-9_.-]+")', 'INSERT_PART_RE = re.compile(r".+")',
+     "absolute component on a read pathlib chain"),
+    ("insert-part-dots", 'node.value not in (".", "..")', "True", "dot component on a read pathlib chain"),
+    ("parents-bound", "if not 1 <= up <= MAX_PARENTS_INDEX + 1:", "if not 1 <= up:",
+     ".parents index one past the highest read"),
+    ("str-wrapper-required", "    return _os_path_join(node, rel, bindings)\n",
+     "    return _os_path_join(node, rel, bindings) or _path_chain(node, rel, bindings, named)\n",
+     "unwrapped pathlib value"),
+    ("binding-sole", 'found[0][1] if found and len(found) == 1 and found[0][0] == "assign"',
+     'found[0][1] if found and found[0][0] == "assign"', "name rebound by an annotated assignment"),
+    ("binding-other-forms", "            if id(node) not in plain:\n", "            if False:\n",
+     "name rebound by an augmented assignment"),
+    ("binding-defs", "        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):\n",
+     "        elif False:\n", "repo_root import shadowed by a def"),
+    ("import-identity", "found[0] == INSERT_IMPORTS[name]", "found[0][-1] == INSERT_IMPORTS[name][-1]",
+     "repo_root imported from another module"),
+    ("star-import-unread", 'return None if "*" in bindings else bindings.get(name, [])',
+     "return bindings.get(name, [])", "star import beside a read insertion"),
+    ("builtins-unbound", "return _bindings_of(bindings, name) == []", "return True", "__file__ rebound"),
     # relative imports
     ("relative-module-exists", "                if not ok:\n", "                if False:\n",
      "relative from-import of a missing module"),
