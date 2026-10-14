@@ -947,6 +947,67 @@ def _strip_quoted_heredoc_bodies(command):
     return "".join(out)
 
 
+def _lex_uncertain(command):
+    """FIX-560-R4 (decided item 2): True when the restored round-1 quoting model's reading of
+    `command` is UNCERTAIN - a consumed substitution could read differently under bash - so no
+    consumer may treat a clean lex as proof of what bash will run. The signals, each a shape
+    _skip_quoting does not model the way bash does: a substitution ($(..), `..` or ${..}, nested
+    in a double quote or not) whose consumed span CROSSES A NEWLINE (a comment or heredoc inside
+    it makes bash close it on a different line, swallowing real command lines into one opaque
+    word); a '#' or a '<<' anywhere inside a $(..) or `..` COMMAND substitution (bash starts a
+    comment / reads a heredoc body there; this model only counts quotes and parens); and any
+    construct this scan cannot close (the full lexer raises ValueError on those; this helper
+    never raises). QUOTED heredoc bodies are stripped first (_strip_quoted_heredoc_bodies):
+    their content is literal data under bash and this model alike, so prose there (an
+    apostrophe, a '#') does not flip an otherwise certain read; a top-level '#' comment at a
+    word boundary is skipped for the same reason. Consumers: protected_line lets
+    _protected_line_fallback decide on an uncertain lex even when a benign git segment was
+    lexed (the pl-560r4-unc vectors), and git_discard re-reads the raw lines to NAME the
+    specific work-losing verb (_uncertain_line_lossy). DISCLOSED over-denial (the safe
+    direction): an uncertain command whose raw text pairs git..push with a force/delete/mirror
+    spelling now denies via the fallback even when the push names only a FEATURE ref or is
+    prose (pl-560r4-unc-cost); the same shapes carrying no push spelling still allow (the
+    pl-560r2-*-ctl controls)."""
+    scan = _strip_quoted_heredoc_bodies(command)
+    n = len(scan)
+    i = 0
+    in_dq = False
+    while i < n:
+        c = scan[i]
+        if c == chr(92):
+            i += 2
+            continue
+        if c == '"':
+            in_dq = not in_dq
+            i += 1
+            continue
+        if not in_dq and c == "'":
+            j = scan.find("'", i + 1)
+            if j < 0:
+                return True  # an unpaired single quote: the full lexer raises; read as uncertain here
+            i = j + 1
+            continue
+        if not in_dq and c == "#" and (i == 0 or scan[i - 1] in " \t\n;&|"):
+            nl = scan.find("\n", i)
+            i = n if nl == -1 else nl
+            continue
+        if c == "`" or (c == "$" and i + 1 < n and scan[i + 1] in "({"):
+            cmd_sub = c == "`" or scan[i + 1] == "("
+            try:
+                j = _skip_quoting(scan, i, n)
+            except ValueError:
+                return True  # an unterminated quote or substitution: uncertain by definition
+            span = scan[i:j]
+            if "\n" in span:
+                return True  # the substitution crosses a newline: bash may close it on another line
+            if cmd_sub and ("#" in span or "<<" in span):
+                return True  # a comment or heredoc inside a command substitution: not modelled
+            i = j
+            continue
+        i += 1
+    return False
+
+
 def _lex_command(command, partial=False):
     """Lex the raw Bash command into ordered _Segment records. Raises ValueError on an unbalanced quote or
     escape, a NUL, or an unsupported construct (an UNQUOTED heredoc, a here-string, a process substitution, a
@@ -4933,6 +4994,35 @@ def _nonpristine_discard_actions(segments, cwd):
             "unresolved": unresolved, "saw_actionable": saw_actionable}
 
 
+def _uncertain_line_lossy(command):
+    """FIX-560-R4 (decided item 4): when _lex_uncertain flags an IN-SCOPE command, the whole-command lex
+    may have swallowed the very line that carries the work-losing verb into an opaque word
+    (gd-560r2-reset-reason: a commented paren inside a substitution), leaving the allow-note with only
+    the GENERIC 'a git work-losing verb' wording. bash ends a comment at its newline, so a PHYSICAL LINE
+    is still meaningful there: re-read each raw line on its own and collect the lossy roles of the
+    lines that independently lex as git commands, so the note names the SPECIFIC verb ('git reset',
+    'git reset --hard'). NAMING ONLY: the caller is already in scope via the raw scan and already on
+    the conservative non-pristine snapshot path; this re-read widens no allow and removes no snapshot.
+    A prose line (gd-f17-nested: 'mention git reset --hard ...' inside a heredoc nested in a
+    substitution) does not lex to a 'git' command word, so the generic wording stays there."""
+    found = []
+    for line in command.split("\n"):
+        try:
+            line_segments = _segments(line)
+        except ValueError:
+            continue  # a line the lexer cannot read alone contributes no name
+        for tokens, _sep in line_segments:
+            if _command_word(tokens) != "git":
+                continue
+            sub, args = _git_sub_and_args(tokens)
+            if sub is None:
+                continue
+            role, kind = _discard_role(sub, args)
+            if role != "allow":
+                found.append((role, kind, tokens))
+    return found
+
+
 def git_discard(data):
     """prsunc (integ/preserve-uncommitted-work), PreToolUse/Bash. ULTRA-CONSERVATIVE "recover then allow"
     guard (EN-6). NO-ASK posture: every former ASK is resolved WITHOUT prompting - a recoverable-destructive
@@ -5040,6 +5130,11 @@ def git_discard(data):
     # 'git <verb>' invocation ASKS, without ever consulting the probe (a safe over-ask).
     pristine = _pristine_single_bare_git(command, segments)
     if pristine is None:
+        # FIX-560-R4 (decided item 4): on an UNCERTAIN lex the parsed scan may have swallowed the
+        # work-losing line into an opaque word, leaving only the GENERIC wording; re-read the raw
+        # lines to NAME the specific verb (naming only, see _uncertain_line_lossy).
+        if not lossy and _lex_uncertain(command):
+            lossy = _uncertain_line_lossy(command)
         kind = lossy[0][1] if lossy else "a git work-losing verb"
         # F-D EXPAND (GD-41, Architect-approved): a non-pristine in-scope command still ASKS, but now gets a
         # BEST-EFFORT recovery point first, so an asked-then-approved compound/wrapped discard is recoverable
@@ -6557,14 +6652,24 @@ def _raw_push_segments(command):
     so the backstop judges ONE command segment at a time and an ordinary neighbouring segment (a
     'rm -rf build', a 'git rebase origin/main', a '--format' or '--depth' value, a 'tail -f' in
     another pipe stage) no longer supplies the force spelling or the protected name for an
-    unrelated push. The split is conservative in the safe direction: a quote, backquote or
-    substitution is consumed as ONE opaque unit, so its content (separators included) stays inside
-    the surrounding segment; a backslash keeps its escaped character (a line continuation does not
+    unrelated push. FIX-560-R4: an '&' or '|' that is part of a REDIRECTION OPERATOR is NOT a
+    separator and never splits - an '&' that follows '<' or '>' or is followed by '>' (2>&1, >&2,
+    1>&2, <&0, 2>&-, &>, &>>) and a '|' that follows '>' (the '>|' clobber form) - because bash
+    reads a redirection as part of ONE simple command, so splitting there severed a wrapped push
+    from its force spelling or protected name and silently allowed it (the pl-560r4-red vectors;
+    the old split read 'env git push origin 2>' and '1 --force main' as different segments). The
+    split is conservative where quoting is readable: a quote, backquote or substitution is
+    consumed as ONE opaque unit, so its content (separators included) stays inside the
+    surrounding segment; a backslash keeps its escaped character (a line continuation does not
     split); and on an unterminated or unreadable construct the REST of the command joins the
-    current segment unsplit. Fewer splits only widen a segment, so an unparseable command degrades
-    toward the FIX-560-R2 whole-text read (over-denial), never toward an under-read. Heredoc
-    bodies are NOT modelled and split at their newlines like any other text: push-shaped prose on
-    its own body line still pairs inside its own segment (the disclosed over-denial stands)."""
+    current segment unsplit, degrading toward the FIX-560-R2 whole-text read (over-denial). The
+    splits themselves carry NO such one-sided guarantee: a separator inside text bash reads
+    differently (an unquoted-heredoc body line, a construct the quoting model mis-pairs) can
+    still divide a pairing bash would run together, so this segment read stays one layer beside
+    the parsed classifier and the FIX-560-R4 uncertain-lex fallback, never a proof of safety.
+    Heredoc bodies are NOT modelled and split at their newlines like any other text: push-shaped
+    prose on its own body line still pairs inside its own segment (the disclosed over-denial
+    stands)."""
     segments = []
     start = 0
     i = 0
@@ -6572,6 +6677,14 @@ def _raw_push_segments(command):
     while i < n:
         c = command[i]
         if c in "\n;&|":
+            prev = command[i - 1] if i > 0 else ""
+            nxt = command[i + 1] if i + 1 < n else ""
+            if c == "&" and (prev in ("<", ">") or nxt == ">"):
+                i += 1  # part of a redirection operator (2>&1, >&2, <&0, 2>&-, &>, &>>): not a separator
+                continue
+            if c == "|" and prev == ">":
+                i += 1  # the '>|' clobber redirect: not a separator
+                continue
             segments.append(command[start:i])
             i += 1
             start = i
@@ -6612,9 +6725,14 @@ def _raw_push_guard(command):
     predicate on EVERY call, before the commit-grammar reading and the lexer, so no parse
     outcome and no harmless git segment elsewhere in the command can stand it down: a
     shell-quoting model inside a hook cannot track comments, heredoc bodies and nested
-    substitutions the way bash does, so this layer does not depend on one (the restored round-1
-    lexer is the parsed first line for the shapes the backstop cannot spell, e.g. a hidden push
-    naming no protected branch). DISCLOSED COST (the safe direction): push-shaped prose naming a
+    substitutions the way bash does, so this layer does not depend on
+    one (for the shapes the backstop cannot spell - a hidden push naming no protected branch
+    - the restored round-1 lexer is the parsed first line ONLY while its reading is certain;
+    on an UNCERTAIN lex (_lex_uncertain, FIX-560-R4: a substitution spanning a newline, or a
+    comment or heredoc inside a command substitution)
+    protected_line routes to the broader _protected_line_fallback raw scan, which needs no
+    protected name, rather than let a benign lexed git segment vouch for the command).
+    DISCLOSED COST (the safe direction): push-shaped prose naming a
     protected branch inside a heredoc body line, quoted string, comment or commit message
     DENIES whenever it shares a segment with a push and force spelling (witnessed by pl-cf1 and
     the pl-560r2 vectors); FIX-560-R3 removed only the CROSS-segment pairings (a rebase
@@ -6627,7 +6745,8 @@ def _raw_push_guard(command):
             "AIQT rule prtbrn (protected-branch-integrity): the raw command text pairs a git push "
             "with a force, delete or mirror spelling and a protected branch name within one "
             "command segment. This backstop reads the submitted text on every call, one "
-            "newline/;/&/|-separated segment at a time, including the quoted strings, comments "
+            "segment at a time (split at newlines and at ;/&/| separators outside any readable "
+            "quoting and not part of a redirection operator), including the quoted strings, comments "
             "and heredoc body lines inside that segment, because a quoting model inside a hook "
             "cannot track those the way bash does; push-shaped prose naming a protected branch "
             "beside a push in one segment is denied too (a disclosed over-denial, the safe "
@@ -6688,6 +6807,10 @@ def protected_line(data):
     below carries the restored round-1 nested-quoting model (_skip_quoting), so a push hidden
     behind a nested-substitution heredoc opener is a visible segment again; the lexer remains a
     best-effort reading of bash, not a guarantee, and the backstop is the second layer.
+    FIX-560-R4: where that reading is UNCERTAIN (_lex_uncertain: a substitution spanning a
+    newline, or a comment or heredoc inside a command substitution) a benign lexed git
+    segment no longer suppresses the broad raw fallback; the fallback decides from the raw
+    text (a disclosed over-denial, the safe direction).
     """
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: protected_line wired to unexpected event {!r}; failing closed"
@@ -6764,15 +6887,21 @@ def protected_line(data):
                 "(rule prtbrn); push to a feature branch and merge on green.")
     if pending_deny is not None:
         return _deny(*pending_deny)
-    # The BROAD raw fallback (force/delete spellings with NO protected-name requirement) still
-    # runs only when no git segment was lexed: run on every call it would deny every force-push
-    # to a FEATURE branch (pl-b). The protected-name class no longer depends on this gate:
-    # _raw_push_guard already scanned the raw text on every call (FIX-560-R2), so a harmless
-    # earlier or later git segment can no longer suppress that scan (the old pl-r1/pl-r1b
-    # residual, now closed for pushes naming a protected branch in the wrapped segment). The
-    # NARROWED residual stays disclosed and witnessed (pl-560r3-res1/res1b): a wrapped force
-    # push naming NO protected branch, beside a benign parsed git segment, still allows.
-    if not saw_git and _RAW_GIT_RE.search(command):
+    # The BROAD raw fallback (force/delete spellings with NO protected-name requirement) runs
+    # when no git segment was lexed OR the lex is UNCERTAIN (FIX-560-R4, decided item 2): run on
+    # every call it would deny every force-push to a FEATURE branch (pl-b). On an UNCERTAIN lex
+    # (_lex_uncertain: a substitution spanning a newline, a comment or heredoc inside a command
+    # substitution, or a construct the scan cannot close) the lexed reading may have swallowed a
+    # real push line into one opaque word, so a benign parsed git segment (a 'git status') must
+    # not vouch for the command: the fallback decides from the raw text (the pl-560r4-unc
+    # vectors; DISCLOSED over-denial witnessed by pl-560r4-unc-cost). The protected-name class
+    # does not depend on this gate: _raw_push_guard already scanned the raw text on every call
+    # (FIX-560-R2), so a harmless earlier or later git segment can no longer suppress that scan
+    # (the old pl-r1/pl-r1b residual, closed for pushes naming a protected branch in the wrapped
+    # segment). The NARROWED residual stays disclosed and witnessed (pl-560r3-res1/res1b): a
+    # wrapped force push naming NO protected branch, beside a benign parsed git segment, still
+    # allows on a CERTAIN lex.
+    if (not saw_git or _lex_uncertain(command)) and _RAW_GIT_RE.search(command):
         return _protected_line_fallback(command)
     return _allow()
 

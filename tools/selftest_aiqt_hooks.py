@@ -4878,6 +4878,54 @@ def _main_isolated(monitor):
         pexpect('(pl-560r3-flow8) a tail -f pipe stage beside a plain push to main allows',
                 'git push origin main 2>&1 | tail -f /dev/null', 'allow', cwd=plr)
 
+        # FIX-560-R4 (decided item 1): a redirection operator NEVER splits a raw push segment -
+        # the '&' of 2>&1/>&2/1>&2/<&0/2>&-/&>/&>> and the '|' of >| stay inside their segment -
+        # because bash reads a redirection as part of ONE simple command. The old split put
+        # 'env git push origin 2>' and '1 --force main' in DIFFERENT segments, so a wrapped
+        # protected push slipped the backstop (no segment paired its elements), the parsed path
+        # (the env wrapper hides the push) AND the fallback (suppressed by the leading or
+        # trailing benign git segment): each of these was a SILENT ALLOW at the FIX-560-R3 pin
+        # and must DENY via the raw-text backstop.
+        for _rnm, _rcmd in (
+                ('r1', 'git status && env git push origin 2>&1 --force main'),
+                ('r2', 'git status && env git push --force origin 2>&1 main'),
+                ('r3', 'git status && env git push --force 2>&1 origin main'),
+                ('r4', 'git status && env git push origin --force &>/dev/null main'),
+                ('r5', 'git status && env git push origin &>/dev/null --force main'),
+                ('r6', 'git status && env git push --force origin >&2 main'),
+                ('r7', 'git status && env git push origin 1>&2 -f main'),
+                ('r8', 'env git push origin 2>&1 --force main && git status'),
+                ('r9', 'env git push --force origin 2>&1 main && git status'),
+                ('r10', 'git status && env git push --delete origin 2>&1 main'),
+                ('r11', 'git status && env git push origin 2>&1 --delete main'),
+                ('r12', 'git status && env git push --force origin <&0 main'),
+                ('r13', 'git status && env git push --force origin >|/dev/null main'),
+                ('r14', 'git status && env git push --force origin >| /dev/null main'),
+                ('r15', 'git status && env git push --force origin &>>/dev/null main'),
+                ('r16', 'git status && env git push --force origin 2>&- main'),
+                ('r17', 'git status && env git push origin 2>&1 :main'),
+                ('r18', 'git status; env git push origin 2>&1 +main'),
+                ('r19', 'git status && command git push origin 2>&1 --force main'),
+                ('r20', 'git status && env git push 2>&1 --mirror origin # main'),
+        ):
+            pexpect('(pl-560r4-red-{}) a redirection never splits a wrapped protected push out of its raw segment: denies'.format(_rnm),
+                    _rcmd, 'deny', cwd=plr, detail='raw command text pairs a git push')
+        # The still-allowed controls: ordinary flows keep flowing with the same operators present,
+        # and |& (a real pipeline separator) still splits.
+        pexpect('(pl-560r4-red-c1) flow1 with a trailing 2>&1 still allows',
+                'git fetch origin && git rebase origin/main && git push --force-with-lease origin my-feature 2>&1', 'allow', cwd=plr)
+        pexpect('(pl-560r4-red-c2) a |& pipe stage beside a plain redirected push still allows',
+                'git push origin main 2>&1 |& tail -f /dev/null', 'allow', cwd=plr)
+        pexpect('(pl-560r4-red-c3) the unwrapped redirected force-push keeps denying',
+                'git push origin 2>&1 --force main', 'deny', cwd=plr)
+        pexpect('(pl-560r4-red-c4) |& still splits; a one-segment pairing beside it keeps denying',
+                'git status && env git push --force origin main |& cat', 'deny', cwd=plr, detail='raw command text pairs a git push')
+        # The segmentation itself, asserted for one shape (decided item 1).
+        _r4seg = aiqt_hooks._raw_push_segments('git status && env git push origin 2>&1 --force main')
+        if _r4seg != ['git status ', '', ' env git push origin 2>&1 --force main']:
+            failures.append('(pl-560r4-red-seg) the redirection must stay inside one raw segment; '
+                            'got {!r}'.format(_r4seg))
+
         # FIX-560-R3 mirror abbreviations (decided item 3): the raw backstop recognizes EVERY prefix
         # of --mirror git accepts (--mi/--mir/--mirr/--mirro/--mirror), as it already recognizes
         # --force from '--for' and --delete from '--de'. The wrapped abbreviated forms beside a
@@ -4888,8 +4936,20 @@ def _main_isolated(monitor):
         pexpect('(pl-560r3-mi2) a wrapped --mi push behind a benign git segment: the raw-text backstop denies',
                 'git status && env git push --mi origin # main', 'deny', cwd=plr,
                 detail='raw command text pairs a git push')
-        pexpect('(pl-560r3-mi3) a wrapped --mir push before a trailing benign git segment: denies',
-                'env git push --mir origin # main && git status', 'deny', cwd=plr,
+        # FIX-560-R4 (decided item 4): the old spelling commented OUT its own trailing segment
+        # ('# main && git status' is ONE bash comment), so no trailing benign git segment was
+        # ever lexed and the vector exercised a leading-only arrangement; a REAL trailing segment
+        # needs a newline. The segmentation is asserted too, and the --mirr abbreviation gets its
+        # own witness (the new-mirror vectors previously skipped it).
+        pexpect('(pl-560r3-mi3) a wrapped --mir push before a REAL trailing benign git segment: denies',
+                'env git push --mir origin # main\ngit status', 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
+        _mi3seg = aiqt_hooks._raw_push_segments('env git push --mir origin # main\ngit status')
+        if _mi3seg != ['env git push --mir origin # main', 'git status']:
+            failures.append('(pl-560r3-mi3-seg) the trailing benign git segment must be its own raw '
+                            'segment (and the push segment keeps the commented protected name); got {!r}'.format(_mi3seg))
+        pexpect('(pl-560r3-mi3b) the --mirr abbreviation under the same wrap denies too (witness)',
+                'git status && env git push --mirr origin # main', 'deny', cwd=plr,
                 detail='raw command text pairs a git push')
         pexpect('(pl-560r3-mi4) a wrapped --mirro push behind a benign git segment: denies',
                 'git status && env git push --mirro origin # main', 'deny', cwd=plr,
@@ -4899,6 +4959,50 @@ def _main_isolated(monitor):
                 detail='raw command text pairs a git push')
         pexpect('(pl-560r3-mi6) the same wrapped --mi push with NO protected name in its segment allows (sibling witness)',
                 'git status && env git push --mi origin # feature', 'allow', cwd=plr)
+
+        # FIX-560-R4 (decided item 2): when the lexed reading is UNCERTAIN (_lex_uncertain: a
+        # substitution spanning a newline, or a '#' comment or heredoc inside a command
+        # substitution), a benign parsed git segment no longer suppresses the broad raw fallback:
+        # the fallback decides from the raw text. Each FIX-560-R2 hidden shape is re-spelled so
+        # NEITHER prior layer can deny it - no literal protected name for the backstop, and the
+        # push line is swallowed into an opaque word, so the parsed classifier never sees it -
+        # and each was therefore a SILENT ALLOW at the FIX-560-R3 pin, where the leading
+        # 'git status' set saw_git and suppressed the fallback. The R2 shapes that had no
+        # leading benign segment get one HERE: that suppression is exactly what these vectors
+        # must defeat. Each must DENY with the fallback's fail-safe reason.
+        _u560 = (
+            ('comment-paren', 'git status\necho "$(echo hi # (\n)"\ngit push --force origin main\necho ")"'),
+            ('comment-apostrophe', 'git status\necho "$(echo hi # it\'s\n)"\ngit push --force origin main\necho "\')"'),
+            ('heredoc-paren', 'git status\necho "$(cat <<\'EOF\'\n(\nEOF\n)"\ngit push --force origin main\necho ")"'),
+            ('heredoc-quote', 'git status\necho "$(cat <<\'EOF\'\n\'\nEOF\n)"\ngit push --force origin main\necho \')"\'\\\''),
+            ('heredoc-unquoted', 'git status\necho "$(cat <<EOF\n(\nEOF\n)"\ngit push --force origin main\necho ")"'),
+            ('nested-heredoc-close', 'git status\necho "$(cat <<\'EOF\'\n)"<<\'X\'\nEOF\n)"\ngit push --force origin main'),
+            ('commented-close', 'git status\necho "$(echo ok # )\n echo "<<\'EOF\'"\n)"\ngit push --force origin main'),
+            ('commented-close-heredoc', 'git status\necho "$(echo a # )" <<\'EOF\'\n)"\ngit push --force origin main\nEOF'),
+        )
+        for _unm, _ucmd in _u560:  # each _ucmd still spells the R2 push; re-spelled below
+            for _usn, _usp in (
+                ('head', 'git push --force origin HEAD'),
+                ('bare', 'git push --force'),
+                ('at', 'git push -f origin @'),
+                ('frag', 'git push --force origin ma""in'),
+            ):
+                pexpect('(pl-560r4-unc-{}-{}) an uncertain lex: a benign git segment does not suppress the fallback'.format(_unm, _usn),
+                        _ucmd.replace('git push --force origin main', _usp), 'deny', cwd=plr,
+                        detail='appears to force-push or delete')
+        # The DISCLOSED over-denial this adds (the safe direction), witnessed: an uncertain lex
+        # beside a push naming only a FEATURE ref now denies via the fallback (the pin allowed it
+        # silently); the same shapes carrying no push spelling still allow (the pl-560r2-*-ctl
+        # vectors above stay the standing controls).
+        pexpect('(pl-560r4-unc-cost) DISCLOSED over-denial: an uncertain lex beside a FEATURE force-push denies via the fallback',
+                'git status\necho "$(echo hi # (\n)"\ngit push --force origin my-feature\necho ")"', 'deny', cwd=plr,
+                detail='appears to force-push or delete')
+        # The uncertainty signal itself, pinned at both ends (an uncertain shape reads True; a
+        # plain redirected pipeline reads False, so the gate cannot quietly widen to every command).
+        if not aiqt_hooks._lex_uncertain('git status\necho "$(echo hi # (\n)"\necho done\necho ")"'):
+            failures.append('(pl-560r4-unc-sig) the commented-paren substitution shape must read as an uncertain lex')
+        if aiqt_hooks._lex_uncertain('git push origin main 2>&1 | tail -f /dev/null'):
+            failures.append('(pl-560r4-unc-sig2) a plain redirected pipeline must NOT read as an uncertain lex')
 
         # Push retains its HEAD probe. Commit uses the separate bounded proof probe.
         _orig_head = aiqt_hooks._head_branch
@@ -5551,18 +5655,19 @@ def _main_isolated(monitor):
         except ValueError:
             failures.append("(f17-lex-raise) a QUOTED heredoc must NOT raise (its body is literal data; "
                             "finding 17)")
-        # No lexical Bash guard fires on the quoted-heredoc prose (each returns allow / allow-note, never a
-        # deny caused by the body). git_discard's UNCONDITIONAL raw scan is heredoc-body-stripped too.
+        # No lexical Bash guard fires on the quoted-heredoc prose: each returns the exact SILENT
+        # (0, None, None) allow (FIX-560-R4, decided item 4, strengthened this control from
+        # 'not deny', so an ask, a note or an explicit-allow can no longer false-pass).
+        # git_discard's UNCONDITIONAL raw scan is heredoc-body-stripped too.
         for _f17g in (aiqt_hooks.diff_source_pretool, aiqt_hooks.gate_weakening,
                       aiqt_hooks.bash_absolute_paths, aiqt_hooks.git_explicit_binding,
                       aiqt_hooks.commit_msg_subst, aiqt_hooks.git_discard):
-            _f17c, _f17o, _ = _f17g({"hook_event_name": "PreToolUse", "tool_name": "Bash",
-                                     "tool_input": {"command": _f17_quoted}, "cwd": "/tmp"})
-            _f17d = (_f17o.get("hookSpecificOutput", {}).get("permissionDecision")
-                     if isinstance(_f17o, dict) else None)
-            if _f17d == "deny":
-                failures.append("(f17-guard-{}) a lexical guard must not fire on quoted-heredoc prose "
-                                "(finding 17); got deny".format(getattr(_f17g, "__name__", _f17g)))
+            _f17res = _f17g({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                             "tool_input": {"command": _f17_quoted}, "cwd": "/tmp"})
+            if _f17res != (0, None, None):
+                failures.append("(f17-guard-{}) a lexical guard must stay SILENT (0, None, None) on "
+                                "quoted-heredoc prose (finding 17); got {!r}"
+                                .format(getattr(_f17g, "__name__", _f17g), _f17res))
         # DISCRIMINATION: the SAME lossy verb OUTSIDE a quoted heredoc is still caught (body-strip preserves
         # everything outside the body), so the allow above is the body exclusion, not a blanket pass.
         _f17r, _f17ro, _ = aiqt_hooks.git_discard(
@@ -5592,19 +5697,39 @@ def _main_isolated(monitor):
             texpect("(tok-lexnest-{}) a nested-quote heredoc opener is data; the hidden git push is a visible final segment".format(_xnm),
                     (len(_argv(_xcmd)), _argv(_xcmd)[-1]),
                     (2, ["git", "push", "--force", "origin", "main"]))
+            # FIX-560-R4 (decided item 3): verify the recovery against the REPOSITORY, not the
+            # banner: record the recovery refs before the call, require exactly one NEW ref after
+            # it, require the note to NAME that ref, and read the saved file.txt back out of the
+            # ref requiring the exact dirty content, so a recovery that returns its banner without
+            # saving anything is red here.
+            _xbefore = set(_recovery_refs(gdl_repo))
             _xro = aiqt_hooks.git_discard({"hook_event_name": "PreToolUse", "tool_name": "Bash",
                                            "tool_input": {"command": _xhead + '\ngit reset --hard HEAD~1'}, "cwd": gdlr})
             _xobj = _xro[1] if isinstance(_xro[1], dict) else {}
             _xdec = (_xobj.get("hookSpecificOutput") or {}).get("permissionDecision")
             _xnote = _xobj.get("systemMessage", "")
+            _xnew = sorted(set(_recovery_refs(gdl_repo)) - _xbefore)
+            _xsaved = None
+            if len(_xnew) == 1:
+                try:
+                    _xshow = subprocess.run(["git", "-C", gdlr, "show", _xnew[0] + ":file.txt"],
+                                            capture_output=True, text=True, timeout=30,
+                                            env=git_fixture_env())
+                    _xsaved = _xshow.stdout if _xshow.returncode == 0 else None
+                except (subprocess.SubprocessError, OSError):
+                    _xsaved = None
             if (_xro[0] != 0 or _xdec is not None
                     or "git reset --hard is not a pristine" not in _xnote
-                    or "A pre-command recovery snapshot was saved" not in _xnote):
+                    or "A pre-command recovery snapshot was saved" not in _xnote
+                    or len(_xnew) != 1 or ("at ref " + _xnew[0]) not in _xnote
+                    or _xsaved != "uncommitted change\n"):
                 failures.append("(gd-lexnest-{}) a hidden work-losing verb behind a nested-quote heredoc "
                                 "opener must stay IN SCOPE as a snapshot-backed allow-note naming the "
                                 "specific verb (decision: exit 0 with NO permissionDecision; reason: the "
-                                "prsunc pristine note; recovery: a saved pre-command snapshot), got {!r}"
-                                .format(_xnm, _xro))
+                                "prsunc pristine note; recovery: exactly ONE new refs/aiqt-recovery ref, "
+                                "NAMED in the note, whose tree holds the dirty file.txt content - a banner "
+                                "with no saved snapshot is red), got {!r} (new refs {!r}, saved {!r})"
+                                .format(_xnm, _xro, _xnew, _xsaved))
         # FIX-560-R3 flips gd-f17-nested: with the round-1 quote-aware strip RESTORED, work-losing
         # prose in a quoted heredoc body NESTED INSIDE A SUBSTITUTION stays in the raw scan (nested
         # quoted text is kept verbatim), so git_discard OVER-ASKS with the generic allow-note (the
@@ -5622,12 +5747,15 @@ def _main_isolated(monitor):
             failures.append(
                 '(gd-f17-nested) work-losing prose in a quoted heredoc body nested in a substitution must stay in the git_discard raw scan (FIX-560-R3: an allow-note over-ask with exit 0, NO permissionDecision and the generic work-losing wording, never a silent allow and never a deny), got {!r}'.format(_f17n))
         # FIX-560-R3 (decided item 4): assert the DECISION (exit 0 with NO permissionDecision, so a
-        # deny carrying the same banner text can no longer false-pass) and the REASON, not only the
-        # exit status and banner. With the round-1 lexer restored, _skip_quoting reads the commented
-        # paren as a real paren (a comment inside a substitution is not modelled), so the reset is
-        # swallowed into the opaque word and stays in scope through the RAW scan with the GENERIC
-        # work-losing wording; bash itself would run the final lines, and the in-scope allow-note
-        # (never a silent allow) is the safe outcome on this clean fixture.
+        # deny carrying the same banner text can no longer false-pass) and the REASON. FIX-560-R4
+        # (decided item 4): the reason must name the SPECIFIC verb. With the round-1 lexer
+        # restored, _skip_quoting reads the commented paren as a real paren (a comment inside a
+        # substitution is not modelled), swallowing the reset into the opaque word; the GENERIC
+        # work-losing wording could then ship while this test passed. The uncertain-lex per-line
+        # re-read (_uncertain_line_lossy) now names it, so this predicate is RED whenever the
+        # reset is swallowed back into the generic wording. bash itself would run the final lines,
+        # and the in-scope allow-note (never a silent allow) is the safe outcome on this clean
+        # fixture.
         _rst560 = aiqt_hooks.git_discard({'hook_event_name': 'PreToolUse', 'tool_name': 'Bash',
                                          'tool_input': {'command': 'git status\necho "$(echo hi # (\n)"\ngit reset --hard HEAD~1\necho ")"'},
                                          'cwd': brr})
@@ -5635,9 +5763,9 @@ def _main_isolated(monitor):
         _rst560_dec = (_rst560_obj.get('hookSpecificOutput') or {}).get('permissionDecision')
         _rst560_note = _rst560_obj.get('systemMessage', '')
         if (_rst560[0] != 0 or _rst560_dec is not None
-                or 'is not a pristine' not in _rst560_note or 'prsunc' not in _rst560_note):
+                or 'git reset --hard is not a pristine' not in _rst560_note or 'prsunc' not in _rst560_note):
             failures.append(
-                '(gd-560r2-reset-reason) the in-scope work-losing command behind a nested-quote commented-paren line must produce the prsunc allow-note (exit 0, NO permissionDecision, the pristine-gate reason), got {!r}'.format(_rst560))
+                '(gd-560r2-reset-reason) the in-scope work-losing command behind a nested-quote commented-paren line must produce the prsunc allow-note NAMING THE RESET (exit 0, NO permissionDecision, the reset-specific pristine-gate reason), got {!r}'.format(_rst560))
 
         # === L11: additional diff-source vectors (the AIRTIGHT-NARROW contract) =======================
         dexpect("(l11-d1) bare git diff denies", "git diff", "deny")
