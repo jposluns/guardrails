@@ -6669,15 +6669,42 @@ def self_test():
     # both flag forms, and the disagreeing-walk vector pins that
     # _raw_lexemes returns None rather than raws another tokenization
     # produced.
+    # FIX-551-R10 (PR 551 round-9 review, MINOR): the shorter list alone
+    # caught a removed length guard only through an IndexError, so a
+    # longer list carrying the reviewed spelling at the index of the flag
+    # now pins the guard through its assertion; the reviewed list of the
+    # same length is the control that earns the mask, and an IndexError
+    # is recorded as a failure instead of ending the run.
     for form, raw_tokens in (
             ("space", ["python3", "tools/check_leaks.py", "--base",
                        "$PUSH_BEFORE"]),
             ("equals", ["python3", "tools/check_leaks.py",
                         "--base=$PUSH_BEFORE"])):
-        for label, raws in (("no raws given", None),
-                            ("a length-mismatched raws list", [])):
-            refused = normalize(raw_tokens, raws=raws)
+        # The reviewed workflow spelling double-quotes the flag value.
+        flag, equals, value = raw_tokens[-1].rpartition("=")
+        reviewed = raw_tokens[:-1] + [flag + equals + "\"" + value + "\""]
+        granted = normalize(raw_tokens, raws=reviewed)
+        count += 1
+        if (not granted.ok or granted.value
+                != "tools/check_leaks.py --base <ref:" + value + ">"):
+            failures.append(
+                "35z normalize control ({} form): the reviewed raw "
+                "spelling must earn the masked identity, got ok={} "
+                "code={!r}".format(form, granted.ok, granted.code))
+        for label, raws in (
+                ("no raws given", None),
+                ("a shorter raws list", []),
+                ("a longer raws list carrying the reviewed spelling",
+                 reviewed + ["--self-test"])):
             count += 1
+            try:
+                refused = normalize(raw_tokens, raws=raws)
+            except IndexError as exc:
+                failures.append(
+                    "35z normalize ({} form, {}): indexed past the raws "
+                    "list ({}); the length guard must drop a mismatched "
+                    "list".format(form, label, exc))
+                continue
             if refused.ok or refused.code != "masked-spelling":
                 failures.append(
                     "35z normalize without raw evidence ({} form, {}): "
@@ -6800,6 +6827,49 @@ def self_test():
                 "37 control {}: unexpected scalar-blank-indent "
                 "diagnostic: {!r}".format(
                     label, at_or_below.diagnostics))
+
+    # FIX-551-R10 (PR 551 round-9 review, MEDIUM): the reader holds the
+    # deepest leading blank, so the order of the leading blanks never
+    # decides the outcome. Each vector below puts a blank past the content
+    # indentation and a blank at column 0 ahead of the first content line,
+    # one order each; before these vectors a mutant keeping only the first
+    # leading blank passed the second order, and one keeping only the last
+    # passed the first, each with the suite green.
+    for label, blanks in (
+            ("the deeper blank first", (" " * 13, "")),
+            ("the deeper blank last", ("", " " * 13))):
+        two_blanks = evaluate(
+            local_msg,
+            with_on(ci_fixture(common, block_step(
+                blanks + ("            echo ok",))), defaults),
+            msg_waiver, msg_side)
+        case("37 two leading blanks, one past the content indentation, are "
+             "refused in either order: " + label, two_blanks, 2)
+        count += 1
+        if not any(item.code == "scalar-blank-indent"
+                   for item in two_blanks.diagnostics):
+            failures.append(
+                "37 two leading blanks ({}): no scalar-blank-indent "
+                "diagnostic: {!r}".format(label, two_blanks.diagnostics))
+
+    # FIX-551-R10 (PR 551 round-9 review, MINOR): YAML keeps a blank after
+    # the first content line inside the scalar however deep it is, so the
+    # reader judges leading blanks only; this control holds a later blank
+    # indented past the content indentation accepted.
+    later_blank = evaluate(
+        local_msg,
+        with_on(ci_fixture(common, block_step(
+            ("            echo ok", " " * 20, "            echo again"))),
+            defaults),
+        msg_waiver, msg_side)
+    case("37 control: a blank after the first content line, indented past "
+         "the content indentation, stays inside the scalar", later_blank, 0)
+    count += 1
+    if any(item.code == "scalar-blank-indent"
+           for item in later_blank.diagnostics):
+        failures.append(
+            "37 control later blank: unexpected scalar-blank-indent "
+            "diagnostic: {!r}".format(later_blank.diagnostics))
 
     # FIX-551-R9 (PR 551 round-8 review, MINOR): the YAML feature screen
     # reads an anchor or alias spelling only after whitespace, a colon
