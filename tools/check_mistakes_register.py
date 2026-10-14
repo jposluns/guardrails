@@ -22,7 +22,10 @@ has no tip to anchor: --update-anchor inspects the anchor entry first (an unusab
 refuses), writes nothing and reports no advance. RESIDUAL: concurrent --update-anchor runs are not
 serialized against each other; each advance is atomic, but the last replace wins, so a slower green
 run can move the anchor back to an older verified tip. A stale anchor temporary left by an
-interrupted run blocks the advance (exclusive creation) until it is removed by hand. The anchor write
+interrupted run AT THE CURRENT PROCESS ID'S PATHNAME blocks the advance (exclusive creation) until it
+is removed by hand; a temporary under another process id blocks nothing and is left in place. A failed
+advance removes its temporary and says so, and a cleanup that itself fails is reported with the
+temporary's path beside the write failure, never swallowed. The anchor write
 never opens an existing entry: a non-regular anchor entry (a symlink, dangling or live, included)
 is refused as cannot-evaluate with its target neither created nor rewritten, and a green advance
 lands by atomic os.replace of an exclusively created temporary in the anchor's directory. Fail-closed: a
@@ -34,7 +37,25 @@ entry that exists but is unusable (anchor presence is an explicit lstat whose on
 is ENOENT: a dangling symlink, a non-regular file, or an lstat failure such as EIO is never read
 as a missing anchor), or a declared untracked register with no anchor) is a distinct cannot-evaluate
 failure (exit 2), never a
-silent skip nor a HEAD-against-itself self-comparison (chkfcl/grdinp). With no registry, or no declared
+silent skip nor a HEAD-against-itself self-comparison (chkfcl/grdinp). The LIVE leg resolves its
+validation root from this gate's own installed location (gate_root: the nearest ancestor holding a
+.git entry of ANY type, inspected through entry_state, whose only absence answer is ENOENT) and
+requires git itself to confirm that root as a repository toplevel (confirmed_root: rev-parse
+--show-toplevel, realpath-compared) BEFORE any registry or register is read: an unresolvable,
+uninspectable or unconfirmed root is cannot-evaluate (exit 2), never a cwd fallback and never a
+trusted marker. Every git subprocess this gate runs (the root probe and the authority reads:
+ls-files, merge-base, show, cat-file) runs under git_authority_env(), with EVERY GIT_-prefixed
+environment variable removed (GIT_DIR, GIT_WORK_TREE, GIT_COMMON_DIR, GIT_INDEX_FILE,
+GIT_OBJECT_DIRECTORY, GIT_ALTERNATE_OBJECT_DIRECTORIES, GIT_CEILING_DIRECTORIES,
+GIT_DISCOVERY_ACROSS_FILESYSTEM, GIT_CONFIG*, GIT_NAMESPACE included), so a caller-supplied git
+environment never redirects discovery or an authority read, and ONLY the config-ISOLATION pins
+re-applied, each at the single subtractive value the self-test scrub sets (GIT_CONFIG_NOSYSTEM at
+"1", GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM at os.devnull), so a scrubbed self-test's authority
+reads keep reading NO system or global git configuration while a pin at any other value (a config
+FILE of the caller's choosing can carry core.worktree or safe.directory) stays removed; HOME and
+the on-disk git configuration are kept (the live reads need the caller's safe.directory
+trust). With a confirmed root but no
+registry, or no declared
 register path, the live leg is NOT APPLICABLE and the self-test carries the assurance in CI; registry
 PRESENCE is an explicit lstat whose only absence answer is ENOENT (a dangling or uninspectable
 registry entry is cannot-evaluate, never NOT APPLICABLE and never a silent fall-through to the
@@ -66,9 +87,6 @@ import stat
 import subprocess
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root  # noqa: E402
-
 REGISTRY_FILES = (".aiqt/orchestration.local.json", ".aiqt/orchestration.json")
 STATUSES = ("proposed", "accepted", "landed", "declined", "superseded")
 ZERO = "0" * 64
@@ -97,9 +115,103 @@ def _pairs_without_duplicates(pairs):
     return dict(pairs)
 
 
+def git_authority_env():
+    """A copy of the CURRENT process environment with every GIT_-prefixed variable removed and
+    ONLY the config-ISOLATION pins re-applied, for EVERY git subprocess this gate and the
+    appender run (the root-confirmation probe and the authority reads: ls-files, merge-base,
+    show, cat-file, rev-parse). A caller-supplied GIT_DIR, GIT_WORK_TREE, GIT_COMMON_DIR,
+    GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY, GIT_ALTERNATE_OBJECT_DIRECTORIES,
+    GIT_CEILING_DIRECTORIES, GIT_DISCOVERY_ACROSS_FILESYSTEM, GIT_CONFIG* or GIT_NAMESPACE
+    would redirect git's repository discovery or its object, ref and index reads to a
+    repository of the caller's choosing (git exports several of these to hook children; an
+    environment-supplied config source, GIT_CONFIG_PARAMETERS or the GIT_CONFIG_COUNT/KEY/VALUE
+    family or a config FILE named by a caller-valued GIT_CONFIG_GLOBAL or GIT_CONFIG_SYSTEM,
+    can carry core.worktree or safe.directory), so an unscrubbed probe could confirm a root
+    that is only a marker and an unscrubbed authority read could consult the wrong repository.
+    The drop is the allowlist stance the pack's other scrubs take: EVERY GIT_-prefixed
+    variable, not an enumerated family. THREE pins are then re-applied, each ONLY at the exact
+    value the self-test scrub (_git_fixture_env) sets, because at that value each is purely
+    SUBTRACTIVE: it removes a configuration source while naming no repository, object store,
+    index, worktree or configuration content, so it cannot redirect discovery or an authority
+    read, and its worst effect is a lost trust entry, on which git fails and this gate refuses
+    (fail closed). The pins are GIT_CONFIG_NOSYSTEM at "1" (skip the system config), and
+    GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM at os.devnull (an EMPTY config in place of the
+    global and system files); a pin at ANY other value is dropped with the rest. This keeps a
+    scrubbed self-test's config isolation intact across the probe and the authority reads (the
+    fixture-environment suite's system lane plants a system git config and fails a member
+    whose git call sheds the pins). HOME, XDG_CONFIG_HOME and the on-disk git configuration
+    are KEPT, because the live gate reads the real repository and needs the caller's trust
+    configuration (safe.directory)."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    if os.environ.get("GIT_CONFIG_NOSYSTEM") == "1":
+        env["GIT_CONFIG_NOSYSTEM"] = "1"
+    for pin in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"):
+        if os.environ.get(pin) == os.devnull:
+            env[pin] = os.devnull
+    return env
+
+
+def entry_state(path):
+    """The ONE entry-state read behind every absence test in this gate and the appender (registry
+    and anchor presence, the .git marker walk, the mkdir ancestor walk, the landed check_ref, and
+    the self-tests' own absence assertions): an explicit os.lstat whose only absence answer is
+    ENOENT. Returns the lstat result when an entry of ANY type is present (a dangling symlink
+    included: presence is the entry, not its target), None only on confirmed absence
+    (FileNotFoundError), and raises CannotEvaluate naming the path and the error for any other
+    failure (EIO, EACCES, ENOTDIR, ...): an uninspectable entry is never read as absent."""
+    try:
+        return os.lstat(str(path))
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise CannotEvaluate("the entry at {} cannot be inspected ({}); only confirmed absence "
+                             "(ENOENT) reads as absent".format(path, exc))
+
+
+def gate_root(start):
+    """The validation-root CANDIDATE shared by this gate's live leg and the appender: the nearest
+    ancestor of START (the installed tool's own directory) holding a .git ENTRY of ANY type,
+    selected through entry_state, so ENOENT is the only absence (a dangling .git symlink is
+    SELECTED, never walked past, and left for confirmed_root to refuse) and any other inspection
+    failure raises CannotEvaluate, never reads as absence and never walks past the marker.
+    Returns None when no ancestor holds a .git entry. The candidate is only a MARKER until
+    confirmed_root accepts it."""
+    start = Path(start)
+    for anc in [start, *start.parents]:
+        if entry_state(anc / ".git") is not None:
+            return anc
+    return None
+
+
+def confirmed_root(root):
+    """True only when git itself, run under git_authority_env() (a caller-supplied GIT_DIR or
+    GIT_WORK_TREE could otherwise make git confirm an arbitrary directory), confirms ROOT as a
+    repository toplevel: rev-parse --show-toplevel must succeed AND name ROOT itself
+    (realpath-compared, so a discovery that walked past the candidate's marker to an OUTER
+    repository, past an empty nested .git directory for example, is refused). A bare .git entry
+    (an invalid gitfile, an empty .git directory, a dangling .git symlink) is a repository
+    MARKER, not a repository. A valid linked worktree passes: git reports the worktree's own
+    toplevel."""
+    try:
+        probe = subprocess.run(["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+                               capture_output=True, text=True, timeout=10,
+                               env=git_authority_env())
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if probe.returncode != 0 or not probe.stdout.strip():
+        return False
+    try:
+        return os.path.realpath(probe.stdout.splitlines()[0]) == os.path.realpath(str(root))
+    except OSError:
+        return False
+
+
 def verify_lines(lines, root=None, prefix="MR-"):
     """Return a list of violation strings for the raw register lines (empty = clean). prefix is the
-    register's id family (MR- for the mistakes register, AT- for an attestations register)."""
+    register's id family (MR- for the mistakes register, AT- for an attestations register). The
+    landed-row commit read runs git under git_authority_env(), and a landed check_ref whose entry
+    inspection fails with anything but ENOENT raises CannotEvaluate through entry_state (an
+    uninspectable check_ref is never read as absent or present)."""
     problems, prev_line, ids_born, last_status = [], None, {}, {}
     for n, line in enumerate(lines, 1):
         if not line.strip():
@@ -149,7 +261,8 @@ def verify_lines(lines, root=None, prefix="MR-"):
             commit, check_ref, check_ok = row.get("commit"), row.get("check_ref"), False
             if not isinstance(commit, str) or subprocess.run(
                     ["git", "-C", str(root), "cat-file", "-e", str(commit) + "^{commit}"],
-                    capture_output=True, timeout=10).returncode != 0:
+                    capture_output=True, timeout=10,
+                    env=git_authority_env()).returncode != 0:
                 problems.append("line {}: landed row cites a commit that does not exist".format(n))
             # check_ref is a REPO-RELATIVE path (schema); an absolute value would discard root and let
             # any host file satisfy the check, so reject it and confirm containment under root (grdinp).
@@ -158,7 +271,7 @@ def verify_lines(lines, root=None, prefix="MR-"):
                     check_root = Path(root).resolve()
                     check_path = (check_root / check_ref).resolve()
                     check_path.relative_to(check_root)
-                    check_ok = check_path.exists()
+                    check_ok = entry_state(check_path) is not None
                 except (OSError, ValueError):
                     check_ok = False
             if not check_ok:
@@ -178,7 +291,10 @@ def verify_append_only(root, path, lines, allow_missing_anchor=False):
     back to comparing a possibly-tampered HEAD against itself, and a broken git never routes a tracked
     register into the anchor leg. allow_missing_anchor is set only by the --update-anchor bootstrap
     that establishes the first anchor (it covers any unanchored untracked register, not only an empty
-    one, because a second append must still land before the first anchor is set)."""
+    one, because a second append must still land before the first anchor is set). Every git read
+    here runs under git_authority_env(), so a caller-supplied git environment never redirects the
+    tracked decision or the authority reads, and anchor PRESENCE goes through the shared
+    entry_state (ENOENT-only absence)."""
     rel = None
     try:
         rel = str(path.resolve().relative_to(Path(root).resolve()))
@@ -191,7 +307,8 @@ def verify_append_only(root, path, lines, allow_missing_anchor=False):
         # untracked anchor leg and its missing-anchor allowance (chkfcl).
         try:
             probe = subprocess.run(["git", "-C", str(root), "ls-files", "--error-unmatch", rel],
-                                   capture_output=True, timeout=10)
+                                   capture_output=True, timeout=10,
+                                   env=git_authority_env())
         except (OSError, subprocess.SubprocessError) as exc:
             raise CannotEvaluate("cannot decide whether the register is tracked ({})".format(exc))
         if probe.returncode not in (0, 1):
@@ -203,7 +320,7 @@ def verify_append_only(root, path, lines, allow_missing_anchor=False):
             try:
                 base = subprocess.run(["git", "-C", str(root), "merge-base", "HEAD",
                                        "origin/HEAD"], capture_output=True, text=True,
-                                      timeout=10)
+                                      timeout=10, env=git_authority_env())
             except (OSError, subprocess.SubprocessError) as exc:
                 raise CannotEvaluate("cannot compute the register authority from origin/HEAD: "
                                      "{}".format(exc))
@@ -213,7 +330,8 @@ def verify_append_only(root, path, lines, allow_missing_anchor=False):
             ref = base.stdout.strip()
             try:
                 old = subprocess.run(["git", "-C", str(root), "show", "{}:{}".format(ref, rel)],
-                                     capture_output=True, text=True, timeout=10)
+                                     capture_output=True, text=True, timeout=10,
+                                     env=git_authority_env())
             except (OSError, subprocess.SubprocessError) as exc:
                 raise CannotEvaluate("cannot read the register at its merge-base authority: "
                                      "{}".format(exc))
@@ -232,17 +350,17 @@ def verify_append_only(root, path, lines, allow_missing_anchor=False):
     # non-regular file) is an authority that cannot be read: each is cannot-evaluate, never the
     # allowance.
     try:
-        os.lstat(str(anchor))
-    except FileNotFoundError:
+        anchor_entry = entry_state(anchor)
+    except CannotEvaluate as exc:
+        raise CannotEvaluate("the anchor entry cannot be inspected ({}); an inspection failure "
+                             "that is not ENOENT is never the missing-anchor "
+                             "allowance".format(exc))
+    if anchor_entry is None:
         if not allow_missing_anchor:
             raise CannotEvaluate("the declared untracked register has no anchor; run "
                                  "--update-anchor to establish the baseline (an absent authority "
                                  "is not a clean result)")
         return []
-    except OSError as exc:
-        raise CannotEvaluate("the anchor entry cannot be inspected ({}); an inspection failure "
-                             "that is not ENOENT is never the missing-anchor "
-                             "allowance".format(exc))
     try:
         anchor_stat = os.stat(str(anchor))
     except OSError as exc:
@@ -284,17 +402,20 @@ def update_anchor(path, lines):
     symlink, dangling or live, included) is refused as CannotEvaluate, and the payload lands by
     atomic os.replace of an exclusively created temporary in the same directory (O_NOFOLLOW
     included), so no link is ever followed and no link target is ever created or rewritten; a
-    failed write or replace removes the temporary and leaves the previous anchor in place. A
-    STALE temporary (an interrupted earlier run) refuses the advance and must be removed by
-    hand. Residuals: an entry planted between the inspection and the replace is REPLACED as a
-    whole entry, never followed; concurrent --update-anchor runs are not serialized against
-    each other (the last replace wins)."""
+    failed write, short write, close or replace removes the temporary, leaves the previous
+    anchor in place, and the refusal SAYS what happened to the temporary; a cleanup that itself
+    fails is reported with the temporary's path beside the write failure, never swallowed. A
+    STALE temporary refuses the advance only at the CURRENT process id's pathname (the
+    exclusive creation's own name); a temporary left under another process id blocks nothing
+    and is left in place, and a creation failure that is not EEXIST names the actual error
+    instead of blaming a stale temporary. The entry inspection goes through the shared
+    entry_state (ENOENT-only absence). Residuals: an entry planted between the inspection and
+    the replace is REPLACED as a whole entry, never followed; concurrent --update-anchor runs
+    are not serialized against each other (the last replace wins)."""
     anchor = Path(str(path) + ".anchor")
     try:
-        entry = os.lstat(str(anchor))
-    except FileNotFoundError:
-        entry = None
-    except OSError as exc:
+        entry = entry_state(anchor)
+    except CannotEvaluate as exc:
         raise CannotEvaluate("the anchor entry cannot be inspected before the anchor write "
                              "({})".format(exc))
     if entry is not None and not stat.S_ISREG(entry.st_mode):
@@ -307,10 +428,14 @@ def update_anchor(path, lines):
     tmp_path = "{}.tmp.{}".format(anchor, os.getpid())
     try:
         fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
-    except OSError as exc:
+    except FileExistsError as exc:
         raise CannotEvaluate("the anchor temporary cannot be created ({}); a stale temporary "
-                             "from an interrupted run must be removed by hand before the "
-                             "anchor can advance".format(exc))
+                             "at this process id's pathname ({}), left by an interrupted "
+                             "earlier run, blocks the advance and must be removed by hand "
+                             "before the anchor can advance".format(exc, tmp_path))
+    except OSError as exc:
+        raise CannotEvaluate("the anchor temporary at {} cannot be created "
+                             "({})".format(tmp_path, exc))
     problem = None
     try:
         try:
@@ -327,8 +452,11 @@ def update_anchor(path, lines):
     if problem is not None:
         try:
             os.unlink(tmp_path)
-        except OSError:
-            pass
+        except OSError as exc:
+            problem += ("; the anchor temporary at {} could not be removed ({}) and must be "
+                        "removed by hand".format(tmp_path, exc))
+        else:
+            problem += "; the anchor temporary at {} was removed".format(tmp_path)
         raise CannotEvaluate(problem)
     return True
 
@@ -342,14 +470,14 @@ def run(root, update=False):
         # closed, never NOT APPLICABLE and never a silent fall-through to the lower-priority
         # registry file.
         try:
-            os.lstat(str(p))
-        except FileNotFoundError:
-            continue
-        except OSError as exc:
+            reg_entry = entry_state(p)
+        except CannotEvaluate as exc:
             print("error: the orchestration registry at {} cannot be inspected ({}); only "
                   "confirmed absence (ENOENT) is a missing registry; fail-closed".format(
                       rel, exc))
             return 2
+        if reg_entry is None:
+            continue
         reg_found = True
         try:
             reg = json.loads(p.read_text(encoding="utf-8"))
@@ -385,7 +513,11 @@ def run(root, update=False):
         except OSError as exc:
             print("error: the DECLARED {} is unreadable ({}); fail-closed".format(key, exc))
             return 2
-        line_problems = verify_lines(lines, root=root, prefix=prefix)
+        try:
+            line_problems = verify_lines(lines, root=root, prefix=prefix)
+        except CannotEvaluate as exc:
+            print("error: cannot evaluate the {}'s rows ({}); fail-closed".format(key, exc))
+            return 2
         try:
             append_problems = verify_append_only(root, path, lines, allow_missing_anchor=update)
         except CannotEvaluate as exc:
@@ -461,6 +593,49 @@ def self_test():
                         "commit", "-q", "-m", msg], check=True, capture_output=True, timeout=30)
 
     try:
+        # the AUTHORITY environment: every GIT_-prefixed variable is dropped before the root
+        # probe and the authority reads, and ONLY the scrub's exact-valued config-isolation
+        # pins survive (GIT_CONFIG_NOSYSTEM at "1", GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM
+        # at os.devnull): a repository-selecting variable and a config-CARRYING variable
+        # (GIT_CONFIG_PARAMETERS, the GIT_CONFIG_COUNT/KEY/VALUE family, a pin at a caller's
+        # own value) never reaches them. The suite-level assurance is the fixture-environment
+        # suite's system lane (config/registered-system): it plants a system git config and
+        # fails any member whose git call sheds the pins.
+        contaminated = {
+            "GIT_DIR": str(tmp / "junk"), "GIT_WORK_TREE": str(tmp / "junk"),
+            "GIT_COMMON_DIR": str(tmp / "junk"), "GIT_INDEX_FILE": str(tmp / "junk"),
+            "GIT_OBJECT_DIRECTORY": str(tmp / "junk"),
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(tmp / "junk"),
+            "GIT_CEILING_DIRECTORIES": str(tmp / "junk"),
+            "GIT_DISCOVERY_ACROSS_FILESYSTEM": "1", "GIT_NAMESPACE": "ns",
+            "GIT_CONFIG_PARAMETERS": "'core.worktree=/'",
+            "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.worktree",
+            "GIT_CONFIG_VALUE_0": "/"}
+        pin_names = ("GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM")
+        saved_env = {k: os.environ.get(k) for k in list(contaminated) + list(pin_names)}
+        os.environ.update(contaminated)
+        try:
+            auth = git_authority_env()
+            kept = [(k, auth[k]) for k in sorted(auth) if k.startswith("GIT_")]
+            want = [(name, "1" if name == "GIT_CONFIG_NOSYSTEM" else os.devnull)
+                    for name in sorted(pin_names)]
+            if kept != want:
+                failures.append("authority-env-pins-survive-scrub: want exactly the three "
+                                "scrub-valued config-isolation pins, got {}".format(kept))
+            for name in pin_names:
+                os.environ[name] = str(tmp / "caller-config")
+            os.environ["GIT_CONFIG_NOSYSTEM"] = "0"
+            auth = git_authority_env()
+            kept = sorted(k for k in auth if k.startswith("GIT_"))
+            if kept:
+                failures.append("authority-env-caller-valued-pins-dropped: a pin at a "
+                                "caller's own value must be dropped, kept {}".format(kept))
+        finally:
+            for name, value in saved_env.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
         good = chain(lambda p: row(1, "MR-1", "proposed", p),
                      lambda p: row(2, "MR-2", "proposed", p),
                      lambda p: row(3, "MR-1", "accepted", p))
@@ -630,7 +805,7 @@ def self_test():
                     or "removed by hand" not in str(exc):
                 failures.append("the stale-temporary refusal should name the temporary and "
                                 "its by-hand removal, got: {}".format(exc))
-        if not os.path.lexists(str(stale_tmp)) \
+        if entry_state(stale_tmp) is None \
                 or stale_tmp.read_text(encoding="utf-8") != "sentinel-temporary":
             failures.append("a refused advance consumed or rewrote the existing anchor "
                             "temporary")
@@ -661,6 +836,171 @@ def self_test():
                             "byte-identical")
         if [e.name for e in reg_dir.iterdir() if ".anchor.tmp." in e.name]:
             failures.append("a failed replace left the anchor temporary behind")
+        # (4) EVERY failed advance reports its temporary's fate beside the write failure: a
+        # write error, a short write and a close error each remove the temporary and SAY so,
+        # a cleanup that itself fails is reported with the temporary's path, never swallowed,
+        # and the previous anchor stays byte-identical through each
+        real_os_write = os.write
+        real_os_close = os.close
+        real_os_unlink = os.unlink
+        tmp_name = "{}.tmp.{}".format(anchor_path, os.getpid())
+        anchor_fired = {"write": False, "short": False, "close": False,
+                        "replace": False, "unlink": False}
+
+        def anchor_write_error(wfd, data):
+            if not anchor_fired["write"]:
+                anchor_fired["write"] = True
+                raise OSError(5, "injected write failure")
+            return real_os_write(wfd, data)
+
+        os.write = anchor_write_error
+        try:
+            try:
+                update_anchor(rp, good)
+                failures.append("a failed anchor-temporary write should be cannot-evaluate")
+            except CannotEvaluate as exc:
+                if "could not be written atomically" not in str(exc) \
+                        or "the anchor temporary at" not in str(exc) \
+                        or "was removed" not in str(exc):
+                    failures.append("the failed-write refusal should report the temporary's "
+                                    "removal beside the write failure, got: {}".format(exc))
+        finally:
+            os.write = real_os_write
+        if entry_state(tmp_name) is not None:
+            failures.append("a failed anchor-temporary write left the temporary behind")
+        if anchor_path.read_text(encoding="utf-8") != good_anchor:
+            failures.append("the previous anchor must survive a failed temporary write "
+                            "byte-identical")
+
+        def anchor_short_write(wfd, data):
+            if not anchor_fired["short"]:
+                anchor_fired["short"] = True
+                return real_os_write(wfd, data[:len(data) - 1])
+            return real_os_write(wfd, data)
+
+        os.write = anchor_short_write
+        try:
+            try:
+                update_anchor(rp, good)
+                failures.append("a short anchor-temporary write should be cannot-evaluate")
+            except CannotEvaluate as exc:
+                if "short write to the anchor temporary" not in str(exc) \
+                        or "was removed" not in str(exc):
+                    failures.append("the short-write refusal should report the temporary's "
+                                    "removal beside the short write, got: {}".format(exc))
+        finally:
+            os.write = real_os_write
+        if entry_state(tmp_name) is not None:
+            failures.append("a short anchor-temporary write left the temporary behind")
+        if anchor_path.read_text(encoding="utf-8") != good_anchor:
+            failures.append("the previous anchor must survive a short temporary write "
+                            "byte-identical")
+
+        def anchor_close_error(cfd):
+            if not anchor_fired["close"]:
+                anchor_fired["close"] = True
+                real_os_close(cfd)  # release the descriptor, then report the failure
+                raise OSError(5, "injected close failure")
+            return real_os_close(cfd)
+
+        os.close = anchor_close_error
+        try:
+            try:
+                update_anchor(rp, good)
+                failures.append("a failed anchor-temporary close should be cannot-evaluate")
+            except CannotEvaluate as exc:
+                if "could not be written atomically" not in str(exc) \
+                        or "injected close failure" not in str(exc) \
+                        or "was removed" not in str(exc):
+                    failures.append("the failed-close refusal should report the temporary's "
+                                    "removal beside the close failure, got: {}".format(exc))
+        finally:
+            os.close = real_os_close
+        if entry_state(tmp_name) is not None:
+            failures.append("a failed anchor-temporary close left the temporary behind")
+        if anchor_path.read_text(encoding="utf-8") != good_anchor:
+            failures.append("the previous anchor must survive a failed temporary close "
+                            "byte-identical")
+
+        def cleanup_replace_error(rsrc, rdst, *rargs, **rkw):
+            if not anchor_fired["replace"]:
+                anchor_fired["replace"] = True
+                raise OSError(5, "injected replace failure")
+            return real_os_replace(rsrc, rdst, *rargs, **rkw)
+
+        def cleanup_unlink_error(upath, *uargs, **ukw):
+            if not anchor_fired["unlink"] and str(upath) == tmp_name:
+                anchor_fired["unlink"] = True
+                raise OSError(13, "injected cleanup failure")
+            return real_os_unlink(upath, *uargs, **ukw)
+
+        os.replace = cleanup_replace_error
+        os.unlink = cleanup_unlink_error
+        try:
+            try:
+                update_anchor(rp, good)
+                failures.append("a failed replace with a failed cleanup should be "
+                                "cannot-evaluate")
+            except CannotEvaluate as exc:
+                if "could not be written atomically" not in str(exc) \
+                        or "could not be removed" not in str(exc) \
+                        or tmp_name not in str(exc) \
+                        or "injected cleanup failure" not in str(exc):
+                    failures.append("a failed cleanup must be reported with the temporary's "
+                                    "path beside the write failure, never swallowed, got: "
+                                    "{}".format(exc))
+        finally:
+            os.replace = real_os_replace
+            os.unlink = real_os_unlink
+        if entry_state(tmp_name) is None:
+            failures.append("the failed-cleanup vector should leave the temporary in place "
+                            "(its removal failed)")
+        else:
+            real_os_unlink(tmp_name)
+        if anchor_path.read_text(encoding="utf-8") != good_anchor:
+            failures.append("the previous anchor must survive a failed replace with a failed "
+                            "cleanup byte-identical")
+        # a stale temporary under ANOTHER process id blocks nothing (the exclusive creation
+        # collides only with the CURRENT pid's pathname) and is left in place unchanged
+        other_pid_tmp = Path("{}.tmp.{}".format(anchor_path, os.getpid() + 1))
+        other_pid_tmp.write_text("other-pid-temporary", encoding="utf-8")
+        try:
+            if update_anchor(rp, good) is not True:
+                failures.append("a stale temporary under another pid must not block the "
+                                "advance")
+        except CannotEvaluate as exc:
+            failures.append("a stale temporary under another pid must not block the advance, "
+                            "got: {}".format(exc))
+        if entry_state(other_pid_tmp) is None \
+                or other_pid_tmp.read_text(encoding="utf-8") != "other-pid-temporary":
+            failures.append("the other-pid stale temporary should be left in place unchanged")
+        else:
+            other_pid_tmp.unlink()
+        if anchor_path.read_text(encoding="utf-8") != good_anchor:
+            failures.append("the advance past an other-pid stale temporary should land the "
+                            "same verified tip")
+        # a temporary-creation failure that is NOT the stale-temporary collision (EACCES here)
+        # names the actual error and never blames a stale temporary
+        real_os_open = os.open
+
+        def eacces_open(opath, oflags, *oargs):
+            if str(opath) == tmp_name:
+                raise OSError(13, "injected permission denied")
+            return real_os_open(opath, oflags, *oargs)
+
+        os.open = eacces_open
+        try:
+            try:
+                update_anchor(rp, good)
+                failures.append("an EACCES temporary creation should be cannot-evaluate")
+            except CannotEvaluate as exc:
+                if "cannot be created" not in str(exc) \
+                        or "injected permission denied" not in str(exc) \
+                        or "removed by hand" in str(exc):
+                    failures.append("a non-EEXIST creation failure must name the actual error "
+                                    "and never blame a stale temporary, got: {}".format(exc))
+        finally:
+            os.open = real_os_open
         # a landed row citing a missing commit or check fails
         repo = tmp / "repo"
         repo.mkdir()
@@ -687,6 +1027,36 @@ def self_test():
             lambda p: row(3, "MR-2", "landed", p,
                           {"commit": head, "check_ref": str(check_path.resolve())}))
         _case("landed-absolute-check-ref-fails", landed_absolute, False, root=repo)
+        # a landed check_ref whose entry inspection fails with anything but ENOENT is
+        # cannot-evaluate through the shared entry_state, never a silent violation or pass
+        landed_eio = chain(
+            lambda p: row(1, "MR-3", "proposed", p),
+            lambda p: row(2, "MR-3", "accepted", p),
+            lambda p: row(3, "MR-3", "landed", p,
+                          {"commit": head, "check_ref": "durable-check.py"}))
+        check_target = str(check_path.resolve())
+        real_cr_lstat = os.lstat
+
+        def check_ref_eio(cp, *largs, **lkw):
+            if str(cp) == check_target:
+                raise OSError(5, "injected input-output error")
+            return real_cr_lstat(cp, *largs, **lkw)
+
+        os.lstat = check_ref_eio
+        try:
+            try:
+                verify_lines(landed_eio, root=repo, prefix="MR-")
+                failures.append("a landed check_ref inspection failure should be "
+                                "cannot-evaluate, never a silent result")
+            except CannotEvaluate as exc:
+                if "cannot be inspected" not in str(exc):
+                    failures.append("the check_ref inspection refusal should name itself, "
+                                    "got: {}".format(exc))
+        finally:
+            os.lstat = real_cr_lstat
+        if verify_lines(landed_eio, root=repo, prefix="MR-"):
+            failures.append("the landed rows should verify clean once the inspection "
+                            "succeeds")
         # P1: a tracked register cannot be checked against itself when origin/HEAD is absent -> exit 2.
         (repo / ".aiqt").mkdir()
         tracked = repo / "mistakes.jsonl"
@@ -706,12 +1076,12 @@ def self_test():
         _git_ci(repo, "mistakes.jsonl", msg="rewrite register")
         if run(repo) != 2:
             failures.append("tracked rewrite without origin/HEAD should exit 2")
-        # a git failure deciding WHETHER the register is tracked (a corrupt index: exit 128,
-        # not git's confirmed not-tracked exit 1) is cannot-evaluate and names that decision,
-        # never a fall-through into the untracked anchor leg
-        junk_index = tmp / "junk-index"
-        junk_index.write_text("broken-index", encoding="utf-8")
-        os.environ["GIT_INDEX_FILE"] = str(junk_index)
+        # a git failure deciding WHETHER the register is tracked (a corrupt ON-DISK index:
+        # exit 128, not git's confirmed not-tracked exit 1) is cannot-evaluate and names that
+        # decision, never a fall-through into the untracked anchor leg
+        index_path = repo / ".git" / "index"
+        saved_index = index_path.read_bytes()
+        index_path.write_bytes(b"broken-index")
         try:
             try:
                 verify_append_only(repo, tracked, rewritten)
@@ -721,6 +1091,24 @@ def self_test():
                 if "cannot decide whether the register is tracked" not in str(exc):
                     failures.append("the tracked-decision failure should name itself, got: "
                                     "{}".format(exc))
+        finally:
+            index_path.write_bytes(saved_index)
+        # the authority reads run under a SCRUBBED environment: a junk GIT_INDEX_FILE in the
+        # CALLER's environment no longer reaches them, so the tracked decision stands and the
+        # tracked leg proceeds to its own origin/HEAD refusal (before this change the same
+        # junk index flipped the decision itself into cannot-decide)
+        junk_index = tmp / "junk-index"
+        junk_index.write_text("broken-index", encoding="utf-8")
+        os.environ["GIT_INDEX_FILE"] = str(junk_index)
+        try:
+            try:
+                verify_append_only(repo, tracked, rewritten)
+                failures.append("the tracked leg without origin/HEAD should still be "
+                                "cannot-evaluate")
+            except CannotEvaluate as exc:
+                if "cannot compute the register authority" not in str(exc):
+                    failures.append("a caller GIT_INDEX_FILE must never reach the scrubbed "
+                                    "tracked decision, got: {}".format(exc))
         finally:
             os.environ.pop("GIT_INDEX_FILE", None)
         # each of the three git AUTHORITY reads (ls-files, merge-base, show) fails closed on a
@@ -828,7 +1216,7 @@ def self_test():
         if run(repo, update=True) != 2:
             failures.append("a dangling-symlink anchor should be cannot-evaluate (exit 2) even "
                             "with --update-anchor")
-        if (repo / "missing-at-anchor-target").exists():
+        if entry_state(repo / "missing-at-anchor-target") is not None:
             failures.append("the --update-anchor bootstrap wrote through a dangling anchor "
                             "symlink")
         at_anchor_path.unlink()
@@ -897,16 +1285,32 @@ def self_test():
                                 "cannot-evaluate (exit 2)")
         finally:
             os.lstat = real_reg_lstat
-        # a declared register value that is not a non-empty string is a named exit 2, never
-        # a TypeError traceback and never a skipped surface
-        for bad_decl in ('{"version": 1, "mistakes_register": 5}',
-                         '{"version": 1, "mistakes_register": ["x"]}',
-                         '{"version": 1, "mistakes_register": ""}',
-                         '{"version": 1, "mistakes_register": null}'):
+        # a declared register value that is not a non-empty string (a number, a list, an
+        # empty string, null) is a NAMED exit 2 for EACH form, never a TypeError traceback
+        # and never a skipped surface; the exact refusal text is asserted per form, so a
+        # mutant that skips one form (or renames the diagnostic) goes red here
+        for bad_decl, bad_form in (('{"version": 1, "mistakes_register": 5}', "a number"),
+                                   ('{"version": 1, "mistakes_register": ["x"]}', "a list"),
+                                   ('{"version": 1, "mistakes_register": ""}',
+                                    "an empty string"),
+                                   ('{"version": 1, "mistakes_register": null}', "null")):
             registry.write_text(bad_decl, encoding="utf-8")
-            if run(repo) != 2:
-                failures.append("a declared register value that is not a non-empty string "
-                                "({}) should be cannot-evaluate (exit 2)".format(bad_decl))
+            decl_out = io.StringIO()
+            with contextlib.redirect_stdout(decl_out):
+                decl_rc = run(repo)
+            if decl_rc != 2 or ("the registry's mistakes_register declaration is not a "
+                                "non-empty string") not in decl_out.getvalue():
+                failures.append("a mistakes_register declaration that is {} should be a "
+                                "named cannot-evaluate (exit 2), got exit {}: {}".format(
+                                    bad_form, decl_rc, decl_out.getvalue().strip()))
+        registry.write_text('{"version": 1, "attestations": 5}', encoding="utf-8")
+        decl_out = io.StringIO()
+        with contextlib.redirect_stdout(decl_out):
+            decl_rc = run(repo)
+        if decl_rc != 2 or ("the registry's attestations declaration is not a non-empty "
+                            "string") not in decl_out.getvalue():
+            failures.append("a malformed attestations declaration should name its own key, "
+                            "got exit {}: {}".format(decl_rc, decl_out.getvalue().strip()))
         # TRACKED registers and the anchor WRITE: a green tracked run reaches update_anchor
         # through the merge-base leg (no anchor inspection on the read side), so the write
         # itself must refuse a symlink entry, dangling or live, and advance only by atomic
@@ -934,7 +1338,7 @@ def self_test():
         if run(trk, update=True) != 2:
             failures.append("--update-anchor through a dangling tracked-register anchor "
                             "symlink should be cannot-evaluate (exit 2)")
-        if (trk / "missing-trk-anchor-target").exists():
+        if entry_state(trk / "missing-trk-anchor-target") is not None:
             failures.append("--update-anchor created a dangling tracked anchor link's target")
         if not os.path.islink(str(trk_anchor)):
             failures.append("--update-anchor replaced the dangling tracked anchor symlink "
@@ -976,7 +1380,7 @@ def self_test():
         if run(trk, update=True) != 2:
             failures.append("an empty register with an unusable anchor entry should be "
                             "cannot-evaluate (exit 2), never a reported advance")
-        if (trk / "missing-empty-anchor-target").exists():
+        if entry_state(trk / "missing-empty-anchor-target") is not None:
             failures.append("an empty-register update wrote through a dangling anchor "
                             "symlink")
         empty_anchor.unlink()
@@ -987,8 +1391,122 @@ def self_test():
                 or "the anchor was not advanced" not in out.getvalue():
             failures.append("an empty-register update should pass without claiming an "
                             "advance, got exit {}: {}".format(rc, out.getvalue().strip()))
-        if os.path.lexists(str(empty_anchor)):
+        if entry_state(empty_anchor) is not None:
             failures.append("an empty-register update wrote an anchor")
+        # the SHARED root resolution: the marker walk selects the nearest .git entry WHATEVER
+        # its type (a dangling symlink included, inside a valid outer repository) and lets the
+        # git confirmation refuse it; an uninspectable nearer marker is cannot-evaluate, never
+        # a walk past it to the outer repository; a nested EMPTY .git directory makes git
+        # discovery name the OUTER toplevel, which the realpath comparison refuses
+        walk_outer = tmp / "walk-outer"
+        (walk_outer / "w" / "tools").mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(walk_outer)], check=True,
+                       capture_output=True, timeout=30)
+        (walk_outer / "w" / ".git").symlink_to("missing-git-target")
+        selected = gate_root(walk_outer / "w" / "tools")
+        if selected != walk_outer / "w":
+            failures.append("the marker walk should select the dangling .git symlink, never "
+                            "walk past it to the outer repository, got {}".format(selected))
+        if confirmed_root(walk_outer / "w"):
+            failures.append("a dangling .git symlink is a marker, never a repository git "
+                            "confirms")
+        if not confirmed_root(walk_outer):
+            failures.append("the valid outer repository should be git-confirmed")
+        (walk_outer / "x" / "tools").mkdir(parents=True)
+        (walk_outer / "x" / ".git").mkdir()
+        if gate_root(walk_outer / "x" / "tools") != walk_outer / "x":
+            failures.append("the marker walk should select the nested empty .git directory")
+        if confirmed_root(walk_outer / "x"):
+            failures.append("git discovery past an empty .git directory names the OUTER "
+                            "toplevel; the realpath comparison must refuse the nested root")
+        (walk_outer / "e" / "tools").mkdir(parents=True)
+        (walk_outer / "e" / ".git").mkdir()
+        eio_marker = str(walk_outer / "e" / ".git")
+
+        def marker_eio_lstat(mp, *largs, **lkw):
+            if str(mp) == eio_marker:
+                raise OSError(5, "injected input-output error")
+            return real_os_lstat(mp, *largs, **lkw)
+
+        os.lstat = marker_eio_lstat
+        try:
+            try:
+                got_root = gate_root(walk_outer / "e" / "tools")
+                failures.append("an uninspectable nearer .git marker should be "
+                                "cannot-evaluate, never a root (got {})".format(got_root))
+            except CannotEvaluate as exc:
+                if "cannot be inspected" not in str(exc):
+                    failures.append("the marker-walk refusal should name the inspection, "
+                                    "got: {}".format(exc))
+        finally:
+            os.lstat = real_os_lstat
+        # the LIVE gate (main) uses the same root confirmation BEFORE reading the registry:
+        # an installed gate under an invalid gitfile or an empty .git directory refuses with
+        # exit 2 (a contaminated caller git environment included: GIT_DIR, and GIT_DIR plus
+        # GIT_WORK_TREE, pointed at a valid repository) and writes no anchor even for a
+        # declared EXTERNAL register under --update-anchor; in a valid repository the live
+        # leg still answers (NOT APPLICABLE with no registry, a green --update-anchor
+        # bootstrap with one)
+        gate_src = Path(__file__).resolve()
+        live_ext = tmp / "live-ext"
+        live_ext.mkdir()
+        ext_rows = chain(lambda p: row(1, "MR-1", "proposed", p))
+        for live_tag in ("invalid-gitfile", "empty-gitdir"):
+            live_inst = tmp / ("live-" + live_tag)
+            (live_inst / "tools").mkdir(parents=True)
+            if live_tag == "invalid-gitfile":
+                (live_inst / ".git").write_text("not a gitfile\n", encoding="utf-8")
+            else:
+                (live_inst / ".git").mkdir()
+            shutil.copy(str(gate_src), str(live_inst / "tools" / gate_src.name))
+            (live_inst / ".aiqt").mkdir()
+            live_reg = live_ext / (live_tag + "-reg.jsonl")
+            live_reg.write_text("\n".join(ext_rows) + "\n", encoding="utf-8")
+            (live_inst / ".aiqt" / "orchestration.local.json").write_text(json.dumps(
+                {"version": 1, "mistakes_register": str(live_reg)}), encoding="utf-8")
+            for env_tag, live_env in (
+                    ("plain", None),
+                    ("git-dir", dict(os.environ, GIT_DIR=str(reg_dir / ".git"))),
+                    ("git-dir-worktree", dict(os.environ, GIT_DIR=str(reg_dir / ".git"),
+                                              GIT_WORK_TREE=str(live_inst)))):
+                proc = subprocess.run(
+                    [sys.executable, "-I", "-B", str(live_inst / "tools" / gate_src.name),
+                     "--update-anchor"],
+                    capture_output=True, text=True, timeout=60, cwd=str(tmp), env=live_env)
+                if proc.returncode != 2 \
+                        or "not a git repository git itself confirms" not in proc.stdout:
+                    failures.append("live-{}-{}: the installed gate should refuse (exit 2) "
+                                    "naming the unconfirmed root, got exit {}: {} {}".format(
+                                        live_tag, env_tag, proc.returncode,
+                                        proc.stdout.strip(), proc.stderr.strip()))
+                if entry_state(str(live_reg) + ".anchor") is not None:
+                    failures.append("live-{}-{}: the refused live gate wrote the external "
+                                    "register's anchor".format(live_tag, env_tag))
+        live_ok = tmp / "live-ok"
+        (live_ok / "tools").mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(live_ok)], check=True, capture_output=True,
+                       timeout=30)
+        shutil.copy(str(gate_src), str(live_ok / "tools" / gate_src.name))
+        proc = subprocess.run(
+            [sys.executable, "-I", "-B", str(live_ok / "tools" / gate_src.name)],
+            capture_output=True, text=True, timeout=60, cwd=str(tmp))
+        if proc.returncode != 0 or "NOT APPLICABLE" not in proc.stdout:
+            failures.append("live-ok: a confirmed root with no registry should be NOT "
+                            "APPLICABLE (exit 0), got exit {}: {} {}".format(
+                                proc.returncode, proc.stdout.strip(), proc.stderr.strip()))
+        (live_ok / ".aiqt").mkdir()
+        ok_reg = live_ok / "ok-reg.jsonl"
+        ok_reg.write_text("\n".join(ext_rows) + "\n", encoding="utf-8")
+        (live_ok / ".aiqt" / "orchestration.local.json").write_text(json.dumps(
+            {"version": 1, "mistakes_register": "ok-reg.jsonl"}), encoding="utf-8")
+        proc = subprocess.run(
+            [sys.executable, "-I", "-B", str(live_ok / "tools" / gate_src.name),
+             "--update-anchor"],
+            capture_output=True, text=True, timeout=60, cwd=str(tmp))
+        if proc.returncode != 0 or "anchor advanced to seq 1" not in proc.stdout:
+            failures.append("live-ok-update: a confirmed root should verify and bootstrap "
+                            "its anchor (exit 0), got exit {}: {} {}".format(
+                                proc.returncode, proc.stdout.strip(), proc.stderr.strip()))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     if failures:
@@ -1015,14 +1533,34 @@ def self_test():
           "untracked registers alike, with the link's target neither created nor rewritten and "
           "the link entry left in place, and a green advance (a clean tracked register with a "
           "computable merge-base included) lands the verified tip by atomic replace of an "
-          "exclusively created temporary, leaving no temporary behind (a stale temporary "
-          "refuses the advance and names its by-hand removal, a failed replace removes the "
-          "temporary and keeps the previous anchor, and an entry planted after the "
-          "inspection is replaced as a whole entry, never followed); an empty register "
+          "exclusively created temporary, leaving no temporary behind (a stale temporary at "
+          "this process id's pathname refuses the advance and names its by-hand removal, a "
+          "stale temporary under another process id blocks nothing and is left in place "
+          "unchanged, a failed write, short write, close or replace removes the temporary "
+          "and says so, a cleanup that itself fails is reported with the temporary's path "
+          "beside the write failure, never swallowed, a creation failure that is not EEXIST "
+          "names the actual error without blaming a stale temporary, and an entry planted "
+          "after the inspection is replaced as a whole entry, never followed); an empty register "
           "advances nothing and reports no advance, with its anchor entry still inspected "
           "first; the --update-anchor "
-          "bootstrap establishes the baseline; and a declared attestations register is "
-          "verified under the AT- prefix with the optional class and ref fields accepted")
+          "bootstrap establishes the baseline; a declared attestations register is "
+          "verified under the AT- prefix with the optional class and ref fields accepted; "
+          "the LIVE leg resolves and git-confirms its root from the gate's own installed "
+          "location before reading any registry (an installed gate under an invalid gitfile "
+          "or an empty .git directory refuses with exit 2, a caller GIT_DIR and GIT_DIR plus "
+          "GIT_WORK_TREE included, and writes no anchor for a declared external register, "
+          "while a confirmed root still answers NOT APPLICABLE or bootstraps its anchor); "
+          "every git subprocess runs under the authority environment (a caller GIT_INDEX_FILE "
+          "never flips the tracked decision, every GIT_-prefixed variable is dropped, and only "
+          "the scrub's exact-valued config-isolation pins survive, a pin at a caller's own "
+          "value included among the dropped); the shared marker walk selects the nearest "
+          ".git entry whatever its type (a dangling .git symlink is selected and refused, an "
+          "uninspectable marker is cannot-evaluate, never a walk past it, and a nested empty "
+          ".git directory is refused by the realpath comparison); a landed check_ref whose "
+          "inspection fails with anything but ENOENT is cannot-evaluate through the shared "
+          "entry state; and each malformed declaration form (a number, a list, an empty "
+          "string, null) is refused with its named per-key diagnostic (a malformed "
+          "attestations declaration names its own key)")
     return 0
 
 
@@ -1030,7 +1568,27 @@ def main():
     args = sys.argv[1:]
     if "--self-test" in args:
         return self_test()
-    return run(repo_root(), update="--update-anchor" in args)
+    # The LIVE leg shares the appender's root confirmation: the validation root is resolved
+    # from this gate's own installed location and git itself must confirm it BEFORE any
+    # registry or register is read (grdinp; never a cwd fallback, never a trusted marker).
+    try:
+        root = gate_root(Path(__file__).resolve().parent)
+    except CannotEvaluate as exc:
+        print("error: cannot establish the gate's validation root ({}); fail-closed".format(exc))
+        return 2
+    if root is None:
+        print("error: this gate is not installed inside a git repository, so its validation "
+              "root cannot be established (the root is resolved from the gate's own location, "
+              "never from the invocation directory); fail-closed")
+        return 2
+    if not confirmed_root(root):
+        print("error: the gate's validation root is not a git repository git itself confirms "
+              "(rev-parse --show-toplevel under a scrubbed environment must name it; an "
+              "invalid gitfile, an empty .git directory or a dangling .git symlink is a "
+              "repository marker, not a repository), so neither its registry nor any register "
+              "it declares, an external register included, is trusted; fail-closed")
+        return 2
+    return run(root, update="--update-anchor" in args)
 
 
 if __name__ == "__main__":
