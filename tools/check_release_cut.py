@@ -1848,6 +1848,10 @@ _CLOSE_SWEEP_DISPOSITIONS = (
     ("tools/orch_register.py", "_dirs_created", "TRY", "prev", "dir_fd", 1,
      _CS_P1.format("prev, dir_fd = dir_fd, nxt runs before os.close(prev), so the handler closes nxt, never "
                    "prev")),
+    ("tools/orch_register.py", "_dirs_created", "AFTER", "dir_fd", "dir_fd", 1,
+     "false positive: the unwind handler's wrapped close (its OSError suppressed so the in-flight refusal "
+     "wins) sits in a handler whose own block ends in a raise, so the wrapped close after the try never "
+     "runs after it"),
     ("tools/check_release_cut.py", "working_blob", "TRY", "parent", "directory", 1,
      _CS_P1.format("parent, directory = directory, child runs before the close of parent, so the finally closes "
                    "child, never parent")),
