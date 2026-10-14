@@ -118,10 +118,18 @@ SUITE_ID = "git-fixture-env-selftest"
 # "FAILED (unexpected successes=N)" summary starts with FAIL and is covered), a verbose
 # "... FAIL"/"... ERROR"/"... unexpected success" result ending, or unittest's F, E or u progress
 # characters, which only failing, erroring or unexpectedly succeeding tests write (an unexpected
-# success makes wasSuccessful() false), including a progress run cut short by other text on the
-# same line (the failing character may open the line; the cut is recognized only where the other
-# text does not begin with a word character, so an ordinary word that merely opens with
-# progress-letter spellings, such as success or Elapsed, is not failure evidence). The members'
+# success makes wasSuccessful() false), including a progress run CUT SHORT by other text on the
+# same line (a worker log line printed over a progress run: "..Fworker retrying", ".FINFO
+# started", "..E_x"). The exact rule tells a cut progress run from an ordinary word that merely
+# opens with a progress-letter spelling: an F after a progress run (one or more of . E s x u) is
+# always a failure (F is only ever a failed test), so "..Fworker" is evidence; an E or u after a
+# progress run is evidence only where it does NOT open a lowercase word, so "..EWARNING" and
+# "..E_x" are evidence but "...Elapsed" is not; and a bare F, E or u opening the line is evidence
+# only where the text that follows is a non-word character, so "F[worker]" and "u[worker]" are
+# evidence but "Finished" and "success" (whose only failing letter, the u of s-u-ccess, opens a
+# lowercase word) are not. The rule OVER-matches prose that takes a progress shape ("E.g. the
+# run" reads as E then a non-word, so it files as evidence): the conservative direction, a
+# would-be cannot-evaluate read as a failure, never a hidden defect. The members'
 # own PASSING unittest progress on stderr (dots, "Ran N tests",
 # "OK", written by passing runs too) is NOT failure evidence: a stop beside passing-progress-only
 # streams stays a BoundStop, never a false failure.
@@ -197,21 +205,23 @@ def _bound_stop(what, exc):
 # makes wasSuccessful() false), whether the progress line is pure or cut short by other text
 # written onto the same line: the progress prefix may be EMPTY (a failing F, E or u can open the
 # line), and the cut is recognized only while the run stays progress-shaped, the cut text NOT
-# beginning with a word character, so an ordinary word that merely opens with progress-letter
-# spellings (success, suite, subprocess, summary, or a dotted ...Elapsed) is never read as a cut
-# progress run. unittest's PASSING progress (dots, "Ran N tests", "OK") lands on
-# stderr in passing runs too, so it is never failure evidence: without a marker the stop stays a
-# BoundStop (cannot-evaluate), exactly like a silent one (the _load_bound contract). The
-# line-start words and progress runs are matched as spelled, so unrelated output that begins a
-# line with one of them (or with a progress-shaped run carrying F, E or u) also counts as failure
-# evidence: that files a would-be cannot-evaluate (exit 2) as a failure (exit 1), the direction
-# that never hides a defect; the completed path judges the exit code, not this text, and the
-# word-character boundary keeps that direction inside progress-shaped lines, not prose.
+# opening a lowercase word, so an ordinary word that merely opens with a progress-letter spelling
+# (success, suite, subprocess, summary, or a dotted ...Elapsed, each continuing into lowercase) is
+# never read as a cut progress run, while a real progress run cut by log text ("..Fworker
+# retrying", ".FINFO started", "..E_x", "F[worker] retrying") is. The exact rule is stated above
+# the regex. unittest's PASSING progress (dots, "Ran N tests", "OK") lands on stderr in passing
+# runs too, so it is never failure evidence: without a marker the stop stays a BoundStop
+# (cannot-evaluate), exactly like a silent one (the _load_bound contract). The rule OVER-matches
+# prose that takes a progress shape ("E.g. the run" reads as E then a non-word): that files a
+# would-be cannot-evaluate (exit 2) as a failure (exit 1), the direction that never hides a
+# defect; the completed path judges the exit code, not this text.
 _FAILURE_EVIDENCE_RE = re.compile(
     r"^(Traceback|FAIL|ERROR|SELF-TEST FAIL)"        # line-start failure markers
     r"|\.\.\. (FAIL|ERROR|unexpected success)$"      # verbose unittest result line endings
-    r"|^[.Esxu]*[FEu][.FEsxu]*$"                     # verbosity-1 progress carrying F, E or u
-    r"|^[.Esxu]*[FEu][.EFsxu]*(?!\w)",               # a progress run cut short by other text
+    r"|^[.Esxu]*[FEu][.FEsxu]*$"                     # a pure verbosity-1 progress run carrying F, E or u
+    r"|^[FEu](?!\w)"                                 # a failing char opens the line, cut by non-word text
+    r"|^[.Esxu]+F"                                   # a progress run then F (F is only ever a failure)
+    r"|^[.Esxu]+[Eu](?![a-z])",                       # a progress run then E or u not opening a lowercase word
     re.MULTILINE)
 
 
@@ -2291,21 +2301,25 @@ _SCAN_ALLOWED_UNPINNED = (
      " maintenance-triggering one"),
     # Cannot-evaluate launches (argv or head outside the resolver's bounds), each audited:
     ("tools/_load_bound.py", "run", ("unresolved",),
-     "cannot-evaluate head: the shared load-tolerant runner launches its caller argv, which"
-     " this scan does not follow to the call site, and its executable= is the program it"
-     " resolved from that argv head; run() refuses (ValueError), before any launch, an argv"
-     " whose program (resolved as the exec in the child resolves it: PATH from env, a relative"
-     " or empty entry taken from the child cwd, then symlinks) is git or the same file as git,"
-     " or whose head is one of the known shell and launcher spellings in _LAUNCHERS (env, nice,"
-     " timeout and the rest), and it launches the resolved path so lookup and exec agree. That"
-     " is a deny list, not proof that no git runs below it: an interpreter head (python -c,"
-     " perl, awk, make), an unlisted launcher or a copy of the git binary under another name"
-     " can still run git. Every adopting call site (the module's own vectors launch scratch"
-     " fixtures) passes sys.executable or the registered hook command (python3) as the head,"
-     " and git launched by the code those interpreters run"
-     " (generators, self-tests) sits on those files' own subprocess calls, which this scan"
-     " reads where they stand; its vectors include /usr/bin/env git, a symlink alias and"
-     " relative PATH entries"),
+     "cannot-evaluate argv and executable=: the shared load-tolerant runner spawns through"
+     " _acquiring_popen(owned)(...), an ownership subclass of subprocess.Popen (the child is"
+     " captured before the fork, so a fault before run() binds the handle still stops it)"
+     " that this scan resolves as a Popen launch (a call whose callee is a call returning a"
+     " Popen subclass defined in the scanned file, _scan_popen_factories); it launches its"
+     " caller argv, which this scan does not follow to the call site, and its executable= is"
+     " the program it resolved from that argv head; run() refuses (ValueError), before any"
+     " launch, an argv whose program (resolved as the exec in the child resolves it: PATH"
+     " from env, a relative or empty entry taken from the child cwd, then symlinks) is git"
+     " or the same file as git, or whose head is one of the known shell and launcher"
+     " spellings in _LAUNCHERS (env, nice, timeout and the rest), and it launches the"
+     " resolved path so lookup and exec agree. That is a deny list, not proof that no git"
+     " runs below it: an interpreter head (python -c, perl, awk, make), an unlisted launcher"
+     " or a copy of the git binary under another name can still run git. Every adopting call"
+     " site (the module's own vectors launch scratch fixtures) passes sys.executable or the"
+     " registered hook command (python3) as the head, and git launched by the code those"
+     " interpreters run (generators, self-tests) sits on those files' own subprocess calls,"
+     " which this scan reads where they stand; its vectors include /usr/bin/env git, a"
+     " symlink alias and relative PATH entries"),
     ("tools/check_git_option_table.py", "_git", ("unresolved",),
      "cannot-evaluate funnel: the argv tail is the caller's *args; every caller passes"
      " option-table introspection forms (init -q --template= of a scratch probe repo,"
@@ -3479,6 +3493,73 @@ def _scan_env_covered(expr, func_node, module_consts, func_defs, scope_scrubbed,
     return False
 
 
+def _scan_popen_factories(tree):
+    """The bare names of functions defined anywhere in the module whose own scope returns a
+    class derived from the module-qualified subprocess.Popen: the base spelled directly
+    (class X(subprocess.Popen)), through a name the scope or the module scope binds to
+    subprocess.Popen (spawn_cls = subprocess.Popen; class X(spawn_cls)), or through another
+    such class. _scan_launches resolves a call THROUGH such a factory's result,
+    factory(...)(argv, ...), as a subprocess.Popen launch at the outer call (the ownership
+    spawn in tools/_load_bound.py run). Read in each scope's OWN statements (control flow
+    descended, nested scopes excluded; source order is not ordered here, so a base bound
+    anywhere in the scope counts, erring toward MORE resolved launches, never fewer). Bounded
+    by design, like every resolution here, to the scanned file: a factory imported from
+    another module, or a locally defined subclass instantiated directly by its bare name, is
+    not resolved by this rule and stays on the scan's other rules and the audited allowlist."""
+    def popen_expr(node, aliases):
+        if isinstance(node, ast.Attribute) and node.attr == "Popen" \
+                and isinstance(node.value, ast.Name) and node.value.id == "subprocess":
+            return True
+        return isinstance(node, ast.Name) and node.id in aliases
+
+    def scope_nodes(body):
+        # The scope's own nodes: control flow is descended, nested scopes are not (a ClassDef
+        # contributes its name and bases, never its body).
+        nodes, stack = [], list(body)
+        while stack:
+            node = stack.pop()
+            nodes.append(node)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef,
+                                 ast.Lambda)):
+                continue
+            stack.extend(ast.iter_child_nodes(node))
+        return nodes
+
+    def popen_classes(nodes, outer_aliases, outer_classes):
+        # Fixpoint over the scope's single-target Popen aliases and its Popen-derived classes
+        # (an alias of an alias, and a subclass of a subclass, both resolve).
+        aliases, classes = set(outer_aliases), set(outer_classes)
+        grown = True
+        while grown:
+            grown = False
+            for node in nodes:
+                if isinstance(node, ast.Assign) and len(node.targets) == 1 \
+                        and isinstance(node.targets[0], ast.Name) \
+                        and node.targets[0].id not in aliases \
+                        and popen_expr(node.value, aliases):
+                    aliases.add(node.targets[0].id)
+                    grown = True
+                elif isinstance(node, ast.ClassDef) and node.name not in classes \
+                        and any(popen_expr(base, aliases)
+                                or (isinstance(base, ast.Name) and base.id in classes)
+                                for base in node.bases):
+                    classes.add(node.name)
+                    grown = True
+        return aliases, classes
+
+    module_aliases, module_classes = popen_classes(scope_nodes(tree.body), (), ())
+    factories = set()
+    for func in ast.walk(tree):
+        if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        nodes = scope_nodes(func.body)
+        classes = popen_classes(nodes, module_aliases, module_classes)[1]
+        if any(isinstance(node, ast.Return) and isinstance(node.value, ast.Name)
+               and node.value.id in classes for node in nodes):
+            factories.add(func.name)
+    return factories
+
+
 def _scan_launches(tree):
     """(node, flavor, launcher, dotted qualname, qualname parts, enclosing function node,
     innermost enclosing class node) for every launch-shaped or tripwire-shaped node in the
@@ -3490,8 +3571,12 @@ def _scan_launches(tree):
     getattr(asyncio, ...) except a literal
     NON-launcher attribute (getattr(os, "O_NOFOLLOW", 0) reads a constant, not a launcher),
     subprocess.__dict__ / os.__dict__ / asyncio.__dict__, and vars(subprocess) / vars(os) /
-    vars(asyncio)."""
+    vars(asyncio). A call through a Popen-subclass factory's result, factory(...)(argv, ...)
+    where the factory returns a subprocess.Popen subclass defined in this file
+    (_scan_popen_factories), is a direct launch of that subclass: flavor 'subprocess',
+    launcher 'Popen'."""
     found = []
+    factories = _scan_popen_factories(tree)
     stack = [(tree, (), None, None)]
     while stack:
         node, parts, func_node, class_node = stack.pop()
@@ -3507,6 +3592,15 @@ def _scan_launches(tree):
                 if isinstance(func, ast.Attribute) and func.attr in _SCAN_LAUNCH_NAMES \
                         and isinstance(func.value, ast.Name) and func.value.id == "subprocess":
                     found.append((child, "subprocess", func.attr, qualname, parts,
+                                  func_node, class_node))
+                elif isinstance(func, ast.Call) and isinstance(func.func, ast.Name) \
+                        and func.func.id in factories:
+                    # factory(...)(argv, ...): the callee is a call whose own callee is a
+                    # factory returning a subprocess.Popen subclass defined in this file
+                    # (_scan_popen_factories), so the outer call IS that subclass's launch
+                    # (the ownership spawn in tools/_load_bound.py run) and resolves exactly
+                    # like a direct subprocess.Popen call.
+                    found.append((child, "subprocess", "Popen", qualname, parts,
                                   func_node, class_node))
                 else:
                     name = func.attr if isinstance(func, ast.Attribute) else (
@@ -4663,6 +4757,55 @@ _SCAN_CONTRACT_CASES = (
          "                    '--config-env', 'gc.auto=0=' + str(var),",
          "                    'commit', '--allow-empty', '-m', 'x'])", ""))),),
      None),
+    # Round-9b forms: a launch through a call-of-call factory, factory(...)(argv, ...),
+    # whose factory returns a subprocess.Popen subclass defined in the scanned file (the
+    # ownership spawn in tools/_load_bound.py run) is resolved as a Popen launch: a git argv
+    # there is enforced like a direct launch, and the run()-shaped caller-argv-plus-
+    # executable= form is a finding without a kind-matched justification and clean with one
+    # (each red without the round-9b call-of-call resolver, which then sees no launch at
+    # all: the first two scans come back clean, and the third's planted entry reads stale).
+    ("popen-factory-git-argv",
+     (("tools/planted.py", "\n".join((
+         "import subprocess", "", "",
+         "def _acquire(owned):",
+         "    spawn_cls = subprocess.Popen", "",
+         "    class Acquiring(spawn_cls):",
+         "        def __init__(self, *args, **kwargs):",
+         "            owned.append(self)",
+         "            super().__init__(*args, **kwargs)",
+         "    return Acquiring", "", "",
+         "def _seed(owned):",
+         "    _acquire(owned)(['git', 'commit', '--allow-empty', '-m', 'x'])", ""))),),
+     "maintenance-triggering git launch"),
+    ("popen-factory-executable-override",
+     (("tools/planted.py", "\n".join((
+         "import subprocess", "", "",
+         "def _acquire(owned):",
+         "    spawn_cls = subprocess.Popen", "",
+         "    class Acquiring(spawn_cls):",
+         "        def __init__(self, *args, **kwargs):",
+         "            owned.append(self)",
+         "            super().__init__(*args, **kwargs)",
+         "    return Acquiring", "", "",
+         "def _seed(argv, real, owned):",
+         "    _acquire(owned)(argv, executable=real)", ""))),),
+     "executable= keyword overrides"),
+    ("popen-factory-justified",
+     (("tools/planted.py", "\n".join((
+         "import subprocess", "", "",
+         "def _acquire(owned):",
+         "    spawn_cls = subprocess.Popen", "",
+         "    class Acquiring(spawn_cls):",
+         "        def __init__(self, *args, **kwargs):",
+         "            owned.append(self)",
+         "            super().__init__(*args, **kwargs)",
+         "    return Acquiring", "", "",
+         "def _seed(argv, real, owned):",
+         "    _acquire(owned)(argv, executable=real)", ""))),),
+     None,
+     (("tools/planted.py", "_seed", ("unresolved",),
+       "planted: the factory-call launch mirrors tools/_load_bound.py run (caller argv and"
+       " resolved executable=)"),)),
 )
 
 
@@ -4868,6 +5011,35 @@ def _bound_stop_lane(base):
         "    sys.stderr.write(text)\n    sys.stdout.write(text)\n"
         "    sys.stderr.flush()\n    sys.stdout.flush()\n    time.sleep(3600)\n    return 0\n",
         encoding="utf-8")
+    # A real progress run CUT SHORT by log text whose first non-progress character is a WORD
+    # character ("..Fworker retrying", not ".E[worker] retrying"): the round-8 word-boundary rule
+    # wrongly dropped these, so they are driven on BOTH streams through all three runners, each
+    # asserted a FAILURE. The F cases rely on "F after a progress run is always a failure"; the E
+    # cases on "E not opening a lowercase word" (an uppercase or underscore continuation).
+    log_cut_f_err = base / "bound-log-cut-f-err.py"
+    log_cut_f_err.write_text("import sys, time\nsys.stderr.write(\"..Fworker retrying\\n\")\n"
+                             "sys.stderr.flush()\ntime.sleep(3600)\n", encoding="utf-8")
+    log_cut_f_out = base / "bound-log-cut-f-out.py"
+    log_cut_f_out.write_text("import sys, time\nsys.stdout.write(\".FINFO started\\n\")\n"
+                             "sys.stdout.flush()\ntime.sleep(3600)\n", encoding="utf-8")
+    log_cut_corpus_err = base / "bound-log-cut-corpus-err.py"
+    log_cut_corpus_err.write_text("import sys, time\nsys.stderr.write(\"..EWARNING: x\\n\")\n"
+                                  "sys.stderr.flush()\ntime.sleep(3600)\n", encoding="utf-8")
+    log_cut_corpus_out = base / "bound-log-cut-corpus-out.py"
+    log_cut_corpus_out.write_text("import sys, time\nsys.stdout.write(\"..Fworker retrying\\n\")\n"
+                                  "sys.stdout.flush()\ntime.sleep(3600)\n", encoding="utf-8")
+    imported_log_cut_err_tools = base / "bound-imported-log-cut-err"
+    imported_log_cut_err_tools.mkdir()
+    (imported_log_cut_err_tools / "selftest_aiqt_corpus.py").write_text(
+        "import sys, time\n\n\ndef run_self_test():\n"
+        "    sys.stderr.write(\"..E_x\\n\")\n"
+        "    sys.stderr.flush()\n    time.sleep(3600)\n    return 0\n", encoding="utf-8")
+    imported_log_cut_out_tools = base / "bound-imported-log-cut-out"
+    imported_log_cut_out_tools.mkdir()
+    (imported_log_cut_out_tools / "selftest_aiqt_corpus.py").write_text(
+        "import sys, time\n\n\ndef run_self_test():\n"
+        "    sys.stdout.write(\".FINFO started\\n\")\n"
+        "    sys.stdout.flush()\n    time.sleep(3600)\n    return 0\n", encoding="utf-8")
     saved = (MEMBER_BUDGET_S, MEMBER_STALL_S, CORPUS_BUDGET_S, CORPUS_STALL_S, CORPUS_SELFTEST,
              CORPUS_TOOLS, _LOAD_FACTOR)
     kept = len(BOUND_STOPS)
@@ -4922,6 +5094,8 @@ def _bound_stop_lane(base):
         cut_first_u_rc = quiet("cut-first-u-stdout", _run_config_member,
                                (str(cut_first_u_stdout),), env)
         word_controls_rc = quiet("word-controls", _run_config_member, (str(word_controls),), env)
+        log_cut_f_err_rc = quiet("log-cut-f-err", _run_config_member, (str(log_cut_f_err),), env)
+        log_cut_f_out_rc = quiet("log-cut-f-out", _run_config_member, (str(log_cut_f_out),), env)
         CORPUS_BUDGET_S, CORPUS_STALL_S, CORPUS_SELFTEST = 20, 1.5, silent
         corpus_stop = quiet("corpus", _run_corpus, "GIT_DIR", "/decoy/.git", base)
         CORPUS_SELFTEST = progress
@@ -4945,6 +5119,12 @@ def _bound_stop_lane(base):
         CORPUS_SELFTEST = word_controls
         corpus_word_controls = quiet("corpus-word-controls", _run_corpus, "GIT_DIR",
                                      "/decoy/.git", base)
+        CORPUS_SELFTEST = log_cut_corpus_err
+        corpus_log_cut_err = quiet("corpus-log-cut-err", _run_corpus, "GIT_DIR", "/decoy/.git",
+                                   base)
+        CORPUS_SELFTEST = log_cut_corpus_out
+        corpus_log_cut_out = quiet("corpus-log-cut-out", _run_corpus, "GIT_DIR", "/decoy/.git",
+                                   base)
         CORPUS_TOOLS = imported_failing_tools
         imported_failing = quiet("imported-failing-progress", _run_corpus_imported, "GIT_DIR",
                                  "/decoy/.git", base)
@@ -4960,16 +5140,34 @@ def _bound_stop_lane(base):
         CORPUS_TOOLS = imported_controls_tools
         imported_word_controls = quiet("imported-word-controls", _run_corpus_imported,
                                        "GIT_DIR", "/decoy/.git", base)
+        CORPUS_TOOLS = imported_log_cut_err_tools
+        imported_log_cut_err = quiet("imported-log-cut-err", _run_corpus_imported, "GIT_DIR",
+                                     "/decoy/.git", base)
+        CORPUS_TOOLS = imported_log_cut_out_tools
+        imported_log_cut_out = quiet("imported-log-cut-out", _run_corpus_imported, "GIT_DIR",
+                                     "/decoy/.git", base)
     finally:
         (MEMBER_BUDGET_S, MEMBER_STALL_S, CORPUS_BUDGET_S, CORPUS_STALL_S, CORPUS_SELFTEST,
          CORPUS_TOOLS, _LOAD_FACTOR) = saved
         del BOUND_STOPS[kept:]
         # None is UNOBSERVABLE (/proc could not be read), never absence: judged by its own check
-        # below instead of silently reading as "no leaked child".
+        # below instead of silently reading as "no leaked child". On a host WITH /proc that is a
+        # failure; on a host with no /proc at all there is no survivor check (the disclosed
+        # platform limit), never a false leak (_leak_cleanup_is_failure).
         leaked_pids = _load_bound._alive_with(leaked)
         for pid in (leaked_pids or ()):
             _load_bound._kill_pid(pid)
-    check("bound/leaked-cleanup-observable", leaked_pids is not None, True)
+    has_proc_here = os.path.isdir("/proc")
+    # The real post-lane result (no leak), plus the injected None/[] pairs: an unobservable scan
+    # (None) while /proc exists is a failure, an observed [] is not, and None with no /proc is the
+    # disclosed platform limit, not a failure. Removing the guard in _leak_cleanup_is_failure
+    # turns the None-while-/proc leg red.
+    check("bound/leaked-cleanup-observable",
+          (_load_bound._leak_cleanup_is_failure(leaked_pids, has_proc_here),
+           _load_bound._leak_cleanup_is_failure(None, True),
+           _load_bound._leak_cleanup_is_failure([], True),
+           _load_bound._leak_cleanup_is_failure(None, False)),
+          (False, True, False, False))
     check("bound/slowed-run-passes", (slowed_loaded, isinstance(slowed_idle, BoundStop)), (0, True))
     check("bound/hang-is-cannot-evaluate",
           (isinstance(member_stop, BoundStop),
@@ -5004,6 +5202,8 @@ def _bound_stop_lane(base):
     progress_cut_out, progress_cut_err = written.pop("progress-cut", ("", ""))
     cut_first_f_out, cut_first_f_err = written.pop("cut-first-f", ("", ""))
     cut_first_u_out, cut_first_u_err = written.pop("cut-first-u-stdout", ("", ""))
+    log_cut_f_err_out, log_cut_f_err_err = written.pop("log-cut-f-err", ("", ""))
+    log_cut_f_out_out, log_cut_f_out_err = written.pop("log-cut-f-out", ("", ""))
     # The full expected leaky diagnostic, on stdout: only the stall idle seconds are free.
     frame = "CONFIG-INJECTION {} (exited 3 before its bound fired: \x00):\n\n".format((str(leaky),))
     head, tail = frame.split("\x00")
@@ -5075,6 +5275,32 @@ def _bound_stop_lane(base):
            (False, "fail", True, ""), (False, "fail", True, ""), (False, "fail", True, ""),
            (False, "fail", True), (False, "fail", True), (False, "fail", True),
            (False, "fail", True), (False, "fail", True), (False, "fail", True),
+           (False, "fail", True), (False, "fail", True)))
+    # A progress run cut short by log text whose first non-progress character is a WORD character
+    # ("..Fworker retrying") is failure evidence again, on both streams through every runner: the
+    # round-8 word-boundary rule dropped these, so each is asserted a FAILURE here (red when that
+    # rule is restored).
+    check("bound/log-cut-progress-is-failure",
+          ((isinstance(log_cut_f_err_rc, BoundStop), _judge(log_cut_f_err_rc, 0),
+            "..Fworker retrying" in log_cut_f_err_out, log_cut_f_err_err),
+           (isinstance(log_cut_f_out_rc, BoundStop), _judge(log_cut_f_out_rc, 0),
+            ".FINFO started" in log_cut_f_out_out, log_cut_f_out_err),
+           (isinstance(corpus_log_cut_err, BoundStop), _judge(corpus_log_cut_err, 0),
+            isinstance(corpus_log_cut_err, str)
+            and "captured failure evidence: '..EWARNING: x\\n'" in corpus_log_cut_err),
+           (isinstance(corpus_log_cut_out, BoundStop), _judge(corpus_log_cut_out, 0),
+            isinstance(corpus_log_cut_out, str)
+            and "captured failure evidence: '..Fworker retrying\\n'" in corpus_log_cut_out),
+           (isinstance(imported_log_cut_err, BoundStop), _judge(imported_log_cut_err, 0),
+            isinstance(imported_log_cut_err, str)
+            and imported_log_cut_err.startswith("imported corpus self-test")
+            and "captured failure evidence: '..E_x\\n'" in imported_log_cut_err),
+           (isinstance(imported_log_cut_out, BoundStop), _judge(imported_log_cut_out, 0),
+            isinstance(imported_log_cut_out, str)
+            and imported_log_cut_out.startswith("imported corpus self-test")
+            and "captured failure evidence: '.FINFO started\\n'" in imported_log_cut_out)),
+          ((False, "fail", True, ""), (False, "fail", True, ""),
+           (False, "fail", True), (False, "fail", True),
            (False, "fail", True), (False, "fail", True)))
 
 

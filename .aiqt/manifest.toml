@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "db7895c6e36eed5a40dd5ce1765fb44584b6439d3b87f92b2018b67db39328ae"
+tree-sha256 = "a6a9140b362eb9c44487f42d2f90dc880f7dde878cc068704421f1782ae5ae65"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3226,8 +3226,8 @@ sha256 = "58e6a5fca74d2c4ff43aecaabc186f8c3482826b418d80ac8d2034c28cb62146"
 
 [[sources]]
 path = "tools/_load_bound.py"
-bytes = 146743
-sha256 = "38cc16c7cca555d7c320cdcdb9d5d8a0d26a7e3c8c44dd399e7b6621b6d23f34"
+bytes = 173482
+sha256 = "f1ed1caec16a70ebada7b35358bfd4dc3867cc703fbe03273d888d9d52eb8e3c"
 
 [[sources]]
 path = "tools/_qa_adapter.py"
@@ -3326,8 +3326,8 @@ sha256 = "4504783abbd6934c4b3d57631b13729d0f56e72e779c79440bcfe410ae65430f"
 
 [[sources]]
 path = "tools/check_gensrc_failclose.py"
-bytes = 104604
-sha256 = "577d85cb2c0a9e51810afee04e04d1da35bdab922c9523d58818a0e6db0cdcb4"
+bytes = 106544
+sha256 = "4803bbc05f6bdf58713c54e2ce2519ea14a3754a811fff276f30b0655db72d0e"
 
 [[sources]]
 path = "tools/check_git_option_table.py"
@@ -3336,8 +3336,8 @@ sha256 = "8452eefa4ea89f00c6cac593951443ba4e6113cd804655fb040eb3e29d85b833"
 
 [[sources]]
 path = "tools/check_hooks_preview.py"
-bytes = 45248
-sha256 = "b372c0fc246e8507ed5e91f1e30e93ab2136575a720a42c5177f47a114ad4b3d"
+bytes = 47198
+sha256 = "931b7f5677954153b4be7d86068513aaa7cf82f3ce504699059531c616ce781a"
 
 [[sources]]
 path = "tools/check_install_page.py"
@@ -3711,8 +3711,8 @@ sha256 = "9d3986280ddd5cbee8bae2f8b9d8526e5a6e058178bfc61aaa8554be029dd944"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 58656
-sha256 = "b475c16d55950679883e19d513d83035ec2cee9b0a780c00910db8e5a4d637aa"
+bytes = 58695
+sha256 = "edb1467fcde399413b0d6151301a7155dfc83c3827408559f17fe1d03a645de5"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
@@ -3721,8 +3721,8 @@ sha256 = "a193ad61ef6c6dbb0e0eea8152311bc2cffebb087c2407b38ca9bd1fde7d8794"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env.py"
-bytes = 314717
-sha256 = "2799003bd015bb23db999ab900c237831af563c1deb6196bd7240f0219a46f0d"
+bytes = 329348
+sha256 = "ad020faadf48d7ab22fac8967f4d794e378f526bd95f2d054b17fa49943cc015"
 
 [[sources]]
 path = "tools/selftest_opf_render.py"

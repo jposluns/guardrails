@@ -988,6 +988,7 @@ expected-check-ids = [
   "bound/hang-is-cannot-evaluate",
   "bound/stop-keeps-failure-evidence",
   "bound/failing-progress-is-failure",
+  "bound/log-cut-progress-is-failure",
 ]
 
 [[suite]]

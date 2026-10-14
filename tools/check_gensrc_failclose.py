@@ -1327,6 +1327,20 @@ def _close_vectors(base):
     return _close_selftest._st_close_check(ns, vectors)
 
 
+def _cleanup_leaked_descendant(leaked, failures):
+    """Kill any descendant still carrying the leaked token; where the survivor scan was
+    UNOBSERVABLE (None) on a host WITH /proc, record a self-test failure (the leak cannot be
+    proven absent). On a host with no /proc at all there is no survivor check (the disclosed
+    platform limit), never a false leak (_load_bound._leak_cleanup_is_failure)."""
+    leaked_pids = _load_bound._alive_with(leaked)
+    if _load_bound._leak_cleanup_is_failure(leaked_pids, os.path.isdir("/proc")):
+        failures.append("leaked-descendant cleanup: the survivor check was unobservable "
+                        "(/proc could not be read) on a host with /proc, so the leaked child "
+                        "cannot be proven absent")
+    for pid in (leaked_pids or ()):
+        _load_bound._kill_pid(pid)
+
+
 def self_test_main():
     from _git_fixture_env import fixture_git_lifecycle, scrub_git_environment
     scrub_git_environment()
@@ -1567,15 +1581,11 @@ def _self_test_main_isolated():
             _load_factor, PROBE_TIMEOUT, PROBE_STALL_S = saved_bounds
             _now = saved_now
             _run_check = saved_run_check
-            # None is UNOBSERVABLE (/proc could not be read), never absence: surfaced as a
-            # self-test failure instead of silently reading as "no leaked child".
-            leaked_pids = _load_bound._alive_with(leaked)
-            if leaked_pids is None:
-                failures.append("leaked-descendant cleanup: the survivor check was unobservable "
-                                "(/proc could not be read), so the leaked child cannot be proven "
-                                "absent")
-            for pid in (leaked_pids or ()):
-                _load_bound._kill_pid(pid)
+            # None is UNOBSERVABLE (/proc could not be read) on a host WITH /proc, surfaced as a
+            # self-test failure instead of silently reading as "no leaked child"; on a host with
+            # no /proc there is no survivor check (the disclosed platform limit), never a false
+            # leak (_cleanup_leaked_descendant).
+            _cleanup_leaked_descendant(leaked, failures)
         if (rc_slow, rc_hang, rc_idle, sorted(set(stops)), rc_leaky, rc_leaky_reject,
                 rc_leaky_reject_escape) != (0, 2, 2, ["stall"], 1, 0, 2):
             failures.append("load tolerance: expected (slow under load, silent hang, slow on an idle host, "
@@ -1593,6 +1603,26 @@ def _self_test_main_isolated():
                             "containment diagnostic ('left the target uncontained') in the sweep "
                             "output, got stdout {!r} stderr {!r}".format(escape_out, escape_err))
         failures.extend(_load_bound.vector_failures(sys.executable))
+
+        # Caller-level coverage for the leaked-descendant cleanup guard: an injected UNOBSERVABLE
+        # scan (None) on a host with /proc must record exactly one failure, an observed empty scan
+        # none. This drives the caller itself, so removing the guard (here or in
+        # _load_bound._leak_cleanup_is_failure) turns this leg red; the committed []-path run
+        # above never exercises the None branch on its own.
+        if os.path.isdir("/proc"):
+            probe_none, probe_empty = [], []
+            saved_alive_probe = _load_bound._alive_with
+            try:
+                _load_bound._alive_with = lambda tok, opener=None: None
+                _cleanup_leaked_descendant("gensrc-cleanup-probe", probe_none)
+                _load_bound._alive_with = lambda tok, opener=None: []
+                _cleanup_leaked_descendant("gensrc-cleanup-probe", probe_empty)
+            finally:
+                _load_bound._alive_with = saved_alive_probe
+            if (len(probe_none), probe_empty) != (1, []):
+                failures.append("leaked-cleanup guard: an unobservable (None) scan must record "
+                                "one failure and an observed empty scan none; got {} and {!r}"
+                                .format(len(probe_none), probe_empty))
 
         # (l) A sandbox-setup mkdtemp failure (injected OSError) returns cannot-evaluate (exit 2), not an
         #     escaping raise (the work-dir mkdtemp now lives inside the try).
