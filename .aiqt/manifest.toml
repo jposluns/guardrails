@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "f614076b3f4c163f9452894fdd655172b62ba4df6934c9073945dc7a1ebb51bb"
+tree-sha256 = "dc7c27dbe383efd98d75de10672a5808e81088ab305420617a2f9cd1983acfee"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3421,8 +3421,8 @@ sha256 = "a9127c88e9ab235919af8b318e393c7e859a5510809e20d5c1145094beb62a33"
 
 [[sources]]
 path = "tools/check_python_host_pin.py"
-bytes = 179029
-sha256 = "c385556e4ae79eb75f09386797f667f61ae4d57546270429b088903b4e3e73d5"
+bytes = 190893
+sha256 = "92da4c5cbd5f0b9541e583750160361e014725d6ed349cd4cef75436dc989689"
 
 [[sources]]
 path = "tools/check_python_launcher_isolation.py"
