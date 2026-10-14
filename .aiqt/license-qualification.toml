@@ -5,9 +5,12 @@
 # LICENCE_IDENTITIES table. The gate VERIFIES the declaration against the licence file (exactly one of
 # LICENSE, LICENSE.md, LICENSE.txt, COPYING may be present): that identity's canonical opening must
 # be the file's LEADING non-blank text, ending on a complete token boundary, and no other identity's
-# opening may appear anywhere in the file. An absent key falls back to inference only for a
-# rights-RESERVING identity whose opening leads the file; a rights-waiving identity (CC0-1.0,
-# Unlicense) is NEVER inferred and must be declared here; anything else is cannot-evaluate (exit 2).
+# opening may appear anywhere in the file (markdown emphasis, heading, list, and blockquote markers
+# are read as spaces). A declared rights-waiving identity (CC0-1.0, Unlicense) must further be the
+# WHOLE canonical text of that licence, token for token, with only whitespace tolerated. An absent
+# key falls back to inference only for a rights-RESERVING identity whose opening leads the file; a
+# rights-waiving identity is NEVER inferred and must be declared here; anything else is
+# cannot-evaluate (exit 2).
 #
 # Each [[exception]] row excuses EXACTLY ONE waiver-phrase occurrence on ONE scanned surface and MUST
 # carry these keys:

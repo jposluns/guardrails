@@ -50,16 +50,25 @@ file. Exactly one licence file (LICENSE, LICENSE.md, LICENSE.txt, or COPYING) mu
 CANONICAL OPENING TEMPLATE of the declared identity (the opening of the licence text itself, with
 controlled whitespace and punctuation variation: \\s+ between tokens, each canonical comma point
 tolerating a comma, a dash, or a line break, CRLF included, plus the optional title/copyright preamble
-of the licence itself) must be the FIRST NON-BLANK TEXT of the file and end on a COMPLETE TOKEN
-BOUNDARY ("CC0 1.0 Universalist" never verifies CC0-1.0), and the file must not contain the opening of
-any OTHER identity ANYWHERE, line-anchored or not. A mention of another identity (wrapped, quoted, or
-mid-sentence: "This is not CC0 1.0 Universal.") therefore never DECIDES, or un-decides, an identity
-into use; it REFUSES the file (cannot-evaluate, exit 2), which fails closed. When the declaration is
-absent, a rights-RESERVING identity is INFERRED only when its opening is the leading text of the file
-and the opening of no other identity appears anywhere; a RIGHTS-WAIVING identity (CC0-1.0, the
-Unlicense) is NEVER inferred, because an inferred waiver would switch class 3 off: a licence file
-whose only match is a rights-waiving opening is, without a declaration, cannot-evaluate (exit 2) with
-a message naming that identity and the `licence` key to set. An unknown, ambiguous, duplicated, or
+of the licence itself) must be the FIRST NON-BLANK TEXT of the file (one leading U+FEFF byte-order
+mark is dropped first) and end on a COMPLETE TOKEN BOUNDARY ("CC0 1.0 Universalist" never verifies
+CC0-1.0), and the file must not contain the opening of any OTHER identity ANYWHERE, line-anchored or
+not, where the search reads the markdown marker characters * _ ` # = + > - as spaces. A mention of
+another identity (wrapped, quoted, or mid-sentence: "This is not CC0 1.0 Universal."; or wrapped in
+markdown emphasis, heading, list, or blockquote markers: "**Apache License**", "# Apache License",
+"> Apache License") therefore never DECIDES, or un-decides, an identity into use; it REFUSES the file
+(cannot-evaluate, exit 2), which fails closed. A DECLARED RIGHTS-WAIVING identity (CC0-1.0, the
+Unlicense), the declaration that switches class 3 off, is further verified against the WHOLE
+canonical text of that licence (CANONICAL_WAIVER_TEXTS: the CC0 1.0 Universal legal code; the
+Unlicense dedication, disclaimer, and closing reference line), token for token, case-insensitively,
+with whitespace (reflow, CRLF, indentation) the only tolerated difference: a heading over other terms
+("CC0 1.0 Universal" then a proprietary licence), an appended addendum, or one changed token is
+cannot-evaluate (exit 2), never a waiver. When the declaration is absent, a rights-RESERVING identity
+is INFERRED only when its opening is the leading text of the file and the opening of no other
+identity appears anywhere; a RIGHTS-WAIVING identity (CC0-1.0, the Unlicense) is NEVER inferred,
+because an inferred waiver would switch class 3 off: a licence file whose only match is a
+rights-waiving opening is, without a declaration, cannot-evaluate (exit 2) with a message naming
+that identity and the `licence` key to set. An unknown, ambiguous, duplicated, or
 unreadable licence file is cannot-evaluate (exit 2), NEVER a clean pass, and nothing about any
 particular project is hardcoded (the licence file and configuration of whatever repository is scanned
 decide). When the declared and verified licence itself waives rights (CC0-1.0, the Unlicense) class 3
@@ -70,9 +79,15 @@ reserved`, `all rights waived`, `dedicated to the public domain`, `copyright wai
 matched on the same scanned surfaces classes 1 and 2 use, case-insensitively, tokens joined by [\\s>]+
 and \\b-anchored, so a line-wrapped waiver, a capitalized "No Rights Reserved", the hyphen-adjacent
 "CC0-1.0", and a waiver wrapped across markdown blockquote continuation lines ("> no rights" then "
-> reserved") are all caught, while "acc0unt" and a COMPLETE CSS HEX COLOUR token "#cc0" (a cc0
-immediately after "#" whose maximal hex-digit run is exactly 3 or 6 digits long) are not; every OTHER
-waiver phrase immediately after "#" (a markdown heading "#no rights reserved") IS a finding. There is
+> reserved") are all caught, while "acc0unt" and the CSS HEX COLOUR "#cc0" are not. The colour
+exclusion is decided on the WHOLE hash token: a cc0 is excused only when a SINGLE "#" sits immediately
+before it, that "#" is at the start of the text or follows whitespace or one of : ( , { ; " ' =, the
+token ends with the cc0 (the end of the text, whitespace, or one of ; } ) , ! " ' < >), and no "1.0"
+version number follows; so "#CC0-1.0", "#CC0 1.0 Universal", "##cc0", "x#cc0", "&#cc0;", "#cc0.5em",
+and a sentence-final "#cc0." are findings (a genuine colour mention there needs an exception row). A
+six-digit colour such as "#cc0000" never matches the \\b-anchored cc0 phrase at all, so no length rule
+applies; every OTHER waiver phrase immediately after "#" (a markdown heading "#no rights reserved") IS
+a finding. There is
 NO quoted-text exemption: a waiver phrase inside a markdown blockquote, a fenced code block, or an
 HTML blockquote element is a finding like any other, whether or not the quote names a licence (a
 genuinely quoted third-party licence text is excused only by an explicit exception row). The ONLY
@@ -104,7 +119,10 @@ exists but is unreadable as text), not a crash and not a skip. For class 3 the l
 required (exactly one of LICENSE, LICENSE.md, LICENSE.txt, COPYING). PRESENCE of a licence candidate and of
 the configuration is decided with os.lstat, never Path.exists: FileNotFoundError is absence, and any OTHER
 OSError (EACCES included) on a candidate or on .aiqt/license-qualification.toml is a NAMED class-3
-cannot-evaluate (exit 2), never read as absence and never a silent pass. An absent, duplicated, unreadable,
+cannot-evaluate (exit 2), never read as absence and never a silent pass. The regular-file test that
+follows uses os.stat, never Path.is_file: a stat error on the present entry (a dangling symlink, an
+EACCES on its target) is a NAMED cannot-evaluate carrying that error, never "not a regular file", and
+an entry of another type is cannot-evaluate saying so. An absent, duplicated, unreadable,
 unknown, or ambiguous licence file, a declaration the file does not verify, a rights-waiving opening
 without a declaration, a malformed configuration, or a stale exception row is cannot-evaluate (exit 2),
 never a clean pass. A class-3 cannot-evaluate NEVER hides class-1 or class-2 findings: those classes always
@@ -137,18 +155,24 @@ whitespace and markdown blockquote markers ONLY, so a waiver phrase whose tokens
 markup or an entity is not seen: an HTML-SPLIT phrase ("no <b>rights</b> reserved"), a markdown
 EMPHASIS-SPLIT phrase ("no *rights* reserved"), and an entity-separated phrase ("no&nbsp;rights
 reserved", where entity text, not a space, sits between the tokens) all slip the matcher (a literal
-U+00A0 character IS whitespace and is caught); a cc0 completing a CSS HEX COLOUR token immediately
-after "#" (a maximal run of exactly 3 or 6 hex digits, as in "#cc0") is never matched, so a genuine
-waiver spelled exactly "#cc0" is not seen, though every OTHER waiver phrase after "#" IS a finding;
+U+00A0 character IS whitespace and is caught); a cc0 that is the whole hash token "#cc0" in a colour
+position (above) is never matched, so a genuine waiver spelled exactly that way is not seen, though
+every OTHER waiver phrase after "#" IS a finding;
 a waiver token fused to an underscore ("CC0_1.0" written with an underscore is one \\w+ token) has
-no word boundary and is not seen; a quoted
+no word boundary and is not seen; the other-identity refusal reads markdown markers as spaces but NOT
+HTML tags or entities, so an opening split by them ("<b>Apache</b> License", "Apache&nbsp;License") is
+not refused (a rights-waiving identity is accepted only as its whole canonical text, so such a missed
+mention can only leave a rights-RESERVING identity in force, with class 3 on); a rights-waiving licence
+file that differs from its canonical text in any token (a reworded disclaimer, an https reference line
+in the Unlicense, an added copyright line) is cannot-evaluate (exit 2), never accepted; a quoted
 third-party licence text on a scanned surface now FLAGS and needs an exception row binding each exact
 occurrence, so an unmaintained quotation surfaces as a finding, never a silent exemption; and the
 licence identity table is closed, so a licence it does not know (for instance LGPL) is cannot-evaluate
 (exit 2), not guessed. Grow the vocabulary, and the licence identity table, when a new class is found.
 
   gen: python3 tools/check_license_qualification.py             scan the required public-facing surfaces
-       python3 tools/check_license_qualification.py --self-test  run the in-memory fixture corpus
+       python3 tools/check_license_qualification.py --self-test  run the fixture corpus (in-memory and
+                                                                 temporary-tree legs)
 
 Exit 0 clean, 1 on any finding, 2 on a read error (absent/unwalkable/wrong-type required surface) or a
 class-3 cannot-evaluate (an absent, duplicated, unknown, ambiguous, or unreadable licence file or
@@ -173,6 +197,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 import argparse
 import os
 import re
+import stat
 from pathlib import Path
 
 # Import the sibling module WITHOUT placing this script's own directory AHEAD of the stdlib on sys.path.
@@ -258,13 +283,15 @@ NAMED_FILES = ("disclosure.toml", "DISCLOSURE.md", "README.md")
 # variant all match). The LEADING template is anchored to the START OF THE FILE: only whitespace and
 # the optional title/copyright preamble of the licence itself may precede the opening, and the
 # template ends on a complete token boundary. It is what ESTABLISHES an identity, so an opening
-# buried below other terms never verifies or infers one. The ANYWHERE template is unanchored and only
-# ever REFUSES: the opening of any OTHER identity found anywhere in the file, even wrapped or quoted
-# mid-sentence ("This is not CC0 1.0 Universal."), is cannot-evaluate (exit 2), never a decision. The
-# table is closed by design: the declaration is validated against it, an unmatched or multiply-matched
-# licence file is cannot-evaluate (exit 2), never a clean pass, and nothing about any particular
-# project is hardcoded (the licence file of whatever repository is scanned decides). Grow the table
-# when a new licence is adopted, as the class-1 vocabulary grows.
+# buried below other terms never verifies or infers one; a DECLARED rights-waiving identity must
+# further be the WHOLE canonical text (CANONICAL_WAIVER_TEXTS). The ANYWHERE template is unanchored
+# and only ever REFUSES: the opening of any OTHER identity found anywhere in the file, even wrapped,
+# quoted mid-sentence ("This is not CC0 1.0 Universal."), or wrapped in the markdown markers
+# _MARKDOWN_MARKS reads as spaces ("**Apache License**", "> Apache License"), is cannot-evaluate
+# (exit 2), never a decision. The table is closed by design: the declaration is validated against
+# it, an unmatched or multiply-matched licence file is cannot-evaluate (exit 2), never a clean pass,
+# and nothing about any particular project is hardcoded (the licence file of whatever repository is
+# scanned decides). Grow the table when a new licence is adopted, as the class-1 vocabulary grows.
 
 
 def _leading(preamble, body):
@@ -277,10 +304,18 @@ def _leading(preamble, body):
 
 def _anywhere(body):
     """Compile one canonical opening for the APPEARS-ANYWHERE refusal test: unanchored and
-    word-boundary-bounded, so even a wrapped or quoted mention of the opening of ANOTHER identity
-    refuses the file (fail closed) instead of deciding, or silently coexisting with, the identity in
-    use."""
+    word-boundary-bounded, and searched over the licence text with the _MARKDOWN_MARKS characters
+    read as spaces, so even a wrapped, quoted, or markdown-formatted mention of the opening of
+    ANOTHER identity refuses the file (fail closed) instead of deciding, or silently coexisting with,
+    the identity in use."""
     return re.compile(r"\b" + body + r"\b", re.IGNORECASE)
+
+
+# The markdown marker characters the APPEARS-ANYWHERE search reads as spaces: emphasis (* _), code
+# (`), ATX and setext headings (# = -), list items (+), and blockquotes (>). An opening wrapped in
+# them ("**Apache License**", "> Apache License", "# Apache License") is still found. HTML tags and
+# entities are NOT read through ("<b>Apache</b> License" is not found; a disclosed residual).
+_MARKDOWN_MARKS = re.compile(r"[*_`#=+>-]")
 
 
 # Optional copyright preamble lines ("Copyright (c) 2026 Example") tolerated before the openings whose
@@ -316,6 +351,179 @@ LICENCE_IDENTITIES = (
 )
 LICENCE_IDENTITY_NAMES = tuple(ident for ident, _, _, _ in LICENCE_IDENTITIES)
 
+# The WHOLE canonical text of each rights-waiving identity. A declared waiving identity switches class 3
+# off, so its opening alone never verifies it: the licence file must BE this text, token for token
+# (case-insensitively; whitespace, line breaks, and CRLF are the only tolerated difference), decided in
+# resolve_licence_identity by _canonical_divergence. The CC0-1.0 entry is the Creative Commons CC0 1.0
+# Universal legal code; the Unlicense entry is its dedication, warranty disclaimer, and closing
+# reference line. The self-test pins both texts by SHA-256, so an edit to either fails it.
+_CANON_CC0 = """\
+Creative Commons Legal Code
+
+CC0 1.0 Universal
+
+    CREATIVE COMMONS CORPORATION IS NOT A LAW FIRM AND DOES NOT PROVIDE
+    LEGAL SERVICES. DISTRIBUTION OF THIS DOCUMENT DOES NOT CREATE AN
+    ATTORNEY-CLIENT RELATIONSHIP. CREATIVE COMMONS PROVIDES THIS
+    INFORMATION ON AN "AS-IS" BASIS. CREATIVE COMMONS MAKES NO WARRANTIES
+    REGARDING THE USE OF THIS DOCUMENT OR THE INFORMATION OR WORKS
+    PROVIDED HEREUNDER, AND DISCLAIMS LIABILITY FOR DAMAGES RESULTING FROM
+    THE USE OF THIS DOCUMENT OR THE INFORMATION OR WORKS PROVIDED
+    HEREUNDER.
+
+Statement of Purpose
+
+The laws of most jurisdictions throughout the world automatically confer
+exclusive Copyright and Related Rights (defined below) upon the creator
+and subsequent owner(s) (each and all, an "owner") of an original work of
+authorship and/or a database (each, a "Work").
+
+Certain owners wish to permanently relinquish those rights to a Work for
+the purpose of contributing to a commons of creative, cultural and
+scientific works ("Commons") that the public can reliably and without fear
+of later claims of infringement build upon, modify, incorporate in other
+works, reuse and redistribute as freely as possible in any form whatsoever
+and for any purposes, including without limitation commercial purposes.
+These owners may contribute to the Commons to promote the ideal of a free
+culture and the further production of creative, cultural and scientific
+works, or to gain reputation or greater distribution for their Work in
+part through the use and efforts of others.
+
+For these and/or other purposes and motivations, and without any
+expectation of additional consideration or compensation, the person
+associating CC0 with a Work (the "Affirmer"), to the extent that he or she
+is an owner of Copyright and Related Rights in the Work, voluntarily
+elects to apply CC0 to the Work and publicly distribute the Work under its
+terms, with knowledge of his or her Copyright and Related Rights in the
+Work and the meaning and intended legal effect of CC0 on those rights.
+
+1. Copyright and Related Rights. A Work made available under CC0 may be
+protected by copyright and related or neighboring rights ("Copyright and
+Related Rights"). Copyright and Related Rights include, but are not
+limited to, the following:
+
+  i. the right to reproduce, adapt, distribute, perform, display,
+     communicate, and translate a Work;
+ ii. moral rights retained by the original author(s) and/or performer(s);
+iii. publicity and privacy rights pertaining to a person's image or
+     likeness depicted in a Work;
+ iv. rights protecting against unfair competition in regards to a Work,
+     subject to the limitations in paragraph 4(a), below;
+  v. rights protecting the extraction, dissemination, use and reuse of data
+     in a Work;
+ vi. database rights (such as those arising under Directive 96/9/EC of the
+     European Parliament and of the Council of 11 March 1996 on the legal
+     protection of databases, and under any national implementation
+     thereof, including any amended or successor version of such
+     directive); and
+vii. other similar, equivalent or corresponding rights throughout the
+     world based on applicable law or treaty, and any national
+     implementations thereof.
+
+2. Waiver. To the greatest extent permitted by, but not in contravention
+of, applicable law, Affirmer hereby overtly, fully, permanently,
+irrevocably and unconditionally waives, abandons, and surrenders all of
+Affirmer's Copyright and Related Rights and associated claims and causes
+of action, whether now known or unknown (including existing as well as
+future claims and causes of action), in the Work (i) in all territories
+worldwide, (ii) for the maximum duration provided by applicable law or
+treaty (including future time extensions), (iii) in any current or future
+medium and for any number of copies, and (iv) for any purpose whatsoever,
+including without limitation commercial, advertising or promotional
+purposes (the "Waiver"). Affirmer makes the Waiver for the benefit of each
+member of the public at large and to the detriment of Affirmer's heirs and
+successors, fully intending that such Waiver shall not be subject to
+revocation, rescission, cancellation, termination, or any other legal or
+equitable action to disrupt the quiet enjoyment of the Work by the public
+as contemplated by Affirmer's express Statement of Purpose.
+
+3. Public License Fallback. Should any part of the Waiver for any reason
+be judged legally invalid or ineffective under applicable law, then the
+Waiver shall be preserved to the maximum extent permitted taking into
+account Affirmer's express Statement of Purpose. In addition, to the
+extent the Waiver is so judged Affirmer hereby grants to each affected
+person a royalty-free, non transferable, non sublicensable, non exclusive,
+irrevocable and unconditional license to exercise Affirmer's Copyright and
+Related Rights in the Work (i) in all territories worldwide, (ii) for the
+maximum duration provided by applicable law or treaty (including future
+time extensions), (iii) in any current or future medium and for any number
+of copies, and (iv) for any purpose whatsoever, including without
+limitation commercial, advertising or promotional purposes (the
+"License"). The License shall be deemed effective as of the date CC0 was
+applied by Affirmer to the Work. Should any part of the License for any
+reason be judged legally invalid or ineffective under applicable law, such
+partial invalidity or ineffectiveness shall not invalidate the remainder
+of the License, and in such case Affirmer hereby affirms that he or she
+will not (i) exercise any of his or her remaining Copyright and Related
+Rights in the Work or (ii) assert any associated claims and causes of
+action with respect to the Work, in either case contrary to Affirmer's
+express Statement of Purpose.
+
+4. Limitations and Disclaimers.
+
+ a. No trademark or patent rights held by Affirmer are waived, abandoned,
+    surrendered, licensed or otherwise affected by this document.
+ b. Affirmer offers the Work as-is and makes no representations or
+    warranties of any kind concerning the Work, express, implied,
+    statutory or otherwise, including without limitation warranties of
+    title, merchantability, fitness for a particular purpose, non
+    infringement, or the absence of latent or other defects, accuracy, or
+    the present or absence of errors, whether or not discoverable, all to
+    the greatest extent permissible under applicable law.
+ c. Affirmer disclaims responsibility for clearing rights of other persons
+    that may apply to the Work or any use thereof, including without
+    limitation any person's Copyright and Related Rights in the Work.
+    Further, Affirmer disclaims responsibility for obtaining any necessary
+    consents, permissions or other rights required for any use of the
+    Work.
+ d. Affirmer understands and acknowledges that Creative Commons is not a
+    party to this document and has no duty or obligation with respect to
+    this CC0 or use of the Work.
+"""
+_CANON_UNLICENSE = """\
+This is free and unencumbered software released into the public domain.
+
+Anyone is free to copy, modify, publish, use, compile, sell, or distribute this
+software, either in source code form or as a compiled binary, for any purpose,
+commercial or non-commercial, and by any means.
+
+In jurisdictions that recognize copyright laws, the author or authors of this
+software dedicate any and all copyright interest in the software to the public
+domain. We make this dedication for the benefit of the public at large and to
+the detriment of our heirs and successors. We intend this dedication to be an
+overt act of relinquishment in perpetuity of all present and future rights to
+this software under copyright law.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+For more information, please refer to <http://unlicense.org/>
+"""
+CANONICAL_WAIVER_TEXTS = {"CC0-1.0": _CANON_CC0, "Unlicense": _CANON_UNLICENSE}
+
+
+def _canonical_divergence(text, canon):
+    """None when text IS canon token for token (case-insensitively; whitespace is the only tolerated
+    difference), else a short description of the first divergence for the diagnostic: a changed
+    token, text past the end of the canonical text, or text that stops short of it."""
+    got = text.split()
+    want = canon.split()
+    for i, (g, w) in enumerate(zip(got, want)):
+        if g.casefold() != w.casefold():
+            return "token {} is {!r} where the canonical text has {!r}".format(i + 1, g, w)
+    if len(got) > len(want):
+        return "{} token(s) follow the end of the canonical text, starting {!r}".format(
+            len(got) - len(want), got[len(want)])
+    if len(got) < len(want):
+        return "the text stops after token {} of {}; the canonical text continues {!r}".format(
+            len(got), len(want), want[len(got)])
+    return None
+
+
 # The licence file: EXACTLY ONE of these canonical names must be present at the repository root. Zero
 # candidates, or more than one, is cannot-evaluate (exit 2): the gate never guesses between files.
 LICENCE_FILE_NAMES = ("LICENSE", "LICENSE.md", "LICENSE.txt", "COPYING")
@@ -333,9 +541,8 @@ CONFIG_LICENCE_KEY = "licence"
 
 # The CLOSED waiver-phrase list. Tokens are joined by [\s>]+ (whitespace plus the markdown blockquote
 # continuation marker, so a waiver wrapped across quoted lines stays one phrase) and \b-anchored
-# ("acc0unt" is not cc0). The ONLY "#" exclusion is the CSS hex colour: a cc0 immediately after "#"
-# whose maximal hex-digit run is exactly 3 or 6 digits long (a complete colour token, decided in
-# _is_css_colour_cc0, not in the regex) is not a waiver; every OTHER phrase after "#" (a markdown
+# ("acc0unt" is not cc0). The ONLY "#" exclusion is the CSS hex colour "#cc0", decided on the WHOLE
+# hash token in _is_css_colour_cc0, not in the regex; every OTHER phrase after "#" (a markdown
 # heading "#no rights reserved") flags. Closed and documented: a paraphrased or markup-split waiver is
 # a disclosed residual (module docstring), not a matcher ambition.
 WAIVER_PHRASES = (
@@ -346,17 +553,30 @@ WAIVER_PHRASES = (
     "cc0",
 )
 
-_HEX_RUN = re.compile(r"[0-9a-f]*", re.IGNORECASE)
+# The CSS colour exclusion, decided on the WHOLE hash token: what may precede the "#" (besides the
+# start of the text and whitespace), what may end the token (besides the end of the text and
+# whitespace), and the version number that makes a following cc0 name the dedication instead.
+_COLOUR_LEAD = ":(,{;\"'="
+_COLOUR_END = ";}),!\"'<>"
+_CC0_VERSION = re.compile(r"\s+1\.0\b")
 
 
-def _is_css_colour_cc0(text, start):
-    """True iff the cc0 match at `start` completes a CSS hex colour token: a "#" immediately before
-    it and a maximal hex-digit run, starting at the match, of exactly 3 or 6 digits. "#cc0 " and
-    "#cc0;" are the colour; "# cc0" and a run of any other length are not, and no other waiver
-    phrase is ever excluded by this test."""
+def _is_css_colour_cc0(text, start, end):
+    """True iff the cc0 match text[start:end] is the WHOLE token after a single "#" in a colour
+    position: the "#" sits immediately before the match and is itself at the start of the text or
+    after whitespace or one of : ( , { ; " ' =; the token ends with the match (the end of the text,
+    whitespace, or one of ; } ) , ! " ' < >); and no "1.0" version number follows. So "#cc0",
+    "color:#cc0;", and "background: #cc0 " are the colour, while "#CC0-1.0", "#CC0 1.0 Universal",
+    "##cc0", "x#cc0", "&#cc0;", "#cc0.5em", and a sentence-final "#cc0." are not. A six-digit colour
+    such as "#cc0000" never matches the \\b-anchored cc0 phrase at all, so no length rule applies,
+    and no other waiver phrase is ever excluded by this test."""
     if start == 0 or text[start - 1] != "#":
         return False
-    return len(_HEX_RUN.match(text, start).group(0)) in (3, 6)
+    if start > 1 and not (text[start - 2].isspace() or text[start - 2] in _COLOUR_LEAD):
+        return False
+    if end < len(text) and not (text[end].isspace() or text[end] in _COLOUR_END):
+        return False
+    return not _CC0_VERSION.match(text, end)
 
 
 def _waiver_regex(phrase):
@@ -393,16 +613,22 @@ def resolve_licence_identity(declared, licence_name, licence_text):
     `licence_name` and `licence_text` are the chosen licence file and its text. An identity is
     ESTABLISHED only by the LEADING text of the file (the _leading templates); the unanchored
     _anywhere templates only ever REFUSE. DECLARED: the declaration decides and is VERIFIED, so the
-    canonical opening of the declared identity must be the leading text of the file, and the opening
-    of no OTHER identity may appear anywhere in it. INFERRED (no declaration): accepted only for a
-    rights-RESERVING identity whose opening leads the file, with no other opening anywhere; a
-    RIGHTS-WAIVING identity (CC0-1.0, the Unlicense) is NEVER inferred, because inference would switch
-    class 3 off on text nobody declared. Every other outcome raises _FailClosed (exit 2) with a
-    message naming the `licence` key: cannot-evaluate, never a clean pass, never decided by a
-    mention."""
+    canonical opening of the declared identity must be the leading text of the file, the opening of
+    no OTHER identity may appear anywhere in it (searched with the _MARKDOWN_MARKS read as spaces),
+    and a declared RIGHTS-WAIVING identity must be the WHOLE canonical text of that licence
+    (CANONICAL_WAIVER_TEXTS, compared by _canonical_divergence), because the declaration is what
+    switches class 3 off. INFERRED (no declaration): accepted only for a rights-RESERVING identity
+    whose opening leads the file, with no other opening anywhere; a RIGHTS-WAIVING identity (CC0-1.0,
+    the Unlicense) is NEVER inferred, because inference would switch class 3 off on text nobody
+    declared. One leading U+FEFF byte-order mark is dropped first (an encoding signature, not licence
+    text). Every other outcome raises _FailClosed (exit 2) with a message naming the `licence` key:
+    cannot-evaluate, never a clean pass, never decided by a mention."""
+    if licence_text.startswith("\ufeff"):
+        licence_text = licence_text[1:]
     leading = [(ident, reserves) for ident, lead_rx, _, reserves in LICENCE_IDENTITIES
                if lead_rx.match(licence_text)]
-    mentioned = [ident for ident, _, any_rx, _ in LICENCE_IDENTITIES if any_rx.search(licence_text)]
+    flat = _MARKDOWN_MARKS.sub(" ", licence_text)
+    mentioned = [ident for ident, _, any_rx, _ in LICENCE_IDENTITIES if any_rx.search(flat)]
     if declared is not None:
         if all(ident != declared for ident, _ in leading):
             raise _FailClosed(
@@ -416,7 +642,18 @@ def resolve_licence_identity(declared, licence_name, licence_text):
                 "{} declares {} = \"{}\" but {} also contains the canonical opening of {}; a licence"
                 " file must carry exactly one canonical opening".format(
                     CONFIG_PATH, CONFIG_LICENCE_KEY, declared, licence_name, ", ".join(extra)))
-        return next((ident, reserves) for ident, reserves in leading if ident == declared)
+        identity = next((ident, reserves) for ident, reserves in leading if ident == declared)
+        if not identity[1]:
+            # A waiving identity missing from CANONICAL_WAIVER_TEXTS is compared with the empty text,
+            # so it always refuses: a table row alone can never switch class 3 off.
+            divergence = _canonical_divergence(licence_text, CANONICAL_WAIVER_TEXTS.get(declared, ""))
+            if divergence is not None:
+                raise _FailClosed(
+                    "{} declares {} = \"{}\", a rights-waiving licence, but {} is not the whole"
+                    " canonical text of that licence ({}); a declared waiver switches class 3 off only"
+                    " on the complete text, so fix the declaration or the licence file".format(
+                        CONFIG_PATH, CONFIG_LICENCE_KEY, declared, licence_name, divergence))
+        return identity
     if len(leading) > 1:
         raise _FailClosed(
             "{} opens with the canonical opening of more than one licence identity ({}); reduce it to"
@@ -472,15 +709,15 @@ def scan_waivers(text, rel, rows, consumed):
     """Return the class-3 (label, snippet) findings in one surface text whose repo-relative POSIX path
     is rel, given the parsed exception rows and the caller-owned parallel `consumed` flag list.
     Occurrences of one phrase are numbered 1-based in position order within this file (a cc0 excluded
-    as a complete CSS hex colour token is not an occurrence); an UNCONSUMED row excuses one occurrence
-    when its path and phrase match and its binder does (occurrence equals the index, or line equals the
-    exact text of the line the occurrence starts on). A row is consumed by the first occurrence it
-    excuses, so a SECOND occurrence beside an excused one still flags, even on the same or an identical
-    line; the caller reports rows left unconsumed as stale."""
+    as the whole CSS hex colour token "#cc0" is not an occurrence); an UNCONSUMED row excuses one
+    occurrence when its path and phrase match and its binder does (occurrence equals the index, or
+    line equals the exact text of the line the occurrence starts on). A row is consumed by the first
+    occurrence it excuses, so a SECOND occurrence beside an excused one still flags, even on the same
+    or an identical line; the caller reports rows left unconsumed as stale."""
     findings = []
     for phrase, rx in WAIVER_RES:
         matches = [m for m in rx.finditer(text)
-                   if not (phrase == "cc0" and _is_css_colour_cc0(text, m.start()))]
+                   if not (phrase == "cc0" and _is_css_colour_cc0(text, m.start(), m.end()))]
         for index, m in enumerate(matches, start=1):
             line_text = _line_at(text, m.start())
             excused = False
@@ -598,10 +835,11 @@ def _parse_config(data, source):
         rows.append(entry)
     return declared, tuple(rows)
 
-# Injection seams for the file-layer self-test: an EACCES on a presence probe or on a read is injected
-# here (the testing account may be root, where a chmod 000 denies nothing), and production behaviour
-# is identical to calling the underlying functions directly.
+# Injection seams for the file-layer self-test: an EACCES on a presence probe, a type probe, or a read
+# is injected here (the testing account may be root, where a chmod 000 denies nothing), and production
+# behaviour is identical to calling the underlying functions directly.
 _lstat = os.lstat
+_stat = os.stat
 _load_toml_file = load_toml
 
 
@@ -625,16 +863,29 @@ def _present(p, what):
     return True
 
 
+def _require_regular_file(p, what):
+    """Require the entry _present found at p to be a regular file, decided by os.stat (which follows
+    a symlink), NEVER Path.is_file (which reads any OSError as "not a file"): a stat error on the
+    present entry (a dangling symlink, an EACCES on its target) raises a NAMED class-3
+    cannot-evaluate carrying that error, and an entry of another type raises one saying so."""
+    try:
+        mode = _stat(p).st_mode
+    except OSError as exc:
+        raise _FailClosed(
+            "{} cannot be inspected ({}); cannot evaluate class 3".format(what, exc)) from exc
+    if not stat.S_ISREG(mode):
+        raise _FailClosed("{} exists but is not a regular file; cannot evaluate class 3".format(what))
+
+
 def _load_config(root):
     """Read the gate configuration; an absent file means no declaration and no exceptions, a malformed
     one raises _FailClosed (exit 2), and an unreadable one is never read as absent (_present fails
-    closed on a non-ENOENT OSError; a read-time OSError propagates to _collect, which converts it to
-    the class-3 error). Returns (declared, rows)."""
+    closed on a non-ENOENT OSError, _require_regular_file names a stat error; a read-time OSError
+    propagates to _collect, which converts it to the class-3 error). Returns (declared, rows)."""
     p = root / CONFIG_PATH
     if not _present(p, CONFIG_PATH):
         return None, ()
-    if not p.is_file():
-        raise _FailClosed("{} exists but is not a regular file".format(CONFIG_PATH))
+    _require_regular_file(p, CONFIG_PATH)
     try:
         data = _load_toml_file(p)
     except ValueError as exc:
@@ -645,12 +896,12 @@ def _load_config(root):
 def _read_licence(root):
     """Pick and read the licence file. Raises _FailClosed (exit 2) when not exactly one canonical name
     is present (an unreadable candidate fails closed in _present, never reads as absent), the chosen
-    one is not a regular file, or it cannot be decoded as UTF-8; a read-time OSError propagates to
-    _collect, which converts it to the class-3 error so class-1/2 findings stay visible."""
+    one cannot be stat-ed or is not a regular file (_require_regular_file), or it cannot be decoded
+    as UTF-8; a read-time OSError propagates to _collect, which converts it to the class-3 error so
+    class-1/2 findings stay visible."""
     name = _pick_licence_file([n for n in LICENCE_FILE_NAMES if _present(root / n, n)])
     p = root / name
-    if not p.is_file():
-        raise _FailClosed("{} exists but is not a regular file; cannot evaluate class 3".format(name))
+    _require_regular_file(p, name)
     try:
         return name, _read_file_text(p)
     except UnicodeDecodeError as exc:
@@ -845,7 +1096,9 @@ FLAGGED_FIXTURES = [
 
 # Class-3 licence-file fixtures: realistic canonical openings (Debian-style layouts), the controlled
 # whitespace and punctuation variants, and the fail-closed shapes (unknown, ambiguous, short-notice,
-# LGPL, empty). The resolver needs only the opening region, so the texts are abbreviated below it.
+# LGPL, empty). For a rights-RESERVING identity the resolver reads only the opening region, so those
+# texts are abbreviated below it; a declared rights-WAIVING identity is verified against the WHOLE
+# canonical text, so those fixtures are the whole texts.
 _LIC_APACHE = ("                                 Apache License\n"
                "                           Version 2.0, January 2004\n"
                "                        http://www.apache.org/licenses/\n\n"
@@ -872,11 +1125,28 @@ _LIC_BSD = ("Redistribution and use in source and binary forms, with or without\
 _LIC_ISC = ("ISC License\n\nCopyright (c) 2026\n\n"
             "Permission to use, copy, modify, and distribute this software for any\n"
             "purpose with or without fee is hereby granted.\n")
-_LIC_CC0 = ("Creative Commons Legal Code\n\nCC0 1.0 Universal\n\n"
-            "    CREATIVE COMMONS CORPORATION IS NOT A LAW FIRM\n")
-_LIC_UNLICENSE = ("This is free and unencumbered software released into the public domain.\n\n"
-                  "Anyone is free to copy, modify, publish, use, compile, sell, or\n"
-                  "distribute this software.\n")
+# A rights-waiving licence verifies only as its WHOLE canonical text: the canonical texts themselves,
+# reflowed, CRLF, and BOM-prefixed copies verify; the bare opening, an appended or substituted
+# proprietary term, and one changed token never do.
+_LIC_CC0 = CANONICAL_WAIVER_TEXTS["CC0-1.0"]
+_LIC_UNLICENSE = CANONICAL_WAIVER_TEXTS["Unlicense"]
+_LIC_CC0_REFLOWED = " ".join(_LIC_CC0.split()) + "\n"
+_LIC_UNLICENSE_CRLF = _LIC_UNLICENSE.replace("\n", "\r\n")
+_LIC_CC0_OPENING_ONLY = ("Creative Commons Legal Code\n\nCC0 1.0 Universal\n\n"
+                         "    CREATIVE COMMONS CORPORATION IS NOT A LAW FIRM\n")
+_LIC_CC0_THEN_PROPRIETARY = ("CC0 1.0 Universal\n\nACME PROPRIETARY LICENCE. All rights reserved. No use"
+                             " without a signed agreement.\n")
+_LIC_CC0_PLUS_ADDENDUM = _LIC_CC0 + "\nACME ADDENDUM: all rights reserved; no use without a licence.\n"
+_LIC_CC0_ONE_TOKEN = _LIC_CC0.replace("unconditionally waives,", "unconditionally reserves,")
+_LIC_UNLICENSE_THEN_PROPRIETARY = ("This is free and unencumbered software released into the public"
+                                   " domain.\n\nExcept that ACME reserves all rights in it.\n")
+# Openings wrapped in markdown markers are still found anywhere, so they refuse the file.
+_LIC_CC0_BOLD_APACHE = "CC0 1.0 Universal\n\n**Apache License**\nVersion 2.0, January 2004\n"
+_LIC_CC0_QUOTED_APACHE = "CC0 1.0 Universal\n> Apache License\n> Version 2.0, January 2004\n"
+_LIC_APACHE_QUOTED_CC0 = _LIC_APACHE + "\n> This is not CC0 1.0\n> Universal.\n"
+_LIC_APACHE_BOLD_MPL = _LIC_APACHE + "\n**Mozilla Public License** Version 2.0\n"
+_LIC_MIT_SETEXT_APACHE = _LIC_MIT + "\nApache License\n==============\nVersion 2.0, January 2004\n"
+_LIC_MIT_ATX_APACHE = _LIC_MIT + "\n# Apache License\n# Version 2.0, January 2004\n"
 # LGPL-3.0 with the canonical wrap: "GNU General Public\nLicense," is never a line-anchored GPL opening.
 _LIC_LGPL3 = ("                   GNU LESSER GENERAL PUBLIC LICENSE\n"
               "                       Version 3, 29 June 2007\n\n"
@@ -919,9 +1189,31 @@ LICENCE_IDENTITY_CASES = [
     # a rights-waiving identity is NEVER inferred, however canonical the file: declare it instead.
     (None, _LIC_CC0, "never inferred"),
     (None, _LIC_UNLICENSE, "never inferred"),
-    # declared, a rights-waiving identity verifies against the leading text of the file.
+    # declared, a rights-waiving identity verifies only as the WHOLE canonical text of that licence,
+    # whitespace (reflow, CRLF) and one leading byte-order mark aside ...
     ("CC0-1.0", _LIC_CC0, ("CC0-1.0", False)),
     ("Unlicense", _LIC_UNLICENSE, ("Unlicense", False)),
+    ("CC0-1.0", _LIC_CC0_REFLOWED, ("CC0-1.0", False)),
+    ("Unlicense", _LIC_UNLICENSE_CRLF, ("Unlicense", False)),
+    ("CC0-1.0", "\ufeff" + _LIC_CC0, ("CC0-1.0", False)),
+    # ... so the bare heading, a heading over proprietary terms, an appended addendum, and one changed
+    # token never switch class 3 off.
+    ("CC0-1.0", _LIC_CC0_OPENING_ONLY, "not the whole canonical text"),
+    ("CC0-1.0", _LIC_CC0_THEN_PROPRIETARY, "not the whole canonical text"),
+    ("CC0-1.0", _LIC_CC0_PLUS_ADDENDUM, "not the whole canonical text"),
+    ("CC0-1.0", _LIC_CC0_ONE_TOKEN, "not the whole canonical text"),
+    ("Unlicense", _LIC_UNLICENSE_THEN_PROPRIETARY, "not the whole canonical text"),
+    # a leading byte-order mark is dropped before the leading text is read.
+    (None, "\ufeff" + _LIC_APACHE, ("Apache-2.0", True)),
+    # the opening of another identity wrapped in markdown emphasis, blockquote, or heading markers
+    # is still found anywhere in the file, so it refuses, declared or inferred.
+    ("CC0-1.0", _LIC_CC0_BOLD_APACHE, "also contains the canonical opening of Apache-2.0"),
+    ("CC0-1.0", _LIC_CC0_QUOTED_APACHE, "also contains the canonical opening of Apache-2.0"),
+    ("Apache-2.0", _LIC_APACHE_QUOTED_CC0, "also contains the canonical opening of CC0-1.0"),
+    (None, _LIC_APACHE_QUOTED_CC0, "more than one licence identity"),
+    (None, _LIC_APACHE_BOLD_MPL, "more than one licence identity"),
+    ("MIT", _LIC_MIT_SETEXT_APACHE, "also contains the canonical opening of Apache-2.0"),
+    ("MIT", _LIC_MIT_ATX_APACHE, "also contains the canonical opening of Apache-2.0"),
     # a wrapped rights-waiving opening below proprietary terms never decides, inferred or declared.
     (None, _LIC_PROPRIETARY_CC0_WRAP, "never inferred"),
     ("CC0-1.0", _LIC_PROPRIETARY_CC0_WRAP, "does not open with the canonical opening"),
@@ -1017,18 +1309,38 @@ CLASS3_SCAN_CASES = [
      (("docs/oneline.md", "copyright waiver", "line",
        "A copyright waiver and a second copyright waiver here."),), 1,
      ("second copyright waiver",)),
-    # ... and even when two IDENTICAL lines each carry the phrase: one row excuses one of them.
-    ("A copyright waiver.\nA copyright waiver.\n", "docs/dupline.md",
-     (("docs/dupline.md", "copyright waiver", "line", "A copyright waiver."),), 1),
-    # the CSS-colour exclusion is cc0-only and complete-hex-token-only: every other waiver phrase
-    # after "#" flags (markdown headings, quoted headings, fences, HTML), and so does "# cc0".
+    # ... and even when two IDENTICAL lines each carry the phrase: one row excuses the FIRST of them
+    # (occurrences are taken in position order), and the distinct context around each line pins
+    # which one is left standing (the second, whose snippet carries the closing "omega" context).
+    ("Opening context alpha.\nA copyright waiver.\n"
+     "A long separating paragraph keeps the two snippets apart.\nA copyright waiver.\n"
+     "Closing context omega.\n", "docs/dupline.md",
+     (("docs/dupline.md", "copyright waiver", "line", "A copyright waiver."),), 1, ("omega",)),
+    # the CSS-colour exclusion is cc0-only and decided on the WHOLE hash token: every other waiver
+    # phrase after "#" flags (markdown headings, quoted headings, fences, HTML), and so does "# cc0" ...
     ("#no rights reserved\n", "docs/hash-heading.md", (), 1),
     ("> #no rights reserved\n", "docs/hash-quote.md", (), 1),
     ("```\n#all rights waived\n```\n", "docs/hash-fence.md", (), 1),
     ("<blockquote>#copyright waiver</blockquote>", "site/hash-quote.html", (), 1),
     ("# cc0 is discussed in this heading.", "docs/hash-spaced.md", (), 1),
-    # ... while a COMPLETE 3-digit hex colour token stays excluded wherever it ends.
+    # ... and so does a cc0 that is not the whole token after a single "#" in a colour position: a
+    # version suffix or a following version number, a doubled or fused "#", an entity, and a token
+    # that runs on past the cc0 (a dimension, a sentence-final full stop).
+    ("#CC0-1.0", "docs/hash-version.md", (), 1),
+    ("#CC0 1.0 Universal", "docs/hash-name.md", (), 1),
+    ("##cc0", "docs/hash-double.md", (), 1),
+    ("x#cc0", "docs/hash-fused.md", (), 1),
+    ("&#cc0;", "docs/hash-entity.md", (), 1),
+    ("#cc0.5em", "docs/hash-dimension.md", (), 1),
+    ("The accent is #cc0.", "docs/hash-stop.md", (), 1),
+    # ... while the whole-token colour stays excluded: alone, after whitespace or a CSS delimiter,
+    # and ended by the end of the text, whitespace, or a CSS terminator. A six-digit colour never
+    # matches the cc0 phrase at all.
+    ("#cc0", "docs/hash-bare.md", (), 0),
+    ("#cc0000", "docs/hash-six.md", (), 0),
     ("background: #cc0;", "docs/hash-colour.md", (), 0),
+    ("border: 1px solid #cc0 !important", "docs/hash-spaced-end.md", (), 0),
+    ("<p style=\"color:#cc0\">x</p>", "site/hash-attr.html", (), 0),
 ]
 
 # End-to-end class-3 evaluation fixtures over in-memory trees: (declared, licence text, exception rows,
@@ -1142,8 +1454,23 @@ RENDER_CASES = [
 
 def _self_test_class3():
     """The class-3 fixture legs; return the failure strings (the caller aggregates and reports)."""
+    import hashlib
     import tomllib
     failures = []
+    # The canonical rights-waiving texts are pinned by SHA-256 (CC0 1.0 Universal legal code, 7048
+    # bytes; the Unlicense with its closing reference line), and every rights-waiving identity in
+    # the table must carry one.
+    for ident, want_sha in (
+            ("CC0-1.0", "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499"),
+            ("Unlicense", "4af8fb61da2cb1f815106d1e41f10836ed0b8f3dd830bfb3a8c02c2621bd76ad")):
+        got_sha = hashlib.sha256(CANONICAL_WAIVER_TEXTS.get(ident, "").encode("utf-8")).hexdigest()
+        if got_sha != want_sha:
+            failures.append("CANONICAL TEXT: {} hashes to {}, expected {}".format(
+                ident, got_sha, want_sha))
+    waiving = {ident for ident, _, _, reserves in LICENCE_IDENTITIES if not reserves}
+    if set(CANONICAL_WAIVER_TEXTS) != waiving:
+        failures.append("CANONICAL TEXT: texts for {} but rights-waiving identities {}".format(
+            sorted(CANONICAL_WAIVER_TEXTS), sorted(waiving)))
     for present, expected in LICENCE_FILE_CASES:
         try:
             got = _pick_licence_file(present)
@@ -1248,25 +1575,77 @@ def _write_tree(root, files):
             q.write_text(text, encoding="utf-8")
 
 
+def _collect_shape_ok(got):
+    """True iff got has the shape _collect documents, (findings, claim count, identity, reserves,
+    class3_error): a list of str, an int, and identity (a str) and reserves (a bool) set exactly when
+    class3_error (a str) is None. The file-layer cases read these fields, so a None or malformed
+    result must fail by name, never skip their assertions."""
+    if not (isinstance(got, tuple) and len(got) == 5):
+        return False
+    findings, claims, identity, reserves, c3err = got
+    if not (isinstance(findings, list) and all(isinstance(f, str) for f in findings)):
+        return False
+    if isinstance(claims, bool) or not isinstance(claims, int):
+        return False
+    if c3err is None:
+        return isinstance(identity, str) and isinstance(reserves, bool)
+    return isinstance(c3err, str) and identity is None and reserves is None
+
+
+def _source_dir_entries():
+    """The names in this tool's source directory and in its __pycache__ (where bytecode lands), so
+    the self-test can show it wrote nothing beside its sources."""
+    src = Path(__file__).resolve().parent
+    names = set(os.listdir(src))
+    if (src / "__pycache__").is_dir():
+        names |= {"__pycache__/" + n for n in os.listdir(src / "__pycache__")}
+    return names
+
+
 def _self_test_files():
-    """The file-layer fixture legs: real temporary trees driven through _collect (and one child process
-    through _emit for stream ordering), so licence-file discovery, configuration loading, the
-    lstat-presence and EACCES fail-closed paths, and the never-hidden guarantee are exercised where
-    they live, not only on in-memory lists. EACCES is injected through the _lstat / _read_file_text /
-    _load_toml_file seams (a chmod 000 denies nothing under root). Returns (failures, case count)."""
+    """The file-layer fixture legs: real temporary trees driven through _collect (and child processes
+    through _emit and main for stream ordering), so licence-file discovery, configuration loading,
+    the lstat-presence, stat, and EACCES fail-closed paths, and the never-hidden guarantee are
+    exercised where they live, not only on in-memory lists. EACCES is injected through the _lstat /
+    _stat / _read_file_text / _load_toml_file seams (a chmod 000 denies nothing under root). Every
+    child runs as -I -B with its working directory inside the temporary root, and the root is
+    checked to be gone afterwards. Returns (failures, case count)."""
     import subprocess
     import tempfile
-    global _lstat, _read_file_text, _load_toml_file
+    global _lstat, _stat, _read_file_text, _load_toml_file
     failures = []
     cases = []
 
     def run_collect(label, root):
+        """_collect(root), or None after a NAMED failure (an escaped exception, or a None or
+        malformed result), so no case built on it can pass with zero assertions."""
         cases.append(label)
         try:
-            return _collect(root)
+            got = _collect(root)
         except (OSError, UnicodeDecodeError) as exc:
             failures.append("FILES {}: {} escaped _collect: {}".format(label, type(exc).__name__, exc))
             return None
+        if not _collect_shape_ok(got):
+            failures.append("FILES {}: _collect returned a malformed result: {!r}".format(label, got))
+            return None
+        return got
+
+    def run_child(payload, cwd):
+        return subprocess.run([sys.executable, "-I", "-B", "-c", payload], cwd=cwd,
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120, text=True)
+
+    def merged_order_failure(label, proc, want_code, first, then):
+        """None when the child exited want_code and `first` precedes `then` in its merged capture,
+        else the failure line: a child that crashed after printing in order still fails."""
+        if proc.returncode != want_code:
+            return "FILES {}: the child exited {} (expected {}): {!r}".format(
+                label, proc.returncode, want_code, proc.stdout)
+        a = proc.stdout.find(first)
+        b = proc.stdout.find(then)
+        if not 0 <= a < b:
+            return "FILES {}: {!r} must precede {!r} in a merged capture, got {!r}".format(
+                label, first, then, proc.stdout)
+        return None
 
     def make_tree(td, name, extra):
         root = Path(td) / name
@@ -1374,28 +1753,90 @@ def _self_test_files():
         got = run_collect("NO LICENCE FILE", root)
         if got is not None and not (got[4] is not None and "no licence file found" in got[4]):
             failures.append("FILES NO LICENCE FILE: expected a refusal, got {!r}".format(got))
-    # 9. stream ordering: the findings reach a MERGED capture before the class-3 error line (the
-    # stdout flush in _emit is what holds the order once both streams share one pipe).
-    cases.append("EMIT ORDER")
-    payload = ("import sys; sys.path.insert(0, {!r}); import importlib;"
-               " m = importlib.import_module({!r});"
-               " m._emit([\"FAIL: 1 license/trademark issue(s)\", \"  docs/a.md: class1 -> x\"],"
-               " [\"error: licence trouble; fail-closed\"])").format(
-                   str(Path(__file__).resolve().parent), Path(__file__).stem)
-    proc = subprocess.run([sys.executable, "-I", "-c", payload], stdout=subprocess.PIPE,
-                          stderr=subprocess.STDOUT, timeout=120, text=True)
-    merged = proc.stdout
-    a = merged.find("FAIL: 1 license/trademark issue(s)")
-    b = merged.find("error: licence trouble")
-    if not (0 <= a < b):
-        failures.append("FILES EMIT ORDER: findings must precede the error in a merged capture,"
-                        " got {!r}".format(merged))
+        # 9. a licence entry present by lstat but failing os.stat (a dangling symlink) is reported as
+        # that stat error, never as "not a regular file"; a directory is reported as the wrong type.
+        root = make_tree(td, "lic-dangling", {})
+        (root / "LICENSE").unlink()
+        os.symlink("no-such-licence-target", root / "LICENSE")
+        got = run_collect("LICENCE DANGLING SYMLINK", root)
+        if got is not None and not (got[4] is not None and "LICENSE cannot be inspected" in got[4]
+                                    and "not a regular file" not in got[4]):
+            failures.append(
+                "FILES LICENCE DANGLING SYMLINK: expected the named stat error, got {!r}".format(got))
+        root = make_tree(td, "lic-dir", {})
+        (root / "LICENSE").unlink()
+        (root / "LICENSE").mkdir()
+        got = run_collect("LICENCE IS A DIRECTORY", root)
+        if got is not None and not (got[4] is not None
+                                    and "LICENSE exists but is not a regular file" in got[4]):
+            failures.append(
+                "FILES LICENCE IS A DIRECTORY: expected the wrong-type error, got {!r}".format(got))
+        # 10. EACCES on the CONFIGURATION stat, after a clean lstat, is that error, named.
+        orig_stat = _stat
+
+        def denying_cfg_stat(path):
+            if Path(path).name == "license-qualification.toml":
+                raise PermissionError(13, "injected stat denial", str(path))
+            return orig_stat(path)
+        _stat = denying_cfg_stat
+        try:
+            got = run_collect("CONFIG STAT DENIED", make_tree(
+                td, "cfg-stat", {".aiqt/license-qualification.toml": "licence = \"Apache-2.0\"\n"}))
+        finally:
+            _stat = orig_stat
+        if got is not None and not (got[4] is not None
+                                    and CONFIG_PATH + " cannot be inspected" in got[4]
+                                    and "injected stat denial" in got[4]):
+            failures.append(
+                "FILES CONFIG STAT DENIED: expected the named stat error, got {!r}".format(got))
+        # 11. stream ordering: the findings reach a MERGED capture before the class-3 error line (the
+        # stdout flush is what holds the order once both streams share one pipe), first through
+        # _emit, whose child must exit 0 ...
+        child_cwd = Path(td) / "child-cwd"
+        child_cwd.mkdir()
+        src_dir = str(Path(__file__).resolve().parent)
+        stem = Path(__file__).stem
+        emit_payload = ("import sys; sys.path.insert(0, {!r}); import importlib;"
+                        " m = importlib.import_module({!r});"
+                        " m._emit([\"FAIL: 1 license/trademark issue(s)\", \"  docs/a.md: class1 -> x\"],"
+                        " [\"error: licence trouble; fail-closed\"])").format(src_dir, stem)
+        cases.append("EMIT ORDER")
+        bad = merged_order_failure("EMIT ORDER", run_child(emit_payload, child_cwd), 0,
+                                   "FAIL: 1 license/trademark issue(s)", "error: licence trouble")
+        if bad:
+            failures.append(bad)
+        # ... while the check refuses a child that printed in that order and then crashed ...
+        cases.append("EMIT ORDER CRASH CONTROL")
+        crashed = run_child(emit_payload + "; raise RuntimeError('injected crash after output')",
+                            child_cwd)
+        if merged_order_failure("EMIT ORDER CRASH CONTROL", crashed, 0,
+                                "FAIL: 1 license/trademark issue(s)", "error: licence trouble") is None:
+            failures.append("FILES EMIT ORDER CRASH CONTROL: the order check accepted a child that"
+                            " exited {}: {!r}".format(crashed.returncode, crashed.stdout))
+        # ... and then through main itself on a real tree (class-1 and class-2 findings beside a
+        # class-3 refusal), which must exit 2. main resolves the repository root from __file__, so
+        # the child points the module's __file__ into the fixture tree.
+        root = make_tree(td, "main-order", {"README.md": _README_FINDINGS, "COPYING": _LIC_APACHE})
+        main_payload = ("import sys; sys.path.insert(0, {!r}); import importlib;"
+                        " m = importlib.import_module({!r}); m.__file__ = {!r};"
+                        " sys.argv = [m.__file__]; sys.exit(m.main())").format(
+                            src_dir, stem, str(root / "tools" / (stem + ".py")))
+        cases.append("MAIN ORDER")
+        bad = merged_order_failure("MAIN ORDER", run_child(main_payload, child_cwd), 2,
+                                   "FAIL: 2 license/trademark issue(s)",
+                                   "error: more than one licence file")
+        if bad:
+            failures.append(bad)
+    # 12. the temporary root, with every fixture tree and the child working directory, is gone.
+    if os.path.lexists(td):
+        failures.append("FILES CLEANUP: the temporary root {} is still present".format(td))
     return failures, len(cases)
 
 
 def _self_test():
     """Run the fixture corpus: the in-memory legs, then the file-layer legs in a private temporary tree. Exit 0 iff every fixture behaves, else 1."""
     failures = []
+    source_entries = _source_dir_entries()
     for line in CLEAN_FIXTURES:
         hits = scan_text(line)
         if hits:
@@ -1410,6 +1851,10 @@ def _self_test():
     failures.extend(_self_test_class3())
     file_failures, file_cases = _self_test_files()
     failures.extend(file_failures)
+    gained = sorted(_source_dir_entries() - source_entries)
+    if gained:
+        failures.append("SOURCE DIR: the self-test wrote {} beside its sources (every child must run"
+                        " as -I -B inside the temporary root)".format(gained))
     if failures:
         print("FAIL: check_license_qualification self-test")
         for f in failures:
