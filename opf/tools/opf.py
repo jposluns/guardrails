@@ -5705,10 +5705,12 @@ _WATCHDOG_LAUNCH_INTROSPECTION = ("exec", "eval", "compile", "vars", "globals", 
 # read, since patch("opf.py", create=True) can target this module's
 # attribute py and so hold this module. The carve-out is syntactic, not
 # proof of unreachability: an exempt literal still reaches this module
-# whenever ANY code hands it to patch(..., create=True), a case, a helper
-# or another top-level statement (a module-level patcher bound to a name, a
-# tuple constant indexed at the top level); residual (g) of
-# _watchdog_dispatch_faults keeps that limitation for review.
+# whenever ANY code hands it to patch(...), with or without create=True
+# (the patcher reads the module object into its target before a missing
+# attribute makes start() raise), a case, a helper or another top-level
+# statement (a module-level patcher bound to a name, a tuple constant
+# indexed at the top level); residual (g) of _watchdog_dispatch_faults
+# keeps that limitation for review.
 _WATCHDOG_FILE_SUFFIXES = ("py", "pyc", "pyi", "pyw")
 # The functions through which a scanned case may read the module table, each
 # with its reason: a gate's own def is exempt from the module-route reach seed
@@ -5962,9 +5964,11 @@ def _watchdog_dispatch_faults(budgets, module=None, cases=None, scanned=None):
     a Tuple, List, Set or Dict display or a module-level Assign or AnnAssign
     statement; under any call, comprehension, generator expression, type
     alias, compound statement, def, async def, class or lambda the carve-out
-    does not hold) that ANY code hands to patch(..., create=True): a case, a
-    helper or another top-level statement (a module-level patcher bound to a
-    name, a tuple constant indexed at the top level). Each of (a)
+    does not hold) that ANY code hands to patch(...), with or without
+    create=True (the patcher reads the module object into its target
+    before a missing attribute makes start() raise): a case, a helper or
+    another top-level statement (a module-level patcher bound to a name, a
+    tuple constant indexed at the top level). Each of (a)
     to (g) is open to
     code written to reach a case unseen: deliberate evasion of a static scan
     is the residual this guard leaves to review. Returns the faults."""
@@ -6069,10 +6073,13 @@ def _watchdog_dispatch_faults(budgets, module=None, cases=None, scanned=None):
             bound = [statement.name]
         else:
             bound = [name for node in ast.walk(statement) for name in binds(node)]
-        # The seed's value never matters: a statement is never a Constant,
-        # so spelled() reads the seed's `filed` for no string, and the
-        # children's `filed` below is isinstance(statement, displays), whose
-        # only statement members are the two tables, Assign and AnnAssign.
+        # Any seed true for the two tables, Assign and AnnAssign, gives
+        # the same result: a statement is never a Constant, so spelled()
+        # never reads `filed` from the seed itself, and the `filed` handed
+        # to the children below is isinstance(statement, displays), whose
+        # only statement members are those two tables. A False seed is NOT
+        # equivalent: it would disable the carve-out for every string in
+        # the statement.
         names, stack = set(), [(statement, True)]
         while stack:
             node, filed = stack.pop()
@@ -21145,6 +21152,21 @@ def _watchdog_regression_self_test():
                        "            _watchdog_hidden_targets[0], create=True)\n"
                        "        found.start()\n"
                        "        return getattr(found.target, " + computed
+                       + ")(\"no-signal-echild\")\n"),
+        gen_sibling=("        found = _watchdog_hidden_mock(\n"
+                     "            next(_watchdog_hidden_gens)[0], create=True)\n"
+                     "        found.start()\n"
+                     "        return getattr(found.target, " + computed
+                     + ")(\"no-signal-echild\")\n"),
+        list_sibling=("        found = _watchdog_hidden_mock(\n"
+                      "            _watchdog_hidden_list[0][0], create=True)\n"
+                      "        found.start()\n"
+                      "        return getattr(found.target, " + computed
+                      + ")(\"no-signal-echild\")\n"),
+        alias_sibling=("        found = _watchdog_hidden_mock(\n"
+                       "            _watchdog_hidden_alias.__value__[0], create=True)\n"
+                       "        found.start()\n"
+                       "        return getattr(found.target, " + computed
                        + ")(\"no-signal-echild\")\n"))
     helper_def = ("\n\ndef _watchdog_hidden_dispatch():\n"
                   "    return _watchdog_completion_case(\"no-signal-echild\")\n")
@@ -21191,17 +21213,39 @@ def _watchdog_regression_self_test():
         type_alias=(patch_import
                     + "type _watchdog_hidden_alias = _watchdog_hidden_mock(\n"
                     "    \"opf.py\", create=True)\n"))
-    # The same file-suffixed string placed beside its patch call rather than
-    # under it (the if form binds a tuple the planted branch hands to patch,
-    # and the type alias form binds the tuple its branch reads back): the
-    # node that ends `filed` is the generator expression, list
-    # comprehension, for loop, if or type alias itself, never a Call. A
-    # loosened scan that still refuses the string under a Call but admits
-    # one of those node types among its displays exempts exactly that form,
-    # while every patch_table_defs string above sits under the Call and
-    # would stay refused: these five rows pin each excluded node type on
-    # its own.
+    # The same file-suffixed string placed beside its patch call rather
+    # than under it: the node that ends `filed` is then the generator
+    # expression, list comprehension, for loop, if or type alias itself,
+    # never a Call, so a loosened scan that still refuses the string under
+    # a Call but admits the right node type or types among its displays
+    # exempts exactly that form, while every patch_table_defs string above
+    # sits under the Call and would stay refused. The generator_elt and
+    # list_comp_elt rows place the tuple in the yielded element, a direct
+    # child of the expression node, so admitting GeneratorExp alone or
+    # ListComp alone turns its own row red; their consuming branches hand
+    # the yielded tuple to patch themselves. In the generator and
+    # list_comp rows the string sits in the iterator, under the
+    # comprehension node as well, so each turns red only when its
+    # expression type and comprehension are admitted TOGETHER: grouped
+    # coverage, the only kind the comprehension ancestor can get, since
+    # it never encloses a string without its enclosing expression. The
+    # for_loop, under_if and type_alias rows pin For, If and TypeAlias
+    # each on its own (the if form binds a tuple the planted branch hands
+    # to patch, and the type alias form binds the tuple whose first item
+    # its branch hands to patch). The remaining excluded node types
+    # (While, With, Try, TryStar, Match, AsyncFor, AsyncWith, SetComp,
+    # DictComp, Lambda, FunctionDef, AsyncFunctionDef, ClassDef) are
+    # refused by the same allowlist but are NOT individually pinned: no
+    # row places a string whose only non-display ancestor is one of them,
+    # so a scan admitting any or all of them misses no row here. Every
+    # fixture and branch in this table reaches the scan as text only (a
+    # scanner flip, never executed); the executed legs are the separate
+    # `cases` roster above.
     sibling_table_defs = dict(
+        generator_elt=(patch_import + "_watchdog_hidden_gens = (\n"
+                       "    (\"opf.py\",) for _ in (0,))\n"),
+        list_comp_elt=(patch_import + "_watchdog_hidden_list = [\n"
+                       "    (\"opf.py\",) for _ in (0,)]\n"),
         generator=(patch_import + "_watchdog_hidden_gens = (\n"
                    "    _watchdog_hidden_mock(_watchdog_hidden_name, create=True)\n"
                    "    for _watchdog_hidden_name in (\"opf.py\",))\n"),
@@ -21309,6 +21353,16 @@ def _watchdog_regression_self_test():
             ("file-suffixed patch target in a top-level type alias", budgets,
              hidden("alias_patch", patch_table_defs["type_alias"]), launched_cases,
              "spells _watchdog_hidden_alias, which can reach a case function"),
+            ("file-suffixed string in the yielded element of a top-level "
+             "generator expression, handed to patch by the planted branch",
+             budgets, hidden("gen_sibling", sibling_table_defs["generator_elt"]),
+             launched_cases,
+             "spells _watchdog_hidden_gens, which can reach a case function"),
+            ("file-suffixed string in the yielded element of a top-level "
+             "list comprehension, handed to patch by the planted branch",
+             budgets, hidden("list_sibling", sibling_table_defs["list_comp_elt"]),
+             launched_cases,
+             "spells _watchdog_hidden_list, which can reach a case function"),
             ("file-suffixed string beside its patch call in a top-level "
              "generator expression", budgets,
              hidden("gen_patch", sibling_table_defs["generator"]), launched_cases,
@@ -21326,8 +21380,8 @@ def _watchdog_regression_self_test():
              hidden("targets_patch", sibling_table_defs["under_if"]), launched_cases,
              "spells _watchdog_hidden_targets, which can reach a case function"),
             ("file-suffixed string as a top-level type alias value with no "
-             "call around it", budgets,
-             hidden("alias_patch", sibling_table_defs["type_alias"]), launched_cases,
+             "call around it, handed to patch by the planted branch", budgets,
+             hidden("alias_sibling", sibling_table_defs["type_alias"]), launched_cases,
              "spells _watchdog_hidden_alias, which can reach a case function"),
             ("case def carrying a decorator", budgets,
              module_source.replace(case_def, "@_watchdog_remap\n" + case_def) + remap_def,
