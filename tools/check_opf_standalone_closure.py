@@ -23,7 +23,8 @@ Exit convention (matches the repo's gates):
   1  a real finding (a subset gate failed in isolation: closure is broken)
   2  malformed input or a harness error (fail-closed): opf/ absent/unreadable, copy failed, no interpreter,
      a per-leg bound that cannot be derived, or a leg killed at its wall-clock bound (named as the bound
-     tripping, never as a failure the leg reported; see _LEG_CEILING_S for how each bound is derived)
+     tripping, never as a failure the leg reported; see _LEG_CEILING_S for how each bound is derived),
+     with any cleanup after that kill that did not complete named beside it (CLEANUP INCOMPLETE)
 """
 import sys
 
@@ -102,11 +103,12 @@ _SUBSET = [
 #     never a clean pass; the measured-ceiling term is what keeps such legs runnable.
 #   * _MIN_LEG_BOUND_S, the floor for the legs that finish in seconds.
 # The legs run one after another, so the worst case of one gate run is the SUM of the bounds plus one
-# bounded post-kill drain per leg (_DRAIN_MARGIN_S, paid only by a leg killed at its bound); the
-# self-test requires the whole opf-closure CI job's worst case (its self-test step plus its live gate
-# step, drains included) to fit that job's time limit, and refuses BY NAME any single leg bound that
-# exceeds the limit rather than shrinking it. A change that adds or lengthens a leg's wait updates this
-# table in the same change.
+# bounded post-kill cleanup deadline per leg (_DRAIN_MARGIN_S, which the output drain and the leader
+# reap SHARE, paid only by a leg killed at its bound); the self-test requires the whole opf-closure CI
+# job's worst case (_job_worst_case_s: its self-test step plus its live gate step, cleanup deadlines
+# included) to fit that job's time limit, and refuses BY NAME any single leg bound that exceeds the
+# limit rather than shrinking it. A change that adds or lengthens a leg's wait updates this table in
+# the same change.
 # Every ceiling below is whole seconds, rounded up, from ONE source: a serial isolated run of every leg
 # started 2026-10-13 and finished 2026-10-14, at the tree of revision
 # 05eb4d88483b6f833fe38b46403d4a8d218c7cb6, whose opf/ subtree is byte-identical to this tree's (the
@@ -118,7 +120,8 @@ _SUBSET = [
 # an INFERENCE, not a measurement: the measurement host was already oversubscribed (the load5 on every
 # row exceeds its 24 CPUs), so contention that run already paid sits inside every ceiling, and the
 # multiplier covers a host slower still; a leg that outgrows it trips its bound (exit 2, fail-closed),
-# never passes clean.
+# never passes clean. The multiplier is also capped by the job fit: at 4 the job's worst case on this
+# table (_job_worst_case_s) is 23106 s, over the 21600 s default job limit, while at 3 it is 21186 s.
 _LEG_CEILING_S = {
     "opf-homes-selftest": 67,  # measured: 66.4 s at load5 33.3
     "opf-homes-contract": 1,  # measured: 0.3 s at load5 35.1
@@ -148,9 +151,10 @@ _LEG_CEILING_S = {
 }
 _LOAD_HEADROOM = 3
 _LAUNCH_MARGIN_S = 60
-# The bounded post-kill drain and leader reap (_kill_and_reap): a deliberate deadline, paid only by a
-# leg killed at its bound. A descendant that left the leg's process group can hold the output pipe
-# open longer; the drain then returns with the partial output it collected, never hangs the gate.
+# The post-kill cleanup deadline (_kill_and_reap): ONE absolute deadline that the output drain and the
+# leader reap share, so a leg killed at its bound pays at most this much cleanup. A descendant that left
+# the leg's process group can hold the output pipe open longer; the drain then returns with the partial
+# output it collected and the cleanup is reported incomplete by name, never hangs the gate.
 _DRAIN_MARGIN_S = 10
 _MIN_LEG_BOUND_S = 120
 
@@ -159,8 +163,9 @@ _CI_JOB = "opf-closure"
 _CI_DEFAULT_JOB_MINUTES = 360  # the GitHub Actions limit for a hosted-runner job that sets no timeout-minutes
 _CI_SETUP_ALLOWANCE_S = 600    # checkout with full history and setup-python, before the gate steps start
 _VECTOR_ALLOWANCE_S = 240      # the self-test step's registration, verdict, table, scan, CI-read and
-                               # time-scaled stub checks, the kill vectors (termination, leader reap,
-                               # partial output) and their waits for the escapee included
+                               # time-scaled stub checks, the cleanup doubles, the kill vectors
+                               # (termination and its marker window, leader reap, partial output, the
+                               # runner's cleanup report) and their waits for the escapee included
 
 
 class _BoundError(Exception):
@@ -275,8 +280,55 @@ def _oversize_legs(bounds, limit_s):
             for name, _script, _args in _SUBSET if bounds[name] > limit_s]
 
 
+def _job_worst_case_s(bounds, negative_bound_s):
+    """The opf-closure CI job's worst case in seconds: two subset sweeps (the self-test's positive leg
+    and the live gate step), the self-test's negative leg, ONE cleanup deadline (_DRAIN_MARGIN_S, the
+    drain and the leader reap sharing it) for every leg that can be killed (each leg of both sweeps and
+    the negative leg), the self-test's vectors, and the job's setup."""
+    kills = 2 * len(_SUBSET) + 1
+    return (2 * sum(bounds[name] for name, _script, _args in _SUBSET) + negative_bound_s
+            + kills * _DRAIN_MARGIN_S + _VECTOR_ALLOWANCE_S + _CI_SETUP_ALLOWANCE_S)
+
+
+def _fit_fault(bounds, negative_bound_s, limit_s):
+    """None when the job's worst case fits limit_s, else the refusal naming every term of it."""
+    total = _job_worst_case_s(bounds, negative_bound_s)
+    if total <= limit_s:
+        return None
+    return ("{}s of worst-case job work (2 x subset sweep {}s, negative leg {}s, {} cleanup deadlines of "
+            "{}s, vectors {}s, setup {}s) exceeds the {}s job limit".format(
+                total, sum(bounds[name] for name, _script, _args in _SUBSET), negative_bound_s,
+                2 * len(_SUBSET) + 1, _DRAIN_MARGIN_S, _VECTOR_ALLOWANCE_S, _CI_SETUP_ALLOWANCE_S,
+                limit_s))
+
+
 _CI_PLAIN_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*:(?=\s|$)")
-_CI_PLAIN_ITEM = re.compile(r"[A-Za-z0-9._/'\" -]+")
+_CI_PLAIN_ITEM = re.compile(r"[A-Za-z0-9._/ -]+")
+_CI_BLOCK_HEADER = re.compile(r"([|>][0-9+-]*)(?:\s+#.*)?")
+_CI_QUOTED_VALUE = re.compile(r"""('(?:[^']|'')*'|"(?:[^"\\]|\\.)*")(?:\s+#.*)?""")
+
+
+def _ci_value(rest):
+    """The form of the text after a plain key's colon, as (form, value): ("nested", "") for an empty or
+    comment-only value (nested lines follow, and are scanned in turn), ("block", header) for a
+    block-scalar header, ("quoted", text) for a single-line quoted scalar, ("plain", text) for a
+    single-line plain scalar (a comment begins only at whitespace then `#`, so `30#x` is the scalar
+    `30#x`), and (None, text) for any other value: an alias, anchor or tag, a flow collection, a
+    multi-line or unterminated quoted scalar, or a plain scalar carrying a mapping colon introduces
+    structure this line parser does not read."""
+    text = rest.strip()
+    if not text or text.startswith("#"):
+        return "nested", ""
+    block = _CI_BLOCK_HEADER.fullmatch(text)
+    if block:
+        return "block", block.group(1)
+    quoted = _CI_QUOTED_VALUE.fullmatch(text)
+    if quoted:
+        return "quoted", quoted.group(1)
+    scalar = re.split(r"\s+#", text, maxsplit=1)[0]
+    if text[0] in "-?:,[]{}#&*!|>'\"%@`" or re.search(r":(\s|$)", scalar):
+        return None, text
+    return "plain", scalar
 
 
 def _ci_job_limit_s(workflow_text, job=_CI_JOB):
@@ -287,13 +339,18 @@ def _ci_job_limit_s(workflow_text, job=_CI_JOB):
     parsed and validated but does not cap the job budget (it kills that one step, a loud step failure,
     without shrinking the time the gate steps get). Fail-closed: before ANY limit (the default
     included) is returned, every line of the job must be one this line parser evaluates: a plain-key
-    line (`KEY:` or `- KEY:`, the key a plain unquoted scalar with the colon directly after it), a
-    plain-scalar list item, a comment or blank line, or the content of a block scalar that a plain-key
-    line opened. A quoted, escaped, tagged, anchored or aliased key or step, a flow mapping, and any
-    other line shape are refused BY NAME, never scanned around: the YAML loader GitHub runs would
-    evaluate them where this parser would not, so no limit the job might carry there can be trusted. An
-    absent or duplicated job header and a timeout-minutes value that is not a plain integer literal
-    also refuse by name."""
+    line (`KEY:` or `- KEY:`, the key a plain unquoted scalar with the colon directly after it) whose
+    value is a form _ci_value reads (empty, a block-scalar header, or a single-line quoted or plain
+    scalar), an UNQUOTED plain-scalar list item (no quote, colon or `#`), a comment or blank line, or
+    the content of a block scalar that a plain-key line opened. A quoted, escaped, tagged, anchored or
+    aliased key or step, a quoted list item, a value that is an alias, anchor, tag or flow collection
+    (`steps: *closure_steps`, `steps: [{run: echo ok, timeout-minutes: 1}]`), and any other line shape
+    are refused BY NAME, never scanned around: the YAML loader GitHub runs would evaluate them where
+    this parser would not, so no limit the job might carry there can be trusted. A timeout-minutes
+    value is validated BEFORE any block-scalar skip, so `timeout-minutes: |` is refused by name, never
+    skipped as content; it must be a plain decimal integer without a leading zero (`030` reads as 24
+    to a YAML 1.1 loader and as 30 to a YAML 1.2 one, and `30#x` is the string `30#x`, never 30). An
+    absent or duplicated job header also refuses by name."""
     lines = workflow_text.splitlines()
     header = "  {}:".format(job)
     if lines.count(header) != 1:
@@ -320,22 +377,28 @@ def _ci_job_limit_s(workflow_text, job=_CI_JOB):
         match = _CI_PLAIN_KEY.match(item)
         if not match:
             if dashes and _CI_PLAIN_ITEM.fullmatch(item):
-                continue  # a plain-scalar list item carries no key and no step mapping
+                continue  # an unquoted plain-scalar list item carries no key and no step mapping
             return None, ("line {!r} in the {} job is not a form this parser evaluates (a plain-key "
-                          "line, a plain-scalar list item, or block-scalar content); cannot evaluate "
-                          "the job limit".format(stripped, job))
+                          "line, an unquoted plain-scalar list item, or block-scalar content); cannot "
+                          "evaluate the job limit".format(stripped, job))
         if job_indent is None and dashes == 0:
             job_indent = indent
-        head = item[match.end():].strip().split("#")[0].strip()
-        if re.fullmatch(r"[|>][0-9+-]*", head):
-            block_column = indent + 2 * dashes
-            continue
+        form, value = _ci_value(item[match.end():])
         if match.group(0)[:-1] == "timeout-minutes":
-            if not re.fullmatch(r"[0-9]+", head):
-                return None, ("timeout-minutes value {!r} in the {} job is not a plain integer "
-                              "(cannot evaluate)".format(head, job))
+            if form != "plain" or not re.fullmatch(r"0|[1-9][0-9]*", value):
+                return None, ("timeout-minutes value {!r} in the {} job is not a plain decimal "
+                              "integer without a leading zero (cannot evaluate)".format(
+                                  value, job))
             if dashes == 0 and indent == job_indent:
-                minutes.append(int(head))
+                minutes.append(int(value))
+            continue
+        if form is None:
+            return None, ("value {!r} of key {!r} in the {} job is not a form this parser evaluates "
+                          "(an alias, anchor, tag or flow collection introduces structure it does not "
+                          "read); cannot evaluate the job limit".format(
+                              value, match.group(0)[:-1], job))
+        if form == "block":
+            block_column = indent + 2 * dashes
     return 60 * min(minutes), None
 
 
@@ -422,27 +485,52 @@ def _tail(output, keep=3):
     return "\n".join((output or b"").decode("utf-8", "replace").splitlines()[-keep:])
 
 
-def _kill_and_reap(proc, drain_s=_DRAIN_MARGIN_S):
+def _kill_and_reap(proc, drain_s=_DRAIN_MARGIN_S, killpg=os.killpg):
     """Kill the timed-out leg's process GROUP (the leg was started as its own session leader, so every
-    descendant that has not itself left the group shares it), then, on every path, reap the LEADER with
-    a bounded wait and close the output pipe this runner owns. The drain keeps whatever partial output
-    it collected before timing out (TimeoutExpired carries it). Disclosed residual: a descendant that
-    called setpgid() or setsid() has LEFT the group; it is neither killed nor reaped here, and it can
-    hold the output pipe open past the kill, which is why the drain and the leader reap are bounded
-    deadlines (drain_s each), never waits on the whole descendant tree."""
+    descendant that has not itself left the group shares it), then drain its output and reap its
+    LEADER under ONE absolute deadline of drain_s seconds that the two waits SHARE (the reap gets only
+    what the drain left, so the whole cleanup costs at most drain_s, the one cleanup term the fit model
+    counts per killed leg), and close the output pipe this runner owns in a finally, on EVERY path (a
+    normal drain, a drain timeout, an OSError from the kill or the drain). Returns (output, faults):
+    output is whatever the drain collected (TimeoutExpired carries the partial output; b"" when the
+    drain failed), and faults names each cleanup step that did not complete: `kill-error`,
+    `drain-timeout`, `drain-error`, and `leader-unreaped` for a leader still unreaped at the deadline
+    (never suppressed, never claimed reaped). Disclosed residual: a descendant that called setpgid() or
+    setsid() has LEFT the group; it is neither killed nor reaped here, and it can hold the output pipe
+    open past the kill, which is why the drain is bounded (a `drain-timeout` fault), never a wait on the
+    whole descendant tree. killpg is os.killpg; the self-test's process doubles replace it with a
+    recorder, so a double is never signalled."""
+    deadline = time.monotonic() + drain_s
+    out, faults = b"", []
     try:
-        os.killpg(proc.pid, signal.SIGKILL)
-    except OSError:
-        proc.kill()
-    try:
-        out, _err = proc.communicate(timeout=drain_s)
-    except subprocess.TimeoutExpired as exc:
-        out = exc.stdout or b""
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            proc.wait(timeout=drain_s)
+        try:
+            killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            try:
+                proc.kill()
+            except OSError as exc:
+                faults.append("kill-error: neither the group kill nor the leader kill was "
+                              "delivered: {}".format(exc))
+        try:
+            out, _err = proc.communicate(timeout=max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired as exc:
+            out = exc.stdout or b""
+            faults.append("drain-timeout: the output pipe was still held open at the {}s cleanup "
+                          "deadline (a descendant that left the group holds it)".format(drain_s))
+        except OSError as exc:
+            faults.append("drain-error: the output drain failed: {}".format(exc))
+        if proc.returncode is None:
+            try:
+                proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                pass  # the leader is still unreaped: named below, never suppressed
+    finally:
         if proc.stdout is not None:
             proc.stdout.close()
-    return out
+    if proc.returncode is None:
+        faults.append("leader-unreaped: leader pid {} was still unreaped at the {}s cleanup "
+                      "deadline".format(proc.pid, drain_s))
+    return out, faults
 
 
 def _run_one(opf_root, script, args, run_dir, env, bound_s, keep=3, drain_s=_DRAIN_MARGIN_S):
@@ -451,15 +539,16 @@ def _run_one(opf_root, script, args, run_dir, env, bound_s, keep=3, drain_s=_DRA
     whole process GROUP and reaps the LEADER: work a hung leg forked does not continue past the kill
     unless the descendant itself left the group with setpgid() or setsid(), the disclosed residual on
     _kill_and_reap (such a survivor is neither killed nor reaped). Returns
-    (rc, tail_of_output, elapsed_s, launched): rc is None when the leg was killed at its bound (the
-    bound tripped; the leg itself reported nothing), and launched is False for a harness failure (a
+    (rc, tail_of_output, elapsed_s, launched, cleanup): rc is None when the leg was killed at its bound
+    (the bound tripped; the leg itself reported nothing), launched is False for a harness failure (a
     missing script, an interpreter that could not start) whose rc 2 is this runner's verdict, NEVER an
-    outcome the leg reported, whatever text it carries. cwd is run_dir, which is OUTSIDE any git
-    repository and does not contain the tools/ tree, so only the copied opf/tools/ is reachable to
-    `python3 -I`."""
+    outcome the leg reported, whatever text it carries, and cleanup lists the named faults of a kill
+    whose cleanup did not complete (_kill_and_reap; empty otherwise). cwd is run_dir, which is OUTSIDE
+    any git repository and does not contain the tools/ tree, so only the copied opf/tools/ is
+    reachable to `python3 -I`."""
     target = opf_root / "tools" / script
     if not target.is_file():
-        return 2, "missing subset script in the copy: {}".format(target), 0.0, False
+        return 2, "missing subset script in the copy: {}".format(target), 0.0, False, []
     start = time.monotonic()
     try:
         proc = subprocess.Popen(
@@ -468,25 +557,27 @@ def _run_one(opf_root, script, args, run_dir, env, bound_s, keep=3, drain_s=_DRA
             start_new_session=True,
         )
     except OSError as exc:
-        return 2, "could not launch the interpreter: {}".format(exc), time.monotonic() - start, False
+        return (2, "could not launch the interpreter: {}".format(exc), time.monotonic() - start, False,
+                [])
     try:
         stdout, _err = proc.communicate(timeout=bound_s)
     except subprocess.TimeoutExpired:
-        stdout = _kill_and_reap(proc, drain_s)
-        return None, _tail(stdout, keep), time.monotonic() - start, True
-    return proc.returncode, _tail(stdout, keep), time.monotonic() - start, True
+        stdout, cleanup = _kill_and_reap(proc, drain_s)
+        return None, _tail(stdout, keep), time.monotonic() - start, True, cleanup
+    return proc.returncode, _tail(stdout, keep), time.monotonic() - start, True, []
 
 
 def _run_subset(opf_root, run_dir, bounds):
     """Run every subset member under its own bound. Returns a list of
-    (name, rc, tail, elapsed_s, launched, bound_s)."""
+    (name, rc, tail, elapsed_s, launched, bound_s, cleanup)."""
     _check_pack_manifest_registration(_SUBSET)
     _check_adopt_observe_registration(_SUBSET)
     env = _isolated_env()
     results = []
     for name, script, args in _SUBSET:
         bound = bounds[name][0]
-        results.append((name, *_run_one(opf_root, script, args, run_dir, env, bound), bound))
+        rc, tail, elapsed, launched, cleanup = _run_one(opf_root, script, args, run_dir, env, bound)
+        results.append((name, rc, tail, elapsed, launched, bound, cleanup))
     return results
 
 
@@ -495,11 +586,14 @@ def _report(results):
     non-zero is a finding (1). A leg killed at its bound is reported as the bound tripping, and a leg
     that never launched (launched False: a missing script or an interpreter that could not start) as a
     harness failure, never as a failure the leg reported; either way, with no finding beside it the
-    gate cannot evaluate closure (2), and never reads as clean."""
+    gate cannot evaluate closure (2), and never reads as clean. A killed leg whose cleanup did not
+    complete (row[6], the named faults from _kill_and_reap: an unreaped leader, a pipe still held by an
+    escaped descendant) is reported as CLEANUP INCOMPLETE by name, and never reads as clean either."""
     failed = [row for row in results if row[1] not in (0, None) and row[4]]
     unlaunched = [row for row in results if not row[4]]
     timed_out = [row for row in results if row[1] is None]
-    for name, rc, _tail_text, elapsed, launched, bound in results:
+    uncleaned = [row for row in results if row[6]]
+    for name, rc, _tail_text, elapsed, launched, bound, _cleanup in results:
         if not launched:
             status = "NOT LAUNCHED (harness failure; the leg reported nothing)"
         elif rc == 0:
@@ -512,23 +606,28 @@ def _report(results):
     if failed:
         print("STANDALONE CLOSURE: BROKEN (the isolated opf/ subtree does not verify itself):",
               file=sys.stderr)
-        for name, rc, tail, _elapsed, _launched, _bound in failed:
+        for name, rc, tail, _elapsed, _launched, _bound, _cleanup in failed:
             print("  {} (rc={}): {}".format(name, rc, tail.replace("\n", " | ")), file=sys.stderr)
     if unlaunched:
         print("STANDALONE CLOSURE: NOT EVALUATED (a leg below never launched; the failure is the "
               "harness's, never the leg's, whatever text it carries):", file=sys.stderr)
-        for name, _rc, tail, _elapsed, _launched, _bound in unlaunched:
+        for name, _rc, tail, _elapsed, _launched, _bound, _cleanup in unlaunched:
             print("  {}: {}".format(name, tail.replace("\n", " | ")), file=sys.stderr)
     if timed_out:
         print("STANDALONE CLOSURE: LEG BOUND EXCEEDED (the gate killed each leg below at its wall-clock bound; "
               "the bound tripped, not a failure the leg reported, so closure was not evaluated for it):",
               file=sys.stderr)
-        for name, _rc, tail, elapsed, _launched, bound in timed_out:
+        for name, _rc, tail, elapsed, _launched, bound, _cleanup in timed_out:
             print("  {}: killed at its {}s bound after {:.1f}s; last output: {}".format(
                 name, bound, elapsed, tail.replace("\n", " | ") or "(none)"), file=sys.stderr)
+    if uncleaned:
+        print("STANDALONE CLOSURE: CLEANUP INCOMPLETE (the cleanup after the kill of each leg below did "
+              "not complete; nothing here is claimed reaped or drained):", file=sys.stderr)
+        for name, _rc, _tail_text, _elapsed, _launched, _bound, cleanup in uncleaned:
+            print("  {}: {}".format(name, "; ".join(cleanup)), file=sys.stderr)
     if failed:
         return 1
-    if timed_out or unlaunched:
+    if timed_out or unlaunched or uncleaned:
         return 2
     print("STANDALONE CLOSURE: OK (opf/ verifies itself with no AIQT tree reachable)")
     return 0
@@ -632,7 +731,9 @@ def _bounds_self_test(root):
     else:
         raise AssertionError("closure/missing-ceiling-not-refused")
     # The declared-wait scan reads what it says it reads: sequential sites SUM; a conditional site
-    # counts once at its largest arm; arithmetic and computed waits are under-read, never over-trusted.
+    # counts once at its largest arm; a repeated site counts once; arithmetic is MIS-READ in either
+    # direction (600 * 3 reads as 600, under its real 1800; 600 / 3 reads as 600, over its real 200);
+    # a computed wait reads as nothing.
     tmp = Path(tempfile.mkdtemp(prefix="opf-closure-scan-"))
     try:
         probe = tmp / "probe.py"
@@ -682,17 +783,35 @@ def _bounds_self_test(root):
     oversize = _oversize_legs(live, limit)
     if oversize:
         raise AssertionError("closure/leg-bound-exceeds-the-ci-job: " + "; ".join(oversize))
+    # The expectation is recombined here, independently of _job_worst_case_s: every leg of both sweeps
+    # and the negative leg can be killed, and each kill pays ONE cleanup deadline (_DRAIN_MARGIN_S,
+    # shared by the drain and the leader reap in _kill_and_reap), so a model that drops or halves the
+    # cleanup term is a named fault, not a tautology.
     subset_sum = sum(live.values())
-    drains = len(_SUBSET) * _DRAIN_MARGIN_S  # the worst case pays one bounded drain per killed leg
-    total = (2 * (subset_sum + drains) + required["opf-tooling-selftest"][0] + _DRAIN_MARGIN_S
-             + _VECTOR_ALLOWANCE_S + _CI_SETUP_ALLOWANCE_S)
-    if total > limit:
-        raise AssertionError("closure/bounds-fit-the-ci-job: {}s of worst-case job work, job limit "
-                             "{}s".format(total, limit))
-    print("PASS closure/bounds-fit-the-ci-job: 2 x (subset sweep {}s + kill drains {}s) + negative "
-          "leg {}s + its drain {}s + vectors {}s + setup {}s = {}s <= {}s ({} job)".format(
-              subset_sum, drains, required["opf-tooling-selftest"][0], _DRAIN_MARGIN_S,
-              _VECTOR_ALLOWANCE_S, _CI_SETUP_ALLOWANCE_S, total, limit, _CI_JOB))
+    negative = required["opf-tooling-selftest"][0]
+    kills = 2 * len(_SUBSET) + 1
+    cleanup_free = 2 * subset_sum + negative + _VECTOR_ALLOWANCE_S + _CI_SETUP_ALLOWANCE_S
+    want_total = cleanup_free + kills * _DRAIN_MARGIN_S
+    total = _job_worst_case_s(live, negative)
+    if total != want_total:
+        raise AssertionError("closure/fit-model-counts-one-cleanup-deadline-per-kill: {}s, recombined "
+                             "{}s".format(total, want_total))
+    fault = _fit_fault(live, negative, limit)
+    if fault is not None:
+        raise AssertionError("closure/bounds-fit-the-ci-job: " + fault)
+    print("PASS closure/bounds-fit-the-ci-job: 2 x subset sweep {}s + negative leg {}s + {} cleanup "
+          "deadlines x {}s + vectors {}s + setup {}s = {}s <= {}s ({} job)".format(
+              subset_sum, negative, kills, _DRAIN_MARGIN_S, _VECTOR_ALLOWANCE_S,
+              _CI_SETUP_ALLOWANCE_S, total, limit, _CI_JOB))
+    # The fit check's cleanup term is discriminating: a job limit that covers every bound but not the
+    # cleanup deadlines is refused, as is one second below the worst case; at the worst case it fits.
+    for probe_limit, fits in ((want_total, True), (want_total - 1, False), (cleanup_free, False)):
+        if (_fit_fault(live, negative, probe_limit) is None) != fits:
+            raise AssertionError("closure/fit-check-cleanup-term (limit {}s, worst case {}s)".format(
+                probe_limit, want_total))
+    print("RED a job limit covering every bound but not the {} cleanup deadlines ({}s) -> refused; one "
+          "second below the {}s worst case -> refused; at it -> fits".format(
+              kills, cleanup_free, want_total))
     # A single leg bound over the job limit is refused by name, never shrunk: one second over is named,
     # at and one under the limit are not (each side of its boundary tested).
     for delta, want_named in ((-1, False), (0, False), (1, True)):
@@ -746,10 +865,39 @@ def _bounds_self_test(root):
         step, "      - run: |\n          echo widen\n          \"timeout-minutes\": 1\n" + step, 1)
     if blocky == text or _ci_job_limit_s(blocky) != (default_s, None):
         raise AssertionError("closure/ci-block-scalar-content-misread-as-a-key")
+    # Value forms, on a minimal job: each entry is (check, job body, the limit it must read, or None
+    # with the text its refusal must name). A timeout-minutes value is validated before any
+    # block-scalar skip; a value that opens structure this parser does not read (an alias, a flow
+    # collection) is refused by name; a comment begins only at whitespace then `#`; a leading zero is
+    # refused; a quoted list item is not a plain-scalar item, an unquoted one is; and an indentless
+    # step sequence (its `- ` at the job keys' own column) keeps a step's timeout off the job budget.
+    for check, body, want_limit, want_named in (
+            ("ci-block-scalar-timeout-not-refused-by-name", "    timeout-minutes: |\n      1\n", None,
+             "timeout-minutes value '|'"),
+            ("ci-alias-steps-value-not-refused-by-name", "    steps: *closure_steps\n", None,
+             "*closure_steps"),
+            ("ci-flow-steps-value-not-refused-by-name",
+             "    steps: [{run: echo ok, timeout-minutes: 1}]\n", None, "[{run: echo ok"),
+            ("ci-hash-without-space-read-as-a-comment", "    timeout-minutes: 30#x\n", None, "30#x"),
+            ("ci-leading-zero-timeout-not-refused", "    timeout-minutes: 030\n", None, "'030'"),
+            ("ci-quoted-list-item-not-refused", "    needs:\n      - 'lint'\n", None, "'lint'"),
+            ("ci-spaced-comment-misread", "    timeout-minutes: 30 # half an hour\n", 1800, None),
+            ("ci-plain-list-item-refused", "    needs:\n      - lint\n", default_s, None),
+            ("ci-indentless-step-timeout-capped-the-job-budget",
+             "    steps:\n    - timeout-minutes: 1\n      run: echo ok\n", default_s, None)):
+        got_limit, got_reason = _ci_job_limit_s(
+            "jobs:\n  {}:\n    runs-on: ubuntu-latest\n{}".format(_CI_JOB, body))
+        if want_limit is not None:
+            if (got_limit, got_reason) != (want_limit, None):
+                raise AssertionError("closure/{}: {!r}".format(check, (got_limit, got_reason)))
+        elif got_limit is not None or want_named not in (got_reason or ""):
+            raise AssertionError("closure/{}: {!r}".format(check, (got_limit, got_reason)))
     print("RED ci-job-30-minutes -> does not fit; ci-job-absent, a non-integer value, a quoted key, an "
-          "escaped key and an alias step -> each refused by name; a step's own timeout-minutes: 1 "
-          "(first key or not) -> parsed, the job budget stays {}s; quoted text inside a block scalar "
-          "-> content, not a key".format(default_s))
+          "escaped key, an alias step, a block-scalar timeout-minutes, an alias or flow steps value, "
+          "timeout-minutes 30#x and 030, and a quoted list item -> each refused by name; a step's own "
+          "timeout-minutes: 1 (first key or not, and in an indentless step sequence) -> parsed, the "
+          "job budget stays {}s; `30 # comment` -> 30 minutes; an unquoted list item -> accepted; "
+          "quoted text inside a block scalar -> content, not a key".format(default_s))
     return required
 
 
@@ -773,6 +921,132 @@ def _pid_gone(pid, deadline_s):
         time.sleep(0.1)
 
 
+def _await_file(path, deadline_s):
+    """The monotonic time at which path was first seen to exist, polled for up to deadline_s seconds,
+    or None when it never appeared (a readiness wait under its OWN deadline)."""
+    deadline = time.monotonic() + deadline_s
+    while True:
+        if path.is_file():
+            return time.monotonic()
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(0.1)
+
+
+def _readiness_pids(path, count, check):
+    """The `count` pids a fixture wrote to its readiness file. A file holding anything else (a partly
+    written file included) raises AssertionError naming `check`: a named self-test failure, never a
+    traceback and never cleanup credit. The fixtures write the file aside and rename it into place, so
+    a reader sees it whole or not at all; this check is the backstop."""
+    text = path.read_text(encoding="utf-8")
+    parts = text.split()
+    if len(parts) != count or not all(re.fullmatch(r"[1-9][0-9]*", part) for part in parts):
+        raise AssertionError("closure/{}-readiness-malformed: {!r} (want {} pid(s))".format(
+            check, text, count))
+    return [int(part) for part in parts]
+
+
+class _PipeDouble:
+    """A stand-in for a killed leg's output pipe: counts its closes."""
+
+    def __init__(self):
+        self.closes = 0
+
+    @property
+    def closed(self):
+        return self.closes > 0
+
+    def close(self):
+        self.closes += 1
+
+
+class _LegDouble:
+    """A stand-in for a killed leg's Popen whose kill, drain and reap outcomes are scripted. No process
+    stands behind it and nothing is signalled: the group kill goes to the recorder the test passes as
+    _kill_and_reap's killpg, kill() only records (or raises, scripted), and the pid is -1, which killpg
+    refuses (EINVAL) rather than reads as a group, should a broken caller pass it there. The drain
+    spends drain_used_s seconds before its scripted outcome, so the reap's share of the one cleanup
+    deadline is observable."""
+
+    def __init__(self, drain, reap, kill_fails=False, drain_used_s=0.0):
+        self.pid = -1
+        self.args = ["leg-double"]
+        self.returncode = None
+        self.stdout = _PipeDouble()
+        self.drain, self.reap, self.kill_fails, self.drain_used_s = drain, reap, kill_fails, drain_used_s
+        self.calls = []
+
+    def kill(self):
+        self.calls.append(("kill", None))
+        if self.kill_fails:
+            raise OSError("scripted leader-kill failure")
+
+    def communicate(self, timeout=None):
+        self.calls.append(("drain", timeout))
+        time.sleep(self.drain_used_s)
+        if self.drain == "timeout":
+            raise subprocess.TimeoutExpired(self.args, timeout, output=b"partial before the kill\n")
+        if self.drain == "oserror":
+            raise OSError("scripted drain failure")
+        self.returncode = -9
+        return b"whole output\n", None
+
+    def wait(self, timeout=None):
+        self.calls.append(("reap", timeout))
+        if self.reap == "timeout":
+            raise subprocess.TimeoutExpired(self.args, timeout)
+        self.returncode = -9
+        return self.returncode
+
+
+def _cleanup_doubles_self_test():
+    """_kill_and_reap at the unit, on process doubles (deterministic: no scheduling delay can turn a
+    scripted drain timeout into a normal drain). On every path (a normal drain, a drain timeout, a reap
+    timeout, an OSError from the drain, a kill that could not be delivered) the pipe is closed and each
+    incomplete step is NAMED (an unreaped leader as leader-unreaped, never claimed reaped); the partial
+    output is kept; and the reap gets only what the drain left of the ONE cleanup deadline."""
+    drain_s, used_s = 1.0, 0.6
+    partial = b"partial before the kill\n"
+    for check, drain, reap, kill_fails, want_faults, want_out, want_reaped in (
+            ("cleanup-normal-drain", "ok", "ok", False, [], b"whole output\n", True),
+            ("cleanup-drain-timeout", "timeout", "ok", False, ["drain-timeout"], partial, True),
+            ("cleanup-reap-timeout", "timeout", "timeout", False, ["drain-timeout", "leader-unreaped"],
+             partial, False),
+            ("cleanup-drain-oserror", "oserror", "ok", False, ["drain-error"], b"", True),
+            ("cleanup-kill-error", "timeout", "timeout", True,
+             ["kill-error", "drain-timeout", "leader-unreaped"], partial, False)):
+        double = _LegDouble(drain, reap, kill_fails, 0.0 if drain == "ok" else used_s)
+        group_kills = []
+
+        def killpg(pid, sig, double=double, group_kills=group_kills):
+            group_kills.append((pid, sig))
+            if double.kill_fails:
+                raise OSError("scripted group-kill failure")
+
+        try:
+            out, faults = _kill_and_reap(double, drain_s, killpg=killpg)
+        except Exception as exc:
+            raise AssertionError("closure/{}: _kill_and_reap raised {!r} instead of naming the outcome "
+                                 "(pipe closed: {})".format(check, exc, double.stdout.closed))
+        named = [fault.split(":", 1)[0] for fault in faults]
+        reaps = [timeout for call, timeout in double.calls if call == "reap"]
+        if (named != want_faults or out != want_out or not double.stdout.closed
+                or (double.returncode is not None) != want_reaped
+                or group_kills != [(double.pid, signal.SIGKILL)]
+                or any(timeout > drain_s - used_s + 1e-6 for timeout in reaps)):
+            raise AssertionError("closure/{}: faults {!r}, output {!r}, pipe closed {}, returncode {!r}, "
+                                 "group kills {!r}, calls {!r}".format(
+                                     check, faults, out, double.stdout.closed, double.returncode,
+                                     group_kills, double.calls))
+        if "leader-unreaped" in named and "leader pid {}".format(double.pid) not in faults[-1]:
+            raise AssertionError("closure/{}: the unreaped leader is not named by pid: {!r}".format(
+                check, faults))
+    print("RED cleanup doubles -> a drain timeout, a reap timeout, a drain OSError and an undelivered "
+          "kill each close the pipe and name the incomplete step (an unreaped leader by pid, never "
+          "claimed reaped); partial output kept; the reap waits only the {:g}s the drain left of the "
+          "{:g}s cleanup deadline".format(drain_s - used_s, drain_s))
+
+
 def _timeout_vectors_self_test(required):
     """Time-scaled stub legs through the real runner, derived from the live ceiling table (never from a
     recorded constant): a run exactly as slow as the slowest recorded ceiling finishes inside that leg's
@@ -780,14 +1054,18 @@ def _timeout_vectors_self_test(required):
     work kills a correct run); a genuine hang is cut off at the bound and reported as the bound
     tripping, never as a leg failure. LIMIT: the stubs are time-SCALED (the slowest ceiling maps to
     _STUB_CEILING_SLEEP_S real seconds), so these vectors exercise the kill-or-finish decision around
-    the scaled bound, never the real legs or their durations. Then the kill itself, ONE PROPERTY PER
-    VECTOR: TERMINATION (a descendant that stayed in the leg's process group is gone after the kill,
-    confirmed by the pid from the fixture's readiness file, which the leg writes BEFORE starting the
-    hang; no readiness is a self-test failure, never cleanup credit), LEADER REAPING (the killed leg's
-    leader is reaped even when the drain times out because an escaped descendant holds the pipe), and
-    PARTIAL OUTPUT (that timed-out drain keeps what it collected). The escape fixture's descendant
-    leaves the group with start_new_session, the disclosed residual on _kill_and_reap: the kill does
-    not reach it, so it is built to exit on its own and each run waits until it is gone."""
+    the scaled bound, never the real legs or their durations. Then the kill itself on real processes,
+    ONE PROPERTY PER VECTOR: TERMINATION (a descendant that stayed in the leg's process group is gone
+    after the kill, confirmed by its pid and by its marker staying absent past the moment it would
+    have been written; readiness is established under its own deadline BEFORE the hang deadline
+    starts, and no readiness is a self-test failure, never cleanup credit), LEADER REAPING (the killed
+    leg's leader is reaped even when the drain times out because an escaped descendant holds the
+    pipe), PARTIAL OUTPUT (that timed-out drain keeps what it collected), and the RUNNER'S CLEANUP
+    REPORT (_run_one returns that drain timeout by name). The escape fixture's descendant leaves the
+    group with start_new_session, the disclosed residual on _kill_and_reap: the kill does not reach
+    it, and it holds the pipe until the run RELEASES it after the assertions (or its directory is
+    removed, or 120 s pass), so the drain timeout is certain, never a scheduling accident, and each
+    run then waits until it is gone."""
     leg = max(_LEG_CEILING_S, key=lambda name: (_LEG_CEILING_S[name], name))
     ceiling = _LEG_CEILING_S[leg]
     bound = required[leg][0]
@@ -803,36 +1081,41 @@ def _timeout_vectors_self_test(required):
         (stub_root / "tools" / "stub_sleep.py").write_text(
             "import sys, time\ntime.sleep(float(sys.argv[1]))\n", encoding="utf-8")
         env = _isolated_env()
-        rc, _tail_text, _elapsed, _launched = _run_one(stub_root, "stub_sleep.py", [slow], tmp, env,
-                                                       undersized)
+        rc, _tail_text, _elapsed, _launched, _cleanup = _run_one(stub_root, "stub_sleep.py", [slow],
+                                                                 tmp, env, undersized)
         if rc is not None:
             raise AssertionError(
                 "closure/half-ceiling-bound-did-not-kill-the-ceiling-run (rc={!r})".format(rc))
         print("RED half-ceiling flat bound -> a correct run at the recorded {}s {} ceiling is killed "
               "(time-scaled 1:{:g})".format(ceiling, leg, scale))
-        rc, _tail_text, _elapsed, _launched = _run_one(stub_root, "stub_sleep.py", [slow], tmp, env,
-                                                       scaled_bound)
+        rc, _tail_text, _elapsed, _launched, _cleanup = _run_one(stub_root, "stub_sleep.py", [slow],
+                                                                 tmp, env, scaled_bound)
         if rc != 0:
             raise AssertionError("closure/derived-bound-killed-the-ceiling-run (rc={!r})".format(rc))
         print("PASS closure/derived-bound-lets-the-ceiling-run-finish ({}s bound over the {}s "
               "ceiling)".format(bound, ceiling))
-        rc, tail, elapsed, _launched = _run_one(stub_root, "stub_sleep.py", [hang], tmp, env,
-                                                scaled_bound)
-        if rc is not None or not scaled_bound <= elapsed < scaled_bound + 30:
-            raise AssertionError("closure/hang-not-cut-off (rc={!r}, {:.1f}s)".format(rc, elapsed))
+        rc, tail, elapsed, _launched, cleanup = _run_one(stub_root, "stub_sleep.py", [hang], tmp, env,
+                                                         scaled_bound)
+        if rc is not None or not scaled_bound <= elapsed < scaled_bound + 30 or cleanup:
+            raise AssertionError("closure/hang-not-cut-off (rc={!r}, {:.1f}s, cleanup {!r})".format(
+                rc, elapsed, cleanup))
+        unreaped = "leader-unreaped: leader pid 4242 was still unreaped at the 10s cleanup deadline"
         for rows, want_code, want, refused in (
-                ([(leg, None, tail, elapsed, True, bound)], 2,
+                ([(leg, None, tail, elapsed, True, bound, [])], 2,
                  ("TIMED OUT (killed at its {}s bound)".format(bound), "LEG BOUND EXCEEDED",
                   "{}: killed at its {}s bound".format(leg, bound), "not a failure the leg reported"),
-                 ("BROKEN", "CLOSURE: OK")),
-                ([(leg, None, tail, elapsed, True, bound),
-                  ("opf-homes-contract", 1, "boom", 1.0, True, 120)], 1,
+                 ("BROKEN", "CLOSURE: OK", "CLEANUP INCOMPLETE")),
+                ([(leg, None, tail, elapsed, True, bound, []),
+                  ("opf-homes-contract", 1, "boom", 1.0, True, 120, [])], 1,
                  ("BROKEN", "opf-homes-contract (rc=1): boom",
                   "{}: killed at its {}s bound".format(leg, bound)),
                  ("CLOSURE: OK",)),
-                ([(leg, 2, "could not launch the interpreter: boom", 0.0, False, bound)], 2,
+                ([(leg, 2, "could not launch the interpreter: boom", 0.0, False, bound, [])], 2,
                  ("NOT LAUNCHED", "NOT EVALUATED", "never the leg's"),
-                 ("BROKEN", "CLOSURE: OK", "FAILED rc=2"))):
+                 ("BROKEN", "CLOSURE: OK", "FAILED rc=2")),
+                ([(leg, None, tail, elapsed, True, bound, [unreaped])], 2,
+                 ("LEG BOUND EXCEEDED", "CLEANUP INCOMPLETE", "{}: {}".format(leg, unreaped)),
+                 ("BROKEN", "CLOSURE: OK"))):
             out = io.StringIO()
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
                 code = _report(rows)
@@ -841,82 +1124,156 @@ def _timeout_vectors_self_test(required):
                 raise AssertionError("closure/timeout-report (exit {}): {!r}".format(code, said))
         print("RED hang -> cut off at its bound and reported as LEG BOUND EXCEEDED (exit 2; exit 1 "
               "beside a real failure; a leg that never launched -> NOT EVALUATED, exit 2, never "
-              "BROKEN)")
-        # TERMINATION: the hung leg forks a descendant (it stays in the leg's process group) that
-        # would write its marker only well after the kill, and writes a READINESS file naming the
-        # descendant's pid BEFORE starting the hang the bound cuts off. No readiness is a self-test
-        # failure (there was no descendant to clean up, so the run proves nothing), never cleanup
-        # credit; after the kill the descendant's state is confirmed by pid, not only by the marker
-        # staying absent.
+              "BROKEN; a killed leg whose leader is unreaped -> CLEANUP INCOMPLETE naming it, exit 2)")
+        # A readiness file holding anything but whole pids (a partly written file included) is a
+        # named self-test failure, never a traceback.
+        partly = tmp / "partly-written.pid"
+        for text, count in (("", 1), ("4242 ", 2), ("42x", 1)):
+            partly.write_text(text, encoding="utf-8")
+            try:
+                _readiness_pids(partly, count, "partly-written")
+            except AssertionError as exc:
+                if "closure/partly-written-readiness-malformed" not in str(exc):
+                    raise
+            else:
+                raise AssertionError("closure/partly-written-readiness-not-refused: {!r}".format(text))
+        print("RED a partly written or malformed readiness file -> a named self-test failure")
+        tools = stub_root / "tools"
+        # TERMINATION: the hung leader forks a holder that STAYS in the leg's process group. The holder
+        # writes its own pid to the readiness file (aside, then renamed into place) and writes its
+        # marker holder_delay_s later. Readiness is established under its OWN 30 s deadline; only then
+        # does the 2 s hang deadline start. The group kill must leave the cleanup complete and the
+        # holder gone by pid, and the marker is checked until AFTER the moment the holder would have
+        # written it, so the marker check can fire inside its window even if the pid check were wrong.
+        # No readiness is a self-test failure (there was no descendant to clean up), never credit.
+        holder_delay_s, marker_margin_s = 8.0, 4.0
+        (tools / "stub_holder.py").write_text(
+            "import os, sys, time\n"
+            "with open(sys.argv[2] + '.tmp', 'w') as f:\n"
+            "    f.write(str(os.getpid()))\n"
+            "os.replace(sys.argv[2] + '.tmp', sys.argv[2])\n"
+            "time.sleep(float(sys.argv[1]))\n"
+            "with open(sys.argv[3], 'w') as f:\n"
+            "    f.write('leaked')\n", encoding="utf-8")
+        (tools / "stub_tree.py").write_text(
+            "import os, subprocess, sys, time\n"
+            "subprocess.Popen([sys.executable, '-I', '-B',\n"
+            "                  os.path.join(os.path.dirname(os.path.abspath(__file__)), 'stub_holder.py'),\n"
+            "                  *sys.argv[1:4]])\n"
+            "time.sleep(3600)\n", encoding="utf-8")
         marker = tmp / "descendant-marker.txt"
         ready = tmp / "descendant-ready.txt"
-        (stub_root / "tools" / "stub_tree.py").write_text(
-            "import subprocess, sys, time\n"
-            "child = subprocess.Popen([sys.executable, '-I', '-c',\n"
-            "    'import sys, time; time.sleep(float(sys.argv[1])); '\n"
-            "    'open(sys.argv[2], \"w\").write(\"leaked\")', sys.argv[1], sys.argv[2]])\n"
-            "open(sys.argv[3], 'w').write(str(child.pid))\n"
-            "time.sleep(3600)\n", encoding="utf-8")
-        rc, _tail_text, elapsed, _launched = _run_one(
-            stub_root, "stub_tree.py", ["30", str(marker), str(ready)], tmp, env, 5.0)
-        if rc is not None or not 5.0 <= elapsed < 35.0:
-            raise AssertionError(
-                "closure/descendant-hang-not-cut-off (rc={!r}, {:.1f}s)".format(rc, elapsed))
-        if not ready.is_file():
-            raise AssertionError("closure/descendant-readiness-missing: the fixture leg never spawned "
-                                 "its descendant inside the 5.0s bound (a self-test failure, never "
-                                 "cleanup credit)")
-        descendant = int(ready.read_text(encoding="utf-8"))
+        proc = subprocess.Popen(
+            [sys.executable, "-I", "-B", str(tools / "stub_tree.py"), repr(holder_delay_s), str(ready),
+             str(marker)],
+            cwd=str(tmp), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            start_new_session=True)
+        try:
+            ready_at = _await_file(ready, 30.0)
+            if ready_at is None:
+                raise AssertionError("closure/descendant-readiness-missing: the fixture leg never "
+                                     "spawned its descendant inside its own 30s readiness deadline (a "
+                                     "self-test failure, never cleanup credit)")
+            descendant, = _readiness_pids(ready, 1, "descendant")
+            try:
+                proc.communicate(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                pass  # the hang the deadline cuts off
+            else:
+                raise AssertionError("closure/descendant-fixture-shape: the leader exited (rc={!r}) "
+                                     "inside its 2.0s hang deadline".format(proc.returncode))
+        finally:
+            _out, cleanup = _kill_and_reap(proc)
+        if cleanup:
+            raise AssertionError("closure/descendant-kill-cleanup-incomplete: " + "; ".join(cleanup))
         if not _pid_gone(descendant, 10.0):
             raise AssertionError("closure/descendant-survived-the-kill: descendant pid {} still "
                                  "exists after the group kill".format(descendant))
+        while time.monotonic() < ready_at + holder_delay_s + marker_margin_s and not marker.exists():
+            time.sleep(0.1)
         if marker.exists():
             raise AssertionError("closure/descendant-survived-the-kill: the descendant wrote its "
-                                 "marker after the leg was killed at its bound")
-        print("RED descendant-bearing hang -> readiness confirmed (descendant pid {} written before "
-              "the hang), then the group kill: the descendant is gone and its marker never "
-              "appears".format(descendant))
+                                 "marker after the leg was killed")
+        print("RED descendant-bearing hang -> readiness confirmed under its own deadline (holder pid {}), "
+              "then the 2.0s hang deadline and the group kill: cleanup complete, the holder gone, and "
+              "no marker {:g}s past the moment it would have been written".format(
+                  descendant, marker_margin_s))
         # LEADER REAPING and PARTIAL OUTPUT, one run each, at the unit (_kill_and_reap holds the
-        # Popen, so interpreter cleanup of a dropped handle cannot reap for it): the escape fixture
-        # prints, then starts a descendant OUTSIDE the leg's process group (start_new_session, the
-        # disclosed residual: the kill does not reach it) that holds the output pipe, so the bounded
-        # drain TIMES OUT. The leader must be reaped and the pipe closed anyway, and the drain must
-        # keep the partial output it collected. Readiness (the fixture's pid file) gates the kill, as
-        # above; the escapee exits by itself and each run waits until it is gone.
-        (stub_root / "tools" / "stub_escape.py").write_text(
+        # Popen, so interpreter cleanup of a dropped handle cannot reap for it), then the RUNNER'S
+        # CLEANUP REPORT through _run_one: the escape fixture prints, then starts an escapee OUTSIDE
+        # the leg's process group (start_new_session, the disclosed residual: the kill does not reach
+        # it) that holds the output pipe until RELEASED after the assertions, so the bounded drain
+        # TIMES OUT whatever the scheduling, and the returned drain-timeout fault proves that branch
+        # ran. The leader must be reaped and the pipe closed anyway, and the drain must keep the
+        # partial output it collected.
+        (tools / "stub_escapee.py").write_text(
+            "import os, sys, time\n"
+            "with open(sys.argv[1] + '.tmp', 'w') as f:\n"
+            "    f.write(str(os.getpid()))\n"
+            "os.replace(sys.argv[1] + '.tmp', sys.argv[1])\n"
+            "deadline = time.monotonic() + 120\n"
+            "while (time.monotonic() < deadline and not os.path.exists(sys.argv[2])\n"
+            "       and os.path.isdir(os.path.dirname(sys.argv[2]))):\n"
+            "    time.sleep(0.05)\n", encoding="utf-8")
+        (tools / "stub_escape.py").write_text(
             "import os, subprocess, sys, time\n"
             "sys.stdout.write('partial output before the hang\\n')\n"
             "sys.stdout.flush()\n"
-            "child = subprocess.Popen([sys.executable, '-I', '-c', 'import time; time.sleep(8)'],\n"
-            "                         start_new_session=True)\n"
-            "open(sys.argv[1], 'w').write('{} {}'.format(os.getpid(), child.pid))\n"
+            "subprocess.Popen([sys.executable, '-I', '-B',\n"
+            "                  os.path.join(os.path.dirname(os.path.abspath(__file__)), 'stub_escapee.py'),\n"
+            "                  sys.argv[1], sys.argv[2]], start_new_session=True)\n"
             "time.sleep(3600)\n", encoding="utf-8")
         for check in ("leader-reaped-after-a-drain-timeout", "partial-output-kept-on-a-drain-timeout"):
-            pids = tmp / (check + ".pids")
+            pids = tmp / (check + ".pid")
+            release = tmp / (check + ".release")
             proc = subprocess.Popen(
-                [sys.executable, "-I", "-B", str(stub_root / "tools" / "stub_escape.py"), str(pids)],
+                [sys.executable, "-I", "-B", str(tools / "stub_escape.py"), str(pids), str(release)],
                 cwd=str(tmp), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 start_new_session=True)
-            deadline = time.monotonic() + 30.0
-            while not pids.is_file() and time.monotonic() < deadline:
-                time.sleep(0.1)
-            ready_in_time = pids.is_file()
-            out = _kill_and_reap(proc, drain_s=2.0)
-            if not ready_in_time:
-                raise AssertionError("closure/{}-fixture-shape: no readiness inside 30s (a self-test "
-                                     "failure, never credit)".format(check))
-            _leader, escapee = (int(part) for part in pids.read_text(encoding="utf-8").split())
-            if check == "leader-reaped-after-a-drain-timeout":
-                if proc.returncode is None or not proc.stdout.closed:
-                    raise AssertionError("closure/leader-not-reaped-or-pipe-left-open after the drain "
-                                         "(returncode={!r})".format(proc.returncode))
-            elif "partial output before the hang" not in out.decode("utf-8", "replace"):
-                raise AssertionError(
-                    "closure/partial-output-lost-on-a-drain-timeout: {!r}".format(out))
+            try:
+                try:
+                    if _await_file(pids, 30.0) is None:
+                        raise AssertionError("closure/{}-fixture-shape: no readiness inside 30s (a "
+                                             "self-test failure, never credit)".format(check))
+                    escapee, = _readiness_pids(pids, 1, check)
+                finally:
+                    out, faults = _kill_and_reap(proc, drain_s=2.0)
+                if [fault.split(":", 1)[0] for fault in faults] != ["drain-timeout"]:
+                    raise AssertionError("closure/{}-drain-did-not-time-out: {!r} (the branch under "
+                                         "test never ran)".format(check, faults))
+                if check == "leader-reaped-after-a-drain-timeout":
+                    if proc.returncode is None or not proc.stdout.closed:
+                        raise AssertionError("closure/leader-not-reaped-or-pipe-left-open after the "
+                                             "drain (returncode={!r})".format(proc.returncode))
+                elif "partial output before the hang" not in out.decode("utf-8", "replace"):
+                    raise AssertionError(
+                        "closure/partial-output-lost-on-a-drain-timeout: {!r}".format(out))
+            finally:
+                release.write_text("released", encoding="utf-8")
             if not _pid_gone(escapee, 20.0):
-                raise AssertionError("closure/escape-fixture-descendant-still-running: pid {} (it is "
-                                     "built to exit by itself)".format(escapee))
-            print("PASS closure/{} (escaped descendant pid {} exited by itself)".format(check, escapee))
+                raise AssertionError("closure/escape-fixture-descendant-still-running: pid {} (it "
+                                     "exits once released)".format(escapee))
+            print("PASS closure/{} (the drain timed out on escapee pid {}, released after the "
+                  "assertions)".format(check, escapee))
+        pids = tmp / "runner-cleanup-report.pid"
+        release = tmp / "runner-cleanup-report.release"
+        try:
+            rc, tail, elapsed, _launched, cleanup = _run_one(
+                stub_root, "stub_escape.py", [str(pids), str(release)], tmp, env, 5.0, drain_s=2.0)
+        finally:
+            release.write_text("released", encoding="utf-8")
+        if (rc is not None or [fault.split(":", 1)[0] for fault in cleanup] != ["drain-timeout"]
+                or "partial output before the hang" not in tail):
+            raise AssertionError("closure/runner-cleanup-not-reported (rc={!r}, cleanup {!r}, tail "
+                                 "{!r})".format(rc, cleanup, tail))
+        if _await_file(pids, 30.0) is None:
+            raise AssertionError("closure/runner-cleanup-report-fixture-shape: no readiness inside 30s")
+        escapee, = _readiness_pids(pids, 1, "runner-cleanup-report")
+        if not _pid_gone(escapee, 20.0):
+            raise AssertionError("closure/escape-fixture-descendant-still-running: pid {} (it exits "
+                                 "once released)".format(escapee))
+        print("PASS closure/runner-reports-an-incomplete-cleanup (_run_one returned the drain-timeout "
+              "fault by name, with the partial output, after {:.1f}s)".format(elapsed))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -967,25 +1324,41 @@ def _negative_verdict_self_test():
             (1, "SELF-TEST FAIL: unrelated", True, "unrelated-failure")):
         if _negative_verdict(rc, tail, 600, launched) is None:
             raise AssertionError("closure/negative-verdict-not-red: {} (rc={!r})".format(label, rc))
-    # A REAL harness failure through _run_one, under a path that contains the token: the missing-script
-    # branch names its full path, so the text alone would read as a catch; the structural flag, not the
-    # text, must reject it. (An interpreter that fails to start takes the same launched-False path.)
+    # REAL harness failures through _run_one, under a path that contains the token, one per
+    # launched-False producer: the missing-script branch names the script's full path, and the
+    # interpreter-launch branch (an EXISTING script, an interpreter path that does not exist, so Popen
+    # itself raises OSError naming it) names the interpreter's; the text alone would read as a catch
+    # either way, so the structural flag, not the text, must reject each.
     tmp = Path(tempfile.mkdtemp(prefix="opf-closure-neg-launch-"))
+    real_interpreter = sys.executable
     try:
-        fake_root = Path(tempfile.mkdtemp(prefix="check_versions-", dir=tmp)) / "opf"
+        token_dir = Path(tempfile.mkdtemp(prefix="check_versions-", dir=tmp))
+        fake_root = token_dir / "opf"
         os.makedirs(fake_root / "tools")
-        rc, tail, _elapsed, launched = _run_one(fake_root, "missing.py", [], tmp, _isolated_env(), 10)
-        if launched or rc != 2 or _INJECTED_EDGE not in (tail or ""):
-            raise AssertionError(
-                "closure/negative-launch-fixture-shape (rc={!r}, launched={!r})".format(rc, launched))
-        if _negative_verdict(rc, tail, 600, launched) is None:
-            raise AssertionError("closure/negative-verdict-not-red: a real launch failure whose path "
-                                 "contains {!r}".format(_INJECTED_EDGE))
+        (fake_root / "tools" / "present.py").write_text("", encoding="utf-8")
+        for label, script, interpreter, want_text in (
+                ("missing-script", "missing.py", real_interpreter, "missing subset script"),
+                ("interpreter-launch", "present.py", str(token_dir / "bin" / "python3"),
+                 "could not launch the interpreter")):
+            sys.executable = interpreter
+            try:
+                rc, tail, _elapsed, launched, _cleanup = _run_one(fake_root, script, [], tmp,
+                                                                  _isolated_env(), 10)
+            finally:
+                sys.executable = real_interpreter
+            if (launched is not False or rc != 2 or want_text not in (tail or "")
+                    or _INJECTED_EDGE not in (tail or "")):
+                raise AssertionError("closure/negative-launch-fixture-shape: {} (rc={!r}, launched={!r}, "
+                                     "tail={!r})".format(label, rc, launched, tail))
+            if _negative_verdict(rc, tail, 600, launched) is None:
+                raise AssertionError("closure/negative-verdict-not-red: a real {} failure whose path "
+                                     "contains {!r}".format(label, _INJECTED_EDGE))
     finally:
+        sys.executable = real_interpreter
         shutil.rmtree(tmp, ignore_errors=True)
     print("RED negative-leg bound-kill, clean-pass, unrelated-failure, launch-error, and a real "
-          "harness failure under a path containing {!r} -> each is a self-test failure, never "
-          "coverage credit".format(_INJECTED_EDGE))
+          "missing-script failure and a real interpreter-launch failure under a path containing {!r} "
+          "-> each is a self-test failure, never coverage credit".format(_INJECTED_EDGE))
 
 
 def self_test_main():
@@ -993,7 +1366,8 @@ def self_test_main():
     verdict legs run first and fast: the per-leg bounds cover each leg's table-derived need and fit the
     CI job, time-scaled stub legs show a flat bound below the recorded work killing a correct leg while
     a hang is still cut off and named (descendants that stayed in the leg's process group included),
-    and the negative-leg verdict is shown discriminating. The positive leg runs run() over the real
+    the post-kill cleanup closes the pipe and names what it could not complete on every path, and the
+    negative-leg verdict is shown discriminating. The positive leg runs run() over the real
     opf/ and requires 0. The negative leg materializes opf/ alone, then RE-INTRODUCES the pre-move
     upward edge (opf/tools/_opf_store.py importing `_parse` from AIQT `check_versions` instead of the
     extracted `_semver`); with no AIQT tree reachable that import fails, so the leg must itself report
@@ -1005,6 +1379,7 @@ def self_test_main():
         _pack_manifest_registration_self_test()
         _adopt_observe_registration_self_test()
         _negative_verdict_self_test()
+        _cleanup_doubles_self_test()
         required = _bounds_self_test(root)
         _timeout_vectors_self_test(required)
     except (AssertionError, _BoundError, OSError) as exc:
@@ -1031,11 +1406,14 @@ def self_test_main():
             store.write_text(flipped, encoding="utf-8")
             env = _isolated_env()
             bound = required["opf-tooling-selftest"][0]
-            rc, tail, _elapsed, launched = _run_one(opf_root, "opf.py", ["--self-test"], tmp, env,
-                                                    bound, keep=40)
+            rc, tail, _elapsed, launched, cleanup = _run_one(opf_root, "opf.py", ["--self-test"], tmp,
+                                                             env, bound, keep=40)
             verdict = _negative_verdict(rc, tail, bound, launched)
             if verdict is not None:
                 failures.append(verdict)
+            if cleanup:
+                failures.append("negative: the cleanup after the flipped leg's kill did not complete: "
+                                "{}".format("; ".join(cleanup)))
     except OSError as exc:
         failures.append("negative: harness error building the broken copy: {}".format(exc))
     finally:
