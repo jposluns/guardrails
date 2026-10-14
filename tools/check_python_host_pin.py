@@ -51,53 +51,70 @@ Legs, in order:
                                 git-fixture-env-host-patch: the git-fixture-env behaviour self-test);
                  outside-judge  the judge step holds its place: exactly one step outside the HOST_JOBS
                                 jobs runs this gate with --jobs-only (JOBS_ONLY_RUN) as its own run:
-                                command, judged by command tokens, never by exact text. Every step
-                                run: of a judge-naming job is tokenized with shlex (POSIX): a step is
-                                judge-shaped when any token is --jobs-only or any token's
+                                command, judged by command tokens, never by exact text. EVERY job
+                                outside HOST_JOBS is read whole; no job is selected or skipped by
+                                literal text. Each is read with the host-patch jobs' own line model
+                                extended by three spellings that model refuses there: a block scalar
+                                (a literal | or folded > opener, an optional chomping indicator, no
+                                indentation indicator), whose body lines, each more indented than its
+                                key, are joined and read as the value; a one-line flow sequence that
+                                can define no key (no colon, brace, quote or opener inside), read as
+                                one opaque scalar; and a bare scalar list item (a needs: member among
+                                them). Every run: value of every such job, a block scalar included, is
+                                tokenized with shlex (POSIX), the way a POSIX shell reads the script:
+                                a step is judge-shaped when any token is --jobs-only or any token's
                                 os.path.normpath base name is this gate's file name, and a
                                 judge-shaped step counts as the judge only when its tokens equal
                                 JOBS_ONLY_RUN's token for token, the path token compared after
-                                normpath (so a doubled space, a ./tools/ path, quoted trailing
-                                whitespace and a tab before the value each still count); every other
-                                judge-shaped step is a finding (an unresolved judge-shaped command),
-                                and so is any other scalar value of a judge-naming job that names
-                                this gate's file name or the flag (a matrix or include value, an env
-                                value, a with: input, a job-level run: or a name: among them): only a
-                                step's own run: may carry the judge. The counted step carries no key
-                                but name and run, no non-comment line of a HOST_JOBS job names
-                                --jobs-only, and no job that carries a counted or judge-shaped step,
-                                nor any step of such a job, carries env: (a job-level env: can
-                                silence, in CI, every step of the carrying job; an env: on the judge
-                                step the judge itself; and an env: on an earlier step every later
-                                step of the job, through a GITHUB_ENV write; an env: on a step after
-                                the judge does not reach it, and is refused as policy so the judge's
-                                job stays env-free); each env: and judge-step-key diagnostic names
-                                the recorded line of its key. A job outside HOST_JOBS is judge-naming
-                                when its accepted header line (its comment included) or any
-                                non-comment line of it names this gate's file name or --jobs-only
-                                literally; it is read whole with the same line model as the
-                                host-patch jobs (control characters refused, then _entry /
-                                _job_tree), so a line of it this model cannot read (a job property at
-                                an unexpected indent, a quoted or explicit key, a block or folded
-                                scalar, a flow mapping, an anchor or an alias among them) is
-                                cannot-evaluate, never skipped, and so are a job or step key of it
-                                carrying an upper-case letter (whether a workflow reader folds key
-                                case is not modelled) and a run: of it that shlex cannot tokenize or
-                                that carries a ${{ }} expression, which GitHub resolves before the
-                                shell runs. Every other job outside HOST_JOBS is held to literal
-                                spellings: a non-comment line of it that carries a backslash (a
-                                double-quoted YAML scalar resolves backslash escapes and joins
-                                escaped line breaks, so the text a YAML reader builds can differ from
-                                every literal line) or that opens a YAML anchor, alias or tag where a
-                                value may start is cannot-evaluate, never skipped, so a judge spelled
-                                in a form whose literal lines never name it is refused, not missed. A
-                                body comment line is inert (it cannot name a command a step runs) and
-                                never makes a job judge-naming; what no literal line of such a job
-                                names, this rule does not read (a command built by a ${{ }}
-                                expression or a shell expansion from parts that are not the literal
-                                names), and tools/check_ci_parity.py is the holder there (measured at
-                                this commit: a run: of a ${{ }} expression and a run: splicing a
-                                variable into this gate's path are each exit 2 there).
+                                normpath and carrying no .. segment (so a doubled space, a ./tools/
+                                path, quoted trailing whitespace, a tab before the value and a
+                                quote-spliced spelling whose quote removal builds the judge's tokens
+                                each still count, and a docs/../tools/ path, equal only through the
+                                lexical normpath, never does); every other judge-shaped step is a
+                                finding (an unresolved judge-shaped command), and so is a step run:
+                                that names this gate's file name or the flag literally while its
+                                tokens resolve to neither (the literal-substring fallback, a
+                                conservative extra category beyond the token predicates). A run: that
+                                is not a step's own (a job-level run: or a with: input named run among
+                                them) whose tokens are judge-shaped or the judge's, or whose text
+                                names either literal, and any other scalar value of any outside job
+                                naming either literal (a matrix or include value, an env value, a
+                                with: input, a name: or a bare list item among them), are each a
+                                finding: only a step's own run: may carry the judge. The counted step
+                                carries no key but name and run, no non-comment line of a HOST_JOBS
+                                job names --jobs-only, and no job that carries a counted or
+                                judge-shaped step, nor any step of such a job, carries env: (a
+                                job-level env: can silence, in CI, every step of the carrying job; an
+                                env: on the judge step the judge itself; and an env: on an earlier
+                                step every later step of the job, through a GITHUB_ENV write; an env:
+                                on a step after the judge does not reach it, and is refused as policy
+                                so the judge's job stays env-free); each env: and judge-step-key
+                                diagnostic names the recorded line of its key and says whether the
+                                carrying step is the counted judge or an unresolved judge-shaped
+                                step. Because every outside job is read whole, a line of any of them
+                                the extended model cannot read (a job property at an unexpected
+                                indent, a quoted or explicit key, a flow mapping, a block opener
+                                carrying an indentation indicator, an anchor or an alias among them),
+                                a job or step key of any of them carrying an upper-case letter
+                                (whether a workflow reader folds key case is not modelled), a run: of
+                                any of them whose value is not one string (a null value or a nested
+                                mapping among them, refused at its recorded key line), and a run: of
+                                any of them that shlex cannot tokenize or that carries a ${{ }}
+                                expression, which GitHub resolves before the shell runs, are each
+                                cannot-evaluate, never skipped; so is a non-comment line of any
+                                outside job, its header and block-scalar bodies included, that
+                                carries a backslash (a double-quoted YAML scalar resolves backslash
+                                escapes and joins escaped line breaks, so the text a YAML reader
+                                builds can differ from every literal line) or opens a YAML anchor,
+                                alias or tag where a value may start. A comment line is inert (its
+                                first content character is #, which a shell reads as a comment inside
+                                a block-scalar body too) and is never read. What no run: token and no
+                                scalar value of a job spells is not read: a judge built at run time
+                                by a shell expansion from parts that are not the literal names (a
+                                variable spliced into the path or the flag among them) passes this
+                                gate unread, and tools/check_ci_parity.py is the holder there
+                                (measured at this commit: a run: splicing a variable into this gate's
+                                path is exit 2 there, dynamic-target).
                So a top-level key outside TOP_KEYS, another runner or checkout, an env: on a
                host-patch job or on any of its steps, removing or moving a
                host-patch job, its setup-python step, its Python host pin step or its suite step, changing a
@@ -107,7 +124,7 @@ Legs, in order:
                A line that still carries a carriage return once its one trailing CR is removed, or carries
                U+0085, U+2028 or U+2029 (LINE_BREAKS, the set the python-floor gate refuses), is
                cannot-evaluate: a YAML reader may break the line there and read a key this model does not see.
-               A line of a host-patch job or of a judge-naming job, the job's header line included,
+               A line of a host-patch job or of any job outside them, the job's header line included,
                carrying a form feed or a vertical tab (CONTROL_CHARS) is also cannot-evaluate: neither
                is a YAML line break, and this model refuses every such line rather than modelling which
                of them another reader accepts.
@@ -151,24 +168,24 @@ Legs, in order:
 
 Exit convention: 0 every leg passes; 1 a finding; 2 usage or cannot-evaluate (a missing, unreadable,
 non-regular, symlinked, non-UTF-8 or malformed source or workflow, a workflow line carrying a line-break
-character, a line of a host-patch job or of a judge-naming job, their accepted job headers included,
+character, a line of a host-patch job or of any job outside them, their accepted job headers included,
 carrying a form feed or a vertical tab, a top-level line that is not a plain key, a repeated top-level
-key, a line the line model cannot place or read, a line of a judge-naming job (one whose accepted
-header line or any non-comment line names the --jobs-only flag or this gate's file name) that the job
-model cannot read, a job or step key of such a job carrying an upper-case letter, a run: of such a job
-that shlex cannot tokenize or that carries a ${{ }} expression, a non-comment line of any other job
-outside the host-patch jobs carrying a backslash or opening a YAML anchor, alias or tag, a pin line
-outside the strict form, unavailable temporary storage).
+key, a line the line model cannot place or read, a line of any job outside the host-patch jobs that the
+extended job model cannot read, a job or step key of such a job carrying an upper-case letter, a run: of
+such a job whose value is not one string, that shlex cannot tokenize or that carries a ${{ }}
+expression, a non-comment line of such a job, its header and block-scalar bodies included, carrying a
+backslash or opening a YAML anchor, alias or tag, a pin line outside the strict form, unavailable
+temporary storage).
 
 DISCLOSED RESIDUAL. The jobs leg reads only quality.yml: its top-level keys; in the HOST_JOBS jobs, their
 keys, runner, checkout step, the env: of every step, setup-python step, Python host pin step and suite step;
-and, outside those jobs, the judge-naming jobs (each whose accepted header line, its comment included,
-or any non-comment line names this gate's file name or the --jobs-only flag literally), each read whole
-with the same job model, every step run: of it tokenized with shlex and classified by tokens (the
-counted judge, an unresolved judge-shaped command, or neither), every other scalar value of it scanned
-for those two literal names, and the env: of every job that carries a counted or judge-shaped step and
-of every step of such a job (outside-judge); in every other job outside those jobs, only the refusal of
-a non-comment line carrying a backslash or opening a YAML anchor, alias or tag. Another step in a host-patch job is only partly held: this gate refuses its env:
+and EVERY job outside those jobs, each read whole with the same job model extended by block scalars
+(bodies joined, no indentation indicator), colon-free one-line flow sequences (opaque) and bare scalar
+list items, every run: value of it, a block scalar included, tokenized with shlex and classified by
+tokens (the counted judge, an unresolved judge-shaped command, or neither, with a literal-substring
+fallback as a conservative extra category), every other scalar value of it scanned for the two literal
+names, and the env: of every job that carries a counted or judge-shaped step and of every step of such a
+job (outside-judge). Another step in a host-patch job is only partly held: this gate refuses its env:
 (step-env) and a non-comment line naming --jobs-only (outside-judge), and accepts a step-level shell:,
 working-directory: or if: on it, which changes what, where or whether that step runs; and what the suites
 test is theirs: a step whose run: command starts another interpreter, appends to GITHUB_PATH or GITHUB_ENV,
@@ -179,18 +196,21 @@ it (measured at this commit on an extra host-patch-job step carrying each of the
 check_ci_parity refused), and in every job it refuses a uses: of an action other than actions/checkout and
 actions/setup-python and a run: command outside its parity grammar. In CI the jobs leg runs inside the
 host-patch jobs (their Python host pin steps) and once outside them, as the --jobs-only judge step of the
-registry job, and the outside-judge rule holds that placement by command tokens, so moving the judge into a host-patch
-job, removing it, doubling it in any spelling whose shlex tokens equal the judge command's (a quoted
-run: value, a tab before the value, a doubled space, a ./tools/ path or quoted trailing whitespace
-among them), running any other judge-shaped command outside the host-patch jobs, naming this gate's
-file name or the flag in a value that is not a step's own run: property (a matrix or include value, an
-env value, a with: input or a job-level run: among them), putting a key beyond name and run on the
-judge step, or an env: on a job that carries a counted or judge-shaped step or on any of that job's
-steps is a finding; a judge-naming job's line the job model cannot read (a re-indented job body, a
-quoted env key, or a judge spelled as a block or folded scalar, a flow mapping, an anchor or an alias
-among them), a job or step key of it carrying an upper-case letter, a run: of it shlex cannot tokenize
-or carrying a ${{ }} expression, and a non-comment line of any other job outside the host-patch jobs
-carrying a backslash or opening a YAML anchor, alias or tag are each cannot-evaluate, never skipped; the host-patch
+registry job, and the outside-judge rule holds that placement by the command tokens of every run: of
+every outside job, so moving the judge into a host-patch job, removing it, doubling it in any spelling
+whose shlex tokens equal the judge command's (a quoted run: value, a tab before the value, a doubled
+space, a ./tools/ path, quoted trailing whitespace, a quote-spliced path or flag and a one-command
+literal or folded block scalar among them), running any other judge-shaped command outside the
+host-patch jobs, naming this gate's file name or the flag in a value that is not a step's own run:
+property (a matrix or include value, an env value, a with: input or a job-level run: among them),
+putting a key beyond name and run on the judge step, or an env: on a job that carries a counted or
+judge-shaped step or on any of that job's steps is a finding; a line of any outside job the extended
+job model cannot read (a re-indented job body, a quoted env key, a flow-mapping step, a block opener
+carrying an indentation indicator, an anchor or an alias among them), a job or step key of it carrying
+an upper-case letter, a run: of it whose value is not one string (a null value or a nested mapping
+among them, refused at its recorded key line), a run: of it shlex cannot tokenize or carrying a
+${{ }} expression, and a non-comment line of it, its header and block-scalar bodies included, carrying
+a backslash or opening a YAML anchor, alias or tag are each cannot-evaluate, never skipped; the host-patch
 jobs' own Python host pin steps report each in CI while those steps still run, and
 tools/run_all_checks.sh reports each in every local run. What stays CI-blind is an edit that leaves no CI run of
 the jobs leg at all. A top-level defaults: or env: silences, in CI, every run step of every job, the judge
@@ -206,14 +226,12 @@ run outside CI, in tools/run_all_checks.sh, which owns that surface, as a findin
 job model cannot read (a re-indented registry body or a quoted env key among them), as cannot-evaluate (a
 job-level defaults:, container:,
 continue-on-error: or uses: on the registry job is a check_ci_parity finding, reported in
-tools/run_all_checks.sh when CI is silenced). What this gate's token model never reads: in a job outside the host-patch jobs
-no literal line of which names this gate's file name or the flag and no line of which spells a
-backslash, anchor, alias or tag, a judge built at run time from parts that are not the literal names,
-by a ${{ }} expression (a format or join among them) or by a shell expansion (a variable spliced into
-the path or the flag among them); tools/check_ci_parity.py is the holder for those commands (measured
-at this commit on a full tree copy: a run: of ${{ matrix.command }} is exit 2 there,
-workflow-expression, and a run: splicing a variable into this gate's path is exit 2 there,
-dynamic-target). The grammar of the whole workflow,
+tools/run_all_checks.sh when CI is silenced). What this gate's token model never reads: a judge built at
+run time by a shell expansion from parts that are not the literal names (a variable spliced into the
+path or the flag among them), whose tokens are not the judge's and spell neither literal name;
+tools/check_ci_parity.py is the holder for those commands (measured at this commit on a full tree copy:
+a run: splicing a variable into this gate's path is exit 2 there, dynamic-target; a run: of
+${{ matrix.command }} is cannot-evaluate here and exit 2 there too, workflow-expression). The grammar of the whole workflow,
 the setup-python uses: shape and every other pin
 belong to the python-floor gate (tools/check_python_floor.py), which accepts a pin of a patch release only
 inside the HOST_JOBS jobs of quality.yml and only when it equals this source, and holds every other
@@ -270,8 +288,7 @@ HOST_SUITES = {
         "python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-selftest",
 }
 HOST_JOBS = tuple(HOST_SUITES)
-# The path this gate runs as: a job outside HOST_JOBS any non-comment line of which names it or
-# JOBS_ONLY_FLAG is judge-naming, and is read whole with the strict job model (_judge_findings).
+# The path this gate runs as; _judge_shaped and _counts_as_judge read it from command tokens.
 GATE_PATH = "tools/check_python_host_pin.py"
 # The step right after a host-patch job's setup-python step: this gate, which fails there when the job does
 # not run the host patch.
@@ -301,29 +318,30 @@ JOB_RULES = frozenset({"workflow-keys", "job-keys", "runner", "checkout", "step-
 # non-comment host-patch-job line names the flag, exactly one step outside those jobs has the judge
 # command's shlex tokens as its own run: property with no key but name and run, every other judge-shaped
 # step and every other value naming GATE_BASENAME or the flag is a finding, and no job that carries a
-# counted or judge-shaped step, nor any step of such a job, carries env:. A job whose accepted header
-# line (comment included) or any non-comment line names GATE_BASENAME or the flag literally is
-# judge-naming and is read whole with the strict job model (_entry / _job_tree); a line of it that model
-# cannot read is cannot-evaluate, and a non-comment line of every other outside job carrying a backslash
-# or opening a YAML anchor, alias or tag is cannot-evaluate, never skipped (_other_job_refusals).
+# counted or judge-shaped step, nor any step of such a job, carries env:. EVERY job outside HOST_JOBS is
+# read whole with the extended job model (_outside_entries / _job_tree), never selected by literal text;
+# a line of it that model cannot read is cannot-evaluate, and a non-comment line of any outside job
+# carrying a backslash or opening a YAML anchor, alias or tag is cannot-evaluate, never skipped
+# (_outside_line_refusals).
 JOBS_ONLY_FLAG = "--jobs-only"
 JOBS_ONLY_RUN = GATE_RUN + " " + JOBS_ONLY_FLAG
 # The judge command's shlex (POSIX) tokens. A step counts as the judge only when its own parsed run:'s
-# tokens equal these token for token, the one path token compared after os.path.normpath
-# (_counts_as_judge); a step is judge-shaped when any token is JOBS_ONLY_FLAG or any token's normpath
+# tokens equal these token for token, the one path token compared after os.path.normpath and carrying
+# no .. segment (_counts_as_judge; normpath is lexical, and through a symlinked directory a .. path can
+# name another file); a step is judge-shaped when any token is JOBS_ONLY_FLAG or any token's normpath
 # base name is GATE_BASENAME (_judge_shaped), and a judge-shaped step that does not count is a finding,
 # never a silent pass.
 JOBS_ONLY_TOKENS = tuple(shlex.split(JOBS_ONLY_RUN))
-# This gate's file name: a job outside HOST_JOBS whose accepted header line (its comment included) or any
-# non-comment line carries it or JOBS_ONLY_FLAG literally is judge-naming (_judge_text) and is read whole
-# with the strict job model (_judge_findings).
+# This gate's file name: _judge_text reads it and JOBS_ONLY_FLAG as the literal names in the scan of
+# every outside job's scalar values and in the conservative literal-substring fallback of the run:
+# classification (_judge_findings).
 GATE_BASENAME = os.path.basename(GATE_PATH)
-# A YAML anchor, alias or tag opener in a non-comment line of a job outside HOST_JOBS that is not
-# judge-naming: as the line's first content character, or right after a key's colon, a list dash or a
-# flow opener. An alias can carry a value defined anywhere in the document and a tag can rewrite one, so
-# such a line can name a command no literal line spells, and this model refuses it (_other_job_refusals).
+# A YAML anchor, alias or tag opener in a non-comment line of any job outside HOST_JOBS: as the line's
+# first content character, or right after a key's colon, a list dash or a flow opener. An alias can
+# carry a value defined anywhere in the document and a tag can rewrite one, so such a line can name a
+# command no literal line spells, and this model refuses it (_outside_line_refusals).
 UNREAD_OPENER_RE = re.compile(r"(?:^[ \t]*|:[ \t]*|-[ \t]+|[\[{,][ \t]*)[&*!]")
-# Control characters refused in any line of a host-patch job or of a judge-naming job, the job's header
+# Control characters refused in any line of a host-patch job or of any job outside them, the job's header
 # line included: neither is a YAML line break (LINE_BREAKS), and before this refusal some such lines
 # passed this line model while others (a header comment carrying one) were accepted or cannot-evaluate
 # by position, so the refusal holds every one of them out rather than modelling which.
@@ -355,6 +373,25 @@ ENTRY_RE = re.compile(
     r"(?P<indent> *)(?P<dash>- +)?(?P<key>[A-Za-z_][A-Za-z0-9_-]*) *:"
     r"(?:[ \t]+(?:'(?P<single>[^']*)'|\"(?P<double>[^\"\\]*)\"|(?P<plain>[A-Za-z0-9_.$/~=+][^#]*?)))?"
     r"(?:[ \t]+#.*)?[ \t]*")
+# A block-scalar opener in a job outside HOST_JOBS: a literal (|) or folded (>) style with an optional
+# chomping indicator and no indentation indicator (the body indent of one is set by the indicator,
+# which this line model does not read, so it is cannot-evaluate through ENTRY_RE). The body lines,
+# every later line more indented than the key, are joined with newlines into the value
+# (_outside_entries); shlex reads the joined text the way a POSIX shell reads a script, so a run:
+# block's tokens are the ones CI would run.
+BLOCK_RE = re.compile(
+    r"(?P<indent> *)(?P<dash>- +)?(?P<key>[A-Za-z_][A-Za-z0-9_-]*) *: "
+    r"[|>][+-]?(?:[ \t]+#.*)?[ \t]*")
+# A one-line flow-sequence value in a job outside HOST_JOBS, accepted only when it can define no key
+# and carry no alias or quote (no colon, brace, bracket, quote, backslash or opener character inside):
+# a strategy matrix os list among them. It is read as one opaque scalar value; any other flow spelling
+# is cannot-evaluate through ENTRY_RE.
+FLOW_RE = re.compile(
+    r"(?P<indent> *)(?P<dash>- +)?(?P<key>[A-Za-z_][A-Za-z0-9_-]*) *: "
+    r"(?P<flow>\[[A-Za-z0-9_. ,/@=+-]*\])(?:[ \t]+#.*)?[ \t]*")
+# A bare scalar list item in a job outside HOST_JOBS (a needs: member among them): a dash, one plain
+# scalar with no colon, space, quote or opener character, then an optional comment.
+BARE_RE = re.compile(r"(?P<indent> *)- +(?P<text>[A-Za-z0-9_./@=+-]+)(?:[ \t]+#.*)?[ \t]*")
 # The deepest indentation a host-patch job line may have: a step input under with:.
 MAX_INDENT = 10
 
@@ -446,9 +483,10 @@ def _entry(job, number, line, where=None):
 
 
 def _job_tree(job, entries, where=None):
-    """The block mapping of a host-patch job or of a job naming the --jobs-only judge from its entries
-    (_entry), or CannotEvaluate for an entry the indentation does not place or a repeated key. MAX_INDENT
-    bounds the nesting, so the recursion is shallow."""
+    """The block mapping of a host-patch job or of a job outside HOST_JOBS from its entries (_entry /
+    _outside_entries), or CannotEvaluate for an entry the indentation does not place or a repeated key.
+    A bare scalar list item (key None, _outside_entries) is a sequence member holding its scalar.
+    MAX_INDENT bounds the nesting, so the recursion is shallow."""
     where = "the host-patch job " + job if where is None else where
     position = [0]
 
@@ -489,6 +527,11 @@ def _job_tree(job, entries, where=None):
                 break
             if not entry[3] or entry[1] != indent:
                 refuse(entry, "a line the indentation does not place")
+            if entry[4] is None:
+                # A bare scalar list item (a needs: member among them): one sequence member.
+                position[0] += 1
+                out.append(entry[5])
+                continue
             out.append(mapping(entry[2], True))
         return out
 
@@ -511,8 +554,11 @@ def _executes(step, command):
 
 def _judge_text(text):
     """Whether text names this gate's file name (GATE_BASENAME) or the --jobs-only flag literally: the
-    selection of judge-naming jobs and the scan of their scalar values. An escaped, aliased or tagged
-    spelling names neither literally; _other_job_refusals refuses such lines instead."""
+    scan of every outside job's scalar values, and the conservative literal-substring fallback of the
+    run: classification (a run: naming either literally is refused even when its tokens resolve to
+    neither). An escaped, aliased or tagged spelling names neither literally; _outside_line_refusals
+    and the job model refuse such lines instead, and a spelling only shell quote removal or expansion
+    builds is read from shlex tokens, never from this substring."""
     return GATE_BASENAME in text or JOBS_ONLY_FLAG in text
 
 
@@ -526,34 +572,37 @@ def _judge_shaped(tokens):
 def _counts_as_judge(tokens):
     """Whether a step's shlex tokens are the judge command's, token for token: each token equals its
     JOBS_ONLY_TOKENS counterpart, the one path token (GATE_PATH) compared after os.path.normpath, so a
-    doubled space, a ./tools/ path, quoted trailing whitespace or a tab before the value still counts,
-    and any other judge-shaped token list does not."""
+    doubled space, a ./tools/ path, quoted trailing whitespace, a tab before the value or a
+    quote-spliced spelling still counts, and any other judge-shaped token list does not. A path token
+    carrying a .. segment never counts: normpath is lexical, and through a symlinked directory a
+    docs/../tools/ path can name another file."""
     return len(tokens) == len(JOBS_ONLY_TOKENS) and all(
-        token == want or (want == GATE_PATH and os.path.normpath(token) == GATE_PATH)
+        token == want or (want == GATE_PATH and ".." not in token.split("/")
+                          and os.path.normpath(token) == GATE_PATH)
         for token, want in zip(tokens, JOBS_ONLY_TOKENS))
 
 
 def _run_tokens(job, value):
-    """The shlex (POSIX) tokens of a step's own run: value in a judge-naming job, or CannotEvaluate for
-    a value this command model cannot resolve: one carrying a ${{ }} expression, which GitHub resolves
+    """The shlex (POSIX) tokens of a run: value in a job outside HOST_JOBS, or CannotEvaluate for a
+    value this command model cannot resolve: one carrying a ${{ }} expression, which GitHub resolves
     before the shell runs, or one shlex refuses (an unclosed quote among them)."""
     if "${{" in value:
-        raise CannotEvaluate("{}:{}: a run: command of the job {}, which names the --jobs-only judge "
-                             "or this gate, carries a ${{{{ }}}} expression; GitHub resolves it before "
-                             "the shell runs, so this command model cannot read what the step "
+        raise CannotEvaluate("{}:{}: a run: command of the job {}, outside the host-patch jobs, "
+                             "carries a ${{{{ }}}} expression; GitHub resolves it before the shell "
+                             "runs, so this command model cannot read what the step "
                              "runs".format(WORKFLOW_REL, value.line, job))
     try:
         return shlex.split(value)
     except ValueError as exc:
-        raise CannotEvaluate("{}:{}: a run: command of the job {}, which names the --jobs-only judge "
-                             "or this gate, that shlex cannot tokenize ({}); this command model cannot "
-                             "read what the step runs".format(WORKFLOW_REL, value.line, job, exc))
+        raise CannotEvaluate("{}:{}: a run: command of the job {}, outside the host-patch jobs, that "
+                             "shlex cannot tokenize ({}); this command model cannot read what the "
+                             "step runs".format(WORKFLOW_REL, value.line, job, exc))
 
 
 def _judge_values(node, runs):
     """Each (line number, value) scalar under node naming this gate's file name or the flag
-    (_judge_text), a step's own run: value (runs, by identity) excluded: a matrix or include value, an
-    env value, a with: input, a job-level run: or a name: among them."""
+    (_judge_text), every run: value already classified by tokens (runs, by identity) excluded: a
+    matrix or include value, an env value, a with: input, a name: or a bare list item among them."""
     out = []
     if isinstance(node, dict):
         for value in node.values():
@@ -566,10 +615,99 @@ def _judge_values(node, runs):
     return out
 
 
+def _outside_entries(job, lines, where):
+    """The entry tuples of a job outside HOST_JOBS, _entry's shape, from its non-comment lines: ENTRY_RE
+    entries as for the host-patch jobs, plus the three spellings that model refuses there: a
+    block-scalar opener (BLOCK_RE) whose body lines, each more indented than its key, are joined with
+    newlines into the value, recorded on the opener's line; a colon-free one-line flow sequence
+    (FLOW_RE), read as one opaque scalar; and a bare scalar list item (BARE_RE), read as a sequence
+    member with no key. Any other line, and any of the three nested deeper than a step input
+    (MAX_INDENT, the bound _entry holds for its own entries), is cannot-evaluate, never skipped."""
+    def deep(number, indent):
+        if indent > MAX_INDENT:
+            raise CannotEvaluate("{}:{}: a line in {} nested deeper than a step input; this "
+                                 "job model cannot read it".format(WORKFLOW_REL, number, where))
+        return indent
+
+    entries, index = [], 0
+    while index < len(lines):
+        number, line = lines[index]
+        index += 1
+        match = BLOCK_RE.fullmatch(line)
+        if match is None:
+            match = FLOW_RE.fullmatch(line)
+            if match is not None:
+                indent, dash = deep(number, len(match.group("indent"))), match.group("dash") or ""
+                value = _Scalar(match.group("flow"))
+                value.line = number
+                entries.append((number, indent, indent + len(dash), bool(dash), match.group("key"),
+                                value))
+                continue
+            match = BARE_RE.fullmatch(line)
+            if match is not None:
+                indent = deep(number, len(match.group("indent")))
+                value = _Scalar(match.group("text"))
+                value.line = number
+                entries.append((number, indent, indent, True, None, value))
+                continue
+            entries.append(_entry(job, number, line, where))
+            continue
+        indent, dash = deep(number, len(match.group("indent"))), match.group("dash") or ""
+        column = indent + len(dash)
+        body = []
+        while index < len(lines):
+            text = lines[index][1]
+            if len(text) - len(text.lstrip(" ")) <= column:
+                break
+            body.append(text.strip(" \t"))
+            index += 1
+        value = _Scalar("\n".join(body))
+        value.line = number
+        entries.append((number, indent, column, bool(dash), match.group("key"), value))
+    return entries
+
+
+def _refuse_non_string_runs(job, node):
+    """Refuse a run: key of a job outside HOST_JOBS whose value is not one string, naming the recorded
+    line of the key: every run: of every such job is tokenized (_run_tokens), so a run: this model
+    cannot resolve to one string (a null value or a nested mapping among them) is cannot-evaluate,
+    never skipped."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "run" and not isinstance(value, str):
+                raise CannotEvaluate("{}:{}: a run: key of the job {} whose value is not one string "
+                                     "(a null value or a nested mapping among them); every run: of a "
+                                     "job outside the host-patch jobs is tokenized, so this command "
+                                     "model cannot read what it runs".format(
+                                         WORKFLOW_REL, node.lines[key], job))
+            _refuse_non_string_runs(job, value)
+    elif isinstance(node, list):
+        for item in node:
+            _refuse_non_string_runs(job, item)
+
+
+def _other_runs(node, runs):
+    """Each (line number, value) string under a run: key of node that is not a step's own run: value
+    (runs, by identity): a job-level run:, a with: input named run or a matrix value among them. Each
+    is tokenized like a step's own run:, so a judge-shaped spelling there is read, never skipped; it
+    can only ever be a finding (only a step's own run: may carry the judge)."""
+    out = []
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "run" and isinstance(value, str) and id(value) not in runs:
+                out.append((value.line, value))
+            else:
+                out.extend(_other_runs(value, runs))
+    elif isinstance(node, list):
+        for item in node:
+            out.extend(_other_runs(item, runs))
+    return out
+
+
 def _refuse_upper_case_keys(job, tree):
-    """Refuse a job or step key of a judge-naming job that carries an upper-case letter (an Env: for
-    env: among them): whether a workflow reader folds key case is not modelled, so this job model reads
-    such a job only in the lower-case key spellings it holds. The keys of an env: or with: value
+    """Refuse a job or step key of a job outside HOST_JOBS that carries an upper-case letter (an Env:
+    for env: among them): whether a workflow reader folds key case is not modelled, so this job model
+    reads such a job only in the lower-case key spellings it holds. The keys of an env: or with: value
     mapping are data (an environment variable name among them), not job or step properties, and stay
     unjudged."""
     steps = tree.get("steps")
@@ -577,31 +715,32 @@ def _refuse_upper_case_keys(job, tree):
                           if isinstance(step, dict)]:
         for key in node:
             if key != key.lower():
-                raise CannotEvaluate("{}:{}: the key {}: of the job {}, which names the --jobs-only "
-                                     "judge or this gate, carries an upper-case letter; whether a "
-                                     "workflow reader folds key case is not modelled, so this job "
-                                     "model cannot read it".format(
-                                         WORKFLOW_REL, node.lines[key], key, job))
+                raise CannotEvaluate("{}:{}: the key {}: of the job {}, outside the host-patch jobs, "
+                                     "carries an upper-case letter; whether a workflow reader folds "
+                                     "key case is not modelled, so this job model cannot read "
+                                     "it".format(WORKFLOW_REL, node.lines[key], key, job))
 
 
-def _other_job_refusals(job, lines):
-    """Refuse a non-comment line of a job outside HOST_JOBS that is not judge-naming when the line
-    carries a backslash (a double-quoted YAML scalar resolves backslash escapes and joins escaped line
-    breaks, so the text a YAML reader builds can differ from every literal line) or opens a YAML
-    anchor, alias or tag where a value may start (UNREAD_OPENER_RE: an alias can carry a value defined
-    anywhere in the document, and a tag can rewrite one). The judge-naming selection reads only literal
-    text, so a line that can name a command without spelling it literally is cannot-evaluate, never
-    skipped."""
+def _outside_line_refusals(job, lines):
+    """Refuse a line of a job outside HOST_JOBS, its accepted header and its block-scalar body lines
+    included, when it carries a backslash (a double-quoted YAML scalar resolves backslash escapes and
+    joins escaped line breaks, so the text a YAML reader hands the shell can differ from every literal
+    line) or opens a YAML anchor, alias or tag where a value may start (UNREAD_OPENER_RE: an alias can
+    carry a value defined anywhere in the document, and a tag can rewrite one). Every outside job is
+    read by literal lines and shlex tokens, so a line that can name a command without spelling it is
+    cannot-evaluate, never skipped; a comment line is inert (its first content character is #, which a
+    shell reads as a comment inside a block-scalar body too) and is not read."""
     for number, line in lines:
         if "\\" in line:
-            raise CannotEvaluate("{}:{}: carries a backslash in the job {}: a double-quoted YAML "
-                                 "scalar resolves backslash escapes and joins escaped line breaks, so "
-                                 "this gate's literal selection cannot read what the line "
+            raise CannotEvaluate("{}:{}: carries a backslash in the job {} (its header and "
+                                 "block-scalar bodies included): a double-quoted YAML scalar resolves "
+                                 "backslash escapes and joins escaped line breaks, so this gate's "
+                                 "line model cannot read what the line "
                                  "names".format(WORKFLOW_REL, number, job))
         if UNREAD_OPENER_RE.search(line):
             raise CannotEvaluate("{}:{}: opens a YAML anchor, alias or tag in the job {}: the value it "
                                  "names can be defined or rewritten elsewhere in the document, so this "
-                                 "gate's literal selection cannot read what the line "
+                                 "gate's line model cannot read what the line "
                                  "names".format(WORKFLOW_REL, number, job))
 
 
@@ -683,27 +822,30 @@ def _judge_findings(host_judges, other_lines, other_raw, headers):
     """The outside-judge rule over the whole workflow: host_judges the (job, line number) of each
     non-comment HOST_JOBS line naming JOBS_ONLY_FLAG, other_lines the non-comment (line number, line) of
     each job outside HOST_JOBS, other_raw every line of each such job, its accepted header and comment
-    lines included, headers each such job's accepted header (line number, line). Exactly one step
-    outside the host-patch jobs runs JOBS_ONLY_RUN as its own run: command, judged by command tokens
-    (_counts_as_judge), never by exact text; that step carries no key but name and run; no non-comment
-    host-patch-job line names the flag; and no job that carries a counted or judge-shaped step, nor any
-    step of such a job, carries env: (in CI a job-level env: such as a BASH_ENV value can silence every
-    step of the carrying job, an env: on the judge step the judge itself, and an env: on an earlier step
-    every later step of the job, through a GITHUB_ENV write; an env: on a step after the judge does not
-    reach it and is refused as policy, so the judge's job stays env-free), each env: and judge-step-key
-    diagnostic naming the recorded line of its key. A job outside HOST_JOBS whose accepted header line
-    (its comment included) or any non-comment line names GATE_BASENAME or JOBS_ONLY_FLAG literally is
-    judge-naming (_judge_text): it is read whole with the host-patch jobs' own line model
-    (_refuse_control_chars over every line, then _entry / _job_tree), so a line of it that model cannot
-    read is cannot-evaluate, never skipped, and so are a job or step key of it carrying an upper-case
-    letter (_refuse_upper_case_keys) and a run: of it shlex cannot tokenize or carrying a ${{ }}
-    expression (_run_tokens); a step of it whose tokens are judge-shaped without being the judge
-    command's is a finding (an unresolved judge-shaped command), and so is any other scalar value of it
-    naming GATE_BASENAME or the flag (_judge_values): only a step's own run: may carry the judge. Every
-    other job outside HOST_JOBS is held to literal spellings (_other_job_refusals): a non-comment line
-    of it carrying a backslash or opening a YAML anchor, alias or tag is cannot-evaluate, never skipped,
-    so a judge spelled in a form whose literal lines never name it is refused, not missed; a body
-    comment line is inert (it cannot name a command a step runs) and never selects."""
+    lines included, headers each such job's accepted header (line number, line). EVERY job outside
+    HOST_JOBS is read whole, never selected or skipped by literal text: its lines are refused for
+    control characters (_refuse_control_chars, the header included) and for a backslash or a YAML
+    anchor, alias or tag opener (_outside_line_refusals, the header and block-scalar bodies included),
+    then read with the host-patch jobs' own line model extended by block scalars, colon-free flow
+    sequences and bare list items (_outside_entries / _job_tree); a line that extended model cannot
+    read, a job or step key carrying an upper-case letter (_refuse_upper_case_keys), a run: whose value
+    is not one string (_refuse_non_string_runs, named by its recorded key line) and a run: shlex cannot
+    tokenize or carrying a ${{ }} expression (_run_tokens) are each cannot-evaluate, never skipped.
+    EVERY run: value is tokenized: a step's own run: counts as the judge on token equality
+    (_counts_as_judge) and is otherwise a finding when judge-shaped (_judge_shaped) or when its text
+    names this gate's file name or the flag literally (_judge_text, the conservative literal-substring
+    fallback); a run: that is not a step's own (a job-level run: or a with: input named run among them)
+    whose tokens are judge-shaped or the judge's or whose text names either literal (_other_runs), and
+    any other scalar value naming either literal (_judge_values), are each a finding: only a step's
+    own run: may carry the judge. Exactly one step outside the host-patch jobs runs JOBS_ONLY_RUN; that
+    step carries no key but name and run; no non-comment host-patch-job line names the flag; and no job
+    that carries a counted or judge-shaped step, nor any step of such a job, carries env: (in CI a
+    job-level env: such as a BASH_ENV value can silence every step of the carrying job, an env: on the
+    judge step the judge itself, and an env: on an earlier step every later step of the job, through a
+    GITHUB_ENV write; an env: on a step after the judge does not reach it and is refused as policy, so
+    the judge's job stays env-free), each env: and judge-step-key diagnostic naming the recorded line
+    of its key and whether the carrying step is the counted judge or an unresolved judge-shaped
+    step."""
     found = []
     for job, number in host_judges:
         found.append("{}:{}: names {} inside the host-patch job {}: the jobs leg's outside run never "
@@ -712,21 +854,20 @@ def _judge_findings(host_judges, other_lines, other_raw, headers):
     judges, shaped, trees = [], [], {}
     for job, header in headers.items():
         lines = other_lines.get(job, [])
-        if not (_judge_text(header[1]) or any(_judge_text(line) for _, line in lines)):
-            _other_job_refusals(job, lines)
-            continue
-        where = "the job {}, which names the --jobs-only judge or this gate".format(job)
+        where = "the job {}, outside the host-patch jobs".format(job)
         for number, line in other_raw[job]:
             _refuse_control_chars(job, number, line, where)
-        tree = _job_tree(job, [_entry(job, number, line, where) for number, line in lines], where)
+        _outside_line_refusals(job, [header] + lines)
+        tree = _job_tree(job, _outside_entries(job, lines, where), where)
         trees[job] = tree
         _refuse_upper_case_keys(job, tree)
+        _refuse_non_string_runs(job, tree)
         runs = set()
         steps = tree.get("steps")
         for index, step in enumerate(steps if isinstance(steps, list) else ()):
-            value = step.get("run")
-            if not isinstance(value, str):
+            if not isinstance(step, dict) or "run" not in step:
                 continue
+            value = step["run"]
             runs.add(id(value))
             tokens = _run_tokens(job, value)
             if _counts_as_judge(tokens):
@@ -734,10 +875,20 @@ def _judge_findings(host_judges, other_lines, other_raw, headers):
             elif _judge_shaped(tokens) or _judge_text(value):
                 shaped.append((job, index))
                 found.append("{}:{}: an unresolved judge-shaped command in the job {}: this step's own "
-                             "run: names this gate's file name or {}, but its tokens are not the judge "
-                             "command's ({}); a judge-shaped step either counts as the one judge or is "
-                             "a finding, never a silent pass".format(
+                             "run: carries a token that is {} or a path whose normpath base name is "
+                             "this gate's file name, or names one of them literally, but its tokens "
+                             "are not the judge command's ({}); a judge-shaped step either counts as "
+                             "the one judge or is a finding, never a silent pass".format(
                                  WORKFLOW_REL, value.line, job, JOBS_ONLY_FLAG, JOBS_ONLY_RUN))
+        for number, value in _other_runs(tree, runs):
+            runs.add(id(value))
+            tokens = _run_tokens(job, value)
+            if _counts_as_judge(tokens) or _judge_shaped(tokens) or _judge_text(value):
+                found.append("{}:{}: the job {} names this gate's file name or {} in a value that is "
+                             "not a step's own run: command (a matrix or include value, an env value, "
+                             "a with: input, a job-level run: or a name: among them); only the judge "
+                             "step's own run: may carry it".format(
+                                 WORKFLOW_REL, number, job, JOBS_ONLY_FLAG))
         for number, value in _judge_values(tree, runs):
             found.append("{}:{}: the job {} names this gate's file name or {} in a value that is not a "
                          "step's own run: command (a matrix or include value, an env value, a with: "
@@ -747,45 +898,55 @@ def _judge_findings(host_judges, other_lines, other_raw, headers):
         found.append("{}: {} steps outside the host-patch jobs run {} as their own run: command (want "
                      "exactly one: the one CI run of the jobs leg that an edit inside the host-patch "
                      "jobs cannot silence)".format(WORKFLOW_REL, len(judges), JOBS_ONLY_RUN))
+    counted = {}
+    for job, index in judges:
+        counted.setdefault(job, set()).add(index)
     carriers = {}
     for job, index in judges + shaped:
         carriers.setdefault(job, []).append(index)
     for job, indexes in carriers.items():
         tree = trees[job]
+        job_step_kind = ("the --jobs-only judge step" if counted.get(job)
+                         else "an unresolved judge-shaped step")
+        job_kind = ("the --jobs-only judge" if counted.get(job) else "an unresolved judge-shaped step")
         if "env" in tree:
-            found.append("{}:{}: the job {} carries the --jobs-only judge step and sets a job-level "
-                         "env:, which in CI can silence every step of that job, the judge step "
-                         "included".format(WORKFLOW_REL, tree.lines["env"], job))
+            found.append("{}:{}: the job {} carries {} and sets a job-level env:, which in CI can "
+                         "silence every step of that job, the judge step included".format(
+                             WORKFLOW_REL, tree.lines["env"], job, job_step_kind))
         for position, step in enumerate(tree["steps"]):
+            if not isinstance(step, dict):
+                continue
             if position in indexes:
+                step_kind = ("the --jobs-only judge" if position in counted.get(job, set())
+                             else "an unresolved judge-shaped command")
                 for key in sorted(set(step) - RUN_KEYS - {"env"}):
-                    found.append("{}:{}: the step that carries the --jobs-only judge carries {}:, "
-                                 "which can skip, mask or change what it runs (the judge step carries "
-                                 "no key but name and run)".format(WORKFLOW_REL, step.lines[key], key))
+                    found.append("{}:{}: the step that carries {} carries {}:, which can skip, mask "
+                                 "or change what it runs (the judge step carries no key but name and "
+                                 "run)".format(WORKFLOW_REL, step.lines[key], step_kind, key))
             if "env" not in step:
                 continue
             number = step.lines["env"]
             if position in indexes:
-                found.append("{}:{}: the step that carries the --jobs-only judge sets env:, which in "
-                             "CI can change or silence what it runs (a BASH_ENV value among "
-                             "them)".format(WORKFLOW_REL, number))
+                found.append("{}:{}: the step that carries {} sets env:, which in CI can change or "
+                             "silence what it runs (a BASH_ENV value among them)".format(
+                                 WORKFLOW_REL, number, step_kind))
             elif position < max(indexes):
-                found.append("{}:{}: the job {} carries the --jobs-only judge and sets env: on step "
-                             "{}: a step env: changes what that step's run: command does, and a write "
-                             "to GITHUB_ENV or GITHUB_PATH through it reaches every later step of the "
-                             "job, the judge step included".format(
-                                 WORKFLOW_REL, number, job, position + 1))
+                found.append("{}:{}: the job {} carries {} and sets env: on step {}: a step env: "
+                             "changes what that step's run: command does, and a write to GITHUB_ENV "
+                             "or GITHUB_PATH through it reaches every later step of the job, the "
+                             "judge step included".format(WORKFLOW_REL, number, job, job_kind,
+                                                          position + 1))
             else:
-                found.append("{}:{}: the job {} carries the --jobs-only judge and sets env: on step "
-                             "{}, after the judge step: that env: does not reach the judge, and this "
-                             "gate refuses env: on every step of the judge's job as policy".format(
-                                 WORKFLOW_REL, number, job, position + 1))
+                found.append("{}:{}: the job {} carries {} and sets env: on step {}, after the judge "
+                             "step: that env: does not reach the judge, and this gate refuses env: on "
+                             "every step of the judge's job as policy".format(
+                                 WORKFLOW_REL, number, job, job_kind, position + 1))
     return found
 
 
 def _refuse_control_chars(job, number, line, where=None):
     """Refuse a form feed or a vertical tab (CONTROL_CHARS) in a line of a host-patch job (where None)
-    or of a judge-naming job (where naming it), the job's accepted header line included: neither is a
+    or of a job outside them (where naming it), the job's accepted header line included: neither is a
     YAML line break, so this line model reads the line whole, and the refusal holds every such line out
     rather than modelling what another reader does with it."""
     where = "the host-patch job " + job if where is None else where
@@ -904,9 +1065,10 @@ def evaluate(root, version, jobs_only=False):
         return 1, ["FAIL: " + finding for finding in findings]
     report = ("PASS: python host patch {} ({}): {} carries only the top-level keys {}, its host-patch jobs "
               "{} each run on {}, carry env: on no job key or step, check out as written, pin it in their "
-              "one setup-python step, run this gate right after it and run their suite, and one step "
-              "outside them carries the jobs leg's --jobs-only judge as its own run: command with no key "
-              "but name and run, its job and every step of that job free of env:".format(
+              "one setup-python step, run this gate right after it and run their suite, every run: of "
+              "every job outside them is tokenized, and one step outside them carries the jobs leg's "
+              "--jobs-only judge as its own run: command with no key but name and run, its job and "
+              "every step of that job free of env:".format(
                   _patch_text(patch), SOURCE_REL, WORKFLOW_REL, ", ".join(TOP_KEYS), ", ".join(HOST_JOBS),
                   RUNNER))
     if jobs_only:
@@ -1367,6 +1529,40 @@ def _job_cases():
            JUDGE_STEP + "  second:\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n"
            "        command: '" + JOBS_ONLY_RUN + "'\n    steps:\n      - run: echo ok\n"),), (),
          "in a value that is not a step's own run: command", "outside-judge"),
+        # FIX-529-R8 reviewer reproductions: selection follows the tokens of every run: of every job
+        # outside the host-patch jobs, so a quote-spliced spelling (shell quote removal builds the
+        # name from parts no literal substring spells), a canonical or spliced judge inside a literal
+        # or folded block scalar, and a docs/../tools/ path that only the lexical normpath folds are
+        # each classified, never passed unread.
+        ("jobs/jobs-only-double-quote-spliced-second-judge-finding",
+         (("registry", JUDGE_STEP, JUDGE_STEP + second
+           + '      - run: python3 -I -B tools/check_python_host_"pin".py --jobs-o""nly\n'),), (),
+         "2 steps outside the host-patch jobs run", "outside-judge"),
+        ("jobs/jobs-only-single-quote-spliced-second-judge-finding",
+         (("registry", JUDGE_STEP, JUDGE_STEP + second
+           + "      - run: python3 -I -B tools/check_python_host_'pin'.py --jobs-'only'\n"),), (),
+         "2 steps outside the host-patch jobs run", "outside-judge"),
+        ("jobs/jobs-only-spliced-flag-free-gate-path-finding",
+         (("registry", JUDGE_STEP, JUDGE_STEP + second
+           + '      - run: python3 -I -B tools/check_python_host_pi"n".py\n'),), (),
+         "an unresolved judge-shaped command", "outside-judge"),
+        ("jobs/jobs-only-literal-block-second-judge-finding",
+         (("registry", JUDGE_STEP, JUDGE_STEP + second
+           + "      - run: |\n          " + JOBS_ONLY_RUN + "\n"),), (),
+         "2 steps outside the host-patch jobs run", "outside-judge"),
+        ("jobs/jobs-only-folded-block-second-judge-finding",
+         (("registry", JUDGE_STEP, JUDGE_STEP + second
+           + "      - run: >-\n          " + JOBS_ONLY_RUN + "\n"),), (),
+         "2 steps outside the host-patch jobs run", "outside-judge"),
+        ("jobs/jobs-only-spliced-literal-block-second-judge-finding",
+         (("registry", JUDGE_STEP, JUDGE_STEP + second
+           + '      - run: |\n          python3 -I -B tools/check_python_host_"pin".py'
+           ' --jobs-o""nly\n'),), (),
+         "2 steps outside the host-patch jobs run", "outside-judge"),
+        ("jobs/jobs-only-dotdot-judge-path-finding",
+         (("registry", "run: " + JOBS_ONLY_RUN,
+           "run: python3 -I -B docs/../tools/check_python_host_pin.py --jobs-only"),), (),
+         "an unresolved judge-shaped command", "outside-judge"),
         ("jobs/checkout-ref-finding", ((OPF, fetch_tags, fetch_tags + "          ref: main\n"),), (),
          "opf-host-patch: its first step is not the checkout step as written", "checkout"),
         ("jobs/checkout-repository-finding",
@@ -1591,9 +1787,9 @@ def _self_test_cases(base):
         check(check_id, (code, _has(lines, "carries " + CONTROL_CHARS[char]),
                          controls.evaluate(root, HOST)[0]), (2, True, 0))
 
-    # A form feed or a vertical tab in a line of the judge-naming job, its accepted header and its
-    # comment lines included: cannot-evaluate, as for the host-patch jobs, and the copy without the
-    # refusal reads the job and passes (red on revert).
+    # A form feed or a vertical tab in a line of any job outside the host-patch jobs, its accepted
+    # header and its comment lines included: cannot-evaluate, as for the host-patch jobs, and the copy
+    # without the refusal reads the job and passes (red on revert).
     for check_id, edits, char in (
             ("jobs/jobs-only-header-form-feed-cannot-evaluate",
              (("registry", "  registry:\n", "  registry: #\f\n"),), "\f"),
@@ -1601,9 +1797,9 @@ def _self_test_cases(base):
              (("registry", "    steps:\n", "    # judge\f notes\n    steps:\n"),), "\f"),
             ("jobs/jobs-only-name-vertical-tab-cannot-evaluate",
              (("registry", "Python host pin (jobs leg", "Python host pin\v (jobs leg"),), "\v"),
-            # FIX-529-R7: a job selected only by its header comment naming the flag, that header
-            # carrying a form feed: the header takes part in selection, so the control character is
-            # refused, never read past.
+            # FIX-529-R7/R8: a second job whose header comment carries a form feed: every outside
+            # job's lines, its header included, are refused for control characters, so the character
+            # is never read past, whatever the header names.
             ("jobs/jobs-only-header-mention-form-feed-cannot-evaluate",
              (("registry", JUDGE_STEP,
                JUDGE_STEP + "  second: # --jobs-only\f\n    runs-on: ubuntu-latest\n"
@@ -1613,15 +1809,18 @@ def _self_test_cases(base):
         check(check_id, (code, _has(lines, "carries " + CONTROL_CHARS[char]),
                          controls.evaluate(root, HOST)[0]), (2, True, 0))
 
-    # The job naming the --jobs-only judge is read with the host-patch jobs' own line model: a job
-    # property at an unexpected indent (the job body re-indented by two spaces with a job-level env:, a
-    # reviewer reproduction; its setup-python with: dropped so every line stays within MAX_INDENT and
-    # the placement refusal is what fires), a quoted key YAML reads as env (on the job and on the judge
-    # step) and an explicit ? key are each cannot-evaluate, and the copy with the outside-judge rule
-    # removed never reads that job and passes (red on revert). Round-6 reviewer reproductions keep the
-    # canonical registry judge and add a second job spelling the judge a way this model cannot read (a
-    # quoted run key, a literal and a folded block scalar, a flow-mapping step, an anchor and an
-    # alias): each is selected by its judge-naming line and refused, never skipped.
+    # Every job outside the host-patch jobs is read whole with the host-patch jobs' own line model,
+    # extended by block scalars, colon-free flow sequences and bare list items: a job property at an
+    # unexpected indent (the job body re-indented by two spaces with a job-level env:, a reviewer
+    # reproduction; its setup-python with: dropped so every line stays within MAX_INDENT and the
+    # placement refusal is what fires), a quoted key YAML reads as env (on the job and on the judge
+    # step), an explicit ? key, a quoted run key, a flow-mapping step and a block opener carrying an
+    # indentation indicator are each cannot-evaluate, and the copy with the outside-judge rule removed
+    # never reads the job and passes (red on revert). A run: carrying a ${{ }} expression, a run: shlex
+    # cannot tokenize, an upper-case Env: key, a backslash spelling (a hex escape, an escaped line
+    # break, a backslash in a header comment) and an alias consuming a top-level anchor are
+    # cannot-evaluate in EVERY outside job: the backslash and anchor/alias/tag refusals cover the
+    # accepted headers and the block-scalar bodies too.
     judge_env = "      BASH_ENV: '$(: > \"$0\")'\n"
     trimmed = REGISTRY_JOB.replace("        with:\n          python-version: '3.14'\n", "")
     reindented = ("  registry:\n      env:\n  " + judge_env
@@ -1643,14 +1842,6 @@ def _self_test_cases(base):
              (("registry", JUDGE_STEP,
                JUDGE_STEP + second + '      - "run": ' + JOBS_ONLY_RUN + "\n"),),
              "not a block mapping entry"),
-            ("jobs/jobs-only-literal-block-second-judge-cannot-evaluate",
-             (("registry", JUDGE_STEP,
-               JUDGE_STEP + second + "      - run: |\n          " + JOBS_ONLY_RUN + "\n"),),
-             "not a block mapping entry"),
-            ("jobs/jobs-only-folded-block-second-judge-cannot-evaluate",
-             (("registry", JUDGE_STEP,
-               JUDGE_STEP + second + "      - run: >-\n          " + JOBS_ONLY_RUN + "\n"),),
-             "not a block mapping entry"),
             ("jobs/jobs-only-flow-step-second-judge-cannot-evaluate",
              (("registry", JUDGE_STEP,
                JUDGE_STEP + second + "      - {name: judge, run: " + JOBS_ONLY_RUN + "}\n"),),
@@ -1659,14 +1850,11 @@ def _self_test_cases(base):
              (("registry", JUDGE_STEP,
                JUDGE_STEP + second + "      - run: &judge " + JOBS_ONLY_RUN + "\n"
                "      - run: *judge\n"),),
+             "opens a YAML anchor, alias or tag"),
+            ("jobs/jobs-only-indentation-indicator-block-cannot-evaluate",
+             (("registry", JUDGE_STEP,
+               JUDGE_STEP + second + "      - run: |2\n          echo ok\n"),),
              "not a block mapping entry"),
-            # FIX-529-R7 reviewer reproductions: a judge this model cannot resolve, each
-            # cannot-evaluate, never skipped. In a judge-naming job: a run: carrying a ${{ }}
-            # expression (here a judge-shaped matrix value consumed by run:), a run: shlex cannot
-            # tokenize, an upper-case Env: key, and a job selected only by its header comment whose
-            # body holds a block-scalar run:. In a job that never names the judge literally: a
-            # backslash spelling (a hex escape, an escaped line break) and an alias consuming a
-            # top-level anchor.
             ("jobs/jobs-only-matrix-run-expression-cannot-evaluate",
              (("registry", JUDGE_STEP,
                JUDGE_STEP + "  second:\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n"
@@ -1680,11 +1868,6 @@ def _self_test_cases(base):
             ("jobs/jobs-only-upper-case-env-key-cannot-evaluate",
              (("registry", "    runs-on: ", "    Env:\n      SAMPLE: value\n    runs-on: "),),
              "carries an upper-case letter"),
-            ("jobs/jobs-only-header-comment-selects-cannot-evaluate",
-             (("registry", JUDGE_STEP,
-               JUDGE_STEP + "  second: # --jobs-only\n    runs-on: ubuntu-latest\n    steps:\n"
-               "      - run: |\n          echo ok\n"),),
-             "not a block mapping entry"),
             ("jobs/jobs-only-escaped-run-cannot-evaluate",
              (("registry", JUDGE_STEP,
                JUDGE_STEP + second
@@ -1695,6 +1878,11 @@ def _self_test_cases(base):
              (("registry", JUDGE_STEP,
                JUDGE_STEP + second + "      - run: \"python3 -I -B tools/check_python_host_\\\n"
                "          pin.py --jobs-\\\n          only\"\n"),),
+             "carries a backslash"),
+            ("jobs/jobs-only-header-backslash-cannot-evaluate",
+             (("registry", JUDGE_STEP,
+               JUDGE_STEP + "  second: # a header comment with a backslash \\\n"
+               "    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n"),),
              "carries a backslash"),
             ("jobs/jobs-only-alias-run-cannot-evaluate",
              ((None, "name: Quality\n", "name: &judge " + JOBS_ONLY_RUN + "\n"),
@@ -1709,10 +1897,12 @@ def _self_test_cases(base):
             rules.JOB_RULES = JOB_RULES
         check(check_id, (code, _has(lines, marker), removed), (2, True, 0))
 
-    # FIX-529-R7: the env and judge-step-key diagnostics carry exact line numbers, the
-    # before-the-judge wording is its own, every judge-carrying job reports, and the selection reads
-    # this gate's file name as well as the flag. Each _mutant copy below is a targeted regression of
-    # one of those properties, and each vector holds it red.
+    # FIX-529-R7/R8: the env and judge-step-key diagnostics carry exact line numbers, the
+    # before-the-judge wording is its own, every judge-carrying job reports, the run: classification
+    # reads token shape (not only the literal fallback), the carrier set holds judge-shaped steps as
+    # well as counted judges, and the value scan reads this gate's file name as well as the flag. Each
+    # _mutant copy below is a targeted regression of one of those properties, and each vector holds it
+    # red.
     env_line_mutant = _mutant(base, "python_host_pin_env_line_mutant", source,
                               (("tree.lines" + '["env"]', "0"),
                                ("number = step.lines" + '["env"]', "number = 0"),
@@ -1722,9 +1912,15 @@ def _self_test_cases(base):
     carrier_mutant = _mutant(base, "python_host_pin_single_carrier_mutant", source,
                              (("for job, indexes in " + "carriers.items():",
                                "for job, indexes in list" + "(carriers.items())[:1]:"),))
-    selection_mutant = _mutant(base, "python_host_pin_flag_only_selection_mutant", source,
-                               (("GATE_BASENAME in text or " + "JOBS_ONLY_FLAG in text",
-                                 "JOBS_ONLY" + "_FLAG in text"),))
+    token_shape_mutant = _mutant(base, "python_host_pin_token_shape_mutant", source,
+                                 (("elif _judge_shaped(tokens) or " + "_judge_text(value):",
+                                   "elif " + "_judge_text(value):"),))
+    carrier_set_mutant = _mutant(base, "python_host_pin_counted_only_carrier_mutant", source,
+                                 (("for job, index in " + "judges + shaped:",
+                                   "for job, index in " + "judges:"),))
+    value_scan_mutant = _mutant(base, "python_host_pin_flag_only_text_mutant", source,
+                                (("GATE_BASENAME in text or " + "JOBS_ONLY_FLAG in text",
+                                  "JOBS_ONLY" + "_FLAG in text"),))
 
     def line_of(workflow, text):
         return workflow.split("\n").index(text) + 1
@@ -1781,6 +1977,24 @@ def _self_test_cases(base):
           (code, _has(lines, marker), _has(env_line_mutant.evaluate(root, HOST)[1], marker)),
           (1, True, False))
 
+    # A present run: whose value is not one string (a null value, a nested mapping), in any outside
+    # job: cannot-evaluate at its recorded key line, never skipped, and the copy with the
+    # outside-judge rule removed never reads the job (red on revert).
+    for check_id, body in (
+            ("jobs/jobs-only-null-run-cannot-evaluate", "      - run:\n"),
+            ("jobs/jobs-only-mapping-run-cannot-evaluate", "      - run:\n          foo: bar\n")):
+        workflow = _workflow((("registry", JUDGE_STEP, JUDGE_STEP + second + body),))
+        marker = "{}:{}: a run: key of the job second whose value is not one string".format(
+            WORKFLOW_REL, line_of(workflow, "      - run:"))
+        root = _fixture(base, workflow=workflow)
+        code, lines = evaluate(root, HOST)
+        rules.JOB_RULES = JOB_RULES - {"outside-judge"}
+        try:
+            removed = rules.evaluate(root, HOST)[0]
+        finally:
+            rules.JOB_RULES = JOB_RULES
+        check(check_id, (code, _has(lines, marker), removed), (2, True, 0))
+
     second_judge = ("  second:\n    env:\n      OTHER: value\n    runs-on: ubuntu-latest\n    steps:\n"
                     "      - name: Second judge\n        run: " + JOBS_ONLY_RUN + "\n")
     workflow = _workflow((("registry", "    runs-on: ", "    env:\n      SAMPLE: value\n    runs-on: "),
@@ -1794,17 +2008,75 @@ def _self_test_cases(base):
            _has(carrier_mutant.evaluate(root, HOST)[1], other)),
           (1, True, True, False))
 
+    # The token classification and the carrier set, each red under a targeted mutant: a quote-spliced
+    # flag-free gate run (no literal substring names this gate) in a job with a job-level env: is an
+    # unresolved judge-shaped command AND an env-checked carrier; the copy whose classification reads
+    # only the literal fallback passes the job whole, and the copy whose carrier set holds only
+    # counted judges keeps the unresolved finding but loses the env diagnostic.
+    carrier_job = ("  second:\n    env:\n      SAMPLE: value\n    runs-on: ubuntu-latest\n    steps:\n"
+                   "      - name: Extra gate\n"
+                   "        run: python3 -I -B tools/check_python_host_'pin'.py\n")
+    root = _fixture(base, workflow=_workflow((("registry", JUDGE_STEP, JUDGE_STEP + carrier_job),)))
+    code, lines = evaluate(root, HOST)
+    unresolved = "an unresolved judge-shaped command in the job second"
+    carrier_env = "the job second carries an unresolved judge-shaped step and sets a job-level env:"
+    check("jobs/jobs-only-spliced-env-carrier-finding",
+          (code, _has(lines, unresolved), _has(lines, carrier_env)), (1, True, True))
+    check("jobs/jobs-only-token-shape-mutant-red", token_shape_mutant.evaluate(root, HOST)[0], 0)
+    code, lines = carrier_set_mutant.evaluate(root, HOST)
+    check("jobs/jobs-only-carrier-set-mutant-red",
+          (code, _has(lines, unresolved), _has(lines, carrier_env)), (1, True, False))
+
+    # The value scan reads this gate's file name as well as the flag: a flag-free literal gate command
+    # in a matrix value is a value finding, and the copy whose _judge_text reads only the flag passes
+    # it (red on revert).
     root = _fixture(base, workflow=_workflow((("registry", JUDGE_STEP,
                                                JUDGE_STEP + "  second:\n    runs-on: ubuntu-latest\n"
-                                               "    steps:\n      - run: " + GATE_RUN + "\n"),)))
-    check("jobs/jobs-only-flag-free-selection-mutant-red",
-          (evaluate(root, HOST)[0], selection_mutant.evaluate(root, HOST)[0]), (1, 0))
+                                               "    strategy:\n      matrix:\n        command: '"
+                                               + GATE_RUN + "'\n    steps:\n      - run: echo ok\n"),)))
+    code, lines = evaluate(root, HOST)
+    check("jobs/jobs-only-value-scan-mutant-red",
+          (code, _has(lines, "in a value that is not a step's own run: command"),
+           value_scan_mutant.evaluate(root, HOST)[0]), (1, True, 0))
 
+    # Acceptance boundaries (each exit 0, not a regression vector): a header comment naming the flag
+    # selects nothing (selection is by tokens), a clean block-scalar body is read and tokenized, and
+    # the committed quality.yml's own outside shapes stay accepted: a multi-line block-scalar run:
+    # with shell expansions and quotes, a matrix with a flow-sequence value consumed by ${{ }}
+    # expressions outside run:, and an aggregator with a needs: list of bare items.
     check("jobs/jobs-only-header-comment-clean-body-passes",
           evaluate(_fixture(base, workflow=_workflow((("registry", JUDGE_STEP,
                                                        JUDGE_STEP + "  second: # --jobs-only\n"
                                                        "    runs-on: ubuntu-latest\n    steps:\n"
                                                        "      - run: echo ok\n"),))), HOST)[0], 0)
+    check("jobs/jobs-only-header-comment-block-body-passes",
+          evaluate(_fixture(base, workflow=_workflow((("registry", JUDGE_STEP,
+                                                       JUDGE_STEP + "  second: # --jobs-only\n"
+                                                       "    runs-on: ubuntu-latest\n    steps:\n"
+                                                       "      - run: |\n          echo ok\n"),))),
+                   HOST)[0], 0)
+    block_job = ("  second:\n    runs-on: ubuntu-latest\n    steps:\n"
+                 "      - name: Blocked tool\n        env:\n          SAMPLE: value\n"
+                 "        run: |\n          set -euo pipefail\n"
+                 '          url="https://example.invalid/v${SAMPLE}/x.tar.gz"\n'
+                 '          echo "${SAMPLE}  x.tar.gz" | sha256sum -c -\n')
+    check("jobs/outside-block-scalar-run-passes",
+          evaluate(_fixture(base, workflow=_workflow((("registry", JUDGE_STEP,
+                                                       JUDGE_STEP + block_job),))), HOST)[0], 0)
+    matrix_job = ("  second:\n    name: Vectors (${{ matrix.os }})\n    runs-on: ${{ matrix.os }}\n"
+                  "    strategy:\n      fail-fast: false\n      matrix:\n"
+                  "        os: [ubuntu-latest, macos-latest]\n    steps:\n"
+                  "      - run: git config --global core.autocrlf true\n")
+    check("jobs/outside-matrix-flow-and-expression-passes",
+          evaluate(_fixture(base, workflow=_workflow((("registry", JUDGE_STEP,
+                                                       JUDGE_STEP + matrix_job),))), HOST)[0], 0)
+    needs_job = ("  second:\n    if: always()\n    needs:\n      - floor\n      - registry\n"
+                 "    runs-on: ubuntu-latest\n    steps:\n      - name: All\n        env:\n"
+                 "          RESULTS: ${{ join(needs.*.result, ' ') }}\n        run: |\n"
+                 '          rest="${RESULTS:-none}"\n          echo "Results: ${RESULTS}"\n')
+    check("jobs/outside-needs-list-passes",
+          evaluate(_fixture(base, workflow=_workflow((("registry", JUDGE_STEP,
+                                                       JUDGE_STEP + needs_job),))), HOST)[0], 0)
 
     for check_id, version, shown in (
             ("interpreter/newer-patch-finding", (3, 14, 8, "final"), "Python 3.14.8 (final)"),
