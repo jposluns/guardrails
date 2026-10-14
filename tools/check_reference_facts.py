@@ -18,7 +18,10 @@ generator alone cannot assert:
     higher level), with headings found fence-aware (a '#' line inside an open ``` or ~~~ fence is
     content, not a heading), a heading ACCEPTED only in the grammar this reader implements (one to six
     '#' at up to three spaces of indent, then exactly U+0020 or the end of the line; a Unicode
-    whitespace separator such as U+00A0 is refused), a fence OPENED only where CommonMark opens one (a
+    whitespace separator such as U+00A0 is refused; a '#' line with LEADING WHITESPACE is refused
+    outright anywhere from the file start to the section end, because CommonMark can read an
+    indented heading as nested in a list item, so a legal indented top-level heading is
+    over-refused, a disclosed conservative refusal), a fence OPENED only where CommonMark opens one (a
     backtick fence whose info string holds a backtick is not an opener), a fence CLOSED only by a line
     holding nothing after the fence run but U+0020 or tab (never str.strip's Unicode whitespace), and
     an unterminated fence failing closed (exit 2, naming the file and the fence's opening line).
@@ -131,10 +134,13 @@ N_OF_M = re.compile(r"\b\d+ of \d+\b")
 # The POSITIVE deferred-section grammar (applied by _require_section_grammar to the RAW lines from
 # the deferred phrase to the section's end boundary): a column-0 ATX heading, a flat column-0 list
 # item (its text must then not open another container or a '#' lead, and sit at most four spaces
-# after the marker: five or more, or a tab, is indented code in CommonMark), the list-marker lead
+# after the marker: five or more is indented code in CommonMark, and a TAB gap is refused too, a
+# conservative over-refusal of a shape CommonMark can read as a plain item), the list-marker lead
 # that text may not carry, and the setext-underline / thematic-break shape (a line of only '-',
-# '=', '_' or '*' runs and blanks) that no span line may take, because CommonMark reads it as a
-# heading underline or a thematic break, never as the plain paragraph text this reader would read.
+# '=', '_' or '*' runs and blanks) that no span line may take, because CommonMark reads most
+# such lines as a heading underline or a thematic break (a short '_', '=' or '*' run elsewhere
+# is plain text and is over-refused, a conservative refusal), never as the plain paragraph text
+# this reader would prove it reads.
 COL0_HEADING = re.compile(r"^#{1,6}(?: |$)")
 FLAT_LIST_ITEM = re.compile(r"^(?:[-*+]|\d{1,9}[.)])(?P<gap>[ \t]+)(?=\S)")
 LIST_MARKER_LEAD = re.compile(r"^(?:[-*+]|\d{1,9}[.)])(?:[ \t]|$)")
@@ -301,18 +307,36 @@ def _refuse_unbounded(lines, end, where):
     single-line HTML comment ('<!--' at up to three spaces of indent with its '-->' on the same line,
     which CommonMark closes at that line, so it cannot swallow a later heading); and any line opening
     with '#' that is not a heading in the accepted grammar (HEADING: one to six '#' at up to three
-    spaces of indent, then exactly U+0020 or the line end). Lines inside a recognized line-start
+    spaces of indent, then exactly U+0020 or the line end). A '#'-led line WITH LEADING
+    WHITESPACE is refused outright, wherever it sits from the file start to the section end (the
+    boundary line INCLUDED: an indented boundary heading can itself be list-nested, so it is
+    refused before it may bound the section): CommonMark can read an indented
+    heading as nested in a list item (`- x` then `  ###### note`), which this reader does not
+    model, so the LEGAL indented top-level heading (up to three spaces, no list above) is
+    over-refused too, a disclosed conservative refusal. Lines inside a recognized line-start
     fence are bounded content and exempt; the fence state is recomputed from the top of the text with
     the same _fence_open/_fence_close rules as _heading_levels, so the two scans can never disagree.
     DELIBERATE OVER-REFUSAL: a harmless list fence, autolink or '<div>' anywhere above the boundary
     exits 2 too; the alternative is a silent truncation or a silently mis-started section."""
     fence_char, fence_len = None, 0
-    for k in range(end):
+    for k in range(min(end + 1, len(lines))):
         line = lines[k]
         if fence_char is not None:
             if _fence_close(line, fence_char, fence_len):
                 fence_char = None
             continue
+        if line[:1] in (" ", "\t") and line.lstrip(" \t").startswith("#"):
+            raise OSError("{}:{}: a '#' line with leading whitespace (CommonMark can read it as a "
+                          "heading nested in a list item, which this reader does not model; a "
+                          "LEGAL indented top-level heading is over-refused by the same rule, a "
+                          "disclosed conservative refusal); the section reader cannot bound the "
+                          "section through it (fail-closed)".format(where, k + 1))
+        if k >= end:
+            # The boundary line itself (a heading by construction when end < len(lines)) takes
+            # ONLY the indented-'#' test above: an indented boundary heading can be nested in a
+            # list item, so it is refused BEFORE it may bound the section; the other refusals
+            # keep their [0, end) span.
+            break
         fm = _fence_open(line)
         if fm:
             fence_char, fence_len = fm.group(1)[0], len(fm.group(1))
@@ -343,16 +367,20 @@ def _require_section_grammar(raw_lines, start, end, where):
     markers NOT stripped) from the deferred phrase's line to the section's end boundary. A line is
     accepted ONLY as one of: a blank line (empty, or spaces and tabs only); a column-0 ATX heading
     (one to six '#', then exactly U+0020 or the line end); a flat column-0 list item at most four
-    spaces after its marker (five or more, or a tab, is indented code in CommonMark) whose text
+    spaces after its marker (five or more is indented code in CommonMark; a tab gap is refused
+    too, a conservative over-refusal of a shape CommonMark can read as a plain item) whose text
     starts with none of '<', '>', '#', a backtick or a tilde and is not another list marker; a
     plain column-0 paragraph line (first character none of '<', '>', '#', a backtick, a tilde, and
     not a list marker); or an indented continuation that DIRECTLY CONTINUES a non-blank,
     non-heading line and whose first non-blank character passes the same plain-text test (an
     indented line after a blank line or a heading is indented code or a new container in
-    CommonMark, not a continuation). A line of only '-', '=', '_' or '*' runs and blanks is
-    refused at any position: CommonMark reads it as a setext heading underline or a thematic
-    break, so the phrase's own paragraph could become a heading whose section this reader does not
-    model. EVERY other line -- any blockquote, any fence, any HTML-led line, any nested or
+    CommonMark, not a continuation; at ONE to three spaces after a blank line or a heading
+    CommonMark reads a plain paragraph, which is refused too, a conservative over-refusal). A
+    line of only '-', '=', '_' or '*' runs and blanks is
+    refused at any position: CommonMark reads most such lines as a setext heading underline or a
+    thematic break, so the phrase's own paragraph could become a heading whose section this
+    reader does not model (the '_', '=' and '*' runs CommonMark keeps as plain text are refused
+    too, a conservative over-refusal). EVERY other line -- any blockquote, any fence, any HTML-led line, any nested or
     indented container, any list-held heading or code, any indented continuation that is not plain
     text -- is REFUSED (OSError -> exit 2, naming the file and line): between the phrase and the
     boundary the reader accepts only what this grammar proves it reads as flat text, instead of
@@ -363,7 +391,9 @@ def _require_section_grammar(raw_lines, start, end, where):
             continue
         if SETEXT_OR_BREAK.match(line):
             raise OSError("{}:{}: a line of only '-', '=', '_' or '*' runs (a setext heading "
-                          "underline or a thematic break in CommonMark, never plain text); the "
+                          "underline or a thematic break in CommonMark for most such lines; the "
+                          "'_', '=' and '*' runs CommonMark keeps as plain text are refused "
+                          "too, a conservative over-refusal); the "
                           "section reader cannot prove it reads this line "
                           "(fail-closed)".format(where, k + 1))
         if line[:1] not in (" ", "\t"):
@@ -391,7 +421,9 @@ def _require_section_grammar(raw_lines, start, end, where):
                       "plain list items, and column-0 ATX headings are read; a blockquote, a fence, "
                       "an HTML-led line, a nested or indented container, indented code, a list-held "
                       "heading, or an indented line that does not directly continue a text line is "
-                      "not); the section reader cannot prove it reads this line "
+                      "not; a TAB list-item gap and a one- to three-space-indented paragraph "
+                      "line, which CommonMark reads as plain text, are refused too, conservative "
+                      "over-refusals); the section reader cannot prove it reads this line "
                       "(fail-closed)".format(where, k + 1))
 
 
@@ -402,10 +434,11 @@ def deferred_sections(text, where):
     the WHOLE region from the nearest preceding ATX heading (or the top of the text) to the next
     heading of the same or a higher level (or any heading, for the pre-heading preamble), headings
     found fence-aware by _heading_levels. The structure is validated BEFORE a boundary may exclude
-    text, in two layers. FIRST, the WHOLE TEXT from its top to the section's end boundary passes
+    text, in three layers. FIRST, the WHOLE TEXT from its top to the section's end boundary passes
     _refuse_unbounded: an arrangement the line reader cannot prove it reads (a fence run not at line
     start, list-item HTML, a line starting with '<' other than a single-line HTML comment, a '#' line
-    that is not a heading in the accepted grammar) is REFUSED (OSError -> exit 2, naming the file and
+    that is not a heading in the accepted grammar, a '#' line with leading whitespace: an indented
+    heading CommonMark can nest in a list item, its legal top-level form over-refused) is REFUSED (OSError -> exit 2, naming the file and
     line) wherever it sits in that span. SECOND, the deferred span itself (from the phrase's line to
     the end boundary) must pass the POSITIVE grammar of _require_section_grammar on the RAW lines:
     only blank lines, plain paragraph or continuation text (a continuation only directly under a
@@ -606,7 +639,9 @@ def main():
 #      continuation, an indented list under an indented phrase line, and a fence inside the
 #      deferred section (its '#' content can no longer end the section: the fence itself is
 #      refused);
-#  6zq-6zs. the round-5 counter-examples, each REFUSED (exit 2, naming a line), never a clean pass
+#  6zq-6zs. the round-5 counter-examples, each REFUSED (exit 2, naming a line; 6zq and 6zr exit
+#      through the FENCE check, the unterminated-fence refusal naming the fence's opening line,
+#      never the span grammar; 6zs exits through the positive span grammar), never a clean pass
 #      through a mis-bounded section: a backtick fence whose info string holds a backtick (not a
 #      CommonMark opener; the old reader's fence state inverted and a '#' content line read as the
 #      end boundary, 6zq), a pseudo-closing tilde fence followed by U+00A0 (only spaces and tabs
@@ -635,7 +670,17 @@ def main():
 #      positive grammar (exit 2, naming the line): a setext underline under the phrase (clean on
 #      the reader this replaces, the renderer's section continuing past the reader's boundary), a
 #      thematic break, indented code after a blank line or directly under a heading, list-held
-#      code (five spaces or a tab after the marker), and a list-held heading,
+#      code (five spaces after the marker; a TAB gap is refused too, a conservative over-refusal
+#      of a shape CommonMark reads as a plain item), and a list-held heading,
+#  6zzf-6zzi. an indented '#' line (first non-space character '#', any leading whitespace),
+#      anywhere from the file start to the section end, the end-boundary line included (6zzi, an
+#      indented heading AT the boundary, list-nested in CommonMark), is refused (exit 2, naming
+#      the line):
+#      CommonMark can read it as a heading nested in a list item ('- x' then '  ###### note'),
+#      which this reader does not model but HEADING would read as a top-level boundary; a LEGAL
+#      indented top-level heading is over-refused by the same rule (disclosed). The 6zzh control
+#      (a blockquote line, then a top-level column-0 '###### note') keeps its unchanged clean
+#      result, exit 0;
 #  6g. a vendored name in a section without the phrase, and 6q. one after the next same-level
 #      heading, stay clean (the read is scoped to the section),
 #  6zc-6zg. arrangements the section reader cannot prove it bounds are REFUSED (exit 2, naming the
@@ -984,7 +1029,9 @@ def self_test_main():
         #     (any blockquote, any fence, any nested or indented container between the phrase and
         #     the section end) are refused (exit 2, naming the file and line), never read through
         #     container stripping and never a clean pass through a mis-bounded section. 6zq-6zs are
-        #     the round-5 counter-examples: on the reader this replaces, 6zq and 6zs each passed
+        #     the round-5 counter-examples (6zq and 6zr exit through the FENCE check, the
+        #     unterminated-fence refusal naming the opening line, never this span grammar; 6zs
+        #     exits through the grammar): on the reader this replaces, 6zq and 6zs each passed
         #     CLEAN (a fence-state inversion through a backtick info string; a stripped '> # fake'
         #     read as the end boundary) and 6zr passed clean through a U+00A0 pseudo-close; 6n, 6o,
         #     6w, 6y, 6z and 6za were findings that the grammar now refuses instead (fail-closed,
@@ -1066,7 +1113,9 @@ def self_test_main():
                                     label, lineno, rc, out))
 
         # 6zy-6zz, 6zza-6zze. lines INSIDE the deferred span that CommonMark reads as a non-text
-        #     block but the earlier grammar accepted as plain text, each now refused (exit 2,
+        #     block (or, for the 6zzd tab gap, a shape CommonMark reads as a plain item that this
+        #     grammar refuses as a disclosed conservative over-refusal) but the earlier grammar
+        #     accepted as plain text, each now refused (exit 2,
         #     naming the line). On the reader this replaces, 6zy passed CLEAN (the renderer's
         #     setext section continues past the ATX heading the reader stops at, so the name was
         #     unread) and the others were findings read through text the renderer shows as code, a
@@ -1084,7 +1133,8 @@ def self_test_main():
                 ("6zzc list-held code (five spaces after the marker)", 13, _README.replace(prose, (
                     "Not yet vendored:\n\n-     code in a list\n\n"
                     "- Fixture Full Framework\n"))),
-                ("6zzd a tab between the list marker and the text", 13, _README.replace(prose, (
+                ("6zzd a tab between the list marker and the text (a conservative over-refusal: "
+                 "CommonMark reads it as a plain item)", 13, _README.replace(prose, (
                     "Not yet vendored:\n\n-\tFixture note\n\n- Fixture Full Framework\n"))),
                 ("6zze list-held heading", 13, _README.replace(prose, (
                     "Not yet vendored:\n\n- # Nested heading\n\n"
@@ -1096,6 +1146,39 @@ def self_test_main():
                 failures.append("a span line outside the tightened grammar ({}) expected exit 2 "
                                 "naming standards README:{} (got {}: {!r})".format(
                                     label, lineno, rc, out))
+
+        # 6zzf-6zzi. an indented '#' line (first non-space character '#', any leading
+        #     whitespace), anywhere from the file start to the section end, the end-boundary
+        #     line included (6zzi: an indented heading AT the boundary, which CommonMark can
+        #     nest in the list item above it, is refused BEFORE it may bound the section), is
+        #     refused (exit 2,
+        #     naming the line): CommonMark can read it as a heading NESTED IN A LIST ITEM, which
+        #     this reader does not model but HEADING would read as a top-level section boundary;
+        #     a LEGAL indented top-level heading is over-refused by the same rule, a disclosed
+        #     conservative refusal. On the reader this replaces, each read as a top-level heading
+        #     that STARTED the section and the fixture passed clean (exit 0). 6zzh is the
+        #     control: a blockquote line, then a top-level column-0 heading, keeps its unchanged
+        #     clean result (exit 0).
+        for label, lineno, readme in (
+                ("6zzf list item then a two-space-indented heading", 12, _README.replace(prose, (
+                    "- x\n  ###### note\n\n" + prose))),
+                ("6zzg ordered item, blank line, then a three-space-indented heading", 13,
+                 _README.replace(prose, ("1. x\n\n   ###### note\n\n" + prose))),
+                ("6zzi indented heading AT the end boundary (list-nested in CommonMark)", 14,
+                 _README.replace(prose, ("### Not yet vendored\n\n- item\n   ## fake\n\n"
+                                         "- Fixture Full Framework\n")))):
+            case = tmp / ("deferred-" + label.split()[0])
+            _write_fixture(case, readme=readme)
+            rc, out = run_capture(case)
+            if rc != 2 or "standards README:{}:".format(lineno) not in out:
+                failures.append("an indented '#' line ({}) expected exit 2 naming "
+                                "standards README:{} (got {}: {!r})".format(
+                                    label, lineno, rc, out))
+        control = tmp / "deferred-6zzh"
+        _write_fixture(control, readme=_README.replace(prose, ("> x\n###### note\n\n" + prose)))
+        if run_quiet(control) != 0:
+            failures.append("a blockquote line then a top-level column-0 heading (the 6zzh "
+                            "control) expected exit 0 (unchanged result)")
 
         # 6zu. the backtick-info opener rule ABOVE the section: a ```x`y line is NOT a fence
         #     opener (CommonMark forbids a backtick in a backtick fence's info string), so it is a
@@ -1300,7 +1383,9 @@ def self_test_main():
           "an unreadable standards dir, an unterminated code fence (naming the file and the fence's "
           "opening line), a fence not at line start, list-item HTML, an HTML block other than a "
           "single-line comment, or a '#' line that is not a heading in the accepted grammar (one to six "
-          "'#', then exactly U+0020 or the line end), each refused anywhere from the top of the text to "
+          "'#', then exactly U+0020 or the line end), or a '#' line with leading whitespace (an "
+          "indented heading CommonMark can nest in a list item; the legal top-level form is "
+          "over-refused, a disclosed conservative refusal), each refused anywhere from the top of the text to "
           "the section's end boundary (naming the file and line, the structure validated BEFORE a "
           "boundary may exclude text, a mis-started section included), a dangling-symlink manifest "
           "failing inside the real loader naming the manifest, a missing/invalid catalogue, and an "
