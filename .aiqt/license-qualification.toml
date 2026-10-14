@@ -1,0 +1,25 @@
+# .aiqt/license-qualification.toml: the licence-qualification gate configuration read by
+# tools/check_license_qualification.py (class 3, licence-waiver contradiction).
+#
+# licence: the project's declared licence identity, an identity from the gate's closed
+# LICENCE_IDENTITIES table. The gate VERIFIES the declaration against the licence file (exactly one of
+# LICENSE, LICENSE.md, LICENSE.txt, COPYING may be present): the file must contain that identity's
+# line-anchored canonical opening and no other identity's opening. An absent key falls back to
+# inference, accepted only when exactly one identity's canonical opening matches; anything else is
+# cannot-evaluate (exit 2).
+#
+# Each [[exception]] row excuses EXACTLY ONE waiver-phrase occurrence on ONE scanned surface and MUST
+# carry these keys:
+#   path        the repo-relative POSIX path of the scanned surface the occurrence sits on
+#   phrase      the excused phrase, a member of the closed WAIVER_PHRASES list in the gate
+#   reason      a nonempty explanation of why this occurrence is not a rights-waiver claim
+# and exactly ONE binder:
+#   line        the exact text of the line the occurrence starts on (trailing CR/LF excluded)
+#   occurrence  the 1-based index of that phrase's match within that file, in position order
+# A row that matches no present occurrence is STALE and the gate is cannot-evaluate (exit 2); a second
+# occurrence beside an excused one still flags. An absent file means no declaration and no exceptions
+# (adopters own their configuration, like .aiqt/newtab.toml); a present but malformed file is
+# cannot-evaluate (exit 2), never a clean pass. This repository needs no exceptions, so this file
+# declares the licence identity and no [[exception]] rows.
+
+licence = "Apache-2.0"
