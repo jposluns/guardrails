@@ -475,6 +475,14 @@ count = 4
 class = "EXEMPT"
 reason = "test-code"
 
+[[site]]
+path = "opf/tools/_opf_schema.py"
+function = "self_test"
+form = "call"
+count = 11
+class = "EXEMPT"
+reason = "test-code"
+
 # the self-test seam that rebinds tomllib._parser.parse_key to emulate the key-part cap
 [[site]]
 path = "opf/tools/_opf_store.py"
@@ -570,6 +578,14 @@ path = "opf/tools/_opf_worklog_regressions.py"
 function = "_upgrade_preflight_regressions"
 form = "call"
 count = 3
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_write_guard.py"
+function = "_self_test_vectors.<lambda>"
+form = "call"
+count = 1
 class = "EXEMPT"
 reason = "test-code"
 

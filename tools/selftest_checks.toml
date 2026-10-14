@@ -1597,6 +1597,8 @@ expected-check-ids = [
   "table/float-format-version-2",
   "table/invalid-family-name-2",
   "table/not-toml-2",
+  "table/deep-nesting-2",
+  "table/overlong-integer-2",
   # ---------- structure ----------
   "structure/dash-list-refused",
   "structure/nested-list-refused",
@@ -1809,6 +1811,8 @@ expected-check-ids = [
   "main/repeated-table-2",
   "main/bare-shipped-table-0",
   "main/bare-malformed-table-2",
+  "main/manifest-deep-nesting-harness-error",
+  "main/manifest-overlong-integer-harness-error",
   # ---------- red on revert: each blocking rule, form and exemption patched out flips its fixture ----------
   "revert/s1-red",
   "revert/s1-exec-tags-red",

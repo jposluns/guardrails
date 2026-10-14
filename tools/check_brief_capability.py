@@ -361,7 +361,7 @@ def parse_table(data):
     """The table as family -> (key -> value), or CannotEvaluate on anything outside its schema."""
     try:
         doc = tomllib.loads(data.decode("utf-8"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise CannotEvaluate("capability table: not valid UTF-8 TOML: {}".format(exc))
     version = doc.get("format-version")
     # the exact integer 1: a bool (true == 1) or a float (1.0 == 1) is refused
@@ -1581,7 +1581,7 @@ def _expected_check_ids():
     try:
         with open(CHECKS_MANIFEST, "rb") as handle:
             data = tomllib.load(handle)
-    except (OSError, tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+    except (OSError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         print("SELF-TEST HARNESS ERROR: cannot read {}: {}".format(CHECKS_MANIFEST, exc), file=sys.stderr)
         return None
     for row in data.get("suite", []):
@@ -1593,6 +1593,32 @@ def _expected_check_ids():
     print("SELF-TEST HARNESS ERROR: missing or malformed suite {!r} in {}".format(SUITE_ID, CHECKS_MANIFEST),
           file=sys.stderr)
     return None
+
+
+TABLE_PARSE_REFUSAL = "capability table: not valid UTF-8 TOML:"
+MANIFEST_PARSE_REFUSAL = "SELF-TEST HARNESS ERROR: cannot read"
+
+
+def _table_refusal(text):
+    """The parse site's own refusal prefix, "no refusal", or the class of a parse failure that escaped it."""
+    try:
+        parse_table(text.encode("utf-8"))
+    except CannotEvaluate as exc:
+        return str(exc)[:len(TABLE_PARSE_REFUSAL)]
+    except (ValueError, RecursionError, MemoryError) as exc:
+        return "escaped " + type(exc).__name__
+    return "no refusal"
+
+
+def _manifest_refusal(path):
+    """(result, stderr prefix) of _expected_check_ids reading `path`, or the class of an escaped failure."""
+    printed = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(printed), _patched(CHECKS_MANIFEST=path):
+            got = _expected_check_ids()
+    except (ValueError, RecursionError, MemoryError) as exc:
+        return "escaped " + type(exc).__name__
+    return got, printed.getvalue()[:len(MANIFEST_PARSE_REFUSAL)]
 
 
 RUN_ITEM = "3. Run `t.py --self-test` on a snapshot of the change.\n"
@@ -2225,6 +2251,10 @@ def self_test(report_path=None):
     check("table/invalid-family-name-2", _table_outcome(TABLE_FIXTURE.replace('"beta"', '"Beta two"')),
           "CannotEvaluate")
     check("table/not-toml-2", _table_outcome("[[family]\n"), "CannotEvaluate")
+    # a parse failure outside TOMLDecodeError (deep nesting recurses; an over-long integer exceeds the
+    # int conversion limit) is the site's own refusal, never a traceback (F-TOML-BARE-VALUEERROR-CLASS)
+    check("table/deep-nesting-2", _table_refusal("x = " + "[" * 8000 + "]" * 8000), TABLE_PARSE_REFUSAL)
+    check("table/overlong-integer-2", _table_refusal("x = " + "1" * 5000), TABLE_PARSE_REFUSAL)
     # ---------- structure ----------
     check("structure/dash-list-refused", _outcome(DASH_LIST),
           (1, [("R1", "ADVISORY"), ("R5", "ADVISORY"), ("S3", "HARD")]))
@@ -2536,6 +2566,15 @@ def self_test(report_path=None):
             handle.write(TABLE_FIXTURE.replace('execute = "no"', 'execute = "sometimes"'))
         with _patched(ROOT=tmp):
             check("main/bare-malformed-table-2", _quiet(main, []), 2)
+        # the checks manifest's parse maps the same failures to the harness refusal and None, never a traceback
+        for name, body in (("deep.toml", "x = " + "[" * 8000 + "]" * 8000),
+                           ("longint.toml", "x = " + "1" * 5000)):
+            with open(tmp / name, "w", encoding="utf-8") as handle:
+                handle.write(body)
+        check("main/manifest-deep-nesting-harness-error", _manifest_refusal(tmp / "deep.toml"),
+              (None, MANIFEST_PARSE_REFUSAL))
+        check("main/manifest-overlong-integer-harness-error", _manifest_refusal(tmp / "longint.toml"),
+              (None, MANIFEST_PARSE_REFUSAL))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     # ---------- red on revert: each blocking rule, form and exemption patched out flips its fixture ----------
