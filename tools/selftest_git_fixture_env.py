@@ -942,6 +942,10 @@ CONFIG_MEMBER_BOUNDS = {
     # reached in all three config lanes on three consecutive runs at that load.
     # ESTIMATED (the same load-proportional assumption): 3600 s, about 2.7 times the longest
     # measured run, covers load5 up to about 95.
+    # DELIBERATE SHORTER DEADLINE: 3600 s sits far BELOW this member's own worst case (its per-leg
+    # bounds alone sum to several hours; see _LEG_CEILING_S in the member itself), exactly as the
+    # default's comment above sanctions: this lane owns no member's verdict, and cutting a stalled
+    # rerun short is cannot-evaluate, never a pass or a fail of the member.
     ("tools/check_opf_standalone_closure.py", "--self-test"): 3600,
 }
 # After the process-group kill: the bounded drain of output still held by a descendant that left
