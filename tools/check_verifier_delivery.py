@@ -57,11 +57,14 @@ question-list template fixes them:
     once, left to right: a numeric reference is its code point, U+FFFD standing in for zero,
     surrogates and values past U+10FFFF, and a named reference is only an exact HTML5 entity-table
     name with its semicolon, an unknown name staying literal; renderers differ on control code
-    points, so a line is refused when either that reading or the legacy html.unescape reading of
-    the whole line, which remaps 128..159 through Windows-1252, drops some control code points and
-    reads semicolonless legacy names and numeric references, reads as a marker; that legacy reading
-    honours no backslash escape, so a backslash-escaped reference that reads as a marker under it
-    is refused too, a disclosed over-refusal):
+    points, so a line is refused when any of three readings scans as a marker: that CommonMark
+    reading; the legacy html.unescape reading of the whole line, which remaps 128..159 through
+    Windows-1252, drops some control code points and reads semicolonless legacy names and numeric
+    references; and the escape-aware legacy reading, escapes honoured with each tokenized
+    reference decoded through html.unescape, so a dropped code point such as "&#65535;" beside an
+    escaped stop reads as a marker: a stated union. The whole-line reading honours no backslash
+    escape, so a backslash-escaped reference that reads as a marker under it is refused too, a
+    disclosed over-refusal):
     past leading whitespace, emphasis, heading, quote, bullet and ordered-list
     marks ("1. ", "1) "), backslashes, the blank glyph U+2800 and ignorable characters (category Cf,
     the pinned Default_Ignorable_Code_Point table and the non-whitespace control characters of
@@ -73,6 +76,21 @@ question-list template fixes them:
     "Q4\\.", "&#81;4.", "Q4&period;", "Q*4*.", "**Q**4.", "1. Q4.", "\u2800Q4.", "&#133;Q4.",
     "Q4.&#31;", "&nbspQ4.", "Q4&#46 x", "&#129;Q4." and a literal U+0001 inside "Q4." are refused,
     in answers, findings, blockquotes and fenced blocks alike, however long the prefix runs.
+  * A numeric character reference whose digit run is longer than the grammar bound of seven
+    decimal or six hexadecimal digits: html.unescape converts a decimal digit run through int(),
+    which raises past the interpreter conversion limit (sys.get_int_max_str_digits(), 4300
+    digits), so such a line is refused by a bounded pre-scan of digit-run length before any decode
+    runs, in body lines and fenced content alike; an over-long or undecodable reference is
+    CANNOT_EVALUATE, never a crash and never a pass.
+  * A line that reads as a VERDICT line or as the QA-COMPLETE line under its CommonMark rendering,
+    its legacy html.unescape reading or the raw line with the non-whitespace Cc controls dropped,
+    while its raw text is not that line: the canonical boundary is read from the raw text alone
+    (that parse is unchanged), so an encoded or control-padded boundary ("VERDICT&#58; BLOCKERS
+    FOUND", "QA&#45;COMPLETE", "QA&#45COMPLETE", a U+0001 inside either word), duplicated or not,
+    anywhere in the body, is refused, never read as content.
+  * A VERDICT value holding a whitespace separator other than space or tab (U+001C and U+0085
+    included): str.split would fold it into a clean verdict, so the value is refused, never
+    normalised.
   * A construct that can hide text from rendered view, outside fenced blocks, inline code spans and
     blockquote lines: raw HTML ("<" then "!", "?", or an optional "/" and a tag name ending at
     whitespace, "/", ">" or the line's end, which opens a comment, an HTML block or inline HTML; an
@@ -198,9 +216,10 @@ its line is not read; a quote cut at a line edge passes (above); a marker shaped
 span ("`Q4.`") or as the text of an inline link ("[Q4.](x)") at the start of a line is not read as a
 marker candidate, its first source character being a backtick or a bracket (the code-span and
 link-text marker residual: the scan models escapes, character references, emphasis, list marks and
-blank glyphs, not full inline parsing); a default-ignorable character directly after the marker's
-stop is dropped, so "Q4." then U+3164 then text is read with the text against the stop and passes,
-though some fonts show a gap; of the glyphs that render blank without being whitespace, format,
+blank glyphs, not full inline parsing); a default-ignorable, format or non-whitespace control (Cc)
+character directly after the stop of the marker is dropped, so "Q4." then U+3164 (or U+0001) then
+text is read with the text against the stop and passes, though some fonts show a gap or a box; of
+the glyphs that render blank without being whitespace, format,
 non-whitespace control or default-ignorable, only U+2800 is consumed; a token that is no file reference (a
 directory of the tree, a path without an extension whose first part is no directory of the tree, a
 URL, a glob or placeholder path) binds nothing, so an answer naming only such tokens binds like one
@@ -210,7 +229,9 @@ match a file another finding names; a findings section naming no file is checked
 tree; findings written after the last answer without the exact "## Findings" line (a
 bulleted "- MAJOR:", "### Findings" or "Findings:") are read as text of the last answer, so their words
 can answer a question that does not ask for a quote and their quotes can answer one that does (each
-quote still held to that answer's files); an answer word need not answer the question (only an exact restatement is caught). False FAIL: a
+quote still held to that answer's files); an answer word need not answer the question (only an exact restatement is caught); a literal format or
+default-ignorable character inside a would-be VERDICT or QA-COMPLETE word is not stripped by the
+boundary refusal (only the non-whitespace Cc controls are dropped), so such a line stays content. False FAIL: a
 double-quoted word used as a scare quote ("belt and braces"), not an example in "(e.g. ...)", is held to
 the tree; a quote of the brief's own text is held to the tree like any other; an answer that names a
 file absent from the tree its question does not name (a placeholder path without a placeholder
@@ -223,9 +244,11 @@ rendered view is safe but whose text this grammar cannot prove safe: a "<" then 
 reference in marker form ("- Q2. missed"), a fence right after a blockquote line, a closing fence
 indented otherwise than its opening fence, a raw-HTML-shaped text inside a multi-line code span, and
 a line whose legacy html.unescape reading (the whole line decoded, semicolonless references
-included) scans as a marker even where CommonMark renders it literal (so a backslash-escaped
-reference that reads as a marker under html.unescape is refused, an over-refusal this grammar
-accepts rather than model escape-aware legacy decoding);
+included) or whose escape-aware legacy reading (escapes honoured, each tokenized reference
+decoded through html.unescape) scans as a marker even where CommonMark renders it literal (the
+whole-line reading refuses a backslash-escaped reference that reads as a marker under it, an
+over-refusal this grammar accepts; the escape-aware reading is kept beside the whole-line
+reading as a further refusal branch, a stated union, never a replacement);
 the UNVERIFIABLE and quote-question tests are word tests, so a stray
 mention moves an answer toward NO_VOTE, never toward a pass. Object reads: commit and tree objects are
 not re-hashed (only blobs are), so a rewritten loose tree or commit object could list other existing
@@ -244,7 +267,10 @@ first and last lines, a WORKER_STATUS-prefixed line read as content), hidden tex
 code spans read across lines, the content of a fence indented four or more columns, link reference
 definitions, images, link titles that run on, quote-mark character references), answer-marker
 lookalikes, lazy blockquote continuation, indented code after a fence or a heading, a fence after a
-list marker, the question marker, pin matching, repeated pins, commit-only pins, strict decoding, the numeric decode bounds, CRLF
+list marker, the question marker, pin matching, repeated pins, commit-only pins, strict decoding, the numeric decode
+bounds, the over-long reference pre-scan (live through the CLI, in a fence included), the encoded,
+control-padded and semicolonless boundary refusal, the escape-aware legacy branch, the
+verdict-value separator refusal, the missing-Cc-clause static guard, CRLF
 transport, indented code blocks, ambient GIT_ variables, replace refs, blob re-hashing on both read
 paths, the pinned tree and both runtime scanners; a recording seam also shows the NFKC input for the
 two U+FDFA runtime fixtures is the bounded head only (whole-remainder normalisation fails those two
@@ -778,6 +804,12 @@ def _marker_ignorable(char):
 MARKER_SOURCE_RE = re.compile(r"\\([!-/:-@\[-`{-~])"
                               r"|&(?:#[0-9]{1,7}|#[xX][0-9A-Fa-f]{1,6}|[A-Za-z][A-Za-z0-9]{1,31});")
 _NUMERIC_REFERENCE_RE = re.compile(r"&#(?:([0-9]{1,7})|[xX]([0-9A-Fa-f]{1,6}));")
+# The bounded pre-scan of digit-run length: a numeric reference run past the grammar bound (seven
+# decimal or six hexadecimal digits). html.unescape tokenizes runs of any length and converts a
+# decimal run through int(), which raises past the interpreter conversion limit
+# (sys.get_int_max_str_digits(), 4300 digits), so an over-long run is refused before any decode
+# runs, never decoded; the conversion limit is never raised.
+_OVERLONG_REFERENCE_RE = re.compile(r"&#(?:[0-9]{8,}|[xX][0-9A-Fa-f]{7,})")
 # Characters whose NFKC forms a marker match can consume up to its one-character lookahead:
 # MARKER_DECORATION, the Q forms and the stops; whitespace and digits of any script are tested per
 # character (_marker_material), so fullwidth and mathematical forms stay in.
@@ -808,6 +840,30 @@ def _reference_commonmark(reference):
     return chr(point)
 
 
+def _undecodable_reference(line):
+    """The first numeric character reference of line whose digit run is longer than the grammar
+    bound (_OVERLONG_REFERENCE_RE), shortened for the refusal message, or None. Decided BEFORE
+    html.unescape is called anywhere on the line: the refusal never rests on catching a decode
+    crash."""
+    if "&#" not in line:
+        return None
+    match = _OVERLONG_REFERENCE_RE.search(line)
+    if match is None:
+        return None
+    found = match.group(0)
+    return found if len(found) <= 16 else found[:16] + "..."
+
+
+def _undecodable_refusal(found):
+    """The refusal reason for a reference _undecodable_reference found, named once for the line
+    and fenced-content pre-scans alike."""
+    return ("a numeric character reference whose digit run is longer than the grammar bound of"
+            " seven decimal or six hexadecimal digits ({}): html.unescape converts a decimal"
+            " digit run through int(), which raises past the interpreter conversion limit, so"
+            " the line is refused by this bounded pre-scan before any decode, never decoded and"
+            " never a crash".format(found))
+
+
 def _marker_rendered(line):
     """line as a CommonMark renderer shows it to the marker scan: backslash escapes and character
     references (MARKER_SOURCE_RE) decoded once, left to right, through _reference_commonmark;
@@ -821,6 +877,42 @@ def _marker_rendered(line):
     for match in MARKER_SOURCE_RE.finditer(line):
         pieces.append(line[at:match.start()])
         pieces.append(match.group(1) or _reference_commonmark(match.group(0)))
+        at = match.end()
+    pieces.append(line[at:])
+    return "".join(pieces)
+
+
+# The escape-aware legacy decode, cached per token: one 16 MiB line can repeat a reference
+# millions of times, and the cache keeps that at one html.unescape call per distinct token.
+_LEGACY_TOKEN_CACHE = {}
+
+
+def _legacy_reference(reference):
+    """reference (one MARKER_SOURCE_RE character reference) as html.unescape decodes it whole:
+    128..159 remapped through Windows-1252, the code points the HTML standard holds invalid
+    (U+FFFF included) dropped, an unknown name read by its longest known prefix. Every token here
+    is inside the grammar bound (at most seven decimal or six hexadecimal digits), so this decode
+    never raises."""
+    try:
+        return _LEGACY_TOKEN_CACHE[reference]
+    except KeyError:
+        decoded = html.unescape(reference)
+        if len(_LEGACY_TOKEN_CACHE) < 4096:
+            _LEGACY_TOKEN_CACHE[reference] = decoded
+        return decoded
+
+
+def _marker_escape_aware(line):
+    """The round-9 escape-aware legacy reading: backslash escapes decoded as _marker_rendered
+    decodes them, and each tokenized character reference (MARKER_SOURCE_RE) decoded through
+    html.unescape (_legacy_reference), so "Q&#65535;4\\. x", "Q4\\.&#65535; x" and
+    "Q&#xFFFF;4\\. x" read "Q4. x" (U+FFFF is dropped where CommonMark substitutes U+FFFD). Kept
+    beside the whole-line html.unescape reading as a further refusal branch, a union, never a
+    replacement."""
+    pieces, at = [], 0
+    for match in MARKER_SOURCE_RE.finditer(line):
+        pieces.append(line[at:match.start()])
+        pieces.append(match.group(1) or _legacy_reference(match.group(0)))
         at = match.end()
     pieces.append(line[at:])
     return "".join(pieces)
@@ -842,21 +934,35 @@ def _marker_material(char):
 
 
 def _marker_candidate(line):
-    """Whether line reads as an answer marker "QN." to an eye on the rendered text. Two readings
-    are scanned: the CommonMark reading (backslash escapes and semicolon-terminated character
-    references decoded once, _marker_rendered) and the legacy reading, html.unescape over the whole
-    line (no reference tokenizer, so semicolonless legacy names and numeric references, "&nbspQ4."
-    or "Q4&#46 x", decode too; backslash escapes are not honoured, so a backslash-escaped reference
+    """Whether line reads as an answer marker "QN." to an eye on the rendered text. Three
+    readings are scanned, a stated union erring toward refusal, never toward a pass: the
+    CommonMark reading (backslash escapes and semicolon-terminated character references decoded
+    once, _marker_rendered); the escape-aware legacy reading (_marker_escape_aware: escapes
+    honoured, each tokenized reference decoded through html.unescape, the round-9 reading kept as
+    a further refusal branch); and the legacy whole-line reading, html.unescape over the line (no
+    reference tokenizer, so semicolonless legacy names and numeric references, "&nbspQ4." or
+    "Q4&#46 x", decode too; backslash escapes are not honoured, so a backslash-escaped reference
     that reads as a marker under html.unescape is refused: the disclosed over-refusal). Renderers
-    differ on control code points ("&#133;" is U+0085 NEL under the CommonMark code-point rule and
-    U+2026 under the html.unescape HTML5 rule, which also drops "&#31;"), so the line is refused
-    when either reading scans as a marker (_marker_scan): a conservative union, erring toward
-    refusal, never toward a pass."""
+    differ on control code points ("&#133;" is U+0085 NEL under the CommonMark code-point rule
+    and U+2026 under the html.unescape HTML5 rule, which also drops "&#31;"), so the line is
+    refused when any reading scans as a marker (_marker_scan). A line holding a reference
+    _undecodable_reference refuses is refused here too, before any legacy decode, a conservative
+    backstop: the parse refuses such a line outright first, naming the cause (_parse_delivery)."""
     rendered = _marker_rendered(line)
     if _marker_scan(rendered):
         return True
     if "&" not in line:
+        # No reference: the legacy readings decode nothing the CommonMark reading does not, so
+        # the text left to scan is the raw line, which scans as a marker only where its
+        # CommonMark rendering does.
         return False
+    if _undecodable_reference(line) is not None:
+        # Refused outright by the parse before this scan, the cause named (_parse_delivery);
+        # refused here too, before any legacy decode, as a conservative backstop.
+        return True
+    escape_aware = _marker_escape_aware(line)
+    if escape_aware != rendered and _marker_scan(escape_aware):
+        return True
     legacy = html.unescape(line)
     return legacy != rendered and _marker_scan(legacy)
 
@@ -981,6 +1087,71 @@ def _verdict_of(line):
     return rest.strip(" \t")
 
 
+# The non-whitespace Cc controls (C0, DEL and C1; the whitespace controls, tab to carriage
+# return, the information separators U+001C to U+001F and U+0085, stay whitespace): a renderer
+# shows one as nothing, a box or a replacement glyph, so a boundary word holding one can read as
+# the boundary ("VER" then U+0001 then "DICT:").
+_CC_NON_WHITESPACE = frozenset(char for char in map(chr, list(range(0x00, 0x20)) + list(range(0x7F, 0xA0)))
+                               if not char.isspace())
+_CC_STRIP_TABLE = {ord(char): None for char in _CC_NON_WHITESPACE}
+_CC_TRIGGER_RE = re.compile(r"[\x00-\x08\x0e-\x1b\x7f-\x84\x86-\x9f]")
+# The first character, spaces and tabs aside, that can open a boundary under some reading: V or
+# v (VERDICT, any case), Q (QA-COMPLETE), an emphasis mark or an escape before VERDICT, a
+# character reference, or a dropped Cc control. Any other first character survives every reading
+# this grammar takes, so the line is no boundary candidate and nothing is decoded for it.
+_BOUNDARY_HEAD_CHARS = frozenset("VvQ*&\\") | _CC_NON_WHITESPACE
+# A whitespace separator inside a VERDICT value other than space or tab (U+001C and U+0085
+# included): str.split would fold it into a clean verdict, so the value is refused
+# (_parse_delivery), never normalised.
+_ODD_WHITESPACE_RE = re.compile(r"[^\S \t]")
+
+
+def _boundary_readings(line):
+    """(name, reading) pairs under which a renderer can show line otherwise than its raw text:
+    the CommonMark rendering (_marker_rendered), the legacy whole-line html.unescape reading, and
+    the raw line with the non-whitespace Cc controls dropped. A reading equal to the raw line is
+    not yielded, and no legacy decode runs on a line _undecodable_reference refuses (the parse
+    refuses that line outright before any reading is taken)."""
+    if _undecodable_reference(line) is not None:
+        return
+    if "\\" in line or "&" in line:
+        rendered = _marker_rendered(line)
+        if rendered != line:
+            yield "CommonMark", rendered
+    if "&" in line:
+        legacy = html.unescape(line)
+        if legacy != line:
+            yield "legacy html.unescape", legacy
+    if _CC_TRIGGER_RE.search(line):
+        yield "control-stripped", line.translate(_CC_STRIP_TABLE)
+
+
+def _boundary_shown(line):
+    """A refusal description when a reading of line (_boundary_readings) is a VERDICT line or the
+    QA-COMPLETE line while its raw text is neither, or None. The canonical boundary parse reads
+    the raw text alone and is unchanged; this refuses a line a renderer can show as a boundary
+    where that parse reads content ("VERDICT&#58; BLOCKERS FOUND", "QA&#45;COMPLETE", a U+0001
+    inside either word), never a second boundary parse. DISCLOSED RESIDUAL: only the
+    non-whitespace Cc controls are stripped, so a literal format or default-ignorable character
+    inside a boundary word stays content."""
+    head = line.lstrip(" \t")[:1]
+    if not head or head not in _BOUNDARY_HEAD_CHARS:
+        return None
+    if _verdict_of(line) is not None or line.rstrip(" \t") == COMPLETE_LINE:
+        return None
+    for name, reading in _boundary_readings(line):
+        if _verdict_of(reading) is not None:
+            shown = "a VERDICT line"
+        elif reading.rstrip(" \t") == COMPLETE_LINE:
+            shown = "the {} line".format(COMPLETE_LINE)
+        else:
+            continue
+        return ("a line that reads as {} under its {} reading while its raw text is not that line"
+                " (the canonical boundary is read from the raw text alone; an encoded or"
+                " control-padded boundary is refused, never read as content)".format(shown, name))
+    return None
+
+
 def _after_block_end(previous):
     """Whether no paragraph is open before a line: at the start of the body or after a fenced block
     (previous None), a blank line, an ATX heading, a thematic break or a setext underline."""
@@ -1072,6 +1243,10 @@ def _parse_delivery(lines, question_count):
             flush()
             if _lazy_continuation(after_quote, "```"):
                 refuse(number, "a fenced block directly after a blockquote line (leave a blank line after a quote)")
+            for offset, text in enumerate(payload, 1):
+                undecodable = _undecodable_reference(text)
+                if undecodable:
+                    refuse(number + offset, _undecodable_refusal(undecodable))
             inner = _fenced_answer_head(payload)
             if inner is not None:
                 refuse(number + inner + 1, "an answer heading inside the fenced block opened at line {} (or a line "
@@ -1100,6 +1275,12 @@ def _parse_delivery(lines, question_count):
             refuse(number, "a line directly after a blockquote line that is not one (CommonMark reads it into the "
                            "quote; leave a blank line after a quote)")
         after_quote = False
+        undecodable = _undecodable_reference(payload)
+        if undecodable:
+            refuse(number, _undecodable_refusal(undecodable))
+        boundary = _boundary_shown(payload)
+        if boundary:
+            refuse(number, boundary)
         if not (payload.startswith("Q") and ANSWER_HEAD_RE.match(payload)) and _marker_candidate(payload):
             refuse(number, "a line that reads as an answer marker but is not \"QN.\" in ASCII at column 0 "
                            "(lookalike or non-ASCII characters, escapes or character references that render as one, "
@@ -1157,6 +1338,10 @@ def _parse_delivery(lines, question_count):
                 refuse(number, "a second {!r} line".format(FINDINGS_HEADING) if _is_findings_heading(payload)
                        else "{} before the VERDICT line".format(COMPLETE_LINE))
             else:
+                if _ODD_WHITESPACE_RE.search(value):
+                    refuse(number, "a VERDICT value holding a whitespace separator other than space or tab "
+                                   "(U+001C and U+0085 included): str.split would fold it into a clean "
+                                   "verdict, so the value is refused, never normalised")
                 current = verdict = _new_item(None, number, payload, "verdict")
                 verdict["value"] = value
                 phase = "closed"
@@ -1931,6 +2116,9 @@ def _self_test_cases(fx):
     # the escaped-reference row is the disclosed over-refusal: CommonMark renders the escaped
     # reference literal. The C1 and literal control rows discriminate the non-whitespace Cc clause
     # of _marker_ignorable, in a reference before the marker, inside it and as a literal code point.
+    # The escape-aware rows decode only under the round-9 tokenized reading (_marker_escape_aware):
+    # html.unescape drops U+FFFF where CommonMark substitutes U+FFFD, and the escaped stop reads as
+    # a stop only with escapes honoured; the whole-line reading leaves the backslash in the head.
     for check_id, line in (
             ("shape/escaped-stop-marker-cannot-evaluate", "Q4\\. Additional answer"),
             ("shape/decimal-reference-q-marker-cannot-evaluate", "&#81;4. Additional answer"),
@@ -1958,8 +2146,33 @@ def _self_test_cases(fx):
             ("shape/c1-control-reference-marker-cannot-evaluate", "&#129;Q4. Additional answer"),
             ("shape/c1-control-reference-inside-marker-cannot-evaluate", "Q&#129;4. Additional answer"),
             ("shape/literal-control-inside-marker-cannot-evaluate", "Q\x014. Additional answer"),
-            ("shape/variation-selector-supplement-marker-cannot-evaluate", "Q\U000e01004. Additional answer")):
+            ("shape/variation-selector-supplement-marker-cannot-evaluate", "Q\U000e01004. Additional answer"),
+            ("shape/escape-aware-noncharacter-marker-cannot-evaluate", "Q&#65535;4\\. Additional answer"),
+            ("shape/escape-aware-noncharacter-after-stop-marker-cannot-evaluate", "Q4\\.&#65535; Additional answer"),
+            ("shape/escape-aware-hex-noncharacter-marker-cannot-evaluate", "Q&#xFFFF;4\\. Additional answer")):
         check(check_id, refusal(fx.run(_mixed(sha, {4: A4 + "\n" + line})), "reads as an answer marker"),
+              refused)
+
+    # Encoded, control-padded and semicolonless boundary lines: a reading shows a VERDICT or
+    # QA-COMPLETE boundary where the canonical parse reads content, so the line is refused
+    # wherever it stands, duplicated or not; the canonical boundary parse itself is unchanged.
+    for check_id, line in (
+            ("shape/encoded-verdict-line-cannot-evaluate", "VERDICT&#58; BLOCKERS FOUND"),
+            ("shape/encoded-complete-line-cannot-evaluate", "QA&#45;COMPLETE"),
+            ("shape/control-inside-verdict-cannot-evaluate", "VER\x01DICT: BLOCKERS FOUND"),
+            ("shape/control-inside-complete-cannot-evaluate", "QA-\x01COMPLETE"),
+            ("shape/semicolonless-encoded-complete-cannot-evaluate", "QA&#45COMPLETE")):
+        check(check_id, refusal(fx.run(_mixed(sha, {4: A4 + "\n" + line})), "while its raw text is not"), refused)
+    check("shape/encoded-verdict-inside-answer-cannot-evaluate",
+          refusal(fx.run(_mixed(sha, {2: A2 + "\nVERDICT&#58; BLOCKERS FOUND"})), "while its raw text is not"),
+          refused)
+    check("shape/encoded-verdict-duplicate-cannot-evaluate",
+          refusal(fx.run(_mixed(sha).replace("\n" + COMPLETE_LINE + "\n",
+                                             "\nVERDICT&#58; NO BLOCKERS\n" + COMPLETE_LINE + "\n")),
+                  "while its raw text is not"), refused)
+    for check_id, sep_verdict in (("shape/verdict-separator-unit-cannot-evaluate", "VERDICT: NO\x1cBLOCKERS"),
+                                  ("shape/verdict-separator-nel-cannot-evaluate", "VERDICT: NO\x85BLOCKERS")):
+        check(check_id, refusal(fx.run(_mixed(sha, verdict=sep_verdict)), "whitespace separator other than"),
               refused)
 
     # Quote and code forms CommonMark reads that this grammar does not: refused, never read as prose
@@ -2241,8 +2454,9 @@ def _self_test_cases(fx):
     check("runtime/ligature-run-at-cap-bounded",
           (len(bare_ligature.encode("utf-8")), _capped_run(fx, bare_ligature, "linear")),
           (MAX_INPUT_BYTES, (0, "PASS")))
-    # A reference-dense line: about 2.4 million NEL references, decoded once per reading (the
-    # CommonMark tokenizer and the whole-line html.unescape legacy reading), linear in the line.
+    # A reference-dense line: about 2.8 million NEL references at the 16 MiB cap. A runtime bound
+    # only (performance coverage): it shows the readings stay linear in the line inside the cap,
+    # not that any decode runs; decode discrimination lives in the decode/ and shape/ fixtures.
     reference_run = _padded(_mixed(sha), "text ", "&#133;", "\nVERDICT:")
     check("runtime/reference-run-at-cap-bounded",
           (len(reference_run.encode("utf-8")), _capped_run(fx, reference_run, "linear")),
@@ -2287,8 +2501,10 @@ def _self_test_cases(fx):
     check("decode/unknown-entity-name-stays-literal",
           (_marker_rendered("&notit;"), _marker_rendered("&ampx;")), ("&notit;", "&ampx;"))
     # The numeric decode bounds (_reference_commonmark): zero, both surrogate ends and their
-    # neighbours, the last code point, the first value past it and an over-long decimal, as decimal
-    # and hexadecimal references alike, decode to U+FFFD or the code point without raising.
+    # neighbours, the last code point, the first value past it and 9999999 (seven digits: inside
+    # the grammar bound, past the value ceiling), as decimal and hexadecimal references alike,
+    # decode to U+FFFD or the code point without raising; a run longer than the grammar bound
+    # never reaches a decoder (_undecodable_reference).
     bounds = ((0, "\ufffd"), (1, "\x01"), (0xd7ff, "\ud7ff"), (0xd800, "\ufffd"), (0xdfff, "\ufffd"),
               (0xe000, "\ue000"), (0x10ffff, "\U0010ffff"), (0x110000, "\ufffd"), (9999999, "\ufffd"))
     check("decode/numeric-reference-bounds",
@@ -2389,6 +2605,31 @@ def _self_test_cases(fx):
     check("cli/bare-ok-exit-0",
           (result.returncode, len(result.stdout.splitlines()), result.stdout.startswith("check_verifier_delivery: OK"),
            result.stderr), (0, 1, True, ""))
+    # Over-long numeric references, through the CLI end to end: the bounded pre-scan refuses the
+    # line before any decode (html.unescape converts a decimal digit run through int(), which
+    # raises past the interpreter conversion limit, sys.get_int_max_str_digits(), 4300 digits),
+    # so each run exits 2 with the JSON report on stdout naming the line and the cause. With the
+    # pre-scan removed, the three decimal rows crash the child instead (exit 1, no JSON) and the
+    # hexadecimal row passes: each row is red without the pre-scan.
+    for check_id, reference in (
+            ("decode/overlong-decimal-reference-cli-cannot-evaluate", "&#" + "9" * 4301 + ";"),
+            ("decode/overlong-semicolonless-decimal-cli-cannot-evaluate", "&#" + "9" * 4301),
+            ("decode/overlong-leading-zero-decimal-cli-cannot-evaluate", "&#" + "0" * 4299 + "81;"),
+            ("decode/overlong-hex-reference-cli-cannot-evaluate", "&#x" + "f" * 4301 + ";")):
+        brief_path, delivery_path = fx.files(_mixed(sha, {4: A4 + "\nNote " + reference + " end"}))
+        result = subprocess.run([sys.executable, "-I", "-B", script, "--brief", brief_path,
+                                 "--delivery", delivery_path, "--repo", str(fx.repo)],
+                                capture_output=True, text=True, timeout=TIMEOUT, check=False)
+        try:
+            shown = json.loads(result.stdout)
+            got = (result.returncode, shown["verdict"],
+                   "digit run is longer than the grammar bound" in " ".join(shown["reasons"]))
+        except (ValueError, KeyError, TypeError):
+            got = (result.returncode, None, False)
+        check(check_id, got, (2, "CANNOT_EVALUATE", True))
+    check("decode/overlong-reference-in-fence-cannot-evaluate",
+          refusal(fx.run(_mixed(sha, {2: "Q2. src/beta.py:\n```\n&#" + "9" * 4301 + ";\n```"})),
+                  "digit run is longer than the grammar bound"), refused)
     check("bare/static-tables-valid", _static_config_problems(), [])
     check("bare/broken-grammar-refused", bool(_patched("ANSWER_HEAD_RE", never, _static_config_problems)), True)
     check("bare/broken-quote-pairs-refused",
@@ -2396,6 +2637,10 @@ def _self_test_cases(fx):
     shrunk = tuple(pair for pair in DEFAULT_IGNORABLE_RANGES if pair not in ((0x180B, 0x180F), (0xE0000, 0xE0FFF)))
     check("bare/ignorable-range-deletion-refused",
           bool(_patched("DEFAULT_IGNORABLE_RANGES", shrunk, _static_config_problems)), True)
+    without_cc = lambda char: unicodedata.category(char) == "Cf" or ord(char) in DEFAULT_IGNORABLE
+    check("bare/missing-cc-clause-refused",
+          any("_marker_ignorable" in problem
+              for problem in _patched("_marker_ignorable", without_cc, _static_config_problems)), True)
 
 
 # The 8a61dfb9 forms of the two scanners, kept only so the runtime checks can show the old forms exceed
@@ -2543,6 +2788,14 @@ GRAMMAR_PROBES = (
     ("_marker_candidate", "`Q4.` x", False), ("_marker_candidate", "[Q4.](x) y", False),
     ("_marker_candidate", "\\&#81;4. x", True), ("_marker_candidate", "1.Q4. x", False),
     ("_marker_candidate", "1234567890. Q4. x", False),
+    ("_marker_candidate", "Q&#65535;4\\. x", True), ("_marker_candidate", "Q4\\.&#65535; x", True),
+    ("_marker_candidate", "Q&#xFFFF;4\\. x", True),
+    ("_undecodable_reference", "&#12345678; x", True), ("_undecodable_reference", "&#1234567; x", False),
+    ("_undecodable_reference", "&#x1234567; x", True), ("_undecodable_reference", "&#x123456; x", False),
+    ("_boundary_shown", "VERDICT&#58; BLOCKERS FOUND", True), ("_boundary_shown", "QA&#45;COMPLETE", True),
+    ("_boundary_shown", "VER\x01DICT: BLOCKERS FOUND", True), ("_boundary_shown", "QA-\x01COMPLETE", True),
+    ("_boundary_shown", "QA&#45COMPLETE", True), ("_boundary_shown", "VERDICT: BLOCKERS FOUND", False),
+    ("_boundary_shown", "QA-COMPLETE", False),
     ("_unread_fence", "- ```", True), ("_unread_fence", "```", False),
 )
 
@@ -2563,15 +2816,20 @@ def _static_config_problems():
         if got != want:
             problems.append("{} {} {!r}".format(name, "does not match" if want else "matches", line))
     canonical = ",".join("{:04X}..{:04X}".format(low, high) for low, high in DEFAULT_IGNORABLE_RANGES)
-    if hashlib.sha256(canonical.encode("ascii")).hexdigest() != DEFAULT_IGNORABLE_SHA256 \
-            or len(DEFAULT_IGNORABLE) != DEFAULT_IGNORABLE_COUNT \
+    if (hashlib.sha256(canonical.encode("ascii")).hexdigest() != DEFAULT_IGNORABLE_SHA256
+            or len(DEFAULT_IGNORABLE) != DEFAULT_IGNORABLE_COUNT
             or DEFAULT_IGNORABLE != frozenset(
-                point for low, high in DEFAULT_IGNORABLE_RANGES for point in range(low, high + 1)) \
-            or not all(_marker_ignorable(char) for char in "\u00ad\u034f\u061c\u115f\u200b\u2060\u3164\ufe0f\ufeff\x01\x7f\u0081") \
-            or any(_marker_ignorable(char) for char in " \t*_#>+-\\Qq4.\u00a0\uff11\u2800\x1c\u0085"):
+                point for low, high in DEFAULT_IGNORABLE_RANGES for point in range(low, high + 1))):
         problems.append("DEFAULT_IGNORABLE_RANGES does not hold the pinned Default_Ignorable_Code_Point table "
                         "(Unicode 16.0.0 DerivedCoreProperties.txt: {} code points; canonical range list "
                         "SHA-256 {})".format(DEFAULT_IGNORABLE_COUNT, DEFAULT_IGNORABLE_SHA256))
+    if (not all(_marker_ignorable(char) for char in "\u00ad\u034f\u061c\u115f\u200b\u2060\u3164\ufe0f\ufeff\x01\x7f\u0081")
+            or any(_marker_ignorable(char) for char in " \t*_#>+-\\Qq4.\u00a0\uff11\u2800\x1c\u0085")
+            or not all(char.isspace() for char in "\x1c\x85")):
+        problems.append("_marker_ignorable does not hold the declared ignorable classes: category Cf, the pinned "
+                        "Default_Ignorable_Code_Point table and the non-whitespace Cc controls (NUL, U+0001, DEL "
+                        "and U+0081 included; the whitespace controls, U+001C and U+0085 included, stay "
+                        "whitespace to the scan)")
     if not FENCE_CLOSE_RE.fullmatch("```") or FENCE_CLOSE_RE.fullmatch("``` x"):
         problems.append("FENCE_CLOSE_RE does not hold the declared closing fence")
     if not (SHA_RE.fullmatch("0" * 40) and not SHA_RE.fullmatch("0" * 39)):
