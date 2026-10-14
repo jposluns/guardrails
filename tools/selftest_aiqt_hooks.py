@@ -1892,8 +1892,8 @@ def _main_isolated(monitor):
         expect("(patch-r) a genuine terminator after a consumed value leaves -p a pathspec, a "
                "control (R13 item 1)",
                "git checkout --pathspec-from-file flist -- -p", "allow-note", cwd=rp)
-        # R14 DECIDED item 1: the declarations of git itself for stash save (builtin/stash.c,
-        # surfaced by the installed git -h listing) carry "-m, --[no-]message <message>" and
+        # R14 DECIDED item 1: the option listing of git itself for stash save (the installed
+        # git 2.55.0 'git stash save -h' output) carries "-m, --[no-]message <message>" and
         # "-S, --[no-]staged", so the save entry of _DISCARD_STASH_OP_OPTS lists -m/--message
         # as a VALUE option exactly like push (the R13 entry listed an empty value set on the
         # false premise that save takes no -m): a separated message value that reads as '--'
@@ -1925,8 +1925,12 @@ def _main_isolated(monitor):
                "control)", "git stash save -m -p", "allow", cwd=rp)
         expect("(patch-v) stash save -mp carries an attached message, ALLOWS (R14 item 1 control)",
                "git stash save -mp", "allow", cwd=rp)
-        expect("(patch-w) stash save -- -p: a genuine terminator, git saves a stash whose message "
-               "is -p, ALLOWS exactly as git behaves (R14 item 1 control)",
+        # R15 DECIDED item 2: git keeps the '--' of 'stash save -- -p' in the message (git
+        # 2.55.0 saves a stash whose message is '-- -p'); that '--' still ends option parsing,
+        # so the -p is message text, git enters no patch mode, and the allow below still holds.
+        expect("(patch-w) stash save -- -p: a genuine terminator, git keeps the '--' and saves a "
+               "stash whose message is '-- -p' with no patch mode, ALLOWS exactly as git "
+               "behaves (R14 item 1 control; R15 item 2 wording)",
                "git stash save -- -p", "allow", cwd=rp)
         patch_deny("(patch-x) implicit push: stash --pathspec-from-file -- -p DENIES, the "
                    "terminator is the consumed filename value (R14 item 1)",
@@ -4717,16 +4721,18 @@ def _main_isolated(monitor):
         g423_note("(g423-allow-checkout-pffterm) a genuine terminator after a consumed value "
                   "leaves -p a pathspec (R13 item 1 control)",
                   "git checkout --pathspec-from-file flist -- -p && :", rp)
-        # R14 DECIDED item 1 (grammar path): stash save derives -m/--message from the
-        # declarations of git itself (builtin/stash.c carries "-m, --[no-]message <message>"
-        # and "-S, --[no-]staged" for save exactly as for push; the R13 save entry listed an
-        # EMPTY value set on the false premise that save takes no -m), so a message value
-        # reading as '--' never terminates the -p scan on this path either. Red on the R13
-        # delivery: the two denies below were verbopt denies there (the save table listed no
-        # -m, so the needle naming the patch spelling fails) and the -m/-mp controls were
-        # verbopt denies too; the terminator control was green, and the implicit-push and
-        # restore --conflict denies were green already (the class behaviour existed with no
-        # vector; they close R14 item 1 on the grammar path).
+        # R14 DECIDED item 1 (grammar path): stash save derives -m/--message from the option
+        # listing of git itself (the installed git 2.55.0 'git stash save -h' output lists
+        # "-m, --[no-]message <message>" and "-S, --[no-]staged" for save exactly as for push;
+        # the R13 save entry listed an EMPTY value set on the false premise that save takes no
+        # -m), so a message value reading as '--' never terminates the -p scan on this path
+        # either. Red on the R13 delivery: the two denies below were verbopt denies there (the
+        # save table listed no -m, so the needle naming the patch spelling fails), and the
+        # -m/-mp controls were patch denies (R15 item 3: the -p scan runs before option
+        # validation and, with no -m value consumed, read the -p, or the p of -mp, as a patch
+        # flag); the terminator control was green, and the implicit-push and restore
+        # --conflict denies were green already (the class behaviour existed with no vector;
+        # they close R14 item 1 on the grammar path).
         g423_deny("(g423-deny-stashsave-mdd) stash save -m -- -p: the consumed terminator is "
                   "the message, the -p real (R14 item 1)",
                   "git stash save -m -- -p && :", "git stash save -p", rp)
@@ -4737,8 +4743,14 @@ def _main_isolated(monitor):
                   "(R14 item 1 control)", "git stash save -m -p && :", rp)
         g423_note("(g423-allow-stashsave-mjoined) stash save -mp carries an attached message "
                   "(R14 item 1 control)", "git stash save -mp && :", rp)
-        g423_note("(g423-allow-stashsave-term) a genuine terminator: git saves a stash whose "
-                  "message is -p (R14 item 1 control)", "git stash save -- -p && :", rp)
+        g423_note("(g423-allow-stashsave-term) a genuine terminator: git keeps the '--' and "
+                  "saves a stash whose message is '-- -p', no patch mode (R14 item 1 control; "
+                  "R15 item 2 wording)", "git stash save -- -p && :", rp)
+        # R15 DECIDED item 3: the save entry lists --no-include-untracked exactly as push does
+        # ('git stash save -h' lists "-u, --[no-]include-untracked" for save as for push); the
+        # R14 entry omitted it, an over-deny (a verbopt deny) on which this control is red.
+        g423_note("(g423-allow-stashsave-noincl) stash save --no-include-untracked is a listed "
+                  "save flag (R15 item 3)", "git stash save --no-include-untracked && :", rp)
         g423_deny("(g423-deny-stashimpl-pffdd) implicit push --pathspec-from-file -- -p: the "
                   "terminator is the consumed filename value (R14 item 1)",
                   "git stash --pathspec-from-file -- -p && :", "git stash -p", rp)
@@ -4791,10 +4803,13 @@ def _main_isolated(monitor):
         # are already clean, so without these a regex that can never match would leave the
         # suite green: the round-label forms must match, while a residual-class id, a word
         # that merely contains "round", and a spelling past the three-separator bound must
-        # not.
+        # not. R15 DECIDED item 1: both ends of the {0,3} separator bound are pinned. At the
+        # lower end, "round12" (zero separators) must match, red under a {1,3} mutant; at the
+        # upper end, "round - 3" (three) must match and "round -  3" (four, just past the
+        # bound) must not, red under a {0,4} mutant.
         for _ctl, _want in (("ROUND-12", True), ("round: 12", True), ("round - 3", True),
-                            ("R1", False),
-                            ("Around 5", False), ("round  -  3", False)):
+                            ("round12", True), ("R1", False), ("Around 5", False),
+                            ("round -  3", False), ("round  -  3", False)):
             if (_roundlabel_rx.search(_ctl) is not None) is not _want:
                 failures.append("(g423-roundlabel-ctl) the round-label regex must {} {!r}"
                                 .format("match" if _want else "not match", _ctl))

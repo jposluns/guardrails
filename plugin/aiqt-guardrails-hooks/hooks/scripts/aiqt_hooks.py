@@ -4694,10 +4694,10 @@ def _discard_stash_ro_bad(args):
 # deny, and a REAL -p standing behind a consumed separated value was never seen); it DERIVES
 # the arity from the SAME closed allowlists the option validator uses (_DISCARD_VERB_OPTS, and
 # _DISCARD_STASH_OP_OPTS for the resolved stash op) through _discard_valued_arity, so the two
-# can never disagree (ONE arity specification). In a short cluster git
-# reads everything after a value-taking letter as that option's attached VALUE ('checkout -bp' names the
-# branch 'p'), so the scan stops there and never reads a value's bytes as flags (the F-85 lesson),
-# and a SEPARATED value word is consumed by that arity BEFORE the scan looks for -p/--patch or a
+# can never disagree (ONE arity specification). In a short cluster git reads everything after a
+# value-taking letter as that option's attached VALUE ('checkout -bp' names the branch 'p'), so
+# the scan stops there and never reads a value's bytes as flags (the F-85 lesson), and a
+# SEPARATED value word is consumed by that arity BEFORE the scan looks for -p/--patch or a
 # terminator ('stash push -m -- -p' makes '--' the message and the later -p a REAL patch flag,
 # while 'stash push -m -p' makes -p the message itself: git's parser consumes the next word
 # unconditionally). Every OTHER cluster character is read as a FLAG, non-letters included: the
@@ -4727,11 +4727,12 @@ def _discard_patch_token(sub, args):
     option consumes its value FIRST - the rest of its cluster token when attached, the NEXT token
     when separated ('--' and '-p' shapes included, exactly as git itself consumes them) - so a
     value is never read as a flag or a terminator AND a real flag standing after a consumed '--'
-    is still seen; the declared value-taking options are DERIVED from the closed allowlist of
-    the verb (or of the resolved stash op), the same table the option validator reads (R13
-    DECIDED item 1), never a second copy. Over-recognition is safe here - it denies, never silently allows - mirroring
-    _has_long_prefix, so an ambiguous '--p'/'--pa'/'--pat' prefix denies too, and an unambiguous
-    abbreviation of a declared long value option ('--mess') consumes like its full spelling."""
+    is still seen; the declared value-taking options are DERIVED from the closed allowlist of the
+    verb (or of the resolved stash op), the same table the option validator reads (R13 DECIDED
+    item 1), never a second copy. Over-recognition is safe here - it denies, never silently
+    allows - mirroring _has_long_prefix, so an ambiguous '--p'/'--pa'/'--pat' prefix denies too,
+    and an unambiguous abbreviation of a declared long value option ('--mess') consumes like its
+    full spelling."""
     if sub not in _DISCARD_PATCH_VERBS:
         return None
     op = None
@@ -4817,25 +4818,32 @@ _DISCARD_VERB_OPTS = {
 }
 # The stash leg of the same R12 DECIDED item 1 rule, keyed by the RESOLVED op word (None, the
 # bare/implicit push, uses the push entry): only these exact spellings may appear after the op.
-# R14 DECIDED item 1: each entry is audited against the option declarations of git itself for
-# that sub-command (builtin/stash.c, surfaced by the installed git 2.55.0 -h listing), so a
-# value-taking option is never listed as a flag: save declares "-m, --[no-]message <message>"
-# and "-S, --[no-]staged" exactly as push does, so save carries -m/--message in its VALUE set
-# (the R13 entry listed an empty value set on the false premise that save takes no -m) and the
-# -p scan consumes a message value before it looks for a patch flag. The numeric-valued
-# -U/--unified and --inter-hunk-context spellings stay unlisted: git refuses a non-numeric
-# value, so a terminator consumed as such a value never reaches patch mode, and the compound
-# path denies the unlisted spelling outright (the safe direction). list lists nothing here
-# because it accepts NO further token, and show accepts at most ONE positional stash reference
-# (both vetted by _discard_stash_ro_bad); export keeps its two documented spellings (the
-# pristine path still treats every export form as not provably safe).
+# R14 DECIDED item 1: each entry is audited against the option listing of git itself for that
+# sub-command (the 'git stash <op> -h' output of the installed git 2.55.0; create prints none),
+# so a value-taking option is never listed as a flag: the save listing carries
+# "-m, --[no-]message <message>" and "-S, --[no-]staged" exactly as push does, so save carries
+# -m/--message in its VALUE set (the R13 entry listed an empty value set on the false premise
+# that save takes no -m) and the -p scan consumes a message value before it looks for a patch
+# flag. R15 DECIDED item 3: save also lists --no-include-untracked, as push does (both
+# listings carry "-u, --[no-]include-untracked"; the R14 save entry omitted it, an over-deny).
+# The other negated spellings the entries omit (--no-quiet, --no-staged, --no-all and
+# --no-message, for example), --[no-]auto-advance, push's --[no-]pathspec-file-nul and apply's
+# --[no-]label-* values stay unlisted, so the compound path denies them, an over-deny in the
+# safe direction. The numeric-valued -U/--unified and --inter-hunk-context spellings stay
+# unlisted: git refuses a non-numeric value, so a terminator consumed as such a value never
+# reaches patch mode, and the compound path denies the unlisted spelling outright (the safe
+# direction). list lists nothing here because it accepts NO further token, and show accepts
+# at most ONE positional stash reference (both vetted by _discard_stash_ro_bad); export keeps
+# its two documented spellings (the pristine path still treats every export form as not
+# provably safe).
 _DISCARD_STASH_OP_OPTS = {
     "push": (frozenset(("-q", "--quiet", "-k", "--keep-index", "--no-keep-index", "-u",
                         "--include-untracked", "--no-include-untracked", "-a", "--all",
                         "-S", "--staged")),
              frozenset(("-m", "--message", "--pathspec-from-file"))),
     "save": (frozenset(("-q", "--quiet", "-k", "--keep-index", "--no-keep-index", "-u",
-                        "--include-untracked", "-a", "--all", "-S", "--staged")),
+                        "--include-untracked", "--no-include-untracked", "-a", "--all",
+                        "-S", "--staged")),
              frozenset(("-m", "--message"))),
     "apply": (frozenset(("-q", "--quiet", "--index")), frozenset()),
     "pop": (frozenset(("-q", "--quiet", "--index")), frozenset()),
@@ -5151,8 +5159,9 @@ def _discard_git_segment_grammar(words, eff):
             # by _discard_stash_ro_bad above) are NOT a lossy verb: they destroy nothing, so
             # the stash-consume rule must not count them, and its deny text truthfully names
             # only lossy verbs. R14 MINOR: this exemption covers list and show ONLY; every
-            # other read-only stash form (create, store, export --print) still counts as a
-            # lossy segment and can over-deny a compound with pop or branch, the safe direction.
+            # other non-consuming stash form (create, store, export --print; R15: store is not
+            # read-only, it adds an entry to refs/stash) still counts as a lossy segment and
+            # can over-deny a compound with pop or branch, the safe direction.
             return ("ok", None, None, sub)
         if srole == "preserve":
             if seg_dir is None:
