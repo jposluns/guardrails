@@ -236,8 +236,17 @@ run_gate "placement"      python3 -I -B tools/check_rule_placement.py
 run_gate "applies-selftest" python3 -I -B tools/check_applies.py --self-test
 run_gate "applies"         python3 -I -B tools/check_applies.py
 run_gate "mappings"       python3 -I -B tools/check_mappings.py
+# Repository-only assertion lives outside the shipped tooling: it pins the corpus below and the whole permitted
+# gate invocation in both runners (--config .aiqt/cited-standards.toml and nothing else, so an appended --root
+# is a finding), and validates pack.toml with its owning validator (opf/tools/check_opf_prompt_pack.py).
+run_gate "cited-standards-repo-contract-selftest" python3 -I -B .github/check_cited_standards_contract.py --self-test
+run_gate "cited-standards-repo-contract" python3 -I -B .github/check_cited_standards_contract.py
 run_gate "cited-standards-selftest" python3 -I -B tools/check_cited_standards.py --self-test
-run_gate "cited-standards"          python3 -I -B tools/check_cited_standards.py
+# This repository only: the reviewed corpus adds the OPF prompt-pack members to the rule corpus. The config and
+# the two .github contract scripts are not shipped, so in a tree without them this gate, the newtab-repo-contract
+# gate and the cited-standards-repo-contract gate lines all exit 2 (cannot evaluate) and this runner then ends
+# RESULT: FAIL.
+run_gate "cited-standards"          python3 -I -B tools/check_cited_standards.py --config .aiqt/cited-standards.toml
 run_gate "conformance-selftest" python3 -I -B tools/conformance.py --self-test
 run_gate "conformance"    python3 -I -B tools/conformance.py --root .
 run_gate "commonmark-headings-selftest" python3 -I -B opf/tools/selftest_commonmark_headings.py
