@@ -28,7 +28,11 @@ SCANNED SURFACES (the declared set, resolved from the repo root):
     re-add the script directory AHEAD of the stdlib and re-enable the sibling-shadow class under -I; their
     sanctioned sibling-import form is sys.path.append.
 
-LAUNCHER PREDICATE. In a scanned command, a leading ``env`` and any ``VAR=val`` assignments are skipped;
+LAUNCHER PREDICATE. In a scanned command, a leading shell control keyword is skipped ONLY in its
+literal (unquoted, unescaped) spelling: a quoted or backslash-escaped spelling (``i'f'``,
+``"then"``, ``d\\o``, ``t'ime'``, ``'!'``) is a literal command name, so a python word after it
+is not in a command-word position and is a cannot-evaluate, never a finding from a misread
+position. A leading ``env`` and any ``VAR=val`` assignments are then skipped;
 the command word's basename must then match ``^python(3(\\.\\d+)?)?$`` to be a launcher (a non-python
 command word is out of scope, neither pass nor fail). Interpreter options are the tokens after the
 command word up to the first non-option, ``-m``, ``-c``, ``--``, or long ``--option``; single-dash
@@ -110,11 +114,17 @@ either the plain-scalar command itself or a LITERAL block header whose content i
 header and the key (its content lines, bounded by the key column, are scanned); the CLOSED line
 grammar governs that next line BEFORE it is read as command text: a spelling YAML reads as a
 MAPPING or SEQUENCE value there -- a mapping key of ANY spelling (an identifier key, a spaced
-``shell : bash``, a ``foo.bar :`` or ``123:`` key, any text carrying ``: `` or ending with a
-colon), an explicit-key indicator (``? shell``), or a ``- `` sequence item (``- shell: bash``)
+``shell : bash``, a ``foo.bar :`` or ``123:`` key, an UNQUOTED plain value whose operative text
+before its `` #`` trailing comment carries ``: ``/``:<TAB>`` or ends with a colon; a WHOLE quoted
+scalar is never mapping-tested, it is decoded or refused by the value grammar, so a single-quoted
+``'echo foo: bar'`` and a ``: `` inside a trailing comment stay clean scalars), an explicit-key
+indicator (``? shell``), or a ``- `` sequence item (``- shell: bash``)
 -- is cannot-evaluate (only the plain identifier-key form is read, as the defaults.run mapping
-above), never misread as command text; the value is null (no
-command text) only when that next non-blank, non-comment line is not deeper than the key, or the file
+above), never misread as command text; a sequence item at the KEY'S OWN COLUMN (comment lines
+between included) is YAML's reading of the run: value as a SEQUENCE and is cannot-evaluate, never
+read as null; the value is null (no
+command text) only when that next non-blank, non-comment line is not deeper than the key and does
+not begin a sequence item at the key's own column, or the file
 ends. Any other arrangement after an empty ``run:`` (a comment line before a deeper value, a header
 with no content deeper than the key, block content at or above the header's column, a comment line
 inside the block before its content), any other ``run:`` value that starts with ``|`` or ``>`` (on
@@ -362,19 +372,29 @@ def _is_py_word(token):
     return bool(PY_WORD_RE.match(_basename(token)))
 
 
-def _strip_launcher_prefix(tokens):
-    """Return the tokens from the command word onward: skip leading shell keywords, a `run_gate <label>`
-    wrapper (the run_all_checks.sh idiom), and a leading `env` or any `VAR=val` assignments."""
+def _strip_launcher_prefix(pairs):
+    """Return the (decoded, raw) token pairs from the command word onward: skip leading shell
+    keywords, a `run_gate <label>` wrapper (the run_all_checks.sh idiom), and a leading `env` or
+    any `VAR=val` assignments. A shell control keyword is skipped ONLY in its literal spelling
+    (the raw token equals the decoded one): bash recognizes a reserved word, `!` or `time` only
+    unquoted and unescaped, so a quoted or backslash-escaped spelling (`i'f'`, `"then"`, `d\\o`,
+    `t'ime'`, `'!'`) is a literal command NAME, never a skipped keyword, and the python word
+    after it is then not in a command-word position (_scan_command_tokens fails closed:
+    cannot-evaluate, never a finding from a misread position). `run_gate` and `env` are matched on
+    the decoded form (quoting does not stop the shell from resolving a command or function name);
+    a `VAR=val` assignment is matched on the decoded form too, a KEPT conservative over-read (a
+    quoted spelling is really a command name; skipping it can only surface a later python word as
+    a finding or a cannot-evaluate, never silently pass one)."""
     i = 0
-    while i < len(tokens) and tokens[i] in LEADING_KEYWORDS:
+    while i < len(pairs) and pairs[i][0] in LEADING_KEYWORDS and pairs[i][1] == pairs[i][0]:
         i += 1
-    if i < len(tokens) and tokens[i] == "run_gate":
+    if i < len(pairs) and pairs[i][0] == "run_gate":
         i += 1
-        if i < len(tokens):  # skip the gate label argument
+        if i < len(pairs):  # skip the gate label argument
             i += 1
-    while i < len(tokens) and (tokens[i] == "env" or ASSIGN_RE.match(tokens[i])):
+    while i < len(pairs) and (pairs[i][0] == "env" or ASSIGN_RE.match(pairs[i][0])):
         i += 1
-    return tokens[i:]
+    return pairs[i:]
 
 
 VALUE_SHORT_OPTS = frozenset("WX")               # short options that take a value (-Wxxx or -W xxx)
@@ -429,24 +449,28 @@ def _flags_isolated(after_interpreter):
 
 
 def check_argv(argv):
-    """Classify one already-split command word list. Returns None if it is not a python launcher (out of
-    scope), True if isolated, False if a python launcher that is not isolated."""
-    rest = _strip_launcher_prefix(argv)
-    if not rest or not _is_py_word(rest[0]):
+    """Classify one already-split command word list (a JSON argv: no shell decoding happened, so
+    each token is its own raw/literal spelling). Returns None if it is not a python launcher (out
+    of scope), True if isolated, False if a python launcher that is not isolated."""
+    rest = _strip_launcher_prefix([(tok, tok) for tok in argv])
+    if not rest or not _is_py_word(rest[0][0]):
         return None
-    return _flags_isolated(rest[1:])
+    return _flags_isolated([decoded for decoded, _ in rest[1:]])
 
 
-def _segments(tokens):
-    """Split a token list into simple-command segments at shell separator tokens."""
+def _segments(pairs):
+    """Split a (decoded, raw) token pair list into simple-command segments at shell separator
+    tokens, matched on the decoded form (the pre-existing reading; a quoted separator can only
+    split MORE, which surfaces downstream as a finding or a cannot-evaluate, never a silent
+    pass)."""
     segments, cur = [], []
-    for tok in tokens:
-        if tok in SEPARATORS:
+    for pair in pairs:
+        if pair[0] in SEPARATORS:
             if cur:
                 segments.append(cur)
                 cur = []
         else:
-            cur.append(tok)
+            cur.append(pair)
     if cur:
         segments.append(cur)
     return segments
@@ -540,24 +564,85 @@ def _space_shell_operators(s):
     return "".join(out)
 
 
+def _shell_split_pairs(s):
+    """Tokenize a shell line into (decoded, raw) pairs: the decoded tokens are shlex.split after
+    separating unquoted shell operators from adjacent words (so an operator glued to a word,
+    `prep;python3`, `(python3`, tokenizes as a real shell would); the RAW lexemes (quotes and
+    backslashes preserved) come from splitting the SAME operator-spaced text on unquoted,
+    unescaped whitespace under the exact quote/escape tracking _space_shell_operators uses. The
+    raw form is what decides leading-keyword literalness in _strip_launcher_prefix. FAIL-CLOSED:
+    raises ValueError on an unbalanced quote exactly as shlex.split does, and ALSO when the raw
+    and decoded tokenizations disagree (a different token count, or a raw lexeme that does not
+    shlex-decode to exactly its decoded token), so a token whose raw spelling cannot be recovered
+    is a parse failure the callers surface as a cannot-evaluate, never a guessed spelling."""
+    spaced = _space_shell_operators(s)
+    decoded = shlex.split(spaced, comments=False, posix=True)
+    raws, cur = [], []
+    quote = None
+    i, n = 0, len(spaced)
+    while i < n:
+        c = spaced[i]
+        if quote is not None:
+            cur.append(c)
+            if quote == '"' and c == "\\" and i + 1 < n:
+                cur.append(spaced[i + 1])
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+            i += 1
+            continue
+        if c == "\\":
+            cur.append(c)
+            if i + 1 < n:
+                cur.append(spaced[i + 1])
+                i += 2
+            else:
+                i += 1
+            continue
+        if c in ("'", '"'):
+            quote = c
+            cur.append(c)
+            i += 1
+            continue
+        if c in " \t\r\n":
+            if cur:
+                raws.append("".join(cur))
+                cur = []
+            i += 1
+            continue
+        cur.append(c)
+        i += 1
+    if cur:
+        raws.append("".join(cur))
+    if len(raws) != len(decoded):
+        raise ValueError("raw and decoded tokenizations disagree ({} raw token(s), {} decoded)"
+                         .format(len(raws), len(decoded)))
+    for dec, raw in zip(decoded, raws):
+        if shlex.split(raw, comments=False, posix=True) != [dec]:
+            raise ValueError("a raw token does not decode to its decoded form: {!r}".format(raw))
+    return list(zip(decoded, raws))
+
+
 def _shell_split(s):
-    """shlex.split after separating unquoted shell operators from adjacent words, so an operator
-    glued to a word (`prep;python3`, `(python3`) tokenizes as a real shell would. Raises ValueError
-    on an unbalanced quote exactly as shlex.split does, so callers surface it as a parse failure."""
-    return shlex.split(_space_shell_operators(s), comments=False, posix=True)
+    """The decoded token list of _shell_split_pairs (shlex.split semantics, operators pre-spaced);
+    raises ValueError exactly as _shell_split_pairs does."""
+    return [decoded for decoded, _ in _shell_split_pairs(s)]
 
 
-def _scan_command_tokens(rel, lineno, loc, tokens, source_repr, errors, failures):
-    """Scan an already-split token list for python launchers across its simple-command segments. Every
-    python word must resolve to a command-word position; if the launcher count does not match the python
-    words present, a launcher is hidden in an unexpected construct and this is a cannot-evaluate, so it is
-    never silently passed. Each recognized launcher that is not isolated is a failure."""
-    py_word_count = sum(1 for t in tokens if _is_py_word(t))
+def _scan_command_tokens(rel, lineno, loc, pairs, source_repr, errors, failures):
+    """Scan an already-split (decoded, raw) token pair list for python launchers across its
+    simple-command segments. Every python word must resolve to a command-word position; if the
+    launcher count does not match the python words present, a launcher is hidden in an unexpected
+    construct (one after a quoted or escaped leading keyword, which is a literal command name,
+    included) and this is a cannot-evaluate, so it is never silently passed. Each recognized
+    launcher that is not isolated is a failure."""
+    py_word_count = sum(1 for dec, _ in pairs if _is_py_word(dec))
     launchers = []
-    for seg in _segments(tokens):
+    for seg in _segments(pairs):
         rest = _strip_launcher_prefix(seg)
-        if rest and _is_py_word(rest[0]):
-            launchers.append(rest)
+        if rest and _is_py_word(rest[0][0]):
+            launchers.append([dec for dec, _ in rest])
     if len(launchers) != py_word_count:
         errors.append((rel, lineno, loc, "a python token is not in a resolvable command-word position: "
                        "{!r}".format(source_repr)))
@@ -572,9 +657,13 @@ def _check_shell_line(rel, lineno, line, errors, failures):
     """Scan one shell line (from run_all_checks.sh or a workflow `run:` scalar) for python launchers.
     The decision is made on the DECODED command words, exactly as the settings path does via the shared
     `_scan_command_tokens`, so a quote/escape-obfuscated launcher NAME that bash resolves to a real
-    interpreter (`pyt\\hon3`, `pyt"hon"3`, `py'thon'3`) is caught. Fail-closed: a line that may carry a
-    python launcher but cannot be parsed, or one whose python token cannot be resolved to a command
-    word, is a cannot-evaluate, so a launcher hidden in an unexpected construct is never silently passed.
+    interpreter (`pyt\\hon3`, `pyt"hon"3`, `py'thon'3`) is caught, while a LEADING KEYWORD is skipped
+    only in its literal spelling (a quoted or escaped `i'f'`, `"then"`, `d\\o`, `t'ime'`, `'!'` is
+    a literal command name bash would run, so the python word after it is not in a command-word
+    position: a cannot-evaluate, never a finding from a misread position). Fail-closed: a line that
+    may carry a python launcher but cannot be parsed, or one whose python token cannot be resolved
+    to a command word, is a cannot-evaluate, so a launcher hidden in an unexpected construct is
+    never silently passed.
 
     The raw prefilter remains ONLY as a cheap early-accept that can never cause a miss: bash decoding
     strips quote/backslash characters and never inserts letters, so a decoded `python` launcher must
@@ -585,12 +674,12 @@ def _check_shell_line(rel, lineno, line, errors, failures):
     if not PY_TOKEN_RE.search(code) and not QUOTE_OR_ESCAPE_RE.search(code):
         return
     try:
-        tokens = _shell_split(code)
+        pairs = _shell_split_pairs(code)
     except ValueError as exc:
         errors.append((rel, lineno, "", "shell line may carry a python launcher but does not parse; "
                        "fail-closed: {}".format(exc)))
         return
-    _scan_command_tokens(rel, lineno, "", tokens, code.strip(), errors, failures)
+    _scan_command_tokens(rel, lineno, "", pairs, code.strip(), errors, failures)
 
 
 def _decode_scalar(val):
@@ -825,11 +914,17 @@ def _yaml_run_lines(text):
     header and the key (its content lines, bounded by the key column, are yielded). The CLOSED
     line grammar governs that next line BEFORE it is read as command text: a mapping key of ANY
     spelling (the plain identifier form is the defaults.run mapping; a spaced key, a `foo.bar :`
-    or `123:` key, and any text carrying `: ` or ending with a colon are cannot-evaluate), an
+    or `123:` key, and an UNQUOTED plain value whose OPERATIVE text -- the part before its ` #`
+    trailing comment -- carries `: `/`:<TAB>` or ends with a colon are cannot-evaluate; a WHOLE
+    quoted scalar is never mapping-tested, it is decoded or refused by _decode_scalar, so
+    `'echo foo: bar'` and a `: ` inside a trailing comment are clean scalars), an
     explicit-key indicator (`? shell`) and a `- ` sequence item (`- shell: bash`) are each
-    refused, never misread as a command. The value is
-    null (nothing is yielded) only when that next non-blank, non-comment line is not deeper than the
-    key, or the text ends. Unsupported (cannot-evaluate, never a silent null): a comment line
+    refused, never misread as a command; a sequence item AT THE KEY'S OWN COLUMN (comment
+    lines between included) is YAML's reading of the run: VALUE as a sequence and is refused
+    BEFORE the null decision, never read as null. The value is
+    null (nothing is yielded) only when that next non-blank, non-comment line is not deeper than
+    the key and does not begin a sequence item at the key's own column, or the text ends.
+    Unsupported (cannot-evaluate, never a silent null): a comment line
     between an empty `run:` and a deeper value line, a next-line block header with no content deeper
     than the key, block content at or above that header's column, a line opening with `#` directly
     after that next-line header (YAML reads it as block CONTENT, not a comment; this line reader
@@ -953,7 +1048,9 @@ def _yaml_run_lines(text):
             # PyYAML (a next-line plain scalar; a next-line LITERAL block header whose content is
             # deeper than both the header and the key, the content run bounded by the key column).
             # The null decision skips comment lines (a YAML comment carries no value): the value is
-            # null ONLY when the next non-blank, NON-COMMENT line is not deeper than the key, or
+            # null ONLY when the next non-blank, NON-COMMENT line is not deeper than the key AND
+            # does not begin a sequence item at the key's own column (YAML reads that as the run:
+            # SEQUENCE value; the key-column check below refuses it BEFORE the null decision), or
             # the text ends. Any other arrangement (a comment line before a deeper value, a header
             # with no content deeper than the key, block content at or above the header's column,
             # a line opening with '#' directly after the header, which YAML reads as block content
@@ -970,6 +1067,22 @@ def _yaml_run_lines(text):
                 continue
             nxt = lines[j]
             nxt_indent = len(nxt) - len(nxt.lstrip(" "))
+            nbare = nxt.strip()
+            if (nxt_indent == m.start("key")
+                    and (nbare == "-" or (nbare[:1] == "-" and nbare[1:2] in (" ", "\t")))):
+                # A sequence item at the KEY'S OWN COLUMN: YAML reads a block sequence that sits
+                # at its key's indentation as that key's VALUE, so this run: is NOT null. The
+                # defaults.run and step shapes (`run:` with `- python3 x.py` at the key column,
+                # comment lines between included: the loop above already skipped them) each used
+                # to take the null decision below, and the item line then passed the generic
+                # grammar as a plain sequence item, a false clean. Refused BEFORE the null
+                # decision: cannot-evaluate, never read as null, never scanned as command text.
+                unsupported.append((j + 1, "a sequence item at the run: key's own column after "
+                                          "an empty run: (YAML reads the run: value as a "
+                                          "sequence, never as null), outside the supported "
+                                          "line grammar"))
+                i = j + 1
+                continue
             if nxt_indent <= m.start("key"):
                 i += 1
                 continue
@@ -1120,12 +1233,25 @@ def _yaml_run_lines(text):
                                           "mapping), outside the supported line grammar"))
                 i = j + 1
                 continue
-            if ": " in nval or ":\t" in nval or nval.endswith(":"):
-                unsupported.append((j + 1, "a mapping key (of any spelling) on the line after "
-                                          "an empty run: (YAML reads the run: value as a "
-                                          "mapping), outside the supported line grammar"))
-                i = j + 1
-                continue
+            if nval[:1] not in ("'", '"'):
+                # The mapping-indicator test reads ONLY an UNQUOTED plain value's OPERATIVE text,
+                # the part before its ` #` trailing comment (YAML strips that comment from a
+                # plain scalar exactly where _strip_comment does, so `echo ok # note: harmless`
+                # is the plain scalar `echo ok`, never a mapping). A WHOLE quoted scalar is a
+                # SCALAR whatever its body carries (`'echo foo: bar'`), so it is never
+                # mapping-tested: it goes to _decode_scalar below, which decodes the whole
+                # single-quoted form and refuses every other quoted spelling (a double-quoted
+                # value, a quote escape, trailing text), exactly as on the key line. KEPT
+                # over-refusal: a plain operative text carrying `: `/`:<TAB>` or ending with a
+                # colon is refused with the mapping diagnostic even where YAML would reject the
+                # text as malformed rather than read a mapping from it.
+                operative = re.split(r"[ \t]#", nval, maxsplit=1)[0].rstrip()
+                if ": " in operative or ":\t" in operative or operative.endswith(":"):
+                    unsupported.append((j + 1, "a mapping key (of any spelling) on the line after "
+                                              "an empty run: (YAML reads the run: value as a "
+                                              "mapping), outside the supported line grammar"))
+                    i = j + 1
+                    continue
             k = j + 1
             while k < n and lines[k].strip() == "":
                 k += 1
@@ -1269,11 +1395,11 @@ def _check_hooks_json(rel, text, errors, failures):
                     # The settings form: a shell string that may chain commands (e.g. `prep && python3
                     # x.py`), so segment-split and check every launcher segment, not just the first.
                     try:
-                        tokens = _shell_split(command)
+                        pairs = _shell_split_pairs(command)
                     except ValueError as exc:
                         errors.append((rel, 0, hloc, "command string does not parse: {}".format(exc)))
                         continue
-                    _scan_command_tokens(rel, 0, hloc, tokens, command, errors, failures)
+                    _scan_command_tokens(rel, 0, hloc, pairs, command, errors, failures)
 
 
 def _candidate_mode(path):
@@ -1564,7 +1690,13 @@ def main():
 #      disappears when the bound reverts to the dash indent; the value on the line after an
 #      empty run: is governed by the SAME closed grammar (a dotted `foo.bar : bash` and a
 #      numeric `123: bash` mapping key, a `? shell` explicit-key indicator and a
-#      `- shell: bash` sequence item each used to be read as command text and pass clean), a
+#      `- shell: bash` sequence item each used to be read as command text and pass clean;
+#      the mapping test reads ONLY an unquoted plain value's text before its ` #` comment,
+#      so a whole single-quoted `'echo foo: bar'` and a `: ` inside a trailing comment are
+#      clean scalars; a sequence item AT THE KEY'S OWN COLUMN, comment-separated included,
+#      used to be read as NULL and pass clean and is now cannot-evaluate; and a quoted or
+#      escaped leading keyword, `i'f'`/`"then"`/`d\o`/`t'ime'`/`'!'`, is a literal
+#      command name, so a bare launcher after it is a cannot-evaluate, never a finding), a
 #      shell: keyword is the literal comment-stripped scalar (`ba'sh'`, `ba"sh"`, `ba\sh` and
 #      `b''ash`, at a step and under defaults.run, each used to shell-decode to bash and pass
 #      clean), and the remaining generic checks are each pinned by a row of their own: the
@@ -2398,7 +2530,14 @@ def self_test_main():
         #     continued shell refusals; the `- run: >` folded consumer's KEY-column bound (its
         #     line-7 quoted-key diagnostic disappears when the bound reverts to the dash
         #     indent); the empty-run next-line closed grammar (a dotted and a numeric mapping
-        #     key, an explicit-key indicator, a sequence item); the literal shell-keyword
+        #     key, an explicit-key indicator, a sequence item, one row per sub-condition --
+        #     a lone '-', a '-'+TAB item, a lone '?', a ':'+TAB dotted key, a trailing
+        #     colon -- the three clean next-line scalars the mapping test used to over-refuse,
+        #     and the four key-column sequence shapes, comment-separated included, that used
+        #     to be read as null); the literal LEADING-KEYWORD spelling in a run: block (a
+        #     quoted or escaped if/then/do/time/'!' before a bare launcher is a
+        #     cannot-evaluate, never a finding; bare coproc is the pre-existing control; an
+        #     unquoted if still skips, pinned by its exit-1 finding); the literal shell-keyword
         #     comparison (embedded single-quote, double-quote, backslash and doubled-quote
         #     spellings, at a step and under defaults.run); _flow_sequence_value_ok (the
         #     colon-carrying flow sequence); the generic node-property refusal; the generic
@@ -2466,6 +2605,68 @@ def self_test_main():
                  "name: Q\ndefaults:\n  run:\n    - shell: bash\njobs:\n  q:\n    steps:\n"
                  "      - run: python3 -I -B tools/alpha.py\n", 2, 4,
                  "a sequence item on the line after an empty run:"),
+                ("next-line-seq-key-col-defaults",
+                 "name: Q\ndefaults:\n  run:\n  - python3 tools/alpha.py\njobs:\n  q:\n    steps:\n"
+                 "      - run: python3 -I -B tools/alpha.py\n", 2, 4,
+                 "a sequence item at the run: key's own column after an empty run:"),
+                ("next-line-seq-key-col-comment",
+                 "name: Q\ndefaults:\n  run:\n  # c\n  - python3 tools/alpha.py\njobs:\n  q:\n"
+                 "    steps:\n      - run: python3 -I -B tools/alpha.py\n", 2, 5,
+                 "a sequence item at the run: key's own column after an empty run:"),
+                ("next-line-seq-key-col-job-defaults",
+                 "name: Q\njobs:\n  q:\n    defaults:\n      run:\n      - python3 tools/alpha.py\n"
+                 "    steps:\n      - run: python3 -I -B tools/alpha.py\n", 2, 6,
+                 "a sequence item at the run: key's own column after an empty run:"),
+                ("next-line-seq-key-col-step",
+                 sbase + "      - run:\n        - python3 tools/alpha.py\n", 2, 6,
+                 "a sequence item at the run: key's own column after an empty run:"),
+                ("next-line-lone-dash",
+                 "name: Q\ndefaults:\n  run:\n    -\njobs:\n  q:\n    steps:\n"
+                 "      - run: python3 -I -B tools/alpha.py\n", 2, 4,
+                 "a sequence item on the line after an empty run:"),
+                ("next-line-dash-tab",
+                 "name: Q\ndefaults:\n  run:\n    -\techo hi\njobs:\n  q:\n    steps:\n"
+                 "      - run: python3 -I -B tools/alpha.py\n", 2, 4,
+                 "a sequence item on the line after an empty run:"),
+                ("next-line-lone-question",
+                 "name: Q\ndefaults:\n  run:\n    ?\njobs:\n  q:\n    steps:\n"
+                 "      - run: python3 -I -B tools/alpha.py\n", 2, 4,
+                 "an explicit-key indicator on the line after an empty run:"),
+                ("next-line-colon-tab",
+                 "name: Q\ndefaults:\n  run:\n    a.b:\tbash\njobs:\n  q:\n    steps:\n"
+                 "      - run: python3 -I -B tools/alpha.py\n", 2, 4,
+                 "a mapping key (of any spelling) on the line after an empty run:"),
+                ("next-line-trailing-colon",
+                 "name: Q\ndefaults:\n  run:\n    a.b:\njobs:\n  q:\n    steps:\n"
+                 "      - run: python3 -I -B tools/alpha.py\n", 2, 4,
+                 "a mapping key (of any spelling) on the line after an empty run:"),
+                ("next-line-sq-colon-clean",
+                 sbase + "      - run:\n          'echo foo: bar'\n", 0, None, None),
+                ("next-line-comment-colon-clean",
+                 sbase + "      - run:\n          echo ok # note: harmless\n", 0, None, None),
+                ("next-line-isolated-comment-colon-clean",
+                 sbase + "      - run:\n          python3 -I x.py  # :\n", 0, None, None),
+                ("keyword-quoted-if",
+                 sbase + "      - run: |\n          i'f' python3 x.py\n", 2, 6,
+                 "a python token is not in a resolvable command-word position"),
+                ("keyword-quoted-then",
+                 sbase + "      - run: |\n          \"then\" python3 x.py\n", 2, 6,
+                 "a python token is not in a resolvable command-word position"),
+                ("keyword-escaped-do",
+                 sbase + "      - run: |\n          d\\o python3 x.py\n", 2, 6,
+                 "a python token is not in a resolvable command-word position"),
+                ("keyword-quoted-time",
+                 sbase + "      - run: |\n          t'ime' python3 x.py\n", 2, 6,
+                 "a python token is not in a resolvable command-word position"),
+                ("keyword-quoted-bang",
+                 sbase + "      - run: |\n          '!' python3 x.py\n", 2, 6,
+                 "a python token is not in a resolvable command-word position"),
+                ("keyword-bare-coproc",
+                 sbase + "      - run: |\n          coproc python3 x.py\n", 2, 6,
+                 "a python token is not in a resolvable command-word position"),
+                ("keyword-literal-if-control",
+                 sbase + "      - run: |\n          if python3 x.py; then true; fi\n", 1, None,
+                 "non-isolated launcher 'python3 x.py'"),
                 ("shell-embedded-sq-step",
                  sbase + "      - shell: ba'sh'\n        run: |\n          echo hi\n", 2, 5,
                  "neither a bare known shell keyword"),
@@ -2629,7 +2830,18 @@ def self_test_main():
           "a '- name: |' block, inside and outside a steps: block, is a line-named finding, "
           "never consumed content); the value on the line after an empty run: is governed by "
           "the same closed grammar (a mapping key of any spelling, an explicit-key indicator "
-          "and a '- ' sequence item are cannot-evaluate); and a shell: value is clean only "
+          "and a '- ' sequence item are cannot-evaluate; the mapping test reads ONLY an "
+          "unquoted plain value's operative text before its ' #' comment, so a whole "
+          "single-quoted 'echo foo: bar', a ': ' inside a trailing comment and an isolated "
+          "launcher with a ': ' comment stay clean, and each sub-condition, a lone '-', a "
+          "'-'+TAB item, a lone '?', a ':'+TAB and a trailing colon, is pinned by its own "
+          "fixture); a sequence item at the run: key's own column after an empty run: "
+          "(workflow and job defaults, a step, and a comment-separated spelling) is "
+          "cannot-evaluate, never read as null; a leading shell keyword is skipped only in "
+          "its literal spelling (a quoted or escaped if/then/do/time/'!' is a literal "
+          "command name: the bare launcher after it is a cannot-evaluate, never a finding, "
+          "bare coproc stays cannot-evaluate, and the unquoted spelling still skips); "
+          "and a shell: value is clean only "
           "when its comment-stripped scalar is itself a known shell keyword on one line (a "
           "quoted keyword, an embedded quote or backslash spelling, and a deeper continuation "
           "line are cannot-evaluate); "
