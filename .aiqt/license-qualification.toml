@@ -3,10 +3,11 @@
 #
 # licence: the project's declared licence identity, an identity from the gate's closed
 # LICENCE_IDENTITIES table. The gate VERIFIES the declaration against the licence file (exactly one of
-# LICENSE, LICENSE.md, LICENSE.txt, COPYING may be present): the file must contain that identity's
-# line-anchored canonical opening and no other identity's opening. An absent key falls back to
-# inference, accepted only when exactly one identity's canonical opening matches; anything else is
-# cannot-evaluate (exit 2).
+# LICENSE, LICENSE.md, LICENSE.txt, COPYING may be present): that identity's canonical opening must
+# be the file's LEADING non-blank text, ending on a complete token boundary, and no other identity's
+# opening may appear anywhere in the file. An absent key falls back to inference only for a
+# rights-RESERVING identity whose opening leads the file; a rights-waiving identity (CC0-1.0,
+# Unlicense) is NEVER inferred and must be declared here; anything else is cannot-evaluate (exit 2).
 #
 # Each [[exception]] row excuses EXACTLY ONE waiver-phrase occurrence on ONE scanned surface and MUST
 # carry these keys:
@@ -16,7 +17,8 @@
 # and exactly ONE binder:
 #   line        the exact text of the line the occurrence starts on (trailing CR/LF excluded)
 #   occurrence  the 1-based index of that phrase's match within that file, in position order
-# A row that matches no present occurrence is STALE and the gate is cannot-evaluate (exit 2); a second
+# A row that matches no present occurrence is STALE and the gate is cannot-evaluate (exit 2), under a
+# rights-waiving licence too (rows are validated whether or not class 3 scans); a second
 # occurrence beside an excused one still flags. An absent file means no declaration and no exceptions
 # (adopters own their configuration, like .aiqt/newtab.toml); a present but malformed file is
 # cannot-evaluate (exit 2), never a clean pass. This repository needs no exceptions, so this file
