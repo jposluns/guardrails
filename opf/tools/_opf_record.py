@@ -95,7 +95,8 @@ record authoring (spec 9.2 is the precedent; spec 8.8 is normative):
   7. ONE journaled transaction publishes every operand (counters first), rooted at the generation's
      record journal home (.aiqt/record/journal at homes 1; the typed capability home
      .working/journals/record/journal at homes 2, written through the capability-bound _opf_journal
-     API), each operand pinned to the exact bytes it was planned from;
+     API, and preceded there by the run's irrevocable id reservation under the same held capability
+     and run id, _reserve_claim, spec 8.2), each operand pinned to the exact bytes it was planned from;
   8. render the declared views (--write), then require a full doctor VALID (a status change may leave
      only doctor's cannot-evaluate for exactly that record and from/to pair, pending until commit, and
      never a finding: _snapshot_pending);
@@ -104,10 +105,18 @@ record authoring (spec 9.2 is the precedent; spec 8.8 is normative):
 
 The allocation seam: homes 1 claims each id by advancing counters.toml as an operand INSIDE the journaled
 transaction, under the held lease, and reports ids only after the COMPLETE frame, so a rollback restores
-the counters without ever un-publishing an observed id. Homes 2 (the irrevocable
-journals/<kind>/allocations reservation, spec 4.2) is not active in this build (the record reservation
-is a separate later change), and the seam refuses it fail-closed rather than claim through the homes-1
-path, so on a homes-2 store every subcommand still refuses before publication. A legacy
+the counters without ever un-publishing an observed id. Homes 2 derives each next id per counter key as
+one more than the maximum of the counters.toml high-water and every journals/record/allocations
+reservation's [claims] value for that key (spec 8.2), so a reserved number is treated as issued even
+where no published record carries it, then publishes this run's own irrevocable reservation through
+_opf_journal.reserve_allocation BEFORE the journaled publication, under the SAME held operation
+capability that re-verified that derivation (_reserve_claim), so two runs never receive the same id: a
+peer's reservation landing between planning and the capability changes the derivation and refuses this
+run (re-run), never a duplicate. An unreadable, malformed or conflicting reservation refuses (exit 2),
+never a silent fallback to the homes-1 counters path; a run killed after reserving and before
+publishing leaves its reservation standing, its numbers conservatively still reserved (the final doctor
+does not yet read reservations, so a store carrying such an orphan grades the orphan's numbers as
+missing records until that later change). A legacy
 .aiqt/record/journal found on a homes-2 store is refused and never recovered: homes 2 has no homes
 migration to carry it (spec 4.2).
 
@@ -513,7 +522,7 @@ def _require_canonical(operand):
 class Context:
     """The resolved store and the models this operation plans from."""
     __slots__ = ("res", "root", "root_fd", "machine_rel", "manifest", "homes", "types", "vendors",
-                 "import_status", "counters", "version", "worklog", "done_index", "journal_rel")
+                 "import_status", "counters", "version", "worklog", "done_index", "journal_rel", "demand", "claims")
 
     def __init__(self, res, root, root_fd):
         self.res = res
@@ -530,6 +539,8 @@ class Context:
         self.version = None
         self.worklog = None        # the worklog operand: every subcommand appends one entry
         self.done_index = None     # the done index operand, read by done-with-receipt only
+        self.demand = None         # the one claim of this operation (set by _claim): its namespaces,
+        self.claims = None         # and at homes 2 the claimed high per namespace (_reserve_claim reads both)
 
     def rel(self, name):
         return "{}/{}".format(self.machine_rel, name)
@@ -568,18 +579,41 @@ def _counter_state(ctx, counters_model):
         optional_namespaces=frozenset(_opf_store.IMPORTER_TYPES.values()))
 
 
-def claim_ids(homes, high, demand, known_complete):
+def claim_ids(homes, high, demand, known_complete, reserved=None):
     """THE allocation seam (exactly one). `demand` is the ordered list of namespaces to claim; returns
-    (ids, new_high). Homes 1: next_id per namespace from the proven-complete high-water map; the caller
-    publishes the counters advance as an operand INSIDE the journaled transaction under the held lease, so
-    the claim is one atomic act (spec 8.2) and ids are reported only after COMPLETE. Homes 2 delegates to
-    the irrevocable journals/<kind>/allocations reservation (spec 4.2), which is not active in this build:
-    it refuses fail-closed rather than claim through the homes-1 path."""
-    if homes != 1:
-        raise RecordError("homes-{} id allocation (an irrevocable journals/<kind>/allocations reservation, "
-                          "spec 4.2) is not active in this build; refusing rather than claiming ids through "
-                          "the homes-1 counters path (fail-closed)".format(homes))
+    (ids, new_high). Homes 1: next_id per namespace from the proven-complete high-water map, with
+    `reserved` refused (the homes-1 counters path takes no reservation input); the caller publishes the
+    counters advance as an operand INSIDE the journaled transaction under the held lease, so the claim is
+    one atomic act (spec 8.2) and ids are reported only after COMPLETE. Homes 2: `reserved` is REQUIRED,
+    the per-counter-key maximum over every existing journals/record/allocations reservation of this kind
+    (_reservation_high, each one a [claims] map), and the next id per counter key is one more than the
+    maximum of the counters high-water and that reserved value (the spec 8.2 next-ID derivation), so a
+    reserved number is never issued again even where no published record carries it; the caller then
+    publishes the run's own irrevocable reservation BEFORE the journaled publication
+    (_reserve_claim; this function derives only). A homes-2 call without the reservation scan, a
+    malformed scan, and any other generation each refuse fail-closed rather than claim through the
+    homes-1 counters path."""
+    if type(homes) is int and homes == 1:
+        if reserved is not None:
+            raise RecordError("the homes-1 counters path takes no reservation input; fail-closed")
+        base = {}
+    elif type(homes) is int and homes == 2:
+        if reserved is None:
+            raise RecordError("homes-2 id allocation requires the journals/record/allocations "
+                              "reservation scan (spec 8.2); refusing rather than claiming ids through "
+                              "the homes-1 counters path (fail-closed)")
+        if not (isinstance(reserved, dict) and all(isinstance(k, str) and type(v) is int and v >= 1
+                                                   for k, v in reserved.items())):
+            raise RecordError("the reservation scan must map counter keys to high-water integers of at "
+                              "least 1; fail-closed")
+        base = reserved
+    else:
+        raise RecordError("homes generation {!r} is unknown to this build; refusing rather than "
+                          "claiming ids through the homes-1 counters path (fail-closed)".format(homes))
     cur = dict(high)
+    for key, value in base.items():
+        if value > cur.get(key, 0):
+            cur[key] = value
     ids = []
     for ns in demand:
         try:
@@ -591,18 +625,128 @@ def claim_ids(homes, high, demand, known_complete):
     return ids, cur
 
 
+# The homes-2 reservation home of this verb, derived from the one path authority
+# (_opf_store.allocation_record): the directory every record run of the verb publishes its
+# irrevocable id reservation into (spec 4.2/8.2).
+_ALLOCATIONS_REL = _opf_store.allocation_record(
+    "record", "record-00000000T000000Z-0000000000000000").rsplit("/", 1)[0]
+
+
+def _reservation_run_id(entry):
+    """The run id a reservation file name binds, or None when the name is not <record-run-id>.toml
+    (allocation_record is the one grammar authority)."""
+    if not (isinstance(entry, str) and entry.endswith(".toml")):
+        return None
+    run_id = entry[:-len(".toml")]
+    try:
+        _opf_store.allocation_record("record", run_id)
+    except ValueError:
+        return None
+    return run_id
+
+
+def _is_reservation_garbage(entry):
+    """True ONLY for a staging leftover of a reservation publication (the _opf_oplock staging pattern
+    bound to a grammar-valid reservation name): a process that died before its exclusive link published
+    no reservation (reserve_allocation retires such a leftover as garbage under the held capability),
+    so the scan skips it, never reads it, and never removes it."""
+    head, marker, _hexpart = entry.rpartition(_opf_oplock._STAGING_MARKER)
+    return (bool(marker) and entry.startswith(".") and _opf_oplock._is_staging_name(entry, head[1:])
+            and _reservation_run_id(head[1:]) is not None)
+
+
+def _read_reservation(afd, entry):
+    """One reservation, read fail-closed beneath the already-open allocations directory fd, returning
+    its validated claims map: the entry bytes must equal the exact canonical payload of the reservation
+    its own name and content declare (reservation_payload: a reader requires exact equality), so an
+    unreadable, non-regular, malformed or conflicting entry refuses (RecordError), never a silent
+    fallback."""
+    rel = "{}/{}".format(_ALLOCATIONS_REL, entry)
+    run_id = _reservation_run_id(entry)
+    if run_id is None:
+        raise RecordError("the record allocations home {} holds {!r}, which is not an id reservation "
+                          "(<record-run-id>.toml) or a staging leftover of one; manual intervention "
+                          "required (fail-closed)".format(_ALLOCATIONS_REL, entry))
+    try:
+        raw, _st = _journal._read_at(afd, entry, rel)
+    except (_journal.JournalError, OSError) as exc:
+        raise RecordError("cannot read the id reservation {} ({}); fail-closed".format(rel, exc))
+    try:
+        model = tomllib.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise RecordError("the id reservation {} is malformed ({}); fail-closed".format(rel, exc))
+    claims = model.get("claims") if isinstance(model, dict) else None
+    operation_id = model.get("operation_id") if isinstance(model, dict) else None
+    try:
+        expected = _opf_journal.reservation_payload("record", run_id, operation_id, claims)
+    except _journal.JournalError as exc:
+        raise RecordError("the id reservation {} is malformed ({}); fail-closed".format(rel, exc))
+    if raw != expected:
+        raise RecordError("the id reservation {} conflicts with the exact canonical reservation its "
+                          "name and content declare (a reservation is never rewritten, spec 8.2); "
+                          "manual intervention required (fail-closed)".format(rel))
+    return dict(claims)
+
+
+def _reservation_high(ctx):
+    """The per-counter-key maximum over EVERY existing id reservation in the record allocations home,
+    the spec 8.2 next-ID derivation input: an absent home reads as no reservations (the empty map); an
+    unreadable, non-regular, misnamed, malformed or conflicting entry refuses (_read_reservation, exit
+    2 through cli), never a silent fallback to the homes-1 counters path. A staging leftover of the
+    publication idiom is skipped (_is_reservation_garbage): it carries no reservation."""
+    try:
+        pfd, name = _journal._open_parent(ctx.root_fd, _ALLOCATIONS_REL)
+    except FileNotFoundError:
+        return {}
+    except (_journal.JournalError, OSError) as exc:
+        raise RecordError("cannot open the record allocations home {} ({}); fail-closed".format(
+            _ALLOCATIONS_REL, exc))
+    try:
+        try:
+            afd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=pfd)
+        except FileNotFoundError:
+            return {}
+        except OSError as exc:
+            raise RecordError("cannot open the record allocations home {} ({}); fail-closed".format(
+                _ALLOCATIONS_REL, exc))
+        try:
+            try:
+                entries = sorted(os.listdir(afd))
+            except OSError as exc:
+                raise RecordError("cannot list the record allocations home {} ({}); fail-closed".format(
+                    _ALLOCATIONS_REL, exc))
+            high = {}
+            for entry in entries:
+                if _is_reservation_garbage(entry):
+                    continue
+                for key, value in _read_reservation(afd, entry).items():
+                    if value > high.get(key, 0):
+                        high[key] = value
+            return high
+        finally:
+            _journal._close_fd_quietly(afd)
+    finally:
+        _journal._close_fd_quietly(pfd)
+
+
 def _claim(ctx, demand):
-    """Claim `demand` against the counters operand: the proof, then the seam, then the new model."""
+    """Claim `demand` against the counters operand: the proof, then the seam, then the new model. At
+    homes 2 the seam additionally reads every existing reservation (_reservation_high), and the claimed
+    map is kept on the context (ctx.demand, ctx.claims) for _reserve_claim, which re-derives and
+    publishes it under the held capability."""
     high, findings = _counter_state(ctx, ctx.counters.model)
     if findings:
         raise RecordError("counters.toml cannot license an allocation: {} (fail-closed)".format(
             "; ".join(findings)))
-    ids, new_high = claim_ids(ctx.homes, high, demand, known_complete=True)
+    reserved = _reservation_high(ctx) if ctx.homes == 2 else None
+    ids, new_high = claim_ids(ctx.homes, high, demand, known_complete=True, reserved=reserved)
     new_model = copy.deepcopy(ctx.counters.model)
     new_model["counters"] = dict(new_model.get("counters") or {})
     for ns in demand:
         new_model["counters"][ns] = new_high[ns]
     ctx.counters.new_model = new_model
+    ctx.demand = list(demand)
+    ctx.claims = {ns: new_high[ns] for ns in demand} if ctx.homes == 2 else None
     return ids
 
 
@@ -1331,7 +1475,8 @@ def _expected_delta(req, ctx, raws, now):
     """The allowed delta, derived INDEPENDENTLY of the planner's output: ([(rel, expected model)] in
     journal order, the expected ids, the expected (id, from, to) of a status change or None). The inputs
     are the request (the caller passes a copy taken before planning), the allocation result (claim_ids
-    over the high-water map reparsed from the bytes the plan was made from), the clock value, the
+    over the high-water map reparsed from the bytes the plan was made from, plus its own reservation
+    scan at homes 2, _reservation_high), the clock value, the
     planned-from bytes, and the schema rules (the type's namespace, initial state, terminal and gated
     states, and the proposer kinds of spec 8.4). Every baseline, including the one row a status change
     rewrites and its prior status, is reparsed from the planned-from bytes, so no expected row or table is
@@ -1356,11 +1501,13 @@ def _expected_delta(req, ctx, raws, now):
     high, findings = _counter_state(ctx, counters)
     if findings:
         raise _postcondition_failed("the prior counters.toml cannot license the claim")
-    ids, new_high = claim_ids(ctx.homes, high, demand, known_complete=True)
+    reserved = _reservation_high(ctx) if ctx.homes == 2 else None
+    ids, new_high = claim_ids(ctx.homes, high, demand, known_complete=True, reserved=reserved)
     table = dict(counters.get("counters") or {})
     for ns in demand:
-        if new_high[ns] != table.get(ns, 0) + 1:
-            raise _postcondition_failed("the claim does not advance {} by exactly one".format(ns))
+        if new_high[ns] != max(table.get(ns, 0), (reserved or {}).get(ns, 0)) + 1:
+            raise _postcondition_failed("the claim does not advance {} by exactly one above "
+                                        "the counter and reservation high".format(ns))
         table[ns] = new_high[ns]
     counters["counters"] = table
     wid = ids[-1]
@@ -2350,7 +2497,39 @@ _FAILED_STATE = {"open": "still open",
                  "complete": "COMPLETE (its publication is present, with its render and final doctor never run)"}
 
 
-def _publish(ctx, plan, subcommand, cap=None):
+def _reserve_claim(ctx, plan, cap, run_id):
+    """Publish the run's irrevocable id reservation (spec 4.2/8.2) UNDER the held
+    operation capability, re-deriving the claim first from the same counters bytes (re-checked
+    unchanged under the capability) and a FRESH reservation scan: the capability lease leg is the
+    single-writer lock, so the derivation verified here is the one no peer can move, and a reservation
+    that landed between planning and the capability changes the derived ids and refuses this run
+    (re-run), never a duplicate id. The reservation is published BEFORE the journaled publication:
+    a run that dies between the two leaves the reservation standing, its numbers conservatively
+    still reserved and never issued again. A reservation refusal (an existing conflicting entry
+    included) refuses the run with nothing recorded."""
+    if ctx.demand is None or ctx.claims is None:
+        raise RecordError("no claim was planned for this operation; nothing written (fail-closed)")
+    high, findings = _counter_state(ctx, ctx.counters.model)
+    if findings:
+        raise RecordError("counters.toml cannot license an allocation: {} (fail-closed)".format(
+            "; ".join(findings)))
+    ids, new_high = claim_ids(ctx.homes, high, ctx.demand, known_complete=True,
+                              reserved=_reservation_high(ctx))
+    claims = {ns: new_high[ns] for ns in ctx.demand}
+    if list(plan.ids) != ids or claims != ctx.claims:
+        raise RecordError("the homes-2 id derivation changed between planning and the held capability "
+                          "(an id reservation landed in between); nothing written; re-run (fail-closed)")
+    try:
+        _opf_journal.reserve_allocation(cap, "record", run_id, claims)
+    except (_journal.JournalError, OSError) as exc:
+        raise RecordError("the homes-2 id reservation {} for {} could not be published ({}); nothing "
+                          "is offered as recorded, and a reservation this failure may have left "
+                          "standing is irrevocable, its numbers conservatively reserved "
+                          "(fail-closed)".format(
+                              _opf_store.allocation_record("record", run_id), run_id, exc))
+
+
+def _publish(ctx, plan, subcommand, cap=None, run_id=None):
     """ONE journaled transaction publishes every operand, in dependency order (counters first). On a
     homes-2 store the publication runs through the capability-bound API in the typed journal home
     instead (_publish_homes2); the homes-1 path below is unchanged. Each
@@ -2374,7 +2553,7 @@ def _publish(ctx, plan, subcommand, cap=None):
     the lock for the next run's reconciliation, and a lock acquisition failing after its O_EXCL
     create, whose refusal says the created lock may be left in place (PR D fix 10)."""
     if ctx.journal_rel != JOURNAL_REL:
-        return _publish_homes2(ctx, plan, subcommand, cap)
+        return _publish_homes2(ctx, plan, subcommand, cap, run_id)
     root_fd = ctx.root_fd
     journal_root = _journal_root(ctx)
     try:
@@ -2480,7 +2659,7 @@ def _publish(ctx, plan, subcommand, cap=None):
         _journal._close_fd_quietly(jr_fd)
 
 
-def _publish_homes2(ctx, plan, subcommand, cap=None):
+def _publish_homes2(ctx, plan, subcommand, cap=None, run_id=None):
     """The homes-2 publication: ONE capability-bound _opf_journal.run_transaction in the typed record
     journal home (spec 4.2/8.8), the run id minted in the homes record- grammar, and the INTENT header
     carrying the planned bytes (staged, kind record only, D-a4) so a later recovery can tell a torn
@@ -2488,15 +2667,17 @@ def _publish_homes2(ctx, plan, subcommand, cap=None):
     txn_record("record", run_id) in the same act. The operation capability's mandatory lease leg IS the
     single-writer lease, so publication under it composes with no separately held write-guard lease: a
     caller that already holds the capability passes it, and a direct caller without one takes and
-    releases its own. Unreachable through _run_operation while claim_ids refuses homes 2 (the record
-    id reservation is a separate later change)."""
+    releases its own. _run_operation passes the run id its id reservation was published under
+    (_reserve_claim), so the reservation and the transaction share one run identity; a direct caller
+    that passes none gets a freshly minted run id and publishes with no reservation (the reservation
+    is _run_operation's step, not this seam's)."""
     try:
         _journal.require_containment()
     except (_journal.JournalError, OSError) as exc:
         raise RecordError("cannot prepare the record journal {} ({}); nothing written (fail-closed)".format(
             ctx.journal_rel, exc))
-    token = os.urandom(16).hex()
-    run_id = _record_run_id(token)
+    if run_id is None:
+        run_id = _record_run_id(os.urandom(16).hex())
     ops = []
     content = {}
     staged = []
@@ -2842,9 +3023,15 @@ def _run_operation(req):
             for op in plan.operands:
                 if _read_operand(root_fd, op.rel).raw != op.raw:
                     raise RecordError("{} changed after it was read; nothing written (fail-closed)".format(op.rel))
-            # 7. ONE journaled publication; 8. render, then the final doctor.
-            _publish(ctx, plan, req.subcommand,
-                     cap=lease if ctx.journal_rel != JOURNAL_REL else None)
+            # 7. at homes 2 the run's irrevocable id reservation FIRST (_reserve_claim, under the
+            # held capability, spec 8.2), then ONE journaled publication under the same run id;
+            # 8. render, then the final doctor.
+            if ctx.journal_rel != JOURNAL_REL:
+                run_id = _record_run_id(os.urandom(16).hex())
+                _reserve_claim(ctx, plan, lease, run_id)
+                _publish(ctx, plan, req.subcommand, cap=lease, run_id=run_id)
+            else:
+                _publish(ctx, plan, req.subcommand)
             try:
                 _render(root, plan.transition)
                 snapshot_pending = _final_gate(root, plan.transition)
@@ -2908,7 +3095,8 @@ def cli(argv):
 
 def self_test():
     """Unit vectors over synthetic models: the argument grammar, the allocation seam (homes 1 live, homes 2
-    refusing), the counters completeness proof, the four planners (the derived `/proposed`, the recorded
+    deriving over the reservation scan, spec 8.2), the counters completeness proof, the four planners
+    (the derived `/proposed`, the recorded
     pre-proposal state and --reason of a rejection, the one-to-one receipt), the released-span check, the
     byte-reproduction precondition, and the allowed-delta postcondition. Judged on returned
     values and refusals, never by grepping output. Returns 0 clean, 1 on a failure, 2 on a harness error."""
@@ -2996,7 +3184,25 @@ def _self_test_units(check):
     # -- the allocation seam and the completeness proof ----------------------------------------------------
     ids, high = claim_ids(1, {"BI": 4, "WL": 0}, ["BI", "BI", "WL"], known_complete=True)
     check("homes-1 claims sequential ids", ids == ["BI-5", "BI-6", "WL-1"] and high == {"BI": 6, "WL": 1})
-    check("homes-2 refuses fail-closed", _refuses(lambda: claim_ids(2, {"BI": 0}, ["BI"], True), "homes-2"))
+    check("homes-1 refuses a reservation input",
+          _refuses(lambda: claim_ids(1, {"BI": 0}, ["BI"], True, reserved={}), "no reservation input"))
+    check("homes 2 without the reservation scan refuses fail-closed",
+          _refuses(lambda: claim_ids(2, {"BI": 0}, ["BI"], True), "reservation scan"))
+    ids, high = claim_ids(2, {"BI": 4, "WL": 2}, ["BI", "WL"], True, reserved={})
+    check("a homes-2 claim no longer raises (no reservations)",
+          ids == ["BI-5", "WL-3"] and high["BI"] == 5 and high["WL"] == 3)
+    ids, high = claim_ids(2, {"BI": 4, "WL": 2}, ["BI", "WL"], True, reserved={"BI": 9, "WL": 1})
+    check("homes 2 derives one above the max of counters and reservations (spec 8.2)",
+          ids == ["BI-10", "WL-3"] and high["BI"] == 10 and high["WL"] == 3)
+    for res, want in ((3, "BI-5"), (4, "BI-5"), (5, "BI-6")):
+        ids, _hw = claim_ids(2, {"BI": 4}, ["BI"], True, reserved={"BI": res})
+        check("homes-2 reservation boundary {} claims {}".format(res, want), ids == [want])
+    check("a malformed reservation scan refuses",
+          _refuses(lambda: claim_ids(2, {"BI": 0}, ["BI"], True, reserved={"BI": True}),
+                   "high-water integers"))
+    for bad in (0, 3, True, "2", None):
+        check("an unknown homes generation refuses the claim ({!r})".format(bad),
+              _refuses(lambda bad=bad: claim_ids(bad, {"BI": 0}, ["BI"], True), "unknown"))
     check("an absent counter without the proof refuses",
           _refuses(lambda: claim_ids(1, {"WL": 0}, ["BI"], known_complete=False), "cannot claim"))
     check("a non-taxonomy namespace refuses", _refuses(lambda: claim_ids(1, {"ZZ": 0}, ["ZZ"], True)))

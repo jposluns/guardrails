@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OPF record-authoring gate (spec 8.8): `opf record` behaviour, and red-on-revert discriminators.
 
-  check_opf_record.py --self-test                    the fixture suite (T1-T78)
+  check_opf_record.py --self-test                    the fixture suite (T1-T80)
   check_opf_record.py --self-test --red-on-revert    the same, plus each test's flip must turn it red
 
 There is no live-adopter leg (this repository is not an OPFiles adopter), so the whole assurance rides the
@@ -100,11 +100,12 @@ Each case runs on its own copy of that template; the root is removed in a finall
   T21 a direct homes-2 _publish lands ONE capability-bound transaction in
       .working/journals/record/journal with its projection at txn_record("record", <rid>), the operands
       rewritten, and nothing under .aiqt (flip: route homes 2 to the legacy journal root)
-  T22 on a homes-2 store the verb still refuses at the claim seam (the record reservation is a separate
-      later change), with every byte untouched and neither journal home created (flips: a reconcile that
-      mkdirs the typed home; the retired validate_manifest patch, which validates the declaration with
-      homes stripped, so the real 2.0.0 homes-2 manifest reads as above the supported spec_version and
-      the run refuses at the manifest, never at the claim seam)
+  T22 on a homes-2 store the verb claims through the live reservation seam: create records end to end
+      with ONE irrevocable id reservation published under the COMPLETE transaction's own run id, its
+      claims exactly the counters advance, and an unreadable, malformed, conflicting or misnamed
+      reservation refuses exit 2 with every byte untouched, never a silent fallback to the homes-1
+      counters (flips: the reviewed head's refusing seam; a publication that skips the reservation;
+      the retired validate_manifest patch, under which the run refuses at the manifest)
   T23 a homes-2 publication killed at each journal step leaves the typed journal reconcilable: the next
       run reconciles it under the operation capability (the confirmed-dead gate clears the dead run's
       lease and active record), the operands end exactly at the prestate or exactly at the poststate,
@@ -157,8 +158,8 @@ Each case runs on its own copy of that template; the root is removed in a finall
       read the texts with the disclosure removed)
   T35 a live holder that releases between the trigger read and the recovery acquisition leaves nothing
       cleared and nothing pending under the held capability: the run reports no reconciliation and
-      continues to the plain homes-2 claim-seam refusal, operands untouched (flip: the acquisition
-      reports a reclaim it did not make)
+      continues to a plain homes-2 run that records, its reservation published under its run id
+      (flip: the acquisition reports a reclaim it did not make)
   T36 the journal home is reopened under the held capability: a home renamed aside and replaced by a
       peer's with an open transaction after the trigger read is planned from its current binding and
       rolled back (flip: plan through the trigger read's descriptor)
@@ -376,6 +377,17 @@ Each case runs on its own copy of that template; the root is removed in a finall
       retired HOMES2_SPEC_VERSION patch, under which the verb reads that store as generation 2 and
       chooses the typed journal home; the generation-only probe of T30, under which the run publishes
       into the legacy journal on the fresh store and reconciles the leftover in place)
+  T79 a homes-2 run killed after its reservation and before its publication leaves the reservation
+      standing and the operands at the prestate; after the confirmed-dead reclaim, the next create
+      derives ABOVE the orphaned reservation (the reserved numbers are never issued again), its own
+      reservation says so, and the run is then held at the post-publication gate, exit 2 with the
+      change left for review, because the doctor does not yet read reservations and grades the
+      orphaned numbers as missing records (flip: a derivation that ignores the reservation scan,
+      under which the reserved ids are issued again)
+  T80 two runs claiming the same kind never receive the same id: a first run's reservation, published
+      through the production claim-and-reserve path and never published to the store, moves a second
+      run through the same path to the next numbers, both reservations standing disjoint (flip: as
+      T79)
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
 or unusable, temporary storage unusable, or any unexpected harness fault), never a clean skip.
@@ -2349,9 +2361,11 @@ record._record_run_id = lambda lock_id: "record-create." + str(os.getpid()) + ".
 
 # Inside a killed child: activate homes 2 exactly as _self_test_homes2_active does (the manifest on
 # disk already declares the real pair, spec_version 2.0.0 and homes = 2; these are the two remaining
-# module patches, SUPPORTED_HOMES and the record spec_version gate of _Homes2SpecGate), and route the
-# claim seam through the homes-1 counters path, emulating the later id-reservation change, so the run
-# reaches the homes-2 publication.
+# module patches, SUPPORTED_HOMES and the record spec_version gate of _Homes2SpecGate; both stay
+# necessary until activation flips SUPPORTED_HOMES, since homes_generation activates nothing at 1 and
+# _load_manifest admits only the shipped SUPPORTED_SPEC_VERSION). The claim itself runs the REAL
+# homes-2 seam: the reservation scan, the spec 8.2 derivation, and the run id reservation published
+# before the publication.
 HOMES2_CHILD_FLIP = """
 import _opf_store
 _opf_store.SUPPORTED_HOMES = 2
@@ -2361,8 +2375,6 @@ class _Homes2SpecGate:
             return _opf_store.HOMES2_SPEC_VERSION
         return getattr(_opf_store, name)
 record._opf_store = _Homes2SpecGate()
-_claim_seam = record.claim_ids
-record.claim_ids = lambda homes, high, demand, known_complete: _claim_seam(1, high, demand, known_complete)
 """
 
 
@@ -2447,9 +2459,10 @@ def flip_t20():
 
 
 def t21_homes2_publish(fx):
-    """A direct homes-2 publication (claim_ids bypassed to the homes-1 counters path, emulating the
-    later id-reservation change) lands ONE capability-bound transaction in the typed journal home with
-    its terminal projection, rewrites exactly the planned operands, and touches nothing under .aiqt."""
+    """A direct homes-2 publication (the claim through the live homes-2 seam, over an empty reservation
+    scan; the direct _publish seam itself publishes no reservation) lands ONE capability-bound
+    transaction in the typed journal home with its terminal projection, rewrites exactly the planned
+    operands, and touches nothing under .aiqt."""
     env = fx.env
     root = fx.case("t21-homes2-publish")
     with _self_test_homes2_active(root):
@@ -2467,10 +2480,7 @@ def t21_homes2_publish(fx):
             ctx.version = record._read_operand(root_fd, ctx.rel(opf_check.VERSION_NAME)).model
             ctx.worklog = record._read_operand(root_fd, ctx.rel(opf_check.WORKLOG_NAME))
             operand = record._read_operand(root_fd, record._operand_rel(req, ctx))
-            seam = record.claim_ids
-            with patch.object(record, "claim_ids", lambda homes, high, demand, known_complete:
-                              seam(1, high, demand, known_complete)):
-                plan = record._PLANNERS["create"](req, ctx, operand, record._clock_now())
+            plan = record._PLANNERS["create"](req, ctx, operand, record._clock_now())
             for op in plan.operands:
                 op.new_raw = record._emit_bytes(op.new_model)
             record._publish(ctx, plan, "create")
@@ -2492,22 +2502,66 @@ def flip_t21():
     return patch.object(record, "_record_journal_rel", lambda homes: record.JOURNAL_REL)
 
 
-def t22_homes2_claim_refused(fx):
-    """On a homes-2 store the verb still refuses at the claim seam (the record id reservation is a
-    separate later change): every byte untouched, and neither the legacy nor the typed journal home is
-    created."""
+def t22_homes2_claim_reserves(fx):
+    """On a homes-2 store the verb claims through the live reservation seam: create records end to
+    end, publishing ONE irrevocable id reservation at the allocation record of the COMPLETE
+    transaction's own run id, byte-exact (reservation_payload) with claims equal to exactly the
+    counters advance; no legacy journal home is created. Fail-closed: an unreadable (non-regular),
+    a malformed, and a conflicting (content not the canonical reservation its name declares)
+    reservation each refuse exit 2 with every byte untouched, never a silent fallback to the
+    homes-1 counters path."""
     env = fx.env
-    root = fx.case("t22-homes2-claim")
-    with _self_test_homes2_active(root):
-        refused_untouched(env, root, CREATE, "is not active in this build")
+    base = fx.case("t22-homes2-base")
+    with _self_test_homes2_active(base):
+        root = fx.case("t22-homes2-reserves", base)
+        pre_counters = model(root, COUNTERS)["counters"]
+        result = record_cli(env, root, CREATE)
+        recorded(result)
         assert not (Path(root) / record.JOURNAL_REL).exists(), "T22 no legacy journal is created"
-        assert not (Path(root) / ".working/journals").exists(), "T22 no typed journal home is created"
+        states = journal_states(root, TYPED_JOURNAL)
+        assert list(states.values()) == ["complete"], ("T22 one COMPLETE transaction", states)
+        (run_id,) = states
+        reservation = Path(root) / record._opf_store.allocation_record("record", run_id)
+        assert reservation.is_file(), "T22 the reservation is published under the run id"
+        payload = tomllib.loads(reservation.read_bytes().decode("utf-8"))
+        post_counters = model(root, COUNTERS)["counters"]
+        advance = dict((ns, n) for ns, n in post_counters.items() if pre_counters.get(ns) != n)
+        assert payload["kind"] == "record" and payload["run_id"] == run_id, payload
+        assert payload["claims"] == advance == {"BI": pre_counters["BI"] + 1,
+                                               "WL": pre_counters["WL"] + 1}, (payload, advance)
+        assert reservation.read_bytes() == record._opf_journal.reservation_payload(
+            "record", run_id, payload["operation_id"], payload["claims"]), "T22 canonical payload"
+        damaged = "record-20260927T000009Z-0000000000000009.toml"
+        for label, plant, needle in (
+                ("unreadable", lambda d: d.mkdir(), "cannot read the id reservation"),
+                ("malformed", lambda d: d.write_bytes(b"not toml ["), "is malformed"),
+                ("conflicting", lambda d: d.write_bytes(record._opf_journal.reservation_payload(
+                    "record", "record-20260927T000008Z-0000000000000008", "op", {"BI": 1})),
+                 "conflicts with the exact canonical reservation"),
+                ("misnamed", lambda d: d.write_bytes(b"x"), "is not an id reservation")):
+            sub = fx.case("t22-homes2-" + label, base)
+            target = Path(sub) / record._ALLOCATIONS_REL / (
+                "junk.txt" if label == "misnamed" else damaged)
+            target.parent.mkdir(parents=True)
+            plant(target)
+            refused_untouched(env, sub, CREATE, needle)
 
 
-def flip_t22():
-    def creating(ctx):
-        (Path(ctx.res.store_root) / ctx.journal_rel).mkdir(parents=True, exist_ok=True)
-    return patch.object(record, "_reconcile_capability_journal", creating)
+def flip_t22_refuse():
+    """The reviewed head seam: a homes-2 claim raises instead of deriving and reserving."""
+    seam = record.claim_ids
+
+    def refusing(homes, high, demand, known_complete, reserved=None):
+        if homes != 1:
+            raise record.RecordError("homes-{} id allocation is not active in this build; refusing "
+                                     "(the reviewed head seam)".format(homes))
+        return seam(homes, high, demand, known_complete)
+    return patch.object(record, "claim_ids", refusing)
+
+
+def flip_t22_noreserve():
+    """A publication that skips the run id reservation: ids are issued with nothing reserved."""
+    return patch.object(record, "_reserve_claim", lambda ctx, plan, cap, run_id: None)
 
 
 def flip_t22_validator():
@@ -3162,8 +3216,8 @@ def flip_t34():
 def t35_released_holder_not_reconciled(fx):
     """A LIVE holder's capability triggers recovery and the holder releases between the trigger read and
     the recovery acquisition, with no peer: the held acquisition clears nothing and the held plan finds
-    nothing, so the run reports no reconciliation and continues, here to the claim-seam refusal a plain
-    homes-2 run gives, with the operands untouched, no journal home created, and the capability released.
+    nothing, so the run reports no reconciliation and continues, here to a plain homes-2 run that
+    records, its id reservation published under its transaction's run id, and the capability released.
     The reviewed head worded the outcome from the unheld trigger read and refused claiming an
     interrupted run was reconciled."""
     env = fx.env
@@ -3187,10 +3241,14 @@ def t35_released_holder_not_reconciled(fx):
                 record._opf_oplock.release_operation(held.pop())
         assert "was reconciled" not in result[2] and "were reclaimed" not in result[2], \
             ("T35 no reconciliation is reported", result[2][-800:])
-        refused(result, "is not active in this build")
+        recorded(result)
         now = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
-        assert now == pre, "T35 the operands are untouched"
-        assert not (Path(root) / ".working/journals").exists(), "T35 no journal home is created"
+        assert now != pre, "T35 the run records"
+        states = journal_states(root, TYPED_JOURNAL)
+        assert list(states.values()) == ["complete"], ("T35 one COMPLETE transaction", states)
+        (t35_run,) = states
+        assert (Path(root) / record._opf_store.allocation_record("record", t35_run)).is_file(), \
+            "T35 the run reserves before publishing"
         assert not (Path(root) / LEASE).exists() and not active_record(root).exists(), \
             "T35 the capability is released"
 
@@ -3485,8 +3543,8 @@ def t41_residuals_exact(fx):
         finally:
             record._opf_oplock.release_operation(held)
         result = record_cli(env, root, CREATE)
-        refused(result, "is not active in this build")
         assert "was reconciled" not in result[2] and "were reclaimed" not in result[2], result[2][-800:]
+        recorded(result)
 
 
 def flip_t41():
@@ -3591,10 +3649,7 @@ def t43_publish_names_removals(fx):
             ctx.version = record._read_operand(root_fd, ctx.rel(opf_check.VERSION_NAME)).model
             ctx.worklog = record._read_operand(root_fd, ctx.rel(opf_check.WORKLOG_NAME))
             operand = record._read_operand(root_fd, record._operand_rel(req, ctx))
-            seam = record.claim_ids
-            with patch.object(record, "claim_ids", lambda homes, high, demand, known_complete:
-                              seam(1, high, demand, known_complete)):
-                plan = record._PLANNERS["create"](req, ctx, operand, record._clock_now())
+            plan = record._PLANNERS["create"](req, ctx, operand, record._clock_now())
             for op in plan.operands:
                 op.new_raw = record._emit_bytes(op.new_model)
             cap = record._opf_oplock.acquire_operation(str(root), record.VERB)
@@ -4076,10 +4131,7 @@ def t52_publication_refused_before_intent(fx):
             ctx.version = record._read_operand(root_fd, ctx.rel(opf_check.VERSION_NAME)).model
             ctx.worklog = record._read_operand(root_fd, ctx.rel(opf_check.WORKLOG_NAME))
             operand = record._read_operand(root_fd, record._operand_rel(req, ctx))
-            seam = record.claim_ids
-            with patch.object(record, "claim_ids", lambda homes, high, demand, known_complete:
-                              seam(1, high, demand, known_complete)):
-                plan = record._PLANNERS["create"](req, ctx, operand, record._clock_now())
+            plan = record._PLANNERS["create"](req, ctx, operand, record._clock_now())
             for op in plan.operands:
                 op.new_raw = record._emit_bytes(op.new_model)
             pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
@@ -4100,9 +4152,9 @@ def t52_publication_refused_before_intent(fx):
         assert all(s == "nothing-opened" for s in states.values()), ("T52 no transaction opened", states)
         assert dict((rel, read(root, rel)) for rel in RECORD_OPERANDS) == pre, "T52 the operands are untouched"
         result = record_cli(env, root, CREATE)
-        refused(result, "is not active in this build")
         assert "was reconciled" not in result[2] and "were reclaimed" not in result[2], \
             ("T52 the next run reconciles nothing", result[2][-800:])
+        recorded(result)
 
 
 def flip_t52_message():
@@ -4360,7 +4412,7 @@ def t58_released_holder_staging_reported(fx):
     an active-record staging leftover sits in the control directory: the acquisition removes it and
     reclaims no record, and the run now refuses ONCE, its outcome naming the removal and saying no
     record was reclaimed, instead of continuing with no line naming it (the fix-9 head, PR D fix 10);
-    the re-run then proceeds to the claim-seam refusal with no removal left to name. The residual
+    the re-run then records with no removal left to name. The residual
     lists and the recovery docstring state that reporting."""
     module, guard, recover = t58_texts()
     assert T58_BOTH in module and T58_BOTH in guard, "T58 the residual lists state the reporting"
@@ -4395,9 +4447,9 @@ def t58_released_holder_staging_reported(fx):
         assert "nothing written" not in err, ("T58 no nothing-written wording beside the removal", err[-1200:])
         assert capability_records(root) == (False, False), "T58 the capability is released"
         result = record_cli(env, root, CREATE)
-        refused(result, "is not active in this build")
         assert "staging leftover" not in result[2], ("T58 the re-run proceeds with no removal to name",
                                                      result[2][-800:])
+        recorded(result)
 
 
 def flip_t58():
@@ -5892,10 +5944,121 @@ def t78_homes2_needs_the_pair(fx):
 def flip_t78():
     """Restore the retired HOMES2_SPEC_VERSION patch: the base spec_version becomes the homes-2 one, so
     the 1.2.0 store declaring homes = 2 reads as generation 2. The record verb's probe then passes and
-    chooses the typed journal home; in this build the fresh store refuses at the homes-2 claim seam and
-    the legacy one at the legacy-journal refusal, with nothing written, so T78 turns red on the journal
-    home the verb chose, before its refusal text and before the direct homes_generation assertion."""
+    chooses the typed journal home; the fresh store then records through the live homes-2 seam into
+    the typed journal home, and the legacy one refuses at the legacy-journal refusal, so T78 turns red
+    on the written bytes or the journal home the verb chose, before its refusal text and before the
+    direct homes_generation assertion."""
     return patch.object(_opf_store, "HOMES2_SPEC_VERSION", _opf_store.SUPPORTED_SPEC_VERSION)
+
+
+# --- T79, T80: the homes-2 reservation vectors (spec 8.2; homes plan PR-4) -----------------------------
+
+# Inside the killed child: the run dies immediately after its irrevocable id reservation is
+# published, before its journaled publication begins.
+DIE_AFTER_RESERVE = """
+import os
+_real_reserve = record._reserve_claim
+def _die_after_reserve(ctx, plan, cap, run_id):
+    _real_reserve(ctx, plan, cap, run_id)
+    os._exit(137)
+record._reserve_claim = _die_after_reserve
+"""
+
+
+def t79_kill_after_reserve(fx):
+    """A homes-2 run killed after reserving and before publishing leaves its reservation standing
+    and every operand at the prestate, and the reserved numbers are never issued again: after the
+    confirmed-dead reclaim refusal, the next create derives ABOVE the orphan (its own reservation
+    claims the next numbers), publishes them, and is then held at the post-publication gate, exit 2
+    with the change left for review, because the doctor does not yet read reservations and grades
+    the orphaned numbers as missing records (the disclosed residual of this build; the reserved ids
+    are still never reissued)."""
+    env = fx.env
+    base = fx.case("t79-homes2-base")
+    with _self_test_homes2_active(base):
+        root = fx.case("t79-homes2-killed", base)
+        pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
+        counters0 = model(root, COUNTERS)["counters"]
+        proc = child(env, root, CREATE, flip=HOMES2_CHILD_FLIP + DIE_AFTER_RESERVE)
+        assert proc.returncode == 137, ("T79 the child is killed after reserving", proc.returncode,
+                                        proc.stderr[-800:])
+        assert RECORDED_EVENT not in proc.stdout, "T79 a killed run reports no id"
+        alloc_dir = Path(root) / record._ALLOCATIONS_REL
+        names = sorted(os.listdir(alloc_dir))
+        assert len(names) == 1, ("T79 the reservation is standing", names)
+        first = (alloc_dir / names[0]).read_bytes()
+        first_claims = tomllib.loads(first.decode("utf-8"))["claims"]
+        assert first_claims == {"BI": counters0["BI"] + 1, "WL": counters0["WL"] + 1}, first_claims
+        assert journal_states(root, TYPED_JOURNAL) == {}, "T79 nothing was journaled"
+        assert dict((rel, read(root, rel)) for rel in RECORD_OPERANDS) == pre, \
+            "T79 the operands end at the prestate"
+        refused(record_cli(env, root, CREATE), "were reclaimed before this operation")
+        assert (alloc_dir / names[0]).read_bytes() == first, "T79 the reclaim never touches the reservation"
+        rc, out, err = record_cli(env, root, CREATE)
+        assert RECORDED_EVENT not in out, "T79 the held publication reports no success"
+        assert rc == 2 and "the uncommitted change is left for review" in err, (rc, err[-1600:])
+        names2 = sorted(os.listdir(alloc_dir))
+        assert len(names2) == 2 and names[0] in names2, ("T79 both reservations standing", names2)
+        (second_name,) = [n for n in names2 if n != names[0]]
+        second_claims = tomllib.loads((alloc_dir / second_name).read_bytes().decode("utf-8"))["claims"]
+        assert second_claims == {"BI": first_claims["BI"] + 1,
+                                 "WL": first_claims["WL"] + 1}, \
+            ("T79 the re-run derives above the orphaned reservation", first_claims, second_claims)
+        assert (alloc_dir / names[0]).read_bytes() == first, "T79 the orphan is never rewritten"
+        counters2 = model(root, COUNTERS)["counters"]
+        assert counters2["BI"] == second_claims["BI"] and counters2["WL"] == second_claims["WL"], counters2
+        rows = [r["id"] for r in model(root, BI_INDEX)["record"]]
+        reserved_id = "BI-{}".format(first_claims["BI"])
+        issued_id = "BI-{}".format(second_claims["BI"])
+        assert issued_id in rows and reserved_id not in rows, \
+            ("T79 the reserved id is never issued again", rows)
+
+
+def flip_t79():
+    """A derivation that ignores the reservation scan: an orphaned reservation gets its numbers
+    issued again."""
+    return patch.object(record, "_reservation_high", lambda ctx: {})
+
+
+def t80_two_runs_never_same_id(fx):
+    """Two runs claiming the same kind never receive the same id: a first run through the
+    production claim and reservation path (its reservation published under its own held capability,
+    nothing published to the store, the killed-before-publication shape) moves a second run through
+    the same path to the next numbers; both reservations stand disjoint and the first is never
+    rewritten."""
+    base = fx.case("t80-homes2-base")
+    with _self_test_homes2_active(base):
+        root = fx.case("t80-homes2-two-runs", base)
+        res = record._opf_store.resolve_store(Path(os.path.abspath(str(root))))
+        assert res.status == record._opf_store.RESOLVED, res
+        claims = []
+        stamps = ("record-20260927T000101Z-" + "a" * 16,
+                  "record-20260927T000102Z-" + "b" * 16)
+        for stamp in stamps:
+            root_fd = record._opf_store._open_dir_nofollow(res.store_root)
+            try:
+                ctx = record.Context(res, str(root), root_fd)
+                ctx.journal_rel = record._record_journal_rel(record._probe_homes(ctx))
+                record._load_manifest(ctx)
+                assert ctx.homes == 2, ("T80 the validated generation", ctx.homes)
+                ctx.counters = record._read_operand(root_fd, ctx.rel(opf_check.COUNTERS_NAME))
+                ids = record._claim(ctx, ["BI", "WL"])
+                cap = record._opf_oplock.acquire_operation(str(res.store_root), record.VERB)
+                try:
+                    record._reserve_claim(ctx, record.Plan([], ids), cap, stamp)
+                finally:
+                    record._opf_oplock.release_operation(cap)
+                claims.append((list(ids), dict(ctx.claims)))
+            finally:
+                os.close(root_fd)
+        (ids1, c1), (ids2, c2) = claims
+        assert ids1 == ["BI-1", "WL-1"] and ids2 == ["BI-2", "WL-2"], (ids1, ids2)
+        assert c1 == {"BI": 1, "WL": 1} and c2 == {"BI": 2, "WL": 2}, (c1, c2)
+        assert not set(ids1) & set(ids2), ("T80 disjoint ids", ids1, ids2)
+        for stamp, (_ids, claimed) in zip(stamps, claims):
+            reservation = Path(root) / record._opf_store.allocation_record("record", stamp)
+            payload = tomllib.loads(reservation.read_bytes().decode("utf-8"))
+            assert payload["claims"] == claimed, ("T80 the reservation says so", stamp, payload)
 
 
 TESTS = (
@@ -5930,7 +6093,8 @@ TESTS = (
     ("T19-legacy-name-recovery", t19_legacy_name_recovery, flip_t19_legacy),
     ("T20-homes2-legacy-journal-refused", t20_homes2_legacy_refused, flip_t20),
     ("T21-homes2-publish-typed", t21_homes2_publish, flip_t21),
-    ("T22-homes2-claim-still-refused", t22_homes2_claim_refused, (flip_t22, flip_t22_validator)),
+    ("T22-homes2-claim-reserves", t22_homes2_claim_reserves, (flip_t22_refuse, flip_t22_noreserve,
+                                                              flip_t22_validator)),
     ("T23-homes2-crash-typed", t23_homes2_crash, flip_t23),
     ("T5-flip-unjournaled-write", t5_flip_write, None),     # FLIP_T5 itself is T5's discriminator
     ("T24-broken-manifest-fail-closed", t24_broken_manifest, flip_t24),
@@ -6016,6 +6180,8 @@ TESTS = (
     ("T76-examination-lock-failure-diagnosed", t76_lock_failure_diagnosed, flip_t76),
     ("T77-release-report-every-failure", t77_report_every_failure, flip_t77),
     ("T78-homes2-declaration-pair-required", t78_homes2_needs_the_pair, (flip_t78, flip_t30)),
+    ("T79-kill-after-reserve", t79_kill_after_reserve, flip_t79),
+    ("T80-two-runs-distinct-ids", t80_two_runs_never_same_id, flip_t79),
 )
 
 
