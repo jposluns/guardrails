@@ -52,13 +52,17 @@ question-list template fixes them:
   other line (a numbered list, a heading, a grade word such as MAJOR, a line starting WORKER_STATUS) is
   content: it moves no boundary and its quotes and file references are checked like any other.
   Also CANNOT_EVALUATE naming the line, anywhere in the body:
-  * A line that reads as an answer marker but is not one: past leading whitespace, emphasis, heading,
-    quote and list marks and ignorable characters (category Cf and the pinned
-    Default_Ignorable_Code_Point table), interleaved in any order and consumed whole, a Q (or a
-    lookalike letter), digits of any script and a full stop (or a lookalike), compared after NFKC
-    normalisation, then whitespace or the line's end; so "Q\uff11.", "Q\u0663.", a zero-width or
-    variation-selector character inside "Q4.", "  Q4.", "- Q4.", "**Q4.**" and "\u00a0***Q4.***" are
-    refused, in answers, findings, blockquotes and fenced blocks alike, however long the prefix runs.
+  * A line that reads as an answer marker but is not one, read as a renderer shows it (CommonMark
+    backslash escapes of ASCII punctuation and named, decimal and hex character references, decoded
+    once, left to right): past leading whitespace, emphasis, heading, quote, bullet and ordered-list
+    marks ("1. ", "1) "), backslashes, the blank glyph U+2800 and ignorable characters (category Cf
+    and the pinned Default_Ignorable_Code_Point table), interleaved in any order and consumed whole,
+    a Q (or a lookalike letter), digits of any script and a full stop (or a lookalike), emphasis runs
+    permitted inside the marker, compared after NFKC normalisation of the marker-shaped head, then
+    whitespace, emphasis, U+2800 or the line's end; so "Q\uff11.", "Q\u0663.", a zero-width or
+    variation-selector character inside "Q4.", "  Q4.", "- Q4.", "**Q4.**", "\u00a0***Q4.***",
+    "Q4\\.", "&#81;4.", "Q4&period;", "Q*4*.", "**Q**4.", "1. Q4." and "\u2800Q4." are refused, in
+    answers, findings, blockquotes and fenced blocks alike, however long the prefix runs.
   * A construct that can hide text from rendered view, outside fenced blocks, inline code spans and
     blockquote lines: raw HTML ("<" then "!", "?", or an optional "/" and a tag name ending at
     whitespace, "/", ">" or the line's end, which opens a comment, an HTML block or inline HTML; an
@@ -163,7 +167,8 @@ line, with no backtracking pattern):
 LIMITS. An input file is read up to MAX_INPUT_BYTES (16 MiB); a delivery is parsed in time linear in its
 size (the self-test runs, in a capped child each under RUNTIME_CAP_SECONDS, a 16 MiB backtick run after a
 quote, a 16 MiB run of inch marks in the last answer, a 16 MiB whitespace run on the VERDICT line and a
-16 MiB zero-width-space run and digit run on marker-shaped lines; the 8a61dfb9 forms of the code-span
+16 MiB zero-width-space run, digit run and U+FDFA ligature run (the longest NFKC expansion, 18
+characters; bare and after a leading Q) on marker-shaped lines; the 8a61dfb9 forms of the code-span
 and VERDICT scanners exceed that cap on the backtick and whitespace
 runs). At most MAX_QUOTES quotes are checked; each costs at most one pass over the tree's blobs, which
 are read into memory (bounded at MAX_TREE_BYTES) only when a quote needs a tree-wide search or a failure
@@ -181,8 +186,12 @@ example ("(e.g. "...")"), and a straight double quote right after a digit is an 
 'line 4"text"' no quote is read; a double-quoted span that breaks across lines or does not close on
 its line is not read; a quote cut at a line edge passes (above); a marker shaped as an inline code
 span ("`Q4.`") or as the text of an inline link ("[Q4.](x)") at the start of a line is not read as a
-marker candidate, its first rendered character being a backtick or a bracket (the code-span and
-link-text marker residual); a token that is no file reference (a
+marker candidate, its first source character being a backtick or a bracket (the code-span and
+link-text marker residual: the scan models escapes, character references, emphasis, list marks and
+blank glyphs, not full inline parsing); a default-ignorable character directly after the marker's
+stop is dropped, so "Q4." then U+3164 then text is read with the text against the stop and passes,
+though some fonts show a gap; of the glyphs that render blank without being whitespace, format or
+default-ignorable, only U+2800 is consumed; a token that is no file reference (a
 directory of the tree, a path without an extension whose first part is no directory of the tree, a
 URL, a glob or placeholder path) binds nothing, so an answer naming only such tokens binds like one
 naming none, and with a question naming none its quotes match anywhere in the tree; an answer naming several files
@@ -229,8 +238,10 @@ sit inside the parser's loop or another guard also refuses the same input: each 
 section, a second findings line, VERDICT and QA-COMPLETE placement, a "Verdict:" line inside an
 answer, a second harness status line, a closing harness line that is not the last), raw HTML tags, a
 fence after a tab and a closing fence after a tab, the other marker forms (non-ASCII digits, a
-zero-width or default-ignorable character, indentation, bold, decoration and format runs of any
-length before or inside the marker, a lookalike in a fence), a "QN." line right after a quote,
+zero-width or default-ignorable character, indentation, bold, rendered backslash escapes and
+character references, ordered-list marks, blank glyphs, whitespace control characters, decoration
+and format runs of any length before the marker, emphasis and format runs inside it, a lookalike in
+a fence), a "QN." line right after a quote,
 the exemption of an absent reference its question names, the unmatched-opener rule of the inline
 scanner, the non-regular-file check and
 O_NONBLOCK (a FIFO or directory also yields an empty or unopenable input), git exit status (the type
@@ -280,16 +291,25 @@ HARNESS_FIRST_RE = re.compile(r"WORKER_STATUS: [A-Z][A-Z_]*+ \(account=[^\s,()]+
 HARNESS_LAST_LINE = "WORKER_STATUS: COMPLETE"
 CLEAN_VERDICT = "NO BLOCKERS"
 ANSWER_HEAD_RE = re.compile(r"Q([0-9]+)\.(?=[ \t]|$)")
-MARKER_DECORATION = " \t*_#>+-\\"
-MARKER_RE = re.compile(r"[\s*_#>+\\-]*+[Qq\u024a\u024b\u051a\u051b]\d++[.\u06d4\u3002\uff61](?=[\s*_]|$)")
-# Default_Ignorable_Code_Point (Unicode 16.0.0 DerivedCoreProperties.txt): code points rendered as
-# nothing on their own. unicodedata exposes no query for the property, so the ranges are pinned here;
-# the marker scan drops these and category Cf alike (_marker_ignorable).
+# U+2800 BRAILLE PATTERN BLANK is no space and no format character, yet renders as a blank glyph.
+MARKER_DECORATION = " \t*_#>+-\\\u2800"
+# An ordered-list mark a renderer reads at the start of a list item: one to nine digits, "." or ")",
+# then a space or tab (ten digits open no list).
+LIST_MARK_RE = re.compile(r"[0-9]{1,9}[.)][ \t]")
+MARKER_RE = re.compile(r"[\s*_#>+\u2800\\-]*+[Qq\u024a\u024b\u051a\u051b](?:[*_]*+\d++)++[*_]*+"
+                       r"[.\u06d4\u3002\uff61](?=[\s*_\u2800]|$)")
+# Default_Ignorable_Code_Point (Unicode 16.0.0 DerivedCoreProperties.txt): code points a renderer may
+# show as nothing. unicodedata exposes no query for the property, so the ranges are pinned here and
+# validated exactly (_static_config_problems): DEFAULT_IGNORABLE_COUNT code points in all, and the
+# canonical range list ("00AD..00AD,..." in uppercase, four or more hex digits each) hashes to
+# DEFAULT_IGNORABLE_SHA256; the marker scan drops these and category Cf alike (_marker_ignorable).
 DEFAULT_IGNORABLE_RANGES = ((0x00AD, 0x00AD), (0x034F, 0x034F), (0x061C, 0x061C), (0x115F, 0x1160),
                             (0x17B4, 0x17B5), (0x180B, 0x180F), (0x200B, 0x200F), (0x202A, 0x202E),
                             (0x2060, 0x206F), (0x3164, 0x3164), (0xFE00, 0xFE0F), (0xFEFF, 0xFEFF),
                             (0xFFA0, 0xFFA0), (0xFFF0, 0xFFF8), (0x1BCA0, 0x1BCA3), (0x1D173, 0x1D17A),
                             (0xE0000, 0xE0FFF))
+DEFAULT_IGNORABLE_COUNT = 4174
+DEFAULT_IGNORABLE_SHA256 = "d1d78a34fea3a0f9cc46bbab9acf2686a8493e4cadf7c1f412a86f250e9b3624"
 DEFAULT_IGNORABLE = frozenset(point for low, high in DEFAULT_IGNORABLE_RANGES for point in range(low, high + 1))
 FINDINGS_HEADING = "## Findings"
 COMPLETE_LINE = "QA-COMPLETE"
@@ -724,31 +744,93 @@ def _hidden_construct(masked):
 
 def _marker_ignorable(char):
     """A character the marker scan drops before reading: category Cf, or a Default_Ignorable_Code_Point
-    (DEFAULT_IGNORABLE; the variation selectors and the combining grapheme joiner included). Each is
-    rendered as nothing on its own; no other invisible rendering is dropped."""
+    (DEFAULT_IGNORABLE; the variation selectors and the combining grapheme joiner included). Most are
+    rendered as nothing on their own; a few Cf characters (U+0600 ARABIC NUMBER SIGN, U+FFF9) render
+    visibly, so dropping them errs toward refusing a line, never toward passing one."""
     return unicodedata.category(char) == "Cf" or ord(char) in DEFAULT_IGNORABLE
 
 
+# CommonMark's inline reading the marker scan models: a backslash escape of ASCII punctuation, or a
+# character reference (named, decimal or hex, semicolon-terminated; ENTITY_RE's grammar).
+MARKER_SOURCE_RE = re.compile(r"\\([!-/:-@\[-`{-~])"
+                              r"|&(?:#[0-9]{1,7}|#[xX][0-9A-Fa-f]{1,6}|[A-Za-z][A-Za-z0-9]{1,31});")
+# Characters whose NFKC forms a marker match can consume up to its one-character lookahead:
+# MARKER_DECORATION, the Q forms and the stops; whitespace and digits of any script are tested per
+# character (_marker_material), so fullwidth and mathematical forms stay in.
+_MARKER_ALPHABET = frozenset(MARKER_DECORATION + "Qq\u024a\u024b\u051a\u051b.\u06d4\u3002\uff61")
+_ASCII_MATERIAL = frozenset(char for char in map(chr, range(128))
+                            if char.isspace() or char.isdigit() or char in _MARKER_ALPHABET)
+_MATERIAL_CACHE = {}
+
+
+def _marker_rendered(line):
+    """line as a renderer shows it to the marker scan: backslash escapes and character references
+    (MARKER_SOURCE_RE) decoded once, left to right; decoded text is never rescanned, so a
+    backslash-escaped reference stays literal text. An unknown entity name stays literal too, as
+    CommonMark leaves it."""
+    if "\\" not in line and "&" not in line:
+        return line
+    pieces, at = [], 0
+    for match in MARKER_SOURCE_RE.finditer(line):
+        pieces.append(line[at:match.start()])
+        pieces.append(match.group(1) or html.unescape(match.group(0)))
+        at = match.end()
+    pieces.append(line[at:])
+    return "".join(pieces)
+
+
+def _marker_material(char):
+    """Whether char can sit inside a marker match: every character of its NFKC form is whitespace, a
+    digit or in _MARKER_ALPHABET. The first character of a head that is not material is kept as the
+    match's one-character lookahead and ends the head, so NFKC runs over the marker-shaped head only,
+    never the whole line (U+FDFA normalises to 18 characters; a 16 MiB run of it must not multiply)."""
+    cached = _MATERIAL_CACHE.get(char)
+    if cached is None:
+        cached = all(c.isspace() or c.isdigit() or c in _MARKER_ALPHABET
+                     for c in unicodedata.normalize("NFKC", char))
+        _MATERIAL_CACHE[char] = cached
+    return cached
+
+
 def _marker_candidate(line):
-    """Whether line reads as an answer marker "QN." to an eye on the rendered text: past a permitted
-    prefix of whitespace of any script, emphasis, heading, quote and list marks, backslashes and
-    ignorable characters (_marker_ignorable), interleaved in any order and consumed whole, a Q or a
-    letter that looks like one, digits of any script and a full stop or one that looks like one, read
-    after NFKC normalisation (so fullwidth and mathematical forms count), then whitespace, emphasis or
-    the line's end. The whole line is read with no length bound (MARKER_RE is possessive, so the scan
-    stays linear); only category Cf and the pinned Default_Ignorable_Code_Point table are dropped, not
-    every construct a renderer hides. Named residual (the module docstring, DISCLOSED RESIDUAL): a
-    marker shaped as an inline code span ("`Q4.`") or as the text of an inline link ("[Q4.](x)") at
-    the start of a line is not a candidate, its first rendered character being a backtick or a
-    bracket."""
+    """Whether line reads as an answer marker "QN." to an eye on the rendered text, backslash escapes
+    and character references decoded first (_marker_rendered): past a permitted prefix of whitespace
+    of any script, emphasis, heading, quote, bullet and ordered-list marks (LIST_MARK_RE), backslashes,
+    the blank glyph U+2800 and ignorable characters (_marker_ignorable), interleaved in any order and
+    consumed whole, a Q or a letter that looks like one, digits of any script and a full stop or one
+    that looks like one, with emphasis runs permitted inside the marker, read after NFKC normalisation
+    (so fullwidth and mathematical forms count), then whitespace, emphasis, U+2800 or the line's end.
+    The head normalised is cut at the first character that cannot belong to a marker (_marker_material;
+    that character stays as the lookahead), so the scan is linear and NFKC is bounded whatever the
+    line's length (MARKER_RE is possessive). Named residual (the module docstring, DISCLOSED
+    RESIDUAL): a marker shaped as an inline code span ("`Q4.`") or as the text of an inline link
+    ("[Q4.](x)") at the start of a line is not a candidate, its first source character being a
+    backtick or a bracket, and an ignorable dropped directly after the stop leaves the lookahead on
+    the character after it."""
+    line = _marker_rendered(line)
     index, length = 0, len(line)
-    while index < length and (line[index] in MARKER_DECORATION or line[index].isspace()
-                              or _marker_ignorable(line[index])):
-        index += 1
+    while index < length:
+        char = line[index]
+        if char in MARKER_DECORATION or char.isspace() or _marker_ignorable(char):
+            index += 1
+            continue
+        mark = LIST_MARK_RE.match(line, index)
+        if mark is None:
+            break
+        index = mark.end()
     if index == length or (line[index] < "\x80" and line[index] not in "Qq"):
         return False
-    head = "".join(char for char in line[index:] if not _marker_ignorable(char))
-    return bool(MARKER_RE.match(unicodedata.normalize("NFKC", head)))
+    head = []
+    for char in line[index:]:
+        if char < "\x80":
+            head.append(char)
+            if char not in _ASCII_MATERIAL:
+                break
+        elif not _marker_ignorable(char):
+            head.append(char)
+            if not _marker_material(char):
+                break
+    return bool(MARKER_RE.match(unicodedata.normalize("NFKC", "".join(head))))
 
 
 def _unread_fence(line):
@@ -950,7 +1032,8 @@ def _parse_delivery(lines, question_count):
         after_quote = False
         if not (payload.startswith("Q") and ANSWER_HEAD_RE.match(payload)) and _marker_candidate(payload):
             refuse(number, "a line that reads as an answer marker but is not \"QN.\" in ASCII at column 0 "
-                           "(lookalike or non-ASCII characters, indentation or marks before it)")
+                           "(lookalike or non-ASCII characters, escapes or character references that render as one, "
+                           "indentation, list or other marks before it, or emphasis inside it)")
         if _unread_fence(payload):
             refuse(number, "a fence marker after a list marker or a tab (its reading depends on list nesting; "
                            "open the fence at the start of its line)")
@@ -1748,7 +1831,8 @@ def _self_test_cases(fx):
                            ("shape/zwsp-blockquote-mark-run-marker-cannot-evaluate", ">"),
                            ("shape/zwsp-plus-run-marker-cannot-evaluate", "+"),
                            ("shape/zwsp-hyphen-run-marker-cannot-evaluate", "-"),
-                           ("shape/zwsp-backslash-run-marker-cannot-evaluate", "\\")):
+                           ("shape/zwsp-backslash-run-marker-cannot-evaluate", "\\"),
+                           ("shape/zwsp-braille-blank-run-marker-cannot-evaluate", "\u2800")):
         seen_marks.append(mark)
         check(check_id, refusal(fx.run(_mixed(sha, {4: A4 + "\n" + pad + mark * 254 + "Q4. Additional answer"})),
                                 "reads as an answer marker"), refused)
@@ -1766,6 +1850,28 @@ def _self_test_cases(fx):
                              ("shape/combining-grapheme-joiner-marker-cannot-evaluate", "\u034f")):
         check(check_id, refusal(fx.run(_mixed(sha, {4: A4 + "\nQ" + joiner + "4. Additional answer"})),
                                 "reads as an answer marker"), refused)
+    # Lines that render as the marker without carrying it in source: a backslash-escaped stop,
+    # decimal and named character references, emphasis inside the marker, an ordered-list mark or
+    # the blank glyph U+2800 before it. The form feed and unit separator discriminate the isspace
+    # clause of the prefix loop; U+E0100, a supplementary variation selector, discriminates the
+    # pinned default-ignorable table's E0000..E0FFF range.
+    for check_id, line in (
+            ("shape/escaped-stop-marker-cannot-evaluate", "Q4\\. Additional answer"),
+            ("shape/decimal-reference-q-marker-cannot-evaluate", "&#81;4. Additional answer"),
+            ("shape/decimal-reference-stop-marker-cannot-evaluate", "Q4&#46; Additional answer"),
+            ("shape/named-reference-stop-marker-cannot-evaluate", "Q4&period; Additional answer"),
+            ("shape/nbsp-reference-marker-cannot-evaluate", "&nbsp;Q4. Additional answer"),
+            ("shape/inner-emphasis-digit-marker-cannot-evaluate", "Q*4*. Additional answer"),
+            ("shape/inner-bold-q-marker-cannot-evaluate", "**Q**4. Additional answer"),
+            ("shape/bold-escaped-stop-marker-cannot-evaluate", "**Q4\\.** Additional answer"),
+            ("shape/ordered-list-dot-marker-cannot-evaluate", "1. Q4. Additional answer"),
+            ("shape/ordered-list-paren-marker-cannot-evaluate", "1) Q4. Additional answer"),
+            ("shape/braille-blank-marker-cannot-evaluate", "\u2800Q4. Additional answer"),
+            ("shape/form-feed-marker-cannot-evaluate", "\x0cQ4. Additional answer"),
+            ("shape/unit-separator-marker-cannot-evaluate", "\x1fQ4. Additional answer"),
+            ("shape/variation-selector-supplement-marker-cannot-evaluate", "Q\U000e01004. Additional answer")):
+        check(check_id, refusal(fx.run(_mixed(sha, {4: A4 + "\n" + line})), "reads as an answer marker"),
+              refused)
 
     # Quote and code forms CommonMark reads that this grammar does not: refused, never read as prose
     lazy = _mixed(sha, {1: "Q1. docs/alpha.md:\n> The first rule is plain.\nunless the caller overrides it, which is "
@@ -2036,6 +2142,16 @@ def _self_test_cases(fx):
     digit_run = _padded(_mixed(sha), "\u200bQ", "1", "\nVERDICT:")
     check("runtime/marker-digit-run-at-cap-bounded",
           (len(digit_run.encode("utf-8")), _capped_run(fx, digit_run, "linear")), (MAX_INPUT_BYTES, (0, "PASS")))
+    # U+FDFA normalises to 18 characters, so NFKC over a whole 16 MiB line of it would multiply the
+    # text; the scan normalises the marker-shaped head only (_marker_material).
+    ligature_run = _padded(_mixed(sha), "Q", "\ufdfa", "\nVERDICT:")
+    check("runtime/marker-ligature-run-at-cap-bounded",
+          (len(ligature_run.encode("utf-8")), _capped_run(fx, ligature_run, "linear")),
+          (MAX_INPUT_BYTES, (0, "PASS")))
+    bare_ligature = _padded(_mixed(sha), "\ufdfa", "\ufdfa", "\nVERDICT:")
+    check("runtime/ligature-run-at-cap-bounded",
+          (len(bare_ligature.encode("utf-8")), _capped_run(fx, bare_ligature, "linear")),
+          (MAX_INPUT_BYTES, (0, "PASS")))
 
     # Pin, decode, git
     mismatch = _mixed(OTHER_SHA)
@@ -2158,6 +2274,9 @@ def _self_test_cases(fx):
     check("bare/broken-grammar-refused", bool(_patched("ANSWER_HEAD_RE", never, _static_config_problems)), True)
     check("bare/broken-quote-pairs-refused",
           bool(_patched("INLINE_QUOTE_PAIRS", (('"',),), _static_config_problems)), True)
+    shrunk = tuple(pair for pair in DEFAULT_IGNORABLE_RANGES if pair not in ((0x180B, 0x180F), (0xE0000, 0xE0FFF)))
+    check("bare/ignorable-range-deletion-refused",
+          bool(_patched("DEFAULT_IGNORABLE_RANGES", shrunk, _static_config_problems)), True)
 
 
 # The 8a61dfb9 forms of the two scanners, kept only so the runtime checks can show the old forms exceed
@@ -2288,8 +2407,16 @@ GRAMMAR_PROBES = (
     ("HTML_START_RE", "<!-- x", True), ("HTML_START_RE", "<details>", True), ("HTML_START_RE", "<https://x.invalid>", False),
     ("_marker_candidate", "Q\uff11. x", True), ("_marker_candidate", "  **Q4.** x", True),
     ("_marker_candidate", "Q\ufe0f4. x", True), ("_marker_candidate", "\u00a0" + "*" * 300 + "Q4. x", True),
+    ("_marker_candidate", "Q4\\. x", True), ("_marker_candidate", "&#81;4. x", True),
+    ("_marker_candidate", "Q4&#46; x", True), ("_marker_candidate", "Q4&period; x", True),
+    ("_marker_candidate", "&nbsp;Q4. x", True), ("_marker_candidate", "Q*4*. x", True),
+    ("_marker_candidate", "**Q**4. x", True), ("_marker_candidate", "**Q4\\.** x", True),
+    ("_marker_candidate", "1. Q4. x", True), ("_marker_candidate", "1) Q4. x", True),
+    ("_marker_candidate", "123456789. Q4. x", True), ("_marker_candidate", "\u2800Q4. x", True),
     ("_marker_candidate", "Q1.5 x", False), ("_marker_candidate", "Quote 1. x", False),
     ("_marker_candidate", "`Q4.` x", False), ("_marker_candidate", "[Q4.](x) y", False),
+    ("_marker_candidate", "\\&#81;4. x", False), ("_marker_candidate", "1.Q4. x", False),
+    ("_marker_candidate", "1234567890. Q4. x", False),
     ("_unread_fence", "- ```", True), ("_unread_fence", "```", False),
 )
 
@@ -2309,11 +2436,16 @@ def _static_config_problems():
             got = None
         if got != want:
             problems.append("{} {} {!r}".format(name, "does not match" if want else "matches", line))
-    if list(DEFAULT_IGNORABLE_RANGES) != sorted(DEFAULT_IGNORABLE_RANGES) \
-            or any(low > high for low, high in DEFAULT_IGNORABLE_RANGES) \
+    canonical = ",".join("{:04X}..{:04X}".format(low, high) for low, high in DEFAULT_IGNORABLE_RANGES)
+    if hashlib.sha256(canonical.encode("ascii")).hexdigest() != DEFAULT_IGNORABLE_SHA256 \
+            or len(DEFAULT_IGNORABLE) != DEFAULT_IGNORABLE_COUNT \
+            or DEFAULT_IGNORABLE != frozenset(
+                point for low, high in DEFAULT_IGNORABLE_RANGES for point in range(low, high + 1)) \
             or not all(_marker_ignorable(char) for char in "\u00ad\u034f\u061c\u115f\u200b\u2060\u3164\ufe0f\ufeff") \
-            or any(_marker_ignorable(char) for char in " \t*_#>+-\\Qq4.\u00a0\uff11"):
-        problems.append("DEFAULT_IGNORABLE_RANGES does not hold the pinned Default_Ignorable_Code_Point table")
+            or any(_marker_ignorable(char) for char in " \t*_#>+-\\Qq4.\u00a0\uff11\u2800"):
+        problems.append("DEFAULT_IGNORABLE_RANGES does not hold the pinned Default_Ignorable_Code_Point table "
+                        "(Unicode 16.0.0 DerivedCoreProperties.txt: {} code points; canonical range list "
+                        "SHA-256 {})".format(DEFAULT_IGNORABLE_COUNT, DEFAULT_IGNORABLE_SHA256))
     if not FENCE_CLOSE_RE.fullmatch("```") or FENCE_CLOSE_RE.fullmatch("``` x"):
         problems.append("FENCE_CLOSE_RE does not hold the declared closing fence")
     if not (SHA_RE.fullmatch("0" * 40) and not SHA_RE.fullmatch("0" * 39)):
