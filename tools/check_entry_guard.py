@@ -506,10 +506,11 @@ def _child_leg(thunk, fds):
 
 def _in_child(thunk, timeout, forked=None, expiring=None):
     """Run thunk() in a forked child (_child_leg); returns (True, its result through JSON) or (False, "hung",
-    "crashed (...)" or "unreaped (...)"). The bound is a monotonic deadline this parent owns. forked, if given, must be an empty list:
-    the child's pid is recorded in it as the fork returns, so the caller knows the child whether or not thunk ever
-    runs. expiring, if given, is called with the child's pid when the deadline overtakes the run, before the cleanup
-    kills the child, so the caller can read what the still-running child is doing. However this function is left
+    "hung; unreaped (...)", "crashed (...)" or "unreaped (...)"). The bound is a monotonic deadline this
+    parent owns. forked, if given, must be an empty list: the child's pid is recorded in it as the fork
+    returns, so the caller knows the child whether or not thunk ever runs. expiring, if given, is called with
+    the child's pid when the deadline overtakes the run, before the cleanup kills the child, so the caller can
+    read what the still-running child is doing. However this function is left
     (a result, the deadline, or any exception), its finally sends SIGKILL to the child's process group and to the
     child, closes every pipe end, each write end before its read end (so this process still holds the lifeline read
     end when it closes the write end, and the lifeline fires), and reaps the child.
@@ -547,9 +548,11 @@ def _in_child(thunk, timeout, forked=None, expiring=None):
     an audit hook that refuses os.kill, is reached by neither kill nor the lifeline: the bounded reap's first
     window expires and its retry kill raises at that same hook (or, with the kill silently refused, the run
     reads unreaped); either is a failure, never a pass, with the child left running. A child in
-    uninterruptible sleep past both reap deadlines reads unreaped, a named failure, never a reaped child. A fork copies only the calling
-    thread: a lock another thread of the caller holds at the fork stays held in the child, which then reads as
-    hung.
+    uninterruptible sleep past both reap deadlines reads unreaped, a named failure, never a reaped child; a run
+    that also hung reads "hung; unreaped (...)", so the hang stays visible and the reap failure is attached to
+    it, never in its place (a caller that credits a completed run must refuse both forms). A fork copies only
+    the calling thread: a lock another thread of the caller holds at the fork stays held in the child, which
+    then reads as hung.
 
     Nothing here reads, arms or restores a process timer, a signal handler or the signal mask, so the
     ITIMER_REAL of a caller, its interval, its SIGALRM handler and its mask are untouched (the rule
@@ -609,11 +612,14 @@ def _in_child(thunk, timeout, forked=None, expiring=None):
             finally:
                 if forked:
                     status = _reap_within(forked[0], WITNESS_WAIT)
-    if status is UNREAPED:
-        return False, "unreaped (the killed child {} was still unreaped at the reap deadline{})".format(
-            forked[0], "; its run also hung" if hung else "")
+    # A hang stays visible whatever the reap outcome: a hung run whose killed child was not reaped reads
+    # "hung; unreaped (...)", never a bare "unreaped" a caller could take for a completed run (_vector_outcome).
+    unreaped = ("unreaped (the killed child {} was still {})".format(forked[0], UNREAPED)
+                if status is UNREAPED else "")
     if hung:
-        return False, "hung"
+        return False, "hung; " + unreaped if unreaped else "hung"
+    if unreaped:
+        return False, unreaped
     if not isinstance(status, int) or not (os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0):
         return False, "crashed (child wait status {})".format(status)
     try:
@@ -626,7 +632,9 @@ def _in_child(thunk, timeout, forked=None, expiring=None):
 def _gate(module, root, timeout=GATE_TIMEOUT, forked=None, expiring=None):
     """Run module.run(root) in a bounded child (_in_child, which records the child's pid in forked, if given, and
     calls expiring with that pid, if given, when the bound overtakes the run), so every patch and mutant in place at
-    the call is in force there; returns (exit code, or "hung" or "crashed (...)", combined output)."""
+    the call is in force there; returns (exit code, or "hung", "hung; unreaped (...)", "unreaped (...)" or
+    "crashed (...)", combined output): an unreaped form names the killed child still unreaped at the reap
+    deadline (_in_child) and is never a completed run's exit code."""
     def gated():
         out, err = io.StringIO(), io.StringIO()
         try:
@@ -1354,7 +1362,9 @@ def _reap_within(pid, wait):
     not (a child in uninterruptible sleep, or one a caller's SIGCHLD handling took first, can outlive both
     deadlines). Every wait here is a WNOHANG poll against a monotonic deadline, never a blocking waitpid, so no
     caller can block in this helper (leg reap-deadline); a caller reads UNREAPED as its own named failure or
-    cannot-evaluate, never as a reaped child."""
+    cannot-evaluate, never as a reaped child. Only the callers of this helper are bounded by it: the
+    blocking waitpid calls that remain in _reuse_bound, _refused_named, _leftover_children and _hang_credit
+    do not use it, and are not claimed bounded here."""
     def polled():
         deadline = time.monotonic() + wait
         while True:
@@ -1377,7 +1387,11 @@ def _ended_by_pid(pid, wait):
     without reaping (os.waitid with WNOWAIT), the SIGKILL by pid is sent only when the child has not exited
     (the still-unreaped child holds the pid against reuse, so the kill cannot reach another process), and the
     child is then reaped once, bounded (_reap_within): (killed, unreaped): whether the kill was sent, and None
-    once the child was reaped, else the named reap failure (leg holder-exited holds the ordering)."""
+    once the child was reaped, else the named reap failure (leg holder-exited holds the ordering, and leg
+    holder-fixture holds it through the real holder fixture). This assumes no concurrent reaper: nothing else
+    in this process (a SIGCHLD handler that reaps, SIGCHLD set to SIG_IGN, another thread's wait) may reap
+    the child between the observation and the kill; one that does frees the pid, and the kill may then
+    reach a reused pid (the self-test installs no such reaper)."""
     exited = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
     killed = exited is None
     if killed:
@@ -2055,9 +2069,12 @@ def _double_fork_found():
     visible in the children bytes that read returned, so the intended race was not established and a walk that
     found D early is no failure; host scheduling therefore never fails this leg. The four-walk requirement is
     read only once the race is established, and a run whose hooks both fired on the established race and whose
-    walk still misses D is False. Every cleanup reap here is bounded (_reap_within, never a blocking waitpid);
-    a killed pid still unreaped at its deadline is named and the attempt is None, retried, never read as
-    reaped."""
+    walk still misses D is False. Every cleanup reap here is bounded (_reap_within, never a blocking waitpid),
+    and every cleanup kill or reap that raises, or a killed pid still unreaped at its deadline, is recorded
+    with its pid in the detail (cleanup), never suppressed; the "B never reported" attempt keeps those
+    findings too. The walk verdict (_double_fork_verdict) is decided first and cleanup uncertainty can only
+    turn its True into None (retried, never read as reaped): a definite False stays False, so a failed walk
+    is never retried into success (leg fork-cleanup)."""
     own = os.getpid()
     cmd_r, cmd_w = os.pipe()
     rep_r, rep_w = os.pipe()
@@ -2085,11 +2102,10 @@ def _double_fork_found():
     os.close(rep_w)
     real_listdir, real_open = os.listdir, builtins.open
     found = problem = None
+    trouble = []
     try:
         line = waited(rep_r)
         state["b"] = int(line) if line else 0
-        if not state["b"]:
-            return None, dict(state, a=a_pid, note="B never reported")
         own_children = "/proc/{0}/task/{0}/children".format(own)
         b_children = "/proc/{0}/task/{0}/children".format(state["b"])
 
@@ -2132,25 +2148,77 @@ def _double_fork_found():
                 os.write(cmd_w, b"x")
                 state["exited"] = reparented(state["d"])
             return io.BytesIO(data)
-        with _patched(os, "listdir", listing), _patched(builtins, "open", opened):
-            found, problem = _descendants()
+        if state["b"]:
+            with _patched(os, "listdir", listing), _patched(builtins, "open", opened):
+                found, problem = _descendants()
     finally:
         os.close(cmd_w)
         os.close(rep_r)
         for pid in (state["d"], a_pid):
             if pid:
-                with contextlib.suppress(OSError):
+                try:
                     os.kill(pid, signal.SIGKILL)
-        unreaped = []
+                except OSError as exc:
+                    trouble.append("kill of pid {} failed ({!r})".format(pid, exc))
         for pid in (a_pid, state["b"], state["d"]):
             if pid:
-                with contextlib.suppress(OSError):
+                try:
                     if _reap_within(pid, WITNESS_WAIT) is UNREAPED:
-                        unreaped.append(pid)
-    if unreaped:
-        return None, dict(state, a=a_pid, note="killed pids {} were still unreaped at the reap deadline: "
-                          "the attempt cannot be evaluated".format(unreaped))
-    return _double_fork_verdict(state, a_pid, found, problem)
+                        trouble.append("killed pid {} was still {}".format(pid, UNREAPED))
+                except OSError as exc:
+                    trouble.append("reap of pid {} failed ({!r})".format(pid, exc))
+    verdict, detail = (_double_fork_verdict(state, a_pid, found, problem) if state["b"]
+                       else (None, dict(state, a=a_pid, note="B never reported")))
+    if trouble:
+        detail = dict(detail, cleanup=trouble)
+        if verdict is True:
+            verdict = None
+            detail["note"] = "the walk held, but its cleanup is unestablished: the attempt cannot be evaluated"
+    return verdict, detail
+
+
+def _double_fork_cleanup_named():
+    """The cleanup of the live double fork combined with its walk verdict (_double_fork_found), over real
+    processes with only the verdict and the first cleanup reap scripted: _double_fork_verdict is wrapped to
+    judge an established race (D forked and reparented, B alive at walk 2's hook, D not early, four walks)
+    over a scripted found set, and the first cleanup reap (of A) runs for real before its result is replaced,
+    so no child is left behind. Case eio: a held walk ({A, D} found) whose first reap raises EIO is None
+    with that reap named with A's pid, never True (the reap error suppressed into a pass is the regression).
+    Case missing: a walk missing D ({A} found) whose first reap reads UNREAPED stays False with A named
+    unreaped, and through _attempted, whose next attempt is scripted to hold, it is decided at the first
+    attempt, never retried into success. An attempt in which B never reported exercised neither, and the
+    leg is then None: (ok, detail)."""
+    this, real_verdict, real_reap = sys.modules[__name__], _double_fork_verdict, _reap_within
+
+    def driven(missing, failure):
+        reaps = []
+
+        def judged(state, a_pid, found, problem):
+            raced = dict(state, d=state["d"] or FAKE_PID_BASE + 2, walk=max(state["walk"], 4), exited=True,
+                         early=False, b_alive=True)
+            return real_verdict(raced, a_pid, {a_pid} if missing else {a_pid, raced["d"]}, None)
+
+        def reaping(pid, wait):
+            status = real_reap(pid, wait)
+            reaps.append(pid)
+            if len(reaps) > 1:
+                return status
+            if failure == "eio":
+                raise OSError(errno.EIO, "io error of the self-test")
+            return UNREAPED
+        with _patched(this, "_double_fork_verdict", judged), _patched(this, "_reap_within", reaping):
+            return _double_fork_found()
+    eio = driven(False, "eio")
+    attempts = iter((lambda: driven(True, "unreaped"), lambda: (True, "a retry scripted to hold")))
+    missing = _attempted(lambda: next(attempts)())
+    first = missing[1][0]
+    if not (eio[1].get("b") and isinstance(first, dict) and first.get("b")):
+        return None, dict(eio=eio, missing=missing, note="B never reported: the cleanup was not exercised")
+    ok = (eio[0] is None and "reap of pid {} failed".format(eio[1]["a"]) in str(eio[1].get("cleanup"))
+          and "io error of the self-test" in str(eio[1].get("cleanup"))
+          and missing[0] is False and len(missing[1]) == 1
+          and "killed pid {} was still {}".format(first["a"], UNREAPED) in str(first.get("cleanup")))
+    return ok, dict(eio=eio, missing=missing)
 
 
 def _unrelated_unread():
@@ -2255,7 +2323,9 @@ def _probe_table(own, fake):
 def _pidfd_open_refused():
     """A pidfd_open refused (EACCES) on a walked live pid in range is the walk's named problem, never a
     silently skipped exit test: a real forked child is discovered through a scripted children file and its
-    pidfd_open alone is refused: (ok, detail)."""
+    pidfd_open alone is refused. The child is killed by its pid (still unreaped, so the pid is held) and
+    reaped bounded (_reap_within, never a blocking waitpid); one still unreaped at the reap deadline is a
+    named failure: (ok, detail)."""
     own, forked = os.getpid(), []
     real_pidfd_open = os.pidfd_open
 
@@ -2275,11 +2345,12 @@ def _pidfd_open_refused():
         (found, problem), walks = _walk_patched(table, ((os, "pidfd_open", refusing),))
     finally:
         os.kill(forked[0], signal.SIGKILL)
-        os.waitpid(forked[0], 0)
+        reaped = _reap_within(forked[0], WITNESS_WAIT)
+    unreaped = ("child {} killed, still {}".format(forked[0], UNREAPED) if reaped is UNREAPED else None)
     mark = "pidfd_open of recorded pid {} failed".format(forked[0])
     ok = (found == set() and problem is not None and mark in problem
-          and "refused by the self-test" in problem and walks == 1)
-    return ok, dict(child=forked[0], found=found, problem=problem, walks=walks)
+          and "refused by the self-test" in problem and walks == 1 and unreaped is None)
+    return ok, dict(child=forked[0], found=found, problem=problem, walks=walks, unreaped=unreaped)
 
 
 def _alive_probe_refuses():
@@ -2317,15 +2388,21 @@ def _high_descriptor_probes(hold=False, bound=WITNESS_WAIT):
     duplicate at or past descriptor 1024 was refused under RLIMIT_NOFILE (the capability is decided by that
     allocation itself, never by a fixed threshold; the soft bound is first raised as far as the hard bound
     allows, to at most 1100), or the probe child (made to stop itself by hold, the regression on this bound)
-    did not exit within bound seconds, in which case it is killed by its pid (this test started it) and its
-    bounded reap is reported. Every wait here is bounded: the exit is observed through the child's pidfd
-    against a monotonic deadline, never an unbounded waitid, and each reap is _reap_within, a WNOHANG poll
-    against its own deadlines, never a blocking waitpid; a child still unreaped at the reap deadline is a
-    named cleanup failure, never read as reaped. The limit change and the whole probe sit inside one outer
-    try whose finally restores the soft bound unconditionally; each cleanup step (every close, the reap, the
-    restore) is independently protected, and any cleanup failure, a failed restore included, is named in the
-    returned detail and the verdict is then False, never a silent pass (leg probe-cleanup injects a close and
-    a reap failure and holds the restore)."""
+    did not exit within bound seconds, in which case it is killed by its pid (this test started it) and the
+    reason is dict(stalled, reaped, reason), reaped True only once its bounded reap confirmed it. Every wait
+    here is bounded: the exit is observed through the child's pidfd against a monotonic deadline, never an
+    unbounded waitid, and each reap is _reap_within, a WNOHANG poll against its own deadlines, never a
+    blocking waitpid; a child still unreaped at the reap deadline, the stalled one included, is a named
+    cleanup failure and the verdict is then False, never read as reaped or as not exercised (leg
+    probe-stopped-unreaped). The restore of the soft bound sits in the outermost finally of the cleanup, so
+    no earlier cleanup step (every close, then the reap, each in an enclosing finally) can skip it, whatever
+    that step raises (an exception other than OSError included); a failed raise of the bound is named and
+    the verdict is False, the probe not run, after the restore; any cleanup failure, a failed restore
+    included, is named in the returned detail and the verdict is then False, never a silent pass; and while
+    an exception unwinds out of this function, every cleanup failure recorded, a failed restore included, is
+    attached to it as a note, never lost behind it (leg probe-cleanup injects a close OSError, a close
+    RuntimeError, a reap failure, a failed raise, a failed restore and a failed restore under a close
+    RuntimeError, and holds the restore as the last limit call)."""
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     target = 1100 if hard == resource.RLIM_INFINITY else min(hard, 1100)
     lifted = soft < target
@@ -2348,10 +2425,12 @@ def _high_descriptor_probes(hold=False, bound=WITNESS_WAIT):
             if time.monotonic() >= deadline:
                 stalled, child[0] = child[0], 0
                 os.kill(stalled, signal.SIGKILL)
-                ended = ("killed by its pid and reaped" if _reap_within(stalled, bound) is not UNREAPED
-                         else "killed by its pid, still unreaped at the reap deadline")
-                return None, ("probe child {} did not exit within {} s ({}): the "
-                              "high-descriptor probe was not exercised".format(stalled, bound, ended))
+                reaped = _reap_within(stalled, bound) is not UNREAPED
+                if not reaped:
+                    trouble.append("stalled probe child {} killed by its pid, still {}".format(stalled, UNREAPED))
+                return None, dict(stalled=stalled, reaped=reaped, reason=(
+                    "probe child {} did not exit within {} s (killed by its pid, {}): the high-descriptor "
+                    "probe was not exercised".format(stalled, bound, "reaped" if reaped else UNREAPED)))
         opened.append(os.pidfd_open(os.getpid()))
         try:
             opened.append(fcntl.fcntl(opened[0], fcntl.F_DUPFD_CLOEXEC, 1024))
@@ -2368,27 +2447,39 @@ def _high_descriptor_probes(hold=False, bound=WITNESS_WAIT):
         return readings == [True, False] and min(high) >= 1024, dict(high=high, readings=readings)
     verdict = detail = None
     try:
-        if lifted:
-            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
-        verdict, detail = probed()
-    finally:
-        for descriptor in opened:
+        try:
+            if lifted:
+                try:
+                    resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+                except (OSError, ValueError) as exc:
+                    trouble.append("RLIMIT_NOFILE raise to {} failed ({})".format((target, hard), exc))
+            if not trouble:
+                verdict, detail = probed()
+        finally:
             try:
-                os.close(descriptor)
-            except OSError as exc:
-                trouble.append("close of descriptor {} failed ({})".format(descriptor, exc))
-        if child[0]:
-            try:
-                if _reap_within(child[0], bound) is UNREAPED:
-                    trouble.append("probe child {} killed, still unreaped at the reap deadline".format(
-                        child[0]))
-            except OSError as exc:
-                trouble.append("reap of probe child {} failed ({})".format(child[0], exc))
-        if lifted:
-            try:
-                resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
-            except (OSError, ValueError) as exc:
-                trouble.append("RLIMIT_NOFILE restore to {} failed ({})".format((soft, hard), exc))
+                try:
+                    for descriptor in opened:
+                        try:
+                            os.close(descriptor)
+                        except OSError as exc:
+                            trouble.append("close of descriptor {} failed ({})".format(descriptor, exc))
+                finally:
+                    if child[0]:
+                        try:
+                            if _reap_within(child[0], bound) is UNREAPED:
+                                trouble.append("probe child {} killed, still {}".format(child[0], UNREAPED))
+                        except OSError as exc:
+                            trouble.append("reap of probe child {} failed ({})".format(child[0], exc))
+            finally:
+                if lifted:
+                    try:
+                        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+                    except (OSError, ValueError) as exc:
+                        trouble.append("RLIMIT_NOFILE restore to {} failed ({})".format((soft, hard), exc))
+    except BaseException as exc:
+        if trouble:
+            exc.add_note("cleanup of the high-descriptor probe: " + "; ".join(trouble))
+        raise
     if trouble:
         return False, dict(verdict=verdict, detail=detail, cleanup="; ".join(trouble))
     return verdict, detail
@@ -2455,8 +2546,8 @@ def _probe_event_masks():
     child pidfd (POLLIN) and the read end of a pipe whose write end closed (POLLHUP) each read exited; the
     write end of a pipe whose read end closed (POLLERR) and a closed descriptor (POLLNVAL) each raise OSError
     naming the mask, never an exit; every wait here is bounded (_reap_within, a WNOHANG poll against its
-    deadlines), and a probe child still unreaped at the reap deadline is a named failure, never read as
-    reaped: (ok, readings)."""
+    deadlines), and a probe child still unreaped at the reap deadline is a named failure (unreaped names the
+    child's pid and the reason; None once it was reaped), never read as reaped: (ok, readings)."""
     readings, opened = {}, []
     child = os.fork()
     if child == 0:
@@ -2490,12 +2581,12 @@ def _probe_event_masks():
         for descriptor in opened:
             os.close(descriptor)
         reaped = _reap_within(child, WITNESS_WAIT)
-    unreaped = reaped is UNREAPED
+    unreaped = ("probe child {} killed, still {}".format(child, UNREAPED) if reaped is UNREAPED else None)
     ok = (readings.get("exited") is True and readings.get("alive") is False and readings.get("hup") is True
           and isinstance(readings.get("err"), str) and "an error, not an exit" in readings["err"]
           and isinstance(readings.get("nval"), str) and "an error, not an exit" in readings["nval"]
-          and not unreaped)
-    return ok, dict(readings, unreaped=unreaped)
+          and unreaped is None)
+    return ok, dict(readings, child=child, unreaped=unreaped)
 
 
 def _erroring_opens():
@@ -2608,15 +2699,36 @@ def _limited_descriptor_probes():
 def _stopped_probe_named():
     """A probe child that stops itself never exits: the bounded wait must end at its deadline, kill the child
     by its pid, reap it, and name the probe unexercised, never hang or read a pass; run in a child so a wait
-    that lost its bound is cut at CHILD_TIMEOUT and read as red, never as a hang of this run: (ok, detail)."""
+    that lost its bound is cut at CHILD_TIMEOUT and read as red, never as a hang of this run. The confirmed
+    reap is required on its own (reaped True), apart from the expected timeout text, so a stalled child
+    still unreaped at the reap deadline is red here, never a pass: (ok, detail)."""
     def held():
         began = time.monotonic()
         verdict, reason = _high_descriptor_probes(hold=True, bound=WITNESS_TIMEOUT)
         return verdict, reason, time.monotonic() - began
     done, result = _in_child(held, CHILD_TIMEOUT)
-    ok = (done and isinstance(result, list) and result[0] is None and "did not exit within" in result[1]
-          and "not exercised" in result[1] and result[2] < WITNESS_WAIT)
+    ok = (done is True and isinstance(result, list) and result[0] is None and isinstance(result[1], dict)
+          and result[1].get("reaped") is True and "did not exit within" in result[1].get("reason", "")
+          and "not exercised" in result[1].get("reason", "") and result[2] < WITNESS_WAIT)
     return ok, (done, result)
+
+
+def _stopped_unreaped_named():
+    """Leg probe-stopped against a stalled child still unreaped at the reap deadline: _reap_within, in the
+    probe's own child only (this process's reap of that child stays real), reaps for real and then returns
+    UNREAPED, so the stalled probe child reads unreaped; _high_descriptor_probes is then False with the
+    child named still unreaped, and _stopped_probe_named is red, never a pass (reading the unreaped stall as
+    an unexercised probe is the regression): (ok, detail)."""
+    this, owner, real = sys.modules[__name__], os.getpid(), _reap_within
+
+    def reaping(pid, wait):
+        status = real(pid, wait)
+        return status if os.getpid() == owner else UNREAPED
+    with _patched(this, "_reap_within", reaping):
+        verdict, (done, result) = _stopped_probe_named()
+    ok = (verdict is False and done is True and isinstance(result, list) and result[0] is False
+          and "still {}".format(UNREAPED) in str(result[1]))
+    return ok, dict(verdict=verdict, done=done, result=result)
 
 
 def _unreaped_named():
@@ -2642,15 +2754,22 @@ def _unreaped_named():
 
 
 def _cleanup_restores_limit():
-    """The RLIMIT_NOFILE restore of _high_descriptor_probes under an injected cleanup failure, each case in
-    its own child over scripted limit calls (getrlimit reads (1024, 1100) so the lift is taken; setrlimit
-    records and changes nothing, so the restore is observable): with every close raising, and with the reap
-    raising, the failed step is named in the returned cleanup detail, the verdict is False, and the restore
-    (1024, 1100) is still the last recorded limit call, never skipped: (ok, detail)."""
+    """The RLIMIT_NOFILE restore of _high_descriptor_probes under an injected failure, each case in its own
+    child over scripted limit calls (getrlimit reads (1024, 1100) so the lift is taken; setrlimit records
+    and changes nothing unless the case makes it raise, so the restore is observable), every reap recorded:
+    with every close raising OSError, and with the reap raising, the failed step is named in the returned
+    cleanup detail and the verdict is False; with every close raising RuntimeError (no OSError), that
+    exception escapes, yet the probe child is still reaped and the restore still runs (a cleanup whose
+    restore an earlier step's exception skips is the regression); with the raise of the bound failing, the
+    probe is not run and the failed raise is named, the verdict False after the restore (an escaping raise
+    failure is the regression); with the restore failing, it is named and the verdict is False; and with a
+    close raising RuntimeError and the restore failing, the RuntimeError escapes carrying the failed restore
+    as a note, never lost behind it. In every case the restore (1024, 1100) is the last recorded limit call
+    and the raise (1100, 1100) was attempted: (ok, detail)."""
     def driven(failing):
         def run():
             this = sys.modules[__name__]
-            calls = []
+            calls, reaps = [], []
             real_close, real_reap = os.close, _reap_within
 
             def reading(which):
@@ -2658,31 +2777,53 @@ def _cleanup_restores_limit():
 
             def setting(which, bounds):
                 calls.append(list(bounds))
+                if (failing == "raise" and list(bounds) == [1100, 1100]
+                        or failing in ("restore", "unwinding") and list(bounds) == [1024, 1100]):
+                    raise ValueError("limit failure of the self-test")
 
             def closing(fd):
                 real_close(fd)
+                if failing in ("runtime", "unwinding"):
+                    raise RuntimeError("close runtime failure of the self-test")
                 raise OSError(errno.EIO, "close failure of the self-test")
 
             def reaping(pid, wait):
-                real_reap(pid, wait)
-                raise OSError(errno.ECHILD, "reap failure of the self-test")
+                status = real_reap(pid, wait)
+                reaps.append(pid)
+                if failing == "reap":
+                    raise OSError(errno.ECHILD, "reap failure of the self-test")
+                return status
             patches = [(resource, "getrlimit", reading), (resource, "setrlimit", setting),
-                       (os, "close", closing) if failing == "close" else (this, "_reap_within", reaping)]
-            with contextlib.ExitStack() as stack:
-                for owner, name, replacement in patches:
-                    stack.enter_context(_patched(owner, name, replacement))
-                verdict, detail = _high_descriptor_probes()
-            return [verdict, repr(detail), calls]
+                       (this, "_reap_within", reaping)]
+            if failing in ("close", "runtime", "unwinding"):
+                patches.append((os, "close", closing))
+            try:
+                with contextlib.ExitStack() as stack:
+                    for owner, name, replacement in patches:
+                        stack.enter_context(_patched(owner, name, replacement))
+                    verdict, detail = _high_descriptor_probes()
+            except Exception as exc:
+                return ["raised", repr(exc), list(getattr(exc, "__notes__", ())), calls, reaps]
+            return [verdict, repr(detail), [], calls, reaps]
         return run
-    outcomes = dict((failing, _in_child(driven(failing), CHILD_TIMEOUT)) for failing in ("close", "reap"))
+    marks = dict(close=(False, "close failure of the self-test"), reap=(False, "reap failure of the self-test"),
+                 runtime=("raised", "close runtime failure of the self-test"),
+                 raise_=(False, "RLIMIT_NOFILE raise to (1100, 1100) failed"),
+                 restore=(False, "RLIMIT_NOFILE restore to (1024, 1100) failed"),
+                 unwinding=("raised", "close runtime failure of the self-test"))
+    outcomes = dict((name, _in_child(driven(name.rstrip("_")), CHILD_TIMEOUT)) for name in marks)
 
-    def judged(outcome, mark):
-        done, result = outcome
-        return (done is True and isinstance(result, list) and result[0] is False and mark in result[1]
-                and result[2] != [] and result[2][-1] == [1024, 1100] and [1100, 1100] in result[2])
-    ok = (judged(outcomes["close"], "close failure of the self-test")
-          and judged(outcomes["reap"], "reap failure of the self-test"))
-    return ok, outcomes
+    def judged(name):
+        done, result = outcomes[name]
+        verdict, mark = marks[name]
+        if not (done is True and isinstance(result, list) and len(result) == 5):
+            return False
+        held, text, notes, calls, reaps = result
+        return (held == verdict and mark in text and calls != [] and calls[-1] == [1024, 1100]
+                and [1100, 1100] in calls and (reaps != []) is (name != "raise_")
+                and (name != "unwinding" or "RLIMIT_NOFILE restore to (1024, 1100) failed" in str(notes)))
+    judgements = dict((name, judged(name)) for name in marks)
+    return all(judgements.values()), dict(outcomes=outcomes, judgements=judgements)
 
 
 def _capped_limits_named():
@@ -2690,10 +2831,19 @@ def _capped_limits_named():
     for real in a child whose own hard bound is first lowered (a lowered hard bound cannot be raised back, so
     the refusal is the kernel's own, never a stub): at hard 1040 the 1050-bound cases, and at hard 1024 every
     case over 1024, are each cannot-evaluate, and the leg verdict is None with the refused bounds named,
-    never False: (ok, detail)."""
+    never False. This leg's own lowered bound is subject to the same host: each child first reads its
+    inherited hard RLIMIT_NOFILE, and a case whose bound it cannot set (the setrlimit is refused: raising a
+    hard bound needs privilege) is itself cannot-evaluate, named with the host's hard bound, never a crash
+    read as False, so a host whose hard bound sits below 1040 makes this leg None and the suite exit 2,
+    never 1 (leg capped-host): (ok, detail)."""
     def capped(hard):
         def run():
-            resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
+            held = resource.getrlimit(resource.RLIMIT_NOFILE)
+            try:
+                resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
+            except (OSError, ValueError) as exc:
+                return ["capped", "hard bound {} could not be set under this host's hard bound {} ({})".format(
+                    hard, held[1], exc), None]
             verdict, detail = _limited_descriptor_probes()
             refused = sorted(bounds for bounds, judgement in detail["judgements"].items()
                              if judgement is None)
@@ -2703,11 +2853,39 @@ def _capped_limits_named():
 
     def judged(outcome, refused):
         done, result = outcome
+        if done is True and isinstance(result, list) and result[:1] == ["capped"]:
+            return None
         return (done is True and isinstance(result, list) and result[0] is None and result[1] is not None
                 and "cannot be evaluated" in result[1] and result[2] == refused)
-    ok = (judged(outcomes[1040], [[1024, 1050], [1050, 1050]])
-          and judged(outcomes[1024], [[1024, 1050], [1025, 1025], [1026, 1026], [1050, 1050]]))
-    return ok, outcomes
+    verdict = _combined([judged(outcomes[1040], [[1024, 1050], [1050, 1050]]),
+                         judged(outcomes[1024], [[1024, 1050], [1025, 1025], [1026, 1026], [1050, 1050]])])
+    return verdict, outcomes
+
+
+def _capped_host_named():
+    """Leg probe-capped on a capped host, driven for real: in a child whose inherited hard RLIMIT_NOFILE is
+    first lowered to 1024, and in one lowered to 1030 (each below probe-capped's own 1040 case), the leg
+    _capped_limits_named reads None (cannot-evaluate), never False (its 1040 setup crashing into a False is
+    the regression). A lowered bound this host itself refuses (its own hard bound below it) leaves that case
+    cannot-evaluate, and the leg None: (ok, detail)."""
+    def capped(host):
+        def run():
+            try:
+                resource.setrlimit(resource.RLIMIT_NOFILE, (host, host))
+            except (OSError, ValueError) as exc:
+                return ["capped", "hard bound {} could not be set ({})".format(host, exc)]
+            verdict, detail = _capped_limits_named()
+            return [verdict, repr(detail)]
+        return run
+    outcomes = dict((host, _in_child(capped(host), CHILD_TIMEOUT)) for host in (1024, 1030))
+
+    def judged(host):
+        done, result = outcomes[host]
+        if done is True and isinstance(result, list) and result[:1] == ["capped"]:
+            return None
+        return (done is True and isinstance(result, list) and result[0] is None
+                and "could not be set under this host's hard bound {}".format(host) in result[1])
+    return _combined([judged(1024), judged(1030)]), outcomes
 
 
 def _exited_child_unsignalled():
@@ -2782,6 +2960,50 @@ def _holder_probe_failure_named():
     return ok, dict(state=state, reason=reason, sent=sent,
                     exited=None if exited is None else repr(exited),
                     killed=killed, unreaped=unreaped, child=child)
+
+
+def _holder_exited_unsignalled():
+    """The real holder fixture (_holder_probe_failure_named) with its child already exited before the
+    fixture's liveness observation: the child's HANG_SECONDS sleep returns at once (time.sleep is wrapped for
+    that duration only, inherited through the fork), and _kill_holder is wrapped to wait, bounded, through
+    the child's pidfd for that exit before the real call runs. The fixture must then send no kill at all
+    (every os.kill recorded and none sent: a reap-then-kill ordering frees the pid and then signals it, the
+    regression), make no blocking waitpid (every os.waitpid recorded; one without WNOHANG is the
+    regression), report no unreaped child, and leave the child reaped. The fixture's own verdict is not
+    asserted (its child did not stay alive): (ok, detail)."""
+    this, real_sleep, real_kill_holder, real_waitpid = sys.modules[__name__], time.sleep, _kill_holder, os.waitpid
+    kills, waits, raised = [], [], []
+
+    def sleeping(seconds):
+        if seconds != HANG_SECONDS:
+            real_sleep(seconds)
+
+    def holding(pid, write_end):
+        pidfd = os.pidfd_open(pid)
+        try:
+            waiter = select.poll()
+            waiter.register(pidfd, select.POLLIN)
+            waiter.poll(int(WITNESS_WAIT * 1000))
+        finally:
+            os.close(pidfd)
+        return real_kill_holder(pid, write_end)
+
+    def waiting(pid, options):
+        waits.append((pid, options))
+        return real_waitpid(pid, options)
+    detail = {}
+    with (_patched(time, "sleep", sleeping), _patched(this, "_kill_holder", holding),
+          _patched(os, "kill", lambda pid, signum: kills.append((pid, signum))), _patched(os, "waitpid", waiting)):
+        try:
+            _held, detail = _holder_probe_failure_named()
+        except Exception as exc:
+            raised.append(repr(exc))
+    child = detail.get("child")
+    blocking = [call for call in waits if not call[1] & os.WNOHANG]
+    ok = (raised == [] and child is not None and detail.get("exited") is not None and kills == []
+          and detail.get("killed") is False and detail.get("unreaped") is None and blocking == []
+          and _reaped(child))
+    return ok, dict(detail, kills=kills, waits=waits, blocking=blocking, raised=raised)
 
 
 def _double_fork_verdicts():
@@ -3053,18 +3275,27 @@ def _descendant_walk_held(adopted):
     Leg probe-limits: the capability decision is the allocation itself, at hard bounds 1024, 1025, 1026 and
     1050, with a raised soft bound restored; a case whose bounds this host's hard RLIMIT_NOFILE refuses is
     named cannot-evaluate, never False. Leg probe-stopped: a probe child that stops itself is killed by
-    its pid at the deadline, reaped, and named unexercised, never a hang. Leg holder-probe: a liveness probe
+    its pid at the deadline, its reap confirmed, and named unexercised, never a hang; leg
+    probe-stopped-unreaped: that stalled child still unreaped at the reap deadline is False, and
+    probe-stopped red, never a pass. Leg holder-probe: a liveness probe
     failing inside _kill_holder is NOT_EVALUATED, named, nothing signalled. Leg fork-verdict: the double-fork
     verdict table (_double_fork_verdict): the missed-precondition branches (B already exited, D already
     visible) are each None, never a pass, and a missing D alone and a missing A alone are each False. Leg
     reap-deadline: _reap_within over a scripted still-live child makes no blocking wait and returns the named
     UNREAPED result, one SIGKILL sent. Leg probe-cleanup: the soft-bound restore of the high-descriptor probe
-    survives an injected close failure and an injected reap failure, each named, the restore the last limit
-    call. Leg probe-capped: _limited_descriptor_probes under lowered host hard bounds 1040 and 1024 reads
-    cannot-evaluate, never False. Leg holder-exited: the cleanup ownership rule (_ended_by_pid): an
-    already-exited child is observed without reaping and never signalled, a live one killed before any reap. Leg double-fork: the live hook-timed
-    double fork (_double_fork_found), cannot-evaluate without a child subreaper or with its timing
-    precondition missed in every attempt. Leg unrelated: _unrelated_unread."""
+    survives an injected close failure (OSError and RuntimeError), an injected reap failure, a failed raise
+    and a failed restore, each named (a failed restore under an escaping exception as its note), the
+    restore the last limit call. Leg probe-capped: _limited_descriptor_probes under lowered host hard bounds
+    1040 and 1024 reads cannot-evaluate, never False; leg capped-host: probe-capped itself, run where the
+    inherited hard bound is 1024 and 1030, is None, never False. Leg holder-exited: the cleanup ownership
+    rule (_ended_by_pid): an already-exited child is observed without reaping and never signalled, a live
+    one killed before any reap; leg holder-fixture: the real holder fixture over a child already exited
+    before its liveness observation sends no kill and makes no blocking wait. Leg double-fork: the live
+    hook-timed double fork (_double_fork_found), cannot-evaluate without a child subreaper or with its
+    timing precondition missed in every attempt; leg fork-cleanup: its cleanup findings are named with their
+    pids, an EIO at a cleanup reap turns a held walk into None, never True, and a missing D with an
+    unreaped pid stays False, never retried into success (None without a child subreaper). Leg unrelated:
+    _unrelated_unread."""
     legs, problems = _walk_tables(os.getpid())
     outcomes = {}
     for name, (table, want, walks) in legs.items():
@@ -3109,11 +3340,17 @@ def _descendant_walk_held(adopted):
     outcomes["probe-cleanup"] = _cleanup_restores_limit()
     outcomes["probe-capped"] = _capped_limits_named()
     outcomes["holder-exited"] = _exited_child_unsignalled()
+    outcomes["holder-fixture"] = _holder_exited_unsignalled()
+    outcomes["probe-stopped-unreaped"] = _stopped_unreaped_named()
+    outcomes["capped-host"] = _capped_host_named()
     if adopted is True:
         outcomes["double-fork"] = _attempted(_double_fork_found)
+        outcomes["fork-cleanup"] = _double_fork_cleanup_named()
     else:
         outcomes["double-fork"] = (None, "no child subreaper ({}): the reparenting race cannot be driven"
                                    .format(adopted))
+        outcomes["fork-cleanup"] = (None, "no child subreaper ({}): the double-fork cleanup cannot be driven"
+                                    .format(adopted))
     outcomes["unrelated"] = _unrelated_unread()
     return _combined(entry[0] for entry in outcomes.values()), outcomes
 
@@ -3308,7 +3545,10 @@ def _injector(ordinal, in_child, owner, cleanup):
 
 def _leftover_children():
     """Reap every child of this process; returns one entry per child found: "zombie", or "alive" (then waited
-    for)."""
+    for). The wait on a live leftover is a blocking waitpid with no kill (its pid is not known here), not
+    bounded by this function: a stated residual, bounded only by the caller, as the window sweeps run inside
+    _in_child, whose deadline (CHILD_TIMEOUT) kills and reaps a sweep blocked here; _reap_within does not
+    cover it."""
     left = []
     with contextlib.suppress(ChildProcessError):
         while True:
@@ -3330,10 +3570,13 @@ def _marker_text(fd):
 
 def _window_sweep(in_child):
     """Run _in_child over _sweep_thunk once per injection point of _injector, from the first, until a run sees
-    no injection; returns dict(points, complete, count, findings), each finding a point after which a child of
-    this process (alive or a zombie) or a descriptor remained, at which an exception other than the injected
-    one left _in_child, or at which the gate child ran its caller's finally. Run only inside _in_child: it
-    installs a trace function and expects no other child of its process."""
+    no injection; returns dict(points, injected, complete, count, findings), points counting every run
+    attempted (the completing, uninjected run included) and injected only the runs before it, each of which
+    an injection reached (points - 1 on completion: the completing run is an attempt, never an injection,
+    and _swept compares injected with SWEEP_FLOOR), each finding a point after which a child of this process
+    (alive or a zombie) or a descriptor remained, at which an exception other than the injected one left
+    _in_child, or at which the gate child ran its caller's finally. Run only inside _in_child: it installs a
+    trace function and expects no other child of its process."""
     owner, cleanup, findings = os.getpid(), _cleanup_lines(), []
     for ordinal in range(1, SWEEP_LIMIT + 1):
         descriptors = set(os.listdir(DESCRIPTOR_DIR))
@@ -3363,14 +3606,39 @@ def _window_sweep(in_child):
             findings.append(dict(point=ordinal, raised=raised, result=result, children=left, leaked=leaked,
                                  marker=marker))
         if (result == (True, SWEEP_RESULT)) if in_child else raised is None:
-            return dict(points=ordinal, complete=True, count=len(findings), findings=findings[:10])
-    return dict(points=SWEEP_LIMIT, complete=False, count=len(findings), findings=findings[:10])
+            return dict(points=ordinal, injected=ordinal - 1, complete=True, count=len(findings),
+                        findings=findings[:10])
+    return dict(points=SWEEP_LIMIT, injected=SWEEP_LIMIT, complete=False, count=len(findings),
+                findings=findings[:10])
 
 
 def _swept(probe):
-    """True when a window sweep, run in a child, completed over at least SWEEP_FLOOR points with no finding."""
+    """True when a window sweep, run in a child, completed after at least SWEEP_FLOOR completed injections
+    (the completing run is an attempt, never an injection, so a floor over points would overcount by one)
+    with no finding."""
     done, sweep = probe
-    return done and sweep["complete"] and sweep["points"] >= SWEEP_FLOOR and not sweep["count"]
+    return bool(done and sweep["complete"] and sweep["injected"] >= SWEEP_FLOOR and not sweep["count"])
+
+
+def _window_floor_boundary():
+    """The injection floor of _swept at its boundary, over synthetic window-sweep records (the real sweeps
+    are gate/fork-window-cleaned and gate/child-never-unwinds): a completed sweep of SWEEP_FLOOR - 1
+    injections (its points read SWEEP_FLOOR: the overcount a floor over attempts would accept) is refused,
+    one of exactly SWEEP_FLOOR and one just past it are accepted, and an incomplete, finding-bearing or
+    undone record is refused whatever its count: (ok, cases)."""
+    def record(**kwargs):
+        return (True, dict(dict(points=SWEEP_FLOOR + 1, injected=SWEEP_FLOOR, complete=True, count=0,
+                                findings=[]), **kwargs))
+    cases = dict(
+        just_below=_swept(record(points=SWEEP_FLOOR, injected=SWEEP_FLOOR - 1)),
+        at_floor=_swept(record(points=SWEEP_FLOOR + 1, injected=SWEEP_FLOOR)),
+        just_above=_swept(record(points=SWEEP_FLOOR + 2, injected=SWEEP_FLOOR + 1)),
+        incomplete=_swept(record(complete=False)),
+        found=_swept(record(count=1, findings=[dict(point=3, raised="OSError")])),
+        undone=_swept((False, "hung")))
+    ok = (cases["just_below"] is False and cases["at_floor"] is True and cases["just_above"] is True
+          and cases["incomplete"] is False and cases["found"] is False and cases["undone"] is False)
+    return ok, cases
 
 
 def _launch(path, *args, cwd=None):
@@ -3603,7 +3871,10 @@ def _vector_outcome(module, vector, mutant=None):
     such a run is re-run once at BLOCK_CONFIRM, and a re-run that completes decides by its result, so no run earns
     exposure by hanging alone. A re-run still running at BLOCK_CONFIRM is "blocked" only when (mutant, vector) is
     in BLOCK_CREDIT and the re-run's own child, read before it is killed (_fifo_open_evidence), is blocked opening
-    a FIFO; else it is None. (outcome, detail)."""
+    a FIFO; else it is None. A run whose killed child was still unreaped at the reap deadline ("unreaped (...)"
+    or "hung; unreaped (...)", _in_child) is no completed run: under a mutant it is None, never an exposure,
+    so no mutant earns exposure by hanging with an unreaped child either (leg unreaped-hang of
+    _hang_credit); against this gate it is a failure. (outcome, detail)."""
     vid, root, code, text, patch = vector
 
     def run(timeout, expiring=None):
@@ -3612,11 +3883,18 @@ def _vector_outcome(module, vector, mutant=None):
                 owner = check_ci_parity if patch[0] == "extract_local" else module
                 stack.enter_context(_patched(owner, patch[0], patch[1]))
             return _gate(module, root, timeout=timeout, expiring=expiring)
+
+    def unreaped(got):
+        return isinstance(got, str) and got.startswith(("unreaped (", "hung; unreaped ("))
     got, output = run(GATE_TIMEOUT)
+    if mutant is not None and unreaped(got):
+        return None, (got, output)
     if got != "hung" or mutant is None:
         return (got == code and text in output), (got, output)
     evidence = []
     got, output = run(BLOCK_CONFIRM, lambda pid: evidence.append(_fifo_open_evidence(pid)))
+    if unreaped(got):
+        return None, (got, dict(evidence=evidence))
     if got != "hung":
         return (got == code and text in output), (got, output)
     declared = (mutant, vid) in BLOCK_CREDIT
@@ -3649,17 +3927,41 @@ def _mutation_verdicts(records, all_vectors):
     return caught, discriminates, dict(missed=missed, never=never, unresolved=unresolved)
 
 
+def _unreaped_hang_uncredited():
+    """A run whose killed child is still unreaped earns no mutation credit, driven through the real _gate,
+    _in_child and _vector_outcome with only _reap_within stubbed (it reaps the killed child for real, then
+    returns UNREAPED, as for a child in uninterruptible sleep past both reap deadlines) and GATE_TIMEOUT cut
+    to WITNESS_TIMEOUT: a run that hangs reads "hung; unreaped (...)" (the hang visible, the reap failure
+    attached) and is None under a mutant, so that mutant is not caught by it (an exposure here, from a bare
+    "unreaped" read as a completed run, is the regression); a run that returns with its child unreaped is
+    None under a mutant as well: (ok, detail)."""
+    this, real = sys.modules[__name__], _reap_within
+
+    def reaping(pid, wait):
+        real(pid, wait)
+        return UNREAPED
+    vector = ("scratch/unreaped", ROOT, 0, "PASS", None)
+    with _patched(this, "_reap_within", reaping), _patched(this, "GATE_TIMEOUT", WITNESS_TIMEOUT):
+        hung = _vector_outcome(types.SimpleNamespace(run=lambda root: time.sleep(HANG_SECONDS)), vector,
+                               "scratch-mutant")
+        returned = _vector_outcome(types.SimpleNamespace(run=lambda root: 1), vector, "scratch-mutant")
+    caught = _mutation_verdicts([("scratch-mutant", vector[0], {vector[0]: hung[0]})], [vector[0]])[0]
+    ok = (hung[0] is None and str(hung[1][0]).startswith("hung; unreaped (") and returned[0] is None
+          and str(returned[1][0]).startswith("unreaped (") and caught is None)
+    return ok, dict(hung=hung, returned=returned, caught=caught)
+
+
 def _credit_verdict(detail):
     """The hung-credit verdict over detail as _hang_credit fills it: False when any case that needs no reading
-    from the FIFO subject does not hold, the undeclared pair's stall (outside) among them, decided before the
-    evidence gate; else None (cannot evaluate) when that subject never showed its wait; else whether the
-    evidence case credits the block."""
+    from the FIFO subject does not hold, the undeclared pair's stall (outside) and the unreaped hang
+    (unreaped-hang) among them, decided before the evidence gate; else None (cannot evaluate) when that
+    subject never showed its wait; else whether the evidence case credits the block."""
     unresolved = (None, (None, None))
     settled = ([detail[name][:2] for name in ("held", "outside", "no-evidence", "finite-delay")]
                == [(True, (False, False)), unresolved, unresolved, unresolved]
                and detail["held"][2] == [GATE_TIMEOUT, BLOCK_CONFIRM] and detail["this-gate"][0] is False
                and detail["this-gate"][2] == [GATE_TIMEOUT] and detail["subjects"][1][0] is False
-               and detail["halves"][0] is True
+               and detail["halves"][0] is True and detail["unreaped-hang"][0] is True
                and detail["all-hung"][0] == [False] and True not in detail["all-hung"][1])
     if not settled:
         return False
@@ -3679,7 +3981,7 @@ def _stall_decided():
              "outside": unresolved, "no-evidence": unresolved, "finite-delay": unresolved,
              "this-gate": (False, (False, False), [GATE_TIMEOUT]),
              "subjects": [(True, "waiting on the FIFO open"), (False, "sleeping")],
-             "halves": (True, {}), "all-hung": ([False], (False, False)),
+             "halves": (True, {}), "unreaped-hang": (True, {}), "all-hung": ([False], (False, False)),
              "evidence": ("blocked", (True, True), [GATE_TIMEOUT, BLOCK_CONFIRM])}
     unshown = [(False, "never showed its wait"), (False, "sleeping")]
     stalled = dict(clean, outside=("blocked", (True, True)), subjects=unshown)
@@ -3696,7 +3998,9 @@ def _hang_credit(vectors, base):
     None without evidence or with the sleeper's, and "blocked", crediting the mutant, with the FIFO subject's.
     Hung then hung outside BLOCK_CREDIT reads None even with the FIFO subject's evidence. This gate, hung then
     held, reads False with no re-run. With every run hung and no evidence, every vector fails against this gate
-    and neither aggregate passes. Each half of the evidence is necessary on its own (_evidence_halves). The cases
+    and neither aggregate passes. Each half of the evidence is necessary on its own (_evidence_halves). A run
+    whose killed child is still unreaped, hung or not, is None under a mutant, never an exposure
+    (_unreaped_hang_uncredited, through the real _gate). The cases
     that need no reading from the FIFO subject, the undeclared pair's stall among them, are decided first and
     fail as False; only when every one of them holds and that subject never showed its wait is the verdict None
     (cannot evaluate). The decision is _credit_verdict, held over injected details by _stall_decided."""
@@ -3759,6 +4063,7 @@ def _hang_credit(vectors, base):
                 os.kill(pid, signal.SIGKILL)
                 os.waitpid(pid, 0)
     detail["halves"] = _evidence_halves()
+    detail["unreaped-hang"] = _unreaped_hang_uncredited()
     return _credit_verdict(detail), detail
 
 
@@ -4066,10 +4371,13 @@ def _self_test(restore_problems, report_path):
             (False, "crashed (child wait status 9)"), (True, ["hung", ""]), {"child"}, None, None))
         check("gate/parent-death-kills-group", hasattr(fcntl, "F_SETSIG") and orphaned[0],
               (hasattr(fcntl, "F_SETSIG"), orphaned))
+        # each sweep's acceptance floor counts completed injections, held at its 19/20/21 boundary over
+        # synthetic records (_window_floor_boundary), so the completing run is never counted as an injection
+        floor = _window_floor_boundary()
         sweep = _in_child(lambda: _window_sweep(False), CHILD_TIMEOUT)
-        check("gate/fork-window-cleaned", _swept(sweep), sweep)
+        check("gate/fork-window-cleaned", _swept(sweep) and floor[0], (sweep, floor))
         sweep = _in_child(lambda: _window_sweep(True), CHILD_TIMEOUT)
-        check("gate/child-never-unwinds", _swept(sweep), sweep)
+        check("gate/child-never-unwinds", _swept(sweep) and floor[0], (sweep, floor))
 
     # 7. the live leg: the real surface passes and is no smaller than the recorded floor, both in a gate child and
     # through this file's own entry, launched as the roster launches the gate step
@@ -4102,8 +4410,9 @@ def _self_test(restore_problems, report_path):
               "subject never showed its wait, a refusal fixture's dumpability setup or bindability probe could "
               "not be made, the double-fork walk leg had no child subreaper, was not exercised or missed "
               "its timing precondition, or the high-descriptor probe leg could not allocate a descriptor at "
-              "or past 1024 or its probe child did not exit in its bound, or the probe-limits leg could not "
-              "set a case's RLIMIT_NOFILE bounds under this host's hard bound)".format(
+              "or past 1024 or its probe child did not exit in its bound, or the probe-limits, probe-capped "
+              "or capped-host leg could not set a case's RLIMIT_NOFILE bounds under this host's hard bound, "
+              "or a mutant's fixture run left its killed child unreaped)".format(
                   len(unevaluated), len(results), ATTEMPTS))
         for check_id, detail in failed:
             print("  {}: {!r}".format(check_id, detail))
