@@ -201,8 +201,8 @@ HOMES2_CHECKS = ("C-EVIDENCE-ENUM",)
 # separate gates; today an active series is graded against required_checks(1)), so raising that
 # constant alone, or with a placeholder roster, cannot ship. At activation these ids join the
 # required roster of every generation the way HOMES2_CHECKS joins the homes-2 roster: the wiring
-# must place the imported ids inside required_checks(h) for EVERY generation while they stay
-# disjoint from REQUIRED_CHECKS and HOMES2_CHECKS themselves, so any OTHER wiring (even a
+# must place the imported ids inside required_checks(h) for EVERY supported generation while
+# they stay disjoint from REQUIRED_CHECKS and HOMES2_CHECKS themselves, so any OTHER wiring (even a
 # legitimate-looking alternative such as an imported-keyed roster) reads red, which fails
 # closed: a red on a legitimate alternative, never a green on a wiring nothing grades.
 IMPORTED_CONTENT_CHECKS = ()
@@ -236,9 +236,10 @@ def imported_content_checks_landed():
     predicate grades ROSTER STRUCTURE only -- the ids exist, are NEW, and are wired into every
     generation -- never what a registered check reads: a wired check that grades nothing is for
     review and for the report reconciliation (an id that never runs reads CANNOT-EVALUATE), not
-    for this gate. The EVERY-generation bound assumes SUPPORTED_HOMES >= 1: below one supported
-    generation the predicate refuses outright (fail closed) instead of reading the empty
-    generation range vacuously True."""
+    for this gate. Once the imported series is supported, the EVERY-generation bound assumes
+    SUPPORTED_HOMES >= 1: below one supported generation the predicate refuses outright (fail
+    closed) instead of reading the empty generation range vacuously True. While the series is
+    unsupported the deferral answers first, whatever SUPPORTED_HOMES holds."""
     if not _opf_store.imported_series_supported():
         return True
     ids = set(IMPORTED_CONTENT_CHECKS)
@@ -4390,11 +4391,12 @@ def self_test():
               imported_content_checks_landed())
         # The SAME predicate under controlled versions, rosters, and wirings (every patched name
         # restored in finally; no store fixture runs inside this block). The empty, out-of-roster,
-        # reused-id, unprefixed, collision, homes-2-only, omission, and no-generation vectors
-        # assert the False side at a raised support, and each arm is discriminated ON ITS OWN:
-        # deleting the non-empty, membership, prefix, disjointness, or generation-floor
+        # reused-id, unprefixed, collision, multi-id, homes-2-only, omission, and no-generation
+        # vectors assert the False side at a raised support, and each arm is discriminated ON ITS
+        # OWN: deleting the non-empty, membership, prefix, disjointness, or generation-floor
         # condition from the predicate, one at a time, reds a committed vector in an ordinary
-        # suite run.
+        # suite run, and so does weakening the EVERY-id prefix test to any id or the membership
+        # subset to an overlap (the multi-id vectors).
         _icc_prev_ssv = _opf_store.SUPPORTED_SPEC_VERSION
         _icc_prev_homes = _opf_store.SUPPORTED_HOMES
         _icc_prev_roster = IMPORTED_CONTENT_CHECKS
@@ -4450,6 +4452,26 @@ def self_test():
             check("imported-content-gate-homes2-collision-red-once-supported",
                   not imported_content_checks_landed())
             _icc_g["HOMES2_CHECKS"] = _icc_prev_h2
+            # Multi-id rosters pin the EVERY-id half of the prefix and membership arms (a one-id
+            # roster cannot tell all() from any(), or a subset from an overlap): a C-IMPORTED- id
+            # beside a fresh non-prefixed id, both wired into every required roster, is refused
+            # by the prefix arm alone; two C-IMPORTED- ids with only the first wired into every
+            # required roster are refused by the membership arm alone; and the same two ids both
+            # wired read True, so neither red comes from the roster size.
+            _icc_g["IMPORTED_CONTENT_CHECKS"] = ("C-IMPORTED-A", "C-NEWCONTENT")
+            _icc_g["required_checks"] = (
+                lambda homes, _rc=_icc_prev_rc: _rc(homes) + ("C-IMPORTED-A", "C-NEWCONTENT"))
+            check("imported-content-gate-multi-id-unprefixed-red-once-supported",
+                  not imported_content_checks_landed())
+            _icc_g["IMPORTED_CONTENT_CHECKS"] = ("C-IMPORTED-A", "C-IMPORTED-B")
+            _icc_g["required_checks"] = (
+                lambda homes, _rc=_icc_prev_rc: _rc(homes) + ("C-IMPORTED-A",))
+            check("imported-content-gate-multi-id-partly-wired-red-once-supported",
+                  not imported_content_checks_landed())
+            _icc_g["required_checks"] = (
+                lambda homes, _rc=_icc_prev_rc: _rc(homes) + ("C-IMPORTED-A", "C-IMPORTED-B"))
+            check("imported-content-gate-multi-id-wired-green-once-supported",
+                  imported_content_checks_landed())
             # Supported, the legitimate activation wiring: a NEW id joined into
             # required_checks(h) for every generation reads True, and the SAME id wired ONLY
             # into the homes-2 roster stays red while generation 1 is supported, because an
@@ -4490,8 +4512,9 @@ def self_test():
                 lambda homes, _rc=_icc_prev_rc: _rc(homes) + ("C-IMPORTED-CONTENT",))
             check("imported-content-gate-every-generation-green-at-homes-2",
                   imported_content_checks_landed())
-            # Below one supported generation the EVERY-generation range is empty: the predicate
-            # refuses outright rather than reading the vacuous all() True (fail closed).
+            # With the series still supported, below one supported generation the EVERY-generation
+            # range is empty: the predicate refuses outright rather than reading the vacuous all()
+            # True (fail closed).
             _opf_store.SUPPORTED_HOMES = 0
             check("imported-content-gate-no-supported-generation-red",
                   not imported_content_checks_landed())
