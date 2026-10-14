@@ -4957,8 +4957,9 @@ def _main_isolated(monitor):
         pexpect('(pl-560r3-mi5) the --de delete abbreviation under the same wrap keeps denying (regression control)',
                 'git status && env git push --de origin main', 'deny', cwd=plr,
                 detail='raw command text pairs a git push')
-        pexpect('(pl-560r3-mi6) the same wrapped --mi push with NO protected name in its segment allows (sibling witness)',
-                'git status && env git push --mi origin # feature', 'allow', cwd=plr)
+        pexpect('(pl-560r3-mi6) FIX-560-R5 re-expected: the trailing "# feature" comment makes the lex uncertain, so the same wrapped --mi push now denies via the fallback (a named over-denial)',
+                'git status && env git push --mi origin # feature', 'deny', cwd=plr,
+                detail='a target this guard cannot read')
 
         # FIX-560-R4 (decided item 2): when the lexed reading is UNCERTAIN (_lex_uncertain: a
         # substitution spanning a newline, or a '#' comment or heredoc inside a command
@@ -5003,6 +5004,73 @@ def _main_isolated(monitor):
             failures.append('(pl-560r4-unc-sig) the commented-paren substitution shape must read as an uncertain lex')
         if aiqt_hooks._lex_uncertain('git push origin main 2>&1 | tail -f /dev/null'):
             failures.append('(pl-560r4-unc-sig2) a plain redirected pipeline must NOT read as an uncertain lex')
+
+        # FIX-560-R5 (decided item 2 / blocker 1): a heredoc opener carried inside a COMMENT.
+        # At the pin _strip_quoted_heredoc_bodies read the commented "<<'true'" as a real quoted
+        # heredoc and swallowed the substitution and the push line into its body, so _lex_uncertain
+        # returned False and a benign 'git status' suppressed the fallback while the restored lexer
+        # mis-paired the substitution and never saw the push: a SILENT ALLOW. The blunt uncertainty
+        # signal (an unquoted word-start '#' anywhere) now flags it and the fallback decides. Red at
+        # the pin (allowed there).
+        pexpect('(pl-560r5-hc-comment) a commented heredoc opener no longer suppresses the uncertainty signal; denies',
+                '# <<\'true\'\ngit status\necho "$(echo hi # (\n)"\ngit push --force origin ma""in\necho ")"\ntrue',
+                'deny', cwd=plr, detail='appears to force-push or delete')
+        # The signal itself for each commented opener FORM (quoted, bare, tab-strip, single-char),
+        # pinned directly; each reads True at head and False at the pin (the pin skipped the top-level
+        # comment and, for the quoted forms, stripped it away before the scan).
+        for _hcn, _hcc in (
+                ('true', "# <<'true'\ngit status"),
+                ('eof', '# <<EOF\ngit status'),
+                ('dash', '# <<-X\ngit status'),
+                ('quoted-x', "# <<'X'\ngit status"),
+        ):
+            if not aiqt_hooks._lex_uncertain(_hcc):
+                failures.append('(pl-560r5-hcsig-{}) a commented heredoc opener must read as an uncertain lex'.format(_hcn))
+
+        # FIX-560-R5 (decided item 2 / blocker 2): a quote inside a COMMENT must not open a quoting
+        # context in the raw splitter. At the pin the '"' on a '# "' line paired with a later '"' and
+        # split the wrapped push inside its quoted remote name, so no raw segment paired git..push, a
+        # force spelling and the protected name: a SILENT ALLOW with a LITERAL protected name. The
+        # splitter now skips comment text (its quotes and separators) while keeping the text in the
+        # segment, so the push segment stays whole and the backstop denies. Both wrappers (env,
+        # command) and both quoted-name separators (& and |), with the benign sibling leading and
+        # trailing; each red at the pin.
+        for _cqn, _cqc in (
+                ('env-amp', 'git status\n# "\nenv git push --force "origin&other" main\n# "'),
+                ('command-amp', 'git status\n# "\ncommand git push --force "origin&other" main\n# "'),
+                ('env-pipe', 'git status\n# "\nenv git push --force "origin|other" main\n# "'),
+                ('command-pipe', 'git status\n# "\ncommand git push --force "origin|other" main\n# "'),
+        ):
+            pexpect('(pl-560r5-cq-{}) a comment quote no longer mis-pairs and splits the wrapped push; denies'.format(_cqn),
+                    _cqc, 'deny', cwd=plr, detail='raw command text pairs a git push')
+
+        # FIX-560-R5 (decided item 3): operator membership in _raw_push_segments is read in escape and
+        # line-continuation context. A line continuation between '>' and '&' keeps 2>&1 one segment; an
+        # ESCAPED '\>' is literal, so a real '&' or '|' after it splits; an IO number and an fd-var
+        # redirect stay unsplit; a plain '&', '|' and '|&' split. Direct segmentation assertions.
+        _r5seg = (
+                ('cont', '2>' + chr(92) + '\n&1', ['2>' + chr(92) + '\n&1']),
+                ('esc-amp', 'a ' + chr(92) + '>&b', ['a ' + chr(92) + '>', 'b']),
+                ('esc-pipe', 'a ' + chr(92) + '>|b', ['a ' + chr(92) + '>', 'b']),
+                ('ionum', '12>&1', ['12>&1']),
+                ('fdvar', '{fd}>&1', ['{fd}>&1']),
+                ('plain-amp', 'a & b', ['a ', ' b']),
+                ('plain-pipe', 'a | b', ['a ', ' b']),
+                ('pipe-amp', 'a |& b', ['a ', '', ' b']),
+        )
+        for _sn, _sc, _sexp in _r5seg:
+            _sgot = aiqt_hooks._raw_push_segments(_sc)
+            if _sgot != _sexp:
+                failures.append('(pl-560r5-seg-{}) escape/continuation-aware segmentation; expected {!r} got {!r}'
+                                .format(_sn, _sexp, _sgot))
+
+        # FIX-560-R5 (minor, decided item 4): _lex_uncertain reports an unmatched double quote and a
+        # trailing backslash escape as uncertain (both make the full lexer raise).
+        if not aiqt_hooks._lex_uncertain('"'):
+            failures.append('(pl-560r5-minor-dq) an unmatched double quote must read as an uncertain lex')
+        if not aiqt_hooks._lex_uncertain('echo x' + chr(92)):
+            failures.append('(pl-560r5-minor-esc) a trailing backslash escape must read as an uncertain lex')
+
 
         # Push retains its HEAD probe. Commit uses the separate bounded proof probe.
         _orig_head = aiqt_hooks._head_branch

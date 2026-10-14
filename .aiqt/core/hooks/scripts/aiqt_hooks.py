@@ -948,33 +948,41 @@ def _strip_quoted_heredoc_bodies(command):
 
 
 def _lex_uncertain(command):
-    """FIX-560-R4 (decided item 2): True when the restored round-1 quoting model's reading of
-    `command` is UNCERTAIN - a consumed substitution could read differently under bash - so no
-    consumer may treat a clean lex as proof of what bash will run. The signals, each a shape
-    _skip_quoting does not model the way bash does: a substitution ($(..), `..` or ${..}, nested
-    in a double quote or not) whose consumed span CROSSES A NEWLINE (a comment or heredoc inside
-    it makes bash close it on a different line, swallowing real command lines into one opaque
-    word); a '#' or a '<<' anywhere inside a $(..) or `..` COMMAND substitution (bash starts a
-    comment / reads a heredoc body there; this model only counts quotes and parens); and any
-    construct this scan cannot close (the full lexer raises ValueError on those; this helper
-    never raises). QUOTED heredoc bodies are stripped first (_strip_quoted_heredoc_bodies):
-    their content is literal data under bash and this model alike, so prose there (an
-    apostrophe, a '#') does not flip an otherwise certain read; a top-level '#' comment at a
-    word boundary is skipped for the same reason. Consumers: protected_line lets
-    _protected_line_fallback decide on an uncertain lex even when a benign git segment was
-    lexed (the pl-560r4-unc vectors), and git_discard re-reads the raw lines to NAME the
-    specific work-losing verb (_uncertain_line_lossy). DISCLOSED over-denial (the safe
+    """FIX-560-R5 (decided item 2 / blocker 1): True when the restored round-1 quoting model's
+    reading of `command` is UNCERTAIN, so no consumer may treat a clean lex as proof of what bash
+    will run and the raw fallback decides instead. This helper does NOT model comment or heredoc
+    rules precisely: it is deliberately blunt and over-flags (the safe direction). It returns True
+    on any of these shapes, each one bash can read differently from this model:
+      - an unquoted word-start '#' ANYWHERE (bash starts a comment there and reads its text, which
+        this model does not; FIX-560-R2's quoted-heredoc strip could even delete a real line a
+        commented opener faked into a heredoc body, so the strip is no longer consulted here);
+      - a '<<' heredoc opener that is NOT inside a double quote ANYWHERE, INCLUDING inside a comment
+        (a leading "# <<'true'" line and its '<<EOF' / '<<-X' / "<<'X'" variants: bash reads a body
+        this model does not);
+      - a command substitution ($(..) or `..`, nested in a double quote or not) whose consumed span
+        CROSSES A NEWLINE, or contains a '#' or '<<' (bash may close it on another line, or start a
+        comment or read a heredoc body there; this model only counts quotes and parens);
+      - any construct this scan cannot close: an unpaired single quote, an UNMATCHED double quote, a
+        TRAILING backslash escape, or an unterminated substitution (the full lexer raises on those,
+        so this is a certain-to-be-uncertain read; this helper itself never raises). These unclosed
+        shapes are the minor (decided item 4): _lex_uncertain reports the double quote and the
+        trailing escape, not just the quotes it can pair.
+    Consumers: protected_line lets _protected_line_fallback decide on an uncertain lex even when a
+    benign git segment was lexed (the pl-560r4-unc vectors), and git_discard re-reads the raw lines
+    to NAME the specific work-losing verb (_uncertain_line_lossy). DISCLOSED over-denial (the safe
     direction): an uncertain command whose raw text pairs git..push with a force/delete/mirror
-    spelling now denies via the fallback even when the push names only a FEATURE ref or is
-    prose (pl-560r4-unc-cost); the same shapes carrying no push spelling still allow (the
-    pl-560r2-*-ctl controls)."""
-    scan = _strip_quoted_heredoc_bodies(command)
-    n = len(scan)
+    spelling now denies via the fallback even when the push names only a FEATURE ref or is prose
+    (pl-560r4-unc-cost), and a wrapped mirror or force push carrying a trailing '#' comment denies
+    too (pl-560r3-mi6, re-expected from allow to deny, a named over-denial); the same shapes
+    carrying no push spelling still allow (the pl-560r2-*-ctl controls)."""
+    n = len(command)
     i = 0
     in_dq = False
     while i < n:
-        c = scan[i]
+        c = command[i]
         if c == chr(92):
+            if i + 1 >= n:
+                return True  # a trailing backslash escape: the full lexer raises (minor, item 4)
             i += 2
             continue
         if c == '"':
@@ -982,22 +990,22 @@ def _lex_uncertain(command):
             i += 1
             continue
         if not in_dq and c == "'":
-            j = scan.find("'", i + 1)
+            j = command.find("'", i + 1)
             if j < 0:
                 return True  # an unpaired single quote: the full lexer raises; read as uncertain here
             i = j + 1
             continue
-        if not in_dq and c == "#" and (i == 0 or scan[i - 1] in " \t\n;&|"):
-            nl = scan.find("\n", i)
-            i = n if nl == -1 else nl
-            continue
-        if c == "`" or (c == "$" and i + 1 < n and scan[i + 1] in "({"):
-            cmd_sub = c == "`" or scan[i + 1] == "("
+        if not in_dq and c == "#" and (i == 0 or command[i - 1] in " \t\n;&|"):
+            return True  # an unquoted word-start '#': a comment whose text bash reads and this does not
+        if not in_dq and c == "<" and i + 1 < n and command[i + 1] == "<":
+            return True  # a '<<' heredoc opener outside quotes (a comment cannot hide it): uncertain
+        if c == "`" or (c == "$" and i + 1 < n and command[i + 1] in "({"):
+            cmd_sub = c == "`" or command[i + 1] == "("
             try:
-                j = _skip_quoting(scan, i, n)
+                j = _skip_quoting(command, i, n)
             except ValueError:
                 return True  # an unterminated quote or substitution: uncertain by definition
-            span = scan[i:j]
+            span = command[i:j]
             if "\n" in span:
                 return True  # the substitution crosses a newline: bash may close it on another line
             if cmd_sub and ("#" in span or "<<" in span):
@@ -1005,6 +1013,8 @@ def _lex_uncertain(command):
             i = j
             continue
         i += 1
+    if in_dq:
+        return True  # an unmatched double quote: the full lexer raises (minor, item 4)
     return False
 
 
@@ -6647,57 +6657,83 @@ def _commit_denial(detail):
 
 
 def _raw_push_segments(command):
-    """FIX-560-R3: split the raw command at newlines and at the shell separators ; & | (covering
+    """FIX-560-R3/R5: split the raw command at newlines and at the shell separators ; & | (covering
     ;, ;;, &&, ||, |, |& and a background &) that sit OUTSIDE any quoting _skip_quoting can prove,
     so the backstop judges ONE command segment at a time and an ordinary neighbouring segment (a
     'rm -rf build', a 'git rebase origin/main', a '--format' or '--depth' value, a 'tail -f' in
-    another pipe stage) no longer supplies the force spelling or the protected name for an
-    unrelated push. FIX-560-R4: an '&' or '|' that is part of a REDIRECTION OPERATOR is NOT a
-    separator and never splits - an '&' that follows '<' or '>' or is followed by '>' (2>&1, >&2,
-    1>&2, <&0, 2>&-, &>, &>>) and a '|' that follows '>' (the '>|' clobber form) - because bash
-    reads a redirection as part of ONE simple command, so splitting there severed a wrapped push
-    from its force spelling or protected name and silently allowed it (the pl-560r4-red vectors;
-    the old split read 'env git push origin 2>' and '1 --force main' as different segments). The
-    split is conservative where quoting is readable: a quote, backquote or substitution is
-    consumed as ONE opaque unit, so its content (separators included) stays inside the
-    surrounding segment; a backslash keeps its escaped character (a line continuation does not
-    split); and on an unterminated or unreadable construct the REST of the command joins the
-    current segment unsplit, degrading toward the FIX-560-R2 whole-text read (over-denial). The
-    splits themselves carry NO such one-sided guarantee: a separator inside text bash reads
-    differently (an unquoted-heredoc body line, a construct the quoting model mis-pairs) can
-    still divide a pairing bash would run together, so this segment read stays one layer beside
-    the parsed classifier and the FIX-560-R4 uncertain-lex fallback, never a proof of safety.
-    Heredoc bodies are NOT modelled and split at their newlines like any other text: push-shaped
-    prose on its own body line still pairs inside its own segment (the disclosed over-denial
-    stands)."""
+    another pipe stage) no longer supplies the force spelling or the protected name for an unrelated
+    push. FIX-560-R5 (decided item 2 / blocker 2): an unquoted '#' that STARTS A WORD is a comment;
+    the splitter skips to the end of that line WITHOUT reading any quote or separator in it (bash
+    does not), so a quote or an '&'/';'/'|' sitting in comment text neither opens a quoting context
+    nor splits a segment. The comment TEXT stays in the surrounding segment, still available to the
+    raw matching policy (a commented protected name is still matched, the disclosed over-denial),
+    but a comment quote can no longer mis-pair a later string and sever a wrapped push from its
+    force spelling or protected name (the pl-560r5-cq vectors; the old scan let the quote in a
+    '# "' line pair with a later '"' and read 'env git push --force "origin' and 'other" main' as
+    different segments, a silent allow). FIX-560-R4/R5: an '&' or '|' that is part of a REDIRECTION
+    OPERATOR is NOT a separator and never splits - an '&' that follows an UNESCAPED '<' or '>' or is
+    followed by '>' (2>&1, >&2, 1>&2, <&0, 2>&-, &>, &>>) and a '|' that follows an UNESCAPED '>'
+    (the '>|' clobber form) - because bash reads a redirection as part of ONE simple command.
+    Operator membership is read in ESCAPE and LINE-CONTINUATION context (decided item 3): a
+    backslash-newline between the '<'/'>' and the '&' is a line continuation and transparent, so
+    '2>\\<newline>&1' stays one segment, while an ESCAPED '\\>' is a literal character and NOT a
+    redirection operator, so a real '&' or '|' after it splits; an IO number ('12>&1') and an
+    fd-var ('{fd}>&1') redirect stay unsplit, and a plain '&', '|' or '|&' splits. The split is
+    conservative where quoting is readable: a quote, backquote or substitution is consumed as ONE
+    opaque unit, so its content (separators included) stays inside the surrounding segment; a line
+    continuation does not split. On an unterminated or unreadable construct the REST of the command
+    joins the current segment unsplit, degrading toward the FIX-560-R2 whole-text read (over-denial).
+    The splits themselves carry NO one-sided guarantee: a separator inside text bash reads
+    differently (an unquoted-heredoc body line, a construct the quoting model mis-pairs) can still
+    divide a pairing bash would run together, so this segment read stays one layer beside the parsed
+    classifier and the FIX-560-R4 uncertain-lex fallback, never a proof of safety. Heredoc bodies
+    are NOT modelled and split at their newlines like any other text."""
     segments = []
     start = 0
     i = 0
     n = len(command)
+    # prev_redir: the previous significant character (a line continuation is transparent) was an
+    # UNESCAPED '<' or '>', so a following '&'/'|' is part of a redirection operator, not a separator.
+    prev_redir = False
     while i < n:
         c = command[i]
+        if c == "#" and (i == 0 or command[i - 1] in " \t\n;&|"):
+            # an unquoted word-start '#' is a comment: skip to end of line without reading quotes or
+            # separators in it; the comment text stays in the current segment (decided item 2).
+            nl = command.find("\n", i)
+            i = n if nl == -1 else nl
+            prev_redir = False
+            continue
         if c in "\n;&|":
-            prev = command[i - 1] if i > 0 else ""
             nxt = command[i + 1] if i + 1 < n else ""
-            if c == "&" and (prev in ("<", ">") or nxt == ">"):
+            if c == "&" and (prev_redir or nxt == ">"):
                 i += 1  # part of a redirection operator (2>&1, >&2, <&0, 2>&-, &>, &>>): not a separator
+                prev_redir = False
                 continue
-            if c == "|" and prev == ">":
+            if c == "|" and prev_redir:
                 i += 1  # the '>|' clobber redirect: not a separator
+                prev_redir = False
                 continue
             segments.append(command[start:i])
             i += 1
             start = i
+            prev_redir = False
             continue
         if c == chr(92):
-            i += 2
+            if i + 1 < n and command[i + 1] == "\n":
+                i += 2  # a line continuation is removed: it does not break operator adjacency
+                continue
+            i += 2  # an escaped character is literal: it is NOT a redirection metacharacter
+            prev_redir = False
             continue
         if c in ("'", '"', "`") or (c == "$" and i + 1 < n and command[i + 1] in "({"):
             try:
                 i = _skip_quoting(command, i, n)
             except ValueError:
                 break
+            prev_redir = False
             continue
+        prev_redir = c in ("<", ">")
         i += 1
     segments.append(command[start:])
     return segments
@@ -6807,10 +6843,14 @@ def protected_line(data):
     below carries the restored round-1 nested-quoting model (_skip_quoting), so a push hidden
     behind a nested-substitution heredoc opener is a visible segment again; the lexer remains a
     best-effort reading of bash, not a guarantee, and the backstop is the second layer.
-    FIX-560-R4: where that reading is UNCERTAIN (_lex_uncertain: a substitution spanning a
-    newline, or a comment or heredoc inside a command substitution) a benign lexed git
-    segment no longer suppresses the broad raw fallback; the fallback decides from the raw
-    text (a disclosed over-denial, the safe direction).
+    FIX-560-R4/R5: where that reading is UNCERTAIN (_lex_uncertain: an unquoted word-start '#'
+    or a '<<' heredoc opener anywhere, a substitution spanning a newline or carrying a comment
+    or heredoc, or any construct it cannot close) a benign lexed git segment no longer
+    suppresses the broad raw fallback; the fallback decides from the raw text (a disclosed
+    over-denial, the safe direction). That uncertainty check is a LATER fallback condition,
+    reached only for commit-free commands after the input validation, the raw backstop, the
+    'help' early return and the commit-grammar reading above it; it is not the unconditional
+    backstop.
     """
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: protected_line wired to unexpected event {!r}; failing closed"
@@ -6826,9 +6866,13 @@ def protected_line(data):
             "AIQT rule prtbrn (protected-branch-integrity): the Bash payload carried no readable command "
             "string, so the protected-line check could not run; failing closed.",
             "AIQT guardrail: denied a Bash call with no readable command (rule prtbrn, fail-closed).")
-    # FIX-560-R2: the raw-text backstop runs first, on every call, ahead of the commit-grammar
-    # reading and the lexer, so no parse outcome suppresses it; FIX-560-R3 judges one raw
-    # segment at a time. _raw_push_guard states the disclosed over-denial.
+    # FIX-560-R2/R5 (minor, decided item 5): after the input validation above (the PreToolUse
+    # event, the Bash tool, and a readable command string), the raw-text backstop runs
+    # unconditionally on every call, ahead of the commit-grammar reading and the lexer, so no
+    # parse outcome suppresses it; FIX-560-R3 judges one raw segment at a time. The uncertainty
+    # check (_lex_uncertain) is NOT here: it is a LATER fallback condition below, reached only
+    # for commit-free commands and only after the 'help' early return (a lone
+    # 'git commit --help' / -h allows before it). _raw_push_guard states the disclosed over-denial.
     if _raw_push_match(command):
         return _raw_push_guard(command)
     deadline = time.monotonic() + _COMMIT_SECONDS
@@ -6890,8 +6934,9 @@ def protected_line(data):
     # The BROAD raw fallback (force/delete spellings with NO protected-name requirement) runs
     # when no git segment was lexed OR the lex is UNCERTAIN (FIX-560-R4, decided item 2): run on
     # every call it would deny every force-push to a FEATURE branch (pl-b). On an UNCERTAIN lex
-    # (_lex_uncertain: a substitution spanning a newline, a comment or heredoc inside a command
-    # substitution, or a construct the scan cannot close) the lexed reading may have swallowed a
+    # (_lex_uncertain: an unquoted word-start '#' or a '<<' heredoc opener anywhere, a substitution
+    # spanning a newline or carrying a comment or heredoc, or a construct the scan cannot close)
+    # the lexed reading may have swallowed a
     # real push line into one opaque word, so a benign parsed git segment (a 'git status') must
     # not vouch for the command: the fallback decides from the raw text (the pl-560r4-unc
     # vectors; DISCLOSED over-denial witnessed by pl-560r4-unc-cost). The protected-name class
