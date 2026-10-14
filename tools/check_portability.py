@@ -835,10 +835,102 @@ _DISK_KIND_CASES = "the _disk_kind ancestor-symlink and root-boundary real-files
 _REAL_GIT_CASE = "the real-git tracked/untracked GD-130 pair"
 _EVERY_CASE = "every self-test case"
 _SUPPRESS_VECTORS_ENV = "AIQT_SELFTEST_SUPPRESS_VECTORS"
-# The unmarked drift child carries this depth marker: a nested entry that reaches the vectors
-# with it set refuses to run them (a drift child never spawns another drift child), so a
-# reverted no-vectors seam ends at depth 1 with a named failure, never an unbounded chain.
-_DRIFT_DEPTH_ENV = "AIQT_SELFTEST_DRIFT_DEPTH"
+# EVERY self-test child carries this depth marker (the bounded launcher sets it): a nested
+# entry that reaches the vectors with it set refuses to run them (a child never spawns
+# children of its own), so a reverted no-vectors seam or marked-child gate ends at depth 1
+# with a named failure, never an unbounded chain; an inherited value trips the same refusal
+# (fail closed), and the refusal text names the inheritance as a possible cause.
+_CHILD_DEPTH_ENV = "AIQT_SELFTEST_CHILD_DEPTH"
+_CHILD_TIMEOUT = 120  # seconds: the wait bound the launcher applies to every self-test child
+_CHILD_DRAIN_TIMEOUT = 10  # seconds: the bounded post-kill pipe drain and leader reap
+
+
+class _ChildOutcome:
+    """What _run_bounded_child observed. returncode is None when the leader could not be
+    reaped within the drain bound; stdout and stderr are BYTES (text-mode newline translation
+    would split a CR-separated prefix into a line of its own and defeat an exact line match);
+    timed_out means the wait bound elapsed and the whole group was SIGKILLed BEFORE the leader
+    was reaped; survivors means the child's process group still had a member after the bounded
+    probe (a cleanup kill was then sent), which callers treat as a failure, never a pass."""
+
+    def __init__(self, returncode, stdout, stderr, timed_out, survivors):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+        self.timed_out = timed_out
+        self.survivors = survivors
+
+
+def _run_bounded_child(args, env, timeout=_CHILD_TIMEOUT):
+    """The ONE bounded launcher EVERY fresh-process self-test child goes through. args is the
+    argv tail after the fixed [sys.executable, "-I", "-B"] head, so every child runs this
+    interpreter. Bounds: (1) the child's environment carries _CHILD_DEPTH_ENV, whose refusal
+    at the top of _not_run_vectors stops any child of this tool from launching children of
+    its own, so a reverted guard ends at depth 1; (2) the child leads its OWN session and so
+    its own process group, and on timeout the whole group is SIGKILLed BEFORE the leader is
+    reaped (the unreaped leader anchors the group id, so that kill can never land on a reused
+    pid); (3) every wait and drain carries a timeout, so a pipe held open outside the killed
+    group fails THIS child (returncode None), never stalls the self-test. What the group kill
+    bounds is the group's MEMBERS: a descendant that moved itself into a new session is
+    outside the group and outside this bound. After reaping, the group is probed, bounded,
+    until empty; the probe and the cleanup kill signal only this group, never a process
+    listing, and the cleanup kill is sent only when the probe saw a member, so the common
+    empty-group path never signals a group id that reaping may have freed for reuse."""
+    import signal
+    import time
+    child_env = dict(env)
+    child_env[_CHILD_DEPTH_ENV] = "1"
+    proc = subprocess.Popen([sys.executable, "-I", "-B", *args],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            env=child_env, start_new_session=True)
+    timed_out = False
+    out, err = b"", b""
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)  # the whole group, BEFORE the leader is reaped
+        except ProcessLookupError:
+            pass
+        try:
+            out, err = proc.communicate(timeout=_CHILD_DRAIN_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            for pipe in (proc.stdout, proc.stderr):
+                if pipe is not None:
+                    pipe.close()
+            try:
+                proc.wait(timeout=_CHILD_DRAIN_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                pass  # reported through returncode None; the group probe below still runs
+    survivors = True
+    for _ in range(100):  # bounded group probe: up to ~10 s for the group to empty
+        try:
+            os.killpg(proc.pid, 0)
+        except ProcessLookupError:
+            survivors = False
+            break
+        time.sleep(0.1)
+    if survivors:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)  # cleanup: the probe just saw a member
+        except ProcessLookupError:
+            pass
+        for _ in range(100):  # bounded: let the cleanup kill land; survivors stays True
+            try:
+                os.killpg(proc.pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.1)
+    return _ChildOutcome(proc.returncode, out, err, timed_out, survivors)
+
+
+def _exact_line_count(stdout_bytes, line):
+    """Count LINE occurring as an exact LF-delimited line of STDOUT_BYTES. The split is on
+    LF over captured BYTES: text-mode newline translation would turn a CR-separated prefix
+    into a line of its own and let it count as exact, so a prefixed, suffixed, CR-prefixed
+    or CR-suffixed spelling all count 0 here."""
+    return stdout_bytes.split(b"\n").count(line.encode("utf-8"))
 
 
 class _SetupAllocationError(OSError):
@@ -1056,34 +1148,101 @@ def _not_run_vectors(failures):
     setup (a new scrub allocation, a PATH with no git resolvable), so each child below runs this
     tool as __main__ --self-test with the failure injected BEFORE the scrub or the lifecycle can
     run, and must exit 1 with the entry's whole-run NOT RUN line on stdout, never a bare
-    traceback. Every child environment except the unmarked-drifted-lifecycle child's carries
-    _SUPPRESS_VECTORS_ENV, so a marked child never spawns children of its own and never prints
-    any PASS text (a marked FULL entry records the named suppression NOT RUN and exits 1); the
-    unmarked child drives only the explicit no-vectors seam, whose nested entry prints the
-    distinct no-vectors note, never the full PASS line, and is bounded by the depth marker,
-    its own process group (killed and probed as a group) and a timeout. The spy
-    child proves ONLY that a marker-carrying child reaches its own named
-    SELF-TEST FAIL without launching any subprocess; its injections leave the end-to-end,
+    traceback. EVERY child runs through _run_bounded_child, the one bounded launcher (its own
+    process group, the _CHILD_DEPTH_ENV marker whose refusal at the top of this body bounds
+    any child at depth 1, bytes capture, and a timeout on every wait and drain). Every child
+    environment except the unmarked-drifted-lifecycle child's additionally carries
+    _SUPPRESS_VECTORS_ENV, so a marked child records the named suppression NOT RUN and exits
+    1 without printing any PASS text; the unmarked child drives only the explicit no-vectors
+    seam, whose nested entry prints the distinct no-vectors note, never the full PASS line.
+    The spy child proves ONLY that a marker-carrying child reaches its own named
+    SELF-TEST FAIL without launching any subprocess (subprocess.run and subprocess.Popen are
+    both replaced); its injections leave the end-to-end,
     disk-kind and real-git groups NOT RUN inside it, so it does not prove those groups
     complete."""
     import io
     import pathlib
     import shutil
-    import signal
-    import time
     from contextlib import redirect_stderr, redirect_stdout
     from _git_fixture_env import fixture_git_lifecycle
 
-    if os.environ.get(_DRIFT_DEPTH_ENV) == "1":
-        # This entry already runs INSIDE the unmarked drift child, whose only nested entry is
-        # the explicit no-vectors seam, so reaching the vectors at all means that seam was
-        # reverted: refuse with ONE named failure instead of spawning further children (a
-        # drift child never spawns another drift child); the parent then fails named on its
-        # exact-stdout assertion.
+    if os.environ.get(_CHILD_DEPTH_ENV):
+        # This entry already runs INSIDE a child the bounded launcher started (every child
+        # carries the marker), or the variable was inherited from the caller's environment.
+        # Reaching the vectors under the marker means a no-vectors seam or the marked-child
+        # gate did not hold, or the inherited variable is the cause: refuse with ONE named
+        # failure instead of launching children (a child never spawns children of its own),
+        # so any such chain ends at depth 1.
         _not_run(failures, "the red-on-revert NOT RUN and entry vectors",
-                 "refused at drift depth 1 ({} is set): a nested entry reached the vectors, "
-                 "so the explicit no-vectors seam did not hold".format(_DRIFT_DEPTH_ENV))
+                 "refused at child depth 1 ({} is set, either by the bounded launcher or "
+                 "inherited from the caller's environment): a nested entry reached the "
+                 "vectors, so a no-vectors seam or the marked-child gate did not hold, or "
+                 "the variable was inherited".format(_CHILD_DEPTH_ENV))
         return
+
+    # Launcher depth-refusal vector (in-process): with _CHILD_DEPTH_ENV set and both
+    # subprocess.run and subprocess.Popen replaced by spies, a nested _not_run_vectors call
+    # must record exactly ONE failure, the named depth refusal, and launch NOTHING: red when
+    # the depth refusal is removed (the spies turn any launch attempt, or anything else the
+    # unrefused vectors do, into this vector's named failure, bounded in process).
+    def _spy_launch(*_args, **_kwargs):
+        raise RuntimeError("spy: a depth-marked nested vectors call tried to launch")
+
+    prior_depth = os.environ.get(_CHILD_DEPTH_ENV)
+    real_spied_run, real_spied_popen = subprocess.run, subprocess.Popen
+    os.environ[_CHILD_DEPTH_ENV] = "1"
+    subprocess.run, subprocess.Popen = _spy_launch, _spy_launch
+    depth_failures = []
+    depth_got = None
+    try:
+        _not_run_vectors(depth_failures)
+    except Exception as exc:  # the spies raise on any launch attempt
+        depth_got = "an escaped {}: {}".format(type(exc).__name__, exc)
+    finally:
+        subprocess.run, subprocess.Popen = real_spied_run, real_spied_popen
+        if prior_depth is None:
+            os.environ.pop(_CHILD_DEPTH_ENV, None)
+        else:
+            os.environ[_CHILD_DEPTH_ENV] = prior_depth
+    if depth_got is None and (len(depth_failures) != 1
+                              or "refused at child depth 1" not in depth_failures[0]):
+        depth_got = "{} failure(s): {!r}".format(len(depth_failures), depth_failures[:2])
+    if depth_got is not None:
+        failures.append("(vector child-depth-refusal) a nested vectors call under {} must "
+                        "record exactly one named depth refusal and launch nothing "
+                        "(got {})".format(_CHILD_DEPTH_ENV, depth_got))
+
+    # Launcher group-and-marker vector (fresh process): a trivial child run through the ONE
+    # bounded launcher reports whether it leads its own process group and the depth-marker
+    # value it inherited: red when start_new_session is dropped (the child then joins THIS
+    # group and reports False) or when the launcher stops setting _CHILD_DEPTH_ENV.
+    group_probe = ("import os, sys\n"
+                   "print(os.getpgid(0) == os.getpid(), os.environ.get(sys.argv[1]))\n")
+    outcome = _run_bounded_child(["-c", group_probe, _CHILD_DEPTH_ENV], os.environ)
+    if (outcome.returncode != 0 or outcome.stdout != b"True 1\n"
+            or outcome.timed_out or outcome.survivors):
+        failures.append("(vector launcher-group) a child run through the bounded launcher "
+                        "must lead its OWN process group and carry {}=1 (want stdout "
+                        "b'True 1\\n'; got exit {}, stdout {!r}, timed out {}, survivors "
+                        "{})".format(_CHILD_DEPTH_ENV, outcome.returncode, outcome.stdout[:80],
+                                     outcome.timed_out, outcome.survivors))
+
+    # Launcher timeout vector (fresh process): a child that spawns a live same-group
+    # descendant and then outlives the wait bound must come back with its leader reaped (a
+    # returncode, never None) and its group empty, because the launcher SIGKILLs the whole
+    # group BEFORE reaping the leader: red when the timeout group kill is dropped (the
+    # leader is then never reaped in bound) and red when start_new_session is dropped (the
+    # kill then finds no group of the child's own to empty).
+    hang = ("import subprocess, sys, time\n"
+            "subprocess.Popen([sys.executable, '-I', '-c', 'import time; time.sleep(60)'])\n"
+            "time.sleep(60)\n")
+    outcome = _run_bounded_child(["-c", hang], os.environ, timeout=5)
+    if not outcome.timed_out or outcome.returncode is None or outcome.survivors:
+        failures.append("(vector launcher-timeout) a child outliving the wait bound with a "
+                        "live same-group descendant must be killed AS A GROUP before the "
+                        "leader is reaped, leaving the leader reaped and the group empty "
+                        "(got timed out {}, returncode {!r}, survivors {})".format(
+                            outcome.timed_out, outcome.returncode, outcome.survivors))
 
     def _unavailable(*_args, **_kwargs):
         raise OSError("injected: unavailable")
@@ -1093,21 +1252,31 @@ def _not_run_vectors(failures):
             raise OSError("injected: unavailable")
         return tempfile.mkdtemp(*args, **kwargs)
 
-    for label, kwargs, want in (
+    for label, kwargs, wants in (
             ("no-tempdir", {"_mkdtemp": _unavailable},
-             "NOT RUN: {}: no writable temp directory".format(_E2E_SURFACE_CASES)),
+             ("NOT RUN: {}: no writable temp directory".format(_E2E_SURFACE_CASES),)),
+            # BOTH identity-source iterations allocate under the bigint prefix; each must
+            # record its OWN NOT RUN line, asserted independently below, so the over-long
+            # line can never hide a missing parser-overflow line (or the reverse).
             ("no-tempdir-bigint", {"_mkdtemp": _bigint_unavailable},
-             "NOT RUN: the over-long integer identity source case: no writable temp directory"),
+             ("NOT RUN: the over-long integer identity source case: no writable temp "
+              "directory",
+              "NOT RUN: the parser overflow identity source case: no writable temp "
+              "directory")),
             ("no-symlink", {"_symlink": _unavailable},
-             "NOT RUN: {}: no symlink support".format(_DISK_KIND_CASES)),
+             ("NOT RUN: {}: no symlink support".format(_DISK_KIND_CASES),)),
             ("git-absent", {"_which": lambda _name: None},
-             "NOT RUN: {}: git is unavailable".format(_REAL_GIT_CASE))):
+             ("NOT RUN: {}: git is unavailable".format(_REAL_GIT_CASE),))):
         out = io.StringIO()
         with fixture_git_lifecycle(), redirect_stdout(out), redirect_stderr(io.StringIO()):
             rc = _self_test_main_isolated(_vectors=False, **kwargs)
-        if rc == 0 or want not in out.getvalue():
-            failures.append("(NOT RUN vector {}) must exit nonzero AND record {!r}, never a PASS "
-                            "(PARTIAL) exit 0 (got exit {})".format(label, want, rc))
+        text = out.getvalue()
+        missing = [w for w in wants if w not in text]
+        if rc == 0 or missing:
+            failures.append("(NOT RUN vector {}) must exit nonzero AND record each of {!r} "
+                            "independently (one NOT RUN line never hides a missing sibling), "
+                            "never a PASS (PARTIAL) exit 0 (got exit {}, missing {!r})".format(
+                                label, wants, rc, missing))
 
     # Symlink-guard scope (plain-file setup): an OSError injected into the moved mkdir, into the
     # moved write_text, or into the _fresh surface build must PROPAGATE out of the isolated run,
@@ -1220,8 +1389,7 @@ def _not_run_vectors(failures):
             child_env = dict(entry_env)
             child_env["PATH"] = no_git_dir  # an empty directory: no git resolvable on PATH
             children.append(("public-entry git-absent",
-                             subprocess.run([sys.executable, "-I", "-B", tool, "--self-test"],
-                                            capture_output=True, text=True, env=child_env),
+                             _run_bounded_child([tool, "--self-test"], child_env),
                              "NOT RUN: {}: fixture setup failed: git is unavailable".format(
                                  _EVERY_CASE)))
         finally:
@@ -1234,47 +1402,70 @@ def _not_run_vectors(failures):
               "sys.argv[:] = [tool, '--self-test']\n"
               "runpy.run_path(tool, run_name='__main__')\n")
     children.append(("public-entry no-tempdir",
-                     subprocess.run([sys.executable, "-I", "-B", "-c", inject, tool],
-                                    capture_output=True, text=True, env=entry_env),
+                     _run_bounded_child(["-c", inject, tool], entry_env),
                      "NOT RUN: {}: fixture setup failed: no writable temp directory".format(
                          _EVERY_CASE)))
-    for label, proc, want in children:
-        if proc.returncode != 1 or want not in proc.stdout:
+    for label, outcome, want in children:
+        if (outcome.returncode != 1 or want.encode("utf-8") not in outcome.stdout
+                or outcome.timed_out or outcome.survivors):
             failures.append("(NOT RUN vector {}) must exit 1 AND record {!r} through the real "
-                            "--self-test entry, never a bare traceback (got exit {})".format(
-                                label, want, proc.returncode))
+                            "--self-test entry, never a bare traceback, a hang or a surviving "
+                            "group member (got exit {}, timed out {}, survivors {})".format(
+                                label, want, outcome.returncode, outcome.timed_out,
+                                outcome.survivors))
 
     # Inherited-marker guard: a FULL public-entry run that inherits _SUPPRESS_VECTORS_ENV (the
     # scrub keeps it: it is not GIT_-prefixed) must exit 1 and print the named suppression
-    # NOT RUN line as an exact LF-delimited line exactly once (a prefixed or suffixed line
-    # fails), with no PASS text of either form, never the unchanged PASS over silently skipped
-    # vectors; the child is bounded by a timeout so a hang is this vector's named failure,
-    # never a stall of the whole self-test.
+    # NOT RUN line as an exact LF-delimited BYTES line exactly once (a prefixed, suffixed or
+    # CR-separated-prefix line fails: the launcher captures bytes, so newline translation can
+    # never fold a CR-separated prefix away), with no PASS text of either form, never the
+    # unchanged PASS over silently skipped vectors; the bounded launcher turns a hang into
+    # this vector's named failure within the launcher's group-and-timeout bounds, never a
+    # stall of the whole self-test past those bounds.
     marked_expect = []
     _not_run(marked_expect, "the red-on-revert NOT RUN and entry vectors",
              "suppressed by {} (a vector child, never a full run)".format(_SUPPRESS_VECTORS_ENV))
     suppressed_line = "  - " + marked_expect[0]
-    try:
-        proc = subprocess.run([sys.executable, "-I", "-B", tool, "--self-test"],
-                              capture_output=True, text=True, env=entry_env, timeout=120)
-        exact_lines = proc.stdout.split("\n").count(suppressed_line)
-        marked_ok = (proc.returncode == 1 and exact_lines == 1
-                     and "SELF-TEST PASS" not in proc.stdout)
-        got = "exit {} (exact-line count {}, PASS text printed: {})".format(
-            proc.returncode, exact_lines, "SELF-TEST PASS" in proc.stdout)
-    except subprocess.TimeoutExpired:
-        marked_ok = False
-        got = "a timeout: the marked child hung instead of failing named"
+    outcome = _run_bounded_child([tool, "--self-test"], entry_env)
+    exact_lines = _exact_line_count(outcome.stdout, suppressed_line)
+    marked_ok = (not outcome.timed_out and not outcome.survivors and outcome.returncode == 1
+                 and exact_lines == 1 and b"SELF-TEST PASS" not in outcome.stdout)
+    if outcome.timed_out:
+        got = ("a timeout: the marked child hung instead of failing named (the group was "
+               "killed before the leader was reaped; survivors {})".format(outcome.survivors))
+    else:
+        got = "exit {} (exact-line count {}, PASS text printed: {}, survivors {})".format(
+            outcome.returncode, exact_lines, b"SELF-TEST PASS" in outcome.stdout,
+            outcome.survivors)
     if not marked_ok:
         failures.append("(vector inherited-marker) a full public-entry run inheriting {} must "
                         "exit 1 AND print the exact LF-delimited line {!r} exactly once with "
                         "no PASS text, never the unchanged PASS over silently skipped vectors "
                         "(got {})".format(_SUPPRESS_VECTORS_ENV, suppressed_line, got))
 
+    # Exact-line predicate vector: the count is over captured BYTES split on LF, so a
+    # CR-separated prefix (which text-mode newline translation would split into a line of
+    # its own) never counts as the exact line; red when the count reverts to text-mode
+    # splitting or translates newlines before splitting.
+    line_bytes = suppressed_line.encode("utf-8")
+    for case_label, data, want_count in (
+            ("exact", line_bytes + b"\n", 1),
+            ("prefixed", b"prefix " + line_bytes + b"\n", 0),
+            ("CR-prefixed", b"prefix\r" + line_bytes + b"\n", 0),
+            ("suffixed", line_bytes + b" suffix\n", 0),
+            ("CR-suffixed", line_bytes + b"\r\n", 0),
+            ("duplicated", line_bytes + b"\n" + line_bytes + b"\n", 2)):
+        got_count = _exact_line_count(data, suppressed_line)
+        if got_count != want_count:
+            failures.append("(vector marker-line-bytes {}) _exact_line_count must count the "
+                            "suppression line as an exact LF-delimited BYTES line (want {}, "
+                            "got {})".format(case_label, want_count, got_count))
+
     # _SUPPRESS_VECTORS_ENV guard: the spy child proves ONLY that a marker-carrying child
-    # reaches its own named SELF-TEST FAIL without launching any subprocess (subprocess.run is
-    # replaced); its denied mkdtemp and absent git leave the end-to-end, disk-kind and real-git
-    # groups NOT RUN inside it, so it does not prove those groups complete.
+    # reaches its own named SELF-TEST FAIL without launching any subprocess (subprocess.run
+    # AND subprocess.Popen are replaced); its denied mkdtemp and absent git leave the
+    # end-to-end, disk-kind and real-git groups NOT RUN inside it, so it does not prove
+    # those groups complete.
     spy = ("import importlib.util, subprocess, sys\n"
            "spec = importlib.util.spec_from_file_location("
            "'aiqt_portability_vector_child', sys.argv[1])\n"
@@ -1285,27 +1476,32 @@ def _not_run_vectors(failures):
            "    print('VECTOR-CHILD-SPAWNED', file=sys.stderr)\n"
            "    raise RuntimeError('vector child spawned despite the suppress marker')\n"
            "subprocess.run = _spy\n"
+           "subprocess.Popen = _spy\n"
            "def _deny(*_args, **_kwargs):\n"
            "    raise OSError('injected: unavailable')\n"
            "sys.exit(mod._self_test_main_isolated(_mkdtemp=_deny, _which=lambda _n: None))\n")
-    proc = subprocess.run([sys.executable, "-I", "-B", "-c", spy, tool],
-                          capture_output=True, text=True, env=entry_env)
-    spawned = "vector child spawned" in proc.stderr or "VECTOR-CHILD-SPAWNED" in proc.stderr
-    if proc.returncode != 1 or "SELF-TEST FAIL" not in proc.stdout or spawned:
+    outcome = _run_bounded_child(["-c", spy, tool], entry_env)
+    spawned = (b"vector child spawned" in outcome.stderr
+               or b"VECTOR-CHILD-SPAWNED" in outcome.stderr)
+    if (outcome.returncode != 1 or b"SELF-TEST FAIL" not in outcome.stdout or spawned
+            or outcome.timed_out or outcome.survivors):
         failures.append("(vector suppress-marker) a child carrying {} must run its cases to its "
                         "own named SELF-TEST FAIL without spawning vector children (got exit {}, "
-                        "spawned: {})".format(_SUPPRESS_VECTORS_ENV, proc.returncode, spawned))
+                        "spawned: {}, timed out {}, survivors {})".format(
+                            _SUPPRESS_VECTORS_ENV, outcome.returncode, spawned,
+                            outcome.timed_out, outcome.survivors))
 
     # Unmarked drifted-injection child: the REAL lifecycle entry vector runs in a fresh child
     # WITHOUT the suppress marker, with _LIFECYCLE_ALLOC_PREFIX drifted so its injection can
     # never match. The nested no-vectors entry must COMPLETE, so the vector records exactly
-    # its named exit-0 failure as the child's ENTIRE stdout and the child exits 0 without
-    # recursing into vectors of its own: the EXPLICIT no-vectors seam is what stops the
-    # recursion, and _DRIFT_DEPTH_ENV makes a reverted seam refuse at depth 1 instead of
-    # chaining drift children. The child leads its OWN process group (start_new_session),
-    # which is killed on completion or timeout and then probed, AS A GROUP, until empty: a
-    # recursing revert ends with a named failure and no surviving descendant, never a hang
-    # or an orphaned chain; the probe signals only this group, never a process listing.
+    # its named exit-0 failure as the child's ENTIRE stdout (compared as bytes) and the child
+    # exits 0 without recursing into vectors of its own: the EXPLICIT no-vectors seam is what
+    # stops the recursion, and the launcher's _CHILD_DEPTH_ENV makes a reverted seam refuse
+    # at depth 1 instead of chaining children. The bounded launcher kills and probes the
+    # child's OWN process group, so a recursing revert ends with a named failure and no
+    # surviving member of that group (a process that left the group by starting a new
+    # session is outside the launcher's bounds); the probe signals only this group, never a
+    # process listing.
     drift = ("import importlib.util, sys\n"
              "spec = importlib.util.spec_from_file_location("
              "'aiqt_portability_drift_child', sys.argv[1])\n"
@@ -1320,40 +1516,18 @@ def _not_run_vectors(failures):
              "sys.exit(0)\n")
     drift_env = dict(os.environ)
     drift_env.pop(_SUPPRESS_VECTORS_ENV, None)
-    drift_env[_DRIFT_DEPTH_ENV] = "1"  # a drift child never spawns another drift child
-    drift_want = _lifecycle_alloc_failure("exit 0")
-    proc = subprocess.Popen([sys.executable, "-I", "-B", "-c", drift, tool],
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                            env=drift_env, start_new_session=True)
-    timed_out = False
-    drift_out = ""
-    try:
-        drift_out, _ = proc.communicate(timeout=120)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-    try:
-        os.killpg(proc.pid, signal.SIGKILL)  # the whole group: the leader and any descendant
-    except ProcessLookupError:
-        pass  # the group is already empty
-    if timed_out:
-        proc.communicate()  # drain the pipes and reap the killed leader
-    survivors = True
-    for _ in range(100):  # bounded group probe: up to ~10 s for the kill to empty the group
-        try:
-            os.killpg(proc.pid, 0)
-        except ProcessLookupError:
-            survivors = False
-            break
-        time.sleep(0.1)
-    if timed_out:
+    drift_want = (_lifecycle_alloc_failure("exit 0") + "\n").encode("utf-8")
+    outcome = _run_bounded_child(["-c", drift, tool], drift_env)
+    if outcome.timed_out:
         got = ("a timeout: the unmarked nested entry recursed instead of completing (the "
-               "process group was killed; members surviving the kill: {})".format(survivors))
+               "process group was killed BEFORE the leader was reaped; members surviving "
+               "the bounded probe: {})".format(outcome.survivors))
     else:
         got = ("exit {} (stdout is exactly the named failure line: {}, group members "
                "surviving completion: {})".format(
-                   proc.returncode, drift_out == drift_want + "\n", survivors))
-    drift_ok = (not timed_out and proc.returncode == 0
-                and drift_out == drift_want + "\n" and not survivors)
+                   outcome.returncode, outcome.stdout == drift_want, outcome.survivors))
+    drift_ok = (not outcome.timed_out and outcome.returncode == 0
+                and outcome.stdout == drift_want and not outcome.survivors)
     if not drift_ok:
         failures.append("(vector unmarked-drifted-lifecycle) the real lifecycle entry vector, "
                         "driven UNMARKED with _LIFECYCLE_ALLOC_PREFIX drifted, must record "
@@ -2132,9 +2306,11 @@ def _self_test_main_isolated(_mkdtemp=None, _symlink=None, _which=None, _vectors
                      _SUPPRESS_VECTORS_ENV))
     elif _vectors:
         # A marked fresh-process vector child cannot spawn children of its own even when its
-        # injected setup failure stops failing (the marked gate above fails it first); the one
-        # UNMARKED child drives only the explicit no-vectors seam and is bounded by the
-        # depth marker, its own process group and a timeout.
+        # injected setup failure stops failing (the marked gate above fails it first, and the
+        # launcher's _CHILD_DEPTH_ENV refusal at the top of _not_run_vectors bounds even a
+        # route around this gate at depth 1); every child, marked or unmarked, runs through
+        # the ONE bounded launcher: its own process group, killed BEFORE reaping on timeout,
+        # with every wait and drain bounded.
         _not_run_vectors(failures)
 
     if failures:

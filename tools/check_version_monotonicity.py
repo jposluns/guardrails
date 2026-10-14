@@ -583,6 +583,103 @@ _SUPPRESS_VECTORS_ENV = "AIQT_SELFTEST_SUPPRESS_VECTORS"
 _GIT_PROBE_ARGV = ("git", "--version")
 _NO_VECTORS_PASS_NOTE = "SELF-TEST PASS (vectors not run in this nested call)"
 
+# EVERY self-test child carries this depth marker (the bounded launcher sets it): a nested
+# entry that reaches the vectors with it set refuses to run them (a child never spawns
+# children of its own), so a reverted marked-child gate or no-vectors call ends at depth 1
+# with a named failure, never an unbounded chain; an inherited value trips the same refusal
+# (fail closed), and the refusal text names the inheritance as a possible cause.
+_CHILD_DEPTH_ENV = "AIQT_SELFTEST_CHILD_DEPTH"
+_CHILD_TIMEOUT = 120  # seconds: the wait bound the launcher applies to every self-test child
+_CHILD_DRAIN_TIMEOUT = 10  # seconds: the bounded post-kill pipe drain and leader reap
+
+
+class _ChildOutcome:
+    """What _run_bounded_child observed. returncode is None when the leader could not be
+    reaped within the drain bound; stdout and stderr are BYTES (text-mode newline translation
+    would split a CR-separated prefix into a line of its own and defeat an exact line match);
+    timed_out means the wait bound elapsed and the whole group was SIGKILLed BEFORE the leader
+    was reaped; survivors means the child's process group still had a member after the bounded
+    probe (a cleanup kill was then sent), which callers treat as a failure, never a pass."""
+
+    def __init__(self, returncode, stdout, stderr, timed_out, survivors):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+        self.timed_out = timed_out
+        self.survivors = survivors
+
+
+def _run_bounded_child(args, env, timeout=_CHILD_TIMEOUT):
+    """The ONE bounded launcher EVERY fresh-process self-test child goes through. args is the
+    argv tail after the fixed [sys.executable, "-I", "-B"] head, so every child runs this
+    interpreter. Bounds: (1) the child's environment carries _CHILD_DEPTH_ENV, whose refusal
+    at the top of _not_run_vectors stops any child of this tool from launching children of
+    its own, so a reverted guard ends at depth 1; (2) the child leads its OWN session and so
+    its own process group, and on timeout the whole group is SIGKILLed BEFORE the leader is
+    reaped (the unreaped leader anchors the group id, so that kill can never land on a reused
+    pid); (3) every wait and drain carries a timeout, so a pipe held open outside the killed
+    group fails THIS child (returncode None), never stalls the self-test. What the group kill
+    bounds is the group's MEMBERS: a descendant that moved itself into a new session is
+    outside the group and outside this bound. After reaping, the group is probed, bounded,
+    until empty; the probe and the cleanup kill signal only this group, never a process
+    listing, and the cleanup kill is sent only when the probe saw a member, so the common
+    empty-group path never signals a group id that reaping may have freed for reuse."""
+    import signal
+    import time
+    child_env = dict(env)
+    child_env[_CHILD_DEPTH_ENV] = "1"
+    proc = subprocess.Popen([sys.executable, "-I", "-B", *args],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            env=child_env, start_new_session=True)
+    timed_out = False
+    out, err = b"", b""
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)  # the whole group, BEFORE the leader is reaped
+        except ProcessLookupError:
+            pass
+        try:
+            out, err = proc.communicate(timeout=_CHILD_DRAIN_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            for pipe in (proc.stdout, proc.stderr):
+                if pipe is not None:
+                    pipe.close()
+            try:
+                proc.wait(timeout=_CHILD_DRAIN_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                pass  # reported through returncode None; the group probe below still runs
+    survivors = True
+    for _ in range(100):  # bounded group probe: up to ~10 s for the group to empty
+        try:
+            os.killpg(proc.pid, 0)
+        except ProcessLookupError:
+            survivors = False
+            break
+        time.sleep(0.1)
+    if survivors:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)  # cleanup: the probe just saw a member
+        except ProcessLookupError:
+            pass
+        for _ in range(100):  # bounded: let the cleanup kill land; survivors stays True
+            try:
+                os.killpg(proc.pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.1)
+    return _ChildOutcome(proc.returncode, out, err, timed_out, survivors)
+
+
+def _exact_line_count(stdout_bytes, line):
+    """Count LINE occurring as an exact LF-delimited line of STDOUT_BYTES. The split is on
+    LF over captured BYTES: text-mode newline translation would turn a CR-separated prefix
+    into a line of its own and let it count as exact, so a prefixed, suffixed, CR-prefixed
+    or CR-suffixed spelling all count 0 here."""
+    return stdout_bytes.split(b"\n").count(line.encode("utf-8"))
+
 
 def _default_git_probe():
     """The real git probe: launches exactly list(_GIT_PROBE_ARGV), the same constant the
@@ -625,39 +722,128 @@ def _not_run_vectors(failures):
     plus the narrowness of the public entry's setup handler.
 
     Scoped layer: a nested self-test run with git unavailable (the git probe raises OSError),
-    and one with an unavailable temp directory (mkdtemp raises OSError; the git probe is ALSO
-    injected to succeed, so a host where git is genuinely absent still reaches the mkdtemp
-    branch and the nested run records ONLY the no-tempdir line), must each exit nonzero AND name
-    the git-level cases on a NOT RUN line. A third arm re-runs the no-tempdir entry on a
-    SIMULATED git-less host (the real probe launch is patched to raise), so the
-    only-the-no-tempdir-line property is asserted on every host, with or without git. All enter
-    self_test_main AFTER its entry scrub already succeeded.
+    one whose git probe returns NONZERO (its own arm, independent of the OSError arm, so
+    either handler's removal is red on its own), and one with an unavailable temp directory
+    (mkdtemp raises OSError; the git probe is ALSO injected to succeed, so a host where git
+    is genuinely absent still reaches the mkdtemp branch and the nested run records ONLY the
+    no-tempdir line), must each exit nonzero AND name the git-level cases on a NOT RUN line.
+    A further arm re-runs the no-tempdir entry on a SIMULATED git-less host (the real probe
+    launch is patched to raise), so the only-the-no-tempdir-line property is asserted on
+    every host, with or without git. All enter self_test_main AFTER its entry scrub already
+    succeeded.
 
     Entry-narrowness layer (in-process): the public entry catches ONLY the scrub's
     temp-directory ALLOCATION failure (typed at the allocation call by _mark_setup_allocations);
     an injected PermissionError out of the scrub that is NOT the allocation must PROPAGATE,
     never be reported as the setup NOT RUN. The probe vectors assert the default git probe
     launches exactly list(_GIT_PROBE_ARGV), that the simulated git-less arm refuses that same
-    launch, and that self_test_main reaches _default_git_probe when no _git_probe is injected;
-    the no-vectors-pass-text vector asserts a clean nested no-vectors entry exits 0 printing
-    only the distinct no-vectors PASS note.
+    launch, and that self_test_main reaches _default_git_probe when no _git_probe is injected
+    (argv-VALUE agreement and helper reachability; an EQUIVALENT literal on either side still
+    agrees and is not distinguished); the no-vectors-pass-text vector asserts a clean nested
+    no-vectors entry exits 0 printing only the distinct no-vectors PASS note.
 
     Fresh-process public-entry layer: the scoped injections cannot reach a failure of the entry
     scrub itself (scrub_git_environment allocates its scratch HOME with tempfile.mkdtemp before
     any case runs), so a child runs this tool as __main__ --self-test with tempfile.mkdtemp
     raising OSError process-wide, before the scrub, and must exit 1 with the entry's whole-run
-    NOT RUN line on stdout, never a bare traceback. Every child environment carries
+    NOT RUN line on stdout, never a bare traceback. EVERY child runs through
+    _run_bounded_child, the one bounded launcher (its own process group, the _CHILD_DEPTH_ENV
+    marker whose refusal at the top of this body bounds any child at depth 1, bytes capture,
+    and a timeout on every wait and drain), and every child environment carries
     _SUPPRESS_VECTORS_ENV, so a child never spawns children of its own and never prints the
     full PASS (the marked gate records a named NOT RUN failure). The spy child proves ONLY
     that a marker-carrying child reaches its own named SELF-TEST FAIL without launching any
-    subprocess; its injections leave the git-level cases NOT RUN inside it, so it does not
-    prove those cases complete."""
+    subprocess (subprocess.run and subprocess.Popen are both replaced); its injections leave
+    the git-level cases NOT RUN inside it, so it does not prove those cases complete."""
+    if os.environ.get(_CHILD_DEPTH_ENV):
+        # This entry already runs INSIDE a child the bounded launcher started (every child
+        # carries the marker), or the variable was inherited from the caller's environment.
+        # Reaching the vectors under the marker means the marked-child gate or a no-vectors
+        # nested call did not hold, or the inherited variable is the cause: refuse with ONE
+        # named failure instead of launching children (a child never spawns children of its
+        # own), so any such chain ends at depth 1.
+        _not_run(failures, "the red-on-revert NOT RUN and entry vectors",
+                 "refused at child depth 1 ({} is set, either by the bounded launcher or "
+                 "inherited from the caller's environment): a nested entry reached the "
+                 "vectors, so the marked-child gate or a no-vectors nested call did not "
+                 "hold, or the variable was inherited".format(_CHILD_DEPTH_ENV))
+        return
+
+    # Launcher depth-refusal vector (in-process): with _CHILD_DEPTH_ENV set and both
+    # subprocess.run and subprocess.Popen replaced by spies, a nested _not_run_vectors call
+    # must record exactly ONE failure, the named depth refusal, and launch NOTHING: red when
+    # the depth refusal is removed (the spies turn any launch attempt, or anything else the
+    # unrefused vectors do, into this vector's named failure, bounded in process).
+    def _spy_launch(*_args, **_kwargs):
+        raise RuntimeError("spy: a depth-marked nested vectors call tried to launch")
+
+    prior_depth = os.environ.get(_CHILD_DEPTH_ENV)
+    real_spied_run, real_spied_popen = subprocess.run, subprocess.Popen
+    os.environ[_CHILD_DEPTH_ENV] = "1"
+    subprocess.run, subprocess.Popen = _spy_launch, _spy_launch
+    depth_failures = []
+    depth_got = None
+    try:
+        _not_run_vectors(depth_failures)
+    except Exception as exc:  # the spies raise on any launch attempt
+        depth_got = "an escaped {}: {}".format(type(exc).__name__, exc)
+    finally:
+        subprocess.run, subprocess.Popen = real_spied_run, real_spied_popen
+        if prior_depth is None:
+            os.environ.pop(_CHILD_DEPTH_ENV, None)
+        else:
+            os.environ[_CHILD_DEPTH_ENV] = prior_depth
+    if depth_got is None and (len(depth_failures) != 1
+                              or "refused at child depth 1" not in depth_failures[0]):
+        depth_got = "{} failure(s): {!r}".format(len(depth_failures), depth_failures[:2])
+    if depth_got is not None:
+        failures.append("(vector child-depth-refusal) a nested vectors call under {} must "
+                        "record exactly one named depth refusal and launch nothing "
+                        "(got {})".format(_CHILD_DEPTH_ENV, depth_got))
+
+    # Launcher group-and-marker vector (fresh process): a trivial child run through the ONE
+    # bounded launcher reports whether it leads its own process group and the depth-marker
+    # value it inherited: red when start_new_session is dropped (the child then joins THIS
+    # group and reports False) or when the launcher stops setting _CHILD_DEPTH_ENV.
+    group_probe = ("import os, sys\n"
+                   "print(os.getpgid(0) == os.getpid(), os.environ.get(sys.argv[1]))\n")
+    outcome = _run_bounded_child(["-c", group_probe, _CHILD_DEPTH_ENV], os.environ)
+    if (outcome.returncode != 0 or outcome.stdout != b"True 1\n"
+            or outcome.timed_out or outcome.survivors):
+        failures.append("(vector launcher-group) a child run through the bounded launcher "
+                        "must lead its OWN process group and carry {}=1 (want stdout "
+                        "b'True 1\\n'; got exit {}, stdout {!r}, timed out {}, survivors "
+                        "{})".format(_CHILD_DEPTH_ENV, outcome.returncode, outcome.stdout[:80],
+                                     outcome.timed_out, outcome.survivors))
+
+    # Launcher timeout vector (fresh process): a child that spawns a live same-group
+    # descendant and then outlives the wait bound must come back with its leader reaped (a
+    # returncode, never None) and its group empty, because the launcher SIGKILLs the whole
+    # group BEFORE reaping the leader: red when the timeout group kill is dropped (the
+    # leader is then never reaped in bound) and red when start_new_session is dropped (the
+    # kill then finds no group of the child's own to empty).
+    hang = ("import subprocess, sys, time\n"
+            "subprocess.Popen([sys.executable, '-I', '-c', 'import time; time.sleep(60)'])\n"
+            "time.sleep(60)\n")
+    outcome = _run_bounded_child(["-c", hang], os.environ, timeout=5)
+    if not outcome.timed_out or outcome.returncode is None or outcome.survivors:
+        failures.append("(vector launcher-timeout) a child outliving the wait bound with a "
+                        "live same-group descendant must be killed AS A GROUP before the "
+                        "leader is reaped, leaving the leader reaped and the group empty "
+                        "(got timed out {}, returncode {!r}, survivors {})".format(
+                            outcome.timed_out, outcome.returncode, outcome.survivors))
+
     def _unavailable(*_args, **_kwargs):
         raise OSError("injected: unavailable")
 
     scoped = (
         ("git-absent", {"_git_probe": _unavailable},
-         "NOT RUN: {}: git is unavailable".format(_GIT_CASES)),
+         "NOT RUN: {}: git is unavailable (injected: unavailable)".format(_GIT_CASES)),
+        # The probe's nonzero-RETURN-CODE handler is its own arm, independent of the OSError
+        # arm above: each needle names its own cause, so neither NOT RUN line can hide the
+        # other handler's removal.
+        ("git-probe-nonzero", {"_git_probe": lambda: 1},
+         "NOT RUN: {}: git is unavailable (the git probe exited nonzero)".format(_GIT_CASES)),
         ("no-tempdir", {"_git_probe": lambda: 0, "_mkdtemp": _unavailable},
          "NOT RUN: {}: no writable temp directory".format(_GIT_CASES)),
     )
@@ -672,7 +858,7 @@ def _not_run_vectors(failures):
     # The SAME no-tempdir entry under a simulated git-less host: were its successful-probe
     # injection ever dropped, the nested run would probe for real, fail, and record the
     # misleading extra git-unavailable line; this asserts the single-line outcome on every host.
-    label, kwargs, want = scoped[1]
+    label, kwargs, want = scoped[2]  # the no-tempdir arm
     real_run = subprocess.run
 
     def _gitless_run(args, *more, **kw):
@@ -734,11 +920,13 @@ def _not_run_vectors(failures):
                         "scrub that is not the temp-directory allocation must PROPAGATE out of "
                         "the public entry, never be reported as the setup NOT RUN")
 
-    # Probe-argv identity: the default probe must launch exactly list(_GIT_PROBE_ARGV), once,
-    # the same constant the simulated git-less arm matches on; with the arm-refusal vector
-    # above and the probe-default-entry vector below, a move of either side to a literal of
-    # its own goes red. The recording stub launches nothing, so this holds on hosts with or
-    # without git.
+    # Probe-argv agreement: the default probe must launch exactly list(_GIT_PROBE_ARGV), once.
+    # With the arm-refusal vector above (the arm refuses the probe's own real launch) and the
+    # probe-default-entry vector below (the entry reaches this helper), what is proven is
+    # argv-VALUE agreement between probe, arm and entry plus helper reachability, NOT
+    # dependence on the constant object: a side moved to an EQUIVALENT literal still agrees
+    # and is not detected. The recording stub launches nothing, so this holds on hosts with
+    # or without git.
     launched = []
 
     class _ProbeResult:
@@ -810,44 +998,66 @@ def _not_run_vectors(failures):
               "sys.argv[:] = [tool, '--self-test']\n"
               "runpy.run_path(tool, run_name='__main__')\n")
     want = "NOT RUN: {}: fixture setup failed: no writable temp directory".format(_EVERY_CASE)
-    proc = subprocess.run([sys.executable, "-I", "-B", "-c", inject, tool],
-                          capture_output=True, text=True, env=entry_env)
-    if proc.returncode != 1 or want not in proc.stdout:
+    outcome = _run_bounded_child(["-c", inject, tool], entry_env)
+    if (outcome.returncode != 1 or want.encode("utf-8") not in outcome.stdout
+            or outcome.timed_out or outcome.survivors):
         failures.append("(NOT RUN vector public-entry no-tempdir) must exit 1 AND record {!r} "
-                        "through the real --self-test entry, never a bare traceback (got exit "
-                        "{})".format(want, proc.returncode))
+                        "through the real --self-test entry, never a bare traceback, a hang "
+                        "or a surviving group member (got exit {}, timed out {}, survivors "
+                        "{})".format(want, outcome.returncode, outcome.timed_out,
+                                     outcome.survivors))
 
     # Inherited-marker guard: a FULL public-entry run that inherits _SUPPRESS_VECTORS_ENV (the
     # scrub keeps it: it is not GIT_-prefixed) must exit 1 and print the named suppression
-    # NOT RUN line as an exact LF-delimited line exactly once (a prefixed or suffixed line
-    # fails), with no PASS text of either form, never the unchanged PASS over silently skipped
-    # vectors; the child is bounded by a timeout so a hang is this vector's named failure,
-    # never a stall of the whole self-test.
+    # NOT RUN line as an exact LF-delimited BYTES line exactly once (a prefixed, suffixed or
+    # CR-separated-prefix line fails: the launcher captures bytes, so newline translation can
+    # never fold a CR-separated prefix away), with no PASS text of either form, never the
+    # unchanged PASS over silently skipped vectors; the bounded launcher turns a hang into
+    # this vector's named failure within the launcher's group-and-timeout bounds, never a
+    # stall of the whole self-test past those bounds.
     marked_expect = []
     _not_run(marked_expect, "the red-on-revert NOT RUN and entry vectors",
              "suppressed by {} (a vector child, never a full run)".format(_SUPPRESS_VECTORS_ENV))
     suppressed_line = "  - " + marked_expect[0]
-    try:
-        proc = subprocess.run([sys.executable, "-I", "-B", tool, "--self-test"],
-                              capture_output=True, text=True, env=entry_env, timeout=120)
-        exact_lines = proc.stdout.split("\n").count(suppressed_line)
-        marked_ok = (proc.returncode == 1 and exact_lines == 1
-                     and "SELF-TEST PASS" not in proc.stdout)
-        got = "exit {} (exact-line count {}, PASS text printed: {})".format(
-            proc.returncode, exact_lines, "SELF-TEST PASS" in proc.stdout)
-    except subprocess.TimeoutExpired:
-        marked_ok = False
-        got = "a timeout: the marked child hung instead of failing named"
+    outcome = _run_bounded_child([tool, "--self-test"], entry_env)
+    exact_lines = _exact_line_count(outcome.stdout, suppressed_line)
+    marked_ok = (not outcome.timed_out and not outcome.survivors and outcome.returncode == 1
+                 and exact_lines == 1 and b"SELF-TEST PASS" not in outcome.stdout)
+    if outcome.timed_out:
+        got = ("a timeout: the marked child hung instead of failing named (the group was "
+               "killed before the leader was reaped; survivors {})".format(outcome.survivors))
+    else:
+        got = "exit {} (exact-line count {}, PASS text printed: {}, survivors {})".format(
+            outcome.returncode, exact_lines, b"SELF-TEST PASS" in outcome.stdout,
+            outcome.survivors)
     if not marked_ok:
         failures.append("(vector inherited-marker) a full public-entry run inheriting {} must "
                         "exit 1 AND print the exact LF-delimited line {!r} exactly once with "
                         "no PASS text, never the unchanged PASS over silently skipped vectors "
                         "(got {})".format(_SUPPRESS_VECTORS_ENV, suppressed_line, got))
 
+    # Exact-line predicate vector: the count is over captured BYTES split on LF, so a
+    # CR-separated prefix (which text-mode newline translation would split into a line of
+    # its own) never counts as the exact line; red when the count reverts to text-mode
+    # splitting or translates newlines before splitting.
+    line_bytes = suppressed_line.encode("utf-8")
+    for case_label, data, want_count in (
+            ("exact", line_bytes + b"\n", 1),
+            ("prefixed", b"prefix " + line_bytes + b"\n", 0),
+            ("CR-prefixed", b"prefix\r" + line_bytes + b"\n", 0),
+            ("suffixed", line_bytes + b" suffix\n", 0),
+            ("CR-suffixed", line_bytes + b"\r\n", 0),
+            ("duplicated", line_bytes + b"\n" + line_bytes + b"\n", 2)):
+        got_count = _exact_line_count(data, suppressed_line)
+        if got_count != want_count:
+            failures.append("(vector marker-line-bytes {}) _exact_line_count must count the "
+                            "suppression line as an exact LF-delimited BYTES line (want {}, "
+                            "got {})".format(case_label, want_count, got_count))
+
     # _SUPPRESS_VECTORS_ENV guard: the spy child proves ONLY that a marker-carrying child
-    # reaches its own named SELF-TEST FAIL without launching any subprocess (subprocess.run is
-    # replaced); its denied probe and mkdtemp leave the git-level cases NOT RUN inside it, so
-    # it does not prove those cases complete.
+    # reaches its own named SELF-TEST FAIL without launching any subprocess (subprocess.run
+    # AND subprocess.Popen are replaced); its denied probe and mkdtemp leave the git-level
+    # cases NOT RUN inside it, so it does not prove those cases complete.
     spy = ("import importlib.util, subprocess, sys\n"
            "spec = importlib.util.spec_from_file_location("
            "'aiqt_monotonicity_vector_child', sys.argv[1])\n"
@@ -858,16 +1068,20 @@ def _not_run_vectors(failures):
            "    print('VECTOR-CHILD-SPAWNED', file=sys.stderr)\n"
            "    raise RuntimeError('vector child spawned despite the suppress marker')\n"
            "subprocess.run = _spy\n"
+           "subprocess.Popen = _spy\n"
            "def _deny(*_args, **_kwargs):\n"
            "    raise OSError('injected: unavailable')\n"
            "sys.exit(mod.self_test_main(_git_probe=_deny, _mkdtemp=_deny))\n")
-    proc = subprocess.run([sys.executable, "-I", "-B", "-c", spy, tool],
-                          capture_output=True, text=True, env=entry_env)
-    spawned = "vector child spawned" in proc.stderr or "VECTOR-CHILD-SPAWNED" in proc.stderr
-    if proc.returncode != 1 or "SELF-TEST FAIL" not in proc.stdout or spawned:
+    outcome = _run_bounded_child(["-c", spy, tool], entry_env)
+    spawned = (b"vector child spawned" in outcome.stderr
+               or b"VECTOR-CHILD-SPAWNED" in outcome.stderr)
+    if (outcome.returncode != 1 or b"SELF-TEST FAIL" not in outcome.stdout or spawned
+            or outcome.timed_out or outcome.survivors):
         failures.append("(vector suppress-marker) a child carrying {} must run its cases to its "
                         "own named SELF-TEST FAIL without spawning vector children (got exit {}, "
-                        "spawned: {})".format(_SUPPRESS_VECTORS_ENV, proc.returncode, spawned))
+                        "spawned: {}, timed out {}, survivors {})".format(
+                            _SUPPRESS_VECTORS_ENV, outcome.returncode, spawned,
+                            outcome.timed_out, outcome.survivors))
 
 
 def self_test_main(_git_probe=None, _mkdtemp=None, _vectors=True):
@@ -1332,7 +1546,10 @@ def self_test_main(_git_probe=None, _mkdtemp=None, _vectors=True):
     elif _vectors:
         # A fresh-process vector child carries _SUPPRESS_VECTORS_ENV, so a child whose injected
         # setup failure ever stopped failing still could not spawn children of its own (the
-        # marked gate above fails it first).
+        # marked gate above fails it first, and the launcher's _CHILD_DEPTH_ENV refusal at the
+        # top of _not_run_vectors bounds even a route around this gate at depth 1); every
+        # child runs through the ONE bounded launcher: its own process group, killed BEFORE
+        # reaping on timeout, with every wait and drain bounded.
         _not_run_vectors(failures)
 
     if failures:
