@@ -81,7 +81,7 @@ unavailable. LATE-ARRIVAL EXCEPTION: at a block, when the blocked final message 
 its SHA-256 is recorded as pending (at most MAX_PENDING, 8, the OLDEST hash evicted when a ninth is
 stored); a later record with that text is skipped ONCE (the pending entry is consumed) because it arrived
 after OFFSET only through transcript lag, and a supplied last_assistant_message matching that arrived
-record consumes the entry the same way (FIX-537-R9: every path that consumes a final message consumes
+record consumes the entry the same way (every path that consumes a final message consumes
 its pending hash). Pending entries are dropped at any new genuine user message and
 when the transcript is reset (shorter than OFFSET, or the bytes before OFFSET changed), which also discards
 OFFSET and is RECORDED in the state (round 40, see BLOCK CAP). A blocked final message already in the transcript creates no exception. The boundary is never
@@ -155,13 +155,13 @@ next Stop, and a clean Stop whose state READ failed persists it the same way, on
 predicate held, so the one Stop that observed the fault wrote nothing and a later genuine user turn
 restarted the count); on the READABLE transcript branch a Stop whose state read failed also re-reads the
 state under the still-held lock BEFORE the messages are checked, and the pending reconciliation is ONE
-invariant (FIX-537-R9): the (boundary, pending list) pair advances only together, computed from ONE
+invariant: the (boundary, pending list) pair advances only together, computed from ONE
 transcript snapshot, a single rescan from the RECOVERED boundary that replaces the from-0 scan wholesale,
 so a stored hash is consumed only by a record that lies after the stored boundary within that same
 snapshot (a genuine user message there still invalidates them all), every path that consumes a final
 message consumes its pending hash the same way, the supplied last_assistant_message included (skipped
 once at its late arrival, the spent entry never excusing a later verbatim repeat), and an arrival
-appended between reads is either consumed AND covered by the saved boundary or neither (FIX-537-R8
+appended between reads is either consumed AND covered by the saved boundary or neither (an earlier fix
 reconciled against a SECOND scan while the FIRST scan and its boundary were kept, so a record BEFORE the
 recovered boundary could consume a hash and a mid-fault arrival was consumed yet re-reported; the round
 43 follow-up before it merged the recovered hashes back after the consumption scan and resurrected
@@ -424,8 +424,8 @@ zone's abbreviation; a foreign zone sharing that abbreviation is not distinguish
 abbreviation or an invalid date is not checked anywhere, a line-leading status stamp included (round 26: it
 fails open, so a fabricated `[2026-09-24 09:00 PDT]` header in an Eastern-zone process is a MISS). Genuine-user detection is heuristic on entry shape and a fixed list of
 notification prefixes. The recovery boundary lives in volatile per-user storage: it is lost on reboot (the
-state is then absent and the whole current turn is evaluated once more). READABLE-BRANCH RESIDUAL
-(FIX-537-R9): on a Stop whose transcript is readable but whose state read failed, the stored pending
+state is then absent and the whole current turn is evaluated once more). READABLE-BRANCH RESIDUAL:
+on a Stop whose transcript is readable but whose state read failed, the stored pending
 late-arrival hashes survive only through the re-read under the lock, reconciled against ONE rescan from
 the recovered boundary (an unreadable or RESET rescan keeps the stored pair untouched instead, and such
 a Stop records no NEW late hash of its own, so its blocked final can be re-reported once at its late
@@ -1912,7 +1912,7 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None):
         # round 26: this hook writes the state at the block that starts a corrective loop, so an ABSENT state under
         # stop_hook_active (deleted between Stops, or its directory removed mid-call) is an UNKNOWN count, never 0
         blocks = None
-    # round 41: a recorded reset is state too (codex round 40: a READABLE clean explicit-false Stop at
+    # round 41: a recorded reset is state too (a round-40 review: a READABLE clean explicit-false Stop at
     # offset 0, counter 0 and the flag set skipped the save, so the one signal that clears the flag left
     # it standing and every later transcript-derived new turn stayed suppressed); round 42: so is the
     # unknown marker, for the same reason
@@ -1955,20 +1955,20 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None):
     if t.get("reset") or t.get("user"):
         pending = []  # a reset transcript or a new genuine user message invalidates the late-arrival exception
     remaining = list(pending)
-    # FIX-537-R9 (codex MAJOR 1, MEDIUM 2, 3 and 4): the pending reconciliation is ONE invariant now:
+    # the pending reconciliation is ONE invariant now:
     # the (boundary, pending list) pair advances only TOGETHER, computed from ONE transcript snapshot,
     # and a hash is consumed only by a record that lies after the stored boundary within that same
     # snapshot. On a Stop whose state read failed but whose transcript is readable, the state is re-read
     # under the still-held lock and ONE rescan from the recovered boundary replaces the from-0 scan
     # wholesale (boundary, messages, flags), so the consumption below (both final-message paths and the
     # per-message loop) sees exactly the records past the stored boundary, and the boundary saved later
-    # is that same snapshot. Before (FIX-537-R8), the recovered hashes were reconciled against a SECOND
+    # is that same snapshot. Before this change, the recovered hashes were reconciled against a SECOND
     # scan while the FIRST scan and its boundary were kept, so a record BEFORE the recovered boundary
-    # could consume a pending hash (codex 2), and an arrival appended between the two scans was consumed
-    # yet left past the saved boundary and re-reported at the next Stop (codex 3). When the
+    # could consume a pending hash, and an arrival appended between the two scans was consumed
+    # yet left past the saved boundary and re-reported at the next Stop. When the
     # reconciliation cannot be performed, the stored pair that read back is kept EXACTLY as it was,
     # never saved as an empty list: an unreadable or RESET rescan holds the stored (boundary, pending)
-    # pair untouched for the next readable Stop to resolve (codex 4; held below), at the disclosed cost
+    # pair untouched for the next readable Stop to resolve (held below), at the disclosed cost
     # that such a Stop records no NEW late hash of its own; a state still unreadable at the re-read
     # keeps the empty loaded list, the disclosed readable-branch residual (see RESIDUAL COVERAGE): every
     # stored pending entry can then be lost, so each late-arriving already-reported message those
@@ -1998,7 +1998,7 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None):
         msgs = msgs[:-1]  # checked below as the final message
         h = _sha(final.strip())
         if h in remaining:
-            # FIX-537-R9 (codex MAJOR 1): the supplied-final path consumes its pending hash exactly like
+            # the supplied-final path consumes its pending hash exactly like
             # the transcript-read path below: the already-reported final message arriving late is skipped
             # ONCE and the spent entry never excuses a later verbatim repeat (before, the hash was saved
             # back, so the next verbatim repeat passed with nothing reported)
@@ -2024,7 +2024,7 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None):
     for i, (text, ref) in enumerate(msgs, 1):
         h = _sha(text.strip())
         if h in remaining:
-            # FIX-537-R9: consumption runs over every record of the ONE snapshot (after a recovery above,
+            # consumption runs over every record of the ONE snapshot (after a recovery above,
             # msgs lies entirely past the stored boundary); the state_ok gate bounds only the re-CHECK
             remaining.remove(h)  # the already-reported message arriving late: skipped once, consumed
             continue
@@ -2215,7 +2215,7 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None):
 
     saved = False  # whether this Stop's counter reached the recovery state
     if readable:
-        # FIX-537-R9: the reconciliation above adopted the ONE rescan snapshot (the boundary and the
+        # the reconciliation above adopted the ONE rescan snapshot (the boundary and the
         # hashes advance together), so these saves need no merge; when it could NOT be performed (held),
         # the stored pair is written back EXACTLY as it was, never an empty list, and this Stop records
         # no NEW late hash of its own (the pair may not advance alone), so a block here can see its
@@ -2234,13 +2234,13 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None):
     # round 42: `new_turn` joins the final save condition: on a clean explicit-false Stop with BOTH the
     # state and the transcript unreadable, none of will_block, had_state (the failed read hid the
     # recorded reset) or cap == "open" held, so the one signal that clears the flags wrote nothing and a
-    # recorded reset survived two transient faults, capping later genuine turns (codex round 41). Round
+    # recorded reset survived two transient faults, capping later genuine turns (found in round 41). Round
     # 43: unreadable-state discovery joins BOTH predicates, as reset_unknown (the unreadable read
     # itself, or the absent state met under an explicit true), so a CLEAN Stop that discovered either,
     # with the transcript unreadable and the field omitted or explicitly true, still persists the
     # unknown marker and the capped counter (before, only absent_unknown joined: a clean Stop whose
     # STATE read failed saved nothing, the fault was forgotten, and the next genuine user turn
-    # restarted the count, codex round 43)
+    # restarted the count, found in round 43)
     elif tp and (blocks is not None or cap == "open" or reset_unknown) and (will_block or had_state
                                                                             or cap == "open" or new_turn
                                                                             or reset_unknown):
@@ -5467,7 +5467,7 @@ def _self_test():
                 self.assertTrue(load_state(self.sdir, self.tr, extra)[3])
                 self.assertEqual(extra["blocks"], 2, final)  # the other writer's higher value, never lowered
 
-        # -- round 39 (codex MAJOR and claude BLOCKER QA of round 38: an unsaved or rewritten boundary
+        # -- round 39 (QA of round 38: an unsaved or rewritten boundary
         # must not re-arm the new-turn reset) --
         def test_r39_failed_save_user_message_fails_open_absent_state(self):
             # the defect: `fresh` required only `persist` (the lock taken), not a SAVED boundary, so with
@@ -5582,7 +5582,7 @@ def _self_test():
                                  else "open" if notes and "block count unknown" in notes[0] else "pass")
                 self.assertEqual(kinds, ["block"] * BLOCK_CAP + ["cap"] * (5 - BLOCK_CAP), repr(v))
 
-        # -- round 40 (codex BLOCKER and claude MEDIUM QA of round 39: a boundary that moved BACKWARDS must
+        # -- round 40 (QA of round 39: a boundary that moved BACKWARDS must
         # never re-enable a transcript-derived new turn on a later Stop, and an unreadable scan is never a
         # new turn) --
         def test_r40_truncate_restore_never_restarts_the_count(self):
@@ -5633,12 +5633,12 @@ def _self_test():
             self.assertTrue(load_state(sdir, self.tr, extra)[3])
             self.assertEqual(extra["blocks"], BLOCK_CAP)  # each block was recorded on the unmoved boundary
 
-        # -- round 41 (codex BLOCKER and codex MEDIUM / claude MINOR-1 QA of round 40: unreadable reset
+        # -- round 41 (QA of round 40: unreadable reset
         # history is UNKNOWN, never read as cleared, and an explicit-false clean Stop always clears a
-        # recorded reset; claude MAJOR-1 and MINOR-2: the carry-forward and the commit's reset-field
+        # recorded reset; the carry-forward and the commit's reset-field
         # claims get their own vectors) --
         def test_r41_unreadable_state_repair_records_unknown_history(self):
-            # the defect (codex BLOCKER, 12 blocks in 19 Stops): an unreadable state read the reset history
+            # the defect (12 blocks in 19 Stops): an unreadable state read the reset history
             # as False, and the save-time repair wrote the counter at the cap with the flag CLEAR, so the
             # restored OLD user record (104 bytes serialized here, not 63: round-40 wording corrected) was
             # read as a new turn one Stop later and the count restarted without new user input. The history
@@ -5669,10 +5669,10 @@ def _self_test():
             self.assertEqual((extra["reset"], extra["unknown"]), (False, True))
 
         def test_r41_explicit_false_clean_stop_clears_a_recorded_reset(self):
-            # the defect (codex MEDIUM, claude MINOR-1): had_state ignored the reset field, so a READABLE
+            # the defect: had_state ignored the reset field, so a READABLE
             # clean explicit-false Stop at offset 0, counter 0 and the flag set wrote nothing: the one
             # signal that clears the flag left it standing, and every later genuine user turn stayed
-            # suppressed (codex recovery table: zero offset, zero counter). A recorded reset now triggers
+            # suppressed (a review's recovery table: zero offset, zero counter). A recorded reset now triggers
             # the save, so the explicit false always writes the cleared flag
             bad = "[2026-09-23T20:00Z] still wrong"
             sdir = os.path.join(self.tmp, "state41b")
@@ -5701,7 +5701,7 @@ def _self_test():
                 self.assertEqual(extra["blocks"], 1, k)  # round 42: EACH turn blocks with a fresh count of 1
 
         def test_r41_reset_survives_a_stop_that_records_no_reset(self):
-            # claude MAJOR-1: TWO pieces of code carry the recorded flag forward (reset_seen in new_reset,
+            # a review found that TWO pieces of code carry the recorded flag forward (reset_seen in new_reset,
             # and the save re-read), each alone sufficient under the lock, so a mutant removing BOTH
             # passed every round-40 test while restore, truncate, truncate, restore blocked without limit
             # (the counter going 1, 2, 3, 1, ...). The Stop between the truncation and the restore scans
@@ -5782,7 +5782,7 @@ def _self_test():
             self.assertEqual(kinds, ["block", "block"] + ["block"] * (BLOCK_CAP - 1) + ["cap"])
 
         def test_r41_recorded_reset_caps_genuine_turns_until_explicit_false(self):
-            # the disclosed trade-off of recording the reset (claude MEDIUM-1), now stated in the residual
+            # the disclosed trade-off of recording the reset, now stated in the residual
             # list: where the host omits the field, genuinely NEW user messages are suppressed as new-turn
             # signals while the flag stands, so once the count reaches the cap the hook stays in capped-
             # allow mode for that transcript (violations allowed with the cap warning, the fail-open
@@ -5813,12 +5813,12 @@ def _self_test():
             self.assertTrue(load_state(sdir, self.tr, extra)[3])
             self.assertEqual((extra["blocks"], extra["reset"]), (1, False))
 
-        # -- round 42 (codex MEDIUM and claude MEDIUM-1 / MEDIUM-2 QA of round 41: a clean explicit-false
+        # -- round 42 (QA of round 41: a clean explicit-false
         # Stop clears the flags even with BOTH reads unavailable; unknown history is its own marker; an
         # absent state under an explicit true is unknown history too; round 43 below makes the marker
         # fail closed) --
         def test_r42_explicit_false_clears_with_both_reads_unavailable(self):
-            # the defect (codex MEDIUM): with the state read failing (EIO) AND the transcript unreadable, a
+            # the defect: with the state read failing (EIO) AND the transcript unreadable, a
             # clean explicit-false Stop satisfied none of will_block, had_state (the failed read hid the
             # recorded reset) or cap == "open", so the one clearing signal wrote nothing, the stored reset
             # survived two transient faults, and later genuine turns ran to the cap. `new_turn` now joins
@@ -5852,7 +5852,7 @@ def _self_test():
                 self.assertEqual(extra["blocks"], 1, k)
 
         def test_r43_unknown_history_caps_new_turns_until_explicit_false(self):
-            # round 43 (the round-42 BLOCKER of both reviews, decided fail-closed): round 42 cleared the
+            # round 43 (the blocking round-42 finding, decided fail-closed): round 42 cleared the
             # unknown marker at a genuinely new user message past a held non-trivial boundary, but a
             # staged restore of old records satisfies that rule with no new user input (see the three
             # staged-restore vectors below), so the marker now fails CLOSED like the recorded reset:
@@ -5886,7 +5886,7 @@ def _self_test():
             self.assertEqual((extra["blocks"], extra["reset"], extra["unknown"]), (1, False, False))
 
         def test_r42_absent_state_under_explicit_true_is_unknown_history(self):
-            # the defect (claude MEDIUM-2, pre-existing since round 40): an absent state under an explicit
+            # the defect (pre-existing since round 40): an absent state under an explicit
             # true is an UNKNOWN count (round 26), but its reset history read as CLEARED, so an external
             # deletion of the state file mid-loop erased a recorded reset and the restored old user record
             # restarted the count (block, block, block after the deletion, up to BLOCK_CAP more blocks per
@@ -5921,10 +5921,10 @@ def _self_test():
             self.assertTrue(load_state(sdir, self.tr, extra)[3])
             self.assertEqual((extra["blocks"], extra["reset"], extra["unknown"]), (1, False, False))
 
-        # -- round 43 (round-42 QA: the BLOCKER of both reviews, unknown history fails closed; codex
-        # MEDIUM-2 and MEDIUM-3 and claude MEDIUM-2; the once-per-explicit-false and carry MINORs) --
+        # -- round 43 (round-42 QA: the blocking finding, unknown history fails closed; the medium
+        # findings; the once-per-explicit-false and carry minor findings) --
         def test_r43_unknown_history_staged_restore_stays_capped(self):
-            # the round-42 BLOCKER (codex staged restoration): truncate, make the state unreadable (the
+            # the blocking round-42 finding (staged restoration): truncate, make the state unreadable (the
             # repair saves the marker at its trivial offset-0 boundary), then restore the old content in
             # TWO writes: first a non-user prefix (a system record), whose capped Stop advances the
             # boundary past 0 and carries the marker, then the old user suffix, which round 42 read as a
@@ -5971,7 +5971,7 @@ def _self_test():
             self.assertEqual((extra["blocks"], extra["reset"], extra["unknown"]), (1, False, False))
 
         def test_r43_unknown_history_two_write_restore_stays_capped(self):
-            # the round-42 BLOCKER (claude run A): the round-41 blocker vector with the restore done in
+            # the blocking round-42 finding (two-write variant): the round-41 blocker vector with the restore done in
             # TWO writes. The repair saved the marker at offset 0; round 42 suppressed only the FIRST
             # restore Stop (trivial boundary), whose capped allow advanced the boundary, so the second
             # write was read as a new user message past a held boundary and the count restarted (five
@@ -6004,7 +6004,7 @@ def _self_test():
             self.assertEqual((extra["blocks"], extra["reset"], extra["unknown"]), (BLOCK_CAP, False, True))
 
         def test_r43_unknown_history_nonzero_offset_repair_stays_capped(self):
-            # the round-42 BLOCKER (claude run B, the codex nonzero-offset variant): truncation to a
+            # the blocking round-42 finding (nonzero-offset variant): truncation to a
             # NON-empty record prefix, then the state fault. The repair scanned the partial prefix, so
             # it saved the marker at a NON-trivial boundary sitting on truncated content; round 42 read
             # the restored old suffix past that held boundary as a new user message and the count
@@ -6040,7 +6040,7 @@ def _self_test():
             self.assertEqual((extra["blocks"], extra["reset"], extra["unknown"]), (BLOCK_CAP, False, True))
 
         def test_r43_absent_state_clean_explicit_true_persists_unknown(self):
-            # the round-42 MEDIUM (codex 2, claude run C): a CLEAN explicit-true Stop that discovered an
+            # a round-42 finding: a CLEAN explicit-true Stop that discovered an
             # absent state computed the unknown history but persisted nothing (the readable branch needed
             # had_state or an unreadable state, the other branch a readable counter), so the deletion was
             # forgotten by the next Stop and a host that omits the field restarted the count on restored
@@ -6072,7 +6072,7 @@ def _self_test():
                 self.assertEqual(self.r38_ev(sdir, bad)[0], "cap", readable)
 
         def test_r43_save_state_short_write_fails_and_keeps_the_state(self):
-            # the round-42 MEDIUM (codex 3, pre-existing): save_state ignored the os.write return value,
+            # a round-42 finding (pre-existing): save_state ignored the os.write return value,
             # so a SHORT write renamed a truncated JSON prefix into place: the next load was unavailable
             # and neither the cleared state nor the previous stored flag survived, against the clear-
             # durability disclosure. The write now loops until every byte is written, zero progress is a
@@ -6131,12 +6131,12 @@ def _self_test():
             self.assertEqual((extra["blocks"], extra["reset"], extra["unknown"]), (1, False, True))
 
         def test_r43_explicit_false_unreadable_state_keeps_the_boundary(self):
-            # the round-42 MEDIUM (claude run D): an explicit-false Stop whose state read failed loaded
+            # a round-42 finding: an explicit-false Stop whose state read failed loaded
             # 0, None and [], and the round-42 new_turn save wrote THAT over the stored boundary and
             # pending list, so the next Stop re-scanned from 0 and re-blocked on an already-reported old
             # message. The Stop now re-reads the state under the lock: a boundary that reads back is kept
             # (no spurious block), and a state still unreadable at the re-read is cleared to boundary 0,
-            # whose ONE-time recheck is the disclosed residual. Round 43 (codex MEDIUM): the preserved
+            # whose ONE-time recheck is the disclosed residual. Round 43: the preserved
             # pending list is seeded NON-empty (a block whose last_assistant_message is not yet in the
             # transcript), asserted to survive the re-read, and consumed at its late arrival, so a mutant
             # that keeps the boundary but drops the pending list fails here
@@ -6203,7 +6203,7 @@ def _self_test():
                     self.assertEqual(self.r38_ev(sdir, "Done.")[0], "pass")  # bounded: the boundary moved
 
         def test_r43_save_reread_carries_each_flag_on_its_own(self):
-            # round-42 MINOR (claude 2): the save-time re-read carries rs = new_reset or the stored flag
+            # a round-42 finding: the save-time re-read carries rs = new_reset or the stored flag
             # and un = new_unknown or the stored marker, defence in depth under the advisory lock; no
             # vector discriminated either carry on its own (each alone failed no test). Between this
             # Stop's load and its save another writer records the flag: the re-read must carry it, for
@@ -6228,7 +6228,7 @@ def _self_test():
                 self.assertTrue(extra[field], field)  # the re-read carried the concurrent record
 
         def test_r43_explicit_false_staged_restore_restarts_per_record(self):
-            # round-42 MINOR (both reviews): the once-per-explicit-false wording was wrong. An explicit
+            # a round-42 finding: the once-per-explicit-false wording was wrong. An explicit
             # false that read a TRUNCATED transcript clears the recorded reset (the field is the
             # platform's own new-turn statement), so a STAGED restore of the old content afterwards
             # restarts the count once PER restored old user record, each restart recorded normally and
@@ -6257,15 +6257,15 @@ def _self_test():
                 self.assertEqual((extra["blocks"], extra["reset"], extra["unknown"]), (1, False, False))
 
         def test_r43_unreadable_state_clean_stop_persists_unknown(self):
-            # the round-43 MAJOR (codex 1): a CLEAN Stop whose STATE read failed, with the transcript
+            # a round-43 finding: a CLEAN Stop whose STATE read failed, with the transcript
             # unreadable and the field omitted (or explicitly true), satisfied neither predicate of the
             # unreadable-transcript save (blocks None, cap None, no absent state), so the one Stop that
             # observed the fault persisted nothing: the next genuine user turn read a clear history and
             # restarted the count, against the disclosed one-fault capped-allow residual. Unreadable-
             # state discovery (reset_unknown) now joins both predicates: the marker and the capped
             # counter are stored right at the faulting Stop, and the re-read under the lock keeps the
-            # recoverable boundary and the pending list, seeded NON-empty here (FIX-537-R7, codex
-            # MEDIUM) so a conditional mutant that keeps the boundary but drops the pending list on
+            # recoverable boundary and the pending list, seeded NON-empty here (a review
+            # finding) so a conditional mutant that keeps the boundary but drops the pending list on
             # the legs that are not a new turn goes red on both field variants
             bad = "[2026-09-23T20:00Z] still wrong"
             missing = "[2026-09-23T21:00Z] reported but not yet in the transcript"
@@ -6320,16 +6320,16 @@ def _self_test():
                 self.assertEqual((extra["blocks"], extra["reset"], extra["unknown"]), (1, False, False), i)
 
         def test_r43_readable_transcript_state_fault_keeps_pending(self):
-            # FIX-537-R7 MEDIUM (claude 1): a Stop whose STATE read failed but whose transcript was
+            # the defect: a Stop whose STATE read failed but whose transcript was
             # READABLE loaded an empty pending list, and both readable-branch saves wrote that over
             # the stored one, so one transient fault erased the late-arrival exception and the
             # already-reported message was re-reported (field omitted or explicitly true) or
             # re-refused (explicit false) once at its late arrival. The readable branch now re-reads
             # the state under the still-held lock and keeps the stored pending hashes that read
             # back and that the transcript past the recovered boundary neither consumed nor
-            # invalidated (FIX-537-R8), under the MAX_PENDING eviction, for the field omitted,
+            # invalidated (added by a later repair), under the MAX_PENDING eviction, for the field omitted,
             # explicitly true and explicitly false alike; the boundary is EXACTLY the one the
-            # readable scan established, asserted with its tail hash (FIX-537-R8)
+            # readable scan established, asserted with its tail hash (added by that repair)
             bad = "[2026-09-23T20:00Z] still wrong"
             missing = "[2026-09-23T21:00Z] reported but not yet in the transcript"
             real_load = load_state
@@ -6363,7 +6363,7 @@ def _self_test():
                 self.assertEqual(pend, pend0, i)  # the stored pending list survives the fault
                 t = turn_messages(self.tr)
                 self.assertGreater(t["end"], st0[0], i)  # the scan moved past the stored boundary
-                # FIX-537-R8 (codex MEDIUM 2): EXACTLY the readable scan complete-record offset and
+                # EXACTLY the readable scan complete-record offset and
                 # tail hash; off > 0 alone also held for a mutant that saved the OLD boundary that
                 # the re-read under the lock recovered
                 self.assertEqual((off, tl), (t["end"], t["tail"]), i)
@@ -6372,7 +6372,7 @@ def _self_test():
                 self.assertEqual(load_state(sdir, self.tr, {})[2], [], i)  # consumed exactly once
 
         def test_r43_readable_violating_stop_state_fault_keeps_pending(self):
-            # FIX-537-R8 (codex MEDIUM 2): the readable-branch recovery holds on the VIOLATING
+            # the readable-branch recovery holds on the VIOLATING
             # faulting Stop too (the save that records the new late hash), for the field omitted,
             # explicitly true and explicitly false alike, and the saved boundary is EXACTLY the
             # readable scan complete-record offset and tail hash: red when the recovery is
@@ -6421,7 +6421,7 @@ def _self_test():
                     self.assertEqual((extra["blocks"], extra["unknown"]), (BLOCK_CAP, True), i)
 
         def test_r43_recovered_pending_hash_of_arrived_message_is_consumed(self):
-            # FIX-537-R8 MEDIUM (both legs, vector P1): the first merge of the recovered pending
+            # the defect: the first merge of the recovered pending
             # hashes ran AFTER the consumption scan, on the readable-branch saves, so a hash whose
             # message had already arrived was saved back, and the same violating message, repeated
             # verbatim on the next Stop, passed with nothing reported (the parent and the no-fault
@@ -6460,7 +6460,7 @@ def _self_test():
                 self.assertEqual(kind, "block" if i == 2 else "cap", i)
 
         def test_r43_recovered_pending_dropped_at_new_user_turn(self):
-            # FIX-537-R8 MEDIUM (both legs, vector P2): a reset transcript or a new genuine user
+            # the defect: a reset transcript or a new genuine user
             # message invalidates the late-arrival exception, but the first merge ran after that
             # invalidation and resurrected the recovered hashes, so a message refused in an earlier
             # turn, repeated verbatim after the fault, passed with nothing reported. Recovered
@@ -6495,7 +6495,7 @@ def _self_test():
                 self.assertEqual(kind, "block" if i == 2 else "cap", i)  # refused or capped, reported
 
         def test_r43_pending_capacity_evicts_oldest_at_max_pending(self):
-            # FIX-537-R8 MINOR (codex 3): "keeps every stored pending hash" was always bounded by
+            # "keeps every stored pending hash" was always bounded by
             # the MAX_PENDING (8) eviction that every save applies; the docstring now states it. A
             # CONTRACT test at the capacity boundary, green at the pin by design: the eighth stored
             # hash still fits (just inside), and a ninth, recorded by a state-faulting Stop whose
@@ -6530,7 +6530,7 @@ def _self_test():
             # hash is evicted, so that message, were it still to arrive, would be refused once more
 
         def test_r44_supplied_final_matching_arrived_pending_consumed_once(self):
-            # FIX-537-R9 MAJOR (codex 1, pre-existing): a supplied last_assistant_message matching the
+            # the defect (pre-existing): a supplied last_assistant_message matching the
             # arrived pending record took the matching-final branch, which never consumed the hash, so
             # the spent exception was saved back and a later verbatim repeat of the same message passed
             # with nothing reported. The supplied-final path now consumes its pending hash exactly like
@@ -6568,7 +6568,7 @@ def _self_test():
                 self.assertEqual(kind, "block" if i == 2 else "cap", i)
 
         def test_r44_pre_boundary_record_never_consumes_pending(self):
-            # FIX-537-R9 MEDIUM (codex 2): the R8 recovery reconciled against a SECOND scan from the
+            # the defect: the earlier recovery reconciled against a SECOND scan from the
             # recovered boundary while the final-message machinery still read the from-0 scan, so an
             # identical historical record BEFORE the recovered boundary consumed the pending hash and
             # the saved list went empty; the eventual actual arrival was then reported again. A hash is
@@ -6611,7 +6611,7 @@ def _self_test():
                 self.assertEqual(load_state(sdir, self.tr, {})[2], [], i)  # consumed exactly once
 
         def test_r44_arrival_between_scans_consumed_and_covered_together(self):
-            # FIX-537-R9 MEDIUM (codex 3): the R8 recovery consumed hashes against its OWN second scan
+            # the defect: the earlier recovery consumed hashes against its OWN second scan
             # while the first scan boundary was saved, so an arrival appended between the two scans was
             # consumed yet left PAST the saved boundary and re-reported at the next Stop. The pair now
             # comes from ONE snapshot: an arrival is either consumed AND covered by the saved boundary,
@@ -6659,7 +6659,7 @@ def _self_test():
                 self.assertEqual(kind, "pass", i)  # never reported again
 
         def test_r44_unreadable_rescan_keeps_the_stored_pair(self):
-            # FIX-537-R9 MEDIUM (codex 4): a recovery rescan that is UNREADABLE (the transcript vanished
+            # the defect: a recovery rescan that is UNREADABLE (the transcript vanished
             # between the two reads) contributed nothing, and the readable first scan still saved the
             # empty loaded list with its own boundary, silently destroying a recoverable pair. A
             # reconciliation that cannot be performed now keeps the stored (boundary, pending) pair
@@ -6712,7 +6712,7 @@ def _self_test():
                 self.assertEqual(load_state(sdir, self.tr, {})[2], [], i)  # consumed exactly once
 
         def test_r44_residual_reread_still_unreadable_loses_every_entry(self):
-            # FIX-537-R9 MINOR (codex 5): the readable-branch residual is PLURAL: a state still
+            # the readable-branch residual is PLURAL: a state still
             # unreadable at the re-read under the lock keeps the empty loaded list, so EVERY stored
             # pending entry can be lost, and EACH late-arriving already-reported message those entries
             # excused is reported once more; a RESIDUAL contract test (green at the pin by design, like
@@ -6751,7 +6751,7 @@ def _self_test():
             self.assertEqual(sum("2026-09-23T22:00Z" in v for v in report), 1)  # the second, once more
 
         def test_r43_open_stop_both_reads_failing_rereads_the_state(self):
-            # FIX-537-R7 MINOR (claude 3): the round-43 re-read runs on EVERY Stop of the
+            # the round-43 re-read runs on EVERY Stop of the
             # both-unreadable branch whose state read failed, the fail-open VIOLATING Stop (cap
             # "open", not a new turn) included, but no vector exercised that leg on its own: a
             # revert of the widened re-read condition to the new-turn leg was caught only through
@@ -6789,11 +6789,11 @@ def _self_test():
                              (BLOCK_CAP, False, True))
 
         def test_r43_save_state_failed_unlink_is_best_effort_cleanup(self):
-            # round-43 MINOR (codex 3): temporary-file CLEANUP is best effort, apart from the outcome: a
+            # a round-43 finding: temporary-file CLEANUP is best effort, apart from the outcome: a
             # zero-progress write followed by a failed unlink still returns False with the previous
             # state byte-identical, and the one temp file left behind never shadows the state file
             # (only the atomic rename names it); the round-42 wording claimed every failure unlinked
-            # it. A CONTRACT test (FIX-537-R7 MINOR, claude 3): the behaviour it locks in already held
+            # it. A CONTRACT test: the behaviour it locks in already held
             # at the parent, so it is green there by design; it documents the cleanup contract and
             # guards no revert of the round-43 change
             sdir = os.path.join(self.tmp, "state43j")
@@ -6824,7 +6824,7 @@ def _self_test():
             self.assertEqual((extra["blocks"], extra["reset"]), (2, True))
 
         def test_r43_save_state_owned_close_never_raises_after_commit(self):
-            # round-43 MINOR (codex 4): the atomic rename is the COMMIT point. On a direct call without
+            # a round-43 finding: the atomic rename is the COMMIT point. On a direct call without
             # `dfd` the state-directory descriptor is OWNED by save_state, and a close failure AFTER a
             # successful rename escaped as an OSError from a function documented never to raise, with
             # the state already replaced (no rollback is possible). The owned close is now handled
