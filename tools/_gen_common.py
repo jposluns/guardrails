@@ -91,10 +91,18 @@ def load_toml(path):
     with open(path, "rb") as handle:
         try:
             return tomllib.load(handle)
-        except RecursionError as exc:
-            # Callers fail closed on the ValueError family by contract, but tomllib raises RecursionError (a
-            # RuntimeError) on a deeply nested array or inline table; map it into that family here, at the
-            # parse locus, so no caller's ValueError handler is bypassed (F-TOML-BARE-VALUEERROR-CLASS).
+        except (ValueError, RecursionError, MemoryError) as exc:
+            # Callers fail closed on the ValueError family by contract, so a ValueError (a TOMLDecodeError or
+            # an over-long integer literal) passes to them unchanged. tomllib raises RecursionError (a
+            # RuntimeError) on a deeply nested array or inline table and, from CPython 3.14.8, on a key of more
+            # than 1000 dotted parts, and MemoryError on a many-part key under a memory limit; map each into
+            # that family here, at the parse locus, so no caller's ValueError handler is bypassed
+            # (F-TOML-BARE-VALUEERROR-CLASS). A MemoryError is named as the resource failure it is, never
+            # as nesting.
+            if isinstance(exc, ValueError):
+                raise
+            if isinstance(exc, MemoryError):
+                raise ValueError("{}: out of memory parsing TOML ({})".format(path, exc)) from exc
             raise ValueError("{}: TOML nesting is too deep to parse ({})".format(path, exc)) from exc
 
 
