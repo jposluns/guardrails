@@ -67,8 +67,12 @@ and a verbatim link can never resolve to the same id in the result, and a verbat
 earlier import run allocated is never refused for colliding with a placeholder. A verbatim id that
 SPELLS a placeholder this batch itself mints is a genuine alias of a batch row and is refused by
 name, with no second finding (a link to this batch's own row must use its
-local key); a clean-series id is refused by the validator ("Imported-to-clean links MUST be refused by
-both writer and doctor", spec 8.6). The same aliasing rule covers every record-id-bearing row member, and
+local key); a clean-series id IN A LINK is refused by the validator ("Imported-to-clean links MUST be
+refused by both writer and doctor", spec 8.6), a links-only refusal: a block row's `scopes` entry may
+name either series (spec 8.1/8.2: either series may be scoped, with an imported scope id held to the
+imported namespaces), so a well-formed clean-series scope passes and a malformed scopes entry draws the
+validator's own shape finding, never the spec 8.6 link refusal. The same ALIASING rule covers every
+record-id-bearing row member, and
 `links[].id` and a block row's `scopes` entries are the ONLY two, enumerated against the schema: the
 record's own `id` is writer-authored and refused in a row, `refs` rows carry {kind, locator, note}
 locators and notes (free text, never typed record references), `unrecorded` rows carry schema FIELD
@@ -1170,12 +1174,16 @@ def self_test():
                   _refuses(got, INVALID, "lies inside a control area"))
         got = parse_batch(_edited('path = "notes/old.md"', 'path = "worki~1/x"'))
         check("source-path-working-short-prefix-one-digit-valid", got.status == VALID)
-        # The REMAINING tail lengths, one refusal per tail length 4, 5 and 6 and per control name
-        # family, cut stems and extension-bearing names included (a d-digit tail cuts the stem to
-        # 7 - d characters), each beside its ADJACENT acceptance: the same cut stem with one digit
-        # fewer matches no arm and stays a plain product path. Narrowing range(2, 7) to (2, 4),
-        # (2, 5) or (2, 6), skipping the cut arms of a six-character stem, or a cut arm admitting a
-        # shorter run than its cut implies, turns one of these red.
+        # The REMAINING tail lengths these spelled vectors reach (a d-digit tail cuts the stem to
+        # 7 - d characters): .working at 4, 5 and 6, .git at 5, .aiqt at 4, and the pointer names
+        # at 5 and 6 (an op~/o~ spelling matches BOTH pointer arms, so a pointer vector pins the
+        # pair, never one name's arm alone), each beside its ADJACENT acceptance: the same cut
+        # stem with one digit fewer matches no arm and stays a plain product path. The arms no
+        # spelled vector reaches or isolates (.git at 6, .aiqt at 5 and 6, and .opf.local.toml's
+        # arms beyond OPFLO~, unreached or shared with another name's arm) are pinned ONLY by the
+        # literal arm table below. Narrowing range(2, 7) to (2, 4), (2, 5) or (2, 6), skipping
+        # the cut arms of a six-character stem, or a cut arm admitting a shorter run than its cut
+        # implies, turns one of these red.
         for name, bad in (("working-shortname-four-digit", "WOR~1000/x"),
                           ("working-shortname-five-digit", "WO~10000/x"),
                           ("working-shortname-six-digit", "W~100000/x"),
@@ -1215,7 +1223,10 @@ def self_test():
         # U+206A..U+206F and U+FEFF, each dropped by an HFS+ name lookup, so .g<cp>it/x names .git.
         # The raw code point rides each vector: where the emitter escapes it the document is also
         # non-canonical, but the control-area finding is asserted by name, so removing any ONE
-        # member from the fold loses that finding and turns exactly its vector red.
+        # member from the fold loses that finding and turns its enumerated vector red, together
+        # with every NAMED vector riding the same code point (U+FEFF also turns git-bom and
+        # working-bom red, U+200C git-zwnj, U+200D store-area-zwj; the other thirteen fold
+        # members fail alone).
         hfs_declared = ([0xFEFF] + list(range(0x200C, 0x2010))
                         + list(range(0x202A, 0x202F)) + list(range(0x206A, 0x2070)))
         for cp in hfs_declared:
@@ -1251,13 +1262,36 @@ def self_test():
         check("source-measurement-leaves-row-building-intact", got.status == INVALID
               and any("caller-supplied measurement 'size'" in f for f in got.findings)
               and any("never carries proposed_from" in f for f in got.findings))
+        # "Builds no row" is asserted AT THE SEAMS, not only by the absent validator finding:
+        # _resolve_links is the first step of every row build and validate_imported_record the
+        # one validation entry, so a parse that reaches either under an unusable source path
+        # turns this red even where its findings are dropped (red when rows are built and only
+        # validation is skipped, a gap a finding-only assertion cannot see).
         bad_src = _edited('path = "notes/old.md"', 'path = "../x"')
         bad_src = bad_src.replace(b'key = "r1"\ntype = "backlog_item"\n',
                                   b'key = "r1"\ntype = "backlog_item"\nid = "XX-1"\n', 1)
         bad_src = bad_src.replace(b'status = "done"\n',
                                   b'proposed_from = "open"\nstatus = "done"\n', 1)
-        got = parse_batch(bad_src)
+        seam_calls = {"build": 0, "validate": 0}
+        real_resolve, real_validate = _resolve_links, schema.validate_imported_record
+
+        def _counting_resolve(*args, **kwargs):
+            seam_calls["build"] += 1
+            return real_resolve(*args, **kwargs)
+
+        def _counting_validate(*args, **kwargs):
+            seam_calls["validate"] += 1
+            return real_validate(*args, **kwargs)
+
+        globals()["_resolve_links"] = _counting_resolve
+        schema.validate_imported_record = _counting_validate
+        try:
+            got = parse_batch(bad_src)
+        finally:
+            globals()["_resolve_links"] = real_resolve
+            schema.validate_imported_record = real_validate
         check("unusable-source-path-builds-no-row", got.status == INVALID
+              and seam_calls == {"build": 0, "validate": 0}
               and any("not a canonical product-relative file path" in f for f in got.findings)
               and any("writer-authored member 'id'" in f for f in got.findings)
               and not any("proposed_from" in f for f in got.findings))
@@ -1352,52 +1386,74 @@ def self_test():
               and got.batch.rows[0].record["refs"]
               == [{"kind": "path", "locator": bi_ph, "note": wl_ph}])
         # An `unparsed` entry carrying placeholder-LOOKING text rides the batch the same way:
-        # VALID, byte-identical, and moved into the built import table verbatim.
+        # VALID, byte-identical, and moved into the built import table verbatim. The links array
+        # here carries TWO key-resolved links with a verbatim imported id INTERLEAVED between
+        # them (a second worklog row backs the second key), so the masked-copy assertion below
+        # discriminates a mask applied at every links position from one applied at links[0] only.
         masked_text = _FIXTURE.decode("utf-8").replace(
             'links = [{key = "w1", rel = "relates"}]',
             'history = [{field = "title", value = "' + bi_ph + '"}]\n'
-            'links = [{key = "w1", rel = "relates"}]\n'
+            'links = [{key = "w1", rel = "relates"}, {id = "imported:' + bi + '-9", '
+            'rel = "relates"}, {key = "w2", rel = "relates"}]\n'
             'refs = [{kind = "path", locator = "' + bi_ph + '", note = "' + wl_ph + '"}]', 1)
         masked_text = masked_text.replace(
             'title = "Old backlog item"\n',
             'title = "' + bi_ph + '"\nunparsed = ["' + bi_ph + '"]\n', 1)
+        masked_text = masked_text + ("\n[[worklog]]"
+                                     + _FIXTURE.decode("utf-8").rsplit("[[worklog]]", 1)[1]
+                                     ).replace("w1", "w2").replace("the old item note",
+                                                                   "the second note")
         masked_doc = masked_text.encode("utf-8")
         got = parse_batch(masked_doc)
-        mrow = got.batch.rows[0]
-        check("placeholder-text-unparsed-preserved", got.status == VALID
+        # mrow survives a refused parse as None, so a masking mutant that turns this fixture
+        # INVALID grades the vectors below red by name (exit 1), never the exit-2 backstop.
+        mrow = got.batch.rows[0] if got.batch is not None else None
+        wl2_ph = "imported:{}-02".format(wl)
+        check("placeholder-text-unparsed-preserved", mrow is not None and got.status == VALID
               and got.batch.canonical == masked_doc
               and mrow.record["import"]["unparsed"] == [bi_ph])
         # The SEPARATE validation copy, asserted directly: _masked_for_validation re-spells minted
-        # placeholders at EXACTLY the record-id-bearing positions (here the record's own id and the
-        # key-resolved links[0].id) and changes nothing else, so the copy equals the built record
-        # with only those two members re-spelled, the placeholder-LOOKING title, history value,
-        # refs locator and note and unparsed entry preserved verbatim, and the built record itself
-        # untouched (red when a spelling scan re-spells preserved text anywhere in the copy, or
-        # when the helper writes through to the stored record).
-        minted_here = frozenset(r.placeholder_id for r in got.batch.rows)
-        before = copy.deepcopy(mrow.record)
-        masked = _masked_for_validation(mrow.record, minted_here)
-        expected = copy.deepcopy(before)
-        expected["id"] = _validation_mask(bi_ph)
-        expected["links"][0]["id"] = _validation_mask(wl_ph)
-        check("masked-copy-positional-only", masked == expected
+        # placeholders at EXACTLY the record-id-bearing positions (here the record's own id and
+        # the key-resolved links[0].id AND links[2].id, every such position, never only the
+        # first) and changes nothing else, so the copy equals the built record with only those
+        # three members re-spelled, the verbatim links[1].id, the placeholder-LOOKING title,
+        # history value, refs locator and note and unparsed entry preserved verbatim, and the
+        # built record itself untouched (red when a spelling scan re-spells preserved text
+        # anywhere in the copy, when only links[0] is masked, or when the helper writes through
+        # to the stored record).
+        # The three placeholders this fixture mints, spelled literally so a refused parse can
+        # never crash the derivation (fail-closed to a red check instead).
+        minted_here = frozenset({bi_ph, wl_ph, wl2_ph})
+        before = None if mrow is None else copy.deepcopy(mrow.record)
+        masked = None if mrow is None else _masked_for_validation(mrow.record, minted_here)
+        expected = None if mrow is None else copy.deepcopy(before)
+        if expected is not None:
+            expected["id"] = _validation_mask(bi_ph)
+            expected["links"][0]["id"] = _validation_mask(wl_ph)
+            expected["links"][2]["id"] = _validation_mask(wl2_ph)
+        check("masked-copy-positional-only", mrow is not None and masked == expected
               and masked is not mrow.record and mrow.record == before
+              and masked["links"][1] == {"id": "imported:" + bi + "-9", "rel": "relates"}
               and masked["title"] == bi_ph
               and masked["import"]["history"] == [{"field": "title", "value": bi_ph}]
               and masked["refs"] == [{"kind": "path", "locator": bi_ph, "note": wl_ph}]
               and masked["import"]["unparsed"] == [bi_ph])
         # The THIRD record-id-bearing position, `scopes`, asserted by a direct call (a parsed
         # batch refuses a minted scopes entry before validation, so the arm needs a synthetic
-        # record): a minted entry is re-spelled to its mask, a verbatim entry naming an earlier
-        # run's id is preserved, and the synthetic record is untouched.
+        # record), a minted entry sitting BEFORE and AFTER the preserved one, so a mask applied
+        # at scopes[0] alone cannot pass: every minted entry is re-spelled to its mask, the
+        # verbatim entry naming an earlier run's id is preserved in place, and the synthetic
+        # record is untouched.
         bk_ph = "imported:{}-01".format(bk)
-        synthetic = {"id": bk_ph, "type": "block", "scopes": [bk_ph, "imported:" + bi + "-7"]}
+        synthetic = {"id": bk_ph, "type": "block",
+                     "scopes": [bk_ph, "imported:" + bi + "-7", bk_ph]}
         masked_syn = _masked_for_validation(synthetic, frozenset({bk_ph}))
         check("masked-copy-scopes-position",
               masked_syn == {"id": _validation_mask(bk_ph), "type": "block",
-                             "scopes": [_validation_mask(bk_ph), "imported:" + bi + "-7"]}
+                             "scopes": [_validation_mask(bk_ph), "imported:" + bi + "-7",
+                                        _validation_mask(bk_ph)]}
               and synthetic == {"id": bk_ph, "type": "block",
-                                "scopes": [bk_ph, "imported:" + bi + "-7"]})
+                                "scopes": [bk_ph, "imported:" + bi + "-7", bk_ph]})
         # A returned validator finding labels its row by the PLACEHOLDER spelling, never by the
         # well-formed mask it was judged under: the mask is exactly a spelling a real store
         # record could carry (red when the re-label is dropped).
