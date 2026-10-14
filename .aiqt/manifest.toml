@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "41705055a81ea1776d2c6ebdbb5ca4ce59b113499641f1a43970acbd0f6dd5f9"
+tree-sha256 = "693fd8044cf85cb5e4728910f272870f6aa0d6ac6b7d45e2e866999a079db16f"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2367,7 +2367,7 @@ sha256 = "aaf972bbdd8b8520076c1bb6f9d701fab580ed6fd34a91c2ba125d39d463aa11"
 [[sources]]
 path = "README.md"
 bytes = 5055
-sha256 = "4909543b22232ed04b66ea0f3c5efdf609311f624535aad82fdab1640b15de0c"
+sha256 = "ff6236decfdd5c0f508eac552474fdc801263c1df74a6fa8688f31adb561f097"
 
 [[sources]]
 path = "RELEASING.md"
