@@ -359,10 +359,20 @@ _IMPORTED_SERIES_NAMESPACES = (frozenset(BASELINE_TYPES.values())
                                | frozenset(ns for ns, _module in MODULE_TYPES.values()))
 
 
+def imported_series_supported():
+    """True when this tooling ITSELF supports the imported series: SUPPORTED_SPEC_VERSION at or
+    above IMPORTED_SPEC_VERSION, through the house SemVer parser. The ONE support comparison,
+    shared by the imported_series_declared gate below and by the opf-check activation predicate
+    imported_content_checks_landed, so the gate and that predicate cannot disagree about when
+    the series is supported."""
+    return _parse(SUPPORTED_SPEC_VERSION) >= _parse(IMPORTED_SPEC_VERSION)
+
+
 def imported_series_declared(manifest_data):
     """True when the [opf] base table declares a spec_version of IMPORTED_SPEC_VERSION or later AND
-    this tooling itself supports that series (SUPPORTED_SPEC_VERSION at or above
-    IMPORTED_SPEC_VERSION), the activation gate the imported-series registrations read (spec 8.2/4.2).
+    this tooling itself supports that series (imported_series_supported: SUPPORTED_SPEC_VERSION
+    at or above IMPORTED_SPEC_VERSION), the activation gate the imported-series registrations
+    read (spec 8.2/4.2).
     Graded through the house SemVer parser; an absent, non-string, or unparseable spec_version reads
     False (manifest validation, not this helper, reports it). The tooling-support condition mirrors
     homes_generation's gate on SUPPORTED_HOMES: validate_manifest does NOT fail every newer
@@ -377,7 +387,7 @@ def imported_series_declared(manifest_data):
     version = opf.get("spec_version") if isinstance(opf, dict) else None
     parsed = _parse(version) if isinstance(version, str) else None
     return (parsed is not None and parsed >= _parse(IMPORTED_SPEC_VERSION)
-            and _parse(SUPPORTED_SPEC_VERSION) >= _parse(IMPORTED_SPEC_VERSION))
+            and imported_series_supported())
 
 
 def imported_leaf_names(enabled_types):
@@ -3877,10 +3887,11 @@ def self_test():
               imported_leaf_names(("release",)) == frozenset({"release" + IMPORTED_INDEX_SUFFIX}))
         check("imported-leaf-names-unknown-skipped",
               imported_leaf_names(("nonsense", "transaction")) == frozenset())
-        # The activation threshold is PINNED: imported_series_declared compares both arms against
-        # the IMPORTED_SPEC_VERSION constant, so this equality anchors every sampled point below
-        # (red when the constant itself drifts, e.g. to a multidigit 1.2.10 the interval samples
-        # alone would not see).
+        # The activation threshold is PINNED: imported_series_declared compares both arms (the
+        # support arm through the shared imported_series_supported helper) against the
+        # IMPORTED_SPEC_VERSION constant, so this equality anchors every sampled point below
+        # (red when the constant itself drifts, e.g. to a multidigit 1.2.100 the interval
+        # samples alone would not see; a drift to the sampled 1.2.10 the matrix already reds).
         check("imported-spec-version-pinned-130", IMPORTED_SPEC_VERSION == "1.3.0")
         # imported_series_declared: the activation gate requires BOTH the declared spec_version
         # (IMPORTED_SPEC_VERSION or later, through the house SemVer parser) AND this tooling's own
@@ -3916,7 +3927,7 @@ def self_test():
             # Multidigit patch declarations below the threshold: the house parser does not stop
             # at single-digit patches, so 1.2.10 and 1.2.99 parse, sit below 1.3.0, and answer
             # False under raised support. Sampled points only (red when the declared threshold
-            # drifts to 1.2.10, or past it to 1.2.99).
+            # drifts down to 1.2.99, or past it to the lower 1.2.10).
             check("imported-series-declared-multidigit-patch-below-130-false",
                   not imported_series_declared({"opf": {"spec_version": "1.2.10"}})
                   and not imported_series_declared({"opf": {"spec_version": "1.2.99"}}))
@@ -3929,9 +3940,9 @@ def self_test():
             # Support BELOW the threshold stays inactive whatever the declaration: the support
             # arm also compares against IMPORTED_SPEC_VERSION, so the sampled support values
             # 1.2.1 and the multidigit 1.2.10 both answer False even for 1.3.0 and 2.0.0
-            # declarations (red when the support threshold drifts down to 1.2.1, or past it to
-            # an interior multidigit 1.2.10). Sampled support points only, the way the declared
-            # arm is sampled above.
+            # declarations (red when the support threshold drifts down to the interior
+            # multidigit 1.2.10, or past it to the lower 1.2.1). Sampled support points only,
+            # the way the declared arm is sampled above.
             globals()["SUPPORTED_SPEC_VERSION"] = "1.2.1"
             _isd_sup_121 = (not imported_series_declared({"opf": {"spec_version": "1.3.0"}})
                             and not imported_series_declared({"opf": {"spec_version": "2.0.0"}}))

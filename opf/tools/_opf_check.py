@@ -200,7 +200,11 @@ HOMES2_CHECKS = ("C-EVIDENCE-ENUM",)
 # from 1 through SUPPORTED_HOMES (activating the imported series and activating homes 2 are
 # separate gates; today an active series is graded against required_checks(1)), so raising that
 # constant alone, or with a placeholder roster, cannot ship. At activation these ids join the
-# required roster of every generation the way HOMES2_CHECKS joins the homes-2 roster.
+# required roster of every generation the way HOMES2_CHECKS joins the homes-2 roster: the wiring
+# must place the imported ids inside required_checks(h) for EVERY generation while they stay
+# disjoint from REQUIRED_CHECKS and HOMES2_CHECKS themselves, so any OTHER wiring (even a
+# legitimate-looking alternative such as an imported-keyed roster) reads red, which fails
+# closed: a red on a legitimate alternative, never a green on a wiring nothing grades.
 IMPORTED_CONTENT_CHECKS = ()
 
 
@@ -215,7 +219,9 @@ def required_checks(homes):
 def imported_content_checks_landed():
     """The tooling-side imported-series activation gate, asserted by the self-test at the SHIPPED
     constants and exercised there under controlled versions, rosters, and wirings. True while the
-    imported series is unsupported (SUPPORTED_SPEC_VERSION below IMPORTED_SPEC_VERSION): the
+    imported series is unsupported, judged through _opf_store.imported_series_supported, the
+    SAME support comparison the imported_series_declared gate reads (one shared helper, so the
+    gate and this predicate cannot disagree about support): the
     content checks stay deferred, and the runtime tripwire in _check_containment covers any store
     that declares the series. Once support reaches the threshold, True ONLY when
     IMPORTED_CONTENT_CHECKS is a non-empty roster of NEW C-IMPORTED- prefixed ids, disjoint from
@@ -226,9 +232,14 @@ def imported_content_checks_landed():
     gates: today an active series is graded against required_checks(1), so ids wired only into the
     homes-2 roster would bind no generation an active store is actually graded against. Raising
     the support constant without landing the checks, or landing a placeholder roster, therefore
-    fails the suite through this predicate, and the runtime tripwire never stands alone."""
-    if (_opf_store._parse(_opf_store.SUPPORTED_SPEC_VERSION)
-            < _opf_store._parse(_opf_store.IMPORTED_SPEC_VERSION)):
+    fails the suite through this predicate, and the runtime tripwire never stands alone. This
+    predicate grades ROSTER STRUCTURE only -- the ids exist, are NEW, and are wired into every
+    generation -- never what a registered check reads: a wired check that grades nothing is for
+    review and for the report reconciliation (an id that never runs reads CANNOT-EVALUATE), not
+    for this gate. The EVERY-generation bound assumes SUPPORTED_HOMES >= 1: below one supported
+    generation the predicate refuses outright (fail closed) instead of reading the empty
+    generation range vacuously True."""
+    if not _opf_store.imported_series_supported():
         return True
     ids = set(IMPORTED_CONTENT_CHECKS)
     if not ids:
@@ -236,6 +247,9 @@ def imported_content_checks_landed():
     if not all(isinstance(cid, str) and cid.startswith("C-IMPORTED-") for cid in ids):
         return False
     if ids & (set(REQUIRED_CHECKS) | set(HOMES2_CHECKS)):
+        return False
+    # Below one supported generation the all() below is vacuously True: refuse instead.
+    if _opf_store.SUPPORTED_HOMES < 1:
         return False
     return all(ids <= set(required_checks(h))
                for h in range(1, _opf_store.SUPPORTED_HOMES + 1))
@@ -4376,13 +4390,17 @@ def self_test():
               imported_content_checks_landed())
         # The SAME predicate under controlled versions, rosters, and wirings (every patched name
         # restored in finally; no store fixture runs inside this block). The empty, out-of-roster,
-        # reused-id, and homes-2-only vectors assert the False side at a raised support, so
-        # deleting the non-empty, membership, disjointness, or prefix condition from the
-        # predicate reds one of these committed vectors in an ordinary suite run.
+        # reused-id, unprefixed, collision, homes-2-only, omission, and no-generation vectors
+        # assert the False side at a raised support, and each arm is discriminated ON ITS OWN:
+        # deleting the non-empty, membership, prefix, disjointness, or generation-floor
+        # condition from the predicate, one at a time, reds a committed vector in an ordinary
+        # suite run.
         _icc_prev_ssv = _opf_store.SUPPORTED_SPEC_VERSION
         _icc_prev_homes = _opf_store.SUPPORTED_HOMES
         _icc_prev_roster = IMPORTED_CONTENT_CHECKS
         _icc_prev_rc = required_checks
+        _icc_prev_req = REQUIRED_CHECKS
+        _icc_prev_h2 = HOMES2_CHECKS
         _icc_g = globals()
         try:
             # Unsupported tooling defers, whatever the roster holds (the deferral arm).
@@ -4403,11 +4421,35 @@ def self_test():
             check("imported-content-gate-out-of-roster-red-once-supported",
                   not imported_content_checks_landed())
             # Supported, a placeholder reusing an EXISTING required id: red (the disjointness
-            # and prefix arms; C-CONTAINMENT sits inside every required roster, so the
-            # membership arm alone would pass it).
+            # and prefix arms TOGETHER; C-CONTAINMENT sits inside every required roster, so the
+            # membership arm alone would pass it, and each of the two arms is discriminated on
+            # its own by the three vectors below).
             _icc_g["IMPORTED_CONTENT_CHECKS"] = ("C-CONTAINMENT",)
             check("imported-content-gate-reused-id-red-once-supported",
                   not imported_content_checks_landed())
+            # ONLY the prefix arm refuses a FRESH non-prefixed id wired into every required
+            # roster (a NEW id, so disjointness passes; wired, so membership passes).
+            _icc_g["IMPORTED_CONTENT_CHECKS"] = ("C-NEWCONTENT",)
+            _icc_g["required_checks"] = (
+                lambda homes, _rc=_icc_prev_rc: _rc(homes) + ("C-NEWCONTENT",))
+            check("imported-content-gate-unprefixed-new-id-red-once-supported",
+                  not imported_content_checks_landed())
+            # ONLY the disjointness arm refuses a C-IMPORTED- prefixed id that ALSO sits in
+            # REQUIRED_CHECKS (membership is satisfied through that same patched roster), and
+            # likewise one that ALSO sits in HOMES2_CHECKS while wired into every roster. Each
+            # patched roster is staged back between vectors and restored again in finally.
+            _icc_g["required_checks"] = _icc_prev_rc
+            _icc_g["REQUIRED_CHECKS"] = _icc_prev_req + ("C-IMPORTED-X",)
+            _icc_g["IMPORTED_CONTENT_CHECKS"] = ("C-IMPORTED-X",)
+            check("imported-content-gate-required-collision-red-once-supported",
+                  not imported_content_checks_landed())
+            _icc_g["REQUIRED_CHECKS"] = _icc_prev_req
+            _icc_g["HOMES2_CHECKS"] = _icc_prev_h2 + ("C-IMPORTED-X",)
+            _icc_g["required_checks"] = (
+                lambda homes, _rc=_icc_prev_rc: _rc(homes) + ("C-IMPORTED-X",))
+            check("imported-content-gate-homes2-collision-red-once-supported",
+                  not imported_content_checks_landed())
+            _icc_g["HOMES2_CHECKS"] = _icc_prev_h2
             # Supported, the legitimate activation wiring: a NEW id joined into
             # required_checks(h) for every generation reads True, and the SAME id wired ONLY
             # into the homes-2 roster stays red while generation 1 is supported, because an
@@ -4422,21 +4464,44 @@ def self_test():
                 _rc(homes) + (("C-IMPORTED-CONTENT",) if homes >= 2 else ()))
             check("imported-content-gate-homes2-only-wiring-red-once-supported",
                   not imported_content_checks_landed())
-            # The bound is EVERY supported generation, never the top generation alone: with
-            # SUPPORTED_HOMES raised to 2, the homes-2-only wiring stays red (generation 1 is
-            # still unwired) and the every-generation wiring reads True.
+            # The bound is EVERY supported generation, never the top or the bottom generation
+            # alone: with SUPPORTED_HOMES raised to 2, the homes-2-only wiring stays red
+            # (generation 1 is still unwired), a generation-1-only wiring stays red (generation
+            # 2 is unwired), omitting EACH supported generation in turn while wiring the others
+            # stays red, and only the every-generation wiring reads True (red when the checked
+            # range collapses, e.g. to (1,)).
             _opf_store.SUPPORTED_HOMES = 2
             check("imported-content-gate-homes2-only-wiring-red-at-homes-2",
                   not imported_content_checks_landed())
             _icc_g["required_checks"] = (
+                lambda homes, _rc=_icc_prev_rc:
+                _rc(homes) + (("C-IMPORTED-CONTENT",) if homes < 2 else ()))
+            check("imported-content-gate-generation1-only-wiring-red-at-homes-2",
+                  not imported_content_checks_landed())
+            _icc_omissions = []
+            for _icc_skip in range(1, _opf_store.SUPPORTED_HOMES + 1):
+                _icc_g["required_checks"] = (
+                    lambda homes, _rc=_icc_prev_rc, _skip=_icc_skip:
+                    _rc(homes) if homes == _skip else _rc(homes) + ("C-IMPORTED-CONTENT",))
+                _icc_omissions.append(imported_content_checks_landed())
+            check("imported-content-gate-each-generation-omission-red-at-homes-2",
+                  _icc_omissions == [False] * _opf_store.SUPPORTED_HOMES)
+            _icc_g["required_checks"] = (
                 lambda homes, _rc=_icc_prev_rc: _rc(homes) + ("C-IMPORTED-CONTENT",))
             check("imported-content-gate-every-generation-green-at-homes-2",
                   imported_content_checks_landed())
+            # Below one supported generation the EVERY-generation range is empty: the predicate
+            # refuses outright rather than reading the vacuous all() True (fail closed).
+            _opf_store.SUPPORTED_HOMES = 0
+            check("imported-content-gate-no-supported-generation-red",
+                  not imported_content_checks_landed())
         finally:
             _opf_store.SUPPORTED_SPEC_VERSION = _icc_prev_ssv
             _opf_store.SUPPORTED_HOMES = _icc_prev_homes
             _icc_g["IMPORTED_CONTENT_CHECKS"] = _icc_prev_roster
             _icc_g["required_checks"] = _icc_prev_rc
+            _icc_g["REQUIRED_CHECKS"] = _icc_prev_req
+            _icc_g["HOMES2_CHECKS"] = _icc_prev_h2
         # F2 (per-record): worklog/<WL-n>.toml is never a per-record body -> INVALID; a garbage body control
         # is still caught.
         wlr = copy.deepcopy(pr_machine)
