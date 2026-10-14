@@ -148,8 +148,13 @@ since round 26, is unknown HISTORY too, where before the deletion read as CLEARE
 recorded reset; a CLEAN Stop that discovers an absent state under an explicit true persists the marker too
 (round 43), on the readable and the unreadable transcript branches alike, so the discovery survives to the
 next Stop, and a clean Stop whose state READ failed persists it the same way, on both transcript branches
-(round 43: before, with the transcript unreadable and no explicit true, neither save predicate held, so the
-one Stop that observed the fault wrote nothing and a later genuine user turn restarted the count). Round
+(round 43: before, with the transcript unreadable and the field omitted or explicitly true, neither save
+predicate held, so the one Stop that observed the fault wrote nothing and a later genuine user turn
+restarted the count); on the READABLE transcript branch a Stop whose state read failed also re-reads the
+state under the still-held lock before saving and keeps every stored pending hash that reads back,
+whatever the field (round 43 follow-up: before, both readable-branch saves wrote the empty loaded pending
+list over the stored one, so one transient fault erased the late-arrival exception and its
+already-reported message could be re-reported once at its late arrival). Round
 43: the marker FAILS CLOSED, exactly like the recorded reset: while either stands, no
 transcript-derived user message is a new turn, at ANY offset, and ONLY an explicit-false Stop clears them
 (round 42 cleared the marker at a genuinely new user message past a held NON-trivial boundary, reasoning
@@ -2142,6 +2147,19 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None):
 
     saved = False  # whether this Stop's counter reached the recovery state
     if readable:
+        # round 43 follow-up (claude MEDIUM): a Stop whose state read failed loaded an empty pending
+        # list, and BOTH saves of this readable branch wrote that over the stored one, so one transient
+        # fault erased the late-arrival exception and its already-reported message could be re-reported
+        # (or re-refused) once at its late arrival; re-read under the still-held lock and keep every
+        # stored pending hash that reads back, on every readable-branch Stop whose state read failed,
+        # whatever the field (the readable scan re-established the boundary, so only the pending list
+        # is merged; a state still unreadable at the re-read keeps the empty loaded list, whose
+        # one-time recheck is the disclosed residual)
+        if not state_ok and dfd is not None:
+            cur = {}
+            pend2, ok2 = load_state(None, tp, cur, dfd)[2:]
+            if ok2 and not cur.get("absent"):
+                remaining.extend(h for h in pend2 if h not in remaining)
         if final_bad or earlier_bad:
             late = [_sha(lam.strip())] if lam is not None and not lam_in_transcript else []
             saved = save(t["end"], t["tail"], remaining + late)
@@ -6186,16 +6204,22 @@ def _self_test():
             # restarted the count, against the disclosed one-fault capped-allow residual. Unreadable-
             # state discovery (reset_unknown) now joins both predicates: the marker and the capped
             # counter are stored right at the faulting Stop, and the re-read under the lock keeps the
-            # recoverable boundary and pending list
+            # recoverable boundary and the pending list, seeded NON-empty here (FIX-537-R7, codex
+            # MEDIUM) so a conditional mutant that keeps the boundary but drops the pending list on
+            # the legs that are not a new turn goes red on both field variants
             bad = "[2026-09-23T20:00Z] still wrong"
+            missing = "[2026-09-23T21:00Z] reported but not yet in the transcript"
             real_load = load_state
             for i, field in enumerate(({}, {"stop_hook_active": True})):
                 sdir = os.path.join(self.tmp, f"state43i{i}")
                 self.write([self.user("go"), self.asst(bad)])
-                self.assertEqual(self.r38_ev(sdir, bad)[0], "block", i)  # block 1, a boundary past 0
+                # block 1 reports a message NOT yet in the transcript: a boundary past 0 AND a
+                # non-empty pending list are both at stake
+                self.assertEqual(self.r38_ev(sdir, missing)[0], "block", i)
                 off0, tl0, pend0, ok0 = load_state(sdir, self.tr, {})
                 self.assertTrue(ok0, i)
                 self.assertGreater(off0, 0, i)
+                self.assertEqual(pend0, [_sha(missing)], i)  # the non-empty pending list at stake
                 with open(self.tr, "rb") as f:
                     content = f.read()
                 os.remove(self.tr)  # the transcript is unreadable for the faulting Stop
@@ -6235,11 +6259,97 @@ def _self_test():
                 self.assertTrue(load_state(sdir, self.tr, extra)[3], i)
                 self.assertEqual((extra["blocks"], extra["reset"], extra["unknown"]), (1, False, False), i)
 
+        def test_r43_readable_transcript_state_fault_keeps_pending(self):
+            # FIX-537-R7 MEDIUM (claude 1): a Stop whose STATE read failed but whose transcript was
+            # READABLE loaded an empty pending list, and both readable-branch saves wrote that over
+            # the stored one, so one transient fault erased the late-arrival exception and the
+            # already-reported message was re-reported (field omitted or explicitly true) or
+            # re-refused (explicit false) once at its late arrival. The readable branch now re-reads
+            # the state under the still-held lock and keeps every stored pending hash that reads
+            # back, for the field omitted, explicitly true and explicitly false alike; the boundary
+            # stays the one the readable scan established
+            bad = "[2026-09-23T20:00Z] still wrong"
+            missing = "[2026-09-23T21:00Z] reported but not yet in the transcript"
+            real_load = load_state
+            for i, field in enumerate(({}, {"stop_hook_active": True}, {"stop_hook_active": False})):
+                sdir = os.path.join(self.tmp, f"state43m{i}")
+                self.write([self.user("go"), self.asst(bad)])
+                self.assertEqual(self.r38_ev(sdir, missing)[0], "block", i)  # block 1, pending seeded
+                st0 = load_state(sdir, self.tr, {})
+                self.assertTrue(st0[3], i)
+                pend0 = st0[2]
+                self.assertEqual(pend0, [_sha(missing)], i)  # the non-empty pending list at stake
+                self.write([self.asst("Done.")], "a")  # the corrected final message: a CLEAN Stop
+                fails = []
+
+                def transient_load(*a, **k):  # ONE unavailable read; the re-read under the lock recovers
+                    fails.append(1)
+                    globals()["load_state"] = real_load
+                    return 0, None, [], False
+                payload = {"transcript_path": self.tr, "last_assistant_message": "Done."}
+                payload.update(field)
+                globals()["load_state"] = transient_load
+                try:
+                    r = evaluate(dict(payload), self.now, self.start, sdir)
+                finally:
+                    globals()["load_state"] = real_load
+                self.assertIsNone(r, i)  # the final message is clean: allowed
+                self.assertTrue(fails, i)  # the state load was attempted and actually failed
+                extra = {}
+                off, _tl, pend, ok = load_state(sdir, self.tr, extra)
+                self.assertTrue(ok, i)
+                self.assertEqual(pend, pend0, i)  # the stored pending list survives the fault
+                self.assertGreater(off, 0, i)  # the boundary the readable scan established
+                self.write([self.asst(missing)], "a")  # the reported message ARRIVES late
+                self.assertEqual(self.r38_ev(sdir, "Done.")[0], "pass", i)  # consumed, never re-blocked
+                self.assertEqual(load_state(sdir, self.tr, {})[2], [], i)  # consumed exactly once
+
+        def test_r43_open_stop_both_reads_failing_rereads_the_state(self):
+            # FIX-537-R7 MINOR (claude 3): the round-43 re-read runs on EVERY Stop of the
+            # both-unreadable branch whose state read failed, the fail-open VIOLATING Stop (cap
+            # "open", not a new turn) included, but no vector exercised that leg on its own: a
+            # revert of the widened re-read condition to the new-turn leg was caught only through
+            # the clean faulting Stop. A transient state fault at a violating Stop keeps the stored
+            # boundary and pending list and records the capped counter with the unknown marker
+            bad = "[2026-09-23T20:00Z] still wrong"
+            missing = "[2026-09-23T21:00Z] reported but not yet in the transcript"
+            real_load = load_state
+            sdir = os.path.join(self.tmp, "state43n")
+            self.write([self.user("go"), self.asst(bad)])
+            self.assertEqual(self.r38_ev(sdir, missing)[0], "block")  # block 1, pending seeded
+            off0, tl0, pend0, ok0 = load_state(sdir, self.tr, {})
+            self.assertTrue(ok0)
+            self.assertGreater(off0, 0)
+            self.assertEqual(pend0, [_sha(missing)])
+            os.remove(self.tr)  # the transcript is unreadable for the faulting Stop
+            fails = []
+
+            def transient_load(*a, **k):  # ONE unavailable read; the re-read under the lock recovers
+                fails.append(1)
+                globals()["load_state"] = real_load
+                return 0, None, [], False
+            globals()["load_state"] = transient_load
+            try:
+                kind, _ = self.r38_ev(sdir, bad)  # a VIOLATING Stop: the unknown count fails open
+            finally:
+                globals()["load_state"] = real_load
+            self.assertEqual(kind, "open")
+            self.assertTrue(fails)  # the state load was attempted and actually failed
+            extra = {}
+            off, tl, pend, ok = load_state(sdir, self.tr, extra)
+            self.assertTrue(ok)
+            self.assertEqual((off, tl, pend), (off0, tl0, pend0))  # kept by the re-read
+            self.assertEqual((extra["blocks"], extra["reset"], extra["unknown"]),
+                             (BLOCK_CAP, False, True))
+
         def test_r43_save_state_failed_unlink_is_best_effort_cleanup(self):
             # round-43 MINOR (codex 3): temporary-file CLEANUP is best effort, apart from the outcome: a
             # zero-progress write followed by a failed unlink still returns False with the previous
             # state byte-identical, and the one temp file left behind never shadows the state file
-            # (only the atomic rename names it); the round-42 wording claimed every failure unlinked it
+            # (only the atomic rename names it); the round-42 wording claimed every failure unlinked
+            # it. A CONTRACT test (FIX-537-R7 MINOR, claude 3): the behaviour it locks in already held
+            # at the parent, so it is green there by design; it documents the cleanup contract and
+            # guards no revert of the round-43 change
             sdir = os.path.join(self.tmp, "state43j")
             self.write([self.user("go")])
             self.assertTrue(save_state(sdir, self.tr, 0, None, [], 2, reset=True))
