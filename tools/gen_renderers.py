@@ -17,10 +17,13 @@ Fail-closed (GateError -> exit 2): a tools/*.py that declares RENDERER_DECL but 
 same RENDERERS); a tools/*.py that binds or reads RENDERER_DECL other than in ONE single-target top-level
 assignment or annotated assignment to the bare name, or that spells it as an identifier in any
 string-valued AST field, as a string the bounded fold computes equal to the name (a comparison against
-the string or a third or later call argument aside), or as a dot- or colon-separated component of a
+the string or a third or later call argument aside; the fold also reads a supported decode of spelled
+bytes, a REFUSAL-ONLY input, so a name assembled through one is refused wherever it is spelled), or as
+a dot- or colon-separated component of a
 folded path string, or that keys a RECOGNIZED module-namespace access (a subscript of a bare vars() or
 globals() call, or a setattr or delattr call on a sys.modules entry) with anything the bounded fold
-cannot reduce to a constant string (_declaration, the single predicate discovery and the reader share; a
+cannot reduce, call-free, to a constant string (a call-derived fold never ACCEPTS a key; _declaration,
+the single predicate discovery and the reader share; a
 spelling the fold cannot see is NOT refused and is in the disclosed residual); a tools/*.py that cannot
 be read, declares a source encoding other than UTF-8 or cannot be parsed (any parse error class,
 including a parser stack overflow on deep nesting), or a *.py entry that is not a regular file
@@ -215,24 +218,77 @@ def _declaration(tree, where):
 _FOLD_CAP = 64
 
 
+def _ascii_compatible(codec):
+    """Whether codec decodes EVERY single ASCII byte, probed one byte at a time, to that character. utf-16
+    and cp500 fail the probe outright; unicode_escape and utf-7 fail it because a lone backslash or a
+    lone + is an incomplete sequence (a whole-string probe would let unicode_escape through although an
+    escape pair means a different string at run time); an unknown or non-text codec raises and is
+    declined the same way. A declined codec is never folded and its decode stays in the residual
+    _declared_renderer_stems discloses."""
+    try:
+        return all(bytes([i]).decode(codec) == chr(i) for i in range(128))
+    except (LookupError, ValueError):
+        return False
+
+
+def _folded_decode(node, folded, from_bytes):
+    """The str value of a decode call the bounded fold computes EXACTLY, by decoding the spelled bytes
+    with the named codec, or None. Folded: <folded bytes>.decode() with no argument (utf-8),
+    <folded bytes>.decode(<codec literal>) and a two-argument str(<folded bytes>, <codec literal>), each
+    with no keyword and only an ASCII-compatible codec literal (_ascii_compatible). The route test is
+    syntactic (a shadowed str or a bytes subclass still folds), which can only over-refuse, the safe
+    direction. Every other decode spelling stays unfolded and is in the disclosed residual: codecs.decode,
+    an unbound bytes.decode(...) call, a computed or keyword codec, an errors argument, a one- or
+    three-argument str(...), and a codec literal that is not ASCII-compatible. Spelled bytes the named
+    codec refuses are not folded either: at run time that expression raises instead of producing a name.
+    The folded value is REFUSAL-ONLY input: _folded_strings marks every call-derived fold, and
+    _unsupported_binding never ACCEPTS a module-namespace key through one."""
+    if node.keywords:
+        return None
+    if isinstance(node.func, ast.Attribute) and node.func.attr == "decode" and len(node.args) <= 1:
+        receiver, codec_args = node.func.value, node.args
+    elif isinstance(node.func, ast.Name) and node.func.id == "str" and len(node.args) == 2:
+        receiver, codec_args = node.args[0], node.args[1:]
+    else:
+        return None
+    if id(receiver) not in from_bytes:
+        return None
+    codec = "utf-8"
+    if codec_args:
+        if not (isinstance(codec_args[0], ast.Constant) and isinstance(codec_args[0].value, str)):
+            return None
+        codec = codec_args[0].value
+    if not _ascii_compatible(codec):
+        return None
+    try:
+        return folded[id(receiver)].encode("latin-1").decode(codec)
+    except ValueError:
+        return None
+
+
 def _folded_strings(tree):
-    """{id(node): str} for every expression node whose string value a BOUNDED constant fold computes: a str
-    constant (an implicit concatenation is already one), a bytes constant decoded as latin-1 (every byte
-    decodes, so a spelled bytes name or path is judged by the same rules as a str one; a consumer such as
-    pickle reads spelled bytes directly, with no decode in the source), an f-string whose every part is
-    such a STR value (a replacement field with no conversion other than !s and no format spec; a
-    bytes-valued field renders b'...' at run time, bare or under !s, so it is never folded), and a + of
-    two such operands of the SAME kind (str+str or bytes+bytes; a str-plus-bytes + is a run-time
-    TypeError, so it is never folded). A CALL is never folded, whatever its shape: a .decode() or a
-    str(...) of spelled bytes means whatever a local rebinding of its name says, so no syntactic fold of
-    it is sound; a recognized module-namespace access keyed by an unfolded expression is refused instead
-    (_unsupported_binding). Folded bottom-up over the reversed breadth-first walk, where every
-    child precedes its parent, so a long chain needs no recursion; a value longer than _FOLD_CAP is
-    dropped."""
+    """({id(node): str}, the set of ids whose fold passed through a CALL) for every expression node whose
+    string value a BOUNDED constant fold computes: a str constant (an implicit concatenation is already
+    one), a bytes constant decoded as latin-1 (every byte decodes, so a spelled bytes name or path is
+    judged by the same rules as a str one; a consumer such as pickle reads spelled bytes directly, with
+    no decode in the source), an f-string whose every part is such a STR value (a replacement field with
+    no conversion other than !s and no format spec; a bytes-valued field renders b'...' at run time, bare
+    or under !s, so it is never folded), a + of two such operands of the SAME kind (str+str or
+    bytes+bytes; a str-plus-bytes + is a run-time TypeError, so it is never folded), and a supported
+    decode of a folded BYTES node to the exact str the run time produces (_folded_decode: .decode() bare
+    or with one ASCII-compatible codec literal, and a two-argument str(<bytes>, <codec literal>)), so a
+    name decoded piecewise and then concatenated folds like a spelled one. A call-derived fold, marked in
+    the second member transitively, is REFUSAL-ONLY input: a local rebinding of str or of a method name
+    makes a syntactic call fold unsound in the ACCEPTING direction, so _unsupported_binding refuses
+    through it and never accepts a module-namespace key through it. Folded bottom-up over the reversed
+    breadth-first walk, where every child precedes its parent, so a long chain needs no recursion; a
+    value longer than _FOLD_CAP is dropped."""
     folded = {}
     from_bytes = set()
+    from_call = set()
     for node in reversed(list(ast.walk(tree))):
         is_bytes = False
+        tainted = False
         if isinstance(node, ast.Constant):
             if isinstance(node.value, str):
                 value = node.value
@@ -245,23 +301,31 @@ def _folded_strings(tree):
             value = (folded.get(id(node.value))
                      if node.conversion in (-1, ord("s")) and node.format_spec is None
                      and id(node.value) not in from_bytes else None)
+            tainted = id(node.value) in from_call
         elif isinstance(node, ast.JoinedStr):
             parts = [folded.get(id(part)) for part in node.values]
             value = None if any(part is None for part in parts) else "".join(parts)
+            tainted = any(id(part) in from_call for part in node.values)
         elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
             left, right = folded.get(id(node.left)), folded.get(id(node.right))
             is_bytes = id(node.left) in from_bytes
+            tainted = id(node.left) in from_call or id(node.right) in from_call
             if left is None or right is None or is_bytes != (id(node.right) in from_bytes):
                 value = None
             else:
                 value = left + right
+        elif isinstance(node, ast.Call):
+            value = _folded_decode(node, folded, from_bytes)
+            tainted = True
         else:
             continue
         if value is not None and len(value) <= _FOLD_CAP:
             folded[id(node)] = value
             if is_bytes:
                 from_bytes.add(id(node))
-    return folded
+            if tainted:
+                from_call.add(id(node))
+    return folded, from_call
 
 
 def _unsupported_binding(tree):
@@ -293,11 +357,14 @@ def _unsupported_binding(tree):
     spelled path in any other resolver syntax is NOT detected and is part of the residual
     _declared_renderer_stems discloses. A RECOGNIZED module-namespace access holds its key to a
     stronger rule: inside a subscript of a bare, argument-free vars() or globals() call (in ANY context,
-    since a read reaches the same dict an assignment writes), and in the name position of a bare setattr
-    or delattr call whose first argument is a sys.modules subscript, only a key the fold reduces to a
-    non-reserved constant string is accepted; every other key (a call, a conversion builtin, an f-string
-    holding a call, a name, anything unfolded) is refused, because a computed key can be RENDERER_DECL at
-    run time and no fold of a computed form survives a local rebinding. Both exemptions are required by
+    since a read reaches the same dict an assignment writes and a del removes from it), and in the name
+    position of a bare setattr or delattr call whose first argument is a sys.modules subscript, only a
+    key the fold reduces WITHOUT A CALL to a non-reserved constant string is accepted; every other key
+    (a call, a conversion builtin, an f-string holding a call, a name, anything unfolded, and any
+    call-derived fold, the supported decode forms included) is refused, because a computed key can be
+    RENDERER_DECL at run time and no fold of a computed form survives a local rebinding: the decode fold
+    is REFUSAL-ONLY input, feeding the exact-name and dot-component rules, never acceptance. Both
+    exemptions are required by
     this file's own scan
     (self-test case (q)): the walk compares folded values and str fields against the literal name, and
     _parse_module takes it as the third positional argument (purpose). The exemptions are allowed uses, NOT
@@ -311,7 +378,7 @@ def _unsupported_binding(tree):
     for node in ast.walk(tree):
         for child in ast.iter_child_nodes(node):
             parents[id(child)] = node
-    folded = _folded_strings(tree)
+    folded, from_call = _folded_strings(tree)
 
     def _where(node):
         # The innermost enclosing compound statement whose body holds the binder, if any.
@@ -330,6 +397,12 @@ def _unsupported_binding(tree):
 
     def _names_decl(node):
         return folded.get(id(node)) == "RENDERER_DECL"
+
+    def _key_fold(node):
+        # The ACCEPTING fold for a recognized module-namespace key: only a call-free fold accepts a key,
+        # since a call-derived one (a supported decode, say) means whatever a local rebinding says; the
+        # full fold still REFUSES through _names_decl and the dot-component rule.
+        return None if id(node) in from_call else folded.get(id(node))
 
     def _inert(node):
         # A comparison operand, or a third or later positional argument with no starred argument before it:
@@ -402,19 +475,20 @@ def _unsupported_binding(tree):
             if _stores(node) and _names_decl(node.slice):
                 return ("a subscript store or delete keyed 'RENDERER_DECL' (such as vars() or globals())"
                         + _where(node))
-            if _module_namespace(node.value) and folded.get(id(node.slice)) is None:
-                return ("a vars() or globals() subscript whose key the bounded fold cannot reduce to a "
-                        "constant string (a computed key can name RENDERER_DECL at run time; only a key "
-                        "that folds to a non-reserved constant string is accepted)" + _where(node))
+            if _module_namespace(node.value) and _key_fold(node.slice) is None:
+                return ("a vars() or globals() subscript whose key the bounded fold cannot reduce, "
+                        "call-free, to a constant string (a computed key can name RENDERER_DECL at run "
+                        "time; only a key that folds without a call to a non-reserved constant string "
+                        "is accepted)" + _where(node))
         elif isinstance(node, ast.Call):
             if (isinstance(node.func, ast.Name) and node.func.id in ("setattr", "delattr")
                     and len(node.args) >= 2):
                 if _names_decl(node.args[1]):
                     return "a {} call naming RENDERER_DECL".format(node.func.id) + _where(node)
-                if _sys_modules_entry(node.args[0]) and folded.get(id(node.args[1])) is None:
+                if _sys_modules_entry(node.args[0]) and _key_fold(node.args[1]) is None:
                     return ("a {} call on a sys.modules entry whose attribute name the bounded fold "
-                            "cannot reduce to a constant string (a computed name can be RENDERER_DECL "
-                            "at run time)".format(node.func.id) + _where(node))
+                            "cannot reduce, call-free, to a constant string (a computed name can be "
+                            "RENDERER_DECL at run time)".format(node.func.id) + _where(node))
         for field, value in ast.iter_fields(node):
             for item in (value if isinstance(value, list) else (value,)):
                 if isinstance(item, str) and "RENDERER_DECL" in item.split("."):
@@ -438,8 +512,8 @@ def _declared_renderer_stems(tools_dir):
     walk sees other than ONE single-target top-level Assign or AnnAssign to the bare name (_declaration),
     each of which could hide a declaration or change it in place; and on a RECOGNIZED module-namespace
     access (a subscript of a bare vars() or globals() call in any context, or a setattr or delattr call
-    on a sys.modules entry) whose key the bounded fold cannot reduce to a non-reserved constant string,
-    since a computed key can spell the reserved name at run time. A symlink to a regular file is read
+    on a sys.modules entry) whose key the bounded fold cannot reduce, call-free, to a non-reserved
+    constant string, since a computed key can spell the reserved name at run time. A symlink to a regular file is read
     through. RENDERER_DECL is a RESERVED name: the walk is conservative and also refuses an unrelated
     function-local reuse of it, or the string anywhere but a comparison or a third or later call argument,
     which fails in the safe direction.
@@ -448,7 +522,8 @@ def _declared_renderer_stems(tools_dir):
     a string-valued or list-of-string AST field (an identifier, an attribute, an import name, a
     keyword-argument name, a pattern or parameter name, or any such field a later Python adds), or as a
     string the bounded fold of _folded_strings computes (a str or bytes constant, bytes decoded as
-    latin-1, an f-string of str-valued parts, a same-kind + chain), where both a fold equal to the name
+    latin-1, an f-string of str-valued parts, a same-kind + chain, and a supported decode of folded
+    bytes), where both a fold equal to the name
     and a fold whose dot- or colon-separated components include it (a pkgutil.resolve_name or
     operator.attrgetter path) are refused. What remains is beyond this static scan, which does not detect
     it and does not claim to: a SPELLED name or path framed by any resolver syntax other than dot- or
@@ -462,11 +537,19 @@ def _declared_renderer_stems(tools_dir):
     colon in sight);
     a computed name or key consumed by any route outside the two RECOGNIZED module-namespace forms: the
     rule is that a subscript of a bare vars() or globals() call and the name argument of a bare setattr
-    or delattr on a sys.modules entry accept only a key the bounded fold reduces to a non-reserved
-    constant string, at the stated cost of over-reporting a benign computed (or longer-than-_FOLD_CAP)
-    key there, while the same computed name handed to a resolver (pkgutil.resolve_name,
-    operator.attrgetter, importlib), to a bound update, setdefault or __setitem__, to a qualified or
-    aliased setattr, or to a namespace reached through an imported name or alias stays unseen; the
+    or delattr on a sys.modules entry accept only a key the bounded fold reduces, call-free, to a
+    non-reserved constant string, at the stated cost of over-reporting a benign computed (or
+    longer-than-_FOLD_CAP) key there. A name the fold DOES read, one assembled through the supported
+    decode forms included (a no-keyword <folded bytes>.decode() with no argument or with one
+    ASCII-compatible codec literal, and a no-keyword two-argument str(<folded bytes>, <ASCII-compatible
+    codec literal>)), is refused wherever it is spelled, whatever route consumes it: the decode fold is
+    REFUSAL-ONLY input and never accepts a key. What stays unseen is a name computed by a route the fold
+    does not read (a join, %-formatting, str.format, a case change, chr, a decode of computed bytes,
+    codecs.decode, an unbound bytes.decode(...) call, a computed or keyword codec, an errors argument, a
+    one- or three-argument str(...), a codec that fails the per-byte ASCII probe, or any fold longer
+    than _FOLD_CAP) and handed to a resolver (pkgutil.resolve_name, operator.attrgetter, importlib), to
+    a bound update, setdefault or __setitem__, to a qualified or aliased setattr, or to a namespace
+    reached through an imported name or alias; the
     literal name consumed through one of the two EXEMPT USES, by a comparison operand
     (ANY overloaded comparison method receives the spelled name and can store or read through it; __eq__,
     __ne__, __lt__ and __contains__ are examples, never a closed list) or
@@ -661,8 +744,10 @@ def main():
 #       variable holding the name, an f-string, split f-string, a concatenated, spelled-bytes or
 #       split-bytes key (folded decoded as latin-1, each reaching the reserved name before any run-time
 #       decode), a key assembled by decoding spelled bytes and then concatenating (decoded bytes + str,
-#       str + decoded bytes, decoded + decoded, and a two-argument str(bytes, codec): a call is never
-#       folded, so each is reported as an unfoldable namespace key), an import naming it, an
+#       str + decoded bytes, decoded + decoded, and a two-argument str(bytes, codec): the decode fold
+#       reads each, refusal-only, so each reaches the reserved name), a computed name assembled the same
+#       way and handed to a bound setdefault (not a recognized namespace form; the exact-name rule
+#       refuses it through the fold), an import naming it, an
 #       import from it (the module position), an import of a package rooted at it (the dotted module
 #       position), a match-mapping rest, a match-star name, and a later argument that a starred argument
 #       before it can shift to the key position)
@@ -675,8 +760,10 @@ def main():
 #       alone also refuses two bindings; each _MUTATED in-place change to the declared dict (a subscript
 #       store, an update call, a chained-assignment alias, a module attribute read, a class-pattern keyword
 #       read, a pkgutil.resolve_name path string, an operator.attrgetter path string spelled as str, as
-#       bytes decoded at run time or split across a bytes + bytes concatenation, and a subscript key
-#       decoded from spelled bytes piecewise and then concatenated) also fails closed, so
+#       bytes decoded at run time, split across a bytes + bytes concatenation or assembled from a str
+#       piece plus a decoded piece, a subscript key
+#       decoded from spelled bytes piecewise and then concatenated, and a setdefault read keyed by a str
+#       piece plus a two-argument str(bytes, codec) piece) also fails closed, so
 #       none of these routes can make the value Python runs differ from the value read.
 #   (k) a PEP 263 cookie cannot hide a declaration: a UTF-7 cookie that makes a UTF-8 comment a declaration,
 #       and any other non-UTF-8 cookie, fail --check (exit 2); a UTF-8 BOM is parsed as Python parses it.
@@ -698,11 +785,14 @@ def main():
 #       must not over-match any of them.
 #   (p) the bounded string fold keeps no value longer than _FOLD_CAP.
 #   (q) this file passes its own scan (a renderer-free tools/*.py that discovery reads like any other).
-#   (r) a RECOGNIZED module-namespace access (a vars() or globals() subscript, or a setattr or delattr
-#       call on a sys.modules entry) is accepted only when its key folds to a non-reserved constant
-#       string: a key built from a method call, a conversion builtin, a call whose meaning depends on a
-#       local rebinding, or an f-string holding a call is reported with the unfoldable-key text, while a
-#       constant non-reserved key and a folded non-reserved concatenation stay accepted.
+#   (r) a RECOGNIZED module-namespace access (a vars() or globals() subscript in any context, del
+#       included, or a setattr or delattr call on a sys.modules entry) is accepted only when its key
+#       folds, call-free, to a non-reserved constant string: a key built from a method call, a
+#       conversion builtin, a call whose meaning depends on a local rebinding, or an f-string holding a
+#       call is reported with the unfoldable-key text, a computed delattr name and a computed del of a
+#       globals() or vars() subscript are reported the same way, while a constant non-reserved key, a
+#       folded non-reserved concatenation and a constant-name setattr on a sys.modules entry stay
+#       accepted.
 
 _HELPER = "VALUE = 1\n"
 
@@ -804,6 +894,8 @@ _UNSUPPORTED_BINDINGS = (
      "vars()[b'RENDERER_'.decode() + b'DECL'.decode()] = {}\n".format(_DECL_LITERAL)),
     ("two-argument-str subscript key",
      "vars()['RENDERER_' + str(b'DECL', 'ascii')] = {}\n".format(_DECL_LITERAL)),
+    ("setdefault keyed by a decoded concatenation",
+     "globals().setdefault('RENDERER_' + b'DECL'.decode(), {})\n"),
     ("import naming it", "from gen_alpha import RENDERER_DECL as other\nother['semantics-revision'] = 99\n"),
     ("import from it", "from RENDERER_DECL import x\n"),
     ("dotted import root", "import RENDERER_DECL.sub\n"),
@@ -861,6 +953,12 @@ _MUTATED = (
        "(types.SimpleNamespace(m=sys.modules[__name__]))['semantics-revision'] = 99\n"),
     ("a decode-then-concatenate subscript key", _ENTRY_GOOD
      + "vars()[b'RENDERER_'.decode() + b'DECL'.decode()]['semantics-revision'] = 99\n"),
+    ("a decoded operator.attrgetter concatenation", _ENTRY_GOOD
+     + "import operator, types\n"
+       "operator.attrgetter('m.RENDERER_' + b'DECL'.decode())"
+       "(types.SimpleNamespace(m=sys.modules[__name__]))['semantics-revision'] = 99\n"),
+    ("a setdefault read keyed by a decoded concatenation", _ENTRY_GOOD
+     + "globals().setdefault('RENDERER_' + str(b'DECL', 'ascii'), None)['semantics-revision'] = 99\n"),
 )
 
 # (k) unlisted tools/gen_beta.py bodies (bytes) a coding cookie must not hide; '+AAo-' is UTF-7 for a newline.
@@ -898,10 +996,11 @@ _WHERE_MESSAGES = (
 # and a mixed-kind + in each order (str + bytes and bytes + str, each a run-time TypeError, so neither
 # produces the name at all; folding any of these as if it were the plain value would refuse a harmless
 # mention), a one-argument str(bytes) concatenation (str(b'DECL') renders "b'DECL'", never the decoded
-# text) and a decode concatenation (b'DECL'.decode('utf-16') produces a DIFFERENT string than the
-# latin-1 reading, and neither mention keys a namespace, so no rule may fire); each must stay
-# allowed, and each bytes or call control goes red if the bytes fold is extended back into replacement
-# fields or mixed +, or a syntactic fold of str(...) or .decode() calls is reintroduced.
+# text, so the decode fold never reads a one-argument str) and a non-ASCII-compatible decode
+# concatenation (b'DECL'.decode('utf-16') produces a DIFFERENT string than the latin-1 reading; folding
+# it by reusing the latin-1 value would refuse a string the run time never produces); each must stay
+# allowed, and each bytes control goes red if the bytes fold is extended back into replacement fields,
+# mixed +, one-argument str or a non-ASCII-compatible codec.
 _ALLOWED_USES = (
     ("comparison", "def is_decl(name):\n    return name == 'RENDERER_DECL' or 'RENDERER_DECL' != name\n"),
     ("mention in a longer string", "NOTE = 'this module carries no RENDERER_DECL'\n"),
@@ -919,14 +1018,19 @@ _ALLOWED_USES = (
     ("non-ASCII-compatible decode concatenation", "NOTE = 'RENDERER_' + b'DECL'.decode('utf-16')\n"),
 )
 
-# (r) unlisted tools/gen_beta.py bodies keying a module namespace with something the fold cannot reduce
-# to a constant string; each must be reported with the unfoldable-key text, and each goes red when the
-# namespace-key rule is removed ('renderer_decl'.upper() really computes the reserved name at run time,
-# and the rebound str makes a syntactic fold of str(<bytes>, <codec>) mean whatever the rebinding says,
-# so accepting any of these keys on syntactic grounds would be unsound).
-_SUBSCRIPT_KEY_TEXT = ("a vars() or globals() subscript whose key the bounded fold cannot reduce to a "
-                       "constant string")
+# (r) unlisted tools/gen_beta.py bodies keying a module namespace with something the fold cannot reduce,
+# call-free, to a constant string; each must be reported with the unfoldable-key text, and each goes red
+# when its own guard is weakened ('renderer_decl'.upper() really computes the reserved name at run time;
+# the rebound str makes even the supported decode fold of str(<bytes>, <codec>) mean whatever the
+# rebinding says, so a call-derived fold never ACCEPTS a key, and that fixture goes red if acceptance
+# reads the full fold instead of the call-free one; the computed delattr name goes red when delattr is
+# dropped from the call check; each computed del goes red when ast.Del is carved out of the subscript
+# rule).
+_SUBSCRIPT_KEY_TEXT = ("a vars() or globals() subscript whose key the bounded fold cannot reduce, "
+                       "call-free, to a constant string")
 _SETATTR_KEY_TEXT = "call on a sys.modules entry whose attribute name the bounded fold cannot reduce"
+_DELATTR_KEY_TEXT = ("a delattr call on a sys.modules entry whose attribute name the bounded fold "
+                     "cannot reduce, call-free, to a constant string")
 _UNFOLDABLE_KEYS = (
     ("method-call key", "vars()['renderer_decl'.upper()] = {}\n".format(_DECL_LITERAL),
      _SUBSCRIPT_KEY_TEXT),
@@ -938,11 +1042,18 @@ _UNFOLDABLE_KEYS = (
      "globals()[f\"{{'renderer_decl'.upper()}}\"] = {}\n".format(_DECL_LITERAL), _SUBSCRIPT_KEY_TEXT),
     ("setattr computed name", "import sys\nsetattr(sys.modules[__name__], 'renderer_decl'.upper(), {})\n"
                               .format(_DECL_LITERAL), _SETATTR_KEY_TEXT),
+    ("delattr computed name", "import sys\ndelattr(sys.modules[__name__], 'renderer_decl'.upper())\n",
+     _DELATTR_KEY_TEXT),
+    ("del of a computed globals() key", "del globals()['renderer_decl'.upper()]\n", _SUBSCRIPT_KEY_TEXT),
+    ("del of a computed vars() key", "del vars()['renderer_decl'.upper()]\n", _SUBSCRIPT_KEY_TEXT),
 )
-# (r) allowed controls: a key the fold reduces to a non-reserved constant string stays accepted.
+# (r) allowed controls: a key the fold reduces, call-free, to a non-reserved constant string stays
+# accepted, on the subscript leg and the setattr leg both (the setattr control goes red under a mutant
+# that refuses every setattr on a sys.modules entry whatever its name folds to).
 _FOLDED_KEYS = (
     ("constant non-reserved key", "globals()['BETA_FLAG'] = {}\n".format(_DECL_LITERAL)),
     ("concatenated non-reserved key", "vars()['BETA_' + 'FLAG'] = {}\n".format(_DECL_LITERAL)),
+    ("constant sys.modules setattr", "import sys\nsetattr(sys.modules[__name__], 'BETA_FLAG', 1)\n"),
 )
 
 
@@ -1211,10 +1322,12 @@ def self_test_main():
             else:
                 sentinel = b"# a pre-existing renderers.toml a refused run must leave byte-identical\n"
                 (case / RENDERERS_REL).write_bytes(sentinel)
-                if run_refused(case, check=False)[0] != 2:
+                rc, err = run_refused(case, check=False)
+                if rc != 2 or "unsupported use of RENDERER_DECL" not in err:
                     failures.append("a listed generator changing RENDERER_DECL in place through {} "
-                                    "expected exit 2 again with a pre-existing renderers.toml"
-                                    .format(label))
+                                    "expected exit 2 again, for its own reason, with a pre-existing "
+                                    "renderers.toml, got exit {} with diagnostic tail {!r}"
+                                    .format(label, rc, err.strip()[-160:]))
                 elif (case / RENDERERS_REL).read_bytes() != sentinel:
                     failures.append("a listed generator changing RENDERER_DECL in place through {} was "
                                     "refused but changed a pre-existing {} (it must stay byte-identical)"
@@ -1315,7 +1428,7 @@ def self_test_main():
 
         # (p) the fold keeps no value longer than _FOLD_CAP, so a long + chain of long strings stays bounded.
         chain = " + ".join([repr("x" * _FOLD_CAP)] * 4)
-        longest = max(len(value) for value in _folded_strings(ast.parse(chain)).values())
+        longest = max(len(value) for value in _folded_strings(ast.parse(chain))[0].values())
         if longest > _FOLD_CAP:
             failures.append("the string fold kept a {}-character value, over _FOLD_CAP {}"
                             .format(longest, _FOLD_CAP))

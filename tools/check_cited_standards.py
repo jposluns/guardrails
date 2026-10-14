@@ -575,7 +575,13 @@ def _fixture(tmp, manifests=None, rules=None, config=None):
 
 
 def _drive(manifests=None, rules=None, config=None, patch=None):
-    """run() over a fixture; patch ({global name: value}) is swapped into this module for the run only."""
+    """run() over a fixture; patch ({global name: value}) is swapped into this module for the run only.
+    Every patch name must already be a module global: an unknown name (a misspelling, say) is rejected
+    before anything is applied, because installing it would leave the intended fault uninjected and
+    restoring the saved names could never remove it from this module."""
+    unknown = sorted(name for name in (patch or {}) if name not in globals())
+    if unknown:
+        raise ValueError("_drive patch name(s) not module globals: {}".format(", ".join(unknown)))
     saved = {name: value for name, value in globals().items() if name in (patch or {})}
     with tempfile.TemporaryDirectory(prefix="aiqt-cited-standards-selftest-") as tmp:
         root, cfg = _fixture(tmp, manifests, rules, config)
@@ -1022,6 +1028,35 @@ def self_test_main():
         code, out = _drive(manifests, rules, config, patch[0] if patch else None)
         if code != expect or not predicate(out):
             failures.append("{}: expected exit {}, got {}; output:\n{}".format(label, expect, code, out))
+    # _drive patch contract: an unknown patch name is rejected before anything is applied (installed, it
+    # would leave the intended fault uninjected and contaminate every later vector), and every patched
+    # name is restored after a run that returns and after one that raises.
+    try:
+        _drive(patch={"QA_UNKNOWN_PATCH": object()})
+        failures.append("_drive: an unknown patch name expected ValueError, got a completed run")
+    except ValueError as exc:
+        if "QA_UNKNOWN_PATCH" not in str(exc):
+            failures.append("_drive: the unknown-name refusal must name the key, got {!r}".format(str(exc)))
+    if "QA_UNKNOWN_PATCH" in globals():
+        failures.append("_drive: a rejected patch name must not be installed in module globals")
+    code, out = _drive(patch={"ensure_listable": _unlistable})
+    if code != 2 or "cannot be listed" not in out:
+        failures.append("_drive: a patched run that returns expected exit 2 naming the injected fault, got "
+                        "exit {}; output:\n{}".format(code, out))
+    if ensure_listable is _unlistable:
+        failures.append("_drive: after a patched run that returns, the patch must not stay installed")
+
+    def _raising_run(_root, _config):
+        raise RuntimeError("injected by the self-test")
+
+    saved_run = run
+    try:
+        _drive(patch={"run": _raising_run})
+        failures.append("_drive: an injected run exception expected to propagate, got a completed run")
+    except RuntimeError:
+        pass
+    if run is not saved_run:
+        failures.append("_drive: after a patched run that raises, run must be the original")
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
         code = main(["--root"])
@@ -1036,7 +1071,9 @@ def self_test_main():
             print(line)
         return 1
     print("SELF-TEST PASS: {} normalisation case(s), {} in-text case(s), {} non-designator case(s), the roster's "
-          "manifest-field identities, {} fixture vector(s) and the usage error: an unresolved designator fails, a "
+          "manifest-field identities, {} fixture vector(s), the _drive patch contract (an unknown name is "
+          "rejected; a patched name is restored after a return and after a raise) and the usage error: an "
+          "unresolved designator fails, a "
           "manifest resolves it, a suffixed token never resolves to a shorter identity, an exclusion is per path, "
           "needs a reason and goes stale, and a contradicted or malformed input fails closed".format(
               len(_NORMALISATION), len(_IN_TEXT), len(_NOT_DESIGNATORS), len(_VECTORS)))
