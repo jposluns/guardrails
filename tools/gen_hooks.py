@@ -508,16 +508,22 @@ def main():
 #  27. a SECONDARY failure inside the staged cleanup (a persistent drain error, a kill error, an
 #      exhausted bounded reap, a close error on either pipe, a non-timeout wait failure, a
 #      non-timeout drain error FOLLOWED by a non-timeout wait failure, a close failure whose
-#      own __str__ or __repr__ raises or whose render returns a raising str subclass, a
-#      leftover-removal error whose own render raises) never replaces the original
-#      exception: the original still re-raises, the secondary failure is a NAMED failure entry
-#      (rendered through a guarded helper that returns an exact built-in str, with a constant
-#      fallback), the child is reaped (or its unreaped state named) with the child TMPDIR
-#      removed, a child whose exit status was already collected is not signalled again by the
-#      staged cleanup (the returncode gate NARROWS, not eliminates, the reused-pid hazard),
-#      and the case's own rescue of a deliberately-unreaped child is verified: a rescue kill
-#      or wait failure is a named entry, and a child still uncollected after the rescue is a
-#      named failure, so the case can never PASS with a live child,
+#      own __str__ or __repr__ raises, whose render returns a raising str subclass, or whose
+#      __str__ raises while its __repr__ returns such a subclass (the repr fallback is
+#      normalized too), a leftover-removal error whose own render raises, and a SPAWN failure
+#      whose render raises, driven through the real launch diagnostic) never replaces the
+#      original exception: the original still re-raises, the secondary failure is a NAMED
+#      failure entry (rendered through a guarded helper that returns an exact built-in str,
+#      with a constant fallback), the child is reaped (or its unreaped state named) with the
+#      child TMPDIR removed, a child whose exit status was already collected is not signalled
+#      again by the staged cleanup (the returncode gate NARROWS, not eliminates, the reused-pid
+#      hazard), and the case's own rescue of a deliberately-unreaped child is verified
+#      STRUCTURALLY: the injected rescue faults are recorded apart from genuine rescue and
+#      final-collection failures (recognized by exception identity, never by message text), a
+#      genuine rescue or final-collection failure is never discarded by the expected-error
+#      filter, the final collection still attempts its bounded wait when its kill raises, and
+#      after the filter a recorded child without a collected returncode is a named failure, so
+#      the case can never PASS with a live child,
 #  28. _rmtree_verified never follows a symlink out of the tree it removes (a directory symlink
 #      inside the tree pointing at an OUTSIDE directory leaves that directory's mode unchanged;
 #      the symlink is unlinked, never chmodded through), and treats only a confirmed absence
@@ -733,8 +739,10 @@ def self_test_main(_nested=False):
         # subclass's own methods, so a render that legally returns a str SUBCLASS
         # whose own __str__ or __format__ raises cannot escape later, when the
         # diagnostic that embeds this text is itself formatted (case 27 holds this
-        # with vectors whose __str__ and __repr__ raise and one whose render returns
-        # exactly such a subclass).
+        # with vectors whose __str__ and __repr__ raise, one whose __str__ returns
+        # exactly such a subclass, and one whose __str__ raises while its __repr__
+        # returns such a subclass, so the str fallback AND the repr fallback are
+        # both normalized).
         try:
             return str.__str__(str(exc))
         except BaseException:
@@ -893,11 +901,15 @@ def self_test_main(_nested=False):
         # later stages; only one raised inside a guarded stage is contained. DISCLOSED,
         # not covered, the spawn window too: an interruption delivered DURING the spawn,
         # before the child handle is stored in proc, can leave that child running with
-        # no handle for the staged cleanup to kill. A TOP-LEVEL child is started in its
-        # OWN session and process group (start_new_session below), so a kill of this
-        # suite's process group, or a terminal interrupt, does NOT reach it: it survives
-        # until it exits by itself (a BLOCKED child need never exit; no lifetime bound
-        # is claimed) or until a supervisor signals its session or its pid. A NESTED
+        # no handle for the staged cleanup to kill. ONLY where the platform has
+        # os.killpg is a TOP-LEVEL child started in its OWN session and process group
+        # (start_new_session is gated on the same group flag below); there a kill of
+        # this suite's process group, or a terminal interrupt, does NOT reach it: it
+        # survives until it exits by itself (a BLOCKED child need never exit; no
+        # lifetime bound is claimed) or until a supervisor signals its session or its
+        # pid. WITHOUT os.killpg a top-level child shares this suite's session and
+        # process group (start_new_session=False), so a group kill or terminal
+        # interrupt DOES reach it. A NESTED
         # suite's children share their driver's process group, so an outer group kill
         # reaches those. Earlier rounds tried to close that window with
         # a signal mask around the spawn and a Popen subclass publishing the handle from
@@ -1042,11 +1054,12 @@ def self_test_main(_nested=False):
         try:
             # The spawn window is DISCLOSED above, not covered: an interruption landing
             # inside Popen() or at this assignment, before proc holds the handle, leaves
-            # a child the staged cleanup cannot kill. A top-level child is in its OWN
-            # session and process group, which a kill of this suite's group or a
-            # terminal interrupt does not reach: it survives until it exits by itself
-            # (a BLOCKED child need never exit) or until a supervisor signals its
-            # session or its pid; a nested suite's children share their driver's group.
+            # a child the staged cleanup cannot kill. Only where the platform has
+            # os.killpg is a top-level child in its OWN session and process group,
+            # which a kill of this suite's group or a terminal interrupt does not
+            # reach: it survives until it exits by itself (a BLOCKED child need never
+            # exit) or until a supervisor signals its session or its pid; without
+            # os.killpg, and in a nested suite, the child shares its driver's group.
             proc = subprocess.Popen(
                 [sys.executable, "-I", "-B", "-c", code_text],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -1415,14 +1428,45 @@ def self_test_main(_nested=False):
                 exc))
 
         def _check_bare_adopter_absence():
-            # The REAL bare-adopter absence check; the 20b/21b vectors below re-drive
-            # THIS call site under an injected lstat refusal, so a bypass here (a bare
-            # os.path.lexists at the call site) goes red, not only a helper revert.
+            # The REAL bare-adopter absence check: the armed pass below re-drives
+            # the ONE call-site statement in this loop under an injected lstat
+            # refusal WHILE the ordinary case runs, so replacing that call with a
+            # bare os.path.lexists presence check goes red (the named cannot-verify
+            # failure never appears), not only a helper revert.
             _require_absent(bare / ".claude", "bare adopter tree",
                             "an adopter run must never create .claude/ or "
                             ".claude/settings.json")
 
-        _check_bare_adopter_absence()
+        real_lstat_abs = os.lstat
+
+        def _refusing_bare_lstat(path, *args, **kwargs):
+            if str(path) == str(bare / ".claude"):
+                raise PermissionError(
+                    "injected absence-check refusal (self-test fault)")
+            return real_lstat_abs(path, *args, **kwargs)
+
+        for _abs_armed in (True, False):
+            before_abs = len(failures)
+            if _abs_armed:
+                os.lstat = _refusing_bare_lstat
+            try:
+                _check_bare_adopter_absence()
+            finally:
+                os.lstat = real_lstat_abs
+            if _abs_armed:
+                added_abs = failures[before_abs:]
+                del failures[before_abs:]
+                if not any("could not verify" in entry
+                           and "injected absence-check refusal" in entry
+                           for entry in added_abs):
+                    failures.append("the bare-adopter absence check: an lstat "
+                                    "refusal must be a NAMED cannot-verify failure, "
+                                    "never read as absence (a bare os.path.lexists "
+                                    "does exactly that); got entries {!r}"
+                                    .format(added_abs))
+                for entry in added_abs:
+                    if "injected absence-check refusal" not in entry:
+                        failures.append(entry)
         if not (adopter / HOOKS_JSON_REL).is_file():
             failures.append("adopter tree: the plugin surface must still generate")
 
@@ -1469,9 +1513,11 @@ def self_test_main(_nested=False):
         bad_markers.append(("a FIFO", _plant_fifo))
 
         def _check_marker_absence(label, badm):
-            # The REAL bad-marker absence check (one call per planted marker); the
-            # 20b/21b vectors below re-drive THIS call site under an injected lstat
-            # refusal, so a call-site bypass goes red, not only a helper revert.
+            # The REAL bad-marker absence check (one call per planted marker): the
+            # armed pass in the loop below re-drives the ONE call-site statement
+            # under an injected lstat refusal WHILE the ordinary case runs, so
+            # replacing that call with a bare os.path.lexists presence check goes
+            # red, not only a helper revert.
             _require_absent(badm / ".claude" / "settings.json",
                             "a marker that is {}".format(label),
                             "a marker that is {} must not render project settings"
@@ -1502,7 +1548,38 @@ def self_test_main(_nested=False):
                 code = run_project(badm, check=False)
             if code != 2:
                 failures.append("a marker that is {} expected exit 2 (fail-closed)".format(label))
-            _check_marker_absence(label, badm)
+
+            def _refusing_marker_lstat(path, *args, _badm=badm, **kwargs):
+                if str(path) == str(_badm / ".claude" / "settings.json"):
+                    raise PermissionError(
+                        "injected absence-check refusal (self-test fault)")
+                return real_lstat_abs(path, *args, **kwargs)
+
+            # The armed pass runs FIRST, and only for the first planted marker (one
+            # injection proves the call site; every marker still gets the clean
+            # pass), through the SAME call-site statement the clean pass runs.
+            for _abs_armed in ((True, False) if i == 0 else (False,)):
+                before_abs = len(failures)
+                if _abs_armed:
+                    os.lstat = _refusing_marker_lstat
+                try:
+                    _check_marker_absence(label, badm)
+                finally:
+                    os.lstat = real_lstat_abs
+                if _abs_armed:
+                    added_abs = failures[before_abs:]
+                    del failures[before_abs:]
+                    if not any("could not verify" in entry
+                               and "injected absence-check refusal" in entry
+                               for entry in added_abs):
+                        failures.append("the bad-marker absence check: an lstat "
+                                        "refusal must be a NAMED cannot-verify "
+                                        "failure, never read as absence (a bare "
+                                        "os.path.lexists does exactly that); got "
+                                        "entries {!r}".format(added_abs))
+                    for entry in added_abs:
+                        if "injected absence-check refusal" not in entry:
+                            failures.append(entry)
         at_bound = tmp / "markerbound"
         at_bound.mkdir()
         _build_project_tree(at_bound, authoring=False)
@@ -1510,46 +1587,11 @@ def self_test_main(_nested=False):
         if run_project(at_bound, check=False) != 0 or not (at_bound / PROJECT_SETTINGS_REL).is_file():
             failures.append("a valid marker padded to exactly the bound expected exit 0 with project settings")
 
-        # 20b/21b. The strengthened absence checks FAIL CLOSED on an lstat refusal: a
-        #     PermissionError is injected at exactly the bare-adopter path and at a
-        #     bad-marker settings path, and each REAL call site above (the extracted
-        #     check functions the suite itself ran) is re-driven under the injection,
-        #     so the named cannot-verify failure must come out of the same code path
-        #     the suite relies on. Red with a bare os.path.lexists either inside
-        #     _require_absent or at a call site: lexists swallows exactly this error
-        #     and reports absence, so the named failure never appears.
-        real_lstat_abs = os.lstat
-        for _abs_what, _abs_path, _abs_check in (
-                ("the bare-adopter absence check", bare / ".claude",
-                 _check_bare_adopter_absence),
-                ("the bad-marker absence check",
-                 tmp / "badmarker0" / ".claude" / "settings.json",
-                 lambda: _check_marker_absence("other content", tmp / "badmarker0"))):
-
-            def _refusing_abs_lstat(path, *args, _target=str(_abs_path), **kwargs):
-                if str(path) == _target:
-                    raise PermissionError(
-                        "injected absence-check refusal (self-test fault)")
-                return real_lstat_abs(path, *args, **kwargs)
-
-            before_abs = len(failures)
-            os.lstat = _refusing_abs_lstat
-            try:
-                _abs_check()
-            finally:
-                os.lstat = real_lstat_abs
-            added_abs = failures[before_abs:]
-            del failures[before_abs:]
-            if not any("could not verify" in entry
-                       and "injected absence-check refusal" in entry
-                       for entry in added_abs):
-                failures.append("{}: an lstat refusal must be a NAMED cannot-verify "
-                                "failure, never read as absence (a bare "
-                                "os.path.lexists does exactly that); got entries {!r}"
-                                .format(_abs_what, added_abs))
-            for entry in added_abs:
-                if "injected absence-check refusal" not in entry:
-                    failures.append(entry)
+        # The 20b/21b lstat-refusal vectors live INSIDE cases 20 and 21 above: each
+        # arms its refusal around the SAME call-site statement the ordinary case
+        # runs, so the observation passes through the real absence invocations and
+        # a bare os.path.lexists substituted at either call site goes red, not only
+        # a helper revert inside _require_absent.
 
         # Cases 22 and 23 each re-run this whole suite in a child interpreter whose code text calls
         # self_test_main(_nested=True): recursion suppression is that explicit argument, NEVER inherited
@@ -1814,10 +1856,15 @@ def self_test_main(_nested=False):
             #     that the original re-raised, the targeted fault is a NAMED entry, the
             #     child was reaped (or its unreaped state named) and the child TMPDIR
             #     removed (the interrupt-removal and render-removal leftovers are BY
-            #     DESIGN and the case removes them itself). The injected entries are
+            #     DESIGN and the case removes them itself, requiring a NON-EMPTY
+            #     recorded leftover path first: an empty path is a named failure,
+            #     never a silent skip). The injected entries are
             #     then removed from the
             #     failure list: the vector proves they were produced; they are not real
-            #     failures. Every vector PINS both reap bounds against the literal
+            #     failures. Every vector EXCEPT already-reaped (whose staged cleanup
+            #     must never reach the drain or a wait once the status is collected,
+            #     so it is EXEMPT from the two reap-bound checks) PINS both reap
+            #     bounds against the literal
             #     contract (timeout=10 for the drain and for each wait, spelled as
             #     literals, never read from the implementation's constants), snapshots
             #     returncode and pipe state AT THE RE-RAISE (before the case's own
@@ -1825,11 +1872,17 @@ def self_test_main(_nested=False):
             #     the sibling close. The kill-error, exhausted-reap, wait-error,
             #     drain-wait-error and rescue-error vectors leave the real child alive
             #     or unreaped BY DESIGN; the case's RESCUE collects it before
-            #     returning, the rescue's own kill and wait errors are NAMED entries
-            #     (never swallowed), and a child still uncollected after the rescue is
-            #     a NAMED failure, so no vector can PASS with a live child (the
-            #     rescue-error vector drives both rescue faults and then reaps the
-            #     child through a final collection).
+            #     returning. The rescue bookkeeping is STRUCTURAL, never a message
+            #     match: the rescue-error vector's injected rescue faults are
+            #     recognized by exception IDENTITY and recorded apart from genuine
+            #     rescue and final-collection failures, a genuine entry is appended
+            #     AFTER the expected-error filter (so it can never be discarded as an
+            #     expected injection, whatever its text), the final collection still
+            #     attempts its bounded wait when its kill raises, and after the filter
+            #     a recorded child without a collected returncode is a NAMED failure,
+            #     so no vector can PASS with a live child (the rescue-error vector
+            #     drives both rescue faults and then reaps the child through the
+            #     final collection).
             #     The wait-error and drain-wait-error vectors hold that a NON-timeout
             #     wait failure is a named entry on BOTH stage-2 branches (after a
             #     drain exhaustion and after a non-timeout drain failure); wait-error
@@ -1837,14 +1890,16 @@ def self_test_main(_nested=False):
             #     entry never depends on whether the re-kill's internal poll already
             #     collected the child. The render vectors hold that a secondary
             #     failure whose OWN __str__ or __repr__ raises, or whose render
-            #     returns a str subclass that itself raises on __str__ or __format__,
-            #     still becomes a named entry (the guarded render returns an exact
-            #     built-in str with a constant fallback) without replacing the
-            #     original or skipping the later stages, at the stage-3 close and at
-            #     the leftover removal; and the already-reaped vector holds that a
-            #     child whose exit status was already collected is not signalled again
-            #     by the staged cleanup (the returncode gate narrows, not eliminates,
-            #     the reused-pid hazard).
+            #     returns a str subclass that itself raises on __str__ or __format__
+            #     (returned from the str fallback AND from the repr fallback), still
+            #     becomes a named entry (the guarded render returns an exact built-in
+            #     str with a constant fallback) without replacing the original or
+            #     skipping the later stages, at the stage-3 close, at the leftover
+            #     removal, and at the spawn launch diagnostic (the spawn-render
+            #     vector after this case's loop); and the already-reaped vector holds
+            #     that a child whose exit status was already collected is not
+            #     signalled again by the staged cleanup (the returncode gate narrows,
+            #     not eliminates, the reused-pid hazard).
             def _secondary_fault_case(kind):
                 label27 = "case 27 ({})".format(kind)
                 base = tmp / "case27-{}".format(kind)
@@ -1908,6 +1963,18 @@ def self_test_main(_nested=False):
                         return _EvilStr(
                             "subclass-rendered close failure (self-test fault)")
 
+                class _SubclassRepr(Exception):
+                    # Its __str__ RAISES while its __repr__ succeeds but returns the
+                    # raising subclass above, so only a repr FALLBACK that normalizes
+                    # to an exact built-in str keeps the subclass out of the later
+                    # .format of the diagnostic that embeds the rendered text.
+                    def __str__(self):
+                        raise RuntimeError("str render failure (self-test fault)")
+
+                    def __repr__(self):
+                        return _EvilStr(
+                            "subclass-repr close failure (self-test fault)")
+
                 class _RaisingStrOSError(OSError):
                     # An OSError whose __str__ raises: the leftover-removal handler
                     # must render it through the guarded helper, never directly.
@@ -1939,6 +2006,10 @@ def self_test_main(_nested=False):
                             state["real_stdout"], self.stdout = (
                                 self.stdout,
                                 _FailingClose("stdout", _SubclassRendered))
+                        if kind == "render-reprsub":
+                            state["real_stdout"], self.stdout = (
+                                self.stdout,
+                                _FailingClose("stdout", _SubclassRepr))
                         if kind == "close-stdout":
                             state["real_stdout"], self.stdout = (
                                 self.stdout, _FailingClose("stdout"))
@@ -2007,6 +2078,23 @@ def self_test_main(_nested=False):
                     return real_rmtree27(path, *args, **kwargs)
 
                 before = len(failures)
+                # Genuine rescue and final-collection failures are kept APART from
+                # the injected staged-cleanup entries: rescue_named records ONLY the
+                # rescue-error vector's injected rescue faults (recognized by
+                # exception IDENTITY, never by message text), genuine records every
+                # real rescue or final-collection failure, and genuine is appended
+                # AFTER the expected-error filter below, so a real failure can never
+                # be discarded as an expected injection, whatever its message
+                # contains.
+                rescue_named = []
+                genuine = []
+                rescue_kill_fault = (
+                    OSError("injected rescue kill failure (self-test fault)")
+                    if kind == "rescue-error" else None)
+                rescue_wait_fault = (
+                    OSError("injected rescue wait failure (self-test fault)")
+                    if kind == "rescue-error" else None)
+                returned = None
                 subprocess.Popen.communicate = _fault_communicate
                 subprocess.Popen.kill = _fault_kill
                 subprocess.Popen.wait = _fault_wait
@@ -2014,7 +2102,7 @@ def self_test_main(_nested=False):
                 if real_killpg is not None:
                     os.killpg = _fault_killpg
                 try:
-                    code, _out = _run_bounded(
+                    returned = _run_bounded(
                         label27,
                         "import os\n"
                         "import sys\n"
@@ -2026,10 +2114,6 @@ def self_test_main(_nested=False):
                         "os.rename(tmp_path, base + \"/child.pid\")\n"
                         "time.sleep(40)\n".format(base=str(base)),
                         timeout=30)
-                    failures.append("case 27 ({}): the original injected OSError must "
-                                    "re-raise out of _run_bounded, got exit {!r}"
-                                    .format(kind, code))
-                    return
                 except BaseException as exc:
                     # Snapshots taken AT THE RE-RAISE, before this case's own rescue in
                     # the finally below, so the assertions observe _run_bounded's work,
@@ -2052,57 +2136,84 @@ def self_test_main(_nested=False):
                         os.killpg = real_killpg
                     leftover = state["proc"]
                     if leftover is not None and leftover.returncode is None:
-                        # The rescue is itself VERIFIED: its kill and wait errors are
-                        # NAMED entries recorded apart from the injected staged-cleanup
-                        # entries, and a child whose exit status is still uncollected
-                        # after the rescue is a NAMED failure, so no vector can PASS
-                        # while its child is alive (the rescue-error vector drives
-                        # both rescue faults and holds all three names, then reaps the
-                        # child through a final collection after its bookkeeping).
+                        # The rescue is itself VERIFIED: a rescue kill or wait error
+                        # is a named entry; the rescue-error vector's INJECTED faults
+                        # go to rescue_named (recognized by exception identity) while
+                        # any REAL fault goes to genuine (never filtered), and a
+                        # child whose exit status is still uncollected after the
+                        # rescue is recorded the same way, then the FINAL collection
+                        # below reaps it, so no vector can PASS while its child is
+                        # alive.
                         try:
-                            if kind == "rescue-error":
-                                raise OSError(
-                                    "injected rescue kill failure (self-test fault)")
+                            if rescue_kill_fault is not None:
+                                raise rescue_kill_fault
                             real_kill(leftover)
                         except OSError as rescue_exc:
-                            failures.append("case 27 ({}): the rescue kill of the "
-                                            "leftover child (pid {}) failed ({}); a "
-                                            "rescue failure is a named entry, never a "
-                                            "silent pass".format(
-                                                kind, leftover.pid,
-                                                _exc_text(rescue_exc)))
+                            (rescue_named if rescue_exc is rescue_kill_fault
+                             else genuine).append(
+                                "case 27 ({}): the rescue kill of the leftover "
+                                "child (pid {}) failed ({}); a rescue failure is a "
+                                "named entry, never a silent pass".format(
+                                    kind, leftover.pid, _exc_text(rescue_exc)))
                         try:
-                            if kind == "rescue-error":
-                                raise OSError(
-                                    "injected rescue wait failure (self-test fault)")
+                            if rescue_wait_fault is not None:
+                                raise rescue_wait_fault
                             real_wait(leftover, timeout=10)
                         except (subprocess.TimeoutExpired, OSError) as rescue_exc:
-                            failures.append("case 27 ({}): the rescue wait for the "
-                                            "leftover child (pid {}) failed ({}); a "
-                                            "rescue failure is a named entry, never a "
-                                            "silent pass".format(
-                                                kind, leftover.pid,
-                                                _exc_text(rescue_exc)))
+                            (rescue_named if rescue_exc is rescue_wait_fault
+                             else genuine).append(
+                                "case 27 ({}): the rescue wait for the leftover "
+                                "child (pid {}) failed ({}); a rescue failure is a "
+                                "named entry, never a silent pass".format(
+                                    kind, leftover.pid, _exc_text(rescue_exc)))
                         if leftover.returncode is None:
-                            failures.append("case 27 ({}): the rescue could not "
-                                            "collect the leftover child (pid {}); the "
-                                            "case must FAIL rather than PASS with a "
-                                            "live child".format(kind, leftover.pid))
-                        if kind == "rescue-error" and leftover.returncode is None:
-                            # The vector's own FINAL collection, after both injected
-                            # rescue faults were named: kill and reap the child here, and
-                            # a failure of this collection is itself a named entry.
+                            uncollected_entry = (
+                                "case 27 ({}): the rescue could not collect the "
+                                "leftover child (pid {}); the case must FAIL rather "
+                                "than PASS with a live child".format(
+                                    kind, leftover.pid))
+                            if kind == "rescue-error":
+                                # EXPECTED here: both rescue faults were injected,
+                                # so the uncollected state proves the naming; the
+                                # final collection below reaps the child.
+                                rescue_named.append(uncollected_entry)
+                            else:
+                                genuine.append(uncollected_entry)
+                            # The FINAL collection, for EVERY vector whose child is
+                            # still uncollected: the kill and the bounded wait run
+                            # under SEPARATE guards, so a kill failure never skips
+                            # the wait, and a failure of either is a GENUINE entry
+                            # the expected-error filter can never discard.
                             try:
                                 real_kill(leftover)
+                            except OSError as final_exc:
+                                genuine.append(
+                                    "case 27 ({}): the final collection kill of "
+                                    "the leftover child (pid {}) failed ({})"
+                                    .format(kind, leftover.pid,
+                                            _exc_text(final_exc)))
+                            try:
                                 real_wait(leftover, timeout=10)
                             except (subprocess.TimeoutExpired, OSError) as final_exc:
-                                failures.append("case 27 (rescue-error): the final "
-                                                "collection of the leftover child (pid {}) "
-                                                "failed ({})".format(leftover.pid,
-                                                                     _exc_text(final_exc)))
+                                genuine.append(
+                                    "case 27 ({}): the final collection wait for "
+                                    "the leftover child (pid {}) failed ({})"
+                                    .format(kind, leftover.pid,
+                                            _exc_text(final_exc)))
                     for saved in (state["real_stdout"], state["real_stderr"]):
                         if saved is not None:
                             saved.close()
+                if returned is not None:
+                    failures.append("case 27 ({}): the original injected OSError must "
+                                    "re-raise out of _run_bounded, got exit {!r}"
+                                    .format(kind, returned[0]))
+                    failures.extend(genuine)
+                    if state["proc"] is not None and state["proc"].returncode is None:
+                        failures.append("case 27 ({}): the recorded child (pid {}) "
+                                        "has no collected returncode; the case must "
+                                        "FAIL rather than PASS with a live child"
+                                        .format(kind, state["proc"].pid))
+                    return
                 added = failures[before:]
                 del failures[before:]
                 expected = {
@@ -2124,16 +2235,14 @@ def self_test_main(_nested=False):
                         "injected drain failure (self-test fault)",
                         "injected wait failure (self-test fault)",
                         "was not reaped within"),
-                    "rescue-error": (
-                        "injected kill failure (self-test fault)",
-                        "was not reaped within",
-                        "injected rescue kill failure (self-test fault)",
-                        "injected rescue wait failure (self-test fault)",
-                        "the rescue could not collect"),
+                    "rescue-error": ("injected kill failure (self-test fault)",
+                                     "was not reaped within"),
                     "render-str": ("unrenderable close failure (self-test fault)",),
                     "render-repr": ("<unrenderable _RaisingBoth instance>",),
                     "render-strsub": (
                         "subclass-rendered close failure (self-test fault)",),
+                    "render-reprsub": (
+                        "subclass-repr close failure (self-test fault)",),
                     "render-removal": (
                         "injected removal interrupt (self-test fault)",),
                     "already-reaped": (),
@@ -2146,10 +2255,37 @@ def self_test_main(_nested=False):
                 for entry in added:
                     if not any(want in entry for want in expected):
                         failures.append(entry)
+                # Genuine rescue and final-collection failures NEVER pass through the
+                # expected-error filter above: they are real failures whatever their
+                # text, appended verbatim here.
+                failures.extend(genuine)
+                if kind == "rescue-error":
+                    # The vector proves its three rescue diagnostics were produced,
+                    # in the structure that records ONLY injected faults.
+                    for want_rescue in (
+                            "injected rescue kill failure (self-test fault)",
+                            "injected rescue wait failure (self-test fault)",
+                            "the rescue could not collect"):
+                        if not any(want_rescue in entry for entry in rescue_named):
+                            failures.append("case 27 (rescue-error): the injected "
+                                            "rescue fault was not NAMED (no recorded "
+                                            "entry containing {!r} among {!r})"
+                                            .format(want_rescue, rescue_named))
+                elif rescue_named:
+                    failures.append("case 27 ({}): rescue entries were recorded as "
+                                    "injected for a vector that injects no rescue "
+                                    "fault: {!r}".format(kind, rescue_named))
+                if state["proc"] is not None and state["proc"].returncode is None:
+                    failures.append("case 27 ({}): the recorded child (pid {}) has "
+                                    "no collected returncode after the expected-"
+                                    "error filter; the case must FAIL rather than "
+                                    "PASS with a live child".format(
+                                        kind, state["proc"].pid))
                 if kind in ("drain-error", "close-stdout", "close-stderr",
                             "interrupt-group-kill", "interrupt-removal",
                             "render-str", "render-repr", "render-strsub",
-                            "render-removal", "already-reaped") and \
+                            "render-reprsub", "render-removal",
+                            "already-reaped") and \
                         state["returncode_at_reraise"] is None:
                     failures.append("case 27 ({}): the exit status of the child was never "
                                     "collected at the re-raise (before this case's own "
@@ -2175,8 +2311,8 @@ def self_test_main(_nested=False):
                                     "collected ({!r}); a collected pid may be reused "
                                     "and is never a target"
                                     .format(state["kill_attempts"]))
-                if kind in ("close-stdout", "close-stderr",
-                            "render-str", "render-repr", "render-strsub"):
+                if kind in ("close-stdout", "close-stderr", "render-str",
+                            "render-repr", "render-strsub", "render-reprsub"):
                     failing = "stderr" if kind == "close-stderr" else "stdout"
                     sibling = "stdout" if kind == "close-stderr" else "stderr"
                     if failing not in state["close_attempts"]:
@@ -2204,7 +2340,10 @@ def self_test_main(_nested=False):
                 if kind in ("interrupt-removal", "render-removal"):
                     # The injected interrupt left the child TMPDIR behind BY DESIGN (the
                     # stage-4 guard named it; no retry ran); this case removes the
-                    # leftover itself so nothing outlives it. The render-removal vector
+                    # leftover itself so nothing outlives it. BOTH removal vectors
+                    # REQUIRE a non-empty recorded leftover path before proceeding: an
+                    # empty path is a named failure, never a silent skip of the local
+                    # removal check. The render-removal vector
                     # drives THIS removal handler under an injected OSError whose own
                     # __str__ raises: the diagnostic below renders through _exc_text,
                     # so the entry is still NAMED instead of the render escaping (red
@@ -2212,21 +2351,26 @@ def self_test_main(_nested=False):
                     if not state["removal_interrupted"]:
                         failures.append("case 27 ({}): the injected removal interrupt "
                                         "never fired".format(kind))
+                    if not child_tmpdir:
+                        failures.append("case 27 ({}): the beacon recorded no child "
+                                        "TMPDIR path, so the leftover-removal check "
+                                        "could not proceed; a missing path is a named "
+                                        "failure, never a silent skip".format(kind))
+                        return
                     before_rm = len(failures)
-                    if child_tmpdir:
-                        try:
-                            if kind == "render-removal":
-                                raise _RaisingStrOSError(
-                                    "injected leftover-removal failure "
-                                    "(self-test fault)")
-                            real_rmtree27(child_tmpdir)
-                        except FileNotFoundError:
-                            pass
-                        except OSError as exc:
-                            failures.append("case 27 ({}): could not remove the "
-                                            "leftover child TMPDIR {!r} ({})"
-                                            .format(kind, child_tmpdir,
-                                                    _exc_text(exc)))
+                    try:
+                        if kind == "render-removal":
+                            raise _RaisingStrOSError(
+                                "injected leftover-removal failure "
+                                "(self-test fault)")
+                        real_rmtree27(child_tmpdir)
+                    except FileNotFoundError:
+                        pass
+                    except OSError as exc:
+                        failures.append("case 27 ({}): could not remove the "
+                                        "leftover child TMPDIR {!r} ({})"
+                                        .format(kind, child_tmpdir,
+                                                _exc_text(exc)))
                     if kind == "render-removal":
                         added_rm = failures[before_rm:]
                         del failures[before_rm:]
@@ -2245,16 +2389,15 @@ def self_test_main(_nested=False):
                             if ("injected leftover-removal failure "
                                     "(self-test fault)") not in entry:
                                 failures.append(entry)
-                        if child_tmpdir:
-                            try:
-                                real_rmtree27(child_tmpdir)
-                            except FileNotFoundError:
-                                pass
-                            except OSError as exc:
-                                failures.append("case 27 (render-removal): could not "
-                                                "remove the leftover child TMPDIR "
-                                                "{!r} ({})".format(child_tmpdir,
-                                                                   _exc_text(exc)))
+                        try:
+                            real_rmtree27(child_tmpdir)
+                        except FileNotFoundError:
+                            pass
+                        except OSError as exc:
+                            failures.append("case 27 (render-removal): could not "
+                                            "remove the leftover child TMPDIR "
+                                            "{!r} ({})".format(child_tmpdir,
+                                                               _exc_text(exc)))
                 elif not child_tmpdir or not _confirmed_absent(child_tmpdir, label27):
                     failures.append("case 27 ({}): the child TMPDIR {!r} was not removed "
                                     "(or its absence could not be confirmed)"
@@ -2263,7 +2406,8 @@ def self_test_main(_nested=False):
             _vector_kinds = ["drain-error", "kill-error", "close-stdout", "close-stderr",
                              "interrupt-removal", "wait-error", "drain-wait-error",
                              "rescue-error", "render-str", "render-repr",
-                             "render-strsub", "render-removal", "already-reaped"]
+                             "render-strsub", "render-reprsub", "render-removal",
+                             "already-reaped"]
             if hasattr(os, "killpg"):
                 # The exhausted-reap and group-kill-interrupt vectors need the group
                 # kill: the first so its injected kill refusal never has to block a REAL
@@ -2276,6 +2420,54 @@ def self_test_main(_nested=False):
                 skipped.append("27 interrupt-group-kill no-os.killpg-on-this-platform")
             for _kind in _vector_kinds:
                 _secondary_fault_case(_kind)
+
+            # 27 (spawn-render): a SPAWN failure whose own render raises drives the
+            # REAL launch handler in _run_bounded: the launch diagnostic must render
+            # through the guarded helper and NAME the failure (red when the launch
+            # diagnostic formats the exception directly: the raising __str__ then
+            # escapes the handler, and this vector catches and names the escape).
+            class _RaisingStrSpawnOSError(OSError):
+                def __str__(self):
+                    raise RuntimeError("spawn render failure (self-test fault)")
+
+            real_popen27 = subprocess.Popen
+
+            def _refusing_popen(*args, **kwargs):
+                raise _RaisingStrSpawnOSError(
+                    "injected spawn failure (self-test fault)")
+
+            before_spawn = len(failures)
+            spawn_escape = None
+            spawn_result = None
+            subprocess.Popen = _refusing_popen
+            try:
+                spawn_result = _run_bounded("case 27 (spawn-render)",
+                                            "raise SystemExit(0)\n", timeout=30)
+            except BaseException as exc:
+                spawn_escape = exc
+            finally:
+                subprocess.Popen = real_popen27
+            added_spawn = failures[before_spawn:]
+            del failures[before_spawn:]
+            if spawn_escape is not None:
+                failures.append("case 27 (spawn-render): the launch diagnostic must "
+                                "render the spawn failure through the guarded "
+                                "helper; a {} escaped _run_bounded instead"
+                                .format(type(spawn_escape).__name__))
+            elif spawn_result != (None, ""):
+                failures.append("case 27 (spawn-render): a spawn failure must return "
+                                "(None, '') with a named launch failure, got {!r}"
+                                .format(spawn_result))
+            if not any("could not launch the bounded child" in entry
+                       and "injected spawn failure (self-test fault)" in entry
+                       for entry in added_spawn):
+                failures.append("case 27 (spawn-render): the launch failure was not "
+                                "NAMED through the guarded render (no entry naming "
+                                "the injected spawn failure); got entries {!r}"
+                                .format(added_spawn))
+            for entry in added_spawn:
+                if "injected spawn failure (self-test fault)" not in entry:
+                    failures.append(entry)
 
             # 28. _rmtree_verified stays inside its own tree and proves absence. Vector (a):
             #     with the FIRST rmtree attempt refused (injected), a directory symlink
@@ -2581,15 +2773,21 @@ def self_test_main(_nested=False):
              "status collected" + sigkill_proof + ") and clean up the live child before "
              "re-raising, a secondary cleanup failure is a named entry that never replaces "
              "the original exception, even one whose own __str__ or __repr__ raises or "
-             "whose render returns a raising str subclass (the guarded helper renders an "
+             "whose render returns a raising str subclass from the str fallback or the "
+             "repr fallback (the guarded helper renders an "
              "exact built-in str with a constant fallback; its render vectors inject at "
-             "the stage-3 close and at the leftover removal), a non-timeout wait failure "
+             "the stage-3 close, at the leftover removal and at the spawn launch "
+             "diagnostic), a non-timeout wait failure "
              "is a named entry on both stage-2 branches (alone and after a non-timeout "
              "drain failure), a child whose exit status was already collected is not "
-             "signalled again by the staged cleanup, a case-27 rescue failure or a child "
-             "still uncollected after the rescue is a named failure (so no case passes "
+             "signalled again by the staged cleanup, a case-27 rescue or final-collection "
+             "failure is a genuine named failure kept structurally apart from the injected "
+             "entries and never discarded by the expected-error filter, a recorded child "
+             "without a collected returncode after that filter is a named failure (so no "
+             "case passes "
              "with a live child), an absence check whose lstat is refused is a named "
-             "cannot-verify failure driven at the real call sites, a fault in the final "
+             "cannot-verify failure driven through the real call sites while the ordinary "
+             "case runs, a fault in the final "
              "suite removal is "
              "printed beside the escaping original instead of replacing it, "
              "and the removal helper neither follows a symlink out of its tree" +
