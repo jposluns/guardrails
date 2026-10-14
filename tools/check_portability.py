@@ -835,47 +835,153 @@ _DISK_KIND_CASES = "the _disk_kind ancestor-symlink and root-boundary real-files
 _REAL_GIT_CASE = "the real-git tracked/untracked GD-130 pair"
 _EVERY_CASE = "every self-test case"
 _SUPPRESS_VECTORS_ENV = "AIQT_SELFTEST_SUPPRESS_VECTORS"
-# EVERY self-test child carries this depth marker (the bounded launcher sets it): a nested
-# entry that reaches the vectors with it set refuses to run them (a child never spawns
-# children of its own), so a reverted no-vectors seam or marked-child gate ends at depth 1
-# with a named failure, never an unbounded chain; an inherited value trips the same refusal
-# (fail closed), and the refusal text names the inheritance as a possible cause.
+# Every fresh Python VECTOR-ENTRY child (the self-test children the bounded launcher starts)
+# carries this depth marker: a nested entry that reaches the vectors with it PRESENT, with
+# any value, the empty string included, refuses to run them (a child never launches
+# self-test vector children of its own; the launcher-timeout child's plain descendant and
+# the full-run children's git launches are deliberate and are not vector children), so a
+# reverted no-vectors seam or marked-child gate ends at depth 1 with a named failure, never
+# an unbounded chain; an inherited value, even an empty one, trips the same refusal (fail
+# closed: presence, never truthiness, is the trigger), and the refusal text names the
+# inheritance as a possible cause.
 _CHILD_DEPTH_ENV = "AIQT_SELFTEST_CHILD_DEPTH"
-_CHILD_TIMEOUT = 120  # seconds: the wait bound the launcher applies to every self-test child
-_CHILD_DRAIN_TIMEOUT = 10  # seconds: the bounded post-kill pipe drain and leader reap
+_CHILD_TIMEOUT = 120  # seconds: the wait bound the launcher applies to every vector-entry child
+_CHILD_DRAIN_TIMEOUT = 10  # seconds: each bounded post-deadline step (drain, exit wait, reap)
+
+# Reentrancy latch for the depth-refusal DRIVE in _not_run_vectors: a nested vectors call
+# that reaches the drive with the refusal reverted must not run the three-value loop again
+# (three more drives per level: an exponential chain no recursion limit ends), so the loop
+# runs only at the outermost level and a nested drive falls through to its first spied
+# launch attempt, which the outer drive reports as the named failure, bounded in process.
+_DEPTH_DRIVE_ACTIVE = False
 
 
 class _ChildOutcome:
     """What _run_bounded_child observed. returncode is None when the leader could not be
-    reaped within the drain bound; stdout and stderr are BYTES (text-mode newline translation
+    reaped within the reap bound; stdout and stderr are BYTES (text-mode newline translation
     would split a CR-separated prefix into a line of its own and defeat an exact line match);
-    timed_out means the wait bound elapsed and the whole group was SIGKILLed BEFORE the leader
-    was reaped; survivors means the child's process group still had a member after the bounded
-    probe (a cleanup kill was then sent), which callers treat as a failure, never a pass."""
+    timed_out means the wait bound elapsed first, so the whole group was SIGKILLed while the
+    UNREAPED leader still anchored its group id; ready is False when a requested readiness
+    handshake never produced a complete line; survivors means the group still had a member
+    when the bounded post-reap OBSERVATION ended (nothing is ever signalled after the reap).
+    Callers treat timed_out, a None returncode, ready False and survivors True each as a
+    failure, never a pass."""
 
-    def __init__(self, returncode, stdout, stderr, timed_out, survivors):
+    def __init__(self, returncode, stdout, stderr, timed_out, survivors, ready=True):
         self.returncode = returncode
         self.stdout = stdout
         self.stderr = stderr
         self.timed_out = timed_out
         self.survivors = survivors
+        self.ready = ready
 
 
-def _run_bounded_child(args, env, timeout=_CHILD_TIMEOUT):
-    """The ONE bounded launcher EVERY fresh-process self-test child goes through. args is the
-    argv tail after the fixed [sys.executable, "-I", "-B"] head, so every child runs this
-    interpreter. Bounds: (1) the child's environment carries _CHILD_DEPTH_ENV, whose refusal
-    at the top of _not_run_vectors stops any child of this tool from launching children of
-    its own, so a reverted guard ends at depth 1; (2) the child leads its OWN session and so
-    its own process group, and on timeout the whole group is SIGKILLed BEFORE the leader is
-    reaped (the unreaped leader anchors the group id, so that kill can never land on a reused
-    pid); (3) every wait and drain carries a timeout, so a pipe held open outside the killed
-    group fails THIS child (returncode None), never stalls the self-test. What the group kill
-    bounds is the group's MEMBERS: a descendant that moved itself into a new session is
-    outside the group and outside this bound. After reaping, the group is probed, bounded,
-    until empty; the probe and the cleanup kill signal only this group, never a process
-    listing, and the cleanup kill is sent only when the probe saw a member, so the common
-    empty-group path never signals a group id that reaping may have freed for reuse."""
+def _child_depth_marker_present():
+    """True when _CHILD_DEPTH_ENV is set AT ALL, the empty string included: presence is what
+    the bounded launcher guarantees and what an inheriting caller may hand down, so the
+    refusal keyed on this helper triggers on membership, never on truthiness (an inherited
+    empty value refuses the same way: fail closed)."""
+    return _CHILD_DEPTH_ENV in os.environ
+
+
+def _ready_line_complete(ready_path):
+    """True once the readiness file exists and holds a complete (LF-terminated) line."""
+    try:
+        with open(ready_path, "rb") as fh:
+            return fh.read().endswith(b"\n")
+    except OSError:
+        return False
+
+
+def _await_readiness(proc, ready_path):
+    """Wait, bounded by _CHILD_TIMEOUT, for the child's readiness handshake: a complete
+    LF-terminated line at ready_path, which the child writes BEFORE entering the phase the
+    caller's timeout window is meant to cover. Returns False when the bound elapses or the
+    leader exits without completing it; the leader is NOT reaped here either way."""
+    import time
+    deadline = time.monotonic() + _CHILD_TIMEOUT
+    while True:
+        if _ready_line_complete(ready_path):
+            return True
+        exited = os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOWAIT | os.WNOHANG)
+        if exited is not None or time.monotonic() >= deadline:
+            # one last look: the write may have landed between the read and the exit
+            return _ready_line_complete(ready_path)
+        time.sleep(0.05)
+
+
+def _drain_pipes_unreaped(proc, deadline, out, err):
+    """Read the child's pipes toward EOF until DEADLINE WITHOUT reaping the leader (no
+    communicate, no wait): the unreaped leader keeps anchoring the group id so a later group
+    signal can never land on a reused id. Each pipe is closed exactly once, at its own EOF;
+    a pipe still open when the deadline passes is left for the launcher's own close. Returns
+    True when every pipe reached EOF within the bound."""
+    import selectors
+    import time
+    sel = selectors.DefaultSelector()
+    try:
+        for pipe, buf in ((proc.stdout, out), (proc.stderr, err)):
+            if pipe is not None and not pipe.closed:
+                os.set_blocking(pipe.fileno(), False)
+                sel.register(pipe, selectors.EVENT_READ, buf)
+        while sel.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            for key, _events in sel.select(min(remaining, 0.5)):
+                try:
+                    chunk = os.read(key.fileobj.fileno(), 65536)
+                except BlockingIOError:
+                    continue
+                if chunk:
+                    key.data.extend(chunk)
+                else:
+                    sel.unregister(key.fileobj)
+                    key.fileobj.close()
+        return True
+    finally:
+        sel.close()
+
+
+def _await_exit_unreaped(pid, deadline):
+    """Wait, bounded by DEADLINE, for PID to exit WITHOUT reaping it (WNOWAIT): the exited
+    leader stays an unreaped zombie that keeps anchoring its process-group id until the
+    launcher has sent the final group signal. Returns True once the exit was observed."""
+    import time
+    while True:
+        if os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT | os.WNOHANG) is not None:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
+def _run_bounded_child(args, env, timeout=_CHILD_TIMEOUT, ready_path=None):
+    """The one bounded launcher every fresh Python VECTOR-ENTRY self-test child goes
+    through. That scope is deliberately narrower than every child process of this tool: the
+    parent self-test's direct git launches (the real-git GD-130 fixture's git calls, run
+    without this launcher) and the launcher-timeout child's own plain descendant are
+    OUTSIDE this launcher and its bounds.
+    args is the argv tail after the fixed [sys.executable, "-I", "-B"] head, so every
+    vector-entry child runs this interpreter. Bounds: (1) the child's environment carries
+    _CHILD_DEPTH_ENV, whose presence-refusal at the top of _not_run_vectors stops any child
+    of this tool from launching vector children of its own, so a reverted guard ends at
+    depth 1; (2) the child leads its OWN session and so its own process group, and every
+    DESTRUCTIVE group signal is sent while the UNREAPED leader (live, or a zombie: the
+    pipes are drained and the exit observed with WNOWAIT, never by reaping) still anchors
+    the group id, so no kill can ever land on a reused id; after the single reap at the end
+    the group is only ever OBSERVED (signal 0), never signalled destructively, and a member
+    seen then surfaces only as survivors True; (3) every wait, drain and probe carries its
+    own bound, so a pipe held open outside the killed group only delays the bounded drain
+    and is reported through timed_out (returncode None is reserved for a leader that could
+    not be reaped within the reap bound), never a stall of the whole self-test. When
+    ready_path is given, the launcher first waits, bounded by _CHILD_TIMEOUT, for the child
+    to publish a complete LF-terminated line there, and the TIMEOUT window starts only at
+    that readiness; a handshake that never completes comes back as ready False and the
+    group is killed the same anchored way. What the group kill bounds is the group's
+    MEMBERS: group membership, not ancestry, is the boundary, so a descendant that moved
+    itself into a new session, or into another process group with setpgid, is outside the
+    group and outside this bound."""
     import signal
     import time
     child_env = dict(env)
@@ -883,46 +989,52 @@ def _run_bounded_child(args, env, timeout=_CHILD_TIMEOUT):
     proc = subprocess.Popen([sys.executable, "-I", "-B", *args],
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             env=child_env, start_new_session=True)
-    timed_out = False
-    out, err = b"", b""
-    try:
-        out, err = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        timed_out = True
+    ready = True
+    if ready_path is not None:
+        ready = _await_readiness(proc, ready_path)
+    deadline = time.monotonic() + timeout
+    out = bytearray()
+    err = bytearray()
+    timed_out = not _drain_pipes_unreaped(proc, deadline, out, err)
+    if ready and not timed_out:
+        # the pipes are at EOF; wait, bounded by the same deadline, for the leader's exit,
+        # observed with WNOWAIT and never reaped here
+        timed_out = not _await_exit_unreaped(proc.pid, deadline)
+    if not ready or timed_out:
+        # the whole group, while the UNREAPED leader still anchors its id
         try:
-            os.killpg(proc.pid, signal.SIGKILL)  # the whole group, BEFORE the leader is reaped
+            os.killpg(proc.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-        try:
-            out, err = proc.communicate(timeout=_CHILD_DRAIN_TIMEOUT)
-        except subprocess.TimeoutExpired:
-            for pipe in (proc.stdout, proc.stderr):
-                if pipe is not None:
-                    pipe.close()
-            try:
-                proc.wait(timeout=_CHILD_DRAIN_TIMEOUT)
-            except subprocess.TimeoutExpired:
-                pass  # reported through returncode None; the group probe below still runs
+        drain_deadline = time.monotonic() + _CHILD_DRAIN_TIMEOUT
+        _drain_pipes_unreaped(proc, drain_deadline, out, err)
+        _await_exit_unreaped(proc.pid, drain_deadline)
+    for pipe in (proc.stdout, proc.stderr):
+        if pipe is not None and not pipe.closed:
+            pipe.close()  # EOF never came in bound: a holder outside the group keeps it open
+    # the FINAL destructive signal, sent while the unreaped (zombie, or unkillable and
+    # live) leader still anchors the group id; harmless when the group is already empty
+    # apart from that leader
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        proc.wait(timeout=_CHILD_DRAIN_TIMEOUT)  # the single reap; returncode None on failure
+    except subprocess.TimeoutExpired:
+        pass
+    # bounded post-reap OBSERVATION: after the reap the group id may be reused by an
+    # unrelated group, so the probe uses signal 0 only and nothing is ever signalled
+    # destructively here; a member still seen at the end surfaces as survivors True
     survivors = True
-    for _ in range(100):  # bounded group probe: up to ~10 s for the group to empty
+    for _ in range(100):
         try:
             os.killpg(proc.pid, 0)
         except ProcessLookupError:
             survivors = False
             break
         time.sleep(0.1)
-    if survivors:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)  # cleanup: the probe just saw a member
-        except ProcessLookupError:
-            pass
-        for _ in range(100):  # bounded: let the cleanup kill land; survivors stays True
-            try:
-                os.killpg(proc.pid, 0)
-            except ProcessLookupError:
-                break
-            time.sleep(0.1)
-    return _ChildOutcome(proc.returncode, out, err, timed_out, survivors)
+    return _ChildOutcome(proc.returncode, bytes(out), bytes(err), timed_out, survivors, ready)
 
 
 def _exact_line_count(stdout_bytes, line):
@@ -1148,11 +1260,16 @@ def _not_run_vectors(failures):
     setup (a new scrub allocation, a PATH with no git resolvable), so each child below runs this
     tool as __main__ --self-test with the failure injected BEFORE the scrub or the lifecycle can
     run, and must exit 1 with the entry's whole-run NOT RUN line on stdout, never a bare
-    traceback. EVERY child runs through _run_bounded_child, the one bounded launcher (its own
-    process group, the _CHILD_DEPTH_ENV marker whose refusal at the top of this body bounds
-    any child at depth 1, bytes capture, and a timeout on every wait and drain). Every child
-    environment except the unmarked-drifted-lifecycle child's additionally carries
-    _SUPPRESS_VECTORS_ENV, so a marked child records the named suppression NOT RUN and exits
+    traceback. EVERY fresh Python vector-entry child runs through _run_bounded_child, the
+    one bounded launcher (its own process group, the _CHILD_DEPTH_ENV marker whose
+    presence-refusal at the top of this body bounds any child at depth 1, bytes capture,
+    and a bound on every wait, drain and probe); the parent self-test's direct git launches
+    and the launcher-timeout child's own plain descendant are outside that launcher. Every
+    PUBLIC-ENTRY child environment except the unmarked-drifted-lifecycle child's
+    additionally carries _SUPPRESS_VECTORS_ENV (the launcher-group and launcher-timeout
+    probe children carry only the depth marker, and the launcher-group-replacement vector
+    launches nothing: modelled doubles), so a marked child records the named suppression
+    NOT RUN and exits
     1 without printing any PASS text; the unmarked child drives only the explicit no-vectors
     seam, whose nested entry prints the distinct no-vectors note, never the full PASS line.
     The spy child proves ONLY that a marker-carrying child reaches its own named
@@ -1166,51 +1283,70 @@ def _not_run_vectors(failures):
     from contextlib import redirect_stderr, redirect_stdout
     from _git_fixture_env import fixture_git_lifecycle
 
-    if os.environ.get(_CHILD_DEPTH_ENV):
-        # This entry already runs INSIDE a child the bounded launcher started (every child
-        # carries the marker), or the variable was inherited from the caller's environment.
-        # Reaching the vectors under the marker means a no-vectors seam or the marked-child
-        # gate did not hold, or the inherited variable is the cause: refuse with ONE named
-        # failure instead of launching children (a child never spawns children of its own),
-        # so any such chain ends at depth 1.
+    if _child_depth_marker_present():
+        # This entry already runs INSIDE a child the bounded launcher started (every
+        # vector-entry child carries the marker), or the variable was inherited from the
+        # caller's environment, possibly empty: PRESENCE, never truthiness, triggers this
+        # refusal. Reaching the vectors under the marker means a no-vectors seam or the
+        # marked-child gate did not hold, or the inherited variable is the cause: refuse
+        # with ONE named failure instead of launching children (a child never launches
+        # vector children of its own), so any such chain ends at depth 1.
         _not_run(failures, "the red-on-revert NOT RUN and entry vectors",
-                 "refused at child depth 1 ({} is set, either by the bounded launcher or "
-                 "inherited from the caller's environment): a nested entry reached the "
-                 "vectors, so a no-vectors seam or the marked-child gate did not hold, or "
-                 "the variable was inherited".format(_CHILD_DEPTH_ENV))
+                 "refused at child depth 1 ({} is present, with any value, even empty, "
+                 "either set by the bounded launcher or inherited from the caller's "
+                 "environment): a nested entry reached the vectors, so a no-vectors seam "
+                 "or the marked-child gate did not hold, or the variable was "
+                 "inherited".format(_CHILD_DEPTH_ENV))
         return
 
-    # Launcher depth-refusal vector (in-process): with _CHILD_DEPTH_ENV set and both
+    # Launcher depth-refusal vector (in-process): with _CHILD_DEPTH_ENV present (the empty
+    # string, "0" and "1" alike: presence, never truthiness, triggers the refusal) and both
     # subprocess.run and subprocess.Popen replaced by spies, a nested _not_run_vectors call
     # must record exactly ONE failure, the named depth refusal, and launch NOTHING: red when
-    # the depth refusal is removed (the spies turn any launch attempt, or anything else the
-    # unrefused vectors do, into this vector's named failure, bounded in process).
+    # the depth refusal is removed, and red for the empty value when the refusal reverts to
+    # truthiness (the spies turn any launch attempt, or anything else the unrefused vectors
+    # do, into this vector's named failure, bounded in process; the _DEPTH_DRIVE_ACTIVE
+    # latch keeps a reverted refusal LINEAR: a nested drive skips this loop, so each value
+    # ends at its nested call's first spied launch, never an exponential chain).
     def _spy_launch(*_args, **_kwargs):
         raise RuntimeError("spy: a depth-marked nested vectors call tried to launch")
 
     prior_depth = os.environ.get(_CHILD_DEPTH_ENV)
     real_spied_run, real_spied_popen = subprocess.run, subprocess.Popen
-    os.environ[_CHILD_DEPTH_ENV] = "1"
-    subprocess.run, subprocess.Popen = _spy_launch, _spy_launch
-    depth_failures = []
-    depth_got = None
-    try:
-        _not_run_vectors(depth_failures)
-    except Exception as exc:  # the spies raise on any launch attempt
-        depth_got = "an escaped {}: {}".format(type(exc).__name__, exc)
-    finally:
-        subprocess.run, subprocess.Popen = real_spied_run, real_spied_popen
-        if prior_depth is None:
-            os.environ.pop(_CHILD_DEPTH_ENV, None)
-        else:
-            os.environ[_CHILD_DEPTH_ENV] = prior_depth
-    if depth_got is None and (len(depth_failures) != 1
-                              or "refused at child depth 1" not in depth_failures[0]):
-        depth_got = "{} failure(s): {!r}".format(len(depth_failures), depth_failures[:2])
-    if depth_got is not None:
-        failures.append("(vector child-depth-refusal) a nested vectors call under {} must "
-                        "record exactly one named depth refusal and launch nothing "
-                        "(got {})".format(_CHILD_DEPTH_ENV, depth_got))
+    global _DEPTH_DRIVE_ACTIVE
+    prior_drive = _DEPTH_DRIVE_ACTIVE
+    _DEPTH_DRIVE_ACTIVE = True
+    for depth_value in (() if prior_drive else ("", "0", "1")):
+        os.environ[_CHILD_DEPTH_ENV] = depth_value
+        subprocess.run, subprocess.Popen = _spy_launch, _spy_launch
+        depth_failures = []
+        depth_got = None
+        try:
+            _not_run_vectors(depth_failures)
+        except Exception as exc:  # the spies raise on any launch attempt
+            depth_got = "an escaped {}: {}".format(type(exc).__name__, exc)
+        finally:
+            subprocess.run, subprocess.Popen = real_spied_run, real_spied_popen
+            if prior_depth is None:
+                os.environ.pop(_CHILD_DEPTH_ENV, None)
+            else:
+                os.environ[_CHILD_DEPTH_ENV] = prior_depth
+        if depth_got is None and (len(depth_failures) != 1
+                                  or "refused at child depth 1" not in depth_failures[0]):
+            depth_got = "{} failure(s): {!r}".format(len(depth_failures), depth_failures[:2])
+        if depth_got is not None:
+            failures.append("(vector child-depth-refusal value {!r}) a nested vectors call "
+                            "with {} present, whatever its value, must record exactly one "
+                            "named depth refusal and launch nothing (got {})".format(
+                                depth_value, _CHILD_DEPTH_ENV, depth_got))
+    _DEPTH_DRIVE_ACTIVE = prior_drive
+    # The ABSENT side of the same boundary: this very call reached the vectors only under
+    # an absent marker, and the predicate must agree now that the loop restored absence, so
+    # a predicate that refused on absence too could never turn the full run green.
+    if _child_depth_marker_present():
+        failures.append("(vector child-depth-absent) with {} absent the depth predicate "
+                        "must be False so a full run reaches these vectors (got "
+                        "True)".format(_CHILD_DEPTH_ENV))
 
     # Launcher group-and-marker vector (fresh process): a trivial child run through the ONE
     # bounded launcher reports whether it leads its own process group and the depth-marker
@@ -1227,22 +1363,124 @@ def _not_run_vectors(failures):
                         "{})".format(_CHILD_DEPTH_ENV, outcome.returncode, outcome.stdout[:80],
                                      outcome.timed_out, outcome.survivors))
 
-    # Launcher timeout vector (fresh process): a child that spawns a live same-group
-    # descendant and then outlives the wait bound must come back with its leader reaped (a
-    # returncode, never None) and its group empty, because the launcher SIGKILLs the whole
-    # group BEFORE reaping the leader: red when the timeout group kill is dropped (the
-    # leader is then never reaped in bound) and red when start_new_session is dropped (the
-    # kill then finds no group of the child's own to empty).
-    hang = ("import subprocess, sys, time\n"
-            "subprocess.Popen([sys.executable, '-I', '-c', 'import time; time.sleep(60)'])\n"
-            "time.sleep(60)\n")
-    outcome = _run_bounded_child(["-c", hang], os.environ, timeout=5)
-    if not outcome.timed_out or outcome.returncode is None or outcome.survivors:
-        failures.append("(vector launcher-timeout) a child outliving the wait bound with a "
-                        "live same-group descendant must be killed AS A GROUP before the "
-                        "leader is reaped, leaving the leader reaped and the group empty "
-                        "(got timed out {}, returncode {!r}, survivors {})".format(
-                            outcome.timed_out, outcome.returncode, outcome.survivors))
+    # Launcher group-replacement vector (in-process, modelled doubles): once the leader has
+    # been REAPED the kernel may hand its process-group id to an UNRELATED new group, so a
+    # post-reap probe that still "sees a member" may be seeing that replacement. The doubles
+    # model exactly that schedule: the leader exits at once and is reaped, and every group
+    # probe afterwards keeps reporting a member (the replacement). The launcher must send
+    # its destructive group signal only while the unreaped leader anchors the id and must
+    # NEVER signal destructively after the reap (the replacement sighting may surface only
+    # as survivors True): red when a post-reap cleanup kill is reintroduced, and red when
+    # the final kill moves after the reap.
+    import time
+    killpg_events = []
+    reap_events = []
+
+    class _ReplacedGroupProc:
+        """A Popen double whose leader is reapable at once and whose numeric group id is
+        then reused: the patched killpg below always sees a member. No pipes (stdout and
+        stderr None): the drain has nothing to read and the schedule stays modelled."""
+        pid = 4194305  # modelled only: killpg and waitid are both patched below
+        stdout = None
+        stderr = None
+
+        def __init__(self, *_args, **_kwargs):
+            self.returncode = None
+
+        def communicate(self, timeout=None):  # a reap, however the launcher drains
+            self.returncode = 0
+            reap_events.append(True)
+            return b"", b""
+
+        def wait(self, timeout=None):  # the reap
+            self.returncode = 0
+            reap_events.append(True)
+            return 0
+
+    def _replaced_killpg(_pgid, sig):
+        killpg_events.append((sig, bool(reap_events)))
+
+    def _replaced_waitid(*_args, **_kwargs):
+        return True  # any non-None result: the modelled leader is already waitable
+
+    def _no_sleep(*_args, **_kwargs):
+        return None
+
+    real_rg_popen, real_rg_killpg = subprocess.Popen, os.killpg
+    real_rg_waitid, real_rg_sleep = os.waitid, time.sleep
+    subprocess.Popen = _ReplacedGroupProc
+    os.killpg = _replaced_killpg
+    os.waitid = _replaced_waitid
+    time.sleep = _no_sleep
+    try:
+        outcome = _run_bounded_child(["-c", "pass"], os.environ, timeout=5)
+    finally:
+        subprocess.Popen, os.killpg = real_rg_popen, real_rg_killpg
+        os.waitid, time.sleep = real_rg_waitid, real_rg_sleep
+    post_reap_kills = [sig for sig, after_reap in killpg_events if sig != 0 and after_reap]
+    anchored_kill = any(sig != 0 and not after_reap for sig, after_reap in killpg_events)
+    if (post_reap_kills or not anchored_kill or outcome.returncode != 0
+            or not outcome.survivors):
+        failures.append("(vector launcher-group-replacement) under a modelled reaped-leader"
+                        "/replaced-group schedule the launcher must send its destructive "
+                        "group signal while the unreaped leader anchors the id and never "
+                        "after the reap, where the replacement surfaces only as survivors "
+                        "True (got post-reap kills {!r}, anchored kill {}, exit {!r}, "
+                        "survivors {})".format(post_reap_kills, anchored_kill,
+                                               outcome.returncode, outcome.survivors))
+
+    # Launcher timeout vector (fresh process): the child creates a live same-group
+    # descendant, publishes a readiness line (descendant pid and group, its own pid and
+    # group, and the descendant's liveness) and only then enters its hang; the launcher
+    # starts the 5-second window only AT that readiness, so the window can never expire
+    # before the descendant exists. The outcome must come back timed out with the leader
+    # reaped (a returncode, never None) and the group empty, because the launcher SIGKILLs
+    # the whole group while the unreaped leader still anchors it; the parsed readiness
+    # fields must put the live descendant in the group the child leads. Red when the
+    # timeout group kill is dropped, red when start_new_session is dropped, red when the
+    # descendant is no longer created, and red when readiness never completes (missing
+    # readiness FAILS: ready False, never a silently narrower exercise).
+    try:
+        hang_dir = tempfile.mkdtemp(prefix="aiqt-portability-selftest-hang-")
+    except OSError as exc:
+        _not_run(failures, "the launcher-timeout vector",
+                 "no writable temp directory ({})".format(exc))
+    else:
+        try:
+            hang_ready = os.path.join(hang_dir, "ready")
+            hang = ("import os, subprocess, sys, time\n"
+                    "desc = subprocess.Popen([sys.executable, '-I', '-c', "
+                    "'import time; time.sleep(60)'])\n"
+                    "line = '{} {} {} {} {}\\n'.format(desc.pid, os.getpgid(desc.pid), "
+                    "os.getpid(), os.getpgid(0), desc.poll() is None)\n"
+                    "with open(sys.argv[1] + '.tmp', 'w') as fh:\n"
+                    "    fh.write(line)\n"
+                    "os.replace(sys.argv[1] + '.tmp', sys.argv[1])\n"
+                    "time.sleep(60)\n")
+            outcome = _run_bounded_child(["-c", hang, hang_ready], os.environ, timeout=5,
+                                         ready_path=hang_ready)
+            fields = []
+            try:
+                with open(hang_ready, "r", encoding="utf-8") as fh:
+                    fields = fh.read().split()
+            except OSError:
+                pass
+            handshake_ok = (outcome.ready and len(fields) == 5 and fields[4] == "True"
+                            and fields[1] == fields[3] and fields[2] == fields[3])
+            if (not handshake_ok or not outcome.timed_out or outcome.returncode is None
+                    or outcome.survivors):
+                failures.append("(vector launcher-timeout) a child whose readiness line "
+                                "puts a LIVE descendant in the group the child leads, and "
+                                "which then outlives the wait bound, must be killed AS A "
+                                "GROUP while the unreaped leader anchors it, leaving the "
+                                "leader reaped and the group empty; missing or wrong "
+                                "readiness fails (got ready {}, readiness fields {!r}, "
+                                "timed out {}, returncode {!r}, survivors {}, stderr "
+                                "{!r})".format(outcome.ready, fields, outcome.timed_out,
+                                               outcome.returncode, outcome.survivors,
+                                               outcome.stderr[:120]))
+        finally:
+            shutil.rmtree(hang_dir, ignore_errors=True)
 
     def _unavailable(*_args, **_kwargs):
         raise OSError("injected: unavailable")
@@ -1500,8 +1738,9 @@ def _not_run_vectors(failures):
     # at depth 1 instead of chaining children. The bounded launcher kills and probes the
     # child's OWN process group, so a recursing revert ends with a named failure and no
     # surviving member of that group (a process that left the group by starting a new
-    # session is outside the launcher's bounds); the probe signals only this group, never a
-    # process listing.
+    # session, or by setpgid into another group, is outside the launcher's bounds); the
+    # launcher signals the group only while its unreaped leader anchors the id, and after
+    # the reap it only observes, never a process listing and never a post-reap kill.
     drift = ("import importlib.util, sys\n"
              "spec = importlib.util.spec_from_file_location("
              "'aiqt_portability_drift_child', sys.argv[1])\n"

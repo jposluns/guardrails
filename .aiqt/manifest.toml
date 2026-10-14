@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "ff28efb2674fd50aadd4fb3b9cd5510d4f45fa84381656a1b15514d7137dbc9b"
+tree-sha256 = "2ccc24e68b76434e7c31fa9c00237c0fb4145a3ec8d9f213faf21c11a942398c"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3416,8 +3416,8 @@ sha256 = "263bbd21620fc34d3dc0388ab6c8f4be33037e3f22e66152e56364ad2ea45f58"
 
 [[sources]]
 path = "tools/check_portability.py"
-bytes = 138125
-sha256 = "39d47c4e6cc4f3614be47428579491577f41e8499923e3bb3c3c54b844d3a559"
+bytes = 151504
+sha256 = "a03eff54ed9b258c1a0113857b046af941ff5546c5ba5624a576c00eff10561a"
 
 [[sources]]
 path = "tools/check_python_floor.py"
@@ -3501,8 +3501,8 @@ sha256 = "8f498d860e52d5519cd1102364544f373e5e1984ac0e484c963065859c0b4733"
 
 [[sources]]
 path = "tools/check_version_monotonicity.py"
-bytes = 90770
-sha256 = "a0e0483ac070ca5ae4e13a6d8b7034731ea66192c1384e48d7eb11995585bd02"
+bytes = 104140
+sha256 = "8ee22d9dba5fd6fba2feee64a9a2298bb52dded90b7c76ea79301c38d555cecb"
 
 [[sources]]
 path = "tools/check_versions.py"
