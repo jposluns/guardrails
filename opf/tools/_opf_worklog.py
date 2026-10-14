@@ -519,7 +519,8 @@ def _self_test():
             finally:
                 tomllib.loads, tomllib.load = real_loads, real_load
             check("manifest-parse-overflow",
-                  "nesting is too deep; present but unparseable): injected parser overflow" in overflow)
+                  "nesting is too deep or a dotted key has too many parts; present but unparseable): "
+                  "injected parser overflow" in overflow)
         finally:
             os.close(fd)
     if failures:

@@ -205,7 +205,7 @@ def _read_raw_and_parsed(store_root_fd, relpath):
         raise ViewsError("cannot read {} ({})".format(relpath, exc))
     try:
         return raw, tomllib.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError, RecursionError, ValueError) as exc:
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, RecursionError, MemoryError, ValueError) as exc:
         # RecursionError: deeply nested TOML (e.g. hundreds of nested arrays) trips tomllib's recursive
         # descent; it is NOT a TOMLDecodeError, so catch it (and defensively ValueError) here and map it to
         # a cannot-evaluate rather than letting an uncontrolled traceback escape. This is U4's OWN tomllib
