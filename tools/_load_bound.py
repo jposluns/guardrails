@@ -51,10 +51,12 @@ there ends cannot-evaluate after the retries); tools/check_gensrc_failclose.py a
 tools/check_hooks_preview.py judge the exit status of a member alone (a generator prints its rejection
 to stderr, a hook self-test its progress), so captured stderr beside a stop is not failure evidence in
 those two and a stop with no exit status stays cannot-evaluate there. Failure evidence survives every
-stop and every monitoring fault: the watch keeps the bytes captured so far on every poll, in state
-independent of any exception; a fault INSIDE a communicate call recovers into that state the bytes
-the very call had already read (Popen holds each stream's chunks until communicate returns, and the
-watch copies them out before the fault leaves, _recover_partial); every Hung (kind monitor
+stop that leaves as Hung and every monitoring fault: the watch keeps the bytes captured so far on
+every poll, in state independent of any exception; EVERY timeout snapshot, and any fault INSIDE a
+communicate call, recovers into that state the bytes the call had already read (Popen holds each
+stream's chunks until communicate returns, and the watch copies them out on every snapshot and
+before any fault leaves, _recover_partial), so a child that closed both its pipes while it kept
+running cannot strand already-read bytes in those buffers; every Hung (kind monitor
 included) is built from that state, and text decoding happens only AFTER capture, so a fault in a
 later communicate call, a fault between two reads of the current one, or a decode failure itself,
 cannot lose them; and bytes the child had WRITTEN that no read had yet taken (they sit in the
@@ -66,9 +68,10 @@ that fails, is reported by name (stdout or stderr) in the Hung reason, and bytes
 that survived the stop writes after the drain are not captured (a disclosed residual). The Hung
 carries the captured streams (under text=True decoded with the requested
 errors, falling back to errors="replace" where that decode raises), judged the same way. An
-interrupt (KeyboardInterrupt, SystemExit) leaves as itself, not as a Hung, and so carries no
-streams: the one exit from the watch that failure evidence does not ride (the stop stages still run
-first). Where tree CPU time cannot be read (no /proc, or a process-table scan cut short at SCAN_S),
+interrupt (KeyboardInterrupt, SystemExit) leaves as itself, not as a Hung: the stop stages AND the
+drain still run first (each still-open pipe is emptied and closed), but an interrupt carries no
+streams, so the captured and drained bytes are discarded with it, the one exit from the watch that
+failure evidence does not ride. Where tree CPU time cannot be read (no /proc, or a process-table scan cut short at SCAN_S),
 or once it becomes unreadable during a run, the stall test is off for the rest of that run and only
 the load-adjusted budget applies.
 
@@ -82,9 +85,15 @@ The arming is CHECKED, fail closed: the preexec verifies the prctl return and th
 recorded before the fork is still this child's parent (os.getppid), and on a refused prctl or a
 parent already gone (the fork-to-prctl race, where the signal would never fire) the child exits
 at once with UNARMED_EXIT and a diagnostic on its captured stderr, so an unprotected child never
-runs; the limits of that mechanism are in the not-covered list below.
-Once the watch has begun (Popen has returned), any exception that leaves the watch (a bound
-firing, a fault in the monitoring itself, an interrupt) runs the stop before run() leaves: read whether
+runs; run() surfaces that pair (the status beside the diagnostic marker on the captured stderr) as
+Unarmed, a named launch refusal (an OSError, which every caller's launch-failure handling already
+files), never as an ordinary exit status a caller could judge as the program's own; the limits of
+that mechanism are in the not-covered list below.
+The cleanup scope is entered BEFORE the spawn and owns the child from the moment Popen returns
+(proc is None until the spawn completes, and the stop runs only on an acquired child), so any
+exception that leaves after the spawn (a fault between Popen returning and the very next statement
+included, the pidfd acquisition included, a bound firing, a fault in the monitoring itself, an
+interrupt) runs the stop before run() leaves: read whether
 the child already exited on its own, kill the child's own process group, kill the child directly, then
 reap it waiting at most REAP_S. No process-table scan selects victims and no stage signals a numeric
 pid that could have been reused: the group kill addresses the group through the leader's own pid
@@ -101,8 +110,8 @@ watch and stays on the Hung. Each stage runs in its own guard, so a fault in one
 next stage still runs, and an interrupt (KeyboardInterrupt, SystemExit) that arrives during a stage is held
 until every stage has been attempted and is then re-raised. A fault in the monitoring is raised as Hung
 (kind "monitor"), cannot-evaluate, never a crash that looks like a failure. What this does not cover: an
-interrupt that lands outside a stage guard (inside Popen itself, between Popen returning and the watch,
-or between two stage guards), a child killed but left unreaped because the interrupt landed in the reap
+interrupt that lands inside Popen itself (no child was acquired yet; Popen cleans up its own
+partial spawn) or between two stage guards, a child killed but left unreaped because the interrupt landed in the reap
 stage, a child that survives both kills because every kill stage failed, a child
 in uninterruptible sleep (left unreaped after REAP_S, not waited on without bound), a single /proc
 read that blocks in the kernel (the stall test's scan is bounded between entries, not inside one
@@ -121,8 +130,8 @@ pool's shutdown joins its workers); a parent killed between the fork and the chi
 be protected after the fact, so the preexec detects it (the recorded pid is no longer the parent)
 and the child exits with UNARMED_EXIT instead of running unarmed, exactly as it does where the
 host refuses the prctl itself (a seccomp or LSM policy can return nonzero without raising): on
-such a host every bounded child exits UNARMED_EXIT rather than running unprotected, the
-fail-closed direction, disclosed in the residuals below.
+such a host every bounded child exits UNARMED_EXIT rather than running unprotected (run()
+raises Unarmed for each), the fail-closed direction, disclosed in the residuals below.
 
 git. run() does not knowingly launch git (ValueError before any launch). It resolves the program the
 exec in the child would run, the way that exec looks it up: a head with a directory part relative to cwd,
@@ -160,8 +169,8 @@ unverified on Windows; the file at the resolved real path swapped between the lo
 as swapped (the path itself is resolved once, so only that one path can be run); the post-stop drain
 reads only what is in each pipe at the drain, at most DRAIN_BYTES per stream, so bytes a surviving
 out-of-group descendant writes later are not captured; and a host whose libc prctl exists but is
-refused by policy runs no bounded child at all (each exits UNARMED_EXIT), the fail-closed trade for
-the checked parent-death arming.
+refused by policy runs no bounded child at all (each run() raises Unarmed), the fail-closed trade
+for the checked parent-death arming.
 """
 import errno
 import io
@@ -183,6 +192,11 @@ DRAIN_BYTES = 1 << 20
 # Exit status of a child that refused to run because its parent-death signal was not armed: the
 # checked preexec ends the child with this status on a refused prctl or a parent already gone.
 UNARMED_EXIT = 125
+# The diagnostic _arm_pdeathsig writes to fd 2 carries this marker; run() raises Unarmed when the
+# child's exit status is UNARMED_EXIT beside this marker on the captured stderr. The byte literal
+# inside _arm_pdeathsig must stay in sync with it (post-fork code resolves no module symbol, so it
+# cannot read this constant).
+_UNARMED_MARKER = b"parent-death signal was not armed"
 _TICKS = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
 _KILL = getattr(signal, "SIGKILL", signal.SIGTERM)  # Windows has no SIGKILL
 PR_SET_PDEATHSIG = 1  # linux/prctl.h: deliver the given signal to this child when its parent thread dies
@@ -372,6 +386,25 @@ class Hung(subprocess.TimeoutExpired):
 
     def __str__(self):
         return "Command {!r} was stopped by its load-tolerant bound: {}".format(self.cmd, self.reason)
+
+
+class Unarmed(OSError):
+    """The bounded child refused to run: its parent-death signal could not be armed (a refused
+    prctl, or a parent gone before the arming completed), so it exited at once with UNARMED_EXIT
+    and the arming diagnostic on its stderr, and the requested program never ran. A HOST
+    condition, surfaced as its own named outcome so no caller reads UNARMED_EXIT as the requested
+    program's exit status; an OSError, so every caller's existing launch-failure handling
+    (cannot-evaluate or a loud launch failure, never a judged exit status) already files it. A
+    program that itself exits with UNARMED_EXIT while printing the arming marker is
+    indistinguishable from the refusal and is filed the same way, the conservative direction.
+    stderr carries the captured diagnostic (bytes, or str under text mode)."""
+
+    def __init__(self, cmd, stderr=None):
+        super().__init__("the bounded child {!r} refused to run: its parent-death signal was not "
+                         "armed (a refused prctl, or a parent gone before the arming); the "
+                         "requested program never ran".format(cmd))
+        self.cmd = cmd
+        self.stderr = stderr
 
 
 def _kill_group(proc, pidfd):
@@ -599,8 +632,22 @@ def _refused_head(argv, env, cwd, program=None, real=None):
     return None
 
 
+def _pidfd_of(pid):
+    """A pidfd bound to pid (os.pidfd_open), or None where the API is absent or the open fails:
+    the group kill then falls back as _kill_group states. A helper rather than a nested try in
+    run(): the compiler leaves a nested try's own line outside every protected range of the
+    enclosing scope, so a fault landing exactly there (the post-spawn boundary vector traces one
+    onto the first statement after the spawn) would escape the cleanup instead of stopping the
+    child."""
+    try:
+        return os.pidfd_open(pid)
+    except (AttributeError, OSError):
+        return None
+
+
 def _recover_partial(proc, held):
-    """Recover into held the bytes a FAULTING communicate call had already read: CPython's Popen
+    """Recover into held the bytes the current communicate call had already read, run on EVERY
+    timeout snapshot and on any fault inside the call: CPython's Popen
     appends each stream's chunks (cumulative across polls) to proc._fileobj2output as every read
     returns and never clears that state, so a fault between two reads
     cannot lose the chunks earlier reads captured. Best-effort by design: a Popen without that
@@ -621,10 +668,11 @@ def _recover_partial(proc, held):
 def _watch(proc, argv, pending, budget_s, stall_s, clock, start, wall_start, poll_s, cpu_seconds, held):
     """Wait for proc under both bounds; return (stdout, stderr) bytes, or raise Hung (kind stall or
     budget) carrying the bytes captured so far. Every poll also keeps those bytes in held (a two-slot
-    list run() owns), state independent of any exception, and a fault INSIDE a communicate call first
-    recovers into held the bytes that call had already read (_recover_partial), so neither a fault in
-    a LATER communicate call, nor one between two reads of the current call, nor a fault in the
-    monitoring itself, can lose evidence a read had already captured."""
+    list run() owns), state independent of any exception; every timeout snapshot, and any fault
+    INSIDE a communicate call, first recovers into held the bytes that call had already read
+    (_recover_partial), so neither a child that closed both pipes while it kept running, nor a
+    fault in a LATER communicate call, nor one between two reads of the current call, nor a fault
+    in the monitoring itself, can lose evidence a read had already captured."""
     seen_cpu, seen_output, cpu_readable = None, -1, True
     last_progress = wall_start
     while True:
@@ -636,7 +684,13 @@ def _watch(proc, argv, pending, budget_s, stall_s, clock, start, wall_start, pol
                 held[0] = exc.output
             if exc.stderr is not None:
                 held[1] = exc.stderr
-            output = len(exc.output or b"") + len(exc.stderr or b"")
+            # EVERY timeout snapshot also recovers the bytes the call had already read from
+            # Popen's own buffers: once the child has closed both pipes (while it keeps running),
+            # communicate times out in its own wait and snapshots NOTHING, so without this the
+            # bytes it had read would stay stranded in those buffers and the Hung would carry
+            # None. Output progress is then measured on held, which recovery can only grow.
+            _recover_partial(proc, held)
+            output = len(held[0] or b"") + len(held[1] or b"")
             cpu = cpu_seconds(proc.pid) if cpu_readable else None
             if not _real(cpu) or cpu < 0:
                 # Unreadable once means unobservable for the rest of the run: a valid earlier sample does
@@ -695,7 +749,9 @@ def run(argv, *, budget_s, stall_s, input=None, cwd=None, env=None, text=False, 
     carry the full captured streams decoded with errors="replace", and whose returncode carries the exit
     status the child had reached (read by the stop). argv is refused (ValueError) when its program is
     git or a known launcher; otherwise the resolved program is launched by its real path, and a head
-    that resolves to nothing raises FileNotFoundError without a launch. Returns a CompletedProcess
+    that resolves to nothing raises FileNotFoundError without a launch. A child that refused to
+    run because its arming failed (UNARMED_EXIT beside the arming marker on its captured stderr)
+    raises Unarmed, a named OSError, never an ordinary exit status. Returns a CompletedProcess
     otherwise. Without input the child stdin is os.devnull, so a child that reads stdin sees EOF
     instead of blocking. cpu_seconds stands in for tree_cpu_seconds."""
     program = _program(argv, env, cwd)
@@ -726,20 +782,23 @@ def run(argv, *, budget_s, stall_s, input=None, cwd=None, env=None, text=False, 
     parent_pid = os.getpid()  # recorded BEFORE the fork: _arm_pdeathsig verifies it is still the parent
     group_fd = None  # ownership state initialized before any acquisition, so cleanup can always run
     held = [None, None]  # stdout and stderr bytes captured so far, kept independent of exceptions
-    proc = subprocess.Popen(argv, executable=real,
-                            stdin=subprocess.DEVNULL if input is None else subprocess.PIPE,
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd, env=env,
-                            start_new_session=True,
-                            preexec_fn=(lambda: _arm_pdeathsig(parent_pid))
-                            if _PRCTL is not None else None)
+    proc = None  # ownership: None until Popen returns, so the cleanup stops only an acquired child
     try:
-        # The cleanup scope begins AT the spawn: any fault from here on, the pidfd acquisition
-        # included (os.pidfd_open can raise more than OSError), runs the staged stop and closes
-        # the pipes instead of leaving the child running behind an escaped exception.
-        try:
-            group_fd = os.pidfd_open(proc.pid)  # bound at the spawn, while the leader is unreaped
-        except (AttributeError, OSError):
-            group_fd = None  # the group kill falls back as _kill_group states
+        # The cleanup scope is entered BEFORE the spawn and owns the child from the moment Popen
+        # returns: any fault from the very next statement on, the pidfd acquisition included
+        # (os.pidfd_open can raise more than OSError; _pidfd_of guards only the expected two,
+        # without a nested try whose own line the compiler would leave outside this scope's
+        # protected range), runs the staged stop and closes the pipes
+        # instead of leaving the child running behind an escaped exception. A fault inside Popen
+        # itself leaves proc None: no child was acquired (Popen cleans up its own partial spawn),
+        # so the handler below re-raises it untouched.
+        proc = subprocess.Popen(argv, executable=real,
+                                stdin=subprocess.DEVNULL if input is None else subprocess.PIPE,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd, env=env,
+                                start_new_session=True,
+                                preexec_fn=(lambda: _arm_pdeathsig(parent_pid))
+                                if _PRCTL is not None else None)
+        group_fd = _pidfd_of(proc.pid)  # bound at the spawn, while the leader is unreaped
         stdout, stderr = _watch(proc, argv, pending, budget_s, stall_s, clock, start, wall_start,
                                 poll_s, cpu_seconds, held)
         if text_mode:
@@ -748,14 +807,18 @@ def run(argv, *, budget_s, stall_s, input=None, cwd=None, env=None, text=False, 
             stdout = _decode(stdout, encoding, decode_errors)
             stderr = _decode(stderr, encoding, decode_errors)
     except BaseException as exc:
+        if proc is None:
+            raise  # the spawn itself failed: no child was acquired, so there is nothing to stop
         own_exit, notes, interrupt = _stop(proc, group_fd)
+        # The drain runs on EVERY stop, the two interrupt exits below included (bytes written but
+        # not yet read would otherwise close with the pipes). An interrupt still leaves as itself
+        # and carries no streams, so on those two exits the captured and drained bytes are
+        # discarded with held: failure evidence does not accompany an interrupt, the stated limit.
+        notes += _drain(proc, held)
         if interrupt is not None and isinstance(exc, Exception):
             raise interrupt from exc  # an interrupt during the stop leaves once every stage was attempted
         if not isinstance(exc, Exception):
             raise  # an interrupt or exit leaves as itself, after every stop stage was attempted
-        # After the kill and reap stages: bytes written but not yet read would otherwise close
-        # with the pipes, so the drain grows held and the Hung is rebuilt from it below.
-        notes += _drain(proc, held)
         if isinstance(exc, Hung):
             hung = exc
         else:
@@ -771,6 +834,10 @@ def run(argv, *, budget_s, stall_s, input=None, cwd=None, env=None, text=False, 
             hung.returncode = own_exit
             hung.reason += ("; the child itself had already exited with status {} before the stop, "
                             "and that status stands".format(own_exit))
+        if own_exit == UNARMED_EXIT and _UNARMED_MARKER in (held[1] or b""):
+            # The child had refused to run before the stop: the named host condition (module
+            # docstring), never an ordinary exit status, on the stopped path too.
+            raise Unarmed(argv, hung.stderr) from exc
         if hung is exc:
             raise
         raise hung from exc
@@ -780,22 +847,30 @@ def run(argv, *, budget_s, stall_s, input=None, cwd=None, env=None, text=False, 
                 os.close(group_fd)
             except OSError:
                 pass
-        for stream in (proc.stdin, proc.stdout, proc.stderr):
-            if stream is not None:
-                try:
-                    stream.close()
-                except OSError:
-                    pass
+        if proc is not None:
+            for stream in (proc.stdin, proc.stdout, proc.stderr):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except OSError:
+                        pass
+    if proc.returncode == UNARMED_EXIT and _UNARMED_MARKER in (held[1] or b""):
+        # The child exited refusing to run (a refused prctl, or a parent gone before the arming):
+        # a HOST condition surfaced as its own named outcome, never an ordinary exit status the
+        # caller would judge as the requested program's own (the program never ran).
+        raise Unarmed(argv, stderr)
     return subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
 
 
-def _alive_with(token):
+def _alive_with(token, opener=None):
     """Pids whose command line carries token (Linux /proc), [] where none does; None where the
     check is UNOBSERVABLE: /proc cannot be listed (absent or refused), or a command line could not
     be read for a reason other than the process having exited meanwhile (ENOENT and ESRCH mid-scan
     are absence, not blindness). The vectors refuse to read blindness as absence: where /proc
     exists, None is a vector failure, never a clean "no survivors"; a host with no /proc at all
-    has no survivor check, the disclosed platform limit."""
+    has no survivor check, the disclosed platform limit. opener stands in for open, so a vector
+    can inject a refused read (EACCES) without touching the real /proc."""
+    opener = open if opener is None else opener
     try:
         names = os.listdir("/proc")
     except OSError:
@@ -805,7 +880,7 @@ def _alive_with(token):
         if not name.isdigit():
             continue
         try:
-            with open("/proc/" + name + "/cmdline", "rb") as handle:
+            with opener("/proc/" + name + "/cmdline", "rb") as handle:
                 raw = handle.read()
         except OSError as exc:
             if exc.errno in (errno.ENOENT, errno.ESRCH):
@@ -821,6 +896,20 @@ def _kill_pid(pid):
         os.kill(pid, _KILL)
     except OSError:
         pass
+
+
+def _stat_entry(pid, proc_table=None):
+    """The complete (ppid, cpu ticks, start ticks) /proc stat entry for pid, or None when the
+    read failed or the table lacks the pid. The crafted-table vector requires a complete usable
+    entry and records None as UNOBSERVABLE (no clean verdict), never substituting zero start
+    ticks: a table-driven kill that validates start ticks would reject a zero-tick entry, and the
+    vector would then accept the very survival it claims to discriminate. proc_table stands in
+    for _proc_table, so the None branch is itself testable."""
+    table, _ = (_proc_table if proc_table is None else proc_table)(names=[str(pid)])
+    entry = (table or {}).get(pid)
+    if not (isinstance(entry, tuple) and len(entry) == 3):
+        return None
+    return entry
 
 
 def vector_failures(python):
@@ -850,8 +939,11 @@ def vector_failures(python):
     stretched-budget vector needs interpreter start-up and its prints to fit in about 13 s of its 16 s of
     budget; each stop vector allows a fixed wall limit (25 s, 10 s or 5 + REAP_S s) that a host starved
     past it would overrun. A load that extreme shows here as a failure, never as a pass. A non-terminating
-    child is also killed by a watchdog after 30 s, so a regression shows as a failure here, never as a hung
-    self-test.
+    child is also killed by a watchdog (after 30 s on every vector but the two released drain timings,
+    whose children wait on a go file and get 60 s) that stops the processes the vector OWNS through their
+    retained Popen handles; the survivor scan beside those kills is an extra observation, not the
+    enforcement (it can be blind where /proc is unreadable; the handle kills cannot), so a regression
+    shows as a failure here, never as a hung self-test.
 
     Added vectors: a fault INSIDE a communicate call, in the first poll and in a later one
     (WHICH poll faulted is asserted), keeps the bytes that call had already read (recovered from
@@ -875,7 +967,23 @@ def vector_failures(python):
     process each reach the direct child through that armed signal: every outer leg requires the
     inner child's started marker before judging, validates the launcher's exit status, and a
     positive control proves an UNARMED child would have survived and been seen (libc prctl hosts
-    only; elsewhere that survival is the disclosed residual)."""
+    only; elsewhere that survival is the disclosed residual).
+
+    Round-8 vectors: EVERY timeout snapshot recovers the bytes communicate had already read, so a
+    child that closed both pipes and kept running keeps them on the budget Hung; a fault raised
+    right after Popen returns, before the next statement (a trace-injected boundary fault), still
+    stops the child and closes both pipes (the cleanup owns the child from before the spawn); the
+    drain runs before EITHER interrupt re-raise, observed through a drain recorder on both
+    interruption routes, while the interrupt itself still carries no streams (the stated limit);
+    a capability probe that cannot run (injected EMFILE) reads as unobservable, never as a
+    verdict, a refused /proc cmdline read (injected EACCES) reads as unobservable, never as
+    absence (mid-scan ENOENT stays absence), and a group stop still runs with CPU accounting
+    unreadable (the budget fallback); the drain clamp's boundaries are committed (one byte
+    inside, exactly at, one byte over a small injected bound, a partial-read sequence, and a
+    one-stream failure that names its stream); the crafted-table vector requires a complete
+    usable bystander stat entry and records a failed or missing one as unobservable, never a
+    zero-tick substitute; and a refused prctl surfaces as the named Unarmed outcome, never an
+    ordinary exit status."""
     import tempfile
     import threading
 
@@ -898,6 +1006,37 @@ def vector_failures(python):
             return []
         return found
 
+    def handle_watchdog(seconds, made):
+        """A watchdog for a non-terminating fixture: after seconds, stop the processes this
+        vector OWNS through their retained Popen handles (never a pid selected from a scan),
+        then scan for survivors as an EXTRA observation, not the enforcement (the scan can be
+        blind where /proc is unreadable; the handle kills cannot). Returns the started timer;
+        the caller cancels it."""
+        def stop_owned():
+            for proc in list(made):
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+            for pid in (_alive_with(token) or []):
+                _kill_pid(pid)
+        timer = threading.Timer(seconds, stop_owned)
+        timer.daemon = True
+        timer.start()
+        return timer
+
+    def recording_popen(made):
+        """A subclass of the CURRENT subprocess.Popen (so a vector's own patch class is chained,
+        not displaced) that retains every spawned handle in made, for watchdogs that must own
+        what they stop."""
+        outer_cls = subprocess.Popen
+
+        class Recorder(outer_cls):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                made.append(self)
+        return Recorder
+
     def outcome(code, **bounds):
         try:
             done = run([python, "-I", "-B", "-c", code, token], **bounds)
@@ -906,16 +1045,20 @@ def vector_failures(python):
         return done.returncode
 
     def bounded(label, code, want, limit, **bounds):
-        # A non-terminating child: the outcome must arrive within limit wall seconds, leaving nothing alive.
-        timer = threading.Timer(30.0, lambda: [_kill_pid(pid) for pid in (_alive_with(token) or [])])
-        timer.daemon = True
+        # A non-terminating child: the outcome must arrive within limit wall seconds, leaving
+        # nothing alive. The watchdog stops the child through the handle the recorder retains;
+        # the survivor scan inside it is an extra observation, not the enforcement.
+        made = []
+        saved_outer_cls = subprocess.Popen
+        subprocess.Popen = recording_popen(made)
+        timer = handle_watchdog(30.0, made)
         began = time.monotonic()
-        timer.start()
         try:
             got = outcome(code, **bounds)
         except Exception as exc:  # noqa: BLE001  any escape is this vector's failure
             got = "{}: {}".format(type(exc).__name__, exc)
         finally:
+            subprocess.Popen = saved_outer_cls
             timer.cancel()
         took, left = time.monotonic() - began, alive(token)
         for pid in left:
@@ -1064,6 +1207,64 @@ def vector_failures(python):
             failures.append("_load_bound vector (a fault in the {} stop stage): expected {!r} and no child left, "
                             "got {!r}, left alive {!r}".format(stage, want, got, left))
 
+    # The drain runs BEFORE either interrupt re-raise: on both interruption routes (an interrupt
+    # that is itself the leaving exception, and one held from a stop stage while a monitoring
+    # fault leaves), the stop stages and then the drain are attempted first, OBSERVED through a
+    # drain recorder. The interrupt still carries no streams: the captured and drained bytes are
+    # discarded with it, the stated limit.
+    for route in ("the leaving exception", "held from a stop stage"):
+        route_interrupt = KeyboardInterrupt("injected interrupt, {}".format(route))
+        drained_calls = []
+        saved_route_drain = _drain
+
+        def recording_drain(proc, held, saved_route_drain=saved_route_drain,
+                            drained_calls=drained_calls):
+            drained_calls.append(True)
+            return saved_route_drain(proc, held)
+
+        saved_route_own = _own_exit
+
+        def interrupting_own_exit(proc, route_interrupt=route_interrupt):
+            raise route_interrupt
+
+        route_ticks = iter((0.0, 0.0))
+
+        def route_clock(route=route, route_interrupt=route_interrupt):
+            value = next(route_ticks, None)
+            if value is None:
+                if route == "the leaving exception":
+                    raise route_interrupt
+                raise RuntimeError("injected monitoring fault")
+            return value
+        globals()["_drain"] = recording_drain
+        if route == "held from a stop stage":
+            globals()["_own_exit"] = interrupting_own_exit
+        try:
+            try:
+                run([python, "-I", "-B", "-c", "import time\ntime.sleep(3600)\n", token],
+                    budget_s=3600, stall_s=3600, poll_s=0.05, clock=route_clock)
+                got = "returned"
+            except KeyboardInterrupt as exc:
+                got = "interrupt" if exc is route_interrupt else "foreign interrupt"
+            except Exception as exc:  # noqa: BLE001  any other escape is this vector failing
+                got = "{}: {}".format(type(exc).__name__, exc)
+        finally:
+            globals()["_drain"] = saved_route_drain
+            globals()["_own_exit"] = saved_route_own
+        left = alive(token)
+        for _ in range(50):  # a SIGKILLed child can take a moment to leave the process table
+            if not left:
+                break
+            time.sleep(0.1)
+            left = alive(token)
+        for pid in left:
+            _kill_pid(pid)
+        if (got, len(drained_calls), left) != ("interrupt", 1, []):
+            failures.append("_load_bound vector (the drain runs before the interrupt re-raise, "
+                            "{}): expected the interrupt back beside exactly one drain call and "
+                            "no child left, got {!r}, drain calls {}, left alive {!r}"
+                            .format(route, got, len(drained_calls), left))
+
     # A process-table scan is cut short at its limit, driven by an injected table and clock that must
     # cross SCAN_S, so a small real process table cannot complete early and pass this vacuously; a zero
     # real limit still reads as unreadable CPU where /proc exists.
@@ -1154,8 +1355,13 @@ def vector_failures(python):
     def mid_read_fault(label, code, markers, want_out, want_err, poll_s, first_fault_poll,
                        last_fault_poll):
         faulted_polls = []
+        made_procs = []
 
         class MidReadFault(subprocess.Popen):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                made_procs.append(self)
+
             def communicate(self, input=None, timeout=None):
                 saved_read = os.read
                 seen = getattr(self, "_vector_seen", set())
@@ -1179,10 +1385,9 @@ def vector_failures(python):
                     os.read = saved_read
 
         # An independent watchdog: a child that never reaches its markers must not hold this
-        # vector for the full 3600 s budget.
-        watchdog = threading.Timer(30.0, lambda: [_kill_pid(pid) for pid in (_alive_with(token) or [])])
-        watchdog.daemon = True
-        watchdog.start()
+        # vector for the full 3600 s budget. It stops the child through the handle MidReadFault
+        # retains; the survivor scan inside it is an extra observation.
+        watchdog = handle_watchdog(30.0, made_procs)
         saved_cls = subprocess.Popen
         subprocess.Popen = MidReadFault
         try:
@@ -1233,7 +1438,13 @@ def vector_failures(python):
     # Bytes WRITTEN but not yet READ when a fault lands are drained after the stop: a reader
     # fault that fires once both pipes are readable, before any read, would otherwise lose every
     # byte the child wrote (nothing reached Popen's buffers or any timeout snapshot).
+    reader_fault_procs = []
+
     class ReaderFault(subprocess.Popen):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            reader_fault_procs.append(self)
+
         def communicate(self, input=None, timeout=None):
             import select
             deadline = time.monotonic() + 15.0
@@ -1243,9 +1454,7 @@ def vector_failures(python):
                 waiting.difference_update(ready)
             raise OSError("injected reader fault after both pipes were readable")
 
-    watchdog = threading.Timer(30.0, lambda: [_kill_pid(pid) for pid in (_alive_with(token) or [])])
-    watchdog.daemon = True
-    watchdog.start()
+    watchdog = handle_watchdog(30.0, reader_fault_procs)
     saved_cls = subprocess.Popen
     subprocess.Popen = ReaderFault
     try:
@@ -1291,10 +1500,10 @@ def vector_failures(python):
 
         def drained_stop(label, code, want_err, release_point):
             budget_ticks = iter((0.0,))
-            watchdog = threading.Timer(60.0, lambda: [_kill_pid(pid)
-                                                      for pid in (_alive_with(token) or [])])
-            watchdog.daemon = True
-            watchdog.start()
+            made = []
+            saved_outer = subprocess.Popen
+            subprocess.Popen = recording_popen(made)
+            watchdog = handle_watchdog(60.0, made)
             try:
                 try:
                     run([python, "-I", "-B", "-c", code, token], budget_s=60, stall_s=3600,
@@ -1306,6 +1515,7 @@ def vector_failures(python):
                 except Exception as exc:  # noqa: BLE001  any escape is this vector failing
                     got = "{}: {}".format(type(exc).__name__, exc)
             finally:
+                subprocess.Popen = saved_outer
                 watchdog.cancel()
             for pid in alive(token):
                 _kill_pid(pid)
@@ -1341,8 +1551,149 @@ def vector_failures(python):
                          b"FAIL: stop-stage diagnostic\n", lambda pid: 0.0)
         finally:
             globals()["_own_exit"] = saved_own_exit
+
+        # EVERY timeout snapshot recovers the bytes communicate had already read: a child that
+        # writes both streams, CLOSES both pipes and keeps running makes every later communicate
+        # call time out in its own wait with NO snapshot (the bytes then sit only in Popen's
+        # buffers, where the post-stop drain cannot see them either: the streams are closed), so
+        # without the per-snapshot recovery the budget Hung would carry None for both streams.
+        closed_done = os.path.join(drain_dir, "closed-done")
+        closed_code = ("import os, sys, time\n"
+                       "sys.stdout.write(\"OUT: closed-pipe evidence\\n\")\nsys.stdout.flush()\n"
+                       "sys.stderr.write(\"FAIL: closed-pipe diagnostic\\n\")\nsys.stderr.flush()\n"
+                       "os.close(1)\nos.close(2)\n"
+                       "open(sys.argv[2], \"w\").write(\"d\")\n"
+                       "time.sleep(3600)\n")
+        closed_calls, closed_ready = [], []
+
+        def closed_clock():
+            # The budget fires only two polls after the child wrote, closed both pipes and
+            # signalled so through its done file: communicate gets a full window to consume the
+            # bytes and both EOFs first, so the losing snapshot shape is deterministic, not raced.
+            closed_calls.append(True)
+            if len(closed_calls) == 1:
+                return 0.0
+            if os.path.exists(closed_done):
+                closed_ready.append(True)
+                if len(closed_ready) >= 3:
+                    return 3600.0
+            return 0.0
+        closed_made = []
+        saved_closed_cls = subprocess.Popen
+        subprocess.Popen = recording_popen(closed_made)
+        closed_watchdog = handle_watchdog(30.0, closed_made)
+        try:
+            try:
+                run([python, "-I", "-B", "-c", closed_code, token, closed_done], budget_s=3,
+                    stall_s=3600, poll_s=0.2, clock=closed_clock, cpu_seconds=lambda pid: 0.0)
+                got = "returned"
+            except Hung as exc:
+                got = (exc.kind, exc.output, exc.stderr)
+            except Exception as exc:  # noqa: BLE001  any escape is this vector failing
+                got = "{}: {}".format(type(exc).__name__, exc)
+        finally:
+            subprocess.Popen = saved_closed_cls
+            closed_watchdog.cancel()
+        for pid in alive(token):
+            _kill_pid(pid)
+        if got != ("budget", b"OUT: closed-pipe evidence\n", b"FAIL: closed-pipe diagnostic\n"):
+            failures.append("_load_bound vector (a child that closed both pipes and kept running "
+                            "keeps the bytes its reads captured, on every timeout snapshot): got "
+                            "{!r}".format(got))
     finally:
         shutil.rmtree(drain_dir)
+
+    # The drain clamp's committed boundaries, driven on a small injected bound (a kernel pipe can
+    # hold the whole over-bound input): one byte inside the bound drains fully with no note; an
+    # input that exactly exhausts the bound stops AT it and reports the cut (the drain cannot
+    # know nothing remained: the conservative direction); one byte over it drains exactly the
+    # bound and no more; a partial-read sequence (7-byte chunks) still sums to the exact bound
+    # and never requests past it; and a failure on ONE stream is reported naming that stream
+    # while the other still drains. Each case runs in its own helper call, so every descriptor
+    # name is bound once and closed once, in the helper's finally.
+    class RaisingStream:
+        closed = False
+
+        def fileno(self):
+            raise OSError("injected stderr drain fault")
+
+    def drained_fake(out_payload, err_payload, read=None):
+        """(held, notes) after _drain over one fake proc whose stdout and stderr pipes hold the
+        two payloads, each write end already closed (EOF sits behind the payload); read stands in
+        for os.read during the drain."""
+        out_read, out_write = os.pipe()
+        with os.fdopen(out_write, "wb") as out_handle:
+            out_handle.write(out_payload)
+        err_read, err_write = os.pipe()
+        with os.fdopen(err_write, "wb") as err_handle:
+            err_handle.write(err_payload)
+        fake = subprocess.CompletedProcess([], 0)  # anything with the two stream attributes
+        fake.stdout = os.fdopen(out_read, "rb")
+        fake.stderr = os.fdopen(err_read, "rb")
+        held_case = [None, None]
+        saved_read = os.read
+        os.read = read if read is not None else saved_read
+        try:
+            notes = _drain(fake, held_case)
+        finally:
+            os.read = saved_read
+            fake.stdout.close()
+            fake.stderr.close()
+        return held_case, notes
+
+    def drained_fault(out_payload):
+        """(held, notes) when the stderr stream's own fileno fails while stdout still drains."""
+        out_read, out_write = os.pipe()
+        with os.fdopen(out_write, "wb") as out_handle:
+            out_handle.write(out_payload)
+        fake = subprocess.CompletedProcess([], 0)
+        fake.stdout = os.fdopen(out_read, "rb")
+        fake.stderr = RaisingStream()
+        held_case = [None, None]
+        try:
+            notes = _drain(fake, held_case)
+        finally:
+            fake.stdout.close()
+        return held_case, notes
+
+    saved_drain_bytes = DRAIN_BYTES
+    globals()["DRAIN_BYTES"] = 1000
+    try:
+        for label, payload, want_len, want_cut in (
+                ("one byte inside the bound", b"e" * 999, 999, False),
+                ("exactly at the bound", b"e" * 1000, 1000, True),
+                ("one byte over the bound", b"e" * 1001, 1000, True)):
+            held_case, notes = drained_fake(b"ok", payload)
+            got = (held_case[0], len(held_case[1] or b""), held_case[1] == payload[:1000],
+                   "the stderr drain was cut short at its 1000 byte bound" in notes,
+                   "stdout" in notes)
+            if got != (b"ok", want_len, True, want_cut, False):
+                failures.append("_load_bound vector (drain clamp, {}): expected (b'ok', {}, "
+                                "True, {}, False), got {!r}"
+                                .format(label, want_len, want_cut, got))
+        partial_requests = []
+        saved_os_read = os.read
+
+        def chunked_read(fd, size, saved_os_read=saved_os_read):
+            partial_requests.append(size)
+            return saved_os_read(fd, min(size, 7))
+        held_case, notes = drained_fake(b"", b"p" * 1000, read=chunked_read)
+        got = (held_case[0], held_case[1] == b"p" * 1000,
+               "the stderr drain was cut short at its 1000 byte bound" in notes,
+               max(partial_requests) <= 1000)
+        if got != (None, True, True, True):
+            failures.append("_load_bound vector (drain clamp, partial reads sum to the exact "
+                            "bound and never request past it): got {!r}, largest request {}"
+                            .format(got, max(partial_requests)))
+        held_case, notes = drained_fault(b"kept")
+        got = (held_case[0], held_case[1],
+               "the stderr drain failed (OSError: injected stderr drain fault)" in notes,
+               "stdout" in notes)
+        if got != (b"kept", None, True, False):
+            failures.append("_load_bound vector (drain clamp, a one-stream failure names that "
+                            "stream while the other drains): got {!r}".format(got))
+    finally:
+        globals()["DRAIN_BYTES"] = saved_drain_bytes
 
     # A non-OSError fault AFTER the spawn (pidfd_open here) must not route around cleanup: the
     # staged stop still runs (the child dies, reported as a monitor Hung naming the fault) and
@@ -1360,6 +1711,7 @@ def vector_failures(python):
 
         def raising_pidfd_open(pid, flags=0):
             raise RuntimeError("injected pidfd_open fault")
+        spawn_watchdog = handle_watchdog(30.0, made_procs)
         subprocess.Popen = SpawnRecorder
         os.pidfd_open = raising_pidfd_open
         try:
@@ -1374,6 +1726,7 @@ def vector_failures(python):
         finally:
             subprocess.Popen = saved_cls
             os.pidfd_open = saved_pidfd_open
+            spawn_watchdog.cancel()
         state = "no child spawned"
         if made_procs:
             spawned = made_procs[-1]
@@ -1396,6 +1749,108 @@ def vector_failures(python):
             failures.append("_load_bound vector (a non-OSError fault after the spawn still stops "
                             "the child and closes the pipes): got {!r}, child stopped and pipes "
                             "closed {!r}".format(got, state))
+
+    # A fault raised right AFTER Popen returned, BEFORE the very next statement runs (injected
+    # through a trace function armed on run()'s own frame: it fires on the first line event at
+    # which the acquired child is bound to proc), must run the staged stop and close both pipes:
+    # the cleanup owns the child from before the spawn, so no boundary between the Popen return
+    # and a later protected scope is uncovered.
+    trace_procs = []
+    saved_trace_cls = subprocess.Popen
+
+    class TraceSpawnRecorder(saved_trace_cls):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            trace_procs.append(self)
+
+    trace_state = {"raised": False}
+    run_code = run.__code__
+
+    def trace_local(frame, event, arg):
+        if (event == "line" and not trace_state["raised"] and trace_procs
+                and frame.f_locals.get("proc") is trace_procs[-1]):
+            trace_state["raised"] = True
+            raise RuntimeError("injected post-spawn boundary fault")
+        return trace_local
+
+    def trace_global(frame, event, arg):
+        if frame.f_code is run_code:
+            return trace_local
+        return None
+    trace_watchdog = handle_watchdog(30.0, trace_procs)
+    subprocess.Popen = TraceSpawnRecorder
+    sys.settrace(trace_global)
+    try:
+        try:
+            run([python, "-I", "-B", "-c", "import time\ntime.sleep(3600)\n", token],
+                budget_s=3600, stall_s=3600, poll_s=0.2)
+            got = "returned"
+        except Hung as exc:
+            got = ("hung: " + exc.kind, "injected post-spawn boundary fault" in exc.reason)
+        except Exception as exc:  # noqa: BLE001  an uncovered boundary escapes exactly here
+            got = "{}: {}".format(type(exc).__name__, exc)
+    finally:
+        sys.settrace(None)
+        subprocess.Popen = saved_trace_cls
+        trace_watchdog.cancel()
+    state = "no child spawned"
+    if trace_procs:
+        spawned = trace_procs[-1]
+        for _ in range(50):  # a SIGKILLed child can take a moment to be reaped
+            if spawned.poll() is not None:
+                break
+            time.sleep(0.1)
+        state = (spawned.poll() is not None,
+                 spawned.stdout is None or spawned.stdout.closed,
+                 spawned.stderr is None or spawned.stderr.closed)
+        if spawned.poll() is None:
+            spawned.kill()
+            try:
+                spawned.wait(timeout=REAP_S)
+            except subprocess.TimeoutExpired:
+                pass
+        for stream in (spawned.stdin, spawned.stdout, spawned.stderr):
+            if stream is not None and not stream.closed:
+                stream.close()
+    for pid in alive(token):
+        _kill_pid(pid)
+    if got != ("hung: monitor", True) or state != (True, True, True) or not trace_state["raised"]:
+        failures.append("_load_bound vector (a fault right after Popen returns, before the next "
+                        "statement, still stops the child and closes the pipes): got {!r}, child "
+                        "stopped and pipes closed {!r}, fault injected {!r}"
+                        .format(got, state, trace_state["raised"]))
+
+    # UNOBSERVABLE is never a verdict: a capability probe that cannot RUN (pidfd_open refused,
+    # for example EMFILE) must read as None, never as unsupported (False) or supported, and a
+    # survivor scan whose /proc cmdline read is REFUSED while the process exists (EACCES) must
+    # read as None, never as absence, while mid-scan ENOENT stays absence. Both injected, so the
+    # real /proc and the real descriptor table are never touched.
+    if hasattr(os, "pidfd_open") and getattr(signal, "pidfd_send_signal", None) is not None:
+        saved_probe_opener = os.pidfd_open
+
+        def emfile_pidfd_open(pid, flags=0):
+            raise OSError(errno.EMFILE, "injected: too many open files")
+        os.pidfd_open = emfile_pidfd_open
+        try:
+            probed = _group_signal_supported()
+        finally:
+            os.pidfd_open = saved_probe_opener
+        if probed is not None:
+            failures.append("_load_bound vector (a capability probe that cannot run is "
+                            "unobservable, never a verdict): expected None, got {!r}"
+                            .format(probed))
+    if has_proc:
+        def eacces_cmdline(path, mode="rb"):
+            raise PermissionError(errno.EACCES, "injected: permission denied", path)
+
+        def enoent_cmdline(path, mode="rb"):
+            raise FileNotFoundError(errno.ENOENT, "injected: exited mid-scan", path)
+        got = (_alive_with(token, opener=eacces_cmdline),
+               _alive_with("absent-" + token, opener=enoent_cmdline))
+        if got != (None, []):
+            failures.append("_load_bound vector (a refused /proc read is unobservable, never "
+                            "absence; mid-scan ENOENT is absence): expected (None, []), got {!r}"
+                            .format(got))
 
     # A child Popen has already reaped (here a text decode that fails after a clean exit) is never
     # signalled by number (neither os.kill nor os.killpg: its pid, and with it its group id, may
@@ -1465,6 +1920,13 @@ def vector_failures(python):
         try:
             bounded("a live descendant is killed with the tree, through the child's process group",
                     descendant_code, stop_want, 25, **group_stop_bounds())
+            # The group stop does not depend on CPU accounting: with tree CPU seconds UNREADABLE
+            # (injected None), the load-adjusted budget still stops the child and its descendant
+            # through the process group, so this coverage cannot silently narrow to hosts where
+            # the stall heuristic happens to be available.
+            bounded("a group stop runs with CPU accounting unreadable (the budget fallback)",
+                    descendant_code, "hung: budget", 25, budget_s=2, stall_s=3600,
+                    clock=LoadClock(factor=lambda: 1.0), poll_s=0.2, cpu_seconds=lambda pid: None)
             survived = bystander.poll()
             # A kernel refusing the pidfd group flag (EINVAL, forced here with a flag no kernel
             # accepts) falls back to the numeric group id while the leader is unreaped, so the
@@ -1579,34 +2041,62 @@ def vector_failures(python):
         # The lie names the bystander as a descendant of the child, keeping the bystander's REAL
         # cpu and start ticks (read from its own stat): a table-driven kill that re-validates the
         # start ticks before signalling would still accept this entry, so a regression to the
-        # removed table-driven kill, with or without that validation, turns this vector red.
-        bystander_stat, _ = _proc_table(names=[str(table_bystander.pid)])
-        bystander_entry = (bystander_stat or {}).get(table_bystander.pid, (1, 0, 0))
-
-        def crafted_table(limit_s=None, names=None, clock=None, opener=None):
-            table, complete = saved_proc_table(limit_s, names, clock, opener)
-            if table is not None and spawned_pids:
-                table = dict(table)
-                table[table_bystander.pid] = (spawned_pids[-1],) + bystander_entry[1:]
-            return table, complete
-        subprocess.Popen = RecordingPopen
-        globals()["_proc_table"] = crafted_table
-        try:
-            bounded("a crafted ancestor table cannot redirect a signal at a bystander",
-                    "import time\ntime.sleep(3600)\n", stop_want, 25, **group_stop_bounds())
-            table_survived = table_bystander.poll()
-        finally:
-            subprocess.Popen = saved_popen_cls2
-            globals()["_proc_table"] = saved_proc_table
+        # removed table-driven kill, with or without that validation, turns this vector red. The
+        # crafting REQUIRES a complete usable stat entry (_stat_entry): a stat read that fails,
+        # and a run whose table injection never happened, are each recorded as UNOBSERVABLE (no
+        # clean verdict), never patched over with zero start ticks (which a validating kill would
+        # reject, leaving this vector unable to discriminate) and never a silent pass.
+        bystander_entry = _stat_entry(table_bystander.pid)
+        if bystander_entry is None:
             table_bystander.kill()
             try:
                 table_bystander.wait(timeout=REAP_S)
             except subprocess.TimeoutExpired:
                 pass
-        if table_survived is not None:
-            failures.append("_load_bound vector (a crafted ancestor table cannot redirect a "
-                            "signal): the bystander was signalled (poll {!r})"
-                            .format(table_survived))
+            if has_proc:
+                failures.append("_load_bound vector (the crafted-table bystander stat is "
+                                "observable): its /proc stat could not be read, so the "
+                                "crafted-table vector has no clean verdict")
+        else:
+            injected_tables = []
+
+            def crafted_table(limit_s=None, names=None, clock=None, opener=None):
+                table, complete = saved_proc_table(limit_s, names, clock, opener)
+                if table is not None and spawned_pids:
+                    table = dict(table)
+                    table[table_bystander.pid] = (spawned_pids[-1],) + bystander_entry[1:]
+                    injected_tables.append(True)
+                return table, complete
+            subprocess.Popen = RecordingPopen
+            globals()["_proc_table"] = crafted_table
+            try:
+                bounded("a crafted ancestor table cannot redirect a signal at a bystander",
+                        "import time\ntime.sleep(3600)\n", stop_want, 25, **group_stop_bounds())
+                table_survived = table_bystander.poll()
+            finally:
+                subprocess.Popen = saved_popen_cls2
+                globals()["_proc_table"] = saved_proc_table
+                table_bystander.kill()
+                try:
+                    table_bystander.wait(timeout=REAP_S)
+                except subprocess.TimeoutExpired:
+                    pass
+            if table_survived is not None:
+                failures.append("_load_bound vector (a crafted ancestor table cannot redirect a "
+                                "signal): the bystander was signalled (poll {!r})"
+                                .format(table_survived))
+            if not injected_tables:
+                failures.append("_load_bound vector (the crafted table is injected): no process-"
+                                "table read succeeded during the stop, so the crafted-table "
+                                "vector has no clean verdict")
+        # The unobservable branch itself is tested: a stat read that fails, and a table lacking
+        # the pid, each yield None from the shared _stat_entry, never a zero-tick substitute.
+        probe_got = (_stat_entry(table_bystander.pid, proc_table=lambda names: (None, False)),
+                     _stat_entry(table_bystander.pid,
+                                 proc_table=lambda names: ({-1: (1, 2, 3)}, True)))
+        if probe_got != (None, None):
+            failures.append("_load_bound vector (a failed or missing bystander stat yields no "
+                            "entry): expected (None, None), got {!r}".format(probe_got))
 
         # The pidfd group kill stays exact AFTER Popen has reaped the leader: a child that spawns
         # a group member on devnull, prints an undecodable byte and exits 0 is reaped by
@@ -1722,15 +2212,20 @@ def vector_failures(python):
                     done = run([python, "-I", "-B", "-c",
                                 "open({!r}, \"w\").write(\"survived\")\n".format(refused_marker),
                                 token], budget_s=60, stall_s=60)
-                    got = (done.returncode,
-                           b"parent-death signal was not armed" in (done.stderr or b""))
+                    got = ("returned", done.returncode)
+                except Unarmed as exc:
+                    # The named outcome, never an ordinary exit status: an OSError whose message
+                    # and whose captured stderr both name the refused arming.
+                    got = ("unarmed", "refused to run" in str(exc),
+                           _UNARMED_MARKER in (exc.stderr or b""))
                 except Exception as exc:  # noqa: BLE001  any escape is this vector failing
                     got = "{}: {}".format(type(exc).__name__, exc)
             finally:
                 globals()["_PRCTL"] = saved_prctl
-            if got != (UNARMED_EXIT, True) or os.path.exists(refused_marker):
-                failures.append("_load_bound vector (a refused prctl ends the child before it "
-                                "runs): got {!r}, survival marker written {!r}"
+            if got != ("unarmed", True, True) or os.path.exists(refused_marker):
+                failures.append("_load_bound vector (a refused prctl surfaces as the named "
+                                "Unarmed outcome, the child never run): got {!r}, survival "
+                                "marker written {!r}"
                                 .format(got, os.path.exists(refused_marker)))
 
             # A parent gone BEFORE the arming completed (the fork-to-prctl race) is detected by the

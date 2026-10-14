@@ -983,6 +983,7 @@ expected-check-ids = [
   # ---------- the load-tolerant child bound: a slowed run passes, a clean stop is cannot-evaluate, ----------
   # ---------- failure evidence beside a stop stays a failure, and failing progress already written ----------
   # ---------- when the stop lands is a failure, never cannot-evaluate ----------
+  "bound/leaked-cleanup-observable",
   "bound/slowed-run-passes",
   "bound/hang-is-cannot-evaluate",
   "bound/stop-keeps-failure-evidence",

@@ -719,7 +719,14 @@ def self_test_main():
             case("a self-test that exits 1 beside a leaked descendant", 1, r_leaky, needle="exited 1 before")
         finally:
             SELFTEST_TIMEOUT, _load_factor = saved
-            for pid in (_load_bound._alive_with(leaked) or []):
+            # None is UNOBSERVABLE (/proc could not be read), never absence: surfaced as a
+            # self-test failure instead of silently reading as "no leaked child".
+            leaked_pids = _load_bound._alive_with(leaked)
+            if leaked_pids is None:
+                failures.append("leaked-descendant cleanup: the survivor check was unobservable "
+                                "(/proc could not be read), so the leaked child cannot be proven "
+                                "absent")
+            for pid in (leaked_pids or ()):
                 _load_bound._kill_pid(pid)
 
         def _unreadable_leg(rows, findings):

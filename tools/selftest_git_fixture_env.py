@@ -119,7 +119,10 @@ SUITE_ID = "git-fixture-env-selftest"
 # "... FAIL"/"... ERROR"/"... unexpected success" result ending, or unittest's F, E or u progress
 # characters, which only failing, erroring or unexpectedly succeeding tests write (an unexpected
 # success makes wasSuccessful() false), including a progress run cut short by other text on the
-# same line. The members' own PASSING unittest progress on stderr (dots, "Ran N tests",
+# same line (the failing character may open the line; the cut is recognized only where the other
+# text does not begin with a word character, so an ordinary word that merely opens with
+# progress-letter spellings, such as success or Elapsed, is not failure evidence). The members'
+# own PASSING unittest progress on stderr (dots, "Ran N tests",
 # "OK", written by passing runs too) is NOT failure evidence: a stop beside passing-progress-only
 # streams stays a BoundStop, never a false failure.
 # Longest silent wait a member legitimately makes: a bounded hold of a worker thread or a child while
@@ -192,18 +195,23 @@ def _bound_stop(what, exc):
 # success" result ending, or verbosity-1 progress characters that include F, E or u (unittest
 # writes F and E only for failing or erroring tests and u only for an unexpected success, which
 # makes wasSuccessful() false), whether the progress line is pure or cut short by other text
-# written onto the same line. unittest's PASSING progress (dots, "Ran N tests", "OK") lands on
+# written onto the same line: the progress prefix may be EMPTY (a failing F, E or u can open the
+# line), and the cut is recognized only while the run stays progress-shaped, the cut text NOT
+# beginning with a word character, so an ordinary word that merely opens with progress-letter
+# spellings (success, suite, subprocess, summary, or a dotted ...Elapsed) is never read as a cut
+# progress run. unittest's PASSING progress (dots, "Ran N tests", "OK") lands on
 # stderr in passing runs too, so it is never failure evidence: without a marker the stop stays a
 # BoundStop (cannot-evaluate), exactly like a silent one (the _load_bound contract). The
 # line-start words and progress runs are matched as spelled, so unrelated output that begins a
-# line with one of them (or with a progress run carrying F, E or u) also counts as failure
+# line with one of them (or with a progress-shaped run carrying F, E or u) also counts as failure
 # evidence: that files a would-be cannot-evaluate (exit 2) as a failure (exit 1), the direction
-# that never hides a defect; the completed path judges the exit code, not this text.
+# that never hides a defect; the completed path judges the exit code, not this text, and the
+# word-character boundary keeps that direction inside progress-shaped lines, not prose.
 _FAILURE_EVIDENCE_RE = re.compile(
     r"^(Traceback|FAIL|ERROR|SELF-TEST FAIL)"        # line-start failure markers
     r"|\.\.\. (FAIL|ERROR|unexpected success)$"      # verbose unittest result line endings
     r"|^[.Esxu]*[FEu][.FEsxu]*$"                     # verbosity-1 progress carrying F, E or u
-    r"|^[.Esxu]+[FEu]",                              # a progress run cut short by other text
+    r"|^[.Esxu]*[FEu][.EFsxu]*(?!\w)",               # a progress run cut short by other text
     re.MULTILINE)
 
 
@@ -4724,10 +4732,18 @@ def _bound_stop_lane(base):
     "FAILED (unexpected successes=1)" summary, a member whose progress run is cut short by other
     text on the same line (".E[worker] retrying"), a member
     whose stderr carries its own "SELF-TEST FAIL:" line, a member whose marker lands on STDOUT
-    only, and an IMPORTED corpus run (through CORPUS_TOOLS, pointing _run_corpus_imported at a
-    fixture module) whose stderr carries ".F", while the passing-progress controls above stay
-    BoundStops; the corpus and imported legs also assert the captured evidence text rides the
-    returned failing value. bound/stop-keeps-failure-evidence: a stopped member whose hook, monitor or exposure log
+    only, an IMPORTED corpus run (through CORPUS_TOOLS, pointing _run_corpus_imported at a
+    fixture module) whose stderr carries ".F", and a cut progress run whose FIRST character is
+    the failing one, through every runner and on both streams (member "F[worker] retrying" on
+    stderr and "u[worker] retrying" on stdout, corpus "E[worker] retrying" on stderr and
+    "F[worker] retrying" on stdout, imported "u[worker] retrying" on stderr and "E[worker]
+    retrying" on stdout), while the passing-progress controls above AND the word controls (lines
+    that merely open with progress-letter spellings, success:/suite/subprocess/summary:/
+    ...Elapsed, on both streams through all three runners) stay BoundStops; the corpus and
+    imported legs also assert the captured evidence text rides the
+    returned failing value. bound/leaked-cleanup-observable: the post-lane survivor check
+    distinguishes an unobservable /proc read (None, judged a failure) from proven absence ([]),
+    never reading blindness as absence. bound/stop-keeps-failure-evidence: a stopped member whose hook, monitor or exposure log
     recorded a marker is a failure in the registered lists and the OPF lifecycle roster, a wrong value in
     a tuple beside a stop is a failure, a member stopped beside captured failure evidence is a failure (a plain
     failing value, never a BoundStop), and a member that exited nonzero while a leaked descendant held
@@ -4791,6 +4807,32 @@ def _bound_stop_lane(base):
     u_progress = base / "bound-u-progress.py"
     u_progress.write_text("import sys, time\nsys.stderr.write(\"u\")\nsys.stderr.flush()\n"
                           "time.sleep(3600)\n", encoding="utf-8")
+    # A progress run cut short by other text whose FIRST character is the failing one: one per
+    # runner on stderr and one per runner on stdout (the member pair here; the corpus and
+    # imported pairs below), so the empty-prefix case is driven through every runner and both
+    # streams.
+    cut_first_f = base / "bound-cut-first-f.py"
+    cut_first_f.write_text("import sys, time\nsys.stderr.write(\"F[worker] retrying\\n\")\n"
+                           "sys.stderr.flush()\ntime.sleep(3600)\n", encoding="utf-8")
+    cut_first_u_stdout = base / "bound-cut-first-u-stdout.py"
+    cut_first_u_stdout.write_text("import sys, time\nsys.stdout.write(\"u[worker] retrying\\n\")\n"
+                                  "sys.stdout.flush()\ntime.sleep(3600)\n", encoding="utf-8")
+    cut_first_e = base / "bound-cut-first-e.py"
+    cut_first_e.write_text("import sys, time\nsys.stderr.write(\"E[worker] retrying\\n\")\n"
+                           "sys.stderr.flush()\ntime.sleep(3600)\n", encoding="utf-8")
+    cut_first_f_stdout = base / "bound-cut-first-f-stdout.py"
+    cut_first_f_stdout.write_text("import sys, time\nsys.stdout.write(\"F[worker] retrying\\n\")\n"
+                                  "sys.stdout.flush()\ntime.sleep(3600)\n", encoding="utf-8")
+    # Non-progress CONTROLS: ordinary lines that merely OPEN with progress-letter spellings (and
+    # a dotted ...Elapsed), on BOTH streams; none is failure evidence, so the stop must stay a
+    # BoundStop, exactly like the passing-progress fixtures above.
+    word_controls = base / "bound-word-controls.py"
+    word_controls.write_text("import sys, time\n"
+                             "text = (\"success: all members ran\\nsuite started\\nsubprocess \"\n"
+                             "        \"launched\\nsummary: 3 ok\\n...Elapsed 3 s\\n\")\n"
+                             "sys.stderr.write(text)\nsys.stdout.write(text)\n"
+                             "sys.stderr.flush()\nsys.stdout.flush()\ntime.sleep(3600)\n",
+                             encoding="utf-8")
     # Fixture modules for the IMPORTED corpus runner (_run_corpus_imported): one stalls beside
     # failing progress, one beside passing progress only, so that runner's failure-evidence and
     # BoundStop branches are both driven, like the member and corpus runners above.
@@ -4805,6 +4847,27 @@ def _bound_stop_lane(base):
         "import sys, time\n\n\ndef run_self_test():\n"
         "    sys.stderr.write(\"...\\nRan 3 tests in 0.001s\\n\\nOK\\n\")\n"
         "    sys.stderr.flush()\n    time.sleep(3600)\n    return 0\n", encoding="utf-8")
+    imported_cut_tools = base / "bound-imported-cut-first"
+    imported_cut_tools.mkdir()
+    (imported_cut_tools / "selftest_aiqt_corpus.py").write_text(
+        "import sys, time\n\n\ndef run_self_test():\n"
+        "    sys.stderr.write(\"u[worker] retrying\\n\")\n"
+        "    sys.stderr.flush()\n    time.sleep(3600)\n    return 0\n", encoding="utf-8")
+    imported_cut_stdout_tools = base / "bound-imported-cut-stdout"
+    imported_cut_stdout_tools.mkdir()
+    (imported_cut_stdout_tools / "selftest_aiqt_corpus.py").write_text(
+        "import sys, time\n\n\ndef run_self_test():\n"
+        "    sys.stdout.write(\"E[worker] retrying\\n\")\n"
+        "    sys.stdout.flush()\n    time.sleep(3600)\n    return 0\n", encoding="utf-8")
+    imported_controls_tools = base / "bound-imported-word-controls"
+    imported_controls_tools.mkdir()
+    (imported_controls_tools / "selftest_aiqt_corpus.py").write_text(
+        "import sys, time\n\n\ndef run_self_test():\n"
+        "    text = (\"success: all members ran\\nsuite started\\nsubprocess launched\\n\"\n"
+        "            \"summary: 3 ok\\n...Elapsed 3 s\\n\")\n"
+        "    sys.stderr.write(text)\n    sys.stdout.write(text)\n"
+        "    sys.stderr.flush()\n    sys.stdout.flush()\n    time.sleep(3600)\n    return 0\n",
+        encoding="utf-8")
     saved = (MEMBER_BUDGET_S, MEMBER_STALL_S, CORPUS_BUDGET_S, CORPUS_STALL_S, CORPUS_SELFTEST,
              CORPUS_TOOLS, _LOAD_FACTOR)
     kept = len(BOUND_STOPS)
@@ -4853,6 +4916,12 @@ def _bound_stop_lane(base):
         summary_unexpected_rc = quiet("summary-unexpected", _run_config_member,
                                       (str(summary_unexpected),), env)
         progress_cut_rc = quiet("progress-cut", _run_config_member, (str(progress_cut),), env)
+        # The failing character can be the FIRST on the line (empty progress prefix), on either
+        # stream; the word controls on both streams must stay a BoundStop.
+        cut_first_f_rc = quiet("cut-first-f", _run_config_member, (str(cut_first_f),), env)
+        cut_first_u_rc = quiet("cut-first-u-stdout", _run_config_member,
+                               (str(cut_first_u_stdout),), env)
+        word_controls_rc = quiet("word-controls", _run_config_member, (str(word_controls),), env)
         CORPUS_BUDGET_S, CORPUS_STALL_S, CORPUS_SELFTEST = 20, 1.5, silent
         corpus_stop = quiet("corpus", _run_corpus, "GIT_DIR", "/decoy/.git", base)
         CORPUS_SELFTEST = progress
@@ -4867,18 +4936,40 @@ def _bound_stop_lane(base):
         # evidence, like F and E.
         CORPUS_SELFTEST = u_progress
         corpus_u = quiet("corpus-u-progress", _run_corpus, "GIT_DIR", "/decoy/.git", base)
+        CORPUS_SELFTEST = cut_first_e
+        corpus_cut_first = quiet("corpus-cut-first-e", _run_corpus, "GIT_DIR", "/decoy/.git",
+                                 base)
+        CORPUS_SELFTEST = cut_first_f_stdout
+        corpus_cut_stdout = quiet("corpus-cut-first-f-stdout", _run_corpus, "GIT_DIR",
+                                  "/decoy/.git", base)
+        CORPUS_SELFTEST = word_controls
+        corpus_word_controls = quiet("corpus-word-controls", _run_corpus, "GIT_DIR",
+                                     "/decoy/.git", base)
         CORPUS_TOOLS = imported_failing_tools
         imported_failing = quiet("imported-failing-progress", _run_corpus_imported, "GIT_DIR",
                                  "/decoy/.git", base)
         CORPUS_TOOLS = imported_passing_tools
         imported_progress = quiet("imported-passing-progress", _run_corpus_imported, "GIT_DIR",
                                   "/decoy/.git", base)
+        CORPUS_TOOLS = imported_cut_tools
+        imported_cut_first = quiet("imported-cut-first-u", _run_corpus_imported, "GIT_DIR",
+                                   "/decoy/.git", base)
+        CORPUS_TOOLS = imported_cut_stdout_tools
+        imported_cut_stdout = quiet("imported-cut-first-e-stdout", _run_corpus_imported,
+                                    "GIT_DIR", "/decoy/.git", base)
+        CORPUS_TOOLS = imported_controls_tools
+        imported_word_controls = quiet("imported-word-controls", _run_corpus_imported,
+                                       "GIT_DIR", "/decoy/.git", base)
     finally:
         (MEMBER_BUDGET_S, MEMBER_STALL_S, CORPUS_BUDGET_S, CORPUS_STALL_S, CORPUS_SELFTEST,
          CORPUS_TOOLS, _LOAD_FACTOR) = saved
         del BOUND_STOPS[kept:]
-        for pid in (_load_bound._alive_with(leaked) or []):
+        # None is UNOBSERVABLE (/proc could not be read), never absence: judged by its own check
+        # below instead of silently reading as "no leaked child".
+        leaked_pids = _load_bound._alive_with(leaked)
+        for pid in (leaked_pids or ()):
             _load_bound._kill_pid(pid)
+    check("bound/leaked-cleanup-observable", leaked_pids is not None, True)
     check("bound/slowed-run-passes", (slowed_loaded, isinstance(slowed_idle, BoundStop)), (0, True))
     check("bound/hang-is-cannot-evaluate",
           (isinstance(member_stop, BoundStop),
@@ -4886,11 +4977,14 @@ def _bound_stop_lane(base):
            isinstance(corpus_stop, BoundStop),
            isinstance(progress_rc, BoundStop), isinstance(corpus_progress, BoundStop),
            isinstance(imported_progress, BoundStop),
+           isinstance(word_controls_rc, BoundStop), isinstance(corpus_word_controls, BoundStop),
+           isinstance(imported_word_controls, BoundStop),
            _judge(member_stop, 0), _judge([member_stop], []), _judge([member_stop, ("tools/x.py",)], []),
            _judge(([corpus_stop], []), ([], [])),
            (_verdict_code([], ["x"], []), _verdict_code([], [], ["x"]), _verdict_code(["f"], ["x"], ["x"]),
             _verdict_code([], [], []))),
-          (True, True, True, True, True, True, "cannot-evaluate", "cannot-evaluate", "fail",
+          (True, True, True, True, True, True, True, True, True,
+           "cannot-evaluate", "cannot-evaluate", "fail",
            "cannot-evaluate", (2, 2, 1, 0)))
     member = ("tools/x.py", "--self-test")
 
@@ -4908,6 +5002,8 @@ def _bound_stop_lane(base):
     verbose_unexpected_out, verbose_unexpected_err = written.pop("verbose-unexpected", ("", ""))
     summary_unexpected_out, summary_unexpected_err = written.pop("summary-unexpected", ("", ""))
     progress_cut_out, progress_cut_err = written.pop("progress-cut", ("", ""))
+    cut_first_f_out, cut_first_f_err = written.pop("cut-first-f", ("", ""))
+    cut_first_u_out, cut_first_u_err = written.pop("cut-first-u-stdout", ("", ""))
     # The full expected leaky diagnostic, on stdout: only the stall idle seconds are free.
     frame = "CONFIG-INJECTION {} (exited 3 before its bound fired: \x00):\n\n".format((str(leaky),))
     head, tail = frame.split("\x00")
@@ -4945,6 +5041,24 @@ def _bound_stop_lane(base):
             "FAILED (unexpected successes=1)" in summary_unexpected_out, summary_unexpected_err),
            (isinstance(progress_cut_rc, BoundStop), _judge(progress_cut_rc, 0),
             ".E[worker] retrying" in progress_cut_out, progress_cut_err),
+           (isinstance(cut_first_f_rc, BoundStop), _judge(cut_first_f_rc, 0),
+            "F[worker] retrying" in cut_first_f_out, cut_first_f_err),
+           (isinstance(cut_first_u_rc, BoundStop), _judge(cut_first_u_rc, 0),
+            "u[worker] retrying" in cut_first_u_out, cut_first_u_err),
+           (isinstance(corpus_cut_first, BoundStop), _judge(corpus_cut_first, 0),
+            isinstance(corpus_cut_first, str)
+            and "captured failure evidence: 'E[worker] retrying\\n'" in corpus_cut_first),
+           (isinstance(corpus_cut_stdout, BoundStop), _judge(corpus_cut_stdout, 0),
+            isinstance(corpus_cut_stdout, str)
+            and "captured failure evidence: 'F[worker] retrying\\n'" in corpus_cut_stdout),
+           (isinstance(imported_cut_first, BoundStop), _judge(imported_cut_first, 0),
+            isinstance(imported_cut_first, str)
+            and imported_cut_first.startswith("imported corpus self-test")
+            and "captured failure evidence: 'u[worker] retrying\\n'" in imported_cut_first),
+           (isinstance(imported_cut_stdout, BoundStop), _judge(imported_cut_stdout, 0),
+            isinstance(imported_cut_stdout, str)
+            and imported_cut_stdout.startswith("imported corpus self-test")
+            and "captured failure evidence: 'E[worker] retrying\\n'" in imported_cut_stdout),
            (isinstance(corpus_failing, BoundStop), _judge(corpus_failing, 0),
             isinstance(corpus_failing, str)
             and "captured failure evidence: '.F'" in corpus_failing),
@@ -4958,7 +5072,9 @@ def _bound_stop_lane(base):
             and "captured failure evidence: '.F'" in imported_failing)),
           ((False, "fail", True, ""), (False, "fail", True, ""), (False, "fail", True, ""),
            (False, "fail", True, ""), (False, "fail", True, ""), (False, "fail", True, ""),
-           (False, "fail", True, ""), (False, "fail", True), (False, "fail", True),
+           (False, "fail", True, ""), (False, "fail", True, ""), (False, "fail", True, ""),
+           (False, "fail", True), (False, "fail", True), (False, "fail", True),
+           (False, "fail", True), (False, "fail", True), (False, "fail", True),
            (False, "fail", True), (False, "fail", True)))
 
 
