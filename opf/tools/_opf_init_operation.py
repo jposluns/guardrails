@@ -2887,19 +2887,24 @@ def _git(args, cwd, env, allow_fail=False, input_bytes=None):
 
 
 def _write(path, data):
-    """Fixture bytes at `path`, hermetic against the ambient process umask: every directory
-    and file this helper CREATES takes an explicit mode (DIR_MODE, 0o644; a fixture needing
-    another mode chmods after writing), while a pre-existing file keeps its mode and only its
-    bytes change. A fixture's verdict comes from the code under test, never from the umask
-    the harness happened to inherit."""
-    made = []
+    """Fixture bytes at path, hermetic against ANY ambient process umask: every missing
+    directory is created one level at a time, parent-first, and pinned to DIR_MODE before
+    the next level is created beneath it (a bare makedirs under an owner-restrictive umask
+    such as 0o700 leaves a fresh parent untraversable, so nothing deeper could be built),
+    and a freshly created file is pinned to 0o644 (a fixture needing another mode chmods
+    after writing), while a pre-existing file keeps its mode and only its bytes change. A
+    path that is a dangling symlink is NOT handled: the write would follow the link and
+    create its target with a umask-derived mode (the R5 symlink fixtures call os.symlink
+    directly and never pass one here). A fixture verdict comes from the code under test,
+    never from the umask the harness happened to inherit."""
+    missing = []
     parent = os.path.dirname(path)
     while parent and not os.path.lexists(parent):
-        made.append(parent)
+        missing.append(parent)
         parent = os.path.dirname(parent)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    for d in made:
-        os.chmod(d, DIR_MODE)
+    for made in reversed(missing):
+        os.mkdir(made)
+        os.chmod(made, DIR_MODE)
     fresh = not os.path.lexists(path)
     with open(path, "wb") as fh:
         fh.write(data)
@@ -3515,20 +3520,103 @@ def _seam_tests(base, env, ok):
        and "writable" in res.primary_failure["detail"]
        and _tree_snapshot(root) == before and sub_ops(root) == [], str(res.primary_failure))
 
-    # The accepting fixture is hermetic against the ambient umask: built while the process
-    # umask is the group-permissive 0o002, the admitted tree is still accepted (red when a
-    # fixture directory takes its mode from the process umask instead of an explicit one).
-    saved_umask = os.umask(0o002)
+    # The fixture writer itself is hermetic against ANY ambient umask, including an
+    # owner-restrictive one: under umask 0o700 a bare makedirs leaves each fresh parent
+    # untraversable before any later chmod could run, so _write creates and pins one
+    # level at a time, parent-first. Every created directory is asserted at DIR_MODE and
+    # the created file at 0o644, each independently (red when its own chmod is removed),
+    # and a rewrite keeps an explicitly pinned non-default file mode (red when the
+    # fresh-only guard on the file chmod is removed).
+    def _mode(p):
+        return stat.S_IMODE(os.lstat(p).st_mode) if os.path.lexists(p) else None
+
+    def _bytes(p):
+        try:
+            with open(p, "rb") as fh:
+                return fh.read()
+        except OSError:
+            return None
+
+    wp = os.path.join(d, "writeprobe")
+    nested = os.path.join(wp, "a", "b", "c", "leaf.md")
+    built, why = False, ""
+    saved_umask = os.umask(0o700)
     try:
-        root, adm, payload = admit_fixture("umask002")
+        try:
+            _write(nested, b"nested fixture bytes")
+            built = True
+        except OSError as exc:
+            why = str(exc)
     finally:
         os.umask(saved_umask)
+    ok("FIXTURE-write-nested-under-umask-0700", built
+       and _bytes(nested) == b"nested fixture bytes", why)
+    for level in (wp, os.path.join(wp, "a"), os.path.join(wp, "a", "b"),
+                  os.path.join(wp, "a", "b", "c")):
+        ok("FIXTURE-write-dir-mode-" + os.path.relpath(level, d).replace(os.sep, "-"),
+           _mode(level) == DIR_MODE, "mode {}".format(_mode(level)))
+    ok("FIXTURE-write-file-mode-0644", _mode(nested) == 0o644,
+       "mode {}".format(_mode(nested)))
+    if built:
+        os.chmod(nested, 0o640)
+        saved_umask = os.umask(0o700)
+        try:
+            _write(nested, b"rewritten fixture bytes")
+        finally:
+            os.umask(saved_umask)
+    ok("FIXTURE-write-rewrite-preserves-mode", built and _mode(nested) == 0o640
+       and _bytes(nested) == b"rewritten fixture bytes", "mode {}".format(_mode(nested)))
+
+    # The accepting fixture is hermetic against the ambient umask: built while the
+    # process umask is pinned to the group-permissive 0o002, the admitted tree is still
+    # accepted (red when a fixture directory takes its mode from the process umask
+    # instead of an explicit one). A sentinel ambient mask around both builds proves the
+    # pinned block restores whatever mask it found, on the successful and on the raising
+    # path alike; the outer finally restores the real ambient mask.
+    real_umask = os.umask(0o027)
+    try:
+        saved_umask = os.umask(0o002)
+        try:
+            root, adm, payload = admit_fixture("umask002")
+        finally:
+            os.umask(saved_umask)
+        mask_after_build = os.umask(0o027)
+        probe = os.path.join(d, "maskprobe")
+        _write(os.path.join(probe, "plain.md"), b"plain fixture bytes")
+        raised = False
+        saved_umask = os.umask(0o002)
+        try:
+            try:
+                _write(os.path.join(probe, "plain.md", "never.md"), b"never written")
+            except OSError:
+                raised = True
+        finally:
+            os.umask(saved_umask)
+        mask_after_raise = os.umask(0o027)
+    finally:
+        os.umask(real_umask)
+    ok("SEAM-fixture-build-restores-umask", mask_after_build == 0o027
+       and mask_after_raise == 0o027 and raised,
+       "after build {:o}; after raise {:o}; raised {}".format(
+           mask_after_build, mask_after_raise, raised))
     res = run_init_operation(root, admitted=adm, operation_id=oid(11))
     with open(os.path.join(root, ".working/notes/frozen.md"), "rb") as fh:
         live = fh.read()
     ok("SEAM-admitted-accepted-under-umask-0002", res.status == VIEWS_READY
        and live == payload and _opf_store.resolve_store(root).status == _opf_store.RESOLVED
        and len(sub_ops(root)) == 1, str(res.primary_failure))
+
+    # An admitted .working KEEPS its observed owner-restrictive mode end to end: the plan
+    # records the observed 0o750 and validation accepts it, so the run reaches VIEWS_READY
+    # with the mode preserved (red when the keeps-its-observed-mode branch of
+    # validate_init_plan is removed and the plan falls back to DIR_MODE).
+    root, adm, payload = admit_fixture("keepmode")
+    os.chmod(os.path.join(root, ".working"), 0o750)
+    res = run_init_operation(root, admitted=adm, operation_id=oid(12))
+    kept = _mode(os.path.join(root, ".working"))
+    ok("SEAM-admitted-working-keeps-observed-mode", res.status == VIEWS_READY
+       and kept == 0o750 and _opf_store.resolve_store(root).status == _opf_store.RESOLVED
+       and len(sub_ops(root)) == 1, "mode {}; {}".format(kept, res.primary_failure))
 
     # The seam's second leg: a pre-existing EMPTY machine home (what archival of an occupying
     # machine-store file leaves behind) is admitted ONLY through admitted_dirs, at exactly its
