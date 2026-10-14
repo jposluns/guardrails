@@ -2952,8 +2952,11 @@ def _git_gate(label, failures):
     leave its block unrun while a later probe succeeds and the suite still prints SELF-TEST PASS.
     Round-6/7: the self-test also verifies the gate and probe BINDINGS by identity at each gated
     block (_gate_identity_failures over _GATE_IMPORT_BINDINGS) and accounts for exactly one record
-    per label (_gate_accounting_failures). The identity guarantee, exactly: a module rebinding that
-    is still in place at a checkpoint is detected whatever its spelling; a temporary rebinding
+    per label (_gate_accounting_failures). The identity guarantee, exactly (round-8: the checker
+    validates the public capture against its own definition-time reference, so this holds under
+    a co-rebinding of the capture; the checker and that reference are trusted inputs, stated at
+    _gate_identity_failures): a module rebinding that is still in place at a checkpoint is
+    detected whatever its spelling; a temporary rebinding
     restored between checkpoints, and a local shadow that never rebinds the module, are not
     detected by the identity check (the static backstop covers the spellings it lists), while the
     accounting still fails a run whose gated blocks leave no record.
@@ -2975,14 +2978,26 @@ def _git_gate(label, failures):
 # rebinding restored between checkpoints, and a local shadow that never rebinds the module, are
 # not detected by the identity check; the static _git_gate_alignment_failures scan below covers
 # the spellings it lists, and the per-label accounting catches a gate that leaves blocks without
-# a record whatever the binding.
+# a record whatever the binding. Round-8 (codex 1): _gate_identity_failures holds its OWN
+# definition-time reference to these objects and validates this public capture against it at
+# every checkpoint, so rebinding THIS name together with the gate no longer blinds the
+# checkpoints (the checker and its reference are trusted inputs, stated there).
 _GATE_IMPORT_BINDINGS = (_git_gate, _git_available)
 
 
-def _gate_identity_failures(failures, where):
+def _gate_identity_failures(failures, where, _ref=_GATE_IMPORT_BINDINGS):
     """Append a named failure for each module gate/probe binding that is no longer the object
-    captured at import (_GATE_IMPORT_BINDINGS): identity through the module's own namespace,
-    never a spelling scan. The guarantee, exactly (round-7 codex 3 / claude MEDIUM-2): a module
+    captured at import: identity through the module's own namespace, never a spelling scan.
+    Round-8 (codex 1): the reference is _ref, bound ONCE at definition time (import) to the
+    import capture and held on the function object, never reread from the module namespace;
+    the round-7 checker read _GATE_IMPORT_BINDINGS at each call, so rebinding the capture
+    TOGETHER with the gate blinded every checkpoint. The public capture is now validated
+    against _ref at every checkpoint, so that co-rebinding is a named identity failure. This
+    checker and its definition-time reference are TRUSTED INPUTS: a rebinding of
+    _gate_identity_failures itself, or a mutation of its stored default, is outside what the
+    check can observe (review and the static backstop carry that); the check detects drift of
+    the gate, the probe and the public capture, never of itself. The guarantee, exactly
+    (round-7 codex 3 / claude MEDIUM-2; round-8 scopes it to intact trusted inputs): a module
     rebinding that is still in place at a checkpoint is detected whatever its spelling; a
     temporary rebinding restored between checkpoints, and a local shadow (a parameter, a local
     def, class or match capture) that never rebinds the module, are not detected by the identity
@@ -2994,10 +3009,16 @@ def _gate_identity_failures(failures, where):
     SELF-TEST PASS (round-6 codex 1 / claude MEDIUM-1). The reviewed probe swap in
     _not_run_net_vectors is active only inside nested runs whose nonzero exit their caller
     asserts, so an identity failure recorded there never reaches a PASS. Red-on-revert: the
-    planted rebindings and the rebound-gate nested run, whose output must carry this diagnostic
+    planted rebindings, the planted co-rebinding of the capture and the gate (round-8, red at
+    the round-7 pin), and the rebound-gate nested run, whose output must carry this diagnostic
     for every checkpoint by name (round-7: one assertion per checkpoint)."""
     space = vars(sys.modules[__name__])
-    for name, bound in zip(("_git_gate", "_git_available"), _GATE_IMPORT_BINDINGS):
+    if space.get("_GATE_IMPORT_BINDINGS") is not _ref:
+        failures.append("(git-gate identity) {}: _GATE_IMPORT_BINDINGS is not the capture made "
+                        "at import (round-8: the checkpoints validate the module capture "
+                        "against a definition-time reference held outside the module "
+                        "namespace, so a co-rebinding cannot blind them)".format(where))
+    for name, bound in zip(("_git_gate", "_git_available"), _ref):
         if space.get(name) is not bound:
             failures.append("(git-gate identity) {}: {} is not the object captured at import "
                             "(rebound by some spelling; identity decides, so the spelling does "
@@ -3067,7 +3088,9 @@ def _git_gate_alignment_failures(source):
         MatchMapping.rest) or by a class definition (binding nodes the round-6 scan missed); any
         call through a _GATE_IMPORT_BINDINGS subscript (an indirect probe or an uncounted gate
         call through the import capture); any store or delete of _GATE_IMPORT_BINDINGS other
-        than the one reviewed capture (a co-rebinding would blind the identity checkpoints);
+        than the one reviewed capture (round-7: a co-rebinding blinded the then checkpoints;
+        round-8: the checkpoints validate the capture at run time, leaving this rule defence
+        in depth over the Name store/delete spellings it sees);
         and, in _not_run_net_vectors, more or less than one def of _planned_probe and any use of
         _planned_probe other than as the reviewed probe-store value (a second def or a direct
         call would wrap real_probe into an ungated early return).
@@ -3080,7 +3103,10 @@ def _git_gate_alignment_failures(source):
     its counted per-function dynamic-site exceptions. The guarantee is carried at run time
     instead, and it is exactly this (round-7 codex 3 / claude MEDIUM-2): _GATE_IMPORT_BINDINGS
     captures the gate and probe objects once at import, and _gate_identity_failures verifies BOTH
-    module bindings by identity at each gated block and at the end, so a module rebinding that is
+    module bindings by identity at each gated block and at the end, against its own
+    definition-time reference, validating the public capture against that reference too
+    (round-8: a co-rebinding of the capture together with the gate is a named identity
+    failure; the checker and its reference are trusted inputs), so a module rebinding that is
     still in place at a checkpoint is detected whatever its spelling; a temporary rebinding
     restored between checkpoints (reproduced by the disclosed-residual witness in the self-test)
     and a local shadow that never rebinds the module are NOT detected by the identity check, and
@@ -3313,8 +3339,10 @@ def _git_gate_alignment_failures(source):
                 and isinstance(node.ctx, (ast.Store, ast.Del))
                 and id(node) not in capture_target_ids):
             findings.append("line {}: _GATE_IMPORT_BINDINGS is rebound or deleted outside the "
-                            "reviewed import-time capture (round-7: the identity checkpoints "
-                            "read it, so a co-rebinding would blind them)".format(node.lineno))
+                            "reviewed import-time capture (round-7; round-8: the runtime "
+                            "checkpoints validate the capture against a definition-time "
+                            "reference, so this rule is defence in depth over the Name "
+                            "spellings it sees)".format(node.lineno))
     gate_calls = sorted((node for node in ast.walk(tree) if isinstance(node, ast.Call)
                          and isinstance(node.func, ast.Name) and node.func.id == "_git_gate"),
                         key=lambda call: (call.lineno, call.col_offset))
@@ -6650,7 +6678,11 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
     # _GATE_IMPORT_BINDINGS subscript, the capture co-rebinding, and the second def of and the
     # ungated call to _planned_probe) each returned [] from the round-6 checker, which also had
     # five rules with no planted vector at all (a global declaration, an except alias, a keyword
-    # argument, a bytes gate key, the gate-store count; claude MINOR-2), vectored now.
+    # argument, a bytes gate key, the gate-store count; claude MINOR-2), vectored now. Round-8
+    # (codex 2): the capture-deletion and zero-_planned_probe-def inputs were already findings
+    # under the round-7 checker; their new fixtures pin the ast.Del arm and BOTH sides of the
+    # def-count bound, each previously unvectored. Round-8 (codex 1): the co-rebinding RUNTIME
+    # vector below was red at the round-7 pin (its checker reread the rebound module capture).
     # Round-6/7: this battery keeps the checker honest as a BACKSTOP; the runtime identity
     # checkpoints (_gate_identity_failures at every gate and at the end) and the per-label
     # accounting (_gate_accounting_failures) before the verdict carry the guarantee, whose exact
@@ -6751,6 +6783,9 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
              "call through a _GATE_IMPORT_BINDINGS subscript"),
             ("a planted co-rebinding of the import capture (round-7)",
              "_GATE_IMPORT_BINDINGS = (lambda label, failures: False, lambda: True)\n",
+             "rebound or deleted outside the reviewed import-time capture"),
+            ("a planted deletion of the import capture (round-7 rule, vectored round-8)",
+             "del _GATE_IMPORT_BINDINGS\n",
              "rebound or deleted outside the reviewed import-time capture"),
             ("a planted global declaration of the probe (round-6 rule, vectored round-7)",
              "def _planted_global_vector():\n    global _git_available\n",
@@ -6913,6 +6948,21 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
             failures.append("(git-gate alignment) a missing import capture (round-6: the runtime "
                             "identity check reads it) must be a finding (got {})".format(got_cap))
 
+    # Round-8 (codex 2): the _planned_probe def, edited OUT (a SECOND def is a swap-line
+    # vector above); zero defs and two defs are both findings, so the exactly-one def bound
+    # is red-on-revert on BOTH sides (a `> 1` relaxation would readmit a removed def).
+    _planned_def_block = ("        def _planned_probe(plan=plan):\n"
+                          "            return plan.pop(0) if plan else " + "real_probe()\n")
+    if own_source.count(_planned_def_block) != 1:
+        failures.append("(git-gate alignment) expected exactly one _planned_probe def block to "
+                        "edit for the round-8 zero-def vector")
+    else:
+        got_zero = _git_gate_alignment_failures(own_source.replace(_planned_def_block, "", 1))
+        if not any("exactly one def of _planned_probe" in f_zero for f_zero in got_zero):
+            failures.append("(git-gate alignment) ZERO defs of _planned_probe (round-8: the "
+                            "def-count bound is two-sided) must be a finding naming the def "
+                            "count (got {})".format(got_zero))
+
     # Round-6: the RUNTIME identity check, red-on-revert for the rebinding class the static scan
     # kept missing across rounds 4 to 6: identity through the module's own namespace decides, so
     # one IN-PLACE module rebinding stands for every spelling of that class (a globals() store, a
@@ -6952,8 +7002,10 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
     # states, never the dispatch between them). The witness reproduces the escape: a stand-in
     # gate is bound, dispatched through the module namespace, and restored between two
     # checkpoint reads; the failure list must stay empty and the stand-in must have run.
-    # Strengthening dispatch (binding gated calls to the captured object) would turn this
-    # witness red, so the residual retires deliberately, never silently.
+    # Round-8 (codex 3): the witness dispatches through the module namespace read HERE, at
+    # the witness itself, independently of the production gate calls (the static backstop
+    # pins those to direct _git_gate names), so it demonstrates ONLY this residual and makes
+    # no claim about changes to production dispatch, which it cannot observe.
     gate_name_res = next((key_res for key_res, val_res in space_idn.items()
                           if val_res is _GATE_IMPORT_BINDINGS[0]), None)
     if gate_name_res is not None:
@@ -6969,9 +7021,41 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
         if got_res or ran_res != [True] or stood_res is not False:
             failures.append("(git-gate identity) the restore-between-checkpoints witness moved: "
                             "a temporary rebinding restored between checkpoints is the DISCLOSED "
-                            "residual of the identity check, expected to reproduce until dispatch "
-                            "itself is bound to the captured object (got failures={}, ran={}, "
+                            "residual of the identity check (got failures={}, ran={}, "
                             "returned={!r})".format(got_res, ran_res, stood_res))
+
+    # Round-8 (codex 1): the CO-REBINDING vector, red at the round-7 pin: the gate and the
+    # public import capture rebound TOGETHER through the module namespace (both keys found by
+    # identity, so this test needs no name literal). The round-7 checker reread its reference
+    # from the rebound module binding and reported nothing; the checker now validates the
+    # module capture against its definition-time reference, so BOTH rebindings are named.
+    cap_key_co = next((key_co for key_co, val_co in space_idn.items()
+                       if val_co is _GATE_IMPORT_BINDINGS), None)
+    gate_key_co = next((key_co for key_co, val_co in space_idn.items()
+                        if val_co is _GATE_IMPORT_BINDINGS[0]), None)
+    if cap_key_co is None or gate_key_co is None:
+        failures.append("(git-gate identity) the import capture or the gate has no module "
+                        "binding, so the co-rebinding vector cannot run (that drift is "
+                        "itself a named identity failure above)")
+    else:
+        real_cap_co = space_idn[cap_key_co]
+        real_gate_co = real_cap_co[0]
+        got_co = []
+        space_idn[gate_key_co] = lambda *_args_co: False
+        space_idn[cap_key_co] = (space_idn[gate_key_co], real_cap_co[1])
+        try:
+            _gate_identity_failures(got_co, "under a planted co-rebinding")
+        finally:
+            space_idn[cap_key_co] = real_cap_co
+            space_idn[gate_key_co] = real_gate_co
+        if not any("is not the capture made at import" in f_co for f_co in got_co) or not any(
+                gate_key_co in f_co and "is not the object captured at import" in f_co
+                for f_co in got_co):
+            failures.append("(git-gate identity) a co-rebinding of the gate and the import "
+                            "capture must name BOTH the drifted capture and the drifted gate "
+                            "(round-8: the round-7 checker read its reference from the "
+                            "rebound module binding and reported nothing; got {})".format(
+                                got_co))
 
     # Round-7 (fix item 1): the per-label accounting, one unit vector per gate label. Each
     # vector feeds _gate_accounting_failures a record list missing EXACTLY ONE label and
@@ -6980,6 +7064,10 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
     # different label produced. The intact, NOT-RUN-record and duplicate-record cases pin
     # both sides of the exactly-one bound (0 records and 2 records are each findings; 1,
     # from either source, never is).
+    # Round-8 (codex 4), correcting the round-7 account: omitting label 0 from the accounting
+    # draws THREE assertions, not two (its unit vector here, the duplicate-record vector
+    # below, whose expected ran=2 finding the omission suppresses, and the rebound-gate run's
+    # per-label assertion); labels 1-5 each draw two (unit vector and rebound-gate assertion).
     got_av = []
     _gate_accounting_failures(got_av, list(_GIT_GATE_LABELS))
     if got_av:
