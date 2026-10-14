@@ -13,7 +13,13 @@ launcher words are removed. The recognized interpreter-only flags -I, -B, -E, -s
 -P, and -u, including glued forms such as -IB, do not affect identity. The value of a
 runtime-derived flag (--base, --protected, --head) is masked as <ref:expression>,
 preserving which expression supplied it, only in the CI workflow and only when it
-is byte-for-byte one of the reviewed MASKED_REF_EXPRESSIONS. A runtime-derived
+is byte-for-byte one of the reviewed MASKED_REF_EXPRESSIONS AND its raw workflow
+spelling, before shell de-quoting, is byte-for-byte that expression's one
+reviewed spelling, its double-quoted form as quality.yml writes it; tokenization
+removes quotes and escaping backslashes, so any other spelling that de-quotes
+into a reviewed expression (a backslash-escaped, backslash-split,
+adjacent-quoted or single-quoted one) hands the gate different bytes at runtime
+and is cannot-evaluate (masked-spelling), never masked. A runtime-derived
 value is exactly one that carries $ or a backquote: any other such value is
 cannot-evaluate, never masked, a literal <ref:...> placeholder spelling included
 (the placeholder is the OUTPUT of this masking, accepted back only from the
@@ -25,12 +31,17 @@ identity as a kept literal (a tilde, glob or brace word included), so two
 different literals diverge. In the local runner every run_gate word is held to
 a character allowlist that admits no expansion at all, so a runtime-derived
 flag value there is refused, never masked. A ${{ }} GitHub expression anywhere
-in a run: value is cannot-evaluate, not masked, read on the raw block line
-before shell-comment stripping (GitHub substitutes expressions into the script
-text before the shell runs, comments included, so a substituted value carrying
-a newline leaves the comment), so a whole-line or trailing shell comment
-carrying one is refused too. Every other argument remains order-preserving and
-identity-relevant. Duplicates collapse because comparison is set-based.
+in a run: value is cannot-evaluate, not masked, read on the raw lines inside
+the block scalar before shell-comment stripping (GitHub substitutes
+expressions into the script text before the shell runs, comments included, so
+a substituted value carrying a newline leaves the comment), so a whole-line or
+trailing shell comment carrying one is refused too. The scalar extent is read
+as YAML reads it: the content indentation is the first non-empty line's, the
+first non-empty line below it ends the scalar, a comment line included, so a
+dedented YAML comment after the block is not script text, and a layout YAML
+rejects is refused, never passed. Every other argument remains
+order-preserving and identity-relevant. Duplicates collapse because
+comparison is set-based.
 
 REQUIRED STATUS (multi-job shape). The CI member set is the union over every job,
 so a gate moved from one job to another is still one member, and a gate dropped
@@ -276,7 +287,9 @@ a runtime-derived --base, --protected or --head value is refused in the local
 runner outright; the reviewed MASKED_REF_EXPRESSIONS apply only to the CI
 workflow, where an assigning, aborting or otherwise unreviewed expression
 (${x=failed=0}, ${stub_log?}, $((1/0))) stays cannot-evaluate rather than
-masked. A reviewed workflow expression still resolves only at runtime: its
+masked, and a reviewed expression in any raw spelling other than its one
+reviewed double-quoted form is cannot-evaluate too (masked-spelling). A
+reviewed workflow expression still resolves only at runtime: its
 variable can be empty (the flag then receives an empty value) or unset (each
 reviewed step's run block sets -u, so the step then ends early with a non-zero
 status); token-level parity sees neither. The ${...:?...} abort-expansion rule
@@ -389,6 +402,9 @@ RUNTIME_VALUE_FLAGS = frozenset({"--base", "--protected", "--head"})
 # ${PATH:x:0} evaluates it as arithmetic) or abort there (${x?} without a colon,
 # $((1/0))), so an unreviewed expression is cannot-evaluate rather than masked, and a
 # new runtime spelling stays refused until this reviewed set is extended.
+# Membership is read on the de-quoted token; the RAW spelling screen in
+# _mask_value additionally requires each member's one reviewed workflow
+# spelling, its double-quoted form as quality.yml writes it (FIX-551-R8).
 MASKED_REF_EXPRESSIONS = frozenset({
     "origin/${GITHUB_REF_NAME}",
     "origin/${GITHUB_BASE_REF}",
@@ -697,6 +713,98 @@ def _tokenize(code):
         )
 
 
+def _raw_lexemes(code, tokens):
+    """Recover each token's RAW spelling (quotes and escaping backslashes
+    kept) from a command _tokenize already split, by walking the same shlex
+    grammar (posix, whitespace_split, punctuation_chars "|&;<>"). The walk
+    must reproduce the de-quoted token list byte-for-byte; where it cannot,
+    the result is None and normalize grants no masked identity (FIX-551-R8:
+    a missing raw spelling fails closed), so a divergence between the two
+    readers can refuse a mask but never grant one."""
+    raws = []
+    values = []
+    raw = []
+    value = []
+    in_word = False
+    kind = None
+    quote = None
+    escaped = False
+
+    def emit():
+        nonlocal in_word, kind
+        if in_word:
+            raws.append("".join(raw))
+            values.append("".join(value))
+            raw.clear()
+            value.clear()
+        in_word = False
+        kind = None
+
+    for char in code:
+        if escaped:
+            # Outside quotes a backslash escapes any character; inside
+            # double quotes shlex (posix) unescapes only the quote and the
+            # backslash itself and keeps the backslash ahead of anything
+            # else.
+            raw.append(char)
+            if quote == '"' and char not in ('"', "\\"):
+                value.append("\\")
+            value.append(char)
+            escaped = False
+            continue
+        if quote is not None:
+            if char == "\\" and quote == '"':
+                raw.append(char)
+                escaped = True
+                continue
+            raw.append(char)
+            if char == quote:
+                quote = None
+            else:
+                value.append(char)
+            continue
+        if char == "\\":
+            if kind == "punct":
+                emit()
+            raw.append(char)
+            escaped = True
+            in_word = True
+            kind = "word"
+            continue
+        if char in ('"', "'"):
+            if kind == "punct":
+                emit()
+            raw.append(char)
+            quote = char
+            in_word = True
+            kind = "word"
+            continue
+        if char in " \t":
+            emit()
+            continue
+        if char in "|&;<>":
+            if kind == "word":
+                emit()
+            raw.append(char)
+            value.append(char)
+            in_word = True
+            kind = "punct"
+            continue
+        if kind == "punct":
+            emit()
+        raw.append(char)
+        value.append(char)
+        in_word = True
+        kind = "word"
+
+    if quote is not None or escaped:
+        return None
+    emit()
+    if values != list(tokens):
+        return None
+    return raws
+
+
 def _operator(token):
     return bool(token) and all(char in "|&;<>()`" for char in token)
 
@@ -707,23 +815,36 @@ def _interpreter_flag(token):
 
 
 def _is_runtime_value(value):
-    """A runtime-derived flag value carries a shell expansion or a GitHub expression.
-    A literal value has neither and stays in identity, so two different literals diverge."""
+    """A runtime-derived flag value is exactly one carrying $ or a backquote
+    after tokenization. A tilde, glob or brace spelling carries neither, so it
+    is NOT runtime-derived here: it stays in identity as a kept literal and two
+    different literals diverge (bash would expand those spellings, which is why
+    the local runner's word allowlist refuses them outright)."""
     return "$" in value or "`" in value
 
 
-def _mask_value(value, masked_ok=False):
+def _mask_value(value, masked_ok=False, raw=None):
     """Canonicalize a runtime-value-flag value as a Result. A runtime-derived value
     (one carrying $ or a backquote) is masked to <ref:expression>, preserving which
     expression supplied it so a change among runtime spellings (including a
     self-comparison) diverges; a literal stays in identity. The expression must be
     byte-for-byte one of MASKED_REF_EXPRESSIONS: bash can assign or abort inside an
-    expansion, so an unreviewed expression is refused, never masked. A <ref:...>
+    expansion, so an unreviewed expression is refused, never masked. The value's
+    RAW workflow spelling, before shell de-quoting, must also be byte-for-byte
+    the one reviewed spelling of that expression, its double-quoted form as
+    quality.yml writes it (FIX-551-R8). Tokenization removes quotes and escaping
+    backslashes, so a backslash-escaped, backslash-split, adjacent-quoted
+    ("$PUSH""_BEFORE") or single-quoted ('$PUSH_BEFORE') spelling de-quotes
+    into a reviewed value while bash hands the gate different bytes at runtime;
+    raw is that spelling (None where the caller recovered none, refused the same
+    way), and every spelling other than the reviewed one is cannot-evaluate
+    (masked-spelling), never masked. A <ref:...>
     placeholder is the OUTPUT of this masking, accepted back only on the canonical
     path (masked_ok=True: _validate_allowlist re-normalizing the reviewed in-gate
     allowlist identities), where a placeholder of a reviewed expression passes
     through unchanged so the form is idempotent there, which the allowlist
-    canonical-identity check relies on. A workflow value gets no placeholder
+    canonical-identity check relies on; no raw spelling exists or is read on that
+    path. A workflow value gets no placeholder
     reading (FIX-551-R7): a <ref:...> spelling carrying $ or a backquote is
     screened like any other value and refused, because no whole placeholder is in
     MASKED_REF_EXPRESSIONS, so a quoted <ref:...> literal never collapses into the
@@ -742,15 +863,33 @@ def _mask_value(value, masked_ok=False):
                 "runtime-derived flag value {!r} is outside the reviewed "
                 "MASKED_REF_EXPRESSIONS allowlist".format(value),
             )
+        if raw != '"' + value + '"':
+            return Result(
+                False,
+                None,
+                "masked-spelling",
+                "flag value spelled {!r} de-quotes into the reviewed "
+                "expression {!r} but is not its one reviewed raw spelling "
+                "{!r}; quote and backslash removal happens before this "
+                "screen, so only the byte-for-byte reviewed workflow "
+                "spelling earns the masked identity".format(
+                    raw, value, '"' + value + '"'),
+            )
         return Result(True, "<ref:" + value + ">", "", "")
     return Result(True, value, "", "")
 
 
-def normalize(tokens, masked_ok=False):
+def normalize(tokens, masked_ok=False, raws=None):
     """Return a canonical gate identity or a cannot-evaluate Result. masked_ok=True
     is the allowlist-identity path, the one place a <ref:...> placeholder of a
-    reviewed expression is accepted back (_mask_value)."""
+    reviewed expression is accepted back (_mask_value). raws, where given, holds
+    each token's raw spelling as _raw_lexemes recovered it, consulted only to
+    grant a masked identity (FIX-551-R8); with no raws a runtime-derived value
+    in the reviewed set is refused (masked-spelling), never masked, so the
+    grant fails closed."""
     tokens = list(tokens)
+    if raws is not None and len(raws) != len(tokens):
+        raws = None
     if not tokens:
         return Result(False, None, "empty-command", "gate command is empty")
 
@@ -810,6 +949,7 @@ def normalize(tokens, masked_ok=False):
         canonical = [target]
 
     args = tokens[index:]
+    raw_args = raws[index:] if raws is not None else None
     index = 0
     while index < len(args):
         token = args[index]
@@ -823,7 +963,9 @@ def normalize(tokens, masked_ok=False):
                     "{} has no value".format(token),
                 )
             value = args[index + 1]
-            masked = _mask_value(value, masked_ok)
+            raw_value = (raw_args[index + 1]
+                         if raw_args is not None else None)
+            masked = _mask_value(value, masked_ok, raw_value)
             if not masked.ok:
                 return masked
             canonical.extend((token, masked.value))
@@ -844,7 +986,17 @@ def normalize(tokens, masked_ok=False):
                     "{} has an empty value".format(matched_flag),
                 )
             value = token[len(matched_flag) + 1:]
-            masked = _mask_value(value, masked_ok)
+            raw_value = None
+            if raw_args is not None:
+                raw_token = raw_args[index]
+                prefix = matched_flag + "="
+                # The reviewed equals-form spelling writes the flag and =
+                # unquoted; quoting that reaches into them cannot be the
+                # reviewed spelling, so the whole raw token (which never
+                # matches a double-quoted expression) is passed instead.
+                raw_value = (raw_token[len(prefix):]
+                             if raw_token.startswith(prefix) else raw_token)
+            masked = _mask_value(value, masked_ok, raw_value)
             if not masked.ok:
                 return masked
             canonical.extend((matched_flag, masked.value))
@@ -1817,7 +1969,8 @@ def _classify_ci_command(
             and (tokens[0] in INTERPRETERS
                  or tokens[0] in SHELLS
                  or tokens[0].lstrip("./") == "gitleaks")):
-        normalized = normalize(tokens)
+        normalized = normalize(
+            tokens, raws=_raw_lexemes(stripped, tokens))
         if normalized.ok:
             _add_member(
                 members, origins, line_number, normalized.value)
@@ -2654,6 +2807,7 @@ def extract_ci(text, source=CI_SOURCE):
 
                 if value in ("|", "|-", "|+"):
                     index += 1
+                    content_indent = None
                     while index < len(lines):
                         body_raw = lines[index]
                         body_number = index + 1
@@ -2668,15 +2822,44 @@ def extract_ci(text, source=CI_SOURCE):
                             index += 1
                             continue
 
-                        if ("${{" in body_raw
-                                and len(body_raw)
-                                - len(body_raw.lstrip(" ")) > 8):
-                            # The RAW block line, before shell-comment
+                        if not body_raw.strip():
+                            # A whitespace-only line is inside the scalar
+                            # wherever it falls: YAML keeps empty lines in
+                            # a literal block whatever their indentation.
+                            index += 1
+                            continue
+
+                        body_indent = (
+                            len(body_raw)
+                            - len(body_raw.lstrip(" "))
+                        )
+                        if content_indent is None:
+                            if body_indent <= 8:
+                                # No content line at all: the scalar is
+                                # empty and this line is outside it.
+                                break
+                            # YAML detects a literal scalar's content
+                            # indentation from its FIRST non-empty line
+                            # (FIX-551-R8); every non-empty line at or
+                            # beyond it is scalar content, comment
+                            # spellings included.
+                            content_indent = body_indent
+                        if body_indent < content_indent:
+                            # The first non-empty line below the content
+                            # indentation ends the scalar, a comment line
+                            # included, so a dedented YAML comment after
+                            # the block is outside the script text; the
+                            # outer loop re-reads this line, and a layout
+                            # YAML rejects is refused there
+                            # (step-structure), never passed.
+                            break
+
+                        if "${{" in body_raw:
+                            # The RAW scalar line, before shell-comment
                             # stripping (FIX-551-R7): GitHub substitutes
                             # ${{ }} into the script text before the shell
                             # runs, comments included, so a substituted
                             # value carrying a newline leaves the comment.
-                            # A less-indented line ends the block instead.
                             diagnostics.append(_diagnostic(
                                 source,
                                 body_number,
@@ -2691,13 +2874,6 @@ def extract_ci(text, source=CI_SOURCE):
                         if not body_code.strip():
                             index += 1
                             continue
-
-                        body_indent = (
-                            len(body_code)
-                            - len(body_code.lstrip(" "))
-                        )
-                        if body_indent <= 8:
-                            break
 
                         _classify_ci_command(
                             body_code.strip(),
@@ -6375,6 +6551,136 @@ def self_test():
              leak_waiver),
          0, active={(
              "ci-only", "tools/check_leaks.py --base <ref:$PUSH_BEFORE>")})
+
+    # FIX-551-R8 (PR 551 round-7 reviews, MEDIUM): the equals form
+    # --flag=value runs through its own branch of normalize, which the
+    # space-form 35y vectors never reach; a mutant passing masked_ok=True
+    # there accepted a placeholder literal while the whole 35 series stayed
+    # green. The two negatives and the reviewed-expression positive pin that
+    # branch.
+    for label, spelling in (
+            ("a double-quoted equals-form placeholder literal",
+             "--base=\"<ref:$PUSH_BEFORE>\""),
+            ("a single-quoted equals-form placeholder literal",
+             "--base='<ref:$PUSH_BEFORE>'")):
+        spoofed = evaluate(
+            local_fixture(common),
+            ci_fixture(common + (
+                "python3 -I -B tools/check_leaks.py " + spelling,)),
+            leak_waiver)
+        case("35y an equals-form literal placeholder flag value is "
+             "cannot-evaluate: " + label, spoofed, 2)
+        count += 1
+        if not any(item.code == "masked-value"
+                   for item in spoofed.diagnostics):
+            failures.append(
+                "35y {}: no masked-value diagnostic: {!r}".format(
+                    label, spoofed.diagnostics))
+    case("35y control: the reviewed expression in equals form masks and "
+         "reconciles with the placeholder waiver",
+         evaluate(
+             local_fixture(common),
+             ci_fixture(common + (
+                 "python3 -I -B tools/check_leaks.py "
+                 "--base=\"$PUSH_BEFORE\"",)),
+             leak_waiver),
+         0, active={(
+             "ci-only", "tools/check_leaks.py --base <ref:$PUSH_BEFORE>")})
+
+    # FIX-551-R8 (PR 551 round-7 reviews, MAJOR): a masked identity is
+    # granted only when the value's RAW workflow spelling, before shell
+    # de-quoting, is byte-for-byte the reviewed double-quoted spelling. shlex
+    # removes quotes and escaping backslashes, so before the change every
+    # spelling below de-quoted into the reviewed $PUSH_BEFORE, collapsed into
+    # the waived masked identity and reconciled with exit 0, while bash hands
+    # the gate different bytes at runtime (a literal $PUSH_BEFORE for the
+    # escaped and single-quoted spellings, an expansion of $PUSH for the
+    # split ones). Each is now cannot-evaluate (masked-spelling), in space
+    # and equals form; the 35y controls keep the reviewed spelling passing
+    # in both forms.
+    for label, spelling in (
+            ("an escaped dollar", "\\$PUSH_BEFORE"),
+            ("a backslash-split name", "$PUSH_\\BEFORE"),
+            ("adjacent double-quoted parts", "\"$PUSH\"\"_BEFORE\""),
+            ("a double-quoted part with a bare tail", "\"$PUSH\"_BEFORE"),
+            ("an escaped underscore", "$PUSH\\_BEFORE"),
+            ("a single-quoted dollar with a bare tail", "'$'PUSH_BEFORE"),
+            ("a single-quoted spelling", "'$PUSH_BEFORE'")):
+        for form, flag_arg in (("space", "--base " + spelling),
+                               ("equals", "--base=" + spelling)):
+            unreviewed = evaluate(
+                local_fixture(common),
+                ci_fixture(common + (
+                    "python3 -I -B tools/check_leaks.py " + flag_arg,)),
+                leak_waiver)
+            case("35z an unreviewed raw spelling of a reviewed expression "
+                 "is cannot-evaluate ({} form): {}".format(form, label),
+                 unreviewed, 2)
+            count += 1
+            if not any(item.code == "masked-spelling"
+                       for item in unreviewed.diagnostics):
+                failures.append(
+                    "35z {} ({} form): no masked-spelling diagnostic: "
+                    "{!r}".format(label, form, unreviewed.diagnostics))
+
+    # FIX-551-R8 (PR 551 round-7 reviews, MEDIUM): the raw ${{ }} screen
+    # reads the run: block scalar as YAML does, from its content indentation
+    # (the first non-empty line) to its end (the first non-empty line below
+    # that indentation), not from a fixed threshold of 8. A dedented YAML
+    # comment after the block is outside the scalar (before the change it
+    # was refused at any indent above 8); a comment inside the scalar is
+    # script text wherever the content indentation sits; and a dedented line
+    # that re-enters the step is a layout YAML rejects, refused by the outer
+    # loop, never passed.
+    def block_step(block_lines):
+        return (("      - name: Block carrier",
+                 "        " + STEP_SHELL_LINE,
+                 "        run: |") + block_lines)
+
+    dedented_comment = evaluate(
+        local_msg,
+        with_on(ci_fixture(common, block_step(
+            ("            echo ok", "          # " + pr_title))), defaults),
+        msg_waiver, msg_side)
+    case("36 a YAML comment dedented below the run: block content is "
+         "outside the scalar (pass)", dedented_comment, 0)
+    count += 1
+    if any(item.code == "workflow-expression"
+           for item in dedented_comment.diagnostics):
+        failures.append(
+            "36 dedented comment: unexpected workflow-expression "
+            "diagnostic: {!r}".format(dedented_comment.diagnostics))
+    for label, block_lines in (
+            ("a comment at the content indentation of 12",
+             ("            echo ok", "            # " + pr_title)),
+            ("a comment at the content indentation of 9",
+             ("         echo ok", "         # " + pr_title))):
+        inside = evaluate(
+            local_msg,
+            with_on(ci_fixture(common, block_step(block_lines)), defaults),
+            msg_waiver, msg_side)
+        case("36 a comment inside the scalar carries the expression: "
+             + label, inside, 2)
+        count += 1
+        if not any(item.code == "workflow-expression"
+                   for item in inside.diagnostics):
+            failures.append(
+                "36 {}: no workflow-expression diagnostic: {!r}".format(
+                    label, inside.diagnostics))
+    reentry = evaluate(
+        local_msg,
+        with_on(ci_fixture(common, block_step(
+            ("            echo ok", "          # a dedented comment",
+             "            echo again"))), defaults),
+        msg_waiver, msg_side)
+    case("36 content after a dedented comment is a layout YAML rejects, "
+         "refused", reentry, 2)
+    count += 1
+    if not any(item.code == "step-structure"
+               for item in reentry.diagnostics):
+        failures.append(
+            "36 dedented re-entry: no step-structure diagnostic: "
+            "{!r}".format(reentry.diagnostics))
 
     if failures:
         print("SELF-TEST FAIL:")
