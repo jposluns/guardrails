@@ -719,7 +719,7 @@ def self_test_main():
             case("a self-test that exits 1 beside a leaked descendant", 1, r_leaky, needle="exited 1 before")
         finally:
             SELFTEST_TIMEOUT, _load_factor = saved
-            for pid in _load_bound._alive_with(leaked):
+            for pid in (_load_bound._alive_with(leaked) or []):
                 _load_bound._kill_pid(pid)
 
         def _unreadable_leg(rows, findings):

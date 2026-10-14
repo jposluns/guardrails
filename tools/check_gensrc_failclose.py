@@ -1567,7 +1567,7 @@ def _self_test_main_isolated():
             _load_factor, PROBE_TIMEOUT, PROBE_STALL_S = saved_bounds
             _now = saved_now
             _run_check = saved_run_check
-            for pid in _load_bound._alive_with(leaked):
+            for pid in (_load_bound._alive_with(leaked) or []):
                 _load_bound._kill_pid(pid)
         if (rc_slow, rc_hang, rc_idle, sorted(set(stops)), rc_leaky, rc_leaky_reject,
                 rc_leaky_reject_escape) != (0, 2, 2, ["stall"], 1, 0, 2):

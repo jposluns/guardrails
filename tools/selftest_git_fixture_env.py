@@ -99,6 +99,9 @@ import _optlevel  # noqa: E402  level-0 parses for the mutants, shared with opf/
 ROOT = Path(__file__).resolve().parents[1]
 CHECKS_MANIFEST = ROOT / "tools" / "selftest_checks.toml"
 CORPUS_SELFTEST = ROOT / "tools" / "selftest_aiqt_corpus.py"
+# The directory the IMPORTED corpus surface is imported from (_run_corpus_imported); the bound
+# lane points it at a fixture module to drive that runner's stop branches too.
+CORPUS_TOOLS = ROOT / "tools"
 SUITE_ID = "git-fixture-env-selftest"
 # Bounds for the child self-tests this suite launches (every registered member, the corpus lanes). A
 # member runs as long as its own work takes (opf.py --self-test alone needs minutes unloaded), and a host
@@ -111,9 +114,12 @@ SUITE_ID = "git-fixture-env-selftest"
 # stop is a failure (exit 1): a nonzero exit the child reached before the stop (Hung.returncode), a
 # hook, monitor or exposure marker recorded for a stopped member (_stop_or), a wrong value in the same
 # result (_judge), and a captured stream (stderr or stdout) carrying a failure marker
-# (_failure_evidence): a line-start Traceback, FAIL, ERROR or SELF-TEST FAIL, a verbose
-# "... FAIL"/"... ERROR" result ending, or unittest's F/E progress characters, which only failing or
-# erroring tests write. The members' own PASSING unittest progress on stderr (dots, "Ran N tests",
+# (_failure_evidence): a line-start Traceback, FAIL, ERROR or SELF-TEST FAIL (unittest's
+# "FAILED (unexpected successes=N)" summary starts with FAIL and is covered), a verbose
+# "... FAIL"/"... ERROR"/"... unexpected success" result ending, or unittest's F, E or u progress
+# characters, which only failing, erroring or unexpectedly succeeding tests write (an unexpected
+# success makes wasSuccessful() false), including a progress run cut short by other text on the
+# same line. The members' own PASSING unittest progress on stderr (dots, "Ran N tests",
 # "OK", written by passing runs too) is NOT failure evidence: a stop beside passing-progress-only
 # streams stays a BoundStop, never a false failure.
 # Longest silent wait a member legitimately makes: a bounded hold of a worker thread or a child while
@@ -180,19 +186,24 @@ def _bound_stop(what, exc):
 
 
 # Failure markers in a stream captured beside a stop, each one written only by a run that has
-# already failed or errored: a line-start Python Traceback, a unittest FAIL/FAILED/ERROR summary
-# line, a member's own "SELF-TEST FAIL" line, a verbose-mode "... FAIL"/"... ERROR" result ending,
-# or verbosity-1 progress characters that include F or E (unittest writes F and E only for failing
-# or erroring tests). unittest's PASSING progress (dots, "Ran N tests", "OK") lands on stderr in
-# passing runs too, so it is never failure evidence: without a marker the stop stays a BoundStop
-# (cannot-evaluate), exactly like a silent one (the _load_bound contract). The line-start words are
-# matched as spelled, so unrelated output that begins a line with one of them also counts as
-# failure evidence: that files a would-be cannot-evaluate (exit 2) as a failure (exit 1), the
-# direction that never hides a defect; the completed path judges the exit code, not this text.
+# already failed, errored or unexpectedly succeeded: a line-start Python Traceback, a unittest
+# FAIL/FAILED/ERROR summary line (the "FAILED (unexpected successes=N)" summary included), a
+# member's own "SELF-TEST FAIL" line, a verbose-mode "... FAIL"/"... ERROR"/"... unexpected
+# success" result ending, or verbosity-1 progress characters that include F, E or u (unittest
+# writes F and E only for failing or erroring tests and u only for an unexpected success, which
+# makes wasSuccessful() false), whether the progress line is pure or cut short by other text
+# written onto the same line. unittest's PASSING progress (dots, "Ran N tests", "OK") lands on
+# stderr in passing runs too, so it is never failure evidence: without a marker the stop stays a
+# BoundStop (cannot-evaluate), exactly like a silent one (the _load_bound contract). The
+# line-start words and progress runs are matched as spelled, so unrelated output that begins a
+# line with one of them (or with a progress run carrying F, E or u) also counts as failure
+# evidence: that files a would-be cannot-evaluate (exit 2) as a failure (exit 1), the direction
+# that never hides a defect; the completed path judges the exit code, not this text.
 _FAILURE_EVIDENCE_RE = re.compile(
-    r"^(Traceback|FAIL|ERROR|SELF-TEST FAIL)"  # line-start failure markers
-    r"|\.\.\. (FAIL|ERROR)$"                   # verbose unittest result line endings
-    r"|^[.Esxu]*[FE][.FEsxu]*$",               # verbosity-1 progress carrying an F or an E
+    r"^(Traceback|FAIL|ERROR|SELF-TEST FAIL)"        # line-start failure markers
+    r"|\.\.\. (FAIL|ERROR|unexpected success)$"      # verbose unittest result line endings
+    r"|^[.Esxu]*[FEu][.FEsxu]*$"                     # verbosity-1 progress carrying F, E or u
+    r"|^[.Esxu]+[FEu]",                              # a progress run cut short by other text
     re.MULTILINE)
 
 
@@ -1943,7 +1954,7 @@ def _run_corpus_imported(poison_key, poison_value, cwd):
         "sys.exit(rc if dict(os.environ) == saved else 1)",
     ))
     try:
-        proc = _load_bound.run([sys.executable, "-I", "-B", "-c", code, str(ROOT / "tools")],
+        proc = _load_bound.run([sys.executable, "-I", "-B", "-c", code, str(CORPUS_TOOLS)],
                                budget_s=CORPUS_BUDGET_S, stall_s=CORPUS_STALL_S,
                                clock=_load_bound.LoadClock(factor=_LOAD_FACTOR),
                                cwd=str(cwd), env=env, text=True)
@@ -4704,11 +4715,19 @@ def _bound_stop_lane(base):
     before the stop are cannot-evaluate too, never failures (the stream branch needs a failure marker,
     which the noisy member's Traceback supplies); a real difference beside a stop stays a failure; the
     suite exits 1 for any failure, else
-    2 for a stop. bound/failing-progress-is-failure: failure evidence a stopped run had already
+    2 for a stop; the imported-corpus runner's passing-progress fixture stays a BoundStop too.
+    bound/failing-progress-is-failure: failure evidence a stopped run had already
     written files as a FAILURE, never cannot-evaluate: a corpus run whose stderr carries unittest's
-    F progress character, a member whose stderr ends a verbose result line with "... FAIL", a member
-    whose stderr carries its own "SELF-TEST FAIL:" line, and a member whose marker lands on STDOUT
-    only, while the passing-progress controls above stay BoundStops. bound/stop-keeps-failure-evidence: a stopped member whose hook, monitor or exposure log
+    F, E or u progress character (u is an unexpected success, which makes wasSuccessful() false),
+    a member whose stderr ends a verbose result line with "... FAIL", "... ERROR" or
+    "... unexpected success", a member whose stderr carries unittest's
+    "FAILED (unexpected successes=1)" summary, a member whose progress run is cut short by other
+    text on the same line (".E[worker] retrying"), a member
+    whose stderr carries its own "SELF-TEST FAIL:" line, a member whose marker lands on STDOUT
+    only, and an IMPORTED corpus run (through CORPUS_TOOLS, pointing _run_corpus_imported at a
+    fixture module) whose stderr carries ".F", while the passing-progress controls above stay
+    BoundStops; the corpus and imported legs also assert the captured evidence text rides the
+    returned failing value. bound/stop-keeps-failure-evidence: a stopped member whose hook, monitor or exposure log
     recorded a marker is a failure in the registered lists and the OPF lifecycle roster, a wrong value in
     a tuple beside a stop is a failure, a member stopped beside captured failure evidence is a failure (a plain
     failing value, never a BoundStop), and a member that exited nonzero while a leaked descendant held
@@ -4720,7 +4739,8 @@ def _bound_stop_lane(base):
     execution reconciler forwards stdout and faults on any suite stderr byte) and must match its full
     expected text with only the stall idle seconds free, the noisy member diagnostic must land on
     stdout too, and every other call must write nothing, so no vector writes to the suite streams."""
-    global MEMBER_BUDGET_S, MEMBER_STALL_S, CORPUS_BUDGET_S, CORPUS_STALL_S, CORPUS_SELFTEST, _LOAD_FACTOR
+    global MEMBER_BUDGET_S, MEMBER_STALL_S, CORPUS_BUDGET_S, CORPUS_STALL_S, CORPUS_SELFTEST
+    global CORPUS_TOOLS, _LOAD_FACTOR
     import contextlib
     import io
     import re
@@ -4751,7 +4771,42 @@ def _bound_stop_lane(base):
     stdout_marker = base / "bound-stdout-marker.py"
     stdout_marker.write_text("import time\nprint(\"SELF-TEST FAIL:\", flush=True)\ntime.sleep(3600)\n",
                              encoding="utf-8")
-    saved = (MEMBER_BUDGET_S, MEMBER_STALL_S, CORPUS_BUDGET_S, CORPUS_STALL_S, CORPUS_SELFTEST, _LOAD_FACTOR)
+    verbose_error = base / "bound-verbose-error.py"
+    verbose_error.write_text("import sys, time\nsys.stderr.write(\"test_x (suite.Case) ... ERROR\\n\")\n"
+                             "sys.stderr.flush()\ntime.sleep(3600)\n", encoding="utf-8")
+    verbose_unexpected = base / "bound-verbose-unexpected.py"
+    verbose_unexpected.write_text("import sys, time\n"
+                                  "sys.stderr.write(\"test_x (suite.Case) ... unexpected success\\n\")\n"
+                                  "sys.stderr.flush()\ntime.sleep(3600)\n", encoding="utf-8")
+    summary_unexpected = base / "bound-summary-unexpected.py"
+    summary_unexpected.write_text("import sys, time\n"
+                                  "sys.stderr.write(\"FAILED (unexpected successes=1)\\n\")\n"
+                                  "sys.stderr.flush()\ntime.sleep(3600)\n", encoding="utf-8")
+    progress_cut = base / "bound-progress-cut.py"
+    progress_cut.write_text("import sys, time\nsys.stderr.write(\".E[worker] retrying\\n\")\n"
+                            "sys.stderr.flush()\ntime.sleep(3600)\n", encoding="utf-8")
+    e_progress = base / "bound-e-progress.py"
+    e_progress.write_text("import sys, time\nsys.stderr.write(\".E\")\nsys.stderr.flush()\n"
+                          "time.sleep(3600)\n", encoding="utf-8")
+    u_progress = base / "bound-u-progress.py"
+    u_progress.write_text("import sys, time\nsys.stderr.write(\"u\")\nsys.stderr.flush()\n"
+                          "time.sleep(3600)\n", encoding="utf-8")
+    # Fixture modules for the IMPORTED corpus runner (_run_corpus_imported): one stalls beside
+    # failing progress, one beside passing progress only, so that runner's failure-evidence and
+    # BoundStop branches are both driven, like the member and corpus runners above.
+    imported_failing_tools = base / "bound-imported-failing"
+    imported_failing_tools.mkdir()
+    (imported_failing_tools / "selftest_aiqt_corpus.py").write_text(
+        "import sys, time\n\n\ndef run_self_test():\n    sys.stderr.write(\".F\")\n"
+        "    sys.stderr.flush()\n    time.sleep(3600)\n    return 0\n", encoding="utf-8")
+    imported_passing_tools = base / "bound-imported-passing"
+    imported_passing_tools.mkdir()
+    (imported_passing_tools / "selftest_aiqt_corpus.py").write_text(
+        "import sys, time\n\n\ndef run_self_test():\n"
+        "    sys.stderr.write(\"...\\nRan 3 tests in 0.001s\\n\\nOK\\n\")\n"
+        "    sys.stderr.flush()\n    time.sleep(3600)\n    return 0\n", encoding="utf-8")
+    saved = (MEMBER_BUDGET_S, MEMBER_STALL_S, CORPUS_BUDGET_S, CORPUS_STALL_S, CORPUS_SELFTEST,
+             CORPUS_TOOLS, _LOAD_FACTOR)
     kept = len(BOUND_STOPS)
     env = _git_fixture_env.git_fixture_env()
     # Each call below is a deliberate vector: what it writes to the stdout or stderr of this process is
@@ -4792,6 +4847,12 @@ def _bound_stop_lane(base):
         verbose_rc = quiet("verbose-fail", _run_config_member, (str(verbose_fail),), env)
         selftest_rc = quiet("selftest-fail", _run_config_member, (str(selftest_fail),), env)
         stdout_rc = quiet("stdout-marker", _run_config_member, (str(stdout_marker),), env)
+        verbose_error_rc = quiet("verbose-error", _run_config_member, (str(verbose_error),), env)
+        verbose_unexpected_rc = quiet("verbose-unexpected", _run_config_member,
+                                      (str(verbose_unexpected),), env)
+        summary_unexpected_rc = quiet("summary-unexpected", _run_config_member,
+                                      (str(summary_unexpected),), env)
+        progress_cut_rc = quiet("progress-cut", _run_config_member, (str(progress_cut),), env)
         CORPUS_BUDGET_S, CORPUS_STALL_S, CORPUS_SELFTEST = 20, 1.5, silent
         corpus_stop = quiet("corpus", _run_corpus, "GIT_DIR", "/decoy/.git", base)
         CORPUS_SELFTEST = progress
@@ -4800,10 +4861,23 @@ def _bound_stop_lane(base):
         # stopped right after it files as a failure, never cannot-evaluate.
         CORPUS_SELFTEST = failing_progress
         corpus_failing = quiet("corpus-failing-progress", _run_corpus, "GIT_DIR", "/decoy/.git", base)
+        CORPUS_SELFTEST = e_progress
+        corpus_e = quiet("corpus-e-progress", _run_corpus, "GIT_DIR", "/decoy/.git", base)
+        # u is written only for an unexpected success, which makes wasSuccessful() false: failure
+        # evidence, like F and E.
+        CORPUS_SELFTEST = u_progress
+        corpus_u = quiet("corpus-u-progress", _run_corpus, "GIT_DIR", "/decoy/.git", base)
+        CORPUS_TOOLS = imported_failing_tools
+        imported_failing = quiet("imported-failing-progress", _run_corpus_imported, "GIT_DIR",
+                                 "/decoy/.git", base)
+        CORPUS_TOOLS = imported_passing_tools
+        imported_progress = quiet("imported-passing-progress", _run_corpus_imported, "GIT_DIR",
+                                  "/decoy/.git", base)
     finally:
-        MEMBER_BUDGET_S, MEMBER_STALL_S, CORPUS_BUDGET_S, CORPUS_STALL_S, CORPUS_SELFTEST, _LOAD_FACTOR = saved
+        (MEMBER_BUDGET_S, MEMBER_STALL_S, CORPUS_BUDGET_S, CORPUS_STALL_S, CORPUS_SELFTEST,
+         CORPUS_TOOLS, _LOAD_FACTOR) = saved
         del BOUND_STOPS[kept:]
-        for pid in _load_bound._alive_with(leaked):
+        for pid in (_load_bound._alive_with(leaked) or []):
             _load_bound._kill_pid(pid)
     check("bound/slowed-run-passes", (slowed_loaded, isinstance(slowed_idle, BoundStop)), (0, True))
     check("bound/hang-is-cannot-evaluate",
@@ -4811,12 +4885,13 @@ def _bound_stop_lane(base):
            isinstance(member_stop, str) and "heuristic stall bound" in member_stop,
            isinstance(corpus_stop, BoundStop),
            isinstance(progress_rc, BoundStop), isinstance(corpus_progress, BoundStop),
+           isinstance(imported_progress, BoundStop),
            _judge(member_stop, 0), _judge([member_stop], []), _judge([member_stop, ("tools/x.py",)], []),
            _judge(([corpus_stop], []), ([], [])),
            (_verdict_code([], ["x"], []), _verdict_code([], [], ["x"]), _verdict_code(["f"], ["x"], ["x"]),
             _verdict_code([], [], []))),
-          (True, True, True, True, True, "cannot-evaluate", "cannot-evaluate", "fail", "cannot-evaluate",
-           (2, 2, 1, 0)))
+          (True, True, True, True, True, True, "cannot-evaluate", "cannot-evaluate", "fail",
+           "cannot-evaluate", (2, 2, 1, 0)))
     member = ("tools/x.py", "--self-test")
 
     def registered(value):
@@ -4829,6 +4904,10 @@ def _bound_stop_lane(base):
     verbose_out, verbose_err = written.pop("verbose-fail", ("", ""))
     selftest_out, selftest_err = written.pop("selftest-fail", ("", ""))
     stdout_out, stdout_err = written.pop("stdout-marker", ("", ""))
+    verbose_error_out, verbose_error_err = written.pop("verbose-error", ("", ""))
+    verbose_unexpected_out, verbose_unexpected_err = written.pop("verbose-unexpected", ("", ""))
+    summary_unexpected_out, summary_unexpected_err = written.pop("summary-unexpected", ("", ""))
+    progress_cut_out, progress_cut_err = written.pop("progress-cut", ("", ""))
     # The full expected leaky diagnostic, on stdout: only the stall idle seconds are free.
     frame = "CONFIG-INJECTION {} (exited 3 before its bound fired: \x00):\n\n".format((str(leaky),))
     head, tail = frame.split("\x00")
@@ -4858,9 +4937,29 @@ def _bound_stop_lane(base):
             "SELF-TEST FAIL:" in selftest_out, selftest_err),
            (isinstance(stdout_rc, BoundStop), _judge(stdout_rc, 0),
             "SELF-TEST FAIL:" in stdout_out, stdout_err),
-           (isinstance(corpus_failing, BoundStop), _judge(corpus_failing, 0))),
+           (isinstance(verbose_error_rc, BoundStop), _judge(verbose_error_rc, 0),
+            "... ERROR" in verbose_error_out, verbose_error_err),
+           (isinstance(verbose_unexpected_rc, BoundStop), _judge(verbose_unexpected_rc, 0),
+            "unexpected success" in verbose_unexpected_out, verbose_unexpected_err),
+           (isinstance(summary_unexpected_rc, BoundStop), _judge(summary_unexpected_rc, 0),
+            "FAILED (unexpected successes=1)" in summary_unexpected_out, summary_unexpected_err),
+           (isinstance(progress_cut_rc, BoundStop), _judge(progress_cut_rc, 0),
+            ".E[worker] retrying" in progress_cut_out, progress_cut_err),
+           (isinstance(corpus_failing, BoundStop), _judge(corpus_failing, 0),
+            isinstance(corpus_failing, str)
+            and "captured failure evidence: '.F'" in corpus_failing),
+           (isinstance(corpus_e, BoundStop), _judge(corpus_e, 0),
+            isinstance(corpus_e, str) and "captured failure evidence: '.E'" in corpus_e),
+           (isinstance(corpus_u, BoundStop), _judge(corpus_u, 0),
+            isinstance(corpus_u, str) and "captured failure evidence: 'u'" in corpus_u),
+           (isinstance(imported_failing, BoundStop), _judge(imported_failing, 0),
+            isinstance(imported_failing, str)
+            and imported_failing.startswith("imported corpus self-test")
+            and "captured failure evidence: '.F'" in imported_failing)),
           ((False, "fail", True, ""), (False, "fail", True, ""), (False, "fail", True, ""),
-           (False, "fail")))
+           (False, "fail", True, ""), (False, "fail", True, ""), (False, "fail", True, ""),
+           (False, "fail", True, ""), (False, "fail", True), (False, "fail", True),
+           (False, "fail", True), (False, "fail", True)))
 
 
 def main(report_path=None):
