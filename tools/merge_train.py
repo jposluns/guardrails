@@ -178,6 +178,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 
 import contextlib
 import fcntl
+import gettext
 import hashlib
 import json
 import os
@@ -349,7 +350,11 @@ def _clean_env(extra=None):
     explicit additions, from the caller value (os.defpath when PATH is unset) with every empty,
     dot or other relative entry removed: a cwd-resolving entry would resolve a bare configured
     head in the child working directory, which for the regenerate and check commands is the
-    merged scratch checkout, content the PR itself supplies (FIX-541 round 10, decided 1)."""
+    merged scratch checkout, content the PR itself supplies (FIX-541 round 10, decided 1). The
+    rebuilt PATH is the FIRST layer only: _run_external resolves every program head against it
+    to an absolute executable realpath and refuses, by name, an empty sanitized PATH, an
+    unresolvable head and a resolved realpath inside the checkout or a repository
+    worktree, then launches the resolved absolute path (FIX-541 round 11, decided 1)."""
     env = dict((k, v) for k, v in os.environ.items() if not k.startswith("GIT_"))
     env["GIT_TERMINAL_PROMPT"] = "0"
     env.update(extra or dict())
@@ -683,11 +688,66 @@ def _git_author_text(cwd, *args, **kw):
     return _git_author(cwd, *args, **kw)[1].decode("utf-8", "replace").strip()
 
 
-def _run_external(argv, cwd, timeout, extra_env=None):
+def _resolve_program(head, env, confine):
+    """The absolute executable REALPATH _run_external launches for a command head, or (None,
+    reason) refusing the launch by name (FIX-541 round 11, decided 1): an absolute head is
+    taken as given; a bare head is resolved through shutil.which against the SANITIZED PATH of
+    env (see _clean_env; an empty sanitized PATH and an unresolvable head are refused, never
+    handed to the child's own PATH walk); any other head (a relative path) is refused outright.
+    The candidate's os.path.realpath must be an executable regular file lying OUTSIDE every
+    directory in confine (the child working directory, plus the repository worktrees at the
+    config-command call sites), each compared by realpath, so a /proc/self/cwd PATH entry, a
+    symlink alias and every other absolute alias of checkout content are refused before
+    anything runs. The child is then launched with that resolved ABSOLUTE path as argv[0]: it
+    never repeats the PATH walk, so a PATH entry that resolves differently after the child's
+    chdir (cwd-relative content through /proc/self/cwd) can name nothing there. Resolution
+    happens in THIS process at launch time; a file swapped between this check and the exec is
+    the accepted time-of-check residual of any path-based rule."""
+    if os.path.isabs(head):
+        candidate = head
+    elif "/" in head or "\\" in head:
+        return None, ("program %r is a relative path, neither a bare name nor an absolute "
+                      "path, so it is refused unresolved (fail closed)" % head)
+    else:
+        path_value = env.get("PATH", "")
+        if not path_value:
+            return None, ("program %r cannot be resolved: the sanitized PATH is empty (every "
+                          "caller PATH entry was empty, dot or otherwise relative)" % head)
+        candidate = shutil.which(head, path=path_value)
+        if candidate is None:
+            return None, ("program %r cannot be resolved to an executable on the sanitized "
+                          "PATH" % head)
+    real = os.path.realpath(candidate)
+    if not os.path.isfile(real) or not os.access(real, os.X_OK):
+        return None, ("program %r resolves to %r, which is not an executable regular file, "
+                      "so the launch is refused" % (head, real))
+    for base in confine:
+        base_real = os.path.realpath(str(base))
+        if real == base_real or real.startswith(base_real + os.sep):
+            return None, ("program %r resolves to checkout or worktree content, which never "
+                          "runs as a configured program head, so the launch is refused: "
+                          "realpath %r lies inside %r" % (head, real, base_real))
+    return real, None
+
+
+def _run_external(argv, cwd, timeout, extra_env=None, confine=()):
     """Launch a non-git program named by the trusted config, or the gh CLI: an argv list, no shell, a
-    timeout. Returns (returncode, or None on a timeout or launch error, stdout text, stderr text)."""
+    timeout. Returns (returncode, or None on a refusal, a timeout or a launch error, stdout
+    text, stderr text). Before anything runs, the program HEAD is resolved to an absolute
+    executable realpath (shutil.which against the sanitized PATH, or the given absolute path)
+    and refused, by name, when the sanitized PATH is empty, when the head cannot be resolved,
+    or when the resolved realpath lies inside the child working directory or a directory in
+    confine (the repository worktrees at the config-command call sites); the child is launched
+    with the resolved absolute path, never the bare name (FIX-541 round 11, decided 1; the
+    tree-based head refusals in guard_config_fail_closed stay in place as the first layer).
+    See _resolve_program."""
+    env = _clean_env(extra_env)
+    dirs = [str(cwd)] + [str(entry) for entry in confine if entry]
+    resolved, refusal = _resolve_program(argv[0], env, dirs)
+    if resolved is None:
+        return None, "", refusal
     try:
-        proc = _run_child(list(argv), cwd=str(cwd), env=_clean_env(extra_env), timeout=timeout)
+        proc = _run_child([resolved] + list(argv[1:]), cwd=str(cwd), env=env, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return None, "", str(exc)
     return (proc.returncode, proc.stdout.decode("utf-8", "replace"),
@@ -791,11 +851,17 @@ def guard_config_fail_closed(data, tree=None, head_tree=None):
             # guard; what the guard adds over that trust is that a head is never a path, that
             # with the base tip tree given (load_config always gives it; the guarantee needs
             # the tree) a head never names a base tip tree ENTRY, regular file or symlink,
-            # compared case-insensitively, and that _clean_env rebuilds the PATH every
-            # configured command resolves through with every cwd-relative entry removed
-            # (FIX-541 round 10, decided 1 and 4), so checkout content (tools/gen.py,
-            # ./python3, tools/python3, a committed python3 or a committed symlink, and
-            # content a PR adds that a dot or empty PATH entry would resolve in the scratch
+            # compared case-insensitively, and that _run_external resolves every head to an
+            # absolute executable realpath BEFORE the launch (shutil.which against the
+            # sanitized PATH _clean_env rebuilt with every cwd-relative entry removed) and
+            # refuses, by name, an empty sanitized PATH, an unresolvable head and a resolved
+            # realpath inside the private checkout or a repository worktree, then launches
+            # the resolved absolute path, never the bare name (FIX-541 round 10, decided 1
+            # and 4, and round 11, decided 1: a /proc/self/cwd PATH entry and every other
+            # absolute alias of the checkout fail the realpath containment, and the child
+            # repeats no PATH walk), so checkout content (tools/gen.py, ./python3,
+            # tools/python3, a committed python3 or a committed symlink, and content a PR
+            # adds that any PATH entry would resolve in the scratch
             # checkout) never runs as a configured program head.
             head = command[0]
             if "/" in head or "\\" in head:
@@ -1216,7 +1282,8 @@ def guard_fresh_checkout(ctx, scratch, new):
                          "checkout (exit %d): %s" % (rc, err.strip()[:300] or "(no stderr)"))
         for command in ctx["cfg"]["generated"]["check"]:
             code, _out, err = _run_external(command, fresh, ctx["cmd_timeout"],
-                                            dict(PYTHONDONTWRITEBYTECODE="1"))
+                                            dict(PYTHONDONTWRITEBYTECODE="1"),
+                                            confine=(ctx.get("root"), ctx.get("wt")))
             reason = _child_failure(code, command, err)
             if reason is not None:
                 raise Refuse("normal-checkout-failed",
@@ -1485,7 +1552,8 @@ def _changed_lines(wt, left, right, generated):
 def _run_checks(ctx, scratch):
     for command in ctx["cfg"]["generated"]["check"]:
         code, _out, err = _run_external(command, scratch, ctx["cmd_timeout"],
-                                        dict(PYTHONDONTWRITEBYTECODE="1"))
+                                        dict(PYTHONDONTWRITEBYTECODE="1"),
+                                        confine=(ctx.get("root"), ctx.get("wt")))
         _guard("check-exit")(code, command, err)
 
 
@@ -1713,7 +1781,8 @@ def _merge_commit_push(ctx, scratch, old, base, apply):
     automatic = _index_entries(scratch)
     for command in ctx["cfg"]["generated"]["regenerate"]:
         code, _out, err = _run_external(command, scratch, ctx["cmd_timeout"],
-                                        dict(PYTHONDONTWRITEBYTECODE="1"))
+                                        dict(PYTHONDONTWRITEBYTECODE="1"),
+                                        confine=(ctx.get("root"), ctx.get("wt")))
         _guard("regenerate-exit")(code, command, err)
     _git(scratch, "add", "-A", "--", *generated)
     _run_checks(ctx, scratch)
@@ -2561,7 +2630,12 @@ def case_config(_tmp):
     for check_id, argv in (
             ("config/python-inline-code-then-m-generic-refused", ["python3", "-c", "-m"]),
             ("config/python-double-dash-then-m-generic-refused", ["python3", "--", "-m"]),
-            ("config/python-stdin-then-m-generic-refused", ["python3", "-", "-m"])):
+            ("config/python-stdin-then-m-generic-refused", ["python3", "-", "-m"]),
+            # FIX-541 round 11 (decided 4): the BUNDLED c stop (-Ic) draws the same generic
+            # refusal; a scan stepping past the cluster would reach the -m behind it and draw
+            # the module diagnostic instead, so this vector discriminates that stop.
+            ("config/python-bundled-inline-code-then-m-generic-refused",
+             ["python3", "-Ic", "-m"])):
         got = refusal(lambda d, a=argv: d["generated"].update(check=[list(a)]),
                       tree=tree_with_gen)
         check(check_id, (got[0], "must not launch a python module" in got[1],
@@ -2848,6 +2922,105 @@ def case_pathenv(tmp):
         rc, reports, _fatal = fx.run()
         check(check_id, (rc, _result(reports, 1), sentinel.exists()),
               (0, "would-merge", False))
+    # FIX-541 round 11 (decided 1): PATH-syntax filtering alone cannot confine the head; the
+    # launch funnel now RESOLVES every head to an absolute executable realpath BEFORE anything
+    # runs. A caller PATH whose sanitized form is EMPTY (built from empty, dot and relative
+    # entries only) refuses the head by name: at the pin, _run_external handed the bare name
+    # to the child, whose own PATH walk resolved it IN the child working directory, checkout
+    # content (the impostor here would record that it ran).
+    unit_dir = Path(tmp) / "unit-impostor"
+    unit_dir.mkdir()
+    unit_sentinel = unit_dir / "unit-ran"
+    unit_impostor = unit_dir / "python3"
+    unit_impostor.write_text("#!/bin/sh\n: > '%s'\nexit 7\n" % unit_sentinel,
+                             encoding="utf-8")
+    unit_impostor.chmod(0o755)
+    empty_got = []
+    for raw_path in ("", ".", "rel/bin", os.pathsep + "." + os.pathsep + "rel/bin"):
+        saved_path = _put_env(dict(PATH=raw_path))
+        try:
+            code, _out, err = _run_external(["python3", "--version"], unit_dir, 5)
+        finally:
+            _restore_env(saved_path)
+        empty_got.append((code, "sanitized PATH is empty" in err and "python3" in err))
+    check("config/empty-sanitized-path-head-refused",
+          (empty_got, unit_sentinel.exists()), ([(None, True)] * 4, False))
+    # An absolute sanitized PATH that does not carry the head refuses it by name too: a bare
+    # name is never handed to the child to resolve.
+    vacant = Path(tmp) / "vacant-bin"
+    vacant.mkdir()
+    saved_path = _put_env(dict(PATH=str(vacant)))
+    try:
+        code, _out, err = _run_external(["merge-train-absent-program", "--x"], unit_dir, 5)
+    finally:
+        _restore_env(saved_path)
+    check("config/unresolvable-head-refused",
+          (code, "cannot be resolved" in err, unit_sentinel.exists()), (None, True, False))
+    # The accepted boundary (a compatibility check, never red-on-revert evidence): a head
+    # resolved OUTSIDE the confined directories launches as the resolved ABSOLUTE realpath
+    # (the symlink followed), never the bare name, observed through a recording child.
+    outside = Path(tmp) / "outside-bin"
+    outside.mkdir()
+    os.symlink(sys.executable, outside / "python3")
+    launched = []
+
+    def _argv_recording_child(argv, cwd=None, env=None, timeout=None, push=False):
+        launched.append(list(argv))
+        return subprocess.CompletedProcess(list(argv), 0, b"", b"")
+
+    saved_child = globals()["_run_child"]
+    saved_path = _put_env(dict(PATH=str(outside)))
+    globals()["_run_child"] = _argv_recording_child
+    try:
+        code, _out, _err = _run_external(["python3", "--version"], unit_dir, 5)
+    finally:
+        globals()["_run_child"] = saved_child
+        _restore_env(saved_path)
+    check("config/resolved-head-launched-absolute",
+          (code, [a[0] for a in launched], launched[0][1:] if launched else None),
+          (0, [os.path.realpath(sys.executable)], ["--version"]))
+    # End to end (FIX-541 round 11, decided 1), each red at the pin with the impostor's
+    # sentinel written: an absolute PATH entry naming a checkout directory (the PR worktree,
+    # which carries the committed impostor), a /proc/self/cwd entry (an absolute alias of
+    # whatever the RESOLVING process has as its working directory; at the pin the CHILD
+    # resolved it, after its chdir into the merged scratch checkout, so the scratch impostor
+    # ran), and a PATH directory whose python3 is a SYMLINK into the checkout are each refused
+    # by realpath containment before any checkout content runs: the run refuses
+    # regenerate-failed naming the containment, and the sentinel stays absent.
+    for check_id, name, proc_cwd in (
+            ("config/absolute-checkout-path-entry-head-refused",
+             "abs-checkout-path-impostor", False),
+            ("config/proc-self-cwd-path-entry-head-refused",
+             "proc-cwd-path-impostor", True),
+            ("config/checkout-symlink-alias-head-refused",
+             "symlink-alias-impostor", False)):
+        sentinel = Path(tmp) / (name + "-ran")
+        fx = _impostor_pr(tmp, name, str(sentinel))
+        fixtures.append(fx)
+        if check_id.endswith("symlink-alias-head-refused"):
+            alias_bin = fx.base / "alias-bin"
+            alias_bin.mkdir()
+            os.symlink(str(fx.base / "wt-1" / "python3"), str(alias_bin / "python3"))
+            entry = str(alias_bin)
+        elif proc_cwd:
+            entry = "/proc/self/cwd"
+        else:
+            entry = str(fx.base / "wt-1")
+        fx.path = entry + os.pathsep + fx.path
+        cwd_before = os.getcwd()
+        try:
+            if proc_cwd:
+                # The resolver runs in THIS process: point its /proc/self/cwd at the PR
+                # worktree, the checkout alias the containment must refuse.
+                os.chdir(str(fx.base / "wt-1"))
+            rc, reports, _fatal = fx.run()
+        finally:
+            os.chdir(cwd_before)
+        reason = reports[0]["reason"] if reports else ""
+        check(check_id,
+              (rc, _result(reports, 1), sentinel.exists(),
+               "never runs as a configured program head" in reason),
+              (1, "regenerate-failed", False, True))
     check("config/path-entries-invariants", _invariants(*fixtures), [])
 
 
@@ -3279,7 +3452,10 @@ def case_audit(_tmp):
     globals()["_run_child"] = _env_recording_child
     try:
         _git(".", "version")
-        _run_external(["toy-external-probe"], ".", 1)
+        # The probe head must RESOLVE (an absolute executable outside the cwd): _run_external
+        # now refuses an unresolvable head before reaching the recording child (FIX-541
+        # round 11, decided 1).
+        _run_external([sys.executable, "--version"], ".", 1)
     finally:
         globals()["_run_child"] = saved_child
         _restore_env(saved_locale)
@@ -3513,55 +3689,181 @@ def _fault_exit0(_rc, out, err):
 
 
 def _locale_probe_env(locale):
-    """A full child environment carrying EXACTLY the given LC_ALL/LANGUAGE entries: _clean_env
-    pins LC_ALL=C and drops LANGUAGE, so both are removed after the pin and the given entries
-    applied over the hole (self-test harness only: this deliberately undoes the production pin
-    to observe native translation; FIX-541 round 9, decided 3)."""
+    """A full child environment carrying EXACTLY the given LC_ALL/LANGUAGE entries and NO other
+    message-locale selector: _clean_env pins LC_ALL=C and drops LANGUAGE, so LC_ALL, LANGUAGE,
+    LC_MESSAGES and LANG are ALL removed after the pin and the given entries applied over the
+    hole, replaying the captured variables and their absence explicitly (FIX-541 round 11,
+    decided 3: the round-10 probe kept the ambient LANG, so a probe over a capture with no
+    LC_ALL read the HOST locale, never the observed one). Self-test harness only: this
+    deliberately undoes the production pin to observe native translation (FIX-541 round 9,
+    decided 3)."""
     env = _clean_env()
-    env.pop("LC_ALL", None)
-    env.pop("LANGUAGE", None)
+    for key in ("LC_ALL", "LANGUAGE", "LC_MESSAGES", "LANG"):
+        env.pop(key, None)
     env.update(locale)
     return env
 
 
-def _native_probe(locale):
-    """(exit status, stderr text) of ONE forced git fatal diagnostic (rev-parse --verify of an
-    absent name in an empty non-repository directory, read-only) under EXACTLY the given
-    LC_ALL/LANGUAGE entries: the shape both the availability rule and the native-fault
-    validation read, exit status included (FIX-541 round 10, decided 2)."""
+# The ONE diagnostic the probe forces (FIX-541 round 12, decided 1): git run with an EXPLICIT
+# --git-dir naming a RELATIVE path that is absent from the probe's directory. An explicit git
+# directory turns repository discovery off, so git never walks the probe directory's
+# ancestors and dies at setup with the explicit-directory message alone. The round-11 probe
+# relied on discovery from an empty directory, whose message depends on WHERE that directory
+# sits: below a filesystem boundary git names the mount point and adds a second "Stopping at
+# filesystem boundary" line, and inside a repository it reports a missing revision instead,
+# so a probe directory on another filesystem (TMPDIR on a separate mount) never matched the
+# control and every candidate read as not translating. The operand is relative, so the
+# message carries only that name, never the probe directory's own path, and the exit status
+# and text are the same in every directory where the name is absent. The option is spelled
+# as one literal so the maintenance-pin scan resolves the subcommand; the control below is
+# rendered from _PROBE_GIT_DIR, so the two spellings disagreeing fails every control check.
+_PROBE_GIT_DIR = "merge-train-locale-probe-absent"
+_PROBE_ARGV = ("git", "--git-dir=merge-train-locale-probe-absent", "rev-parse", "--verify",
+               "HEAD")
+
+
+def _native_probe(locale, where=None):
+    """(exit status, stderr text) of ONE forced git fatal diagnostic (_PROBE_ARGV: rev-parse
+    under an explicit, absent, relative git directory, read-only: git dies at setup before it
+    reads or writes anything) under EXACTLY the given LC_ALL/LANGUAGE entries: the shape both
+    the availability rule and the native-fault validation read, exit status included (FIX-541
+    round 10, decided 2). With where None the probe runs in a fresh empty temporary directory;
+    the self-test passes where to run it in an EXISTING directory instead, read-only, to show
+    the control does not depend on the directory's location (FIX-541 round 12, decided 2)."""
+    if where is not None:
+        proc = subprocess.run(list(_PROBE_ARGV), cwd=where, env=_locale_probe_env(locale),
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+        return proc.returncode, proc.stderr.decode("utf-8", "replace")
     with tempfile.TemporaryDirectory(prefix="merge-train-locale-probe-") as probe_dir:
-        proc = subprocess.run(["git", "rev-parse", "--verify", "merge-train-locale-probe"],
-                              cwd=probe_dir, env=_locale_probe_env(locale),
+        proc = subprocess.run(list(_PROBE_ARGV), cwd=probe_dir, env=_locale_probe_env(locale),
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
     return proc.returncode, proc.stderr.decode("utf-8", "replace")
 
 
-def _translates(locale):
-    """Whether real git translates its fatal: prefix under the given locale on THIS host,
-    judged against a C-locale CONTROL of the same probe (FIX-541 round 10, decided 2: the
-    round-9 rule read ANY non-empty stderr without the English prefixes as translation, so an
-    unrelated diagnostic could count): True only when the control fails with the English
-    fatal: prefix, the probe under locale fails with the SAME exit status, and its stderr is a
-    non-empty diagnostic carrying NEITHER English prefix, the translated form of that same
-    fatal diagnostic; the C locale itself therefore never counts as translated. Availability
-    is checked before the native leak vector runs, and a host with no translating locale
-    reports that vector NOT RUN (cannot-evaluate), never a pass (FIX-541 round 9, decided
-    3)."""
-    control_rc, control_err = _native_probe(dict(LC_ALL="C"))
-    if control_rc == 0 or not control_err.startswith("fatal:"):
+# Where git's own message catalogs live on the hosts this suite supports: the expected
+# diagnostic is rendered from the catalog git itself translates through, so the expectation
+# is INDEPENDENT of the probe output it validates (FIX-541 round 11, decided 2).
+_GIT_LOCALEDIRS = ("/usr/share/locale", "/usr/local/share/locale")
+# The exact msgid of the ONE diagnostic the probe forces (git's message for an explicit git
+# directory that is not a repository) and its English rendering over the probe's relative
+# operand: the C-locale control must produce exactly this, or nothing is validated (fail
+# closed; a git whose message changed reads as not translating, never as translated).
+_PROBE_MSGID = "not a git repository: '%s'"
+_PROBE_CONTROL = "fatal: " + _PROBE_MSGID % _PROBE_GIT_DIR + "\n"
+
+
+def _git_catalog(locale):
+    """The gettext catalog git reads for the given LC_ALL/LANGUAGE entries, or None: the
+    language is the first LANGUAGE entry when one is set (the highest-priority selector once
+    translation is enabled), else LC_ALL, and the C and POSIX locales name no catalog."""
+    lang = (locale.get("LANGUAGE") or locale.get("LC_ALL") or "").split(":")[0]
+    if not lang or lang.split(".")[0] in ("C", "POSIX"):
+        return None
+    for localedir in _GIT_LOCALEDIRS:
+        try:
+            return gettext.translation("git", localedir=localedir, languages=[lang])
+        except OSError:
+            continue
+    return None
+
+
+def _expected_probe_diag(locale):
+    """The INDEPENDENT expected probe diagnostic under locale: the translated form of the ONE
+    specific fatal message the probe forces, rendered from git's own message catalog, or None
+    when no catalog serves the locale or the catalog leaves the rendering identical to the
+    English control (then nothing distinguishes translation from English, fail closed).
+    FIX-541 round 11 (decided 2): the round-10 rule accepted ANY same-exit non-empty stderr
+    without a leading English prefix, so an unrelated warning, and a warning line ahead of an
+    English fatal line, both counted as the translated diagnostic."""
+    catalog = _git_catalog(locale)
+    if catalog is None:
+        return None
+    expected = (catalog.gettext("fatal: ") + catalog.gettext(_PROBE_MSGID) % _PROBE_GIT_DIR
+                + "\n")
+    if expected == _PROBE_CONTROL:
+        return None
+    return expected
+
+
+def _native_diag_valid(locale, control_rc, control_err, probe_rc, diag):
+    """Whether diag is VALIDATED as the translated form of the probe's specific fatal
+    diagnostic (FIX-541 round 11, decided 2): the C-locale control failed with exactly the
+    expected English message, the probe failed with the SAME exit status, and its stderr is
+    byte-identical to the expected diagnostic rendered from git's own message catalog, an
+    expectation independent of the probe. A same-exit unrelated warning, a warning ahead of
+    an English fatal line, an identity (English) diagnostic and empty output all fail this
+    equality."""
+    expected = _expected_probe_diag(locale)
+    return (control_rc != 0 and control_err == _PROBE_CONTROL and expected is not None
+            and probe_rc == control_rc and diag == expected)
+
+
+def _translates(locale, where=None):
+    """Whether real git translates the probe's fatal diagnostic under the given locale on THIS
+    host: _native_diag_valid over a C-locale CONTROL of the same probe and the catalog-rendered
+    expected text (FIX-541 round 10, decided 2, tightened round 11, decided 2: the round-10
+    rule read any same-exit non-empty stderr without the English prefixes as translation, so
+    an unrelated diagnostic could count); the C locale itself therefore never counts as
+    translated. Availability is checked before the native leak vector runs, and a host with no
+    translating locale reports that vector NOT RUN (cannot-evaluate), never a pass (FIX-541
+    round 9, decided 3). where is passed to both probes (see _native_probe)."""
+    control_rc, control_err = _native_probe(dict(LC_ALL="C"), where=where)
+    if control_rc == 0 or control_err != _PROBE_CONTROL:
         return False
-    rc, err = _native_probe(locale)
-    return (rc == control_rc and bool(err.strip())
-            and not err.startswith(("fatal:", "error:")))
+    rc, err = _native_probe(locale, where=where)
+    return _native_diag_valid(locale, control_rc, control_err, rc, err)
+
+
+def _other_filesystem_ancestor(path):
+    """The nearest ancestor of path on a DIFFERENT filesystem (device) than path itself, or None
+    when every ancestor shares its filesystem or one cannot be stat-ed: the location the
+    probe-location vectors use to put the probe across a filesystem boundary from the
+    self-test scratch without writing outside it (FIX-541 round 12, decided 2)."""
+    try:
+        current = os.path.realpath(path)
+        device = os.stat(current).st_dev
+        while os.path.dirname(current) != current:
+            current = os.path.dirname(current)
+            if os.stat(current).st_dev != device:
+                return current
+    except OSError:
+        return None
+    return None
+
+
+def _probe_locations(tmp, repo):
+    """(label, directory) of every location the probe-location vectors run the probe in
+    (FIX-541 round 12, decided 2): a fresh directory in the self-test scratch, a fresh directory
+    INSIDE the worktree of the given fixture repository (discovery from there finds that
+    repository), the checkout this tool runs from, and, when the self-test scratch has an
+    ancestor on another filesystem (a scratch or TMPDIR on its own mount), that ancestor. The
+    last two are EXISTING directories, probed read-only; nothing is written outside the
+    self-test scratch."""
+    locations = [("scratch", tempfile.mkdtemp(prefix="locale-probe-", dir=tmp)),
+                 ("inside-repository", tempfile.mkdtemp(prefix="locale-probe-", dir=repo)),
+                 ("checkout", str(ROOT))]
+    other = _other_filesystem_ancestor(tmp)
+    if other is not None:
+        locations.append(("other-filesystem", other))
+    return locations
+
+
+def _probe_controls(locations):
+    """(label, probe operand present, exit status, stderr) of the C-locale control probe at
+    each location: the operand must be ABSENT there for the probe to force its one diagnostic."""
+    return [(label, os.path.lexists(os.path.join(where, _PROBE_GIT_DIR)))
+            + _native_probe(dict(LC_ALL="C"), where=where) for label, where in locations]
 
 
 # One record per native-fault injection, cleared per _mergefault_run (FIX-541 round 10,
-# decided 2): observed says a merge-child locale observation existed at all (with none, nothing
-# is probed and nothing appended, NEVER a fallback to the host LANG), diag is the probe stderr
-# appended to the merge stderr, and valid says that diagnostic was VALIDATED as the translated
-# form of a fatal diagnostic (the C-locale control of the same probe fails with the English
-# fatal: prefix, the observed-locale probe fails with the SAME exit status, and its stderr is
-# non-empty with neither English prefix).
+# decided 2, revised round 11, decided 2 and 3): observed says a SUFFICIENT merge-child locale
+# observation existed (none at all, and a record that captured no non-empty LC_ALL, the [{}]
+# shape included, are both cannot-evaluate: nothing is probed, nothing is appended, and NEVER
+# a fallback to the host LANG, whose value in the child the observation did not establish),
+# diag is the probe stderr appended to the merge stderr, and valid says that diagnostic was
+# VALIDATED through _native_diag_valid as the translated form of the probe's one specific
+# fatal diagnostic, byte-identical to git's own catalog rendering, never merely same-exit
+# non-empty output without a leading English prefix.
 _NATIVE_FAULT = []
 # The stderr each injected fault handed back into the funnel, exactly what the merge
 # diagnostic scan reads, cleared per _mergefault_run: the native validation asserts its
@@ -3577,26 +3879,36 @@ def _fault_probe(observed):
     return _native_probe(observed)
 
 
+def _locale_record_sufficient(record):
+    """Whether ONE observed merge-child locale record pins the child's effective message
+    locale: only a record carrying a non-empty LC_ALL does (gettext reads LC_ALL first; with
+    it unset or empty the child's LANG, which the observation does not capture, decided the
+    locale, so the record proves nothing and the fault is cannot-evaluate; FIX-541 round 11,
+    decided 3: the [{}] shape used to probe under whatever LANG the host happened to have)."""
+    return bool(record.get("LC_ALL"))
+
+
 def _fault_native_stderr(rc, out, err):
     # REAL git stderr under the locale OBSERVED in the merge child, appended to the real merge
     # output: with the production pin intact the observed locale is C and the appended
     # diagnostic arrives as English "fatal: ...", which the scan refuses; under the deliberate
     # merge-only leak of a host-translating locale it arrives translated, which the
     # English-only scan misses, with no stand-in text involved (FIX-541 round 9, decided 3).
-    # FIX-541 round 10 (decided 2): the probe outcome is VALIDATED against a C-locale control
-    # and recorded in _NATIVE_FAULT for meta/native-fault-diagnostic-validated; with NO
-    # observed merge-child locale nothing is probed and nothing is appended, never a fallback
-    # to the host LANG.
-    if not _MERGE_CHILD_ENV:
+    # FIX-541 round 10 (decided 2) and round 11 (decided 2 and 3): the probe outcome is
+    # VALIDATED against the catalog-rendered expected diagnostic (_native_diag_valid) and
+    # recorded in _NATIVE_FAULT for meta/native-fault-diagnostic-validated; with NO observed
+    # merge-child locale, and with an observation that is INSUFFICIENT (no non-empty LC_ALL
+    # captured, the [{}] shape included), nothing is probed and nothing is appended,
+    # cannot-evaluate, never a fallback to the host LANG.
+    record = _MERGE_CHILD_ENV[-1] if _MERGE_CHILD_ENV else dict()
+    if not _MERGE_CHILD_ENV or not _locale_record_sufficient(record):
         _NATIVE_FAULT.append(dict(observed=False, valid=False, diag=""))
         return rc, out, err
-    probe_rc, diag = _fault_probe(_MERGE_CHILD_ENV[-1])
+    probe_rc, diag = _fault_probe(record)
     control_rc, control_err = _native_probe(dict(LC_ALL="C"))
     _NATIVE_FAULT.append(dict(
         observed=True, diag=diag,
-        valid=(control_rc != 0 and control_err.startswith("fatal:")
-               and probe_rc == control_rc and bool(diag.strip())
-               and not diag.startswith(("fatal:", "error:")))))
+        valid=_native_diag_valid(record, control_rc, control_err, probe_rc, diag)))
     return rc, out, err + diag
 
 
@@ -3698,6 +4010,64 @@ def case_mergefault(tmp):
     del _MERGE_CHILD_ENV[:]
     check("meta/translated-stand-in-fail-closed-without-capture",
           _fault_translated_stderr(1, b"", "")[2].startswith("Schwerwiegend: "), True)
+    # FIX-541 round 11 (decided 3): the native fault is CANNOT-EVALUATE (stderr unchanged, an
+    # observed=False record, no probe) with NO observation, with an EMPTY observation record
+    # (the child saw neither LC_ALL nor LANGUAGE set, so its LANG, which the observation does
+    # not capture, decided its locale) and with a LANGUAGE-only record (the same hole). None
+    # of these probes anything, so none depends on a translated locale being installed; at
+    # the pin the [{}] shape ran a probe under the ambient LANG.
+    cannot = (dict(observed=False, valid=False, diag=""),)
+    for cannot_id, records in (
+            ("meta/native-no-observation-cannot-evaluate", []),
+            ("meta/native-empty-observation-cannot-evaluate", [dict()]),
+            ("meta/native-language-only-observation-cannot-evaluate",
+             [dict(LANGUAGE="de")])):
+        del _MERGE_CHILD_ENV[:]
+        _MERGE_CHILD_ENV.extend(records)
+        del _NATIVE_FAULT[:]
+        got_cannot = _fault_native_stderr(1, b"", "merge conflict stderr\n")
+        check(cannot_id, (got_cannot, tuple(_NATIVE_FAULT)),
+              ((1, b"", "merge conflict stderr\n"), cannot))
+    del _MERGE_CHILD_ENV[:]
+    del _NATIVE_FAULT[:]
+    # FIX-541 round 11 (decided 3): the probe environment replays the captured variables AND
+    # their absence explicitly; an ambient LANG or LC_MESSAGES never reaches a probe.
+    saved_lang = _put_env(dict(LANG="de_DE.UTF-8", LC_MESSAGES="de_DE.UTF-8"))
+    try:
+        env_empty = _locale_probe_env(dict())
+        env_set = _locale_probe_env(dict(LC_ALL="fr_FR.UTF-8", LANGUAGE="fr"))
+    finally:
+        _restore_env(saved_lang)
+    check("meta/locale-probe-env-replays-absence-explicitly",
+          (sorted(k for k in env_empty if k in ("LANG", "LC_ALL", "LC_MESSAGES", "LANGUAGE")),
+           env_set.get("LC_ALL"), env_set.get("LANGUAGE"),
+           "LANG" in env_set, "LC_MESSAGES" in env_set),
+          ([], "fr_FR.UTF-8", "fr", False, False))
+    # FIX-541 round 11 (decided 2): the availability rule validates against the INDEPENDENT
+    # expected diagnostic (git's own catalog rendering of the probe's one fatal message), so a
+    # same-exit unrelated warning, and a warning line ahead of an English fatal line, are both
+    # NOT translation. Probed over a substituted _native_probe, so neither check depends on a
+    # translated locale being installed; at the pin both shapes read as translated (same exit,
+    # non-empty, no leading English prefix).
+    real_probe = globals()["_native_probe"]
+
+    def _probe_returning(text):
+        def _fake_probe(locale, where=None):
+            if locale == dict(LC_ALL="C"):
+                return 128, _PROBE_CONTROL
+            return 128, text
+        return _fake_probe
+
+    try:
+        globals()["_native_probe"] = _probe_returning("warning: unrelated diagnostic\n")
+        warning_only = _translates(dict(LC_ALL="xx_XX.UTF-8", LANGUAGE="xx"))
+        globals()["_native_probe"] = _probe_returning("warning: x\n" + _PROBE_CONTROL)
+        warning_then_fatal = _translates(dict(LC_ALL="xx_XX.UTF-8", LANGUAGE="xx"))
+    finally:
+        globals()["_native_probe"] = real_probe
+    check("meta/native-translates-rejects-same-exit-unrelated-warning", warning_only, False)
+    check("meta/native-translates-rejects-warning-before-english-fatal",
+          warning_then_fatal, False)
     # FIX-541 round 8 (decided 2): the REQUIRED-RED mutation, run in band: hand ONLY the merge
     # child a non-C locale, merged at the _run_child boundary AFTER _clean_env pinned the
     # environment (the route-around no funnel-level audit observes; the git-funnel locale probe
@@ -3753,13 +4123,44 @@ def case_mergefault(tmp):
     # must NEVER read as translated (its probe diagnostic is the English fatal: prefix); an
     # availability rule that counts any non-empty non-English-prefixed stderr turns this red.
     check("meta/native-c-locale-not-translated", _translates(dict(LC_ALL="C")), False)
+    # FIX-541 round 12 (decided 2): the C-locale control is byte-identical wherever the probe
+    # runs: in the self-test scratch, inside a repository worktree, in the checkout and, where
+    # the scratch has an ancestor on another filesystem, there. The round-11 probe relied on
+    # repository discovery, so its control named the mount point below a filesystem boundary
+    # and reported a missing revision inside a repository; the second check pins that this
+    # vector turns red under that discovery-based probe, whatever filesystems the host has.
+    locations = _probe_locations(tmp, str(fx_leak.main))
+    check("meta/native-probe-control-location-independent", _probe_controls(locations),
+          [(label, False, 128, _PROBE_CONTROL) for label, _where in locations])
+    def _discovery_probe(locale, where=None):
+        # The round-11 probe shape: rev-parse of an absent name, located by discovery.
+        proc = subprocess.run(["git", "rev-parse", "--verify", "merge-train-locale-probe"],
+                              cwd=where, env=_locale_probe_env(locale),
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+        return proc.returncode, proc.stderr.decode("utf-8", "replace")
+
+    discovery_control = "fatal: not a git repository (or any of the parent directories): .git\n"
+    try:
+        globals()["_native_probe"] = _discovery_probe
+        discovery = _probe_controls(locations)
+    finally:
+        globals()["_native_probe"] = real_probe
+    check("meta/native-probe-location-vector-red-under-discovery-probe",
+          discovery != [(label, False, 128, discovery_control) for label, _where in locations],
+          True)
     if native is None:
         why = ("no locale translating the git fatal: prefix is available on this host "
                "(candidates: de_DE.UTF-8+de, en_US.UTF-8+de, fr_FR.UTF-8+fr), so the native "
                "leak vector cannot be evaluated")
         skip("meta/native-translated-vector-red-under-merge-locale-leak", why)
         skip("meta/native-fault-diagnostic-validated", why)
+        skip("meta/native-availability-location-independent", why)
     else:
+        # FIX-541 round 12 (decided 2): the availability rule itself finds the native locale
+        # translating at EVERY probe location, the filesystem-boundary one included.
+        check("meta/native-availability-location-independent",
+              [(label, _translates(native, where=where)) for label, where in locations],
+              [(label, True) for label, _where in locations])
         got_native, reason_native, fx_native = _mergefault_run(
             tmp, "native-translated-locale-leak", _fault_native_stderr, False,
             env=dict(native), leak=dict(native))
@@ -3775,8 +4176,11 @@ def case_mergefault(tmp):
         # fatal diagnostic (same failure exit as the C-locale control, non-empty, neither
         # English prefix), and that diagnostic to have REACHED the stderr handed back into
         # the funnel, the exact text the merge diagnostic scan read and missed. It goes red
-        # when _fault_native_stderr is replaced by an identity function, when its probe
-        # returns empty output, and when the probe returns an unrelated exit-0 warning.
+        # when _fault_native_stderr is replaced by an identity function and when its probe
+        # degrades to empty output, an unrelated exit-0 warning or an unrelated SAME-EXIT
+        # warning: the validation is byte-equality against the catalog-rendered expected
+        # diagnostic, never same-exit non-empty output without a leading English prefix
+        # (FIX-541 round 11, decided 2).
         record = _NATIVE_FAULT[0] if _NATIVE_FAULT else dict()
         diag = record.get("diag", "")
         check("meta/native-fault-diagnostic-validated",
