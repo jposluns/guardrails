@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OPF record-authoring gate (spec 8.8): `opf record` behaviour, and red-on-revert discriminators.
 
-  check_opf_record.py --self-test                    the fixture suite (T1-T80)
+  check_opf_record.py --self-test                    the fixture suite (T1-T83)
   check_opf_record.py --self-test --red-on-revert    the same, plus each test's flip must turn it red
 
 There is no live-adopter leg (this repository is not an OPFiles adopter), so the whole assurance rides the
@@ -97,9 +97,10 @@ Each case runs on its own copy of that template; the root is removed in a finall
   T20 a legacy .aiqt/record/journal on a homes-2 store is refused by name and never recovered,
       with the .aiqt subtree byte-unchanged and no typed journal home created (flip: probe the
       generation as 1, under which the legacy journal is reconciled in place)
-  T21 a direct homes-2 _publish lands ONE capability-bound transaction in
-      .working/journals/record/journal with its projection at txn_record("record", <rid>), the operands
-      rewritten, and nothing under .aiqt (flip: route homes 2 to the legacy journal root)
+  T21 a direct homes-2 _publish, its reservation published first under the same held capability and
+      run id, lands ONE capability-bound transaction in .working/journals/record/journal under that run
+      id with its projection at txn_record("record", <rid>), the operands rewritten, and nothing under
+      .aiqt (flip: route homes 2 to the legacy journal root)
   T22 on a homes-2 store the verb claims through the live reservation seam: create records end to end
       with ONE irrevocable id reservation published under the COMPLETE transaction's own run id, its
       claims exactly the counters advance, and an unreadable, malformed, conflicting or misnamed
@@ -384,10 +385,24 @@ Each case runs on its own copy of that template; the root is removed in a finall
       change left for review, because the doctor does not yet read reservations and grades the
       orphaned numbers as missing records (flip: a derivation that ignores the reservation scan,
       under which the reserved ids are issued again)
-  T80 two runs claiming the same kind never receive the same id: a first run's reservation, published
-      through the production claim-and-reserve path and never published to the store, moves a second
-      run through the same path to the next numbers, both reservations standing disjoint (flip: as
-      T79)
+  T80 two runs claiming the same kind never receive the same id: two runs planned before either
+      reserves derive the same numbers; the first reserves through the production claim-and-reserve
+      path, and the second is refused at the held revalidation with no reservation of its own, no
+      transaction and no operand published; re-planned, it derives the next numbers, both
+      reservations standing disjoint (flips: as T79; a reservation step with no fresh scan and no
+      stale-plan comparison)
+  T81 the homes-2 high-water reads every journal kind's reservations, the homes enumerated from
+      JOURNAL_KINDS: an import-kind reservation of BI-1 and WL-1 moves the next create to BI-2 and
+      WL-2, and a malformed reservation in each other kind's home, plus an unreadable, a conflicting
+      (another kind's payload) and a misnamed entry in the import home, refuse exit 2 with every byte
+      untouched (flip: the reviewed head's single record home)
+  T82 the homes-2 publication boundary requires the reservation of the run id it publishes under: a
+      direct _publish naming no run id, one with no reservation, and one whose reservation claims other
+      numbers each refuse before any transaction opens (flip: the reviewed head's minted run id with
+      no reservation evidence)
+  T83 the harness's journal reader reads an empty journal only for confirmed absence: a regular file,
+      a symlink, a dangling symlink and an unreadable journal home are harness faults (flip: the
+      reviewed head's not-a-directory shortcut)
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
 or unusable, temporary storage unusable, or any unexpected harness fault), never a clean skip.
@@ -810,11 +825,17 @@ def child(env, root, args, kill=None, flip=""):
 
 
 def journal_states(root, rel=None):
+    """{transaction name: state} of the journal home `rel`. The empty map means ONLY confirmed absence
+    (FileNotFoundError: the home or an ancestor is absent); a regular file, a symlink or an unreadable
+    entry at the home is a harness fault (Harness, exit 2), never read as an empty journal."""
     rel = record.JOURNAL_REL if rel is None else rel
     jroot = Path(root) / rel
-    if not jroot.is_dir():
+    try:
+        jr_fd = journal.open_journal_root_from_path(str(root), rel)
+    except FileNotFoundError:
         return {}
-    jr_fd = journal.open_journal_root_from_path(str(root), rel)
+    except (OSError, journal.JournalError) as exc:
+        raise Harness("the journal home {} is not a readable directory ({!r})".format(rel, exc))
     try:
         return {t.name: journal.classify_state(jr_fd, t) for t in journal._journal_txn_dirs(jr_fd, jroot)}
     finally:
@@ -2460,9 +2481,10 @@ def flip_t20():
 
 def t21_homes2_publish(fx):
     """A direct homes-2 publication (the claim through the live homes-2 seam, over an empty reservation
-    scan; the direct _publish seam itself publishes no reservation) lands ONE capability-bound
-    transaction in the typed journal home with its terminal projection, rewrites exactly the planned
-    operands, and touches nothing under .aiqt."""
+    scan, its reservation published by _reserve_claim under the held capability the publication then
+    runs under, with the same run id, as _run_operation does: the boundary requires it, T82) lands ONE
+    capability-bound transaction in the typed journal home under that run id with its terminal
+    projection, rewrites exactly the planned operands, and touches nothing under .aiqt."""
     env = fx.env
     root = fx.case("t21-homes2-publish")
     with _self_test_homes2_active(root):
@@ -2483,13 +2505,20 @@ def t21_homes2_publish(fx):
             plan = record._PLANNERS["create"](req, ctx, operand, record._clock_now())
             for op in plan.operands:
                 op.new_raw = record._emit_bytes(op.new_model)
-            record._publish(ctx, plan, "create")
+            run_id = record._record_run_id(os.urandom(16).hex())
+            cap = record._opf_oplock.acquire_operation(str(root), record.VERB)
+            try:
+                record._reserve_claim(ctx, plan, cap, run_id)
+                record._publish(ctx, plan, "create", cap=cap, run_id=run_id)
+            finally:
+                record._opf_oplock.release_operation(cap)
         finally:
             os.close(root_fd)
         assert not (Path(root) / ".aiqt").exists(), "T21 nothing under .aiqt"
         states = journal_states(root, TYPED_JOURNAL)
         names = list(states)
-        assert len(names) == 1 and re.fullmatch(RECORD_RUN_RE, names[0]), ("T21 one grammar-named txn", names)
+        assert names == [run_id] and re.fullmatch(RECORD_RUN_RE, names[0]), ("T21 one grammar-named txn",
+                                                                             names, run_id)
         assert states[names[0]] == "complete", states
         projection = Path(root) / record._opf_store.txn_record("record", names[0])
         assert projection.is_file(), "T21 the terminal projection is published"
@@ -3630,7 +3659,8 @@ def flip_t42_unwind():
 
 
 def t43_publish_names_removals(fx):
-    """A direct homes-2 publication (T21's setup) whose own acquisition removes a lease staging leftover
+    """A direct homes-2 publication (T21's setup, its reservation published under a capability released
+    before the publication takes its own) whose own acquisition removes a lease staging leftover
     and then refuses the stale lone lease names that removal, never a blanket "nothing written"; the lone
     lease is kept, the staging leftover is gone, and no journal home or operand is written. The reviewed
     head said "nothing written" after deleting the staging file."""
@@ -3652,15 +3682,19 @@ def t43_publish_names_removals(fx):
             plan = record._PLANNERS["create"](req, ctx, operand, record._clock_now())
             for op in plan.operands:
                 op.new_raw = record._emit_bytes(op.new_model)
+            run_id = record._record_run_id(os.urandom(16).hex())
             cap = record._opf_oplock.acquire_operation(str(root), record.VERB)
-            lease_bytes = (Path(root) / LEASE).read_bytes()
-            record._opf_oplock.release_operation(cap)
+            try:
+                record._reserve_claim(ctx, plan, cap, run_id)
+                lease_bytes = (Path(root) / LEASE).read_bytes()
+            finally:
+                record._opf_oplock.release_operation(cap)
             (Path(root) / LEASE).write_bytes(lease_bytes)
             staging = _opf_oplock._staging_name(opf_check.LEASE_NAME)
             (Path(root) / MACH / staging).write_bytes(b"a torn lease publication")
             pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
             try:
-                record._publish(ctx, plan, "create")
+                record._publish(ctx, plan, "create", run_id=run_id)
             except record.RecordError as exc:
                 message = str(exc)
             else:
@@ -4109,8 +4143,9 @@ def t52_publication_refused_before_intent(fx):
     publication (T43's setup) refused by the engine's real pre-INTENT budget check (the journal-read cap
     lowered to one byte) leaves no transaction and releases its own capability: its refusal says any
     journal work left is for the next trigger, none when it failed before its transaction opened, and
-    the next run reconciles nothing. The reviewed head promised the next run reconciles the typed
-    journal."""
+    the next run reconciles nothing (the publication's id reservation, published first as the boundary
+    requires, stands, so that run derives above it and is held at the post-publication gate, as T79).
+    The reviewed head promised the next run reconciles the typed journal."""
     module, guard = residual_texts()
     for text, where in ((module, "module"), (guard, "guard")):
         assert RULE_FIX9 in text, ("T52 the rule scopes the leftovers", where)
@@ -4134,10 +4169,17 @@ def t52_publication_refused_before_intent(fx):
             plan = record._PLANNERS["create"](req, ctx, operand, record._clock_now())
             for op in plan.operands:
                 op.new_raw = record._emit_bytes(op.new_model)
+            run_id = record._record_run_id(os.urandom(16).hex())
+            cap = record._opf_oplock.acquire_operation(str(root), record.VERB)
+            try:
+                record._reserve_claim(ctx, plan, cap, run_id)
+            finally:
+                record._opf_oplock.release_operation(cap)
+            reserved_bi = ctx.claims["BI"]
             pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
             try:
                 with patch.object(journal, "_MAX_JOURNAL_READ_BYTES", 1):
-                    record._publish(ctx, plan, "create")
+                    record._publish(ctx, plan, "create", run_id=run_id)
             except record.RecordError as exc:
                 message = str(exc)
             else:
@@ -4151,10 +4193,16 @@ def t52_publication_refused_before_intent(fx):
         states = journal_states(root, TYPED_JOURNAL)
         assert all(s == "nothing-opened" for s in states.values()), ("T52 no transaction opened", states)
         assert dict((rel, read(root, rel)) for rel in RECORD_OPERANDS) == pre, "T52 the operands are untouched"
-        result = record_cli(env, root, CREATE)
-        assert "was reconciled" not in result[2] and "were reclaimed" not in result[2], \
-            ("T52 the next run reconciles nothing", result[2][-800:])
-        recorded(result)
+        rc, out, err = record_cli(env, root, CREATE)
+        assert "was reconciled" not in err and "were reclaimed" not in err, \
+            ("T52 the next run reconciles nothing", err[-800:])
+        # The refused publication's reservation stands (T79's orphan shape): the next run derives above
+        # it and is held at the post-publication gate, which does not yet read reservations.
+        assert RECORDED_EVENT not in out and rc == 2 and "the uncommitted change is left for review" in err, \
+            ("T52 the next run publishes above the standing reservation and is held", rc, err[-1600:])
+        rows = [r["id"] for r in model(root, BI_INDEX)["record"]]
+        assert "BI-{}".format(reserved_bi + 1) in rows and "BI-{}".format(reserved_bi) not in rows, \
+            ("T52 the reserved id is never issued", rows)
 
 
 def flip_t52_message():
@@ -6021,44 +6069,261 @@ def flip_t79():
 
 
 def t80_two_runs_never_same_id(fx):
-    """Two runs claiming the same kind never receive the same id: a first run through the
-    production claim and reservation path (its reservation published under its own held capability,
-    nothing published to the store, the killed-before-publication shape) moves a second run through
-    the same path to the next numbers; both reservations stand disjoint and the first is never
-    rewritten."""
+    """Two runs claiming the same kind never receive the same id, whatever their interleaving: two
+    contexts planned BEFORE either reserves derive the same numbers; the first reserves through the
+    production claim-and-reserve path (_reserve_claim under its own held capability, nothing
+    published to the store), and the second, reserving after it, is refused by the held
+    revalidation with no reservation file of its own, no transaction and every operand at the
+    prestate; re-planned, the second run derives the next numbers, both reservations standing
+    disjoint and the first never rewritten."""
     base = fx.case("t80-homes2-base")
     with _self_test_homes2_active(base):
         root = fx.case("t80-homes2-two-runs", base)
         res = record._opf_store.resolve_store(Path(os.path.abspath(str(root))))
         assert res.status == record._opf_store.RESOLVED, res
-        claims = []
+        pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
         stamps = ("record-20260927T000101Z-" + "a" * 16,
                   "record-20260927T000102Z-" + "b" * 16)
-        for stamp in stamps:
+        reservations = [Path(root) / record._opf_store.allocation_record("record", s) for s in stamps]
+        fds = []
+
+        def planned():
             root_fd = record._opf_store._open_dir_nofollow(res.store_root)
+            fds.append(root_fd)
+            ctx = record.Context(res, str(root), root_fd)
+            ctx.journal_rel = record._record_journal_rel(record._probe_homes(ctx))
+            record._load_manifest(ctx)
+            assert ctx.homes == 2, ("T80 the validated generation", ctx.homes)
+            ctx.counters = record._read_operand(root_fd, ctx.rel(opf_check.COUNTERS_NAME))
+            return ctx, record._claim(ctx, ["BI", "WL"])
+
+        def reserve(ctx, ids, stamp):
+            cap = record._opf_oplock.acquire_operation(str(res.store_root), record.VERB)
             try:
-                ctx = record.Context(res, str(root), root_fd)
-                ctx.journal_rel = record._record_journal_rel(record._probe_homes(ctx))
-                record._load_manifest(ctx)
-                assert ctx.homes == 2, ("T80 the validated generation", ctx.homes)
-                ctx.counters = record._read_operand(root_fd, ctx.rel(opf_check.COUNTERS_NAME))
-                ids = record._claim(ctx, ["BI", "WL"])
-                cap = record._opf_oplock.acquire_operation(str(res.store_root), record.VERB)
+                record._reserve_claim(ctx, record.Plan([], ids), cap, stamp)
+            finally:
+                record._opf_oplock.release_operation(cap)
+        try:
+            (ctx1, ids1), (ctx2, ids2) = planned(), planned()
+            assert ids1 == ids2 == ["BI-1", "WL-1"], ("T80 both plans derive the same numbers", ids1, ids2)
+            reserve(ctx1, ids1, stamps[0])
+            first = reservations[0].read_bytes()
+            try:
+                reserve(ctx2, ids2, stamps[1])
+            except record.RecordError as exc:
+                message = str(exc)
+            else:
+                raise AssertionError("T80 the second, stale plan must refuse at the held revalidation")
+            assert "changed between planning and the held capability" in message, message
+            assert not reservations[1].exists(), "T80 the refused run publishes no reservation"
+            assert journal_states(root, TYPED_JOURNAL) == {}, "T80 no transaction is opened"
+            assert dict((rel, read(root, rel)) for rel in RECORD_OPERANDS) == pre, \
+                "T80 no operand is published"
+            ctx3, ids3 = planned()
+            assert ids3 == ["BI-2", "WL-2"], ("T80 the re-planned run derives the next numbers", ids3)
+            reserve(ctx3, ids3, stamps[1])
+        finally:
+            for fd in fds:
+                os.close(fd)
+        assert reservations[0].read_bytes() == first, "T80 the first reservation is never rewritten"
+        for reservation, claimed in zip(reservations, ({"BI": 1, "WL": 1}, {"BI": 2, "WL": 2})):
+            payload = tomllib.loads(reservation.read_bytes().decode("utf-8"))
+            assert payload["claims"] == claimed, ("T80 the reservations stand disjoint", reservation, payload)
+
+
+def flip_t80_no_recheck():
+    """A held reservation step with no fresh scan and no stale-plan comparison: the planned claims are
+    reserved as they stand, so a reservation landing after planning is never noticed."""
+    def no_recheck(ctx, plan, cap, run_id):
+        record._opf_journal.reserve_allocation(cap, "record", run_id, ctx.claims)
+    return patch.object(record, "_reserve_claim", no_recheck)
+
+
+# --- T81-T83: the cross-kind high-water, the publication boundary, the journal-home reader ---------------
+
+T81_IMPORT_RUN = "imp-20260927T000101Z-" + "a" * 16
+
+
+def t81_cross_kind_reservations(fx):
+    """The homes-2 high-water reads EVERY journal kind's reservations (spec 8.2: every reservation's
+    [claims] value for the counter key), the homes enumerated from the JOURNAL_KINDS registry: an
+    import-kind reservation of {BI: 1, WL: 1} moves the next create to BI-2 and WL-2 (its own
+    reservation says so, the import one is never touched), and that run is held at the
+    post-publication gate as T79's is. Fail-closed in every other kind's home: a malformed
+    reservation in each non-record kind's home, and in the import home an unreadable (non-regular)
+    entry, an ingest payload under an import name, and a record-grammar name, each refuse exit 2
+    with every byte untouched."""
+    env = fx.env
+    base = fx.case("t81-homes2-base")
+    with _self_test_homes2_active(base):
+        root = fx.case("t81-homes2-import-reserved", base)
+        cap = record._opf_oplock.acquire_operation(str(root), "import")
+        try:
+            record._opf_journal.reserve_allocation(cap, "import", T81_IMPORT_RUN, {"BI": 1, "WL": 1})
+        finally:
+            record._opf_oplock.release_operation(cap)
+        imported = Path(root) / record._opf_store.allocation_record("import", T81_IMPORT_RUN)
+        planted = imported.read_bytes()
+        rc, out, err = record_cli(env, root, CREATE)
+        rows = [r["id"] for r in model(root, BI_INDEX)["record"]]
+        assert rows == ["BI-2"], ("T81 the import-kind reservation's numbers are never issued", rows, rc,
+                                  err[-1200:])
+        own = sorted(os.listdir(Path(root) / record._ALLOCATIONS_REL))
+        assert len(own) == 1, ("T81 one record reservation", own)
+        claims = tomllib.loads((Path(root) / record._ALLOCATIONS_REL / own[0]).read_bytes()
+                               .decode("utf-8"))["claims"]
+        assert claims == {"BI": 2, "WL": 2}, ("T81 the record reservation claims above the import one", claims)
+        assert imported.read_bytes() == planted, "T81 the import reservation is never touched"
+        assert RECORDED_EVENT not in out and rc == 2 and "the uncommitted change is left for review" in err, \
+            ("T81 held at the post-publication gate, as T79", rc, err[-1600:])
+        stamp = "-20260927T000009Z-" + "9" * 16
+        for kind in record._opf_store.JOURNAL_KINDS:
+            if kind == "record":
+                continue
+            sub = fx.case("t81-homes2-malformed-" + kind, base)
+            target = Path(sub) / record._opf_store.allocation_record(
+                kind, record._opf_store._HOME_RUN_PREFIXES[kind] + stamp)
+            target.parent.mkdir(parents=True)
+            target.write_bytes(b"not toml [")
+            refused_untouched(env, sub, CREATE, "is malformed")
+        damaged = "imp" + stamp + ".toml"
+        for label, name, plant, needle in (
+                ("unreadable", damaged, lambda d: d.mkdir(), "cannot read the id reservation"),
+                ("conflicting", damaged, lambda d: d.write_bytes(record._opf_journal.reservation_payload(
+                    "ingest", "imp" + stamp, "op", {"BI": 1})),
+                 "conflicts with the exact canonical reservation"),
+                ("misnamed", "record" + stamp + ".toml", lambda d: d.write_bytes(
+                    record._opf_journal.reservation_payload("record", "record" + stamp, "op", {"BI": 1})),
+                 "is not an id reservation")):
+            sub = fx.case("t81-homes2-import-" + label, base)
+            target = Path(sub) / record._allocations_rel("import") / name
+            target.parent.mkdir(parents=True)
+            plant(target)
+            refused_untouched(env, sub, CREATE, needle)
+
+
+def flip_t81():
+    """The reviewed head's single hard-coded home: only the record kind's reservations are read."""
+    return patch.object(record, "_reservation_high",
+                        lambda ctx: record._kind_reservation_high(ctx, "record", record._ALLOCATIONS_REL))
+
+
+def t82_publication_requires_reservation(fx):
+    """The homes-2 publication boundary requires reservation evidence for the run id it publishes
+    under: a direct _publish naming no run id, one whose run id has no reservation (under a held
+    capability), and one whose reservation claims other numbers each refuse before any transaction
+    opens, with no journal transaction, every operand at the prestate and the capability released."""
+    root = fx.case("t82-homes2-boundary")
+    with _self_test_homes2_active(root):
+        req = record.parse_request(CREATE + ["--root", str(root)])
+        res = record._opf_store.resolve_store(Path(os.path.abspath(str(root))))
+        assert res.status == record._opf_store.RESOLVED, res
+        root_fd = record._opf_store._open_dir_nofollow(res.store_root)
+        try:
+            ctx = record.Context(res, str(root), root_fd)
+            ctx.journal_rel = record._record_journal_rel(record._probe_homes(ctx))
+            assert ctx.journal_rel == TYPED_JOURNAL, ("T82 the probed journal home", ctx.journal_rel)
+            record._load_manifest(ctx)
+            ctx.counters = record._read_operand(root_fd, ctx.rel(opf_check.COUNTERS_NAME))
+            ctx.version = record._read_operand(root_fd, ctx.rel(opf_check.VERSION_NAME)).model
+            ctx.worklog = record._read_operand(root_fd, ctx.rel(opf_check.WORKLOG_NAME))
+            operand = record._read_operand(root_fd, record._operand_rel(req, ctx))
+            plan = record._PLANNERS["create"](req, ctx, operand, record._clock_now())
+            for op in plan.operands:
+                op.new_raw = record._emit_bytes(op.new_model)
+            pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
+            unreserved = "record-20260927T000201Z-" + "c" * 16
+            other = "record-20260927T000202Z-" + "d" * 16
+
+            def held_publish(run_id, reserve=None):
+                cap = record._opf_oplock.acquire_operation(str(root), record.VERB)
                 try:
-                    record._reserve_claim(ctx, record.Plan([], ids), cap, stamp)
+                    if reserve is not None:
+                        record._opf_journal.reserve_allocation(cap, "record", run_id, reserve)
+                    record._publish(ctx, plan, "create", cap=cap, run_id=run_id)
                 finally:
                     record._opf_oplock.release_operation(cap)
-                claims.append((list(ids), dict(ctx.claims)))
-            finally:
-                os.close(root_fd)
-        (ids1, c1), (ids2, c2) = claims
-        assert ids1 == ["BI-1", "WL-1"] and ids2 == ["BI-2", "WL-2"], (ids1, ids2)
-        assert c1 == {"BI": 1, "WL": 1} and c2 == {"BI": 2, "WL": 2}, (c1, c2)
-        assert not set(ids1) & set(ids2), ("T80 disjoint ids", ids1, ids2)
-        for stamp, (_ids, claimed) in zip(stamps, claims):
-            reservation = Path(root) / record._opf_store.allocation_record("record", stamp)
-            payload = tomllib.loads(reservation.read_bytes().decode("utf-8"))
-            assert payload["claims"] == claimed, ("T80 the reservation says so", stamp, payload)
+            for label, call, needle in (
+                    ("no run id", lambda: record._publish(ctx, plan, "create"),
+                     "requires the run id its irrevocable id reservation"),
+                    ("no reservation", lambda: held_publish(unreserved), "requires its id reservation"),
+                    ("other claims", lambda: held_publish(other, {"BI": 7, "WL": 7}),
+                     "to claim exactly this plan's numbers")):
+                try:
+                    call()
+                except record.RecordError as exc:
+                    assert needle in str(exc) and "no transaction is opened" in str(exc), (label, str(exc))
+                else:
+                    raise AssertionError("T82 a publication with {} must refuse".format(label))
+                assert journal_states(root, TYPED_JOURNAL) == {}, ("T82 no transaction", label)
+                assert dict((rel, read(root, rel)) for rel in RECORD_OPERANDS) == pre, \
+                    ("T82 the operands are untouched", label)
+                assert capability_records(root) == (False, False), ("T82 the capability is released", label)
+        finally:
+            os.close(root_fd)
+        assert not (Path(root) / record._opf_store.allocation_record("record", unreserved)).exists(), \
+            "T82 the boundary never reserves on its own"
+
+
+@contextlib.contextmanager
+def flip_t82():
+    """The reviewed head's boundary: a direct call naming no run id gets a freshly minted one, and no
+    reservation evidence is required."""
+    original = record._publish_homes2
+
+    def minting(ctx, plan, subcommand, cap=None, run_id=None):
+        if run_id is None:
+            run_id = record._record_run_id(os.urandom(16).hex())
+        return original(ctx, plan, subcommand, cap, run_id)
+    with patch.object(record, "_publish_homes2", minting), \
+            patch.object(record, "_require_reservation", lambda ctx, run_id: None):
+        yield
+
+
+def t83_journal_states_confirmed_absence(fx):
+    """The harness's journal reader reads an empty journal ONLY for confirmed absence: an absent home
+    reads {}, while a regular file, a symlink to a directory, a dangling symlink, and an unreadable
+    home (the opener's PermissionError) are each a harness fault, never apparent emptiness; a real
+    empty home reads {}."""
+    root = fx.case("t83-journal-home")
+    home = Path(root) / TYPED_JOURNAL
+    assert journal_states(root, TYPED_JOURNAL) == {}, "T83 an absent home reads empty"
+    home.parent.mkdir(parents=True)
+    (home.parent / "elsewhere").mkdir()
+
+    def faults(label):
+        try:
+            got = journal_states(root, TYPED_JOURNAL)
+        except Harness:
+            return
+        raise AssertionError("T83 a {} journal home must be a harness fault, not {!r}".format(label, got))
+    home.write_bytes(b"")
+    faults("regular-file")
+    home.unlink()
+    home.symlink_to("elsewhere")
+    faults("symlinked")
+    home.unlink()
+    home.symlink_to("absent")
+    faults("dangling-symlink")
+    home.unlink()
+    home.mkdir()
+
+    def unreadable(root_path, rel):
+        raise PermissionError(errno.EACCES, "synthetic unreadable journal home", rel)
+    with patch.object(journal, "open_journal_root_from_path", unreadable):
+        faults("unreadable")
+    assert journal_states(root, TYPED_JOURNAL) == {}, "T83 an empty home reads empty"
+
+
+def flip_t83():
+    """The reviewed head's shortcut: anything that is not a directory reads as an empty journal."""
+    original = journal_states
+
+    def shortcut(root, rel=None):
+        if not (Path(root) / (record.JOURNAL_REL if rel is None else rel)).is_dir():
+            return {}
+        return original(root, rel)
+    return patch.object(sys.modules[__name__], "journal_states", shortcut)
 
 
 TESTS = (
@@ -6181,7 +6446,10 @@ TESTS = (
     ("T77-release-report-every-failure", t77_report_every_failure, flip_t77),
     ("T78-homes2-declaration-pair-required", t78_homes2_needs_the_pair, (flip_t78, flip_t30)),
     ("T79-kill-after-reserve", t79_kill_after_reserve, flip_t79),
-    ("T80-two-runs-distinct-ids", t80_two_runs_never_same_id, flip_t79),
+    ("T80-two-runs-distinct-ids", t80_two_runs_never_same_id, (flip_t79, flip_t80_no_recheck)),
+    ("T81-homes2-cross-kind-high-water", t81_cross_kind_reservations, flip_t81),
+    ("T82-homes2-publication-requires-reservation", t82_publication_requires_reservation, flip_t82),
+    ("T83-journal-states-confirmed-absence", t83_journal_states_confirmed_absence, flip_t83),
 )
 
 
