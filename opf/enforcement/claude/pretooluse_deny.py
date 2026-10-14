@@ -1318,7 +1318,9 @@ def _read_roster_toml(path, label):
         return None, "%s %s exceeds the %d-byte roster bound" % (label, path, MAX_ROSTER_BYTES)
     try:
         return tomllib.loads(data.decode("utf-8")), None
-    except (tomllib.TOMLDecodeError, UnicodeDecodeError, ValueError) as exc:
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError, ValueError, RecursionError, MemoryError) as exc:
+        # tomllib refuses deep nesting and (CPython 3.14.8 on) a 1001-part key with RecursionError, and a
+        # many-part key under a memory limit with MemoryError: each is unparseable TOML, the same reason.
         return None, "%s %s is unreadable or unparseable (%s)" % (label, path, exc)
 
 

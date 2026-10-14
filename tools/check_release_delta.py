@@ -870,7 +870,7 @@ def _show_toml(root, commit, path):
     # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
     # on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS). run()'s ValueError
     # backstop covered only the first; both now fail closed here, at the parse locus.
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise GateError("predecessor {} at {} does not parse: {}".format(path, commit, exc))
 
 
@@ -2001,7 +2001,7 @@ def _post_release_head(root, prev_row, release_rows, head_version):
     head_cl_bytes = _show(root, head_oid, CHANGELOG_REL)
     try:
         head_cl = tomllib.loads(head_cl_bytes.decode("utf-8"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise GateError("HEAD {} does not parse: {}".format(CHANGELOG_REL, exc))
     cl_rel = head_cl.get("release", [])
     if (not isinstance(cl_rel, list) or not cl_rel or not isinstance(cl_rel[-1], dict)
@@ -2489,7 +2489,7 @@ def _committed_post_release_state(root, head_oid):
         return None
     try:
         cl = tomllib.loads(_show(root, head_oid, CHANGELOG_REL).decode("utf-8"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise GateError("HEAD {} does not parse: {}".format(CHANGELOG_REL, exc))
     rel = cl.get("release", [])
     if not isinstance(rel, list) or not rel or not isinstance(rel[-1], dict):
