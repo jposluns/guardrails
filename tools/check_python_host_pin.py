@@ -99,18 +99,23 @@ Legs, in order:
                                 job names --jobs-only, and no run: line of a HOST_JOBS job names
                                 the flag's stem --jobs-o once every quote, backslash and dollar
                                 character is deleted from its raw text (a raw-text read, never
-                                token equality: a quote-spliced or operator-adjacent spelling among
+                                token equality: a quote-spliced spelling the grammar admits among
                                 them, and deliberately wider than the flag, so a host-patch job
                                 naming the stem in any run: text, an echo argument among them, is
                                 refused; the scanned lines are the parsed run: scalar's, a trailing
                                 YAML comment of a one-line plain scalar excluded as YAML-dropped
-                                text, a literal block body's #-leading lines included; each such
-                                run: line is still tokenized, so one carrying a
+                                text; a HOST_JOBS job's run: is a one-line scalar entry (ENTRY_RE),
+                                so a run: | block scalar is cannot-evaluate at the host-job line
+                                model BEFORE this flag read and no block body reaches it, while an
+                                OUTSIDE job's literal block keeps its #-leading body lines; each
+                                such run: line is still tokenized, so one carrying a
                                 ${{ }} expression or one shlex cannot tokenize is cannot-evaluate
-                                there too, and so is one carrying a $' ANSI-C quoting opener, a
-                                $( or backquote command substitution opener or a brace
-                                (HOST_RUN_OPENERS: each can build text that
-                                deleting quote characters cannot model, exit 2, named); and no job
+                                there too, and so is one carrying any character outside the closed
+                                safe set a host-patch run: line is held to (HOST_RUN_SAFE: a dollar
+                                sign, a backquote, a brace, a bracket, a glob character, a
+                                redirection, a parenthesis and the other shell-active characters,
+                                exit 2, the character named, closing the leak an opener list left
+                                to every expansion class not on it); and no job
                                 that carries a counted or
                                 judge-shaped step, nor any step of such a job, carries env: (a
                                 job-level env: can silence, in CI, every step of the carrying job; an
@@ -224,8 +229,8 @@ carrying an upper-case letter, a run: of such a job whose real parsed value is n
 value, a nested mapping or sequence, a flow sequence, or a plain null, boolean, value-key (=),
 number (a conservative spelling classifier) or timestamp (its date and time separated by T, t or any
 run of spaces and tabs) scalar among them), a run: of such a job or of a host-patch job with a line
-shlex cannot tokenize or carrying a ${{ }} expression, a run: line of a host-patch job carrying a $'
-ANSI-C quoting opener, a $( or backquote command substitution opener or a brace (HOST_RUN_OPENERS), a
+shlex cannot tokenize or carrying a ${{ }} expression, a run: line of a host-patch job carrying a
+character outside the closed safe set it is held to (HOST_RUN_SAFE), a
 non-comment line of such a job,
 its header and block-scalar bodies (#-leading body lines
 included) carrying a
@@ -246,18 +251,21 @@ scalar value of it scanned for the two literal names, and the env: of every job 
 or judge-shaped step and of every step of such a
 job (outside-judge). Another step in a host-patch job is only partly held: this gate refuses its env:
 (step-env), a non-comment line naming --jobs-only and a run: line of the parsed scalar (a trailing
-YAML comment of a one-line plain run: excluded as YAML-dropped text, a literal block body's
-#-leading lines included) whose text names the flag's
-stem --jobs-o once every quote, backslash and dollar character is deleted, a quote-spliced or
-operator-adjacent spelling and an echo argument among them, the line still tokenized, so a ${{ }}
+YAML comment of a one-line plain run: excluded as YAML-dropped text; a host-patch run: is a one-line
+scalar entry, so a run: | block scalar is cannot-evaluate at the host-job line model before this
+read) whose text names the flag's
+stem --jobs-o once every quote, backslash and dollar character is deleted, a quote-spliced spelling
+the grammar admits and an echo argument among them, the line still tokenized, so a ${{ }}
 expression or a line shlex cannot tokenize there is cannot-evaluate (outside-judge), and so is a
-run: line carrying a $' ANSI-C quoting opener, a $( or backquote command substitution opener or a
-brace (each can build text the
-deletion cannot model), and accepts a
+run: line carrying any character outside the closed safe set it is held to (HOST_RUN_SAFE: a dollar
+sign, a backquote, a brace, a bracket, a glob character, a redirection, a parenthesis and the other
+shell-active characters, each named), and accepts a
 step-level shell:,
 working-directory: or if: on it, which changes what, where or whether that step runs; and what the suites
 test is theirs: a step whose run: command starts another interpreter, appends to GITHUB_PATH or GITHUB_ENV,
-changes the checked-out tree or uses a local or composite action is not judged here.
+changes the checked-out tree, uses a local or composite action, or names an executable that itself
+prints or re-interprets text (a script that echoes the flag among them, out of a text grammar's
+reach) is not judged here.
 tools/check_ci_parity.py is the second holder for those edits: its step grammar accepts only name:, uses:,
 run:, env: and with: as step keys, so a step-level shell:, working-directory: or if: is cannot-evaluate for
 it (measured at this commit on an extra host-patch-job step carrying each of the three: this gate passed,
@@ -404,30 +412,42 @@ JOBS_ONLY_FLAG = "--jobs-only"
 JOBS_ONLY_RUN = GATE_RUN + " " + JOBS_ONLY_FLAG
 # The raw-text stem of the flag the host-patch flag read scans for (_names_flag_text /
 # _host_flag_findings) once every quote, backslash and dollar character is deleted from a run: line:
-# a deletion can leave other text between the stem and the rest of the flag (a dollar expansion's
-# name among them, --jobs-o$Xnly leaving --jobs-oXnly), so the scan reads this stem, not the whole
-# flag. A spelling that splices a BARE dollar expansion into the stem itself (--jobs-$X among them)
-# spells no stem here and stays with tools/check_ci_parity.py (the disclosed expansion residual); a
-# braced splice (--jobs-${X} or --jobs-{o..o}nly), a $' ANSI-C quoted splice and a $( or backquote
-# command substitution are
-# cannot-evaluate in a host-patch run: line instead (HOST_RUN_OPENERS, _host_flag_findings). No
-# committed host-patch run: line names the stem.
+# a deletion can leave other text between the stem and the rest of the flag (a quote splice the
+# grammar admits among them, --jobs-o""nly leaving --jobs-only), so the scan reads this stem, not the
+# whole flag. Every spelling that carries a dollar sign, a brace, a backquote or any other character
+# outside the closed safe set (HOST_RUN_SAFE), for example a bare dollar splice --jobs-$X, a braced
+# splice --jobs-${X} or --jobs-{o..o}nly, a $' ANSI-C quoted splice or a $( or backquote command
+# substitution, is cannot-evaluate in a host-patch run: line (_refused_run_char), before this stem
+# scan, rather than left to tools/check_ci_parity.py. No committed host-patch run: line names the
+# stem, and each carries only safe characters.
 JOBS_ONLY_STEM = "--jobs-o"
-# Shell forms a host-patch job's run: line may never carry (_host_flag_findings; each is
-# cannot-evaluate, exit 2, named): a $' ANSI-C quoting opener, whose quote removal BUILDS characters
-# the raw text does not spell (--jobs-$'\157'nly and --jobs-$'\x6f'nly spell the flag with no o and
-# no stem in their raw text); a $( or backquote command substitution, which splices a command's
-# output into the line; and a brace, which opens a brace expansion (--jobs-{o..o}nly) or a
-# parameter expansion (--jobs-${X}) that a shell resolves to words the deletion read
-# (_names_flag_text) cannot model. A ${{ }} expression is refused first, with its own wording
-# (_run_line_tokens runs before this scan). No committed host-patch run: line carries any of the
-# four.
-HOST_RUN_OPENERS = (
-    ("$'", "a $' ANSI-C quoting opener"),
-    ("$(", "a $( command substitution opener"),
-    ("`", "a backquote command substitution opener"),
-    ("{", "a brace expansion or parameter expansion opener"),
-)
+# A host-patch job's run: line is held to a CLOSED SAFE-CHARACTER GRAMMAR, not a list of refused
+# openers (_host_flag_findings, _refused_run_char): the line is read only when EVERY character of
+# its parsed scalar is in HOST_RUN_SAFE (ASCII letters and digits, space and tab, the punctuation
+# _ - . / = : @ , + % and the two quote characters " and ' the deletion read models), and any other
+# character makes the line cannot-evaluate (exit 2, the character named): a $, a backquote, a brace,
+# a bracket, a glob * or ?, a redirection < or >, a (, a ), a |, an &, a ;, a !, a ~, a # (the parsed
+# scalar carries no trailing YAML comment, so a # there is command text, not a dropped comment), a
+# backslash (a line continuation among its uses) or any other character. An opener LIST leaked every
+# expansion class not on it (pathname expansion echo --jobs-o*, process substitution
+# source <(printf ...), an eval or a here-string among them); a closed set refuses each of them by
+# the character it must spell. A ${{ }} expression is refused first, with its own wording
+# (_run_line_tokens runs before this scan). Every committed host-patch run: line is ASCII letters,
+# digits, spaces and the - _ . / punctuation, so each passes this grammar unchanged. RESIDUAL: a
+# text grammar cannot reach an executable the line NAMES that itself prints or re-interprets text (a
+# script that echoes the flag among them); that is out of its reach, and nothing broader is claimed.
+HOST_RUN_SAFE = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 \t_-./=:@,+%\"'")
+# The name each refused character is reported by (_refused_run_char); a character not listed is named
+# by its repr.
+HOST_RUN_CHAR_NAMES = {
+    "$": "a dollar sign ($)", "`": "a backquote (`)", "{": "an open brace ({)",
+    "}": "a close brace (})", "[": "an open bracket ([)", "]": "a close bracket (])",
+    "*": "an asterisk (*)", "?": "a question mark (?)", "<": "a less-than sign (<)",
+    ">": "a greater-than sign (>)", "(": "an open parenthesis (()", ")": "a close parenthesis ())",
+    "|": "a pipe (|)", "&": "an ampersand (&)", ";": "a semicolon (;)", "!": "an exclamation mark (!)",
+    "~": "a tilde (~)", "#": "a hash (#)", "\\": "a backslash (\\)",
+}
 # The judge command's shlex (POSIX) tokens. A step counts as the judge only when its own parsed run:'s
 # tokens equal these token for token, the one path token compared after os.path.normpath and carrying
 # no .. segment (_counts_as_judge; normpath is lexical, and through a symlinked directory a .. path can
@@ -529,7 +549,9 @@ PLAIN_BOOLS = frozenset({"y", "Y", "n", "N", "yes", "Yes", "YES", "no", "No", "N
 NUMBER_PLAIN_RE = re.compile(
     r"[-+.0-9][0-9_:.a-fA-FoxOX+-]*"
     r"|[-+]?\.(?:inf|Inf|INF)|[-+]?\.(?:nan|NaN|NAN)")
-TIMESTAMP_PLAIN_RE = re.compile(r"[0-9]{4}-[0-9][0-9]?-[0-9][0-9]?(?:(?:[Tt]|[ \t]+).+)?")
+TIMESTAMP_PLAIN_RE = re.compile(
+    r"[0-9]{4}-[0-9][0-9]?-[0-9][0-9]?(?:(?:[Tt]|[ \t]+)[0-9][0-9]?:[0-9][0-9]:[0-9][0-9]"
+    r"(?:\.[0-9]*)?(?:[ \t]*(?:Z|[-+][0-9][0-9]?(?::[0-9][0-9])?))?)?")
 # The deepest indentation a host-patch job line may have: a step input under with:.
 MAX_INDENT = 10
 
@@ -1035,54 +1057,64 @@ def _names_flag_text(text):
     comment from a one-line plain scalar, so a stem spelled only inside such a comment is
     YAML-dropped text, never command text) names JOBS_ONLY_STEM once every quote, backslash and
     dollar character is deleted: a bounded raw-text read of the quote splices the deletion models,
-    the spellings whose quote removal leaves the stem's own characters in place (--jobs-o""nly,
-    --jobs-o'n'ly and --jobs-o$"n"ly among them), with no shell grammar, so an operator-adjacent
-    spelling (x;--jobs-only, --jobs-only&& among them) and any other text naming the stem, an echo
-    argument among them, are refused too: the over-refusal is the disclosed conservative side. A
-    form that can BUILD characters the line does not spell is cannot-evaluate upstream instead
-    (_host_flag_findings, HOST_RUN_OPENERS: a $' ANSI-C quoting opener, so --jobs-o$'n'ly is
-    refused there, this deletion its red-on-removal fallback; a $( or backquote command
-    substitution; a brace). What neither
-    reads stays with tools/check_ci_parity.py: a bare expansion whose VALUE, not its spelling,
-    completes the stem (--jobs-$X among them) spells no stem here."""
+    the spellings whose quote removal leaves the stem's own characters in place (--jobs-o""nly and
+    --jobs-o'n'ly among them), with no shell grammar, so any other text naming the stem, an echo
+    argument among them, is refused too: the over-refusal is the disclosed conservative side. This
+    read runs only on the lines the closed safe-character grammar admits; a line carrying any
+    character outside that grammar (a dollar sign, a brace, a backquote, a glob character among
+    them) is cannot-evaluate upstream instead (_host_flag_findings, _refused_run_char: --jobs-o$'n'ly
+    carries a dollar sign and is refused there, this deletion its red-on-removal fallback). A bare
+    dollar splice whose VALUE, not its spelling, completes the stem (--jobs-$X among them) also
+    carries a dollar sign and is refused there, not left to tools/check_ci_parity.py."""
     for char in "\"'\\$":
         text = text.replace(char, "")
     return JOBS_ONLY_STEM in text
 
 
+def _refused_run_char(text):
+    """The name of the first character of text outside the closed safe set a host-patch job's run:
+    line is held to (HOST_RUN_SAFE), or None when every character is in it: HOST_RUN_CHAR_NAMES
+    names the shell-active characters, and any other character is named by its repr."""
+    for char in text:
+        if char not in HOST_RUN_SAFE:
+            return HOST_RUN_CHAR_NAMES.get(char, "the character {!r}".format(char))
+    return None
+
+
 def _host_flag_findings(job, tree):
     """The outside-judge rule's raw-text read of a HOST_JOBS job's run: values: each PARSED run:
     scalar (ENTRY_RE strips a trailing YAML comment from a one-line plain scalar, so a stem spelled
-    only there is YAML-dropped text, never command text; a literal block body's #-leading lines are
-    content and are kept) is read line by line, and a line naming JOBS_ONLY_STEM once every quote,
-    backslash and dollar character is deleted (_names_flag_text) is a finding: the jobs leg's
-    outside run never sits inside a host-patch job it judges. The read is raw scalar text, never
-    shlex token equality (which a semicolon or another operator joined to the flag token defeats),
-    and deliberately wider than the flag: a host job naming the stem in any run: text, an echo
-    argument among them, is refused (the disclosed over-refusal). The literal line scan
-    (host_judges in job_findings) keeps covering every non-comment line, a name: or an env value
-    among them. Every run: line is still tokenized (_run_line_tokens, with this job's own wording)
-    for its refusals alone, so a host-patch run: line carrying a ${{ }} expression (which GitHub
-    resolves before the shell runs and can spell the flag in parts no raw text names) or one shlex
-    cannot tokenize is cannot-evaluate (exit 2), a disclosed refusal path of the host-patch jobs,
-    never a silent pass; and a line carrying a $' ANSI-C quoting opener, a $( or backquote
-    command substitution opener or a brace
-    (HOST_RUN_OPENERS) is cannot-evaluate the same way, each named: an ANSI-C octal or hex escape,
-    a brace expansion and a command substitution each BUILD text that deleting quote characters
-    cannot model, so this read refuses the line rather than inventing a reading. A host-patch job's
-    own gate and suite steps name this gate's path without the flag and carry none of those
-    openers, so no committed line is selected or refused."""
+    only there is YAML-dropped text, never command text) is read line by line, and a line naming
+    JOBS_ONLY_STEM once every quote, backslash and dollar character is deleted (_names_flag_text) is
+    a finding: the jobs leg's outside run never sits inside a host-patch job it judges. The read is
+    raw scalar text, never shlex token equality (which a semicolon or another operator joined to the
+    flag token defeats), and deliberately wider than the flag: a host job naming the stem in any
+    run: text, an echo argument among them, is refused (the disclosed over-refusal). The literal
+    line scan (host_judges in job_findings) keeps covering every non-comment line, a name: or an env
+    value among them. Every run: line is still tokenized (_run_line_tokens, with this job's own
+    wording) for its refusals alone, so a host-patch run: line carrying a ${{ }} expression (which
+    GitHub resolves before the shell runs and can spell the flag in parts no raw text names) or one
+    shlex cannot tokenize is cannot-evaluate (exit 2), a disclosed refusal path of the host-patch
+    jobs, never a silent pass; and a line carrying any character outside the closed safe set it is
+    held to (_refused_run_char, HOST_RUN_SAFE: a dollar sign, a backquote, a brace, a bracket, a
+    glob character, a redirection, a parenthesis and the other shell-active characters) is
+    cannot-evaluate the same way, the character named, rather than a reading invented for it. This
+    read runs only after the host-job line model has accepted every line as a one-line scalar entry
+    (ENTRY_RE): a host-patch job's run: | block scalar is cannot-evaluate at _entry, BEFORE this flag
+    read, so a block body never reaches here (an OUTSIDE job's literal block, by contrast, keeps its
+    #-leading body lines and is read by _outside_entries). A host-patch job's own gate and suite
+    steps name this gate's path without the flag and carry only safe characters, so no committed
+    line is selected or refused."""
     found = []
     for number, value in _other_runs(tree, set()):
         _run_line_tokens(job, value, where="the host-patch job " + job)
         for text in value.split("\n"):
-            for opener, named in HOST_RUN_OPENERS:
-                if opener in text:
-                    raise CannotEvaluate(
-                        "{}:{}: a run: line of the host-patch job {} carries {}; it can build text "
-                        "that deleting quote characters cannot model, so this raw-text read is "
-                        "cannot-evaluate there, never a silent pass".format(
-                            WORKFLOW_REL, number, job, named))
+            named = _refused_run_char(text)
+            if named is not None:
+                raise CannotEvaluate(
+                    "{}:{}: a run: line of the host-patch job {} carries {}, a character outside the "
+                    "closed safe set a host-patch run: line is held to; this line cannot-evaluate "
+                    "there, never a silent pass".format(WORKFLOW_REL, number, job, named))
         if any(_names_flag_text(text) for text in value.split("\n")):
             found.append("{}:{}: a run: command of the host-patch job {} names {} once every quote, "
                          "backslash and dollar character is deleted from its raw text (a "
@@ -2450,16 +2482,13 @@ def _self_test_cases(base):
                       + JOBS_ONLY_STEM + " once every quote"),
            host_scan_mutant.evaluate(root, HOST)[0]), (1, True, 0))
 
-    # FIX-529-R10 regression vectors. The host-patch flag read is raw text, never token equality:
-    # every quote, backslash and dollar character is deleted from each line of the parsed run:
-    # scalar, and a result naming JOBS_ONLY_STEM anywhere is a finding. The two spliced spellings
-    # below are red under the token-equality mutant (the previous read, which a semicolon, an
-    # operator or a dollar spelling joined to the flag token defeats); the separator,
-    # operator-suffix and plain spellings carry the literal flag, which the literal line scan
-    # (host_judges) already refused, so they are PREVIOUSLY ENFORCED (the token-equality mutant
-    # stays red on them through that scan) and are listed as such, not as discriminating vectors of
-    # that change. The dollar-single-quote spelling --jobs-o$'n'ly moved to the FIX-529-R12 opener
-    # refusals below: a $' opener is cannot-evaluate there, this deletion read its fallback.
+    # The host-patch flag read is raw text, never shlex token equality: every quote, backslash and
+    # dollar character is deleted from each line of the parsed run: scalar, and a result naming
+    # JOBS_ONLY_STEM anywhere is a finding. A quote splice whose shlex token is not the exact flag
+    # (echo "--jobs-o here") is red under the token-equality mutant (the previous read, which the
+    # quoted argument defeats); the plain spelling carries the literal flag, which the literal line
+    # scan (host_judges) already refused, so it is PREVIOUSLY ENFORCED (the mutant stays red on it
+    # through that scan) and is listed as such, not as a discriminating vector of that change.
     token_equality_mutant = _mutant(
         base, "python_host_pin_token_equality_mutant", source,
         (('if any(_names_flag_text(text) for text in value.split("\\n")):',
@@ -2468,10 +2497,7 @@ def _self_test_cases(base):
     raw_flag_marker = ("a run: command of the host-patch job " + OPF + " names " + JOBS_ONLY_STEM
                        + " once every quote")
     for check_id, spelling, equality_code in (
-            ("jobs/host-job-quote-spliced-operator-flag-finding", 'echo --jobs-o""nly;', 0),
-            ("jobs/host-job-dollar-double-quote-flag-finding", 'echo --jobs-o$"n"ly', 0),
-            ("jobs/host-job-separator-joined-flag-finding", "echo x;--jobs-only", 1),
-            ("jobs/host-job-operator-suffix-flag-finding", "echo --jobs-only&&", 1),
+            ("jobs/host-job-quote-spliced-argument-flag-finding", 'echo "--jobs-o here"', 0),
             ("jobs/host-job-plain-flag-raw-text-finding", "echo --jobs-only", 1)):
         extra = "      - name: Extra step\n        run: " + spelling + "\n"
         root = _fixture(base, workflow=_workflow(((OPF, _suite_step(OPF),
@@ -2493,38 +2519,59 @@ def _self_test_cases(base):
                       + " carries a ${{ }} expression"),
            host_scan_mutant.evaluate(root, HOST)[0]), (2, True, 0))
 
-    # FIX-529-R12 regression vectors: a host-patch run: line carrying a $' ANSI-C quoting opener, a
-    # backquote or a brace is cannot-evaluate (exit 2, each named): those forms can BUILD text that
-    # deleting quote characters cannot model (--jobs-$'\157'nly, --jobs-$'\x6f'nly and
-    # --jobs-{o..o}nly spell the flag with no stem in their raw text, and a $( or backquote
-    # substitution splices a command's output into the line). The first five vectors are red under
-    # the copy whose opener
-    # refusal is removed (the pin's behaviour): each then PASSES, exit 0. The dollar-single-quote
-    # spelling --jobs-o$'n'ly keeps the stem's own characters, so under that copy it falls back to
-    # the deletion read and stays a finding (exit 1): it is listed with its fallback, not as a
-    # discriminating vector of the opener refusal.
-    opener_refusal_mutant = _mutant(
-        base, "python_host_pin_no_run_opener_refusal_mutant", source,
-        (("for opener, named in HOST_RUN_" + "OPENERS:", "for opener, named in ():"),))
-    for check_id, spelling, marker, removed_code in (
+    # FIX-529-R13: a host-patch run: line is held to a CLOSED safe-character grammar, not a list of
+    # refused openers: any character outside HOST_RUN_SAFE makes the line cannot-evaluate (exit 2,
+    # the character named). This closes the leak an opener list left to every expansion class not on
+    # it: a pathname-expansion glob (echo --jobs-[o]nly, echo --jobs-o*, echo --jobs-o?ly), a
+    # process substitution (source <(printf ...)), an eval spelled with a refused character and the
+    # round-12 opener forms (an ANSI-C quote, a brace, a backquote and a $( substitution) are each
+    # refused by the character they must spell. Each vector is red under grammar_removed_mutant (the
+    # pin's behaviour, no grammar): the forms whose raw text does not spell the stem --jobs-o then
+    # PASS (exit 0, the [o] glob, the process substitution, the eval and the ANSI-C, brace, backquote
+    # and $( forms, whose o is built or quoted away), and the forms whose raw text already spells the
+    # stem fall back to the deletion read and stay a finding (exit 1, echo --jobs-o*, echo
+    # --jobs-o?ly and the dollar-single-quote --jobs-o$'n'ly).
+    grammar_removed_mutant = _mutant(
+        base, "python_host_pin_no_run_grammar_mutant", source,
+        (("named = _refused_run_char" + "(text)", "named = None"),))
+    for check_id, spelling, named, removed_code in (
+            ("jobs/host-job-glob-bracket-flag-cannot-evaluate", "echo --jobs-[o]nly",
+             "an open bracket ([)", 0),
+            ("jobs/host-job-glob-star-flag-cannot-evaluate", "echo --jobs-o*",
+             "an asterisk (*)", 1),
+            ("jobs/host-job-glob-question-flag-cannot-evaluate", "echo --jobs-o?ly",
+             "a question mark (?)", 1),
+            ("jobs/host-job-process-substitution-flag-cannot-evaluate",
+             "source <(printf 'echo --jobs-%bnly' '\\157')", "a less-than sign (<)", 0),
+            ("jobs/host-job-eval-refused-char-flag-cannot-evaluate", "eval echo --jobs-$'\\157'nly",
+             "a dollar sign ($)", 0),
             ("jobs/host-job-ansi-c-octal-flag-cannot-evaluate", "echo --jobs-$'\\157'nly",
-             "a $' ANSI-C quoting opener", 0),
+             "a dollar sign ($)", 0),
             ("jobs/host-job-ansi-c-hex-flag-cannot-evaluate", "echo --jobs-$'\\x6f'nly",
-             "a $' ANSI-C quoting opener", 0),
+             "a dollar sign ($)", 0),
             ("jobs/host-job-brace-sequence-flag-cannot-evaluate", "echo --jobs-{o..o}nly",
-             "a brace expansion or parameter expansion opener", 0),
+             "an open brace ({)", 0),
             ("jobs/host-job-backquote-flag-cannot-evaluate", "echo --jobs-`printf o`nly",
-             "a backquote command substitution opener", 0),
+             "a backquote (`)", 0),
             ("jobs/host-job-dollar-paren-flag-cannot-evaluate", "echo --jobs-$(printf o)nly",
-             "a $( command substitution opener", 0),
+             "a dollar sign ($)", 0),
             ("jobs/host-job-dollar-single-quote-flag-cannot-evaluate", "echo --jobs-o$'n'ly",
-             "a $' ANSI-C quoting opener", 1)):
+             "a dollar sign ($)", 1)):
         extra = "      - name: Extra step\n        run: " + spelling + "\n"
         root = _fixture(base, workflow=_workflow(((OPF, _suite_step(OPF),
                                                    _suite_step(OPF) + extra),)))
         code, lines = evaluate(root, HOST)
-        check(check_id, (code, _has(lines, marker),
-                         opener_refusal_mutant.evaluate(root, HOST)[0]), (2, True, removed_code))
+        check(check_id, (code, _has(lines, named),
+                         grammar_removed_mutant.evaluate(root, HOST)[0]), (2, True, removed_code))
+
+    # Acceptance control: every committed host-patch run: line passes the closed grammar unchanged
+    # (no refused character), so no committed line is cannot-evaluate for it.
+    for check_id, committed in (
+            ("jobs/host-job-committed-gate-line-grammar-passes", GATE_RUN),
+            ("jobs/host-job-committed-selftest-line-grammar-passes", GATE_RUN + " --self-test"),
+            ("jobs/host-job-committed-opf-suite-line-grammar-passes", HOST_SUITES[OPF]),
+            ("jobs/host-job-committed-gfe-suite-line-grammar-passes", HOST_SUITES[GFE])):
+        check(check_id, _refused_run_char(committed), None)
 
     # FIX-529-R10: the number read is the conservative spelling classifier, which covers the
     # fractional sexagesimal forms the previous pattern missed; each vector is red under the mutant
@@ -2577,34 +2624,41 @@ def _self_test_cases(base):
            equals_mutant.evaluate(root, HOST)[0]), (2, True, 0))
     timestamp_mutant = _mutant(base, "python_host_pin_no_timestamp_kind_mutant", source,
                                (("if TIMESTAMP_PLAIN_RE" + ".fullmatch(value):", "if False:"),))
-    root = _fixture(base, workflow=_workflow((("registry", JUDGE_STEP,
-                                               JUDGE_STEP + second
-                                               + "      - run: 2026-10-14T06:30:00Z\n"),)))
-    code, lines = evaluate(root, HOST)
-    check("jobs/jobs-only-timestamp-run-cannot-evaluate",
-          (code, _has(lines, "a timestamp"),
-           timestamp_mutant.evaluate(root, HOST)[0]), (2, True, 0))
-    # FIX-529-R12 (the YAML 1.1 timestamp grammar separates the date and the time with T, t or ANY
-    # RUN OF SPACES AND TABS): a tab-separated or mixed-whitespace spelling is a named timestamp
-    # cannot-evaluate too. The tab and mixed vectors are red under the copy carrying the previous
-    # pattern, which accepted only T, t or a space as the separator's first character; the
-    # space-separated vector was previously enforced and stays exit 2 under it.
-    previous_timestamp_mutant = _mutant(
-        base, "python_host_pin_previous_timestamp_pattern_mutant", source,
-        (('r"[0-9]{4}-[0-9][0-9]?-[0-9][0-9]?' + '(?:(?:[Tt]|[ \\t]+).+)?"',
-          'r"[0-9]{4}-[0-9][0-9]?-[0-9][0-9]?(?:[Tt ].+)?"'),))
-    for check_id, scalar, previous_code in (
-            ("jobs/jobs-only-tab-timestamp-run-cannot-evaluate", "2026-10-14\t06:30:00Z", 0),
+    # FIX-529-R13: the timestamp classifier now REQUIRES the YAML 1.1 time fields after the T, t or
+    # whitespace separator (an hour of one or two digits, :MM:SS, an optional fraction and an
+    # optional Z or +-HH[:MM] zone), so only a real date-and-time spelling is a timestamp. A valid T,
+    # tab, mixed-whitespace or space spelling stays refused (exit 2), red under timestamp_mutant (the
+    # copy that classifies none).
+    for check_id, scalar in (
+            ("jobs/jobs-only-timestamp-run-cannot-evaluate", "2026-10-14T06:30:00Z"),
+            ("jobs/jobs-only-tab-timestamp-run-cannot-evaluate", "2026-10-14\t06:30:00Z"),
             ("jobs/jobs-only-mixed-whitespace-timestamp-run-cannot-evaluate",
-             "2026-10-14\t \t06:30:00Z", 0),
-            ("jobs/jobs-only-space-timestamp-run-cannot-evaluate", "2026-10-14 06:30:00Z", 2)):
+             "2026-10-14\t \t06:30:00Z"),
+            ("jobs/jobs-only-space-timestamp-run-cannot-evaluate", "2026-10-14 06:30:00Z")):
         root = _fixture(base, workflow=_workflow((("registry", JUDGE_STEP,
                                                    JUDGE_STEP + second + "      - run: " + scalar
                                                    + "\n"),)))
         code, lines = evaluate(root, HOST)
         check(check_id, (code, _has(lines, "a timestamp"),
-                         previous_timestamp_mutant.evaluate(root, HOST)[0]),
-              (2, True, previous_code))
+                         timestamp_mutant.evaluate(root, HOST)[0]), (2, True, 0))
+    # FIX-529-R13: a date-led value whose suffix after the separator is NOT a time (--help after a
+    # tab, nonsense after a space, garbage after T) is a STRING, not a timestamp, so the run: passes
+    # (exit 0). Each is red under loose_timestamp_mutant (the pin's pattern, whose .+ suffix matched
+    # any text and misread these as timestamps, exit 2): the fix ends that false-positive class.
+    loose_timestamp_mutant = _mutant(
+        base, "python_host_pin_loose_timestamp_pattern_mutant", source,
+        (('r"[0-9]{4}-[0-9][0-9]?-[0-9][0-9]?(?:(?:[Tt]|[ \\t]+)[0-9][0-9]?:[0-9][0-9]:[0-9][0-9]"\n'
+          '    r"(?:\\.[0-9]*)?(?:[ \\t]*(?:Z|[-+][0-9][0-9]?(?::[0-9][0-9])?))?)?"',
+          'r"[0-9]{4}-[0-9][0-9]?-[0-9][0-9]?(?:(?:[Tt]|[ \\t]+).+)?"'),))
+    for check_id, scalar in (
+            ("jobs/jobs-only-tab-nontime-suffix-string-passes", "2026-10-14\t--help"),
+            ("jobs/jobs-only-space-nontime-suffix-string-passes", "2026-10-14 nonsense"),
+            ("jobs/jobs-only-t-nontime-suffix-string-passes", "2026-10-14Tgarbage")):
+        root = _fixture(base, workflow=_workflow((("registry", JUDGE_STEP,
+                                                   JUDGE_STEP + second + "      - run: " + scalar
+                                                   + "\n"),)))
+        check(check_id, (evaluate(root, HOST)[0],
+                         loose_timestamp_mutant.evaluate(root, HOST)[0]), (0, 2))
     quoted_exemption_mutant = _mutant(base, "python_host_pin_no_quoted_exemption_mutant", source,
                                       (('if kind in ("quoted", ' + '"block", "bare"):',
                                         'if kind in ("block", "bare"):'),))
@@ -2703,13 +2757,29 @@ def _self_test_cases(base):
     # FIX-529-R12 ACCEPTANCE ONLY (exit 0 by design, red neither at the parent nor under a mutant
     # of this change): the host-patch flag read scans the PARSED run: scalar, so a stem spelled
     # only inside a trailing YAML comment of a one-line plain run: is YAML-dropped text, never
-    # command text, and selects and refuses nothing; a literal block body's #-leading lines are
-    # content and are still scanned.
+    # command text, and selects and refuses nothing. The two block-scalar scopes differ by job kind:
+    # a HOST-PATCH job's run: | block scalar is cannot-evaluate at the host-job line model (ENTRY_RE,
+    # _entry) BEFORE the flag read, so a block body never reaches it; an OUTSIDE job's literal block
+    # keeps its #-leading body lines and is read line by line.
     comment_extra = ("      - name: Extra step\n"
                      '        run: echo ok # --jobs-o""nly\n')
     root = _fixture(base, workflow=_workflow(((OPF, _suite_step(OPF),
                                                _suite_step(OPF) + comment_extra),)))
     check("jobs/host-job-comment-only-stem-passes", evaluate(root, HOST)[0], 0)
+    # FIX-529-R13: the two block-scalar scopes shown directly. The SAME run: | block (echo ok, then
+    # a #-leading body line) is cannot-evaluate (exit 2) in a HOST-PATCH job, refused by the host-job
+    # line model before the flag read, but ACCEPTED (exit 0) in an OUTSIDE job, whose literal block
+    # keeps its #-leading body line.
+    block_step = ("      - name: Extra step\n        run: |\n"
+                  "          echo ok\n          # a note\n")
+    host_block = _fixture(base, workflow=_workflow(((OPF, _suite_step(OPF),
+                                                     _suite_step(OPF) + block_step),)))
+    code, lines = evaluate(host_block, HOST)
+    check("jobs/host-job-block-scalar-refused-before-flag-read",
+          (code, _has(lines, "not a block mapping entry")), (2, True))
+    outside_block = _fixture(base, workflow=_workflow((("registry", JUDGE_STEP,
+                                                        JUDGE_STEP + second + block_step),)))
+    check("jobs/outside-job-block-scalar-keeps-comment-body", evaluate(outside_block, HOST)[0], 0)
 
     for check_id, version, shown in (
             ("interpreter/newer-patch-finding", (3, 14, 8, "final"), "Python 3.14.8 (final)"),
