@@ -36,10 +36,17 @@ the block scalar before shell-comment stripping (GitHub substitutes
 expressions into the script text before the shell runs, comments included, so
 a substituted value carrying a newline leaves the comment), so a whole-line or
 trailing shell comment carrying one is refused too. The scalar extent is read
-as YAML reads it: the content indentation is the first non-empty line's, the
-first non-empty line below it ends the scalar, a comment line included, so a
-dedented YAML comment after the block is not script text, and a layout YAML
-rejects is refused, never passed. Every other argument remains
+by a conservative subset of the YAML block-scalar rules: the content
+indentation is the first non-empty line's; a leading blank line indented
+past it is refused (scalar-blank-indent) because YAML rejects that layout,
+while a later blank line stays inside the scalar wherever it falls; the
+first non-empty line below the content indentation ends the scalar, a
+comment line included, so a dedented YAML comment after the block is not
+script text, and a dedented line that re-enters the step is refused
+(step-structure); a tab on a scalar line is refused (yaml-tab) even where
+YAML accepts one in content; and a folded run: scalar is refused
+(folded-run), so the subset refuses, never passes, the layouts it does not
+read. Every other argument remains
 order-preserving and identity-relevant. Duplicates collapse because
 comparison is set-based.
 
@@ -2808,6 +2815,7 @@ def extract_ci(text, source=CI_SOURCE):
                 if value in ("|", "|-", "|+"):
                     index += 1
                     content_indent = None
+                    leading_blank = None
                     while index < len(lines):
                         body_raw = lines[index]
                         body_number = index + 1
@@ -2823,9 +2831,21 @@ def extract_ci(text, source=CI_SOURCE):
                             continue
 
                         if not body_raw.strip():
-                            # A whitespace-only line is inside the scalar
-                            # wherever it falls: YAML keeps empty lines in
-                            # a literal block whatever their indentation.
+                            # A whitespace-only line after the first
+                            # content line is inside the scalar wherever
+                            # it falls; ahead of it, YAML rejects one
+                            # indented past the content indentation the
+                            # first content line sets (FIX-551-R9), so
+                            # the deepest leading blank is held and
+                            # judged there.
+                            if content_indent is None:
+                                blank_indent = (
+                                    len(body_raw)
+                                    - len(body_raw.lstrip(" ")))
+                                if (leading_blank is None
+                                        or blank_indent > leading_blank[0]):
+                                    leading_blank = (
+                                        blank_indent, body_number)
                             index += 1
                             continue
 
@@ -2844,6 +2864,20 @@ def extract_ci(text, source=CI_SOURCE):
                             # beyond it is scalar content, comment
                             # spellings included.
                             content_indent = body_indent
+                            if (leading_blank is not None
+                                    and leading_blank[0] > content_indent):
+                                # YAML rejects a leading blank line with
+                                # more spaces than the first content line
+                                # (FIX-551-R9), so the layout is refused,
+                                # never read as scalar content.
+                                diagnostics.append(_diagnostic(
+                                    source,
+                                    leading_blank[1],
+                                    "scalar-blank-indent",
+                                    "a leading blank line indented past "
+                                    "the scalar content indentation is a "
+                                    "layout YAML rejects",
+                                ))
                         if body_indent < content_indent:
                             # The first non-empty line below the content
                             # indentation ends the scalar, a comment line
@@ -6594,8 +6628,9 @@ def self_test():
     # spelling below de-quoted into the reviewed $PUSH_BEFORE, collapsed into
     # the waived masked identity and reconciled with exit 0, while bash hands
     # the gate different bytes at runtime (a literal $PUSH_BEFORE for the
-    # escaped and single-quoted spellings, an expansion of $PUSH for the
-    # split ones). Each is now cannot-evaluate (masked-spelling), in space
+    # escaped and single-quoted spellings, an expansion of $PUSH_ for the
+    # backslash-split name, and an expansion of $PUSH for the other split
+    # ones). Each is now cannot-evaluate (masked-spelling), in space
     # and equals form; the 35y controls keep the reviewed spelling passing
     # in both forms.
     for label, spelling in (
@@ -6623,6 +6658,40 @@ def self_test():
                     "35z {} ({} form): no masked-spelling diagnostic: "
                     "{!r}".format(label, form, unreviewed.diagnostics))
 
+    # FIX-551-R9 (PR 551 round-8 review, MEDIUM): the raw-spelling screen
+    # fails closed where no raw spelling reached it: normalize drops a
+    # raws list whose length disagrees with the token list, and
+    # _mask_value refuses a reviewed runtime value whose raw spelling is
+    # None. The 35z vectors above always hand normalize a recovered raw
+    # spelling, so a mutant granting the mask when raw is None (raw is
+    # not None and raw != ...) kept the whole suite green; these
+    # negatives pin the missing-raws and mismatched-raws refusals in
+    # both flag forms, and the disagreeing-walk vector pins that
+    # _raw_lexemes returns None rather than raws another tokenization
+    # produced.
+    for form, raw_tokens in (
+            ("space", ["python3", "tools/check_leaks.py", "--base",
+                       "$PUSH_BEFORE"]),
+            ("equals", ["python3", "tools/check_leaks.py",
+                        "--base=$PUSH_BEFORE"])):
+        for label, raws in (("no raws given", None),
+                            ("a length-mismatched raws list", [])):
+            refused = normalize(raw_tokens, raws=raws)
+            count += 1
+            if refused.ok or refused.code != "masked-spelling":
+                failures.append(
+                    "35z normalize without raw evidence ({} form, {}): "
+                    "expected a masked-spelling refusal, got ok={} "
+                    "code={!r}".format(form, label, refused.ok,
+                                       refused.code))
+    count += 1
+    if _raw_lexemes("--base $PUSH_BEFORE",
+                    ["--base", "DIVERGENT"]) is not None:
+        failures.append(
+            "35z _raw_lexemes: a walk that cannot reproduce the de-quoted "
+            "token list must return None, never raws from another "
+            "tokenization")
+
     # FIX-551-R8 (PR 551 round-7 reviews, MEDIUM): the raw ${{ }} screen
     # reads the run: block scalar as YAML does, from its content indentation
     # (the first non-empty line) to its end (the first non-empty line below
@@ -6632,10 +6701,10 @@ def self_test():
     # script text wherever the content indentation sits; and a dedented line
     # that re-enters the step is a layout YAML rejects, refused by the outer
     # loop, never passed.
-    def block_step(block_lines):
+    def block_step(block_lines, indicator="|"):
         return (("      - name: Block carrier",
                  "        " + STEP_SHELL_LINE,
-                 "        run: |") + block_lines)
+                 "        run: " + indicator) + block_lines)
 
     dedented_comment = evaluate(
         local_msg,
@@ -6681,6 +6750,98 @@ def self_test():
         failures.append(
             "36 dedented re-entry: no step-structure diagnostic: "
             "{!r}".format(reentry.diagnostics))
+
+    # FIX-551-R9 (PR 551 round-8 review, MAJOR): YAML rejects a leading
+    # blank line in a literal block scalar carrying more spaces than the
+    # first content line (the auto-detected content indentation), so the
+    # reader refuses that layout (scalar-blank-indent) instead of
+    # skipping the blank and passing text YAML does not parse; before
+    # the change each refused vector below passed with exit 0. A leading
+    # blank at or below the content indentation, and every blank after
+    # the first content line, stays inside the scalar unchanged.
+    for label, indicator, blank in (
+            ("a | scalar, blank one space past the content indentation",
+             "|", " " * 13),
+            ("a |- scalar, blank two spaces past the content "
+             "indentation", "|-", " " * 14),
+            ("a |+ scalar, blank far past the content indentation",
+             "|+", " " * 20)):
+        over = evaluate(
+            local_msg,
+            with_on(ci_fixture(common, block_step(
+                (blank, "            echo ok"), indicator)), defaults),
+            msg_waiver, msg_side)
+        case("37 an over-indented leading blank in a run: block is a "
+             "layout YAML rejects, refused: " + label, over, 2)
+        count += 1
+        if not any(item.code == "scalar-blank-indent"
+                   for item in over.diagnostics):
+            failures.append(
+                "37 {}: no scalar-blank-indent diagnostic: {!r}".format(
+                    label, over.diagnostics))
+    for label, indicator, blank in (
+            ("a | scalar, blank exactly at the content indentation",
+             "|", " " * 12),
+            ("a |- scalar, blank one space below the content "
+             "indentation", "|-", " " * 11),
+            ("a |+ scalar, an empty leading line", "|+", "")):
+        at_or_below = evaluate(
+            local_msg,
+            with_on(ci_fixture(common, block_step(
+                (blank, "            echo ok"), indicator)), defaults),
+            msg_waiver, msg_side)
+        case("37 control: a leading blank at or below the content "
+             "indentation stays inside the scalar: " + label,
+             at_or_below, 0)
+        count += 1
+        if any(item.code == "scalar-blank-indent"
+               for item in at_or_below.diagnostics):
+            failures.append(
+                "37 control {}: unexpected scalar-blank-indent "
+                "diagnostic: {!r}".format(
+                    label, at_or_below.diagnostics))
+
+    # FIX-551-R9 (PR 551 round-8 review, MINOR): the YAML feature screen
+    # reads an anchor or alias spelling only after whitespace, a colon
+    # or a hyphen, so it refuses the space-separated inline *name and
+    # &name flag spellings, while the equals form bypasses it:
+    # --base=*main survives extraction as a kept literal that diverges
+    # (exit 1, no extraction diagnostic), and --base=&main splits on the
+    # shell control character into an empty flag value, refused
+    # (exit 2). The residue states each outcome; these vectors pin them.
+    for label, flag_arg, wanted in (
+            ("a space-separated alias spelling", "--base *main",
+             "yaml-feature"),
+            ("a space-separated anchor spelling", "--base &main",
+             "yaml-feature"),
+            ("an equals-form anchor spelling", "--base=&main",
+             "runtime-value")):
+        screened = evaluate(
+            local_fixture(common),
+            ci_fixture(common + (
+                "python3 -I -B tools/check_leaks.py " + flag_arg,)),
+            leak_waiver)
+        case("38 an inline anchor or alias flag spelling is refused: "
+             + label, screened, 2)
+        count += 1
+        if not any(item.code == wanted
+                   for item in screened.diagnostics):
+            failures.append(
+                "38 {}: no {} diagnostic: {!r}".format(
+                    label, wanted, screened.diagnostics))
+    glob_literal = evaluate(
+        local_fixture(common),
+        ci_fixture(common + (
+            "python3 -I -B tools/check_leaks.py --base=*main",)),
+        ())
+    case("38 an equals-form glob flag value stays a kept literal that "
+         "diverges", glob_literal, 1, kinds=("ci-only",),
+         ci_only={"tools/check_leaks.py --base *main"})
+    count += 1
+    if glob_literal.diagnostics:
+        failures.append(
+            "38 equals-form glob literal: unexpected diagnostics: "
+            "{!r}".format(glob_literal.diagnostics))
 
     if failures:
         print("SELF-TEST FAIL:")

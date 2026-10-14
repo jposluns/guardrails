@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "d7247f1d9e72f7c14f2196b31287deab0c05a473b32adaed0c12a4338ca247f0"
+tree-sha256 = "079a638afe373778afd1f51a492abfce93adfe1cc682156b75703e5589e4d492"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -61,8 +61,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 300726
-sha256 = "781e4b7069759b7386f18d32a27ba0fddddc68890bb13519cfdb94126b609518"
+bytes = 301379
+sha256 = "8da1e08014ee42c48ffbc393efdd5dede64565f35d28dda0641e00cc7929b26b"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -806,8 +806,8 @@ sha256 = "7854ba7c7fa8221a2b408deaf73505b492ff2d39f67d5addac1b20ed98ac2ba6"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 469287
-sha256 = "bfaabb38ab2937aae7f329254e2428cb0fd4f1d535b294352e0b3f29e6146e97"
+bytes = 469940
+sha256 = "0ada899c0e8496001e0517308b75869a31ab481fbdafdf0c6b4b551ce0d80a9a"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -2341,8 +2341,8 @@ sha256 = "001c5c3f13e7a7b0bc8c283ca1770545d7ba27cb734eff6517b6c03a868225ee"
 
 [[sources]]
 path = "ENFORCEMENT.md"
-bytes = 271962
-sha256 = "1367911e04d772cc9b344837f2316ee4fe02843d4346c48c6be467c34d95bc98"
+bytes = 272615
+sha256 = "403685cf922e1505b6c237523689e09c4a4450531302bbd24885e9e030db0e24"
 
 [[sources]]
 path = "GEMINI.md"
@@ -3136,8 +3136,8 @@ sha256 = "e5760448ade9fc0d5f59b9a6761e07f5e0e122157379ae7fcc0aa1fc59f0d0c2"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 324700
-sha256 = "f04d69fe91ca793e5cd411e48f02ea51b674f3b57e15658ad7174f09322c200a"
+bytes = 325357
+sha256 = "ab7d61b8b0ce4d46ce0df77febe350296ac92cf4e3c2aaeed7df287ed672d1e8"
 
 [[sources]]
 path = "site/evidence.html"
@@ -3301,8 +3301,8 @@ sha256 = "496fde836fc7e0c57d254ccbb66e2229ea782f841608d546c80164ea2e787eae"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
-bytes = 296335
-sha256 = "e355cf528ff4a1d0836d241df6ef1cab789a13fad692aed2a52b0829783a0b8c"
+bytes = 304850
+sha256 = "72a13da508c4a29d76d46dc7e4847360ef497104838c017a3a1841ef210407a2"
 
 [[sources]]
 path = "tools/check_cited_standards.py"
