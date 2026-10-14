@@ -248,8 +248,12 @@ CONFIG_LAUNCHERS = frozenset((
 # tail (python3.12-dbg, python3.13t-dbg) (FIX-541 rounds 4 and 7, decided 6 and 7: the round-4
 # pattern accepted one suffix letter only, so a td, m or dm build name SKIPPED the scan and
 # carried inline code around it).
+# Matched case-insensitively and with an optional .exe tail (FIX-541 round 9, decided 1: a
+# Python3 or python3.exe spelling used to miss the match and fall through to the trusted-config
+# residual, outside every interpreter rule), so no recognized interpreter spelling dodges its
+# grammar by case or suffix.
 CONFIG_INTERPRETERS = re.compile(
-    r"\A(python|pypy|perl|ruby|node|nodejs|lua)[0-9.]*[tdm]*(-dbg)?\Z")
+    r"\A(python|pypy|perl|ruby|node|nodejs|lua)[0-9.]*[tdm]*(-dbg)?(\.exe)?\Z", re.IGNORECASE)
 # The per-interpreter option grammar for the NON-python families, fail closed: a 3-tuple of
 # exact no-operand flags, exact options whose operand is the NEXT word, and prefixes whose
 # operand is attached in the same word. ANY other leading option word is refused as
@@ -258,9 +262,11 @@ CONFIG_INTERPRETERS = re.compile(
 # a cluster tail can never be misread as a harmless script path. Over-refusal of an exotic but
 # legitimate option (a flag cluster, perl -s, node -i) is the accepted fail-closed boundary
 # (FIX-541 round 4, decided 6). The python family is deliberately ABSENT from this table: a
-# configured python command is accepted only as
+# configured command whose HEAD is a recognized python-family spelling is accepted only as
 # <interpreter> -I -B <repo-relative .py path present in the base tip tree as a regular file>,
-# and python -m is refused in every spelling (FIX-541 round 8, decided 1: rounds 5 to 7 tried
+# and python -m draws the module-naming diagnostic in the spellings the module scan recognizes,
+# with every other python form refused by the one-shape rule (FIX-541 round 8, decided 1, and
+# round 9, decided 4: rounds 5 to 7 tried
 # to prove what -m NAME imports from tree membership and could not, because under -I a
 # standard-library name wins over a checkout file and a package needs more than __init__.py,
 # so the capability is removed instead of modelled; see guard_config_fail_closed).
@@ -276,8 +282,11 @@ _INTERPRETER_FAMILY = dict(pypy="python", nodejs="node")
 
 # The exact leading option words of the ONE accepted python command shape (FIX-541 round 8,
 # decided 1): -I (isolated mode: no current or script directory on sys.path, no user site
-# packages, no PYTHON* environment) and -B (no bytecode writes), so the named script is the
-# only checkout code the launch can run.
+# packages, no PYTHON* environment) and -B (no bytecode writes). The options pin the INITIAL
+# launch only: the selected script runs first, and it can itself import further checkout code
+# or extend sys.path (the live generators do), inside the trusted-config residual stated in
+# guard_config_fail_closed (FIX-541 round 9, decided 4: this comment used to claim the named
+# script was the only checkout code the launch can run).
 _PYTHON_SCRIPT_OPTIONS = ["-I", "-B"]
 
 
@@ -681,11 +690,31 @@ def _run_external(argv, cwd, timeout, extra_env=None):
 # ---------------------------------------------------------------- guards (the GUARDS table below)
 
 
+def _python_module_spelling(word):
+    """Whether one leading python option word SPELLS the module launch: -m itself, an attached
+    operand (-mpkg), or an m inside a short flag cluster before any operand-taking letter (-Im,
+    -IBm, -im). A letter in cWX takes the REST of the word as its operand, so an m behind it is
+    operand text, never the module option, and a long option (--) never spells -m. Used for the
+    module-NAMING diagnostic only: every argv it matches is outside the one pinned
+    -I -B <script.py> shape and is refused by that rule anyway (FIX-541 round 9, decided 4)."""
+    if not word.startswith("-") or word.startswith("--"):
+        return False
+    for ch in word[1:]:
+        if ch == "m":
+            return True
+        if ch in "cWX" or not ch.isalpha():
+            return False
+    return False
+
+
 def guard_config_fail_closed(data, tree=None):
     """Raise FailClosed unless data is a well-formed version-1 merge-train config. tree, when
     given, is the set of REGULAR-FILE paths of the base tip tree the config text came from (see
-    _base_tree): it resolves the script path of a configured python command (FIX-541 round 8,
-    decided 1), and with tree None every python command is refused, fail closed."""
+    _base_tree): it resolves the script path of a configured command whose head is a recognized
+    python-family interpreter spelling (FIX-541 round 8, decided 1), and with tree None every
+    such command is refused, fail closed. A command HEAD must be a bare program name: a path
+    head is refused outright, and a bare head naming a tree file is refused whenever tree is
+    given (FIX-541 round 9, decided 1)."""
     def bad(msg):
         raise FailClosed("malformed %s: %s" % (CONFIG_PATH, msg))
 
@@ -706,15 +735,37 @@ def guard_config_fail_closed(data, tree=None):
             # configured command whose argv head names git (any path form) would reach
             # _run_child without the funnel maintenance pins, and a launcher head or an
             # interpreter handed inline code could hand git that same unpinned argv one hop
-            # later. Deny-list, stated exactly: a head naming git; a head in CONFIG_LAUNCHERS;
-            # a CONFIG_INTERPRETERS head whose leading option words leave the supported
+            # later. Deny-list, stated exactly: a head that is a path (any separator) and a
+            # bare head naming a base tip tree file (FIX-541 round 9, decided 1); a head naming
+            # git; a head in CONFIG_LAUNCHERS; a CONFIG_INTERPRETERS head (matched
+            # case-insensitively, optional .exe) whose leading option words leave the supported
             # per-interpreter grammar (python: the ONE pinned shape below; every other family:
             # _INTERPRETER_GRAMMAR exact flags, valued options whose operand is the next word
             # and attached-operand prefixes; anything else, every inline-code option and
             # bundled cluster included, is refused unclassified). A configured program outside
             # this list can still run git itself: the trusted-config threat model accepts that
-            # residual.
-            head = command[0].replace("\\", "/").rsplit("/", 1)[-1]
+            # residual. THE ONE RESIDUAL STATEMENT for the python pinning (FIX-541 round 9,
+            # decided 1); every other comment here and the commit record defer to it: the
+            # python claims hold for commands whose HEAD matches a CONFIG_INTERPRETERS
+            # python-family spelling. Another Python launcher resolved on PATH (ipython, uv,
+            # coverage, py, a renamed or symlinked interpreter) and the imports a selected
+            # script makes from the checkout are TRUSTED CONFIGURATION, not proven by this
+            # guard; what the guard adds over that trust is that a head is never a path and
+            # never a base tip tree file, so checkout content (tools/gen.py, ./python3,
+            # tools/python3, a committed python3) never runs as a configured program head.
+            head = command[0]
+            if "/" in head or "\\" in head:
+                # FIX-541 round 9 (decided 1): a PATH-form head (absolute, ./-prefixed or
+                # repo-relative, tools/gen.py and tools/python3 included) is refused outright:
+                # it can name checkout content or shadow a recognized interpreter, and the
+                # round-8 basename matching let tools/gen.py skip every interpreter rule.
+                bad("%s command %r head is a path, not a bare program name: a path head can "
+                    "run checkout content or a shadowed interpreter, so it is refused; "
+                    "configure a bare program name resolved on PATH" % (where, command[0]))
+            if tree is not None and head in tree:
+                bad("%s command %r head names a base tip tree file: checkout content is never "
+                    "a configured program, so the head is refused (FIX-541 round 9, decided 1)"
+                    % (where, command[0]))
             if head == "git":
                 bad("%s command %r must not launch git: the merge train runs git only through "
                     "its own pinned funnel" % (where, command[0]))
@@ -724,28 +775,39 @@ def guard_config_fail_closed(data, tree=None):
             interp = CONFIG_INTERPRETERS.match(head)
             if not interp:
                 continue
-            family = _INTERPRETER_FAMILY.get(interp.group(1), interp.group(1))
+            base_name = interp.group(1).lower()
+            family = _INTERPRETER_FAMILY.get(base_name, base_name)
             if family == "python":
                 # FIX-541 round 8 (decided 1): a configured python command is accepted ONLY as
                 # <interpreter> -I -B <repo-relative .py path that exists in tree as a regular
-                # file>, with every later word belonging to that script. python -m is refused
-                # in EVERY spelling, attached or separated, operand or no operand, checkout
-                # module or not: rounds 5 to 7 tried to prove what -m NAME imports from tree
-                # membership and could not (under -I or -P a standard-library name wins over a
-                # checkout file, and a package needs more than __init__.py), so the capability
-                # is removed instead of modelled. -I and -B are REQUIRED: isolated mode keeps
-                # the checkout and the PYTHON* environment off sys.path, so the named script
-                # is the only checkout code the launch can run.
+                # file>, with every later word belonging to that script. python -m draws the
+                # module-naming diagnostic in every spelling THIS SCAN RECOGNIZES: separated
+                # (-m mod), attached (-mmod), bundled in a short cluster (-Im, -IBm) and behind
+                # the separate operand of a valued option (-W ignore -m); the scan steps over
+                # -W, -X and --check-hash-based-pycs operands so that last form is reached
+                # (FIX-541 round 9, decided 4: bundled and valued-option-preceded spellings
+                # used to fall to the generic shape refusal below). Rounds 5 to 7 tried to
+                # prove what -m NAME imports from tree membership and could not (under -I or
+                # -P a standard-library name wins over a checkout file, and a package needs
+                # more than __init__.py), so the capability is removed instead of modelled;
+                # a spelling outside the scan is still refused by the shape rule, only with
+                # the generic diagnostic. -I and -B are REQUIRED: isolated mode keeps the
+                # checkout and the PYTHON* environment off the INITIAL sys.path (the selected
+                # script can import further checkout code; see the residual statement above).
                 words = command[1:]
+                i = 0
+                while i < len(words) and words[i].startswith("-"):
+                    word = words[i]
+                    if _python_module_spelling(word):
+                        bad("%s command %r must not launch a python module: python -m is "
+                            "refused because tree membership cannot prove what -m would "
+                            "import; name a checkout script instead, as "
+                            "<interpreter> -I -B <path.py>" % (where, command[0]))
+                    i += 2 if word in ("-W", "-X", "--check-hash-based-pycs") else 1
                 leading = 0
                 for word in words:
                     if not word.startswith("-"):
                         break
-                    if word.startswith("-m"):
-                        bad("%s command %r must not launch a python module: python -m is "
-                            "refused in every spelling because tree membership cannot prove "
-                            "what -m would import; name a checkout script instead, as "
-                            "<interpreter> -I -B <path.py>" % (where, command[0]))
                     leading += 1
                 script = words[leading] if leading < len(words) else None
                 if words[:leading] != _PYTHON_SCRIPT_OPTIONS or script is None:
@@ -1546,11 +1608,14 @@ def _merge_commit_push(ctx, scratch, old, base, apply):
             rc, err.strip()[:300] or "(no stderr)"))
     unmerged = _unmerged(scratch)
     # The accepted diagnostic boundary, stated exactly: a merge may write conflict notices,
-    # warnings and hints to stderr, but never a line git prefixes "fatal:" or "error:"; such a
-    # diagnostic proves the merge ended abnormally WHATEVER exit status was reported, exit 0
-    # included, so it refuses HERE, before any conflict resolution (FIX-541 round 4, decided 1,
-    # blocker; round 8, decided 3: the scan used to run only on exit 1, so a merge that reported
-    # exit 0 beside an error diagnostic went on to commit and push). The English prefixes are
+    # warnings and hints to stderr, but never a line git prefixes "fatal:" or "error:"; the scan
+    # runs before exit 0 or exit 1 is ACCEPTED, while every other status, and an absent
+    # MERGE_HEAD, is refused outright above without reaching the scan (FIX-541 round 9,
+    # decided 4: this comment used to say the scan ran whatever the exit status the merge
+    # reported). Such a diagnostic refuses HERE, before any conflict resolution (FIX-541
+    # round 4, decided 1, blocker; round 8, decided 3: the scan used to run only on exit 1, so
+    # a merge that reported exit 0 beside an error diagnostic went on to commit and push).
+    # The English prefixes are
     # reliable because the funnel pins every child to the C locale: _clean_env sets LC_ALL=C and
     # drops LANGUAGE after any explicit additions, so the shipped git message catalogs that
     # translate both prefixes never apply (FIX-541 rounds 7 and 8, decided 1 and 4).
@@ -2139,6 +2204,11 @@ class Fixture:
         gh = self.bin / "gh"
         gh.write_text("#!%s\n%s" % (sys.executable, FAKE_GH), encoding="utf-8")
         gh.chmod(0o755)
+        # The configured interpreter head is the BARE name python3, resolved through this
+        # fixture-front PATH entry to the running interpreter: the config schema refuses a
+        # path head outright (FIX-541 round 9, decided 1), so the fixture configures its
+        # commands the way a live project now must.
+        os.symlink(sys.executable, self.bin / "python3")
         _git(self.base, "init", "-q", "--bare", "-b", "main", str(self.remote))
         hooks = self.remote / "hooks"
         (hooks / "post-receive").write_text(
@@ -2156,7 +2226,7 @@ class Fixture:
         _git(self.main, "remote", "add", "origin", str(self.remote))
         self.write(self.main, "src/a.txt", NINE)
         self.write(self.main, "tools/gen.py", TOY_GEN)
-        self.write(self.main, CONFIG_PATH, CONFIG_TOML % dict(py=sys.executable, probe=probe))
+        self.write(self.main, CONFIG_PATH, CONFIG_TOML % dict(py="python3", probe=probe))
         self.write(self.main, ".gitignore", "ignored/\n")
         self.commit(self.main, "seed")
         _git(self.main, "push", "-q", "origin", "main")
@@ -2384,10 +2454,12 @@ def case_config(_tmp):
             return ("refused", str(exc))
         return ("accepted", "")
 
-    # FIX-541 round 8 (decided 1): python -m is refused in EVERY spelling, attached or
-    # separated, operand or no operand, checkout module or not, each with the diagnostic NAMING
-    # the module form (rounds 5 to 7 tried to prove what -m NAME imports from tree membership
-    # and could not, so the capability is removed instead of modelled; the named diagnostic is
+    # FIX-541 round 8 (decided 1) and round 9 (decided 4): python -m draws the diagnostic
+    # NAMING the module form in every spelling the module scan recognizes: separated, attached,
+    # trailing, bundled in a short cluster (-Im, -IBm) and behind the separate operand of a
+    # valued option (-W ignore -m), checkout module or not (rounds 5 to 7 tried to prove what
+    # -m NAME imports from tree membership and could not, so the capability is removed
+    # instead of modelled; the named diagnostic is
     # asserted so the dedicated -m scan cannot silently decay into the generic shape refusal
     # covered below).
     for check_id, argv in (
@@ -2396,11 +2468,50 @@ def case_config(_tmp):
             ("config/python-module-code-repl-refused", ["python3", "-I", "-m", "code"]),
             ("config/python-module-local-refused", ["python3", "-I", "-m", "tools.gen"]),
             ("config/python-module-attached-refused", ["python3", "-I", "-mtools.gen"]),
-            ("config/python-module-trailing-refused", ["python3", "-I", "-m"])):
+            ("config/python-module-trailing-refused", ["python3", "-I", "-m"]),
+            ("config/python-module-bundled-refused", ["python3", "-Im", "timeit"]),
+            ("config/python-module-bundled-double-refused", ["python3", "-IBm", "timeit"]),
+            ("config/python-module-after-valued-option-refused",
+             ["python3", "-W", "ignore", "-m", "timeit"])):
         got = refusal(lambda d, a=argv: d["generated"].update(check=[list(a)]),
                       tree=tree_with_gen)
         check(check_id, (got[0], "must not launch a python module" in got[1]),
               ("refused", True))
+    # FIX-541 round 9 (decided 1): a command HEAD that is a path never runs, whatever it names
+    # (a checkout script, a ./-prefixed or repo-relative interpreter), and a bare head naming a
+    # base tip tree file never runs either; each refusal is asserted WITH its own named
+    # diagnostic, so neither head rule can silently decay into another refusal. The tree for
+    # these vectors carries the bare heads themselves.
+    tree_with_heads = frozenset(("tools/gen.py", "gen.py", "python3"))
+    for check_id, argv, named in (
+            ("config/path-head-script-refused", ["tools/gen.py", "--check"],
+             "head is a path"),
+            ("config/path-head-dotslash-interpreter-refused",
+             ["./python3", "-I", "-B", "tools/gen.py"], "head is a path"),
+            ("config/path-head-checkout-interpreter-refused",
+             ["tools/python3", "-I", "-B", "tools/gen.py"], "head is a path"),
+            ("config/tree-file-head-refused", ["gen.py", "--check"],
+             "names a base tip tree file"),
+            ("config/tree-file-interpreter-head-refused",
+             ["python3", "-I", "-B", "tools/gen.py"], "names a base tip tree file")):
+        got = refusal(lambda d, a=argv: d["generated"].update(check=[list(a)]),
+                      tree=tree_with_heads)
+        check(check_id, (got[0], named in got[1]), ("refused", True))
+    # FIX-541 round 9 (decided 1): a recognized interpreter head is matched case-insensitively
+    # and with an optional .exe tail, so neither spelling escapes the python one-shape rule
+    # into the trusted-config residual; the accepted boundary below keeps the uppercase .exe
+    # spelling of the pinned shape working (a compatibility check, never red-on-revert
+    # evidence).
+    check("config/python-uppercase-inline-code-refused",
+          verdict(lambda d: d["generated"].update(check=[["Python3", "-c", "print(1)"]]),
+                  tree=tree_with_gen), "refused")
+    check("config/python-exe-inline-code-refused",
+          verdict(lambda d: d["generated"].update(check=[["python3.exe", "-c", "print(1)"]]),
+                  tree=tree_with_gen), "refused")
+    check("config/python-uppercase-exe-script-accepted",
+          verdict(lambda d: d["generated"].update(
+              check=[["PYTHON3.EXE", "-I", "-B", "tools/gen.py"]]), tree=tree_with_gen),
+          "accepted")
     # FIX-541 round 8 (decided 1): the ONE accepted python shape is
     # <interpreter> -I -B <repo-relative .py path in the tree as a regular file>; a missing
     # script, a suffixless path and a shape without the isolation options are each refused even
@@ -2415,6 +2526,15 @@ def case_config(_tmp):
               check=[["python3", "-I", "-B", "tools/gen"]]), tree=tree_with_gen), "refused")
     check("config/python-script-without-isolation-refused",
           verdict(lambda d: d["generated"].update(check=[["python3", "tools/gen.py"]]),
+                  tree=tree_with_gen), "refused")
+    # FIX-541 round 9 (decided 2): EACH isolation flag is independently required, with the
+    # script present in the tree, so a relaxation accepting -B alone or -I alone fails its own
+    # vector (the round-8 vector omitted both flags together and discriminated neither).
+    check("config/python-script-b-without-i-refused",
+          verdict(lambda d: d["generated"].update(check=[["python3", "-B", "tools/gen.py"]]),
+                  tree=tree_with_gen), "refused")
+    check("config/python-script-i-without-b-refused",
+          verdict(lambda d: d["generated"].update(check=[["python3", "-I", "tools/gen.py"]]),
                   tree=tree_with_gen), "refused")
 
     # FIX-541 rounds 3 and 8 (decided 2 and 1): for the non-python families the option scan
@@ -2506,9 +2626,23 @@ def case_frombase(tmp):
     base_sha = _git_text(fx.main, "rev-parse", "refs/heads/main")
     check("config/base-tree-wiring-script-accepted", load_verdict(fx.main, base_sha),
           ("accepted", "tools/gen.py"))
+    cfg_text = CONFIG_TOML % dict(py="python3", probe="[]")
+    # FIX-541 round 9 (decided 4): the wiring must resolve against the SAME COMMIT the config
+    # text came from, not merely the same repository: this config names a script that exists
+    # ONLY at the tip commit, so a wiring resolving one commit back (base_sha~1, which the
+    # round-8 vector above cannot tell from the tip, both trees carrying tools/gen.py) refuses
+    # what the correct wiring accepts; the expected tuple pins the script present at the tip
+    # and absent one commit back.
+    fx.write(fx.main, "tools/tip_only.py", "print(1)\n")
+    fx.write(fx.main, CONFIG_PATH, cfg_text.replace("tools/gen.py", "tools/tip_only.py"))
+    tip_sha = fx.commit(fx.main, "tip-only script")
+    check("config/base-tree-wiring-same-commit-accepted",
+          (load_verdict(fx.main, tip_sha),
+           "tools/tip_only.py" in _base_tree(fx.main, tip_sha),
+           "tools/tip_only.py" in _base_tree(fx.main, tip_sha + "~1")),
+          (("accepted", "tools/tip_only.py"), True, False))
     # A SYMLINK at the named .py path is not a regular file: _base_tree excludes it, so the
     # resolution refuses even though ls-tree lists the path (FIX-541 round 8, decided 1).
-    cfg_text = CONFIG_TOML % dict(py=sys.executable, probe="[]")
     fx.write(fx.main, CONFIG_PATH, cfg_text.replace("tools/gen.py", "tools/alias_gen.py"))
     os.symlink("gen.py", os.path.join(str(fx.main), "tools", "alias_gen.py"))
     link_sha = fx.commit(fx.main, "symlink script")
@@ -2996,11 +3130,62 @@ def case_conflict(tmp):
     check("refuse/source-conflict-invariants", _invariants(fx), [])
 
 
-# The environment the wrapped funnel observed the MERGE child receive, captured at the
-# _run_child boundary by _mergefault_run (FIX-541 round 8, decided 2): the translated-stderr
-# stand-in derives its prefix from this captured value, never from a fresh _clean_env() of its
-# own, so a merge-only locale leak turns the translated vectors red instead of green.
+# The LC_ALL/LANGUAGE environment OBSERVED IN the merge child itself: _mergefault_run puts a
+# recording git wrapper at the front of the fixture PATH, and for a merge argv the wrapper
+# writes the values it (the exec-ed merge child) sees (FIX-541 round 8, decided 2, revised
+# round 9, decided 3: round 8 captured the env ARGUMENT at the _run_child boundary, so a leak
+# INSIDE _run_child, below that capture point, kept the translated vectors green). The
+# translated-stderr stand-in derives its prefix from this observed value, never from a fresh
+# _clean_env() of its own, so a merge-only locale leak anywhere up to the child exec turns the
+# translated vectors red instead of green.
 _MERGE_CHILD_ENV = []
+
+
+def _merge_env_wrapper(fx, tmp):
+    """Install a recording git wrapper at the front of the fixture PATH (fx.bin precedes
+    everything during fx.run): for a MERGE argv it appends the LC_ALL and LANGUAGE values it
+    observes, in the exec-ed child itself, to the fixture record file, then hands the whole
+    argv to the first git OUTSIDE the self-test temp tree (the lifecycle wrapper, which
+    reasserts the maintenance pins; an earlier fixture recorder is never chained). Returns a
+    reader that appends each newly recorded observation to _MERGE_CHILD_ENV as a dict carrying
+    LC_ALL and LANGUAGE only when the child saw them set (FIX-541 round 9, decided 3: the
+    observation point is the child, so a leak anywhere between _clean_env and the exec, the
+    inside of _run_child included, is recorded)."""
+    record = fx.base / "merge-child-env.log"
+    real_tmp = os.path.realpath(str(tmp)) + os.sep
+    next_git = None
+    for entry in os.environ.get("PATH", os.defpath).split(os.pathsep):
+        if not entry or os.path.realpath(entry).startswith(real_tmp):
+            continue
+        candidate = os.path.join(entry, "git")
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            next_git = os.path.abspath(candidate)
+            break
+    if next_git is None:
+        raise RuntimeError("self-test requires git on PATH outside the fixture tree")
+    wrapper = fx.bin / "git"
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        "for a in \"$@\"; do\n"
+        "  if [ \"$a\" = merge ]; then\n"
+        "    printf '%s\\n' \"${LC_ALL+LC_ALL=$LC_ALL }${LANGUAGE+LANGUAGE=$LANGUAGE}\""
+        " >> '" + str(record) + "'\n"
+        "    break\n"
+        "  fi\n"
+        "done\n"
+        "exec '" + next_git + "' \"$@\"\n", encoding="utf-8")
+    wrapper.chmod(0o755)
+    seen = dict(count=0)
+
+    def observed():
+        try:
+            lines = record.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            lines = []
+        for line in lines[seen["count"]:]:
+            _MERGE_CHILD_ENV.append(dict(part.split("=", 1) for part in line.split()))
+        seen["count"] = len(lines)
+    return observed
 
 
 def _mergefault_run(tmp, name, fault, apply, clean=False, env=None, leak=None):
@@ -3012,9 +3197,12 @@ def _mergefault_run(tmp, name, fault, apply, clean=False, env=None, leak=None):
     inject a non-C locale). leak, when given, is merged into the environment of the MERGE child
     alone at the _run_child boundary, AFTER _clean_env pinned it: the deliberate merge-only
     locale route-around of FIX-541 round 8, decided 2, which the translated stand-in must turn
-    red. The wrapped funnel records the REAL exit code of each merge it faults, every
-    conflict-resolution operation (a checkout --theirs, a resolution add), AND the environment
-    the merge child actually received (_MERGE_CHILD_ENV). Returns ((exit code, result, snapshot
+    red. The wrapped funnel records the REAL exit code of each merge it faults and every
+    conflict-resolution operation (a checkout --theirs, a resolution add); the LC_ALL/LANGUAGE
+    values the merge child OBSERVES are recorded in the child itself by the _merge_env_wrapper
+    recording wrapper (_MERGE_CHILD_ENV; FIX-541 round 9, decided 3: round 8 recorded the env
+    argument at the _run_child boundary, which a leak below that point dodged). Returns ((exit
+    code, result, snapshot
     diff, remote head unchanged, pushes, marker, real merge exit codes reached, resolution
     operations), refusal reason, fixture)."""
     fx = _fixture(tmp, name)
@@ -3032,13 +3220,15 @@ def _mergefault_run(tmp, name, fault, apply, clean=False, env=None, leak=None):
     real_child = _run_child
     reached, resolutions, in_merge = [], [], []
     del _MERGE_CHILD_ENV[:]
+    observed = _merge_env_wrapper(fx, tmp)
 
-    def recording_child(argv, cwd=None, env=None, timeout=None, push=False):
-        if in_merge:
-            if leak:
-                env = dict(env or dict())
-                env.update(leak)
-            _MERGE_CHILD_ENV.append(dict(env or dict()))
+    def leaking_child(argv, cwd=None, env=None, timeout=None, push=False):
+        # leak lands at the _run_child boundary, AFTER _clean_env pinned env; the OBSERVATION
+        # happens later still, in the exec-ed child itself (the recording wrapper), so even a
+        # leak below this point would be observed (FIX-541 round 9, decided 3).
+        if in_merge and leak:
+            env = dict(env or dict())
+            env.update(leak)
         return real_child(argv, cwd=cwd, env=env, timeout=timeout, push=push)
 
     def fault_git(cwd, *args, **kwargs):
@@ -3051,12 +3241,13 @@ def _mergefault_run(tmp, name, fault, apply, clean=False, env=None, leak=None):
             rc, out, err = real_git(cwd, *args, **kwargs)
         finally:
             in_merge.pop()
+        observed()
         reached.append(rc)
         return fault(rc, out, err)
 
     saved_env = _put_env(env or dict())
     _git = fault_git
-    _run_child = recording_child
+    _run_child = leaking_child
     try:
         rc, reports, _fatal = fx.run(apply=apply)
     finally:
@@ -3095,8 +3286,9 @@ def _fault_error_stderr(rc, out, err):
 
 def _fault_exit0_error_stderr(_rc, out, err):
     # An error diagnostic beside a REPORTED SUCCESS exit: the diagnostic scan must read stderr
-    # whatever the exit status (FIX-541 round 8, decided 3: the scan used to run only on exit 1,
-    # so this shape went on to commit and push).
+    # before accepting EITHER supported exit status, 0 included (FIX-541 round 8, decided 3:
+    # the scan used to run only on exit 1, so this shape went on to commit and push; round 9,
+    # decided 4: statuses outside 0 and 1, and an absent MERGE_HEAD, refuse before the scan).
     return 0, out, err + "error: injected merge failure with reported exit zero\n"
 
 
@@ -3106,18 +3298,60 @@ def _fault_exit0(_rc, out, err):
     return 0, out, err
 
 
+def _locale_probe_env(locale):
+    """A full child environment carrying EXACTLY the given LC_ALL/LANGUAGE entries: _clean_env
+    pins LC_ALL=C and drops LANGUAGE, so both are removed after the pin and the given entries
+    applied over the hole (self-test harness only: this deliberately undoes the production pin
+    to observe native translation; FIX-541 round 9, decided 3)."""
+    env = _clean_env()
+    env.pop("LC_ALL", None)
+    env.pop("LANGUAGE", None)
+    env.update(locale)
+    return env
+
+
+def _translates(locale):
+    """Whether real git translates its fatal: prefix under the given locale on THIS host: the
+    probe forces a one-line fatal diagnostic (rev-parse --verify of an absent name in an empty
+    non-repository directory, read-only) and reports True only for non-empty stderr carrying
+    NEITHER English prefix. Availability is checked before the native leak vector runs, and a
+    host with no translating locale reports that vector NOT RUN (cannot-evaluate), never a pass
+    (FIX-541 round 9, decided 3)."""
+    with tempfile.TemporaryDirectory(prefix="merge-train-locale-probe-") as probe_dir:
+        proc = subprocess.run(["git", "rev-parse", "--verify", "merge-train-locale-probe"],
+                              cwd=probe_dir, env=_locale_probe_env(locale),
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+    err = proc.stderr.decode("utf-8", "replace")
+    return bool(err.strip()) and not err.startswith(("fatal:", "error:"))
+
+
+def _fault_native_stderr(rc, out, err):
+    # REAL git stderr under the locale OBSERVED in the merge child, appended to the real merge
+    # output: with the production pin intact the observed locale is C and the appended
+    # diagnostic arrives as English "fatal: ...", which the scan refuses; under the deliberate
+    # merge-only leak of a host-translating locale it arrives translated, which the
+    # English-only scan misses, with no stand-in text involved (FIX-541 round 9, decided 3).
+    observed = _MERGE_CHILD_ENV[-1] if _MERGE_CHILD_ENV else dict()
+    with tempfile.TemporaryDirectory(prefix="merge-train-native-fault-") as probe_dir:
+        proc = subprocess.run(["git", "rev-parse", "--verify", "merge-train-locale-probe"],
+                              cwd=probe_dir, env=_locale_probe_env(observed),
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+    return rc, out, err + proc.stderr.decode("utf-8", "replace")
+
+
 # The non-C locale the translated-diagnostic vectors inject around the run (FIX-541 round 7,
 # decided 1).
 _NON_C_LOCALE = dict(LC_ALL="de_DE.UTF-8", LANGUAGE="de")
 
 
 def _fault_translated_stderr(rc, out, err):
-    # A LOCALIZED git stand-in over the environment the merge child ACTUALLY received
-    # (_MERGE_CHILD_ENV, captured at the _run_child boundary; FIX-541 round 8, decided 2: the
-    # round-7 stand-in reconstructed a fresh _clean_env() of its own, so a merge-only locale
-    # leak kept these vectors green). The injected diagnostic keeps the English "fatal:" prefix
-    # ONLY when that captured environment pins LC_ALL=C with LANGUAGE unset; under any other
-    # captured environment, and when NO environment was captured (fail closed), the prefix
+    # A LOCALIZED git stand-in over the locale OBSERVED IN the merge child by the recording
+    # wrapper (_MERGE_CHILD_ENV; FIX-541 round 8, decided 2, revised round 9, decided 3: the
+    # round-7 stand-in reconstructed a fresh _clean_env() of its own, and the round-8 capture
+    # read the env ARGUMENT at the _run_child boundary, so a leak inside _run_child, below the
+    # capture point, still kept these vectors green). The injected diagnostic keeps the English
+    # "fatal:" prefix ONLY when the observed environment pins LC_ALL=C with LANGUAGE unset;
+    # under any other observed environment, and when NOTHING was observed (fail closed), it
     # arrives translated, exactly as the shipped de catalog translates it ("Schwerwiegend: "),
     # which the English-only prefix scan misses. Requiring BOTH halves of the pin is the
     # DELIBERATELY conservative rule of this stand-in, stricter than the observed gettext
@@ -3198,20 +3432,24 @@ def case_mergefault(tmp):
         fixtures.append(fx_apply)
         check(apply_id, got_apply + (reason_apply.startswith(reason_prefix) or reason_apply,),
               refused)
-    # FIX-541 round 8 (decided 2): the stand-in itself fails CLOSED with no captured merge
-    # environment, so a capture regression turns the translated vectors red, never green.
+    # FIX-541 round 8 (decided 2): the stand-in itself fails CLOSED with no OBSERVED merge
+    # environment, so an observation regression turns the translated vectors red, never green.
     del _MERGE_CHILD_ENV[:]
     check("meta/translated-stand-in-fail-closed-without-capture",
           _fault_translated_stderr(1, b"", "")[2].startswith("Schwerwiegend: "), True)
     # FIX-541 round 8 (decided 2): the REQUIRED-RED mutation, run in band: hand ONLY the merge
     # child a non-C locale, merged at the _run_child boundary AFTER _clean_env pinned the
     # environment (the route-around no funnel-level audit observes; the git-funnel locale probe
-    # in case_audit stays green under it). With the stand-in reading the CAPTURED merge
-    # environment, the injected diagnostic arrives translated, the English-only scan misses it
-    # and the run completes to would-merge THROUGH the conflict resolution: exactly the red the
-    # translated vector must show under that mutation. This check pins that sensitivity; a
+    # in case_audit stays green under it). With the stand-in reading the locale OBSERVED in
+    # the merge child, the injected diagnostic arrives translated, the English-only scan misses
+    # it and the run completes to would-merge THROUGH the conflict resolution: exactly the red
+    # the translated vector must show under that mutation. This check pins that sensitivity; a
     # stand-in that reconstructs its own environment (the round-7 shape) turns it red by
-    # refusing the run.
+    # refusing the run. DELIBERATE SENSITIVITY PROBE (FIX-541 round 9, decided 4): the expected
+    # value PINS the UNSAFE outcome, would-merge through the conflict resolution, on purpose,
+    # as the red the leak must produce; a production hardening that catches translated
+    # diagnostics locale-independently would turn this check red, and the check is then
+    # REWRITTEN with that hardening, never read as a regression.
     got_leak, reason_leak, fx_leak = _mergefault_run(
         tmp, "translated-locale-leak", _fault_translated_stderr, False,
         env=_NON_C_LOCALE, leak=dict(_NON_C_LOCALE))
@@ -3220,6 +3458,35 @@ def case_mergefault(tmp):
           (got_leak, reason_leak.startswith("dry run: would merge")),
           ((0, "would-merge", [], True, [], False, [1],
             [["checkout", "--theirs"], ["add", "--"]]), True))
+    # FIX-541 round 9 (decided 3): the same merge-only leak shown with REAL git output, under
+    # a locale THIS host translates: the availability probe keeps the first candidate whose
+    # fatal: prefix arrives translated from real git; with none available the vector is
+    # reported NOT RUN (cannot-evaluate), never a pass. Under the leak the
+    # _fault_native_stderr stand-in appends stderr real git produced under the locale OBSERVED
+    # in the merge child, so the English-only scan missing the translated prefix is native git
+    # behaviour, not stand-in text (the expected would-merge is the same pinned unsafe outcome
+    # as above).
+    native = None
+    for candidate in (dict(LC_ALL="de_DE.UTF-8", LANGUAGE="de"),
+                      dict(LC_ALL="en_US.UTF-8", LANGUAGE="de"),
+                      dict(LC_ALL="fr_FR.UTF-8", LANGUAGE="fr")):
+        if _translates(candidate):
+            native = candidate
+            break
+    if native is None:
+        skip("meta/native-translated-vector-red-under-merge-locale-leak",
+             "no locale translating the git fatal: prefix is available on this host "
+             "(candidates: de_DE.UTF-8+de, en_US.UTF-8+de, fr_FR.UTF-8+fr), so the native "
+             "leak vector cannot be evaluated")
+    else:
+        got_native, reason_native, fx_native = _mergefault_run(
+            tmp, "native-translated-locale-leak", _fault_native_stderr, False,
+            env=dict(native), leak=dict(native))
+        fixtures.append(fx_native)
+        check("meta/native-translated-vector-red-under-merge-locale-leak",
+              (got_native, reason_native.startswith("dry run: would merge")),
+              ((0, "would-merge", [], True, [], False, [1],
+                [["checkout", "--theirs"], ["add", "--"]]), True))
     check("refuse/mergefault-invariants", _invariants(*fixtures), [])
 
 
@@ -3611,13 +3878,12 @@ def case_timeout(tmp):
     _stale_pr(fx2)
     pid_file = Path(tmp) / "timeout-regen-pids"
     text = _read_text(fx2.main / CONFIG_PATH)
-    plain = 'regenerate = [["%s", "-I", "-B", "tools/gen.py"]]' % sys.executable
+    plain = 'regenerate = [["python3", "-I", "-B", "tools/gen.py"]]'
     # The sleeper is a committed SCRIPT, not inline -c code (the config schema refuses an
     # interpreter handed inline code; FIX-541 round 2, decided 3); the grandchild -c spawn
     # inside it is a direct child launch, never a config-routed argv.
-    sleeper = ('regenerate = [["%s", "-I", "-B", "tools/gen.py"],'
-               ' ["%s", "-I", "-B", "tools/sleep_timeout.py"]]'
-               % (sys.executable, sys.executable))
+    sleeper = ('regenerate = [["python3", "-I", "-B", "tools/gen.py"],'
+               ' ["python3", "-I", "-B", "tools/sleep_timeout.py"]]')
     fx2.write(fx2.main, "tools/sleep_timeout.py", TOY_SLEEP_TIMEOUT)
     _git(fx2.main, "add", "--", "tools/sleep_timeout.py")
     text = text.replace(plain, sleeper).replace("command_timeout_seconds = 60",
@@ -4627,7 +4893,7 @@ def case_signal(tmp):
         probe_dir.mkdir()
         pid_file = probe_dir / "sleeper.pid"
         text = _read_text(fx.main / CONFIG_PATH)
-        plain = 'regenerate = [["%s", "-I", "-B", "tools/gen.py"]]' % sys.executable
+        plain = 'regenerate = [["python3", "-I", "-B", "tools/gen.py"]]'
         # The sleeping regenerate command (a committed SCRIPT: the config schema refuses inline
         # -c code, FIX-541 round 2, decided 3) spawns its OWN child (a grandchild of the tool),
         # so the case also pins the process-GROUP termination: round-4 M1 showed a plain kill of
@@ -4637,9 +4903,8 @@ def case_signal(tmp):
         # direct child wrote it, the signal could land before the grandchild was stubborn, so the
         # post-exit group probe was exercised only on some runs). The grandchild takes the pid
         # file and the direct child's pid as argv (see TOY_SLEEP_SIGNAL).
-        sleeper = ('regenerate = [["%s", "-I", "-B", "tools/gen.py"],'
-                   ' ["%s", "-I", "-B", "tools/sleep_signal.py"]]'
-                   % (sys.executable, sys.executable))
+        sleeper = ('regenerate = [["python3", "-I", "-B", "tools/gen.py"],'
+                   ' ["python3", "-I", "-B", "tools/sleep_signal.py"]]')
         fx.write(fx.main, "tools/sleep_signal.py", TOY_SLEEP_SIGNAL)
         _git(fx.main, "add", "--", "tools/sleep_signal.py")
         fx.write(fx.main, CONFIG_PATH, text.replace(plain, sleeper))
@@ -4785,12 +5050,12 @@ def _launch_window(tmp):
     fx = _fixture(tmp, "launchwin")
     _stale_pr(fx)
     text = _read_text(fx.main / CONFIG_PATH)
-    plain = 'regenerate = [["%s", "-I", "-B", "tools/gen.py"]]' % sys.executable
+    plain = 'regenerate = [["python3", "-I", "-B", "tools/gen.py"]]'
     # A committed sleeper script (the config schema refuses inline -c code; FIX-541 round 2,
     # decided 3); its path doubles as the launch marker kicking_popen watches for.
     marker = "tools/sleep_launch.py"
-    sleeper = ('regenerate = [["%s", "-I", "-B", "tools/gen.py"], ["%s", "-I", "-B", "%s"]]'
-               % (sys.executable, sys.executable, marker))
+    sleeper = ('regenerate = [["python3", "-I", "-B", "tools/gen.py"],'
+               ' ["python3", "-I", "-B", "%s"]]' % marker)
     fx.write(fx.main, "tools/sleep_launch.py", TOY_SLEEP_LAUNCH)
     _git(fx.main, "add", "--", "tools/sleep_launch.py")
     fx.write(fx.main, CONFIG_PATH, text.replace(plain, sleeper))
