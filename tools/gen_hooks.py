@@ -521,9 +521,12 @@ def main():
 #      STRUCTURALLY: the injected rescue faults are recorded apart from genuine rescue and
 #      final-collection failures (recognized by exception identity, never by message text), a
 #      genuine rescue or final-collection failure is never discarded by the expected-error
-#      filter, the final collection still attempts its bounded wait when its kill raises, and
-#      after the filter a recorded child without a collected returncode is a named failure, so
-#      the case can never PASS with a live child,
+#      filter, each rescue and final-collection kill and wait runs under its own guard
+#      against ANY exception (a RuntimeError or KeyboardInterrupt from the final kill
+#      included), so the bounded final wait still runs when its kill raises, every rescue and
+#      final-collection wait must carry timeout=10, and after the filter a recorded child
+#      without a collected returncode is a named failure, so the case can never PASS with a
+#      live child,
 #  28. _rmtree_verified never follows a symlink out of the tree it removes (a directory symlink
 #      inside the tree pointing at an OUTSIDE directory leaves that directory's mode unchanged;
 #      the symlink is unlinked, never chmodded through), and treats only a confirmed absence
@@ -533,6 +536,13 @@ def main():
 #      unremovable root link is a named failure with the outside tree untouched.
 #      Confinement holds up to the disclosed replacement race between an entry's lstat
 #      classification and the chmod or walk that follows (stated at the helper).
+# Every vector that removes the entries its own faults caused (cases 20b, 21b, 27 and 28)
+# does so by PROVENANCE, never by message text: each named entry from the staged cleanup,
+# the removal and absence helpers and the launch diagnostic carries its stage and the
+# exception object that originated it, each injected fault is recorded as it fires, and an
+# entry is removed ONLY when it was recorded at a stage the vector declares AND its origin
+# IS one of those recorded objects. A genuine failure whose text carries an injected token
+# stays a failure (case 27's genuine-token vector and case 28's vector (e) hold this).
 
 _APEX = """---
 corpus-id: apex01
@@ -665,11 +675,13 @@ class _FixtureUnavailable(Exception):
 # for the child (the Linux prctl PR_SET_PDEATHSIG) is a possible LATER layer for that residue;
 # it is not built here.
 # An interruption of the suite DURING a spawn, before the child handle is stored, is the
-# same residual shape, with one sharpening: a TOP-LEVEL child runs in its OWN session and
-# process group, so a kill of this suite's process group, or a terminal interrupt, does
-# NOT reach it; it survives until it exits by itself (a BLOCKED child need never exit) or
-# until a supervisor signals its session or its pid. A NESTED suite's children share
-# their driver's process group, so an outer group kill reaches those. (Disclosed at
+# same residual shape, with one sharpening: ONLY where the platform has os.killpg does a
+# TOP-LEVEL child run in its OWN session and process group, so a kill of this suite's
+# process group, or a terminal interrupt, does NOT reach it; it survives until it exits by
+# itself (a BLOCKED child need never exit) or until a supervisor signals its session or
+# its pid. WITHOUT os.killpg a top-level child shares this suite's session and process
+# group, so a group kill or terminal interrupt DOES reach it. A NESTED suite's children
+# share their driver's process group, so an outer group kill reaches those. (Disclosed at
 # _run_bounded; the earlier mask and handle-publication mechanisms for that window were
 # removed as unprovable.)
 
@@ -756,6 +768,38 @@ def self_test_main(_nested=False):
         except BaseException:
             return "<unrenderable exception>"
 
+    class _Observed(str):
+        # A named failure entry that carries its PROVENANCE: the stage that recorded it
+        # and the exception object that originated it (None where no exception did). A
+        # vector that injects a fault removes an entry ONLY through that provenance
+        # (_split_injected below), never by the entry's text, so a genuine failure whose
+        # message happens to contain an injected token stays a failure.
+        def __new__(cls, text, stage, origin):
+            entry = str.__new__(cls, text)
+            entry.stage = stage
+            entry.origin = origin
+            return entry
+
+    def _observe(text, stage, origin=None):
+        failures.append(_Observed(text, stage, origin))
+
+    def _split_injected(added, injected, stages):
+        # The ONLY way a vector removes entries it caused from the failure list: an entry
+        # is SUPPRESSED only when it was recorded at one of the vector's declared stages
+        # AND its originating exception IS (identity, never equality or message text) one
+        # of the exception objects the vector itself created and recorded when each fired.
+        # Every other entry stays a failure whatever its text. Returns (suppressed, kept).
+        suppressed = []
+        kept = []
+        for entry in added:
+            origin = getattr(entry, "origin", None)
+            if (getattr(entry, "stage", None) in stages and origin is not None
+                    and any(origin is fault for fault in injected)):
+                suppressed.append(entry)
+            else:
+                kept.append(entry)
+        return suppressed, kept
+
     def _mutate(root, old, new):
         """Rewrite the built manifest in place to inject one fault, then the run must fail closed."""
         mpath = root / ".aiqt" / "core" / "hooks" / "manifest.toml"
@@ -790,10 +834,10 @@ def self_test_main(_nested=False):
             try:
                 entry_stat = os.lstat(entry)
             except OSError as exc:
-                failures.append("{}: removal repair could not classify the entry {} ({}); "
-                                "an unclassifiable entry is a named failure left alone, "
-                                "never chmodded through a possible symlink"
-                                .format(what, entry, _exc_text(exc)))
+                _observe("{}: removal repair could not classify the entry {} ({}); "
+                         "an unclassifiable entry is a named failure left alone, "
+                         "never chmodded through a possible symlink"
+                         .format(what, entry, _exc_text(exc)), "removal classify", exc)
                 return
             try:
                 if stat.S_ISLNK(entry_stat.st_mode):
@@ -813,10 +857,11 @@ def self_test_main(_nested=False):
             except FileNotFoundError:
                 return True
             except OSError as exc:
-                failures.append("{}: removal of the temporary tree {} could not be verified "
-                                "({}); only a confirmed absence counts as removed, so an "
-                                "unverifiable removal is a named failure, never a silent "
-                                "success".format(what, path, _exc_text(exc)))
+                _observe("{}: removal of the temporary tree {} could not be verified "
+                         "({}); only a confirmed absence counts as removed, so an "
+                         "unverifiable removal is a named failure, never a silent "
+                         "success".format(what, path, _exc_text(exc)),
+                         "removal verify", exc)
                 return False
             if attempt == 0:
                 # The retry repair walks ONLY a root this verification lstat confirms
@@ -831,12 +876,13 @@ def self_test_main(_nested=False):
                     try:
                         os.unlink(path)
                     except OSError as exc:
-                        failures.append("{}: the root {} of the tree to remove is a "
-                                        "symlink that could not be unlinked ({}); a "
-                                        "root symlink is never walked (os.walk would "
-                                        "follow it into an outside tree), so the "
-                                        "leftover link is a named failure, never a "
-                                        "traversal".format(what, path, _exc_text(exc)))
+                        _observe("{}: the root {} of the tree to remove is a "
+                                 "symlink that could not be unlinked ({}); a "
+                                 "root symlink is never walked (os.walk would "
+                                 "follow it into an outside tree), so the "
+                                 "leftover link is a named failure, never a "
+                                 "traversal".format(what, path, _exc_text(exc)),
+                                 "removal root unlink", exc)
                         return False
                     continue
                 if not stat.S_ISDIR(root_stat.st_mode):
@@ -860,9 +906,9 @@ def self_test_main(_nested=False):
         except FileNotFoundError:
             return True
         except OSError as exc:
-            failures.append("{}: could not verify that {!r} is gone ({}); an unverifiable "
-                            "absence is a named failure, never a silent success"
-                            .format(what, path, _exc_text(exc)))
+            _observe("{}: could not verify that {!r} is gone ({}); an unverifiable "
+                     "absence is a named failure, never a silent success"
+                     .format(what, path, _exc_text(exc)), "absence confirm", exc)
         return False
 
     def _require_absent(path, what, message):
@@ -875,9 +921,9 @@ def self_test_main(_nested=False):
         except FileNotFoundError:
             return
         except OSError as exc:
-            failures.append("{}: could not verify that {!r} is absent ({}); an "
-                            "unverifiable absence is a named failure, never a silent "
-                            "success".format(what, path, _exc_text(exc)))
+            _observe("{}: could not verify that {!r} is absent ({}); an "
+                     "unverifiable absence is a named failure, never a silent "
+                     "success".format(what, path, _exc_text(exc)), "absence verify", exc)
             return
         failures.append(message)
 
@@ -952,7 +998,9 @@ def self_test_main(_nested=False):
             # exception propagating through the caller. An interruption delivered BETWEEN
             # two guards still skips the later stages; that gap is disclosed above, not
             # covered. Returns True only when the group kill actually happened, so no
-            # caller claims a group kill that did not.
+            # caller claims a group kill that did not. Every named entry carries its stage
+            # and the exception that originated it (_observe), so case 27 can tell the
+            # faults it injected from a genuine failure by identity, never by text.
             pid = getattr(proc, "pid", None)
             group_killed = False
             # Stage 1: kill the whole process group where one was created, otherwise the
@@ -968,62 +1016,72 @@ def self_test_main(_nested=False):
                     except OSError:
                         pass
                     except BaseException as exc:
-                        failures.append("{}: cleanup stage 1: the group kill of the child "
-                                        "(pid {}) failed ({}); a kill failure is a named "
-                                        "failure, never an exception replacing the original"
-                                        .format(label, pid, _exc_text(exc)))
+                        _observe("{}: cleanup stage 1: the group kill of the child "
+                                 "(pid {}) failed ({}); a kill failure is a named "
+                                 "failure, never an exception replacing the original"
+                                 .format(label, pid, _exc_text(exc)),
+                                 "stage 1 group kill", exc)
                 if not group_killed:
                     try:
                         proc.kill()
                     except BaseException as exc:
-                        failures.append("{}: cleanup stage 1: the direct kill of the child "
-                                        "(pid {}) failed ({}); a kill failure is a named "
-                                        "failure, never an exception replacing the original"
-                                        .format(label, pid, _exc_text(exc)))
+                        _observe("{}: cleanup stage 1: the direct kill of the child "
+                                 "(pid {}) failed ({}); a kill failure is a named "
+                                 "failure, never an exception replacing the original"
+                                 .format(label, pid, _exc_text(exc)),
+                                 "stage 1 direct kill", exc)
             # Stage 2: bounded reap: drain the pipes for at most _REAP_DRAIN_BOUND seconds,
             # then re-kill and wait at most _REAP_WAIT_BOUND more; a child still unreaped
             # after both bounds is a NAMED failure left to init, never an unbounded wait.
+            # The unreaped entry's origin is the exception that ended the bounded wait
+            # (None when the wait returned or never ran).
             if kill and proc is not None and pid is not None and proc.returncode is None:
+                reap_origin = None
                 try:
                     proc.communicate(timeout=_REAP_DRAIN_BOUND)
                 except subprocess.TimeoutExpired:
                     try:
                         proc.kill()
                     except BaseException as exc:
-                        failures.append("{}: cleanup stage 2: the re-kill of the child "
-                                        "(pid {}) failed ({}); a re-kill failure is a "
-                                        "named failure, never a silent pass"
-                                        .format(label, pid, _exc_text(exc)))
+                        _observe("{}: cleanup stage 2: the re-kill of the child "
+                                 "(pid {}) failed ({}); a re-kill failure is a "
+                                 "named failure, never a silent pass"
+                                 .format(label, pid, _exc_text(exc)),
+                                 "stage 2 re-kill", exc)
                     try:
                         proc.wait(timeout=_REAP_WAIT_BOUND)
-                    except subprocess.TimeoutExpired:
-                        pass
+                    except subprocess.TimeoutExpired as exc:
+                        reap_origin = exc
                     except BaseException as exc:
-                        failures.append("{}: cleanup stage 2: the bounded wait failed "
-                                        "({}); a wait failure is a named failure, and "
-                                        "the unreaped check below still runs"
-                                        .format(label, _exc_text(exc)))
+                        reap_origin = exc
+                        _observe("{}: cleanup stage 2: the bounded wait failed "
+                                 "({}); a wait failure is a named failure, and "
+                                 "the unreaped check below still runs"
+                                 .format(label, _exc_text(exc)), "stage 2 wait", exc)
                 except BaseException as exc:
-                    failures.append("{}: cleanup stage 2: the {}s pipe drain failed ({}); a "
-                                    "drain failure is a named failure, and the bounded wait "
-                                    "below still collects the child where it can"
-                                    .format(label, _REAP_DRAIN_BOUND, _exc_text(exc)))
+                    _observe("{}: cleanup stage 2: the {}s pipe drain failed ({}); a "
+                             "drain failure is a named failure, and the bounded wait "
+                             "below still collects the child where it can"
+                             .format(label, _REAP_DRAIN_BOUND, _exc_text(exc)),
+                             "stage 2 drain", exc)
                     try:
                         proc.wait(timeout=_REAP_WAIT_BOUND)
-                    except subprocess.TimeoutExpired:
-                        pass
+                    except subprocess.TimeoutExpired as exc:
+                        reap_origin = exc
                     except BaseException as exc:
-                        failures.append("{}: cleanup stage 2: the bounded wait failed "
-                                        "({}); a wait failure is a named failure, and "
-                                        "the unreaped check below still runs"
-                                        .format(label, _exc_text(exc)))
+                        reap_origin = exc
+                        _observe("{}: cleanup stage 2: the bounded wait failed "
+                                 "({}); a wait failure is a named failure, and "
+                                 "the unreaped check below still runs"
+                                 .format(label, _exc_text(exc)), "stage 2 wait", exc)
                 if proc.returncode is None:
-                    failures.append("{}: cleanup stage 2: the child (pid {}) was not reaped "
-                                    "within the {}s drain and {}s wait bounds; an unreaped "
-                                    "child is a named failure left to init, never an "
-                                    "unbounded wait".format(label, pid,
-                                                            _REAP_DRAIN_BOUND,
-                                                            _REAP_WAIT_BOUND))
+                    _observe("{}: cleanup stage 2: the child (pid {}) was not reaped "
+                             "within the {}s drain and {}s wait bounds; an unreaped "
+                             "child is a named failure left to init, never an "
+                             "unbounded wait".format(label, pid,
+                                                     _REAP_DRAIN_BOUND,
+                                                     _REAP_WAIT_BOUND),
+                             "stage 2 unreaped", reap_origin)
             # Stage 3: close each pipe on its OWN guard, so a failing stdout close never
             # skips the stderr close (communicate already closed both on the healthy path,
             # where closing again is a no-op).
@@ -1034,10 +1092,11 @@ def self_test_main(_nested=False):
                         try:
                             stream.close()
                         except BaseException as exc:
-                            failures.append("{}: cleanup stage 3: the {} close failed ({}); "
-                                            "a close failure is a named failure and the "
-                                            "other pipe is still closed"
-                                            .format(label, stream_name, _exc_text(exc)))
+                            _observe("{}: cleanup stage 3: the {} close failed ({}); "
+                                     "a close failure is a named failure and the "
+                                     "other pipe is still closed"
+                                     .format(label, stream_name, _exc_text(exc)),
+                                     "stage 3 close", exc)
             # Stage 4: verified removal of the child TMPDIR; an OSError inside is named by
             # the helper itself, and ANY other exception out of it (an interruption
             # included) is named HERE, so the removal can neither replace the original
@@ -1045,10 +1104,10 @@ def self_test_main(_nested=False):
             try:
                 _rmtree_verified(child_tmp, label)
             except BaseException as exc:
-                failures.append("{}: cleanup stage 4: the verified removal of the child "
-                                "TMPDIR raised {}; a removal fault is a named failure, "
-                                "never an exception replacing the original"
-                                .format(label, _exc_text(exc)))
+                _observe("{}: cleanup stage 4: the verified removal of the child "
+                         "TMPDIR raised {}; a removal fault is a named failure, "
+                         "never an exception replacing the original"
+                         .format(label, _exc_text(exc)), "stage 4 removal", exc)
             return group_killed
 
         try:
@@ -1085,8 +1144,8 @@ def self_test_main(_nested=False):
                 # removal stage ran. The diagnostic renders through _exc_text, so an
                 # exception whose own render raises, or returns a raising str
                 # subclass, still becomes a named failure.
-                failures.append("{}: could not launch the bounded child ({})"
-                                .format(label, _exc_text(exc)))
+                _observe("{}: could not launch the bounded child ({})"
+                         .format(label, _exc_text(exc)), "launch", exc)
                 return None, ""
             raise
         except BaseException:
@@ -1438,11 +1497,15 @@ def self_test_main(_nested=False):
                             ".claude/settings.json")
 
         real_lstat_abs = os.lstat
+        # Every injected refusal is recorded as it fires, so the armed pass removes ONLY
+        # the entries those exact exception objects originated (_split_injected).
+        injected_abs = []
 
         def _refusing_bare_lstat(path, *args, **kwargs):
             if str(path) == str(bare / ".claude"):
-                raise PermissionError(
-                    "injected absence-check refusal (self-test fault)")
+                fault = PermissionError("injected absence-check refusal (self-test fault)")
+                injected_abs.append(fault)
+                raise fault
             return real_lstat_abs(path, *args, **kwargs)
 
         for _abs_armed in (True, False):
@@ -1456,17 +1519,17 @@ def self_test_main(_nested=False):
             if _abs_armed:
                 added_abs = failures[before_abs:]
                 del failures[before_abs:]
+                named_abs, kept_abs = _split_injected(
+                    added_abs, injected_abs, ("absence verify",))
                 if not any("could not verify" in entry
                            and "injected absence-check refusal" in entry
-                           for entry in added_abs):
+                           for entry in named_abs):
                     failures.append("the bare-adopter absence check: an lstat "
                                     "refusal must be a NAMED cannot-verify failure, "
                                     "never read as absence (a bare os.path.lexists "
                                     "does exactly that); got entries {!r}"
                                     .format(added_abs))
-                for entry in added_abs:
-                    if "injected absence-check refusal" not in entry:
-                        failures.append(entry)
+                failures.extend(kept_abs)
         if not (adopter / HOOKS_JSON_REL).is_file():
             failures.append("adopter tree: the plugin surface must still generate")
 
@@ -1551,8 +1614,10 @@ def self_test_main(_nested=False):
 
             def _refusing_marker_lstat(path, *args, _badm=badm, **kwargs):
                 if str(path) == str(_badm / ".claude" / "settings.json"):
-                    raise PermissionError(
+                    fault = PermissionError(
                         "injected absence-check refusal (self-test fault)")
+                    injected_abs.append(fault)
+                    raise fault
                 return real_lstat_abs(path, *args, **kwargs)
 
             # The armed pass runs FIRST, and only for the first planted marker (one
@@ -1569,17 +1634,17 @@ def self_test_main(_nested=False):
                 if _abs_armed:
                     added_abs = failures[before_abs:]
                     del failures[before_abs:]
+                    named_abs, kept_abs = _split_injected(
+                        added_abs, injected_abs, ("absence verify",))
                     if not any("could not verify" in entry
                                and "injected absence-check refusal" in entry
-                               for entry in added_abs):
+                               for entry in named_abs):
                         failures.append("the bad-marker absence check: an lstat "
                                         "refusal must be a NAMED cannot-verify "
                                         "failure, never read as absence (a bare "
                                         "os.path.lexists does exactly that); got "
                                         "entries {!r}".format(added_abs))
-                    for entry in added_abs:
-                        if "injected absence-check refusal" not in entry:
-                            failures.append(entry)
+                    failures.extend(kept_abs)
         at_bound = tmp / "markerbound"
         at_bound.mkdir()
         _build_project_tree(at_bound, authoring=False)
@@ -1859,9 +1924,16 @@ def self_test_main(_nested=False):
             #     DESIGN and the case removes them itself, requiring a NON-EMPTY
             #     recorded leftover path first: an empty path is a named failure,
             #     never a silent skip). The injected entries are
-            #     then removed from the
-            #     failure list: the vector proves they were produced; they are not real
-            #     failures. Every vector EXCEPT already-reaped (whose staged cleanup
+            #     then removed from the failure list BY PROVENANCE, never by message
+            #     text: every injected fault is an exception object the vector creates
+            #     and records as it fires, every staged-cleanup entry carries its stage
+            #     and originating exception, and an entry is removed ONLY when it was
+            #     recorded at a stage the vector declares AND its origin IS one of
+            #     those recorded objects; every other entry stays a failure whatever
+            #     its text (the genuine-token vector plants an UNRECORDED wait error
+            #     whose message carries an injected token and holds that it is kept).
+            #     The vector proves the injected entries were produced; they are not
+            #     real failures. Every vector EXCEPT already-reaped (whose staged cleanup
             #     must never reach the drain or a wait once the status is collected,
             #     so it is EXEMPT from the two reap-bound checks) PINS both reap
             #     bounds against the literal
@@ -1873,16 +1945,23 @@ def self_test_main(_nested=False):
             #     drain-wait-error and rescue-error vectors leave the real child alive
             #     or unreaped BY DESIGN; the case's RESCUE collects it before
             #     returning. The rescue bookkeeping is STRUCTURAL, never a message
-            #     match: the rescue-error vector's injected rescue faults are
-            #     recognized by exception IDENTITY and recorded apart from genuine
-            #     rescue and final-collection failures, a genuine entry is appended
-            #     AFTER the expected-error filter (so it can never be discarded as an
-            #     expected injection, whatever its text), the final collection still
-            #     attempts its bounded wait when its kill raises, and after the filter
+            #     match: the rescue-error and final-kill vectors' injected rescue and
+            #     final-collection faults are recognized by exception IDENTITY and
+            #     recorded apart from genuine rescue and final-collection failures, a
+            #     genuine entry is appended AFTER the expected-error filter (so it can
+            #     never be discarded as an expected injection, whatever its text),
+            #     each rescue and final-collection kill, wait and saved-pipe close
+            #     runs under its OWN guard against ANY exception (an interruption
+            #     included), so a kill failure of any type never skips the wait that
+            #     follows, every rescue and final-collection wait records the bound it
+            #     carried and must carry timeout=10 (a literal), and after the filter
             #     a recorded child without a collected returncode is a NAMED failure,
             #     so no vector can PASS with a live child (the rescue-error vector
             #     drives both rescue faults and then reaps the child through the
-            #     final collection).
+            #     final collection; the final-kill-runtime and final-kill-interrupt
+            #     vectors make the FINAL kill raise a RuntimeError and a
+            #     KeyboardInterrupt and hold that the bounded final wait still runs
+            #     and collects the child).
             #     The wait-error and drain-wait-error vectors hold that a NON-timeout
             #     wait failure is a named entry on BOTH stage-2 branches (after a
             #     drain exhaustion and after a non-timeout drain failure); wait-error
@@ -1919,6 +1998,21 @@ def self_test_main(_nested=False):
                          "stderr_closed_at_reraise": None,
                          "removal_interrupted": False, "kill_attempts": [],
                          "real_stdout": None, "real_stderr": None}
+                # PROVENANCE: every fault this vector injects is recorded here as it
+                # fires, and only entries those exact objects originated are removed
+                # from the failure list below (_split_injected), whatever any entry's
+                # text says. planted holds the genuine-token vector's UNRECORDED fault.
+                injected = []
+                planted = []
+                # The final-kill vectors reuse the rescue-error vector's staged faults
+                # (the child stays alive through the staged cleanup) and differ only
+                # in which rescue and final-collection step is injected.
+                rescue_like = kind in ("rescue-error", "final-kill-runtime",
+                                       "final-kill-interrupt")
+
+                def _inject(fault):
+                    injected.append(fault)
+                    return fault
 
                 class _FailingClose:
                     def __init__(self, which, exc_factory=None):
@@ -1928,8 +2022,8 @@ def self_test_main(_nested=False):
                     def close(self):
                         state["close_attempts"].append(self.which)
                         if self.exc_factory is not None:
-                            raise self.exc_factory()
-                        raise OSError("injected close failure (self-test fault)")
+                            raise _inject(self.exc_factory())
+                        raise _inject(OSError("injected close failure (self-test fault)"))
 
                 class _RaisingStr(Exception):
                     # Its __str__ raises, so a diagnostic built from it must come from
@@ -2010,7 +2104,7 @@ def self_test_main(_nested=False):
                             state["real_stdout"], self.stdout = (
                                 self.stdout,
                                 _FailingClose("stdout", _SubclassRepr))
-                        if kind == "close-stdout":
+                        if kind in ("close-stdout", "genuine-token"):
                             state["real_stdout"], self.stdout = (
                                 self.stdout, _FailingClose("stdout"))
                         if kind == "close-stderr":
@@ -2019,9 +2113,9 @@ def self_test_main(_nested=False):
                         raise original
                     state["drain_timeout"] = kwargs.get("timeout", "no-timeout-argument")
                     if kind in ("drain-error", "drain-wait-error"):
-                        raise OSError("injected drain failure (self-test fault)")
-                    raise subprocess.TimeoutExpired(
-                        cmd="injected drain exhaustion (self-test fault)", timeout=0)
+                        raise _inject(OSError("injected drain failure (self-test fault)"))
+                    raise _inject(subprocess.TimeoutExpired(
+                        cmd="injected drain exhaustion (self-test fault)", timeout=0))
 
                 def _fault_kill(self):
                     if kind == "already-reaped" and self is state["proc"]:
@@ -2033,9 +2127,9 @@ def self_test_main(_nested=False):
                     # wait-error and rescue-error vectors: a real kill would reap a dead
                     # child through its internal poll, so wait-error's not-reaped entry
                     # would otherwise depend on timing) keeps each vector pure.
-                    if kind in ("kill-error", "reap-exhausted", "wait-error",
-                                "rescue-error") and self is state["proc"]:
-                        raise OSError("injected kill failure (self-test fault)")
+                    if (kind in ("kill-error", "reap-exhausted", "wait-error")
+                            or rescue_like) and self is state["proc"]:
+                        raise _inject(OSError("injected kill failure (self-test fault)"))
                     return real_kill(self)
 
                 def _fault_wait(self, *args, **kwargs):
@@ -2049,23 +2143,32 @@ def self_test_main(_nested=False):
                         else:
                             state["wait_timeouts"].append("no-timeout-argument")
                     if kind in ("wait-error", "drain-wait-error") and self is state["proc"]:
-                        raise OSError("injected wait failure (self-test fault)")
-                    if kind in ("kill-error", "reap-exhausted",
-                                "rescue-error") and self is state["proc"]:
-                        raise subprocess.TimeoutExpired(
-                            cmd="injected wait exhaustion (self-test fault)", timeout=0)
-                    return real_wait(self, *args, **kwargs)
+                        raise _inject(OSError("injected wait failure (self-test fault)"))
+                    if (kind in ("kill-error", "reap-exhausted") or rescue_like) \
+                            and self is state["proc"]:
+                        raise _inject(subprocess.TimeoutExpired(
+                            cmd="injected wait exhaustion (self-test fault)", timeout=0))
+                    result = real_wait(self, *args, **kwargs)
+                    if kind == "genuine-token" and self is state["proc"]:
+                        # A GENUINE wait error, never recorded as injected, whose text
+                        # carries the close vector's injected token: provenance must
+                        # keep it a failure (a message-text filter discards it).
+                        fault = OSError(
+                            "genuine wait error: injected close failure (self-test fault)")
+                        planted.append(fault)
+                        raise fault
+                    return result
 
                 def _fault_killpg(pgid, sig):
                     if kind == "already-reaped" and state["proc"] is not None \
                             and pgid == state["proc"].pid:
                         state["kill_attempts"].append("group")
                         return None
-                    if kind in ("kill-error", "rescue-error"):
-                        raise OSError("injected group-kill failure (self-test fault)")
+                    if kind == "kill-error" or rescue_like:
+                        raise _inject(OSError("injected group-kill failure (self-test fault)"))
                     if kind == "interrupt-group-kill":
-                        raise KeyboardInterrupt(
-                            "injected group-kill interrupt (self-test fault)")
+                        raise _inject(KeyboardInterrupt(
+                            "injected group-kill interrupt (self-test fault)"))
                     return real_killpg(pgid, sig)
 
                 def _fault_rmtree(path, *args, **kwargs):
@@ -2073,19 +2176,19 @@ def self_test_main(_nested=False):
                             and not state["removal_interrupted"]
                             and os.path.basename(str(path)).startswith("bounded-child-")):
                         state["removal_interrupted"] = True
-                        raise KeyboardInterrupt(
-                            "injected removal interrupt (self-test fault)")
+                        raise _inject(KeyboardInterrupt(
+                            "injected removal interrupt (self-test fault)"))
                     return real_rmtree27(path, *args, **kwargs)
 
                 before = len(failures)
                 # Genuine rescue and final-collection failures are kept APART from
                 # the injected staged-cleanup entries: rescue_named records ONLY the
-                # rescue-error vector's injected rescue faults (recognized by
-                # exception IDENTITY, never by message text), genuine records every
-                # real rescue or final-collection failure, and genuine is appended
-                # AFTER the expected-error filter below, so a real failure can never
-                # be discarded as an expected injection, whatever its message
-                # contains.
+                # rescue-error and final-kill vectors' injected rescue and final-
+                # collection faults (recognized by exception IDENTITY, never by
+                # message text), genuine records every real rescue or final-
+                # collection failure, and genuine is appended AFTER the expected-error
+                # filter below, so a real failure can never be discarded as an
+                # expected injection, whatever its message contains.
                 rescue_named = []
                 genuine = []
                 rescue_kill_fault = (
@@ -2093,7 +2196,30 @@ def self_test_main(_nested=False):
                     if kind == "rescue-error" else None)
                 rescue_wait_fault = (
                     OSError("injected rescue wait failure (self-test fault)")
-                    if kind == "rescue-error" else None)
+                    if rescue_like else None)
+                final_kill_fault = {
+                    "final-kill-runtime": RuntimeError(
+                        "injected final kill runtime failure (self-test fault)"),
+                    "final-kill-interrupt": KeyboardInterrupt(
+                        "injected final kill interrupt (self-test fault)"),
+                }.get(kind)
+                # The bound EVERY rescue and final-collection wait carried, recorded
+                # BEFORE the wait runs (an injected fault included), so a retuned or
+                # unbounded collection wait goes red below exactly as a staged one
+                # does.
+                collection_waits = {"rescue": [], "final": []}
+
+                def _collecting_wait(proc_, phase, fault, *args, **kwargs):
+                    if "timeout" in kwargs:
+                        collection_waits[phase].append(kwargs["timeout"])
+                    elif args:
+                        collection_waits[phase].append(args[0])
+                    else:
+                        collection_waits[phase].append("no-timeout-argument")
+                    if fault is not None:
+                        raise fault
+                    return real_wait(proc_, *args, **kwargs)
+
                 returned = None
                 subprocess.Popen.communicate = _fault_communicate
                 subprocess.Popen.kill = _fault_kill
@@ -2137,18 +2263,21 @@ def self_test_main(_nested=False):
                     leftover = state["proc"]
                     if leftover is not None and leftover.returncode is None:
                         # The rescue is itself VERIFIED: a rescue kill or wait error
-                        # is a named entry; the rescue-error vector's INJECTED faults
-                        # go to rescue_named (recognized by exception identity) while
-                        # any REAL fault goes to genuine (never filtered), and a
-                        # child whose exit status is still uncollected after the
-                        # rescue is recorded the same way, then the FINAL collection
-                        # below reaps it, so no vector can PASS while its child is
-                        # alive.
+                        # is a named entry; the rescue-error and final-kill vectors'
+                        # INJECTED faults go to rescue_named (recognized by exception
+                        # identity) while any REAL fault goes to genuine (never
+                        # filtered), and a child whose exit status is still
+                        # uncollected after the rescue is recorded the same way, then
+                        # the FINAL collection below reaps it, so no vector can PASS
+                        # while its child is alive. Every step is guarded against ANY
+                        # exception (an interruption included), so no step can skip
+                        # the next one or escape this finally.
+                        rescue_wait_injected = False
                         try:
                             if rescue_kill_fault is not None:
                                 raise rescue_kill_fault
                             real_kill(leftover)
-                        except OSError as rescue_exc:
+                        except BaseException as rescue_exc:
                             (rescue_named if rescue_exc is rescue_kill_fault
                              else genuine).append(
                                 "case 27 ({}): the rescue kill of the leftover "
@@ -2156,11 +2285,11 @@ def self_test_main(_nested=False):
                                 "named entry, never a silent pass".format(
                                     kind, leftover.pid, _exc_text(rescue_exc)))
                         try:
-                            if rescue_wait_fault is not None:
-                                raise rescue_wait_fault
-                            real_wait(leftover, timeout=10)
-                        except (subprocess.TimeoutExpired, OSError) as rescue_exc:
-                            (rescue_named if rescue_exc is rescue_wait_fault
+                            _collecting_wait(leftover, "rescue", rescue_wait_fault,
+                                             timeout=10)
+                        except BaseException as rescue_exc:
+                            rescue_wait_injected = rescue_exc is rescue_wait_fault
+                            (rescue_named if rescue_wait_injected
                              else genuine).append(
                                 "case 27 ({}): the rescue wait for the leftover "
                                 "child (pid {}) failed ({}); a rescue failure is a "
@@ -2172,37 +2301,49 @@ def self_test_main(_nested=False):
                                 "leftover child (pid {}); the case must FAIL rather "
                                 "than PASS with a live child".format(
                                     kind, leftover.pid))
-                            if kind == "rescue-error":
-                                # EXPECTED here: both rescue faults were injected,
-                                # so the uncollected state proves the naming; the
-                                # final collection below reaps the child.
+                            if rescue_wait_injected:
+                                # EXPECTED here: the injected rescue wait fault
+                                # fired, so the uncollected state proves the
+                                # naming; the final collection below reaps the
+                                # child.
                                 rescue_named.append(uncollected_entry)
                             else:
                                 genuine.append(uncollected_entry)
                             # The FINAL collection, for EVERY vector whose child is
                             # still uncollected: the kill and the bounded wait run
-                            # under SEPARATE guards, so a kill failure never skips
-                            # the wait, and a failure of either is a GENUINE entry
-                            # the expected-error filter can never discard.
+                            # under SEPARATE guards against ANY exception, so a kill
+                            # failure of any type never skips the wait, and a REAL
+                            # failure of either is a GENUINE entry the expected-
+                            # error filter can never discard.
                             try:
+                                if final_kill_fault is not None:
+                                    raise final_kill_fault
                                 real_kill(leftover)
-                            except OSError as final_exc:
-                                genuine.append(
+                            except BaseException as final_exc:
+                                (rescue_named if final_exc is final_kill_fault
+                                 else genuine).append(
                                     "case 27 ({}): the final collection kill of "
                                     "the leftover child (pid {}) failed ({})"
                                     .format(kind, leftover.pid,
                                             _exc_text(final_exc)))
                             try:
-                                real_wait(leftover, timeout=10)
-                            except (subprocess.TimeoutExpired, OSError) as final_exc:
+                                _collecting_wait(leftover, "final", None, timeout=10)
+                            except BaseException as final_exc:
                                 genuine.append(
                                     "case 27 ({}): the final collection wait for "
                                     "the leftover child (pid {}) failed ({})"
                                     .format(kind, leftover.pid,
                                             _exc_text(final_exc)))
-                    for saved in (state["real_stdout"], state["real_stderr"]):
+                    for saved_name in ("real_stdout", "real_stderr"):
+                        saved = state[saved_name]
                         if saved is not None:
-                            saved.close()
+                            try:
+                                saved.close()
+                            except BaseException as saved_exc:
+                                genuine.append(
+                                    "case 27 ({}): closing the saved {} pipe "
+                                    "failed ({})".format(kind, saved_name,
+                                                         _exc_text(saved_exc)))
                 if returned is not None:
                     failures.append("case 27 ({}): the original injected OSError must "
                                     "re-raise out of _run_bounded, got exit {!r}"
@@ -2216,61 +2357,119 @@ def self_test_main(_nested=False):
                     return
                 added = failures[before:]
                 del failures[before:]
-                expected = {
-                    "drain-error": ("injected drain failure (self-test fault)",),
-                    "kill-error": ("injected kill failure (self-test fault)",
-                                   "was not reaped within"),
-                    "reap-exhausted": ("was not reaped within",
-                                       "injected kill failure (self-test fault)"),
-                    "close-stdout": ("injected close failure (self-test fault)",),
-                    "close-stderr": ("injected close failure (self-test fault)",),
+                # Per vector: the staged-cleanup STAGES at which an injected fault
+                # may be named, and the text each injected entry must render (the
+                # render vectors prove the guarded render through that text). The
+                # text is checked ONLY among entries the provenance split already
+                # attributed to an injected fault; it never selects what is removed.
+                killing = ("stage 1 direct kill", "stage 2 re-kill", "stage 2 unreaped")
+                stages, expected = {
+                    "drain-error": (("stage 2 drain",),
+                                    ("injected drain failure (self-test fault)",)),
+                    "kill-error": (killing,
+                                   ("injected kill failure (self-test fault)",
+                                    "was not reaped within")),
+                    "reap-exhausted": (killing,
+                                       ("was not reaped within",
+                                        "injected kill failure (self-test fault)")),
+                    "close-stdout": (("stage 3 close",),
+                                     ("injected close failure (self-test fault)",)),
+                    "close-stderr": (("stage 3 close",),
+                                     ("injected close failure (self-test fault)",)),
+                    "genuine-token": (("stage 3 close",),
+                                      ("injected close failure (self-test fault)",)),
                     "interrupt-group-kill": (
-                        "injected group-kill interrupt (self-test fault)",),
+                        ("stage 1 group kill",),
+                        ("injected group-kill interrupt (self-test fault)",)),
                     "interrupt-removal": (
-                        "injected removal interrupt (self-test fault)",),
-                    "wait-error": ("injected wait failure (self-test fault)",
-                                   "injected kill failure (self-test fault)",
-                                   "was not reaped within"),
+                        ("stage 4 removal",),
+                        ("injected removal interrupt (self-test fault)",)),
+                    "wait-error": (killing + ("stage 2 wait",),
+                                   ("injected wait failure (self-test fault)",
+                                    "injected kill failure (self-test fault)",
+                                    "was not reaped within")),
                     "drain-wait-error": (
-                        "injected drain failure (self-test fault)",
-                        "injected wait failure (self-test fault)",
-                        "was not reaped within"),
-                    "rescue-error": ("injected kill failure (self-test fault)",
-                                     "was not reaped within"),
-                    "render-str": ("unrenderable close failure (self-test fault)",),
-                    "render-repr": ("<unrenderable _RaisingBoth instance>",),
+                        ("stage 2 drain", "stage 2 wait", "stage 2 unreaped"),
+                        ("injected drain failure (self-test fault)",
+                         "injected wait failure (self-test fault)",
+                         "was not reaped within")),
+                    "rescue-error": (killing,
+                                     ("injected kill failure (self-test fault)",
+                                      "was not reaped within")),
+                    "final-kill-runtime": (killing,
+                                           ("injected kill failure (self-test fault)",
+                                            "was not reaped within")),
+                    "final-kill-interrupt": (killing,
+                                             ("injected kill failure (self-test fault)",
+                                              "was not reaped within")),
+                    "render-str": (("stage 3 close",),
+                                   ("unrenderable close failure (self-test fault)",)),
+                    "render-repr": (("stage 3 close",),
+                                    ("<unrenderable _RaisingBoth instance>",)),
                     "render-strsub": (
-                        "subclass-rendered close failure (self-test fault)",),
+                        ("stage 3 close",),
+                        ("subclass-rendered close failure (self-test fault)",)),
                     "render-reprsub": (
-                        "subclass-repr close failure (self-test fault)",),
+                        ("stage 3 close",),
+                        ("subclass-repr close failure (self-test fault)",)),
                     "render-removal": (
-                        "injected removal interrupt (self-test fault)",),
-                    "already-reaped": (),
+                        ("stage 4 removal",),
+                        ("injected removal interrupt (self-test fault)",)),
+                    "already-reaped": ((), ()),
                 }[kind]
+                named, kept = _split_injected(added, injected, stages)
                 for want in expected:
-                    if not any(want in entry for entry in added):
+                    if not any(want in entry for entry in named):
                         failures.append("case 27 ({}): the secondary cleanup failure was "
-                                        "not NAMED (no entry containing {!r} among {!r})"
+                                        "not NAMED (no entry originated by an injected "
+                                        "fault containing {!r} among {!r})"
                                         .format(kind, want, added))
-                for entry in added:
-                    if not any(want in entry for want in expected):
-                        failures.append(entry)
+                if kind == "genuine-token":
+                    # The planted GENUINE wait error must survive the split as a kept
+                    # failure although its text carries the injected close token; the
+                    # vector then drops exactly the entries that planted object
+                    # originated (identity), so any OTHER kept entry still fails.
+                    planted_kept = [entry for entry in kept
+                                    if any(getattr(entry, "origin", None) is fault
+                                           for fault in planted)]
+                    if not planted or not planted_kept:
+                        failures.append("case 27 (genuine-token): a genuine wait error "
+                                        "whose text carries an injected token must stay "
+                                        "a failure, never be discarded as an injection "
+                                        "(planted {}, kept {!r}, all entries {!r})"
+                                        .format(len(planted), kept, added))
+                    kept = [entry for entry in kept
+                            if not any(entry is planted_entry
+                                       for planted_entry in planted_kept)]
+                failures.extend(kept)
                 # Genuine rescue and final-collection failures NEVER pass through the
                 # expected-error filter above: they are real failures whatever their
                 # text, appended verbatim here.
                 failures.extend(genuine)
-                if kind == "rescue-error":
-                    # The vector proves its three rescue diagnostics were produced,
-                    # in the structure that records ONLY injected faults.
-                    for want_rescue in (
-                            "injected rescue kill failure (self-test fault)",
-                            "injected rescue wait failure (self-test fault)",
-                            "the rescue could not collect"):
+                rescue_wants = {
+                    "rescue-error": (
+                        "injected rescue kill failure (self-test fault)",
+                        "injected rescue wait failure (self-test fault)",
+                        "the rescue could not collect"),
+                    "final-kill-runtime": (
+                        "injected rescue wait failure (self-test fault)",
+                        "the rescue could not collect",
+                        "injected final kill runtime failure (self-test fault)"),
+                    "final-kill-interrupt": (
+                        "injected rescue wait failure (self-test fault)",
+                        "the rescue could not collect",
+                        "injected final kill interrupt (self-test fault)"),
+                }.get(kind)
+                if rescue_wants is not None:
+                    # The vector proves its rescue and final-collection diagnostics
+                    # were produced, in the structure that records ONLY injected
+                    # faults.
+                    for want_rescue in rescue_wants:
                         if not any(want_rescue in entry for entry in rescue_named):
-                            failures.append("case 27 (rescue-error): the injected "
-                                            "rescue fault was not NAMED (no recorded "
-                                            "entry containing {!r} among {!r})"
-                                            .format(want_rescue, rescue_named))
+                            failures.append("case 27 ({}): the injected rescue or "
+                                            "final-collection fault was not NAMED (no "
+                                            "recorded entry containing {!r} among {!r})"
+                                            .format(kind, want_rescue, rescue_named))
                 elif rescue_named:
                     failures.append("case 27 ({}): rescue entries were recorded as "
                                     "injected for a vector that injects no rescue "
@@ -2282,7 +2481,7 @@ def self_test_main(_nested=False):
                                     "PASS with a live child".format(
                                         kind, state["proc"].pid))
                 if kind in ("drain-error", "close-stdout", "close-stderr",
-                            "interrupt-group-kill", "interrupt-removal",
+                            "genuine-token", "interrupt-group-kill", "interrupt-removal",
                             "render-str", "render-repr", "render-strsub",
                             "render-reprsub", "render-removal",
                             "already-reaped") and \
@@ -2305,13 +2504,34 @@ def self_test_main(_nested=False):
                                     "timeout=10 (the pinned wait bound) and at least one "
                                     "wait must run, got {!r}"
                                     .format(kind, state["wait_timeouts"]))
+                # The same literal contract for the case's OWN rescue and final-
+                # collection waits (they run after the staged-wait recorder above is
+                # restored, so they record through _collecting_wait): every vector
+                # whose staged cleanup leaves the child unreaped BY DESIGN must run a
+                # rescue wait, every vector that defeats the rescue must run a final
+                # wait (after its final kill raised, for the final-kill vectors), and
+                # each must carry timeout=10, so an unbounded or retuned collection
+                # wait goes red here.
+                for phase, must_run in (
+                        ("rescue", kind in ("kill-error", "reap-exhausted", "wait-error",
+                                            "drain-wait-error") or rescue_like),
+                        ("final", rescue_like)):
+                    seen_waits = collection_waits[phase]
+                    if (must_run and not seen_waits) or any(
+                            timeout_seen != 10 for timeout_seen in seen_waits):
+                        failures.append("case 27 ({}): every {} wait must carry "
+                                        "timeout=10 (the pinned collection bound){}, "
+                                        "got {!r}".format(
+                                            kind, phase,
+                                            " and at least one must run" if must_run
+                                            else "", seen_waits))
                 if kind == "already-reaped" and state["kill_attempts"]:
                     failures.append("case 27 (already-reaped): the staged cleanup "
                                     "signalled a child whose exit status was already "
                                     "collected ({!r}); a collected pid may be reused "
                                     "and is never a target"
                                     .format(state["kill_attempts"]))
-                if kind in ("close-stdout", "close-stderr", "render-str",
+                if kind in ("close-stdout", "close-stderr", "genuine-token", "render-str",
                             "render-repr", "render-strsub", "render-reprsub"):
                     failing = "stderr" if kind == "close-stderr" else "stdout"
                     sibling = "stdout" if kind == "close-stderr" else "stderr"
@@ -2360,35 +2580,34 @@ def self_test_main(_nested=False):
                     before_rm = len(failures)
                     try:
                         if kind == "render-removal":
-                            raise _RaisingStrOSError(
+                            raise _inject(_RaisingStrOSError(
                                 "injected leftover-removal failure "
-                                "(self-test fault)")
+                                "(self-test fault)"))
                         real_rmtree27(child_tmpdir)
                     except FileNotFoundError:
                         pass
                     except OSError as exc:
-                        failures.append("case 27 ({}): could not remove the "
-                                        "leftover child TMPDIR {!r} ({})"
-                                        .format(kind, child_tmpdir,
-                                                _exc_text(exc)))
+                        _observe("case 27 ({}): could not remove the "
+                                 "leftover child TMPDIR {!r} ({})"
+                                 .format(kind, child_tmpdir,
+                                         _exc_text(exc)), "leftover removal", exc)
                     if kind == "render-removal":
                         added_rm = failures[before_rm:]
                         del failures[before_rm:]
+                        named_rm, kept_rm = _split_injected(
+                            added_rm, injected, ("leftover removal",))
                         if not any(
                                 "could not remove the leftover child TMPDIR" in entry
                                 and "injected leftover-removal failure "
                                     "(self-test fault)" in entry
-                                for entry in added_rm):
+                                for entry in named_rm):
                             failures.append("case 27 (render-removal): a leftover-"
                                             "removal error whose own __str__ raises "
                                             "must still be a NAMED entry through the "
                                             "guarded render, never an escaping render "
                                             "exception; got entries {!r}"
                                             .format(added_rm))
-                        for entry in added_rm:
-                            if ("injected leftover-removal failure "
-                                    "(self-test fault)") not in entry:
-                                failures.append(entry)
+                        failures.extend(kept_rm)
                         try:
                             real_rmtree27(child_tmpdir)
                         except FileNotFoundError:
@@ -2405,9 +2624,10 @@ def self_test_main(_nested=False):
 
             _vector_kinds = ["drain-error", "kill-error", "close-stdout", "close-stderr",
                              "interrupt-removal", "wait-error", "drain-wait-error",
-                             "rescue-error", "render-str", "render-repr",
-                             "render-strsub", "render-reprsub", "render-removal",
-                             "already-reaped"]
+                             "rescue-error", "final-kill-runtime",
+                             "final-kill-interrupt", "genuine-token", "render-str",
+                             "render-repr", "render-strsub", "render-reprsub",
+                             "render-removal", "already-reaped"]
             if hasattr(os, "killpg"):
                 # The exhausted-reap and group-kill-interrupt vectors need the group
                 # kill: the first so its injected kill refusal never has to block a REAL
@@ -2431,10 +2651,12 @@ def self_test_main(_nested=False):
                     raise RuntimeError("spawn render failure (self-test fault)")
 
             real_popen27 = subprocess.Popen
+            injected_spawn = []
 
             def _refusing_popen(*args, **kwargs):
-                raise _RaisingStrSpawnOSError(
-                    "injected spawn failure (self-test fault)")
+                fault = _RaisingStrSpawnOSError("injected spawn failure (self-test fault)")
+                injected_spawn.append(fault)
+                raise fault
 
             before_spawn = len(failures)
             spawn_escape = None
@@ -2458,16 +2680,16 @@ def self_test_main(_nested=False):
                 failures.append("case 27 (spawn-render): a spawn failure must return "
                                 "(None, '') with a named launch failure, got {!r}"
                                 .format(spawn_result))
+            named_spawn, kept_spawn = _split_injected(
+                added_spawn, injected_spawn, ("launch",))
             if not any("could not launch the bounded child" in entry
                        and "injected spawn failure (self-test fault)" in entry
-                       for entry in added_spawn):
+                       for entry in named_spawn):
                 failures.append("case 27 (spawn-render): the launch failure was not "
                                 "NAMED through the guarded render (no entry naming "
                                 "the injected spawn failure); got entries {!r}"
                                 .format(added_spawn))
-            for entry in added_spawn:
-                if "injected spawn failure (self-test fault)" not in entry:
-                    failures.append(entry)
+            failures.extend(kept_spawn)
 
             # 28. _rmtree_verified stays inside its own tree and proves absence. Vector (a):
             #     with the FIRST rmtree attempt refused (injected), a directory symlink
@@ -2482,7 +2704,11 @@ def self_test_main(_nested=False):
             #     could not classify (a chmod could follow the link): the OUTSIDE mode
             #     stays unchanged and the tree is still removed on the retry. Every fault
             #     is injected, so the vectors run the same under any runner (a
-            #     DAC-bypassing root one included).
+            #     DAC-bypassing root one included). Vector (e): a GENUINE verification
+            #     error whose text carries vector (c)'s token stays a failure beside the
+            #     removed injected entry. Each vector removes ONLY the entries its
+            #     recorded faults originated (_split_injected), never a whole slice and
+            #     never an entry selected by its text.
             base28 = tmp / "case28"
             base28.mkdir()
             outside = base28 / "outside"
@@ -2540,17 +2766,24 @@ def self_test_main(_nested=False):
                 else:
                     real_lstat_c = os.lstat
                     state28c = {"refusals": 0}
+                    # Every injected fault is recorded as it fires; only entries those
+                    # exact objects originated are removed below (_split_injected).
+                    injected28c = []
 
                     def _refusing_once_rmtree_c(path, *args, **kwargs):
                         if state28c["refusals"] == 0:
                             state28c["refusals"] = 1
-                            raise OSError("injected rmtree refusal (self-test fault)")
+                            fault = OSError("injected rmtree refusal (self-test fault)")
+                            injected28c.append(fault)
+                            raise fault
                         return real_rmtree(path, *args, **kwargs)
 
                     def _refusing_entry_lstat(path, *args, **kwargs):
                         if str(path) == str(tree28c / "link"):
-                            raise PermissionError(
+                            fault = PermissionError(
                                 "injected entry lstat refusal (self-test fault)")
+                            injected28c.append(fault)
+                            raise fault
                         return real_lstat_c(path, *args, **kwargs)
 
                     before28c = len(failures)
@@ -2563,14 +2796,14 @@ def self_test_main(_nested=False):
                         os.lstat = real_lstat_c
                     added28c = failures[before28c:]
                     del failures[before28c:]
-                    if not any("could not classify" in entry for entry in added28c):
+                    named28c, kept28c = _split_injected(
+                        added28c, injected28c, ("removal classify",))
+                    if not any("could not classify" in entry for entry in named28c):
                         failures.append("case 28: an entry the repair cannot classify "
                                         "(lstat refused) must be a NAMED failure, never "
                                         "a chmod and never a silent pass; got entries "
                                         "{!r}".format(added28c))
-                    for entry in added28c:
-                        if "could not classify" not in entry:
-                            failures.append(entry)
+                    failures.extend(kept28c)
                     mode_after_c = os.lstat(str(outside_c)).st_mode & 0o7777
                     if mode_after_c != 0o750:
                         failures.append("case 28: an entry-level lstat refusal led to a "
@@ -2588,14 +2821,19 @@ def self_test_main(_nested=False):
                 tree28b = base28 / "tree-b"
                 tree28b.mkdir()
                 real_lstat = os.lstat
+                injected28b = []
 
                 def _refusing_lstat(path, *args, **kwargs):
                     if str(path) == str(tree28b):
-                        raise PermissionError("injected lstat refusal (self-test fault)")
+                        fault = PermissionError("injected lstat refusal (self-test fault)")
+                        injected28b.append(fault)
+                        raise fault
                     return real_lstat(path, *args, **kwargs)
 
                 def _refusing_rmtree(path, *args, **kwargs):
-                    raise OSError("injected rmtree refusal (self-test fault)")
+                    fault = OSError("injected rmtree refusal (self-test fault)")
+                    injected28b.append(fault)
+                    raise fault
 
                 before28 = len(failures)
                 shutil.rmtree = _refusing_rmtree
@@ -2607,12 +2845,99 @@ def self_test_main(_nested=False):
                     os.lstat = real_lstat
                 added28 = failures[before28:]
                 del failures[before28:]
+                # Only the entries the injected refusals originated are removed; any
+                # other entry stays a failure whatever its text.
+                named28, kept28 = _split_injected(added28, injected28b, ("removal verify",))
                 if ok28b or not any("could not be verified" in entry
-                                    for entry in added28):
+                                    for entry in named28):
                     failures.append("case 28: an unverifiable removal (lstat refused) must "
                                     "be a NAMED failure, never a silent success; got "
                                     "result={!r} entries={!r}".format(ok28b, added28))
+                failures.extend(kept28)
                 real_rmtree(str(tree28b))
+
+                # Vector (e): the provenance filter keeps a GENUINE failure whose text
+                # carries an injected token. The first rmtree and the interior link's
+                # lstat are refused (injected and recorded, as in vector (c)); after
+                # the real retry removes the tree, the verification lstat of the root
+                # raises a PLANTED genuine error, never recorded as injected, whose
+                # text carries vector (c)'s token. The injected classification entry
+                # is removed; the planted cannot-verify entry must stay a failure (a
+                # message-text or whole-slice filter discards it), and the vector then
+                # drops exactly the entries that planted object originated.
+                base28e = base28 / "genuine-token"
+                base28e.mkdir()
+                tree28e = base28e / "tree"
+                tree28e.mkdir()
+                try:
+                    os.symlink(str(base28e), str(tree28e / "link"))
+                except OSError as exc:
+                    failures.append("case 28: NOT RUN: the genuine-token symlink fixture "
+                                    "could not be planted ({}); coverage that did not run "
+                                    "is a named failure".format(exc))
+                else:
+                    injected28e = []
+                    planted28e = []
+                    state28e = {"refusals": 0}
+
+                    def _refusing_once_rmtree_e(path, *args, **kwargs):
+                        if state28e["refusals"] == 0:
+                            state28e["refusals"] = 1
+                            fault = OSError("injected rmtree refusal (self-test fault)")
+                            injected28e.append(fault)
+                            raise fault
+                        return real_rmtree(path, *args, **kwargs)
+
+                    def _planting_lstat(path, *args, **kwargs):
+                        if str(path) == str(tree28e / "link"):
+                            fault = PermissionError(
+                                "injected entry lstat refusal (self-test fault)")
+                            injected28e.append(fault)
+                            raise fault
+                        try:
+                            return real_lstat(path, *args, **kwargs)
+                        except FileNotFoundError:
+                            if str(path) == str(tree28e) and not planted28e:
+                                fault = PermissionError(
+                                    "genuine root lstat error: could not classify "
+                                    "(self-test fault)")
+                                planted28e.append(fault)
+                                raise fault
+                            raise
+
+                    before28e = len(failures)
+                    shutil.rmtree = _refusing_once_rmtree_e
+                    os.lstat = _planting_lstat
+                    try:
+                        ok28e = _rmtree_verified(tree28e, "case 28 genuine token")
+                    finally:
+                        shutil.rmtree = real_rmtree
+                        os.lstat = real_lstat
+                    added28e = failures[before28e:]
+                    del failures[before28e:]
+                    named28e, kept28e = _split_injected(
+                        added28e, injected28e, ("removal classify",))
+                    planted_kept28e = [entry for entry in kept28e
+                                       if any(getattr(entry, "origin", None) is fault
+                                              for fault in planted28e)]
+                    if not any("could not classify" in entry for entry in named28e):
+                        failures.append("case 28 (genuine token): the injected "
+                                        "classification refusal was not NAMED; got "
+                                        "entries {!r}".format(added28e))
+                    if ok28e or not planted_kept28e:
+                        failures.append("case 28 (genuine token): a genuine "
+                                        "verification error whose text carries an "
+                                        "injected token must stay a failure, never be "
+                                        "discarded as an injection (result {!r}, "
+                                        "planted {}, kept {!r}, all entries {!r})"
+                                        .format(ok28e, len(planted28e), kept28e,
+                                                added28e))
+                    failures.extend(entry for entry in kept28e
+                                    if not any(entry is planted_entry
+                                               for planted_entry in planted_kept28e))
+                    if not _confirmed_absent(str(tree28e), "case 28 genuine token"):
+                        failures.append("case 28 (genuine token): the tree was not "
+                                        "removed on the retry")
 
                 # Vector (d): the ROOT itself is a symlink to an outside directory and
                 # cannot be unlinked (its parent directory is read-only, mode 0o500):
@@ -2643,23 +2968,40 @@ def self_test_main(_nested=False):
                         skipped.append("28 root-symlink-unremovable")
                         os.chmod(str(holder_d), 0o700)
                     else:
+                        # This refusal comes from the fixture, not an injection, so the
+                        # vector RECORDS the exact exception os.unlink raises for the
+                        # root link as it fires; only the entry that object originated
+                        # is removed below, never an entry selected by its text.
+                        real_unlink_d = os.unlink
+                        observed28d = []
+
+                        def _observing_unlink(path, *args, **kwargs):
+                            try:
+                                return real_unlink_d(path, *args, **kwargs)
+                            except OSError as exc:
+                                if str(path) == str(root_link):
+                                    observed28d.append(exc)
+                                raise
+
                         before28d = len(failures)
+                        os.unlink = _observing_unlink
                         try:
                             ok28d = _rmtree_verified(root_link, "case 28 root symlink")
                         finally:
+                            os.unlink = real_unlink_d
                             os.chmod(str(holder_d), 0o700)
                         added28d = failures[before28d:]
                         del failures[before28d:]
+                        named28d, kept28d = _split_injected(
+                            added28d, observed28d, ("removal root unlink",))
                         if ok28d or not any(
                                 "is a symlink that could not be unlinked" in entry
-                                for entry in added28d):
+                                for entry in named28d):
                             failures.append("case 28: an unremovable ROOT symlink must "
                                             "be a NAMED failure and never a success; "
                                             "got result={!r} entries={!r}"
                                             .format(ok28d, added28d))
-                        for entry in added28d:
-                            if "is a symlink that could not be unlinked" not in entry:
-                                failures.append(entry)
+                        failures.extend(kept28d)
                         mode_after_d = os.lstat(str(inner_d)).st_mode & 0o7777
                         if mode_after_d != 0o750:
                             failures.append("case 28: an unremovable root symlink led "
@@ -2780,9 +3122,16 @@ def self_test_main(_nested=False):
              "diagnostic), a non-timeout wait failure "
              "is a named entry on both stage-2 branches (alone and after a non-timeout "
              "drain failure), a child whose exit status was already collected is not "
-             "signalled again by the staged cleanup, a case-27 rescue or final-collection "
+             "signalled again by the staged cleanup, an injected fault's entry is removed "
+             "only by the identity of the recorded fault that originated it at a declared "
+             "stage, never by its text (a genuine failure carrying an injected token stays "
+             "a failure in cases 27 and 28), a case-27 rescue or final-collection "
              "failure is a genuine named failure kept structurally apart from the injected "
-             "entries and never discarded by the expected-error filter, a recorded child "
+             "entries and never discarded by the expected-error filter, each rescue and "
+             "final-collection step is guarded against any exception (a RuntimeError or "
+             "KeyboardInterrupt from the final kill still leaves the bounded final wait to "
+             "collect the child) and every rescue and final-collection wait carries "
+             "timeout=10, a recorded child "
              "without a collected returncode after that filter is a named failure (so no "
              "case passes "
              "with a live child), an absence check whose lstat is refused is a named "
