@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "1e87f86bdd4ed9d4c3af780bec7fe9b33e723ed565c9de030ab4255b59b24889"
+tree-sha256 = "8f82290944bc210daf21962014f774dd108f926b02d2f5341cfab5821ffed8eb"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3291,8 +3291,8 @@ sha256 = "a767caccbd5f5d328fca55bbebe4150c4331292e4c1ee041262bd31912222c9e"
 
 [[sources]]
 path = "tools/check_cited_standards.py"
-bytes = 67925
-sha256 = "0bea1bc6f0cc17886531edfdd39b3fa6fc4f9319f5b3a545c72c6bc98a8213f9"
+bytes = 67951
+sha256 = "258831722acf1609f210d70eea78d0238e9282322d9cbef9d63c48d07904961e"
 
 [[sources]]
 path = "tools/check_clauses.py"
@@ -3461,8 +3461,8 @@ sha256 = "75ea3e78df3957d87339c2eb3af4d5b614e095f15d9ea2577c840ccf8c70e6b8"
 
 [[sources]]
 path = "tools/check_secrets.py"
-bytes = 39762
-sha256 = "bd5533148006969c626b6bea6e574fb6090244355f0e73e150d7b22fbcfe18dd"
+bytes = 40261
+sha256 = "d188419713b29b11936597724a3d4f3a92f560b8ac1aebb4f2b82fc3ec9cdae8"
 
 [[sources]]
 path = "tools/check_selftest_execution.py"
@@ -3546,8 +3546,8 @@ sha256 = "5ba1a61a5e33d765f8c8caa1c6fb951b27ab067e08ad460f46cba880e59553d9"
 
 [[sources]]
 path = "tools/gen_crosswalk.py"
-bytes = 66640
-sha256 = "218b70140feb662e34da2b0d415ef836fd33bc97f891302da20afd6dcf4e4c42"
+bytes = 66646
+sha256 = "2e8150e5166746883e719afa375ce4e61a7c5c04e02407bbd114cfe08608d569"
 
 [[sources]]
 path = "tools/gen_cursor.py"
@@ -3611,8 +3611,8 @@ sha256 = "26ead77672a53c0477ef6f4ed11c459c3a41a9278f64b381c4e258b965c92e14"
 
 [[sources]]
 path = "tools/gen_renderers.py"
-bytes = 82628
-sha256 = "0b604fa0584d26092aa375b19cca6b137b1a74ea464b16f158995a8bbf28d73a"
+bytes = 87446
+sha256 = "9ee37557a604db4bfd35ab547f1dae76f449966bf0884c5c9a392c2d776f82e1"
 
 [[sources]]
 path = "tools/gen_roadmap.py"

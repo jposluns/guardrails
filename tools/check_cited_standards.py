@@ -576,7 +576,7 @@ def _fixture(tmp, manifests=None, rules=None, config=None):
 
 def _drive(manifests=None, rules=None, config=None, patch=None):
     """run() over a fixture; patch ({global name: value}) is swapped into this module for the run only."""
-    saved = {name: globals()[name] for name in (patch or {})}
+    saved = {name: value for name, value in globals().items() if name in (patch or {})}
     with tempfile.TemporaryDirectory(prefix="aiqt-cited-standards-selftest-") as tmp:
         root, cfg = _fixture(tmp, manifests, rules, config)
         buf = io.StringIO()
