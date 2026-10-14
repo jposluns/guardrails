@@ -52,6 +52,10 @@ reason = "Repository-local character policy read by tools/check_no_dashes.py and
 path = ".aiqt/cited-standards.toml"
 reason = "Repository-local corpus config for tools/check_cited_standards.py, passed with --config by this repository's CI and tools/run_all_checks.sh to add the OPF prompt-pack members to the rule corpus, and pinned by .github/check_cited_standards_contract.py; tracked, not shipped. Run without --config, the gate applies its built-in default corpus (the rule files alone) and reads no default file. The shipped tools/run_all_checks.sh still passes --config, so in a tree without this file (an adopter install) its cited-standards gate exits 2 (cannot evaluate) and the runner ends RESULT: FAIL, as its newtab-repo-contract gate and its two cited-standards-repo-contract gate lines do there (their .github scripts are not shipped)."
 
+[[exclusion]]
+path = ".aiqt/license-waiver.toml"
+reason = "Repository-local class-3 licence-waiver exception list read by tools/check_license_qualification.py; tracked, not shipped. Adopters own their exceptions (an absent file applies no exceptions), like .aiqt/newtab.toml; this tracked file belongs to concern 1, not the untracked concern-2 namespace."
+
 # --- concern-1: manifest-self and the managed block ----------------------------------------------------
 
 [[release-class]]

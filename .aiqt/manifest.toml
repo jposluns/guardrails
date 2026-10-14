@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "e2603610dd91c3dcb7fdcde91a49eada762937b72b9e6d4c8a15e645c3aa7c84"
+tree-sha256 = "eea75fad17b22247498124894f95859057a8ab2f869628230f26da0b28600603"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -61,8 +61,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 297710
-sha256 = "77fd71cf532ac3dde9b95c4933da1217bc27fa3a5266fc7bba045cff956b15ca"
+bytes = 298606
+sha256 = "396271f09bbcb33b6be1d0032b03b90a1d753f1ae39f921686b1adc7bb1d9848"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -106,8 +106,8 @@ sha256 = "f1625261cc219e8a08ac893874d74d2f1e435683d9e552d877fefcdde6880f9d"
 
 [[sources]]
 path = ".aiqt/core/ownership.toml"
-bytes = 17520
-sha256 = "81253eae4f825caa0d7b9c6743c88cfc94b95f69d97bc0f8382a41509d745efb"
+bytes = 17877
+sha256 = "bf0c5c8d93b88ec615560b6c292ee1c13d73cff77bf5ef3fc69cbbbf26a58a94"
 
 [[sources]]
 path = ".aiqt/core/profiles/worker-pack.md"
@@ -3371,8 +3371,8 @@ sha256 = "ba9340ac62ec420d50a0175f5e50d12466370df71255b76f6e2de476c2cf9f97"
 
 [[sources]]
 path = "tools/check_license_qualification.py"
-bytes = 24584
-sha256 = "3b9444704adf8d7b0c8e00988cb263b7000cba3e2f027d8ad44f13b3c2c31618"
+bytes = 46457
+sha256 = "ba01024d0ee5efe275041f167b8e37097f33c774df2ab5a1ffa22d762e60a0ba"
 
 [[sources]]
 path = "tools/check_links.py"
