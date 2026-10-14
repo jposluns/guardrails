@@ -46,9 +46,11 @@ Rules (each self-test vector is caught by exactly its rule, and passes with that
                      as an f-string with no placeholder. A computed module name (any expression other than a literal,
                      an f-string with a placeholder among them) is not read: its site is reviewed (DISCLOSED RESIDUAL).
                      Each IMPORT_SEARCH_ROOTS row is held live: its file is scanned, its root lies beyond the file's own
-                     directory, the file calls sys.path.insert or sys.path.append and names every component of the
-                     root's path relative to the file's directory as a string literal somewhere in the file, and at
-                     least one of its imports resolves through that root; a row that fails any of these is a finding.
+                     directory, the file makes a sys.path.insert or sys.path.append call whose argument expression,
+                     read in the forms the Search-roots limitation lists, resolves to the row's root, and at
+                     least one of its imports resolves through that root; a row that fails any of these is a finding,
+                     and an insertion argument outside the read forms, where no read insertion resolves the row's
+                     root, is refused (cannot evaluate), never a silent pass.
   dynamic-import     dynamic imports are not resolved (a literal name excepted, below); a reference to the
                      dynamic-import machinery is refused unless a reviewed row lists that exact node. The watched names
                      are DYNAMIC_IMPORT_NAMES (__import__, __builtins__, importlib, imp, runpy, zipimport, pkgutil,
@@ -358,9 +360,16 @@ the import system's own modules and help, not every importer by name in the stan
 import system's own functions only those LITERAL_IMPORTERS lists are read as importers. A native library
 loaded through ctypes, and Python source handed to a subprocess or written to a file, are outside the
 surface. Search roots: the own-directory root and the IMPORT_SEARCH_ROOTS rows are the gate's
-model of sys.path; a row is held live by a sys.path.insert or sys.path.append call and the root's path components as
-string literals anywhere in the file, not by evaluating that call's argument; the gate does not evaluate a sys.path
-expression or the order of insertions (it refuses a name present in two places instead), it does not model an in-code
+model of sys.path; a row is held live by a sys.path.insert or sys.path.append call whose argument expression resolves
+to the row's root in the read forms this tree writes: a string literal (a bare relative one is read against the
+repository root, where these programs run, not the process working directory); os.path.join, os.path.dirname and
+os.path.abspath over read forms and __file__; the pathlib chain Path(__file__), .resolve(), .parent, .parents[N] and
+the / operator with a string literal on its right, under a str() wrapper or not; a module-level name assigned exactly
+once to a read form; and this tree's repo_root() helper, read as the repository root by that helper's contract, not
+executed. A string literal elsewhere in the file (a fixture path, a docstring) holds no row live, and a row file's
+insertion argument outside the read forms is refused (cannot evaluate) where no read insertion resolves the row's
+root. The reading is of spelling, not execution: an insertion executed conditionally, in unreached code, or only after
+the import it serves still counts; and the gate does not evaluate the order of insertions (it refuses a name present in two places instead), it does not model an in-code
 insertion of a path outside the tree (a site-packages directory, which can then shadow an in-repo name), and it does not
 see a program launched with another path (PYTHONPATH, python3 -m from another directory, or python3 -I without the
 own-directory insertion, under which a sibling import fails or reaches an installed module of that name). Third-party
@@ -1890,29 +1899,111 @@ def _search_roots(rel, file_set, extra):
     return roots
 
 
+def _norm_insert(path):
+    """One sys.path insertion target, normalised repo-relative ('.' is the repository root)."""
+    return os.path.normpath(path).replace(os.sep, "/")
+
+
+def _module_assignments(tree):
+    """Each name a module-level statement assigns exactly once, mapped to its value expression."""
+    assigned = dict()
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            name = node.targets[0].id
+            assigned[name] = None if name in assigned else node.value
+    return assigned
+
+
+def _insertion_path(node, rel, assigned, depth=0):
+    """The repo-relative path a sys.path insertion argument spells, in the read forms the docstring lists
+    (Search roots), or None for an expression outside them; the file is never executed."""
+    if depth > 20:
+        return None
+    deeper = depth + 1
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return _norm_insert(node.value)
+    if isinstance(node, ast.Name):
+        if node.id == "__file__":
+            return _norm_insert(rel)
+        value = assigned.get(node.id)
+        return None if value is None else _insertion_path(value, rel, assigned, deeper)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        if not (isinstance(node.right, ast.Constant) and isinstance(node.right.value, str)):
+            return None
+        left = _insertion_path(node.left, rel, assigned, deeper)
+        return None if left is None else _norm_insert(left + "/" + node.right.value)
+    if isinstance(node, ast.Attribute) and node.attr == "parent":
+        owner = _insertion_path(node.value, rel, assigned, deeper)
+        return None if owner is None else _norm_insert(owner + "/..")
+    if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Attribute) and \
+            node.value.attr == "parents" and isinstance(node.slice, ast.Constant) and \
+            isinstance(node.slice.value, int) and node.slice.value >= 0:
+        owner = _insertion_path(node.value.value, rel, assigned, deeper)
+        return None if owner is None else _norm_insert(owner + "/.." * (node.slice.value + 1))
+    if not isinstance(node, ast.Call) or node.keywords or any(isinstance(a, ast.Starred) for a in node.args):
+        return None
+    func = node.func
+    if isinstance(func, ast.Name):
+        if func.id in ("str", "Path") and len(node.args) == 1:
+            return _insertion_path(node.args[0], rel, assigned, deeper)
+        if func.id == "repo_root" and not node.args:
+            return "."
+        return None
+    if not isinstance(func, ast.Attribute):
+        return None
+    if func.attr == "resolve" and not node.args:
+        return _insertion_path(func.value, rel, assigned, deeper)
+    os_path = isinstance(func.value, ast.Attribute) and func.value.attr == "path" and \
+        isinstance(func.value.value, ast.Name) and func.value.value.id == "os"
+    if os_path and func.attr == "join" and node.args:
+        parts = [_insertion_path(part, rel, assigned, deeper) for part in node.args]
+        return None if None in parts else _norm_insert("/".join(parts))
+    if os_path and func.attr == "dirname" and len(node.args) == 1:
+        owner = _insertion_path(node.args[0], rel, assigned, deeper)
+        return None if owner is None else _norm_insert(owner + "/..")
+    if os_path and func.attr == "abspath" and len(node.args) == 1:
+        return _insertion_path(node.args[0], rel, assigned, deeper)
+    return None
+
+
+def _insertion_roots(tree, rel):
+    """(roots, unread) over every sys.path.insert or sys.path.append call the file makes: roots the repo-relative
+    paths of the argument expressions the gate reads (_insertion_path), unread the spelling of each it cannot."""
+    assigned = _module_assignments(tree)
+    roots, unread = set(), []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and \
+                node.func.attr in ("insert", "append") and isinstance(node.func.value, ast.Attribute) and \
+                node.func.value.attr == "path" and isinstance(node.func.value.value, ast.Name) and \
+                node.func.value.value.id == "sys":
+            shape = len(node.args) == (2 if node.func.attr == "insert" else 1) and not node.keywords
+            target = _insertion_path(node.args[-1], rel, assigned) if shape else None
+            if target is None:
+                unread.append(ast.unparse(node.args[-1] if node.args else node))
+            else:
+                roots.add(target)
+    return roots, unread
+
+
 def _row_problem(rel, sroot, trees, used):
-    """Why an IMPORT_SEARCH_ROOTS row is not live, or None."""
+    """Why an IMPORT_SEARCH_ROOTS row is not live, or None; raises CannotEvaluate where an insertion argument
+    the gate cannot read could be the one that holds the row live (see the docstring)."""
     if rel not in trees:
         return "names no scanned Python file"
     relpath = os.path.relpath(sroot, _dir_of(rel) or ".").replace(os.sep, "/")
     parts = [p for p in relpath.split("/") if p not in ("..", ".")]
     if not parts:
         return "the root is not beyond the file's own directory"
-    literals, inserts = set(), False
-    for node in ast.walk(trees[rel]):
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            literals.add(node.value)
-            literals.update(node.value.split("/"))
-        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and \
-                node.func.attr in ("insert", "append") and isinstance(node.func.value, ast.Attribute) and \
-                node.func.value.attr == "path" and isinstance(node.func.value.value, ast.Name) and \
-                node.func.value.value.id == "sys":
-            inserts = True
-    if not inserts:
+    roots, unread = _insertion_roots(trees[rel], rel)
+    if not roots and not unread:
         return "the file makes no sys.path.insert or sys.path.append call"
-    unnamed = [p for p in parts if p not in literals]
-    if unnamed:
-        return "the file names no string literal %r of the root's path" % unnamed[0]
+    if unread and sroot not in roots:
+        raise CannotEvaluate("%s: IMPORT_SEARCH_ROOTS row (%r, %r): the sys.path insertion argument %s is "
+                             "outside the forms the gate reads, and no read insertion resolves to the root"
+                             % (rel, rel, sroot, unread[0]))
+    if roots and sroot not in roots:
+        return "no sys.path.insert or sys.path.append argument resolves to the root (the file inserts %s)" \
+            % ", ".join(sorted(roots))
     if (rel, sroot) not in used:
         return "stale: no import of the file resolves through the root"
     return None
@@ -2642,9 +2733,13 @@ _RULE_VECTORS = (
      (("lib/_vendor/pkg/sub/leaf.py", "from .. import mod\nfrom .gone import x\n"),), (), {}, True),
     ("search-root row with no sys.path call", "import-closure", "tools/t.py",
      (("tools/t.py", "import pkg\n_ = ('lib', '_vendor')\n"),), (), dict(search_roots=_T_ROOTS), True),
-    ("search-root row whose root the file never names", "import-closure", "tools/t.py",
+    ("search-root row whose root no insertion resolves to", "import-closure", "tools/t.py",
      (("tools/t.py", "import sys\nsys.path.append('lib')\nimport pkg\n"),), (), dict(search_roots=_T_ROOTS),
      True),
+    ("search-root row beside an own-directory insertion and fixture literals", "import-closure", "tools/t.py",
+     (("tools/t.py", "import os, sys\nsys.path.insert(0, os.path.dirname(__file__))\n"
+                     "planted = ('lib', '_vendor', 'lib/_vendor')\nimport pkg\n"),), (),
+     dict(search_roots=_T_ROOTS), True),
     ("stale search-root row", "import-closure", "tools/t.py", (("tools/t.py", _T_VENDOR),), (),
      dict(search_roots=_T_ROOTS), True),
     ("search-root row naming no scanned file", "import-closure", "tools/t.py", (), (),
@@ -3017,6 +3112,13 @@ _GREEN_VECTORS = (
     ("a def's plain local read from a lambda it holds, its row reviewed",
      (("tools/t.py", "def f(record):\n    imp = record.get('import')\n    return lambda: imp.get('run')\n"),),
      dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "f.<lambda>", ("#1: imp.get('run')",), "r"),))),
+    # A row is live through the insertion that resolves to its root: the own-directory insertion beside it
+    # changes nothing.
+    ("own-directory and recorded-root insertions together",
+     (("tools/t.py", "import os, sys\nsys.path.insert(0, os.path.dirname(__file__))\n"
+                     "sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'lib', '_vendor'))\n"
+                     "import pkg\n"),),
+     dict(search_roots=_T_ROOTS)),
 )
 
 
@@ -3484,6 +3586,10 @@ _CANNOT_VECTORS = (
     ("in-repo module named like a standard-library module",
      (("tools/json.py", "x = 1\n"), ("tools/t.py", "import json\n")), (), dict(), None,
      "import 'json' is ambiguous: present in the standard library"),
+    ("search-root insertion argument outside the read forms",
+     (("tools/t.py", "import os, sys\nsys.path.insert(0, os.environ['EXTRA_ROOT'])\nimport pkg\n"),), (),
+     dict(search_roots=_T_ROOTS), None,
+     "outside the forms the gate reads"),
     ("uses inside a flow mapping", ((_WF, "steps:\n  - {uses: a/b@v1}\n"),), (), dict(), None,
      "p.yml:2: a line outside the accepted YAML subset"),
     ("uses value in a block scalar", ((_WF, "steps:\n  - uses: >\n      a/b@v1\n"),), (), dict(), None,
@@ -3807,8 +3913,14 @@ MUTANTS = (
     ("row-file-scanned", 'return "names no scanned Python file"', "return None",
      "search-root row naming no scanned file"),
     ("row-beyond-own", "    if not parts:\n", "    if False:\n", "search-root row naming the file's own directory"),
-    ("row-sys-path-call", "    if not inserts:\n", "    if False:\n", "search-root row with no sys.path call"),
-    ("row-root-named", "    if unnamed:\n", "    if False:\n", "search-root row whose root the file never names"),
+    ("row-sys-path-call", "    if not roots and not unread:\n", "    if False:\n",
+     "search-root row with no sys.path call"),
+    ("row-argument-read", "    if unread and sroot not in roots:\n", "    if False and sroot not in roots:\n",
+     "search-root insertion argument outside the read forms"),
+    ("row-root-resolved", "    if roots and sroot not in roots:\n", "    if False:\n",
+     "search-root row whose root no insertion resolves to"),
+    ("row-root-resolved-own-directory", "    if roots and sroot not in roots:\n", "    if False:\n",
+     "search-root row beside an own-directory insertion and fixture literals"),
     ("row-live", "    if (rel, sroot) not in used:\n", "    if False:\n", "stale search-root row"),
     # relative imports
     ("relative-module-exists", "                if not ok:\n", "                if False:\n",
