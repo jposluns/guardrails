@@ -3877,6 +3877,11 @@ def self_test():
               imported_leaf_names(("release",)) == frozenset({"release" + IMPORTED_INDEX_SUFFIX}))
         check("imported-leaf-names-unknown-skipped",
               imported_leaf_names(("nonsense", "transaction")) == frozenset())
+        # The activation threshold is PINNED: imported_series_declared compares both arms against
+        # the IMPORTED_SPEC_VERSION constant, so this equality anchors every sampled point below
+        # (red when the constant itself drifts, e.g. to a multidigit 1.2.10 the interval samples
+        # alone would not see).
+        check("imported-spec-version-pinned-130", IMPORTED_SPEC_VERSION == "1.3.0")
         # imported_series_declared: the activation gate requires BOTH the declared spec_version
         # (IMPORTED_SPEC_VERSION or later, through the house SemVer parser) AND this tooling's own
         # support (SUPPORTED_SPEC_VERSION at or above IMPORTED_SPEC_VERSION, the way homes_generation
@@ -3887,8 +3892,10 @@ def self_test():
         # and an unparseable declaration answer False in every case (spec 8.2/4.2), INCLUDING while
         # support is raised: once the tooling-support clause is satisfied, only the declared-version
         # comparison keeps them out, so that arm is asserted on its False side under the patch (red
-        # when the comparison is removed or its threshold drifts down to the current version or
-        # to an interior 1.2.x).
+        # when the comparison is removed, or when its threshold drifts down to a SAMPLED point:
+        # 1.2.0, 1.2.1, 1.2.9, or the multidigit 1.2.10 and 1.2.99 below. The samples establish
+        # those points only, never the whole open 1.2.x range; the threshold constant itself is
+        # pinned to 1.3.0 by its own check above).
         check("imported-series-declared-false-until-tooling-supports",
               not imported_series_declared({"opf": {"spec_version": "1.3.0"}})
               and not imported_series_declared({"opf": {"spec_version": "2.0.0"}})
@@ -3906,12 +3913,33 @@ def self_test():
                   and not imported_series_declared({"opf": {"spec_version": "1.2.9"}})
                   and not imported_series_declared({"opf": {"spec_version": "1.0.0"}})
                   and not imported_series_declared({"opf": {"spec_version": "one.three"}}))
+            # Multidigit patch declarations below the threshold: the house parser does not stop
+            # at single-digit patches, so 1.2.10 and 1.2.99 parse, sit below 1.3.0, and answer
+            # False under raised support. Sampled points only (red when the declared threshold
+            # drifts to 1.2.10, or past it to 1.2.99).
+            check("imported-series-declared-multidigit-patch-below-130-false",
+                  not imported_series_declared({"opf": {"spec_version": "1.2.10"}})
+                  and not imported_series_declared({"opf": {"spec_version": "1.2.99"}}))
             # Support ABOVE the threshold activates too: the support comparison is at-or-above,
             # not equality (red when its ">=" tightens to "==").
             globals()["SUPPORTED_SPEC_VERSION"] = "1.3.1"
             check("imported-series-declared-under-support-above-130",
                   imported_series_declared({"opf": {"spec_version": "1.3.0"}})
                   and imported_series_declared({"opf": {"spec_version": "1.3.1"}}))
+            # Support BELOW the threshold stays inactive whatever the declaration: the support
+            # arm also compares against IMPORTED_SPEC_VERSION, so the sampled support values
+            # 1.2.1 and the multidigit 1.2.10 both answer False even for 1.3.0 and 2.0.0
+            # declarations (red when the support threshold drifts down to 1.2.1, or past it to
+            # an interior multidigit 1.2.10). Sampled support points only, the way the declared
+            # arm is sampled above.
+            globals()["SUPPORTED_SPEC_VERSION"] = "1.2.1"
+            _isd_sup_121 = (not imported_series_declared({"opf": {"spec_version": "1.3.0"}})
+                            and not imported_series_declared({"opf": {"spec_version": "2.0.0"}}))
+            globals()["SUPPORTED_SPEC_VERSION"] = "1.2.10"
+            check("imported-series-declared-false-under-support-below-130",
+                  _isd_sup_121
+                  and not imported_series_declared({"opf": {"spec_version": "1.3.0"}})
+                  and not imported_series_declared({"opf": {"spec_version": "2.0.0"}}))
         finally:
             globals()["SUPPORTED_SPEC_VERSION"] = _isd_prev
         check("imported-series-declared-current-and-malformed-false",
