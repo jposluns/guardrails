@@ -5860,10 +5860,13 @@ def _watchdog_dispatch_faults(budgets, module=None, cases=None, scanned=None):
     whole and, when it is a dotted or colon-joined path (a patch or
     resolve_name target), part by part, its module-name parts included,
     except where the string ends in a file suffix (_WATCHDOG_FILE_SUFFIXES)
-    and no def, async def, class or lambda encloses it at any depth (a
-    top-level table entry "opf.py" names a file, while patch("opf.py",
-    create=True) in a def or lambda targets this module, one nested in a
-    top-level if, try, with, for or while included). It refuses:
+    and every enclosing node up to the module is a Tuple, List, Set or Dict
+    display or a module-level Assign or AnnAssign statement, the top-level
+    data table (a table entry "opf.py" names a file; under any call,
+    comprehension, generator expression, type alias, compound statement,
+    def, async def, class or lambda the carve-out does not hold, so
+    patch("opf.py", create=True) targets this module wherever it is
+    written). It refuses:
     (1) a case call it cannot attribute (a non-constant mode, a call outside
     any mode test, or one inside a loop, comprehension, nested function or
     lambda, which may run any number of times);
@@ -19878,6 +19881,7 @@ def _watchdog_regression_self_test():
     """R10: startup/collection/exit bounds and the registered runner under hostile inherited state."""
     import ast
     import contextlib
+    import importlib.util
     import inspect
     import io
     import math
@@ -19885,8 +19889,10 @@ def _watchdog_regression_self_test():
     import select
     import signal
     import subprocess
+    import tempfile
     import threading
     import time
+    import types
     import _opf_emit
     from _opf_emit import run_status_owned
     if signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
@@ -20954,7 +20960,16 @@ def _watchdog_regression_self_test():
     # suffix must not hide its module part (each a route found after the
     # list was first written), and that patch target made in a module-level
     # helper the branch calls, a def under a top-level if, a def under a
-    # top-level try and a lambda, which the carve-out must not reach; a case
+    # top-level try and a lambda, which the carve-out must not reach; that
+    # target made with no def at all, in a top-level patch call, the same
+    # call under if True, a generator expression, a list comprehension and
+    # a type alias; the file-suffixed string placed beside its patch call:
+    # in the yielded element of a top-level generator expression and of a
+    # list comprehension, beside its patch call in each of those two, in
+    # the iterable of a top-level for loop, in a display under a top-level
+    # if, as a top-level type alias value, and under a top-level binary +,
+    # star unpack, subscript and conditional expression, each handed to
+    # patch by the planted branch; a case
     # function bound twice at the top level; a module gate bound twice; a
     # case def and a module gate def each carrying a decorator; a case's
     # __code__ assigned at the top level, an item of a case's __kwdefaults__
@@ -20974,7 +20989,11 @@ def _watchdog_regression_self_test():
     # an item under a function read on opf and an attribute of a function
     # imported from it, spelling setattr, delattr, __setattr__, __delattr__,
     # exec, eval, compile, vars, globals, locals, gc and __dict__, and a
-    # completion leg's own launch source dropped.
+    # completion leg's own launch source dropped. Beside the flips, two
+    # acceptance vectors require a permitted filename table (written with
+    # Assign and with AnnAssign, a tuple inside a list) to scan clean, and
+    # each sibling fixture-consumer pairing runs once in process against
+    # a recording patch stand-in (the executed pairing check).
     runner_source = inspect.getsource(_watchdog_regression_self_test)
     launched = set(live)
     # Assembled, never one literal, so each marker occurs once: in the comment.
@@ -21167,7 +21186,32 @@ def _watchdog_regression_self_test():
                        "            _watchdog_hidden_alias.__value__[0], create=True)\n"
                        "        found.start()\n"
                        "        return getattr(found.target, " + computed
-                       + ")(\"no-signal-echild\")\n"))
+                       + ")(\"no-signal-echild\")\n"),
+        binop_sibling=("        found = _watchdog_hidden_mock(\n"
+                       "            _watchdog_hidden_binop[0], create=True)\n"
+                       "        found.start()\n"
+                       "        return getattr(found.target, " + computed
+                       + ")(\"no-signal-echild\")\n"),
+        star_sibling=("        found = _watchdog_hidden_mock(\n"
+                      "            _watchdog_hidden_star[0], create=True)\n"
+                      "        found.start()\n"
+                      "        return getattr(found.target, " + computed
+                      + ")(\"no-signal-echild\")\n"),
+        sub_sibling=("        found = _watchdog_hidden_mock(\n"
+                     "            _watchdog_hidden_sub, create=True)\n"
+                     "        found.start()\n"
+                     "        return getattr(found.target, " + computed
+                     + ")(\"no-signal-echild\")\n"),
+        ifexp_sibling=("        found = _watchdog_hidden_mock(\n"
+                       "            _watchdog_hidden_ifexp[0], create=True)\n"
+                       "        found.start()\n"
+                       "        return getattr(found.target, " + computed
+                       + ")(\"no-signal-echild\")\n"),
+        accepts=("        found = _watchdog_hidden_mock(\n"
+                 "            _watchdog_hidden_accepts[0][0], create=True)\n"
+                 "        found.start()\n"
+                 "        return getattr(found.target, " + computed
+                 + ")(\"no-signal-echild\")\n"))
     helper_def = ("\n\ndef _watchdog_hidden_dispatch():\n"
                   "    return _watchdog_completion_case(\"no-signal-echild\")\n")
     module_helper_def = ("\n\ndef _watchdog_hidden_module():\n"
@@ -21223,24 +21267,32 @@ def _watchdog_regression_self_test():
     # list_comp_elt rows place the tuple in the yielded element, a direct
     # child of the expression node, so admitting GeneratorExp alone or
     # ListComp alone turns its own row red; their consuming branches hand
-    # the yielded tuple to patch themselves. In the generator and
-    # list_comp rows the string sits in the iterator, under the
-    # comprehension node as well, so each turns red only when its
+    # the first item of the yielded tuple to patch themselves. In the
+    # generator and list_comp rows the string sits in the iterator, under
+    # the comprehension node as well, so each turns red only when its
     # expression type and comprehension are admitted TOGETHER: grouped
     # coverage, the only kind the comprehension ancestor can get, since
     # it never encloses a string without its enclosing expression. The
     # for_loop, under_if and type_alias rows pin For, If and TypeAlias
-    # each on its own (the if form binds a tuple the planted branch hands
-    # to patch, and the type alias form binds the tuple whose first item
-    # its branch hands to patch). The remaining excluded node types
-    # (While, With, Try, TryStar, Match, AsyncFor, AsyncWith, SetComp,
-    # DictComp, Lambda, FunctionDef, AsyncFunctionDef, ClassDef) are
-    # refused by the same allowlist but are NOT individually pinned: no
-    # row places a string whose only non-display ancestor is one of them,
-    # so a scan admitting any or all of them misses no row here. Every
-    # fixture and branch in this table reaches the scan as text only (a
-    # scanner flip, never executed); the executed legs are the separate
-    # `cases` roster above.
+    # each on its own (the if form binds a tuple whose first item the
+    # planted branch hands to patch, and the type alias form binds the
+    # tuple whose first item its branch hands to patch), and the binop,
+    # starred, subscript and ifexp rows pin BinOp, Starred, Subscript
+    # and IfExp the same way: each binds its tuple or string under
+    # exactly that one non-display node, so each row turns red only when
+    # its own kind is admitted. The allowlist excludes EVERY node type
+    # outside `displays`, so the excluded set is open-ended: every
+    # other non-display node type (for example While, With, Try, TryStar,
+    # Match, AsyncFor, AsyncWith, SetComp, DictComp, Lambda, FunctionDef,
+    # AsyncFunctionDef, ClassDef) is refused by the same rule but is NOT
+    # individually pinned, since no row places a string whose only
+    # non-display ancestor is one of those, so a scan admitting any or
+    # all of them misses no row here. Every fixture and branch in this
+    # table reaches the dispatch scan as text (a scanner flip); each
+    # sibling fixture-consumer pairing ALSO runs once in process against
+    # a recording patch stand-in (the executed pairing check below the
+    # flips), and the executed legs are the separate `cases` roster
+    # above.
     sibling_table_defs = dict(
         generator_elt=(patch_import + "_watchdog_hidden_gens = (\n"
                        "    (\"opf.py\",) for _ in (0,))\n"),
@@ -21258,7 +21310,31 @@ def _watchdog_regression_self_test():
         under_if=(patch_import + "if True:\n"
                   "    _watchdog_hidden_targets = (\"opf.py\",)\n"),
         type_alias=(patch_import
-                    + "type _watchdog_hidden_alias = (\"opf.py\",)\n"))
+                    + "type _watchdog_hidden_alias = (\"opf.py\",)\n"),
+        binop=(patch_import
+               + "_watchdog_hidden_binop = (\"opf.py\",) + ()\n"),
+        starred=(patch_import
+                 + "_watchdog_hidden_star = [*(\"opf.py\",)]\n"),
+        subscript=(patch_import
+                   + "_watchdog_hidden_sub = (\"opf.py\",)[0]\n"),
+        ifexp=(patch_import
+               + "_watchdog_hidden_ifexp = (\"opf.py\",) if True else ()\n"))
+    # The acceptance edge of the carve-out: a permitted filename table
+    # written with Assign and with AnnAssign, nesting a tuple inside a
+    # list (representative allowed display nesting), must scan CLEAN
+    # while the planted accepts branch hands its string to patch; the
+    # acceptance checks below the dispatch flips require NO fault. The
+    # seed-equivalence comment in _watchdog_dispatch_faults says why a
+    # False seed [(statement, False)] is NOT equivalent to the True
+    # seed: it disables the carve-out for every string in the
+    # statement, and under it each vector here turns red while every
+    # rejection row above stays green, so these two vectors pin that
+    # edge.
+    accept_table_defs = dict(
+        assign=(patch_import
+                + "_watchdog_hidden_accepts = [(\"opf.py\",)]\n"),
+        ann_assign=(patch_import
+                    + "_watchdog_hidden_accepts: list = [(\"opf.py\",)]\n"))
     # A decorator mapping audit-ignore to no-signal-echild: the scan would
     # price the call by the mode it names, not the mode that runs.
     case_def = "def _watchdog_completion_case(mode):\n"
@@ -21383,6 +21459,22 @@ def _watchdog_regression_self_test():
              "call around it, handed to patch by the planted branch", budgets,
              hidden("alias_sibling", sibling_table_defs["type_alias"]), launched_cases,
              "spells _watchdog_hidden_alias, which can reach a case function"),
+            ("file-suffixed string under a top-level binary +, handed to "
+             "patch by the planted branch", budgets,
+             hidden("binop_sibling", sibling_table_defs["binop"]), launched_cases,
+             "spells _watchdog_hidden_binop, which can reach a case function"),
+            ("file-suffixed string under a star unpack in a top-level "
+             "list, handed to patch by the planted branch", budgets,
+             hidden("star_sibling", sibling_table_defs["starred"]), launched_cases,
+             "spells _watchdog_hidden_star, which can reach a case function"),
+            ("file-suffixed string under a top-level subscript of its "
+             "tuple, handed to patch by the planted branch", budgets,
+             hidden("sub_sibling", sibling_table_defs["subscript"]), launched_cases,
+             "spells _watchdog_hidden_sub, which can reach a case function"),
+            ("file-suffixed string under a top-level conditional "
+             "expression, handed to patch by the planted branch", budgets,
+             hidden("ifexp_sibling", sibling_table_defs["ifexp"]), launched_cases,
+             "spells _watchdog_hidden_ifexp, which can reach a case function"),
             ("case def carrying a decorator", budgets,
              module_source.replace(case_def, "@_watchdog_remap\n" + case_def) + remap_def,
              launched_cases, "_watchdog_completion_case: a case def carrying 1 decorator(s)"),
@@ -21428,6 +21520,82 @@ def _watchdog_regression_self_test():
     if any(module_source.count(anchor) != 1
            for anchor in (alias, branch_head, case_def, gate_def)):
         flip_missed.append("dispatch flip anchors not found once in the module")
+    # The acceptance edge, checked clean: each permitted table must
+    # scan with NO fault at all (the baseline scan is clean) once the
+    # accepts branch is planted; a scan tightened past the display
+    # allowlist (the False seed, or a display dropped from the
+    # allowlist) turns these red where every rejection flip above
+    # stays green.
+    for accept, accept_module in (
+            ("a permitted filename table written with Assign, a tuple "
+             "inside a list, read by the planted branch",
+             hidden("accepts", accept_table_defs["assign"])),
+            ("a permitted filename table written with AnnAssign, a tuple "
+             "inside a list, read by the planted branch",
+             hidden("accepts", accept_table_defs["ann_assign"]))):
+        accepted = _watchdog_dispatch_faults(budgets, accept_module, launched_cases)
+        if accepted:
+            flip_missed.append("dispatch acceptance not clean: %s (%s)"
+                               % (accept, "; ".join(accepted)))
+    # The executed half of each fixture-consumer pairing: the scanner
+    # flips above read these fixtures and branches as text only, so a
+    # pairing whose consumer no longer runs (the type-alias consumer
+    # handing the whole tuple to a patcher that is never constructed,
+    # whose .start() then raises AttributeError) would stay green
+    # there. Here each pairing runs once IN PROCESS: the fixture plus
+    # its consuming branch body, loaded as a scratch module with the
+    # patch stand-in below recording what it is handed, must construct
+    # the stand-in on exactly the string "opf.py" with create=True,
+    # start it, and dispatch exactly the mode no-signal-echild to the
+    # case recorder on the stand-in target.
+    def consumed(how, fixture, path):
+        received = []
+        sentinel = object()
+
+        def recorded_case(mode):
+            received.append(("mode", mode))
+            return sentinel
+
+        class _RecordingPatch:
+            def __init__(self, target, create=False):
+                received.append(("target", target, bool(create)))
+                self.target = types.SimpleNamespace(
+                    _watchdog_completion_case=recorded_case)
+
+            def start(self):
+                received.append(("start",))
+
+        path.write_text(fixture + "\n\ndef _watchdog_hidden_consumer():\n"
+                        "    if True:\n" + hidden_by[how], encoding="utf-8")
+        try:
+            consumer_spec = importlib.util.spec_from_file_location(
+                "_watchdog_consumer_fixture", str(path))
+            consumer_module = importlib.util.module_from_spec(consumer_spec)
+            consumer_spec.loader.exec_module(consumer_module)
+            consumer_module._watchdog_hidden_mock = _RecordingPatch
+            result = consumer_module._watchdog_hidden_consumer()
+        except Exception as exc:
+            return ["executed consumer pairing %s: %r" % (how, exc)]
+        if result is not sentinel or received != [
+                ("target", "opf.py", True), ("start",),
+                ("mode", "no-signal-echild")]:
+            return ["executed consumer pairing %s: recorded %r"
+                    % (how, received)]
+        return []
+
+    with tempfile.TemporaryDirectory() as consumer_dir:
+        for index, (how, fixture) in enumerate((
+                ("alias_sibling", sibling_table_defs["type_alias"]),
+                ("gen_sibling", sibling_table_defs["generator_elt"]),
+                ("list_sibling", sibling_table_defs["list_comp_elt"]),
+                ("binop_sibling", sibling_table_defs["binop"]),
+                ("star_sibling", sibling_table_defs["starred"]),
+                ("sub_sibling", sibling_table_defs["subscript"]),
+                ("ifexp_sibling", sibling_table_defs["ifexp"]),
+                ("accepts", accept_table_defs["assign"]),
+                ("accepts", accept_table_defs["ann_assign"]))):
+            flip_missed.extend(consumed(
+                how, fixture, Path(consumer_dir) / ("consumer_%d.py" % index)))
     # Each launch flip goes through reconciled(), the verdict terms above;
     # the table name is computed where only the string rule must see "opf".
     unlisted = "._watchdog_unlisted_case()"
