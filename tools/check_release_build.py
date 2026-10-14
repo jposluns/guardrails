@@ -178,7 +178,7 @@ def _show_toml(root, ref, path):
     # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
     # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
     # on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise GateError("{} at {} does not parse: {}".format(path, ref, exc))
 
 
@@ -383,7 +383,7 @@ def qa_layers(qa_path, qa_sha256, expect_candidate_sha):
     # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
     # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
     # on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise GateError("QA attestation does not parse: {}".format(exc))
     return validate_qa_obj(obj, expect_candidate_sha)
 
@@ -984,7 +984,7 @@ def _first_pin_evidence_findings(root, candidate_sha, evidence):
     # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
     # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
     # on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise GateError("first-pin: evidence artifact {} does not parse ({}); fail-closed".format(
             evidence, exc))
     agents = _show_bytes(root, candidate_sha, "AGENTS.md")
@@ -1040,7 +1040,7 @@ def _first_pin_evidence_findings(root, candidate_sha, evidence):
             # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
             # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
             # on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
-            except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError):
+            except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError):
                 raise GateError("first-pin: the demonstration {} resolves but is not offline-evaluable "
                                 "(does not parse); adopter-owned evidence that cannot be evaluated is "
                                 "exit 2".format(demo_ref))
