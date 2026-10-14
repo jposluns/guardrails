@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "a8c9bb90c492c2886c6298807e09a9f149825bf1b7a22dfe062aa88701b3c7db"
+tree-sha256 = "e272bdc0f1a793b9ab31e0ebbc98ea778a0bbfc92734ff4b1d50af4cc22e10b6"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3666,8 +3666,8 @@ sha256 = "138df9180843eccc8dd09812fe17c45c82514936f2002a968d930ae2bc6eb9fc"
 
 [[sources]]
 path = "tools/merge_train.py"
-bytes = 272636
-sha256 = "52ba6f772983b2a34888a23c9cfa848a391ab695a2d1bd680b4d2504634f90d1"
+bytes = 285510
+sha256 = "2194601084ecbc4698f2c08a2aae806cab077b56429be2e2b07fe2efee9be3c3"
 
 [[sources]]
 path = "tools/migrate.py"
@@ -3716,8 +3716,8 @@ sha256 = "1e2359aa0c0c6dd2a398c70a9eece680953443191d148664bc61d8e3ff245300"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 74426
-sha256 = "d1b7328779dd25e9b7697b62f1aebddf4c6d8dfd7c3defe7e1e27ba535869465"
+bytes = 75282
+sha256 = "8887116f1e04db9863cd28107c427a8782b4a11ae27fe48fc5a63dcb604f58c9"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"

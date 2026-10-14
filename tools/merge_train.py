@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Merge train (opt-in): refresh every open PR's head branch with the base branch, taking the base's
-side for the declared GENERATED files only, regenerating and checking them, and refusing everything
-else. It does nothing unless the project commits .aiqt/merge-train.toml on its base branch.
+"""Merge train (opt-in): refresh the head branch of eligible, selected open PRs targeting the
+configured base branch, subject to the refusals documented below, taking the base side for the
+declared GENERATED files only, regenerating and checking them, and refusing everything else. It
+does nothing unless the project commits .aiqt/merge-train.toml on its base branch.
 
   merge_train.py --dry-run [--repo DIR] [--pr N]...   live dry run: report what --apply would do
   merge_train.py [--repo DIR] [--pr N]... --apply     live run: commit and push
@@ -238,15 +239,20 @@ CONFIG_LAUNCHERS = frozenset((
     "xargs", "nohup", "setsid", "nice", "ionice", "stdbuf", "timeout", "doas", "sudo"))
 # Interpreter heads whose leading option words are parsed against _INTERPRETER_GRAMMAR in a
 # configured command (FIX-541 round 3, decided 2). The first word the grammar does not consume as
-# an option or an operand is the script; later words belong to it. A free-threaded, debug or
-# -dbg build suffix after the version (python3.13t, python3.13d, python3.12-dbg) names the same
-# interpreter and parses the same grammar (FIX-541 round 4, decided 6).
+# an option or an operand is the script; later words belong to it. A build suffix after the
+# version names the same interpreter and parses the same grammar: free-threaded t, debug d and
+# pymalloc m in any combination (python3.13t, python3.13td, python3.7m, python3.7dm), with or
+# without a distribution -dbg tail (python3.12-dbg, python3.13t-dbg) (FIX-541 rounds 4 and 7,
+# decided 6 and 7: the round-4 pattern accepted one suffix letter only, so a td, m or dm build
+# name SKIPPED the scan and carried inline code around it).
 CONFIG_INTERPRETERS = re.compile(
-    r"\A(python|pypy|perl|ruby|node|nodejs|lua)[0-9.]*([td]|-dbg)?\Z")
+    r"\A(python|pypy|perl|ruby|node|nodejs|lua)[0-9.]*[tdm]*(-dbg)?\Z")
 # The per-interpreter option grammar guard_config_fail_closed scans, fail closed: a 4-tuple of
 # exact no-operand flags, exact options whose operand is the NEXT word, prefixes whose operand is
 # attached in the same word, and exact options whose NEXT-word operand IS the program (python -m
-# <module>) and so ends the scan the way a script word does (FIX-541 round 4, decided 6). ANY
+# <module>, accepted only when the module resolves to a file inside the checkout; see
+# _module_in_tree) and so ends the scan the way a script word does (FIX-541 rounds 4 and 7,
+# decided 6 and 3). ANY
 # other leading option word is refused as unclassifiable: every
 # inline-code option (python/perl/ruby/lua -c and -e, perl -E, node -e, -p and --eval), every
 # bundled cluster (-Icprint(1)) and every unknown option lands there, so an option's operand or a
@@ -268,6 +274,23 @@ _INTERPRETER_GRAMMAR = dict(
     lua=(frozenset(("-v", "-E", "-W")), frozenset(("-l",)), ("-l",), frozenset()),
 )
 _INTERPRETER_FAMILY = dict(pypy="python", nodejs="node")
+
+# A python -m operand: a dotted name of plain-identifier components (anything else cannot be
+# mapped to a checkout path and is refused; FIX-541 round 7, decided 3).
+_MODULE_NAME = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*\Z")
+
+
+def _module_in_tree(module, tree):
+    """Whether a python -m operand resolves to a file INSIDE the checkout: a dotted name of
+    plain-identifier components whose mapped path (<a>/<b>.py, or the package form
+    <a>/<b>/__init__.py) is a path of the base tip tree the config itself was read from
+    (FIX-541 round 7, decided 3). tree None means no tree was supplied to resolve against:
+    nothing resolves, fail closed."""
+    if tree is None or not isinstance(module, str) or not _MODULE_NAME.match(module):
+        return False
+    path = module.replace(".", "/")
+    return path + ".py" in tree or path + "/__init__.py" in tree
+
 
 # Every argv the tool hands to git, for the self-test's forbidden-operation audit.
 GIT_AUDIT = []
@@ -312,8 +335,15 @@ def _now():
 
 def _clean_env(extra=None):
     """The caller's environment with every GIT_-prefixed variable dropped (no repository-selecting or
-    config-injecting variable reaches git), plus explicit additions."""
+    config-injecting variable reaches git), pinned to the C locale (LC_ALL=C set and LANGUAGE
+    dropped: git translates the "fatal:" and "error:" prefixes the merge diagnostic scan
+    matches through its shipped message catalogs, so every child whose stderr the train parses
+    must emit untranslated diagnostics; LANGUAGE is dropped as well because some gettext
+    implementations read it even beside LC_ALL=C; FIX-541 round 7, decided 1), plus explicit
+    additions."""
     env = dict((k, v) for k, v in os.environ.items() if not k.startswith("GIT_"))
+    env.pop("LANGUAGE", None)
+    env["LC_ALL"] = "C"
     env["GIT_TERMINAL_PROMPT"] = "0"
     env.update(extra or dict())
     return env
@@ -655,8 +685,11 @@ def _run_external(argv, cwd, timeout, extra_env=None):
 # ---------------------------------------------------------------- guards (the GUARDS table below)
 
 
-def guard_config_fail_closed(data):
-    """Raise FailClosed unless data is a well-formed version-1 merge-train config."""
+def guard_config_fail_closed(data, tree=None):
+    """Raise FailClosed unless data is a well-formed version-1 merge-train config. tree, when
+    given, is the set of paths of the base tip tree the config text came from: it resolves the
+    python -m module operand (FIX-541 round 7, decided 3), and with tree None every -m module
+    is refused, fail closed."""
     def bad(msg):
         raise FailClosed("malformed %s: %s" % (CONFIG_PATH, msg))
 
@@ -709,10 +742,21 @@ def guard_config_fail_closed(data):
                     elif any(word.startswith(p) and len(word) > len(p) for p in attached):
                         i += 1
                     elif word in program:
-                        # The NEXT word names the program itself (python -m <module>), so it
-                        # ends the option scan exactly as a script word does; later words
-                        # belong to the module. A trailing -m with no operand leaves nothing
-                        # to run (FIX-541 round 4, decided 6).
+                        # The NEXT word names the program itself (python -m <module>) and ends
+                        # the option scan exactly as a script word does; later words belong to
+                        # the module. Accepted ONLY when that module resolves to a file inside
+                        # the checkout (see _module_in_tree, resolved against the base tip
+                        # tree the config text itself came from; tree None resolves nothing):
+                        # a standard-library or site module can execute its own argument as
+                        # inline code (python3 -m timeit "<stmt>", python3 -I -m code) and so
+                        # hand git an unpinned argv one hop later (FIX-541 rounds 4 and 7,
+                        # decided 6 and 3). A trailing -m with no operand leaves nothing to
+                        # run.
+                        if i + 1 < len(words) and not _module_in_tree(words[i + 1], tree):
+                            bad("%s command %r module %r does not resolve to a file inside "
+                                "the checkout, so it could name a standard-library or site "
+                                "module that executes inline code; the form is refused"
+                                % (where, command[0], words[i + 1]))
                         break
                     else:
                         bad("%s command %r option %r is outside the supported %s option "
@@ -1349,6 +1393,14 @@ def _push_and_observe(ctx, scratch, old, new):
 # ---------------------------------------------------------------- the run
 
 
+def _base_tree(repo, base_sha):
+    """Every path of the base tip tree, read from the private base repository: the set the
+    python -m module resolution in guard_config_fail_closed accepts a module against (FIX-541
+    round 7, decided 3)."""
+    out = _git(repo, "ls-tree", "-r", "-z", "--name-only", base_sha)[1]
+    return frozenset(p.decode("utf-8", "surrogateescape") for p in out.split(b"\0") if p)
+
+
 def load_config(root, base_sha):
     text = _guard("config-source")(root, base_sha)
     if text is None:
@@ -1358,7 +1410,7 @@ def load_config(root, base_sha):
         data = tomllib.loads(text)
     except (tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
         raise FailClosed("malformed %s: %s" % (CONFIG_PATH, exc))
-    _guard("config-fail-closed")(data)
+    _guard("config-fail-closed")(data, tree=_base_tree(root, base_sha))
     return data
 
 
@@ -1479,7 +1531,10 @@ def _merge_commit_push(ctx, scratch, old, base, apply):
     # unmerged entries present the supported conflict shape, so it refuses HERE, before any
     # conflict resolution (FIX-541 round 4, decided 1, blocker: acceptance used to stop reading
     # stderr once unmerged entries existed, so an exit-1 merge reporting a fatal failure beside
-    # a real conflict went on to resolve, commit and push).
+    # a real conflict went on to resolve, commit and push). The English prefixes are reliable
+    # because the funnel pins every child to the C locale: _clean_env sets LC_ALL=C and drops
+    # LANGUAGE, so the shipped git message catalogs that translate both prefixes never apply
+    # (FIX-541 round 7, decided 1).
     if rc == 1:
         diagnostic = [line for line in err.splitlines()
                       if line.startswith(("fatal:", "error:"))]
@@ -2236,11 +2291,11 @@ def case_config(_tmp):
                 commit=dict(name="A", email="a@example.invalid"),
                 generated=dict(paths=["gen/d.txt"], regenerate=[["x"]], check=[["y"]]))
 
-    def verdict(mutate):
+    def verdict(mutate, tree=None):
         data = json.loads(json.dumps(good))
         mutate(data)
         try:
-            _guard("config-fail-closed")(data)
+            _guard("config-fail-closed")(data, tree=tree)
         except FailClosed:
             return "refused"
         return "accepted"
@@ -2289,12 +2344,23 @@ def case_config(_tmp):
     check("config/interpreter-valued-option-script-accepted",
           verdict(lambda d: d["generated"].update(
               check=[["perl", "-I", "lib", "tools/gen.pl"]])), "accepted")
-    # FIX-541 round 4 (decided 6): python -m <module> names the program the way a script word
-    # does, so it ends the option scan and the launch stays accepted (a COMPATIBILITY check,
-    # as above).
+    # FIX-541 rounds 4 and 7 (decided 6 and 3): python -m <module> names the program the way
+    # a script word does and ends the option scan, but the launch is accepted ONLY when the
+    # module resolves to a file inside the checkout (here a tree carrying tools/gen.py); a
+    # standard-library or site module is refused even though the head and the option scan are
+    # otherwise clean, because modules such as timeit and code execute inline code.
     check("config/python-module-launch-accepted",
           verdict(lambda d: d["generated"].update(
-              check=[["python3", "-I", "-m", "tools.gen"]])), "accepted")
+              check=[["python3", "-I", "-m", "tools.gen"]]),
+              tree=frozenset(("tools/gen.py",))), "accepted")
+    for check_id, argv in (
+            ("config/python-module-timeit-inline-code-refused",
+             ["python3", "-m", "timeit", "-n1", "print(1)"]),
+            ("config/python-module-code-repl-refused",
+             ["python3", "-I", "-m", "code"])):
+        check(check_id,
+              verdict(lambda d, a=argv: d["generated"].update(check=[list(a)]),
+                      tree=frozenset(("tools/gen.py",))), "refused")
 
     # FIX-541 round 3 (decided 2): the option scan parses each interpreter's own grammar, so an
     # option's operand never ends the scan, a bundled cluster never hides attached code, and a
@@ -2320,14 +2386,24 @@ def case_config(_tmp):
             ("config/ash-shell-inline-command-refused", ["ash", "-c", "git status"]),
             ("config/interpreter-unclassified-option-refused",
              ["python3", "--jit", "tools/gen.py"]),
-            # FIX-541 round 4 (decided 6): a build-suffixed interpreter name (free-threaded t,
-            # debug d, distribution -dbg) parses the same grammar instead of skipping the scan.
+            # FIX-541 rounds 4 and 7 (decided 6 and 7): a build-suffixed interpreter name
+            # (free-threaded t, debug d, pymalloc m, combinations such as td and dm, and a
+            # -dbg tail after any of them) parses the same grammar instead of skipping the
+            # scan.
             ("config/python-free-threaded-inline-code-refused",
              ["python3.13t", "-c", "print(1)"]),
             ("config/python-debug-build-inline-code-refused",
              ["python3.13d", "-c", "print(1)"]),
             ("config/python-dbg-suffix-inline-code-refused",
-             ["python3.12-dbg", "-c", "print(1)"])):
+             ["python3.12-dbg", "-c", "print(1)"]),
+            ("config/python-td-build-inline-code-refused",
+             ["python3.13td", "-c", "print(1)"]),
+            ("config/python-pymalloc-build-inline-code-refused",
+             ["python3.7m", "-c", "print(1)"]),
+            ("config/python-debug-pymalloc-build-inline-code-refused",
+             ["python3.7dm", "-c", "print(1)"]),
+            ("config/python-free-threaded-dbg-build-inline-code-refused",
+             ["python3.13t-dbg", "-c", "print(1)"])):
         check(check_id,
               verdict(lambda d, a=argv: d["generated"].update(check=[list(a)])), "refused")
 
@@ -2737,6 +2813,19 @@ def case_audit(_tmp):
         probes.append(list(vector))
         check(funnel_id, _forbidden(vector), True)
         check(audit_id, _audit_violation(vector), True)
+    # FIX-541 round 7 (decided 5): a -c key still ends at the FIRST "=", so a VALUE carrying
+    # "=" never shifts the variable name out of the key; probed against each predicate
+    # independently, red under an always-last-"=" split.
+    for funnel_id, audit_id, vector in (
+            ("audit/config-key-c-first-equals-pushurl-funnel",
+             "audit/config-key-c-first-equals-pushurl-audit",
+             ["-c", "remote.a.pushurl=https://h/p?x=1", "status"]),
+            ("audit/config-key-c-first-equals-insteadof-funnel",
+             "audit/config-key-c-first-equals-insteadof-audit",
+             ["-c", "url./tmp/elsewhere.insteadOf=/tmp/o?a=1", "status"])):
+        probes.append(list(vector))
+        check(funnel_id, _forbidden(vector), True)
+        check(audit_id, _audit_violation(vector), True)
     check("audit/predicates-agree",
           [a for a in probes if _forbidden(a) != _audit_violation(a)], [])
     # FIX-541 round 1: the maintenance-pin scan cannot resolve _run_child's head and relies on
@@ -2757,6 +2846,28 @@ def case_audit(_tmp):
         globals()["_run_child"] = saved_child
     check("audit/pinned-git-funnel-prefix", recorded[0][:7] if recorded else [],
           ["git", "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false"])
+
+    # FIX-541 round 7 (decided 1): every child the funnel launches runs under LC_ALL=C with
+    # LANGUAGE unset (see _clean_env), so a git whose message catalogs would translate the
+    # "fatal:" and "error:" prefixes the merge diagnostic scan matches always emits them in
+    # English. Probed under an INJECTED non-C locale, so the pin itself, never an empty
+    # ambient environment, is what passes; red when either half of the pin is removed.
+    recorded_env = []
+
+    def _env_recording_child(argv, cwd=None, env=None, timeout=None, push=False):
+        recorded_env.append(dict(env or dict()))
+        return subprocess.CompletedProcess(list(argv), 0, b"", b"")
+
+    saved_locale = _put_env(_NON_C_LOCALE)
+    globals()["_run_child"] = _env_recording_child
+    try:
+        _git(".", "version")
+    finally:
+        globals()["_run_child"] = saved_child
+        _restore_env(saved_locale)
+    check("audit/git-env-c-locale",
+          [(child_env.get("LC_ALL"), "LANGUAGE" in child_env) for child_env in recorded_env],
+          [("C", False)])
 
 
 def case_conflict(tmp):
@@ -2784,16 +2895,19 @@ def case_conflict(tmp):
     check("refuse/source-conflict-invariants", _invariants(fx), [])
 
 
-def _mergefault_run(tmp, name, fault, apply, clean=False):
-    """One tool run over a FRESH fixture with the given merge fault injected at the funnel's
+def _mergefault_run(tmp, name, fault, apply, clean=False, env=None):
+    """One tool run over a FRESH fixture with the given merge fault injected at the funnel
     return boundary (the real merge runs first, so MERGE_HEAD and the merge state exist exactly
     as git leaves them; only the REPORTED code and stderr are replaced), the observations
-    captured immediately after the run, before any later run can disturb them, and the
-    injection itself asserted reached (FIX-541 round 4, decided 4: the fault vectors used to
-    share one mutable fixture across codes and modes, so one accepted fault could contaminate
-    every later observation instead of failing only its own vector). Returns the observation
-    tuple (exit code, result, snapshot diff, remote head unchanged, pushes, marker, injection
-    reached once) and the fixture."""
+    captured immediately after the run, before any later run can disturb them (FIX-541 round 4,
+    decided 4: the fault vectors used to share one mutable fixture across codes and modes, so
+    one accepted fault could contaminate every later observation instead of failing only its
+    own vector). env, when given, is set around the run through _put_env (the translated
+    vectors inject a non-C locale). The wrapped funnel records the REAL exit code of each merge
+    it faults AND every conflict-resolution operation (a checkout --theirs, a resolution add),
+    so the vectors pin that the refusal lands BEFORE any resolution runs (FIX-541 round 7,
+    decided 4). Returns ((exit code, result, snapshot diff, remote head unchanged, pushes,
+    marker, real merge exit codes reached, resolution operations), refusal reason, fixture)."""
     fx = _fixture(tmp, name)
     if clean:
         # A CLEAN merge (MERGE_HEAD, no unmerged index entry): the base advances a path the
@@ -2806,23 +2920,28 @@ def _mergefault_run(tmp, name, fault, apply, clean=False):
     before = _snapshot(wt)
     global _git
     real_git = _git
-    reached = []
+    reached, resolutions = [], []
 
     def fault_git(cwd, *args, **kwargs):
+        if args[:2] in (("checkout", "--theirs"), ("add", "--")):
+            resolutions.append(list(args[:2]))
         rc, out, err = real_git(cwd, *args, **kwargs)
         if args[:1] == ("merge",):
             reached.append(rc)
             return fault(rc, out, err)
         return rc, out, err
 
+    saved_env = _put_env(env or dict())
     _git = fault_git
     try:
         rc, reports, _fatal = fx.run(apply=apply)
     finally:
         _git = real_git
-    return (rc, _result(reports, 1), _snapshot_diff(before, _snapshot(wt)),
-            fx.remote_ref("feat/x") == old, fx.pushes(), _has_marker(wt),
-            len(reached) == 1), fx
+        _restore_env(saved_env)
+    reason = reports[0]["reason"] if reports else ""
+    return ((rc, _result(reports, 1), _snapshot_diff(before, _snapshot(wt)),
+             fx.remote_ref("feat/x") == old, fx.pushes(), _has_marker(wt),
+             reached, resolutions), reason, fx)
 
 
 def _fault_signal(_rc, out, err):
@@ -2843,31 +2962,87 @@ def _fault_fatal_stderr(rc, out, err):
     return rc, out, err + "fatal: injected merge failure after index write\n"
 
 
+def _fault_error_stderr(rc, out, err):
+    # The boundary twin of _fault_fatal_stderr: the "error:" half of the prefix scan gets its
+    # own dry and apply vectors on fresh fixtures (FIX-541 round 7, decided 2).
+    return rc, out, err + "error: injected merge failure after index write\n"
+
+
+# The non-C locale the translated-diagnostic vectors inject around the run (FIX-541 round 7,
+# decided 1).
+_NON_C_LOCALE = dict(LC_ALL="de_DE.UTF-8", LANGUAGE="de")
+
+
+def _fault_translated_stderr(rc, out, err):
+    # A LOCALIZED git stand-in: the injected diagnostic keeps the English "fatal:" prefix ONLY
+    # when the environment the funnel hands its child pins LC_ALL=C with LANGUAGE unset (the
+    # conservative boundary: some gettext implementations read LANGUAGE even beside LC_ALL=C);
+    # under any other locale environment the prefix arrives translated, exactly as the shipped
+    # de catalog translates it ("Schwerwiegend: "), which an English-only prefix scan would
+    # miss (FIX-541 round 7, decided 1).
+    env = _clean_env()
+    if env.get("LC_ALL") == "C" and "LANGUAGE" not in env:
+        return rc, out, err + "fatal: injected localized merge failure after index write\n"
+    return (rc, out,
+            err + "Schwerwiegend: injizierter lokalisierter Fehler nach dem Indexschreiben\n")
+
+
+def _put_env(env):
+    """Set the given os.environ entries, returning what _restore_env needs to undo them (a
+    None value marks a variable that was unset)."""
+    saved = dict((key, os.environ.get(key)) for key in env)
+    os.environ.update(env)
+    return saved
+
+
+def _restore_env(saved):
+    for key, value in saved.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+
+
 def case_mergefault(tmp):
-    # FIX-541 rounds 3 and 4 (decided 1, blocker, in both rounds): a merge whose child reports
-    # an abnormal exit AFTER creating MERGE_HEAD (a signal death, a fatal error), an exit 1
-    # that presents no unmerged index entry, and an exit 1 whose real conflict sits BESIDE a
-    # fatal stderr diagnostic must each refuse with nothing pushed, in both modes. Each fault
-    # and each mode runs on its own fresh fixture through _mergefault_run (decided 4).
+    # FIX-541 rounds 3, 4 and 7 (decided 1 and 1, blockers; round 7, decided 1, 2 and 4): a
+    # merge whose child reports an abnormal exit AFTER creating MERGE_HEAD (a signal death, a
+    # fatal error), an exit 1 that presents no unmerged index entry, and an exit 1 whose real
+    # conflict sits BESIDE a fatal, error or (under a non-C locale) translated stderr
+    # diagnostic must each refuse with nothing pushed, in both modes, BEFORE any conflict
+    # resolution runs (no checkout --theirs, no resolution add), with the injection reached
+    # exactly once at the real merge exit code and the refusal reason naming the fault. Each
+    # fault and each mode runs on its own fresh fixture through _mergefault_run (round 4,
+    # decided 4).
     fixtures = []
-    refused = (1, "git-failed", [], True, [], False, True)
-    for dry_id, apply_id, clean, fault in (
+    for dry_id, apply_id, clean, fault, merge_rc, reason_prefix, env in (
             ("refuse/merge-signal-exit-dry-agrees", "refuse/merge-signal-exit", False,
-             _fault_signal),
+             _fault_signal, 1, "git merge exited -11", None),
             ("refuse/merge-fatal-exit-dry-agrees", "refuse/merge-fatal-exit", False,
-             _fault_fatal),
+             _fault_fatal, 1, "git merge exited 128", None),
             ("refuse/merge-exit1-no-conflict-dry-agrees", "refuse/merge-exit1-no-conflict",
-             True, _fault_exit1),
+             True, _fault_exit1, 0, "git merge exited 1 with no unmerged index entry", None),
             ("refuse/merge-conflict-fatal-stderr-dry-agrees",
-             "refuse/merge-conflict-fatal-stderr", False, _fault_fatal_stderr)):
-        got_dry, fx_dry = _mergefault_run(tmp, dry_id.split("/", 1)[1], fault, False,
-                                          clean=clean)
+             "refuse/merge-conflict-fatal-stderr", False, _fault_fatal_stderr, 1,
+             "git merge exited 1 with a fatal or error diagnostic, not the supported "
+             "conflict condition: fatal: injected merge failure", None),
+            ("refuse/merge-conflict-error-stderr-dry-agrees",
+             "refuse/merge-conflict-error-stderr", False, _fault_error_stderr, 1,
+             "git merge exited 1 with a fatal or error diagnostic, not the supported "
+             "conflict condition: error: injected merge failure", None),
+            ("refuse/merge-conflict-translated-stderr-dry-agrees",
+             "refuse/merge-conflict-translated-stderr", False, _fault_translated_stderr, 1,
+             "git merge exited 1 with a fatal or error diagnostic, not the supported "
+             "conflict condition: fatal: injected localized merge failure", _NON_C_LOCALE)):
+        refused = (1, "git-failed", [], True, [], False, [merge_rc], [], True)
+        got_dry, reason_dry, fx_dry = _mergefault_run(tmp, dry_id.split("/", 1)[1], fault,
+                                                      False, clean=clean, env=env)
         fixtures.append(fx_dry)
-        check(dry_id, got_dry, refused)
-        got_apply, fx_apply = _mergefault_run(tmp, apply_id.split("/", 1)[1], fault, True,
-                                              clean=clean)
+        check(dry_id, got_dry + (reason_dry.startswith(reason_prefix) or reason_dry,), refused)
+        got_apply, reason_apply, fx_apply = _mergefault_run(tmp, apply_id.split("/", 1)[1],
+                                                            fault, True, clean=clean, env=env)
         fixtures.append(fx_apply)
-        check(apply_id, got_apply, refused)
+        check(apply_id, got_apply + (reason_apply.startswith(reason_prefix) or reason_apply,),
+              refused)
     check("refuse/mergefault-invariants", _invariants(*fixtures), [])
 
 
@@ -4916,6 +5091,46 @@ def case_harness(tmp):
            [c.startswith("probe-synthetic (case probe-synthetic): ") for c in probe_cannot]),
           ([], [True]))
 
+    def probe_green(_probe_tmp):
+        # A reverted case that records neither a failure nor a crash: the exact STALE outcome.
+        return None
+
+    probe_stale2, probe_cannot2 = [], []
+    GUARDS["probe-synthetic-stale"] = _noop
+    try:
+        outcome_stale = _revert_one("probe-synthetic-stale", _noop, "probe-synthetic-stale",
+                                    tmp, probe_stale2, probe_cannot2, fn=probe_green)
+    finally:
+        del GUARDS["probe-synthetic-stale"]
+        _RECORDER.update(saved)
+    # The OTHER bookkeeping branch (FIX-541 round 7, decided 6): a reverted guard whose case
+    # stays green must append its exact stale entry inside _revert_one itself; dropping that
+    # append would let --red-on-revert report a stale guard as a pass, and no vector exercised
+    # it before this one.
+    check("meta/revert-stale-bookkeeping-in-revert-one",
+          (outcome_stale, probe_stale2, probe_cannot2),
+          ("stale", ["probe-synthetic-stale (case probe-synthetic-stale)"], []))
+
+    GUARDS["probe-sweep"] = _noop
+    CASES["probe-sweep"] = probe_green
+    saved_reverts = dict(REVERTS)
+    REVERTS.clear()
+    REVERTS["probe-sweep"] = (_noop, "probe-sweep")
+    try:
+        swept = _red_on_revert(tmp)
+    finally:
+        REVERTS.clear()
+        REVERTS.update(saved_reverts)
+        del CASES["probe-sweep"]
+        del GUARDS["probe-sweep"]
+        _RECORDER.update(saved)
+    # The sweep call site itself (FIX-541 round 7, decided 6): _red_on_revert must hand
+    # _revert_one the very lists it returns, so a call site passing throwaway lists (which
+    # would report every sweep green regardless of the per-guard bookkeeping) goes red. One
+    # synthetic stale guard runs through the REAL _red_on_revert over a swapped REVERTS table.
+    check("meta/red-on-revert-returns-revert-one-bookkeeping", swept,
+          (["probe-sweep (case probe-sweep)"], []))
+
 
 CASES = dict([
     ("config", case_config), ("absent", case_absent), ("frombase", case_frombase),
@@ -5003,14 +5218,16 @@ def _revert_outcome(failures, crashes):
 
 
 def _revert_one(name, revert, case, tmp, stale, cannot, fn=None):
-    """ONE reverted guard's case under a fresh recorder, counted through _revert_outcome: the
-    crash-outranks-failure precedence AND the stale/cannot bookkeeping are applied HERE, at the
-    step every sweep entry goes through, so the sweep keeps no outcome handling of its own
-    (FIX-541 round 4, decided 5: _red_on_revert used to re-derive its bookkeeping from this
-    function's return value at its own call site, a step no vector pinned). Pinned by
+    """The case of ONE reverted guard under a fresh recorder, counted through _revert_outcome:
+    the crash-outranks-failure precedence AND the stale/cannot bookkeeping are applied HERE, at
+    the step every sweep entry goes through, so the sweep keeps no outcome handling of its own
+    (FIX-541 round 4, decided 5: _red_on_revert used to re-derive its bookkeeping from the
+    return value at its own call site, a step no vector pinned). Pinned by
     meta/revert-call-site-crash-outranks-failure and meta/revert-bookkeeping-in-revert-one
     over a synthetic guard whose case records a failure and then raises (FIX-541 rounds 3 and
-    4, decided 3 and 5)."""
+    4, decided 3 and 5), by meta/revert-stale-bookkeeping-in-revert-one over a synthetic guard
+    whose case stays green (the stale append itself), and at the sweep call site by
+    meta/red-on-revert-returns-revert-one-bookkeeping (FIX-541 round 7, decided 6)."""
     saved = GUARDS[name]
     GUARDS[name] = revert
     _RECORDER.update(executed=set(), list=[], failures=[], skipped=[], crashes=[])
