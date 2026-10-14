@@ -1030,7 +1030,8 @@ def self_test_main():
             failures.append("{}: expected exit {}, got {}; output:\n{}".format(label, expect, code, out))
     # _drive patch contract: an unknown patch name is rejected before anything is applied (installed, it
     # would leave the intended fault uninjected and contaminate every later vector), and every patched
-    # name is restored after a run that returns and after one that raises.
+    # name is restored after a run that returns non-zero, after one that returns 0 (the injected run must
+    # have run, and the restored binding must be the saved original by identity) and after one that raises.
     try:
         _drive(patch={"QA_UNKNOWN_PATCH": object()})
         failures.append("_drive: an unknown patch name expected ValueError, got a completed run")
@@ -1045,11 +1046,23 @@ def self_test_main():
                         "exit {}; output:\n{}".format(code, out))
     if ensure_listable is _unlistable:
         failures.append("_drive: after a patched run that returns, the patch must not stay installed")
+    saved_run = run
+    succeeded = []
+
+    def _succeeding_run(root, _config):
+        succeeded.append(root)
+        return 0
+
+    code, out = _drive(patch={"run": _succeeding_run})
+    if code != 0 or not succeeded:
+        failures.append("_drive: a patched run that returns 0 expected exit 0 from the injected run, got exit "
+                        "{} with the injected run called {} time(s); output:\n{}".format(code, len(succeeded), out))
+    if run is not saved_run:
+        failures.append("_drive: after a patched run that returns 0, run must be the saved original")
 
     def _raising_run(_root, _config):
         raise RuntimeError("injected by the self-test")
 
-    saved_run = run
     try:
         _drive(patch={"run": _raising_run})
         failures.append("_drive: an injected run exception expected to propagate, got a completed run")
@@ -1072,7 +1085,8 @@ def self_test_main():
         return 1
     print("SELF-TEST PASS: {} normalisation case(s), {} in-text case(s), {} non-designator case(s), the roster's "
           "manifest-field identities, {} fixture vector(s), the _drive patch contract (an unknown name is "
-          "rejected; a patched name is restored after a return and after a raise) and the usage error: an "
+          "rejected; a patched name is restored after a non-zero return, a zero return and a raise) and the "
+          "usage error: an "
           "unresolved designator fails, a "
           "manifest resolves it, a suffixed token never resolves to a shorter identity, an exclusion is per path, "
           "needs a reason and goes stale, and a contradicted or malformed input fails closed".format(

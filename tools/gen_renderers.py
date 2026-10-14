@@ -18,7 +18,8 @@ same RENDERERS); a tools/*.py that binds or reads RENDERER_DECL other than in ON
 assignment or annotated assignment to the bare name, or that spells it as an identifier in any
 string-valued AST field, as a string the bounded fold computes equal to the name (a comparison against
 the string or a third or later call argument aside; the fold also reads a supported decode of spelled
-bytes, a REFUSAL-ONLY input, so a name assembled through one is refused wherever it is spelled), or as
+bytes, a REFUSAL-ONLY input, so a name assembled through one is refused like a spelled one, under the
+same two exemptions), or as
 a dot- or colon-separated component of a
 folded path string, or that keys a RECOGNIZED module-namespace access (a subscript of a bare vars() or
 globals() call, or a setattr or delattr call on a sys.modules entry) with anything the bounded fold
@@ -542,15 +543,21 @@ def _declared_renderer_stems(tools_dir):
     longer-than-_FOLD_CAP) key there. A name the fold DOES read, one assembled through the supported
     decode forms included (a no-keyword <folded bytes>.decode() with no argument or with one
     ASCII-compatible codec literal, and a no-keyword two-argument str(<folded bytes>, <ASCII-compatible
-    codec literal>)), is refused wherever it is spelled, whatever route consumes it: the decode fold is
-    REFUSAL-ONLY input and never accepts a key. What stays unseen is a name computed by a route the fold
+    codec literal>)), is held to the same exact-name rule as a spelled name, whatever route consumes it,
+    and the two exact-name EXEMPT USES below apply to a decode-derived string too: a comparison operand
+    (('RENDERER_' + b'DECL'.decode()) == 'x') and a third or later positional argument with no starred
+    argument before it are accepted, exactly as the spelled name is there; the dot- and colon-component
+    rule has no exemption, so a fold whose components include the name is refused in those positions
+    too. The decode fold is REFUSAL-ONLY input and never accepts a key. What stays unseen is a name
+    computed by a route the fold
     does not read (a join, %-formatting, str.format, a case change, chr, a decode of computed bytes,
     codecs.decode, an unbound bytes.decode(...) call, a computed or keyword codec, an errors argument, a
     one- or three-argument str(...), a codec that fails the per-byte ASCII probe, or any fold longer
     than _FOLD_CAP) and handed to a resolver (pkgutil.resolve_name, operator.attrgetter, importlib), to
     a bound update, setdefault or __setitem__, to a qualified or aliased setattr, or to a namespace
     reached through an imported name or alias; the
-    literal name consumed through one of the two EXEMPT USES, by a comparison operand
+    name, spelled or folded (a decode-derived fold included), consumed through one of the two EXEMPT
+    USES, by a comparison operand
     (ANY overloaded comparison method receives the spelled name and can store or read through it; __eq__,
     __ne__, __lt__ and __contains__ are examples, never a closed list) or
     by a helper taking it as a third or later positional argument that then stores or reads, such as
@@ -790,7 +797,9 @@ def main():
 #       folds, call-free, to a non-reserved constant string: a key built from a method call, a
 #       conversion builtin, a call whose meaning depends on a local rebinding, or an f-string holding a
 #       call is reported with the unfoldable-key text, a computed delattr name and a computed del of a
-#       globals() or vars() subscript are reported the same way, while a constant non-reserved key, a
+#       globals() or vars() subscript are reported the same way, a locally rebound call carried into a
+#       subscript key through either side of a + or through an f-string, or used as a setattr or delattr
+#       name, is reported with the matching text, while a constant non-reserved key, a
 #       folded non-reserved concatenation and a constant-name setattr on a sys.modules entry stay
 #       accepted.
 
@@ -1025,12 +1034,20 @@ _ALLOWED_USES = (
 # rebinding says, so a call-derived fold never ACCEPTS a key, and that fixture goes red if acceptance
 # reads the full fold instead of the call-free one; the computed delattr name goes red when delattr is
 # dropped from the call check; each computed del goes red when ast.Del is carved out of the subscript
-# rule).
+# rule). The five rebound-call fixtures put that rebound call where the fold must CARRY its call taint
+# (_REBOUND_STR makes it compute the reserved name at run time): the keys on the left and on the right
+# of a + go red when the + step stops propagating the taint, the key inside an f-string replacement
+# field goes red when either the replacement-field step or the f-string step does, and the setattr and
+# delattr names go red when that call leg reads the full fold for acceptance instead of the call-free one.
 _SUBSCRIPT_KEY_TEXT = ("a vars() or globals() subscript whose key the bounded fold cannot reduce, "
                        "call-free, to a constant string")
-_SETATTR_KEY_TEXT = "call on a sys.modules entry whose attribute name the bounded fold cannot reduce"
+_SETATTR_KEY_TEXT = ("a setattr call on a sys.modules entry whose attribute name the bounded fold "
+                     "cannot reduce, call-free, to a constant string")
 _DELATTR_KEY_TEXT = ("a delattr call on a sys.modules entry whose attribute name the bounded fold "
                      "cannot reduce, call-free, to a constant string")
+# A str rebound to a function that returns the reserved name: str(b'x', 'ascii') then computes
+# RENDERER_DECL at run time, while the supported decode fold reads the same call as 'x'.
+_REBOUND_STR = "str = lambda *a: '_'.join(('RENDERER', 'DECL'))\n"
 _UNFOLDABLE_KEYS = (
     ("method-call key", "vars()['renderer_decl'.upper()] = {}\n".format(_DECL_LITERAL),
      _SUBSCRIPT_KEY_TEXT),
@@ -1046,6 +1063,18 @@ _UNFOLDABLE_KEYS = (
      _DELATTR_KEY_TEXT),
     ("del of a computed globals() key", "del globals()['renderer_decl'.upper()]\n", _SUBSCRIPT_KEY_TEXT),
     ("del of a computed vars() key", "del vars()['renderer_decl'.upper()]\n", _SUBSCRIPT_KEY_TEXT),
+    ("rebound-call key left of a +",
+     _REBOUND_STR + "globals()[str(b'x', 'ascii') + ''] = {}\n".format(_DECL_LITERAL), _SUBSCRIPT_KEY_TEXT),
+    ("rebound-call key right of a +",
+     _REBOUND_STR + "globals()['' + str(b'x', 'ascii')] = {}\n".format(_DECL_LITERAL), _SUBSCRIPT_KEY_TEXT),
+    ("rebound-call key in an f-string",
+     _REBOUND_STR + "globals()[f\"{{str(b'x', 'ascii')}}\"] = {}\n".format(_DECL_LITERAL),
+     _SUBSCRIPT_KEY_TEXT),
+    ("rebound-call setattr name",
+     _REBOUND_STR + "import sys\nsetattr(sys.modules[__name__], str(b'x', 'ascii'), {})\n"
+     .format(_DECL_LITERAL), _SETATTR_KEY_TEXT),
+    ("rebound-call delattr name",
+     _REBOUND_STR + "import sys\ndelattr(sys.modules[__name__], str(b'x', 'ascii'))\n", _DELATTR_KEY_TEXT),
 )
 # (r) allowed controls: a key the fold reduces, call-free, to a non-reserved constant string stays
 # accepted, on the subscript leg and the setattr leg both (the setattr control goes red under a mutant
