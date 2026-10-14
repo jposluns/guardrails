@@ -81,15 +81,22 @@ inside it included), any other flow spelling, a nested ``- - `` entry (at most o
 is modelled), a key with whitespace before its colon (a ``shell : bash`` under ``defaults:
 run:`` included, which the plain-scalar path used to misread as command text), a value opening
 with a node property, tag, anchor or alias, and a malformed block header are each
-cannot-evaluate (exit 2, naming the file and line), never skipped. A generic key's block-scalar
+cannot-evaluate (exit 2, naming the file and line), never skipped. This closed grammar
+OVER-REFUSES legal YAML outside the plain shapes it models (a quoted block-sequence item
+``- "main"``, a flow sequence followed by a trailing comment, a ``---`` document marker, a
+dotted or ``<<`` merge key, a plain-scalar continuation line): each is cannot-evaluate, a
+disclosed conservative refusal, never a misread. A generic key's block-scalar
 value (literal or folded) is consumed as content bounded by the KEY column and never scanned: it
 is not a run: or shell: payload, so only its extent matters here. SHELL TEMPLATES: every
 ``shell:`` key line (a step's,
 defaults.run's at the workflow or job level, and any other spelling of the key, an action input
-named shell included, a disclosed over-read) is read under a CLOSED classification: a bare
-UNQUOTED known non-python shell keyword (bash, sh, pwsh, powershell, cmd), on one line with no
-continuation, is clean (a following non-blank, non-comment line indented deeper than the key is
-a plain-scalar continuation YAML folds into the value: cannot-evaluate); a template whose
+named shell included, a disclosed over-read) is read under a CLOSED classification: a value
+whose comment-stripped scalar is ITSELF one of the known non-python shell keywords (bash, sh,
+pwsh, powershell, cmd), compared literally with NO shell decoding first, on one line with no
+continuation, is clean (a spelling that only shell-decodes to a keyword, ``ba'sh'``,
+``ba"sh"``, ``ba\\sh``, ``b''ash``, is cannot-evaluate; a following non-blank,
+non-comment line indented deeper than the key is a plain-scalar continuation YAML folds into
+the value: cannot-evaluate); a template whose
 command word is a python interpreter with NO isolation options is handed to the launcher
 predicate (a non-isolated finding, unchanged); every other value, a single- or double-quoted
 keyword and a python template claiming isolation options included
@@ -100,7 +107,13 @@ as a MAPPING (the defaults.run shape): only ``shell`` (classified as above) and
 spelling is cannot-evaluate. An EMPTY same-line value is
 read ONLY in the two proven shapes: the next non-blank, NON-COMMENT line, when deeper than the key, is
 either the plain-scalar command itself or a LITERAL block header whose content is deeper than both the
-header and the key (its content lines, bounded by the key column, are scanned); the value is null (no
+header and the key (its content lines, bounded by the key column, are scanned); the CLOSED line
+grammar governs that next line BEFORE it is read as command text: a spelling YAML reads as a
+MAPPING or SEQUENCE value there -- a mapping key of ANY spelling (an identifier key, a spaced
+``shell : bash``, a ``foo.bar :`` or ``123:`` key, any text carrying ``: `` or ending with a
+colon), an explicit-key indicator (``? shell``), or a ``- `` sequence item (``- shell: bash``)
+-- is cannot-evaluate (only the plain identifier-key form is read, as the defaults.run mapping
+above), never misread as command text; the value is null (no
 command text) only when that next non-blank, non-comment line is not deeper than the key, or the file
 ends. Any other arrangement after an empty ``run:`` (a comment line before a deeper value, a header
 with no content deeper than the key, block content at or above the header's column, a comment line
@@ -608,12 +621,17 @@ def _classify_shell_value(val):
     """Classify a `shell:` value under a CLOSED grammar. Returns (shell_line, message):
     `shell_line` is a command string for the launcher scan when the template's command word is a
     python interpreter WITHOUT isolation options (the standard launcher predicate then reports
-    the non-isolated finding, the python-template handling kept unchanged); both None when the
-    value is a bare UNQUOTED known non-python shell keyword (bash, sh, pwsh, powershell, cmd) on
-    one line (clean; the caller refuses a deeper continuation line, and a single- or double-quoted
-    keyword is refused here); `message` is a cannot-evaluate reason for EVERYTHING else, so no
-    shell: value ever
-    passes unread. A python template that CLAIMS isolation options is cannot-evaluate rather than
+    the non-isolated finding; the python-template classification INSIDE this function is
+    unchanged, though the caller's deeper-continuation refusal can refuse a multi-line
+    template before it reaches this classification); both None when the comment-stripped
+    scalar is ITSELF one of the known non-python shell keywords (bash, sh, pwsh, powershell,
+    cmd), compared LITERALLY with no shell decoding first, on one line (clean; the caller
+    refuses a deeper continuation line; a single- or double-quoted keyword is refused here,
+    and a plain spelling that only shell-decodes to a keyword, `ba'sh'`, `ba"sh"`,
+    `ba\\sh`, `b''ash`, is refused too: YAML hands the runner the literal value,
+    which is not a keyword); `message` is a cannot-evaluate reason for EVERYTHING else, so no
+    shell: value ever passes unread. A python template that CLAIMS isolation options is
+    cannot-evaluate rather than
     credited: this line reader does not model the hosted runner's template invocation (the
     temp-script path substituted for the {0} placeholder, the splitting of the template into
     argv) closely enough to prove the options reach the interpreter, so it refuses instead of
@@ -639,6 +657,8 @@ def _classify_shell_value(val):
     # A plain scalar: YAML strips its ` #` trailing comment exactly where _strip_comment does, so
     # the two readings agree.
     code = _strip_comment(val).strip()
+    if code in KNOWN_SHELLS:
+        return None, None
     try:
         tokens = _shell_split(code)
     except ValueError:
@@ -652,8 +672,6 @@ def _classify_shell_value(val):
         return None, ("a shell: template naming a python interpreter with isolation options; "
                       "this reader does not model the runner's template invocation closely "
                       "enough to credit them, outside the supported shell grammar")
-    if len(tokens) == 1 and tokens[0] in KNOWN_SHELLS:
-        return None, None
     return None, ("a shell: value that is neither a bare known shell keyword (bash, sh, pwsh, "
                   "powershell, cmd) nor a python interpreter template, outside the supported "
                   "shell grammar")
@@ -768,11 +786,13 @@ def _yaml_run_lines(text):
     non-plain key spelling is refused by the line forms, so no launcher hides behind that residual.
     A LITERAL block's content is bounded by the KEY column (never the item dash's indent), so a
     sibling step key after a dashed `- run: |` block re-enters this layer and the line forms. A
-    `shell:` key line at ANY position is read through _classify_shell_value: a bare UNQUOTED
-    known non-python shell keyword on one line is clean (a following non-blank, non-comment line
-    indented deeper than the key is a continuation, cannot-evaluate), a python template without
+    `shell:` key line at ANY position is read through _classify_shell_value: a comment-stripped
+    scalar that is ITSELF a known non-python shell keyword (compared literally, with no shell
+    decoding first) on one line is clean (a following non-blank, non-comment line indented
+    deeper than the key is a continuation, cannot-evaluate), a python template without
     isolation options is yielded to the launcher scan, and every other value, a quoted keyword
-    included, is cannot-evaluate; a bare `run:` whose deeper next
+    and a quote- or backslash-embedded spelling (`ba'sh'`, `ba\\sh`) included, is
+    cannot-evaluate; a bare `run:` whose deeper next
     line is a plain `key:` mapping line is read as the defaults.run MAPPING (shell and
     working-directory keys only, anything else cannot-evaluate).
 
@@ -802,7 +822,12 @@ def _yaml_run_lines(text):
     SAME empty value (proven against PyYAML) -- is read ONLY in the two shapes proven against
     PyYAML: the next non-blank, NON-COMMENT line, when deeper than the key, is either the
     plain-scalar command itself or a LITERAL block header whose content is deeper than both the
-    header and the key (its content lines, bounded by the key column, are yielded). The value is
+    header and the key (its content lines, bounded by the key column, are yielded). The CLOSED
+    line grammar governs that next line BEFORE it is read as command text: a mapping key of ANY
+    spelling (the plain identifier form is the defaults.run mapping; a spaced key, a `foo.bar :`
+    or `123:` key, and any text carrying `: ` or ending with a colon are cannot-evaluate), an
+    explicit-key indicator (`? shell`) and a `- ` sequence item (`- shell: bash`) are each
+    refused, never misread as a command. The value is
     null (nothing is yielded) only when that next non-blank, non-comment line is not deeper than the
     key, or the text ends. Unsupported (cannot-evaluate, never a silent null): a comment line
     between an empty `run:` and a deeper value line, a next-line block header with no content deeper
@@ -880,8 +905,11 @@ def _yaml_run_lines(text):
                     if not refused:
                         shm = SHELL_RE.match(raw)
                         if shm:
-                            # EVERY shell: key line is read, wherever it sits: clean only as a
-                            # bare UNQUOTED known non-python shell keyword on ONE line; a python
+                            # EVERY shell: key line outside consumed block-scalar content is
+                            # read (a block's content lines are command text or consumed
+                            # extent, never key lines): clean only when the comment-stripped
+                            # scalar is ITSELF a known non-python shell keyword on ONE line
+                            # (compared literally, with no shell decoding first); a python
                             # template with no isolation options is yielded to the launcher scan
                             # (a non-isolated finding); everything else is cannot-evaluate. A
                             # following non-blank, non-comment line indented deeper than the key
@@ -1071,6 +1099,31 @@ def _yaml_run_lines(text):
             if nval[:1] in ("{", "["):
                 unsupported.append((j + 1, "run: value on the line after an empty run: is a flow "
                                           "collection, outside the supported scalar grammar"))
+                i = j + 1
+                continue
+            # The CLOSED line grammar also governs this next-line value BEFORE it is read
+            # as command text: YAML reads a mapping key of ANY spelling ('foo.bar : bash',
+            # '123: bash'; the plain identifier spelling is the defaults.run mapping
+            # above), an explicit-key indicator ('? shell') and a '- ' sequence item
+            # ('- shell: bash') there as a MAPPING or SEQUENCE value, never as the
+            # plain-scalar command text the branch below would read: each is cannot-evaluate,
+            # never a misread.
+            if nval == "-" or (nval[:1] == "-" and nval[1:2] in (" ", "\t")):
+                unsupported.append((j + 1, "a sequence item on the line after an empty run: "
+                                          "(YAML reads the run: value as a sequence), outside "
+                                          "the supported line grammar"))
+                i = j + 1
+                continue
+            if nval == "?" or (nval[:1] == "?" and nval[1:2] in (" ", "\t")):
+                unsupported.append((j + 1, "an explicit-key indicator on the line after an "
+                                          "empty run: (YAML reads the run: value as a "
+                                          "mapping), outside the supported line grammar"))
+                i = j + 1
+                continue
+            if ": " in nval or ":\t" in nval or nval.endswith(":"):
+                unsupported.append((j + 1, "a mapping key (of any spelling) on the line after "
+                                          "an empty run: (YAML reads the run: value as a "
+                                          "mapping), outside the supported line grammar"))
                 i = j + 1
                 continue
             k = j + 1
@@ -1508,7 +1561,17 @@ def main():
 #      workflows' only flow shape) stays clean, a single-quoted `shell: 'bash'` and a
 #      `shell: bash` with a deeper continuation line are cannot-evaluate, and the `- run: >`
 #      folded consumer's KEY-column bound is pinned by a sibling quoted-key diagnostic that
-#      disappears when the bound reverts to the dash indent.
+#      disappears when the bound reverts to the dash indent; the value on the line after an
+#      empty run: is governed by the SAME closed grammar (a dotted `foo.bar : bash` and a
+#      numeric `123: bash` mapping key, a `? shell` explicit-key indicator and a
+#      `- shell: bash` sequence item each used to be read as command text and pass clean), a
+#      shell: keyword is the literal comment-stripped scalar (`ba'sh'`, `ba"sh"`, `ba\sh` and
+#      `b''ash`, at a step and under defaults.run, each used to shell-decode to bash and pass
+#      clean), and the remaining generic checks are each pinned by a row of their own: the
+#      colon-carrying flow sequence (_flow_sequence_value_ok), the generic node-property value,
+#      the generic malformed block header, the generic spaced key's own diagnostic, and the
+#      generic block-scalar KEY-column bound (a sibling run: after `- name: |` inside steps and
+#      after `- y: |` outside steps is a line-named finding, exit 1, never consumed content).
 
 SCRIPT = "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py"
 
@@ -2324,11 +2387,26 @@ def self_test_main():
         #     block-scalar content a line is read only as a blank or comment line, a plain
         #     `KEY:`/`KEY: VALUE` line (the colon directly after the key, at most ONE leading
         #     `- ` dash), or a plain `- SCALAR` item; a flow value only as a flow sequence of
-        #     plain or quoted scalars; a shell: value only unquoted on one line. Each refused
-        #     row asserts exit 2 naming quality.yml and the line plus the named diagnostic; the
-        #     flow-sequence row is the live workflows' clean control; the folded-bound row pins
-        #     the `- run: >` consumer's KEY-column bound (its line-7 quoted-key diagnostic
-        #     disappears when the bound reverts to the dash indent).
+        #     plain or quoted scalars; a shell: value only as the literal comment-stripped
+        #     keyword on one line; a value on the line after an empty run: only under the same
+        #     closed grammar. Each refused row asserts exit 2 naming quality.yml and the line
+        #     plus the named diagnostic; each exit-1 row asserts the finding's file, line and
+        #     command. What the rows pin, one check each: the flow-mapping refusal (escaped,
+        #     tagged and explicit key spellings); the empty-run spaced-key refusal (both
+        #     defaults levels); the nested-dash refusal (run and shell keys; the flow-step form
+        #     is a pre-existing refusal, a control, not a discriminator); the single-quoted and
+        #     continued shell refusals; the `- run: >` folded consumer's KEY-column bound (its
+        #     line-7 quoted-key diagnostic disappears when the bound reverts to the dash
+        #     indent); the empty-run next-line closed grammar (a dotted and a numeric mapping
+        #     key, an explicit-key indicator, a sequence item); the literal shell-keyword
+        #     comparison (embedded single-quote, double-quote, backslash and doubled-quote
+        #     spellings, at a step and under defaults.run); _flow_sequence_value_ok (the
+        #     colon-carrying flow sequence); the generic node-property refusal; the generic
+        #     malformed-block-header refusal; the generic spaced-key form's own diagnostic
+        #     (red when the form narrows to run-only); and the generic block-scalar KEY-column
+        #     bound (a sibling run: after `- name: |` inside steps and after `- y: |` outside
+        #     steps is a line-named finding, exit 1, never consumed content).
+        #     flow-sequence-clean is the live workflows' clean control.
         for label, wf_text, want, named_line, message in (
                 ("flow-mapping-escaped-key",
                  'name: Q\ndefaults: {"r\\x75n": {shell: bash}}\njobs:\n  q:\n    steps:\n'
@@ -2371,7 +2449,75 @@ def self_test_main():
                  "a shell: value continued on a deeper-indented line"),
                 ("folded-bound-sibling",
                  sbase + '      - run: >\n          echo hi\n        "shell": bash\n', 2, 7,
-                 "a quoted key")):
+                 "a quoted key"),
+                ("next-line-dotted-key",
+                 "name: Q\ndefaults:\n  run:\n    foo.bar : bash\njobs:\n  q:\n    steps:\n"
+                 "      - run: python3 -I -B tools/alpha.py\n", 2, 4,
+                 "a mapping key (of any spelling) on the line after an empty run:"),
+                ("next-line-numeric-key",
+                 "name: Q\ndefaults:\n  run:\n    123: bash\njobs:\n  q:\n    steps:\n"
+                 "      - run: python3 -I -B tools/alpha.py\n", 2, 4,
+                 "a mapping key (of any spelling) on the line after an empty run:"),
+                ("next-line-explicit-key",
+                 "name: Q\ndefaults:\n  run:\n    ? shell\njobs:\n  q:\n    steps:\n"
+                 "      - run: python3 -I -B tools/alpha.py\n", 2, 4,
+                 "an explicit-key indicator on the line after an empty run:"),
+                ("next-line-sequence-item",
+                 "name: Q\ndefaults:\n  run:\n    - shell: bash\njobs:\n  q:\n    steps:\n"
+                 "      - run: python3 -I -B tools/alpha.py\n", 2, 4,
+                 "a sequence item on the line after an empty run:"),
+                ("shell-embedded-sq-step",
+                 sbase + "      - shell: ba'sh'\n        run: |\n          echo hi\n", 2, 5,
+                 "neither a bare known shell keyword"),
+                ("shell-embedded-dq-step",
+                 sbase + '      - shell: ba"sh"\n        run: |\n          echo hi\n', 2, 5,
+                 "neither a bare known shell keyword"),
+                ("shell-backslash-step",
+                 sbase + "      - shell: ba\\sh\n        run: |\n          echo hi\n", 2, 5,
+                 "neither a bare known shell keyword"),
+                ("shell-doubled-sq-step",
+                 sbase + "      - shell: b''ash\n        run: |\n          echo hi\n", 2, 5,
+                 "neither a bare known shell keyword"),
+                ("shell-embedded-sq-defaults",
+                 "name: Q\ndefaults:\n  run:\n    shell: ba'sh'\njobs:\n  q:\n    steps:\n"
+                 "      - run: python3 -I -B tools/alpha.py\n", 2, 4,
+                 "neither a bare known shell keyword"),
+                ("shell-embedded-dq-defaults",
+                 'name: Q\ndefaults:\n  run:\n    shell: ba"sh"\njobs:\n  q:\n    steps:\n'
+                 "      - run: python3 -I -B tools/alpha.py\n", 2, 4,
+                 "neither a bare known shell keyword"),
+                ("shell-backslash-defaults",
+                 "name: Q\ndefaults:\n  run:\n    shell: ba\\sh\njobs:\n  q:\n    steps:\n"
+                 "      - run: python3 -I -B tools/alpha.py\n", 2, 4,
+                 "neither a bare known shell keyword"),
+                ("shell-doubled-sq-defaults",
+                 "name: Q\ndefaults:\n  run:\n    shell: b''ash\njobs:\n  q:\n    steps:\n"
+                 "      - run: python3 -I -B tools/alpha.py\n", 2, 4,
+                 "neither a bare known shell keyword"),
+                ("flow-sequence-colon",
+                 "name: Q\non:\n  push:\n    branches: [a: b]\njobs:\n  q:\n    steps:\n"
+                 "      - run: python3 -I -B tools/alpha.py\n", 2, 4,
+                 "not a flow sequence of plain or quoted scalars"),
+                ("generic-anchored-value",
+                 "name: Q\nx: &a b\njobs:\n  q:\n    steps:\n"
+                 "      - run: python3 -I -B tools/alpha.py\n", 2, 2,
+                 "a value opening with a YAML node property, tag, anchor or alias"),
+                ("generic-malformed-header",
+                 "name: Q\nx: |x\njobs:\n  q:\n    steps:\n"
+                 "      - run: python3 -I -B tools/alpha.py\n", 2, 2,
+                 "header is outside the block-header grammar"),
+                ("generic-spaced-key",
+                 "name: Q\nfoo : bar\njobs:\n  q:\n    steps:\n"
+                 "      - run: python3 -I -B tools/alpha.py\n", 2, 2,
+                 "a key with whitespace before its colon, outside the supported line grammar"),
+                ("generic-block-bound-step",
+                 sbase + "      - name: |\n          a name\n        run: python3 tools/alpha.py\n",
+                 1, None,
+                 ".github/workflows/quality.yml:7: non-isolated launcher 'python3 tools/alpha.py'"),
+                ("generic-block-bound-nonsteps",
+                 "name: Q\nx:\n  - y: |\n      a\n    run: python3 tools/alpha.py\n", 1, None,
+                 ".github/workflows/quality.yml:5: "
+                 "non-isolated launcher 'python3 tools/alpha.py'")):
             rc, out = run_capture(_build(tmp / ("line-grammar-" + label), workflow=wf_text))
             if rc != want:
                 failures.append("a line-grammar {} form expected exit {} (got {}: {!r})".format(
@@ -2475,11 +2621,18 @@ def self_test_main():
           "and job level through the run: mapping; every other shell: value, an isolation-"
           "claiming python template included, is cannot-evaluate); the quoted-key and "
           "node-property line forms refuse a key under any number of leading sequence dashes; "
-          "every other line outside the closed line grammar (a flow mapping value, a nested "
-          "'- - ' entry, a spaced key, a non-key non-item line) is cannot-evaluate while a flow "
-          "sequence of plain or quoted scalars stays clean, and a shell: value is read only "
-          "unquoted on one line (a single-quoted keyword and a deeper continuation line are "
-          "cannot-evaluate); "
+          "every other line outside the closed line grammar (a flow mapping value, a flow "
+          "sequence carrying a colon, a value opening with a node property, a malformed "
+          "block-scalar header, a nested '- - ' entry, a spaced key, a non-key non-item line) "
+          "is cannot-evaluate while a flow sequence of plain or quoted scalars stays clean; a "
+          "generic key's block-scalar value is bounded by the KEY column (a sibling run: after "
+          "a '- name: |' block, inside and outside a steps: block, is a line-named finding, "
+          "never consumed content); the value on the line after an empty run: is governed by "
+          "the same closed grammar (a mapping key of any spelling, an explicit-key indicator "
+          "and a '- ' sequence item are cannot-evaluate); and a shell: value is clean only "
+          "when its comment-stripped scalar is itself a known shell keyword on one line (a "
+          "quoted keyword, an embedded quote or backslash spelling, and a deeper continuation "
+          "line are cannot-evaluate); "
           "every *.yml workflow candidate that is not a regular "
           "file (a symlink of any kind, a directory, or another non-regular entry) is a named "
           "cannot-evaluate (exit 2); and "

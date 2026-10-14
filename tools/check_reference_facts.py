@@ -308,7 +308,8 @@ def _refuse_unbounded(lines, end, where):
     which CommonMark closes at that line, so it cannot swallow a later heading); and any line opening
     with '#' that is not a heading in the accepted grammar (HEADING: one to six '#' at up to three
     spaces of indent, then exactly U+0020 or the line end). A '#'-led line WITH LEADING
-    WHITESPACE is refused outright, wherever it sits from the file start to the section end (the
+    WHITESPACE is refused outright at every position OUTSIDE a recognized line-start fence,
+    from the file start to the section end (the
     boundary line INCLUDED: an indented boundary heading can itself be list-nested, so it is
     refused before it may bound the section): CommonMark can read an indented
     heading as nested in a list item (`- x` then `  ###### note`), which this reader does not
@@ -1147,7 +1148,7 @@ def self_test_main():
                                 "naming standards README:{} (got {}: {!r})".format(
                                     label, lineno, rc, out))
 
-        # 6zzf-6zzi. an indented '#' line (first non-space character '#', any leading
+        # 6zzf-6zzj. an indented '#' line (first non-space character '#', any leading
         #     whitespace), anywhere from the file start to the section end, the end-boundary
         #     line included (6zzi: an indented heading AT the boundary, which CommonMark can
         #     nest in the list item above it, is refused BEFORE it may bound the section), is
@@ -1155,10 +1156,13 @@ def self_test_main():
         #     naming the line): CommonMark can read it as a heading NESTED IN A LIST ITEM, which
         #     this reader does not model but HEADING would read as a top-level section boundary;
         #     a LEGAL indented top-level heading is over-refused by the same rule, a disclosed
-        #     conservative refusal. On the reader this replaces, each read as a top-level heading
-        #     that STARTED the section and the fixture passed clean (exit 0). 6zzh is the
-        #     control: a blockquote line, then a top-level column-0 heading, keeps its unchanged
-        #     clean result (exit 0).
+        #     conservative refusal. On the reader this replaces, 6zzf and 6zzg each read as a
+        #     top-level heading that STARTED the section (a mis-started span), while 6zzi read
+        #     as the section's false END boundary (excluding the span's content); each fixture
+        #     passed clean (exit 0). Two controls: 6zzh (a blockquote line, then a top-level
+        #     column-0 heading, ABOVE the phrase) and 6zzj (an indented '#' line AFTER the
+        #     section's end boundary, outside the refusal's span) each keep their clean
+        #     result (exit 0).
         for label, lineno, readme in (
                 ("6zzf list item then a two-space-indented heading", 12, _README.replace(prose, (
                     "- x\n  ###### note\n\n" + prose))),
@@ -1179,6 +1183,14 @@ def self_test_main():
         if run_quiet(control) != 0:
             failures.append("a blockquote line then a top-level column-0 heading (the 6zzh "
                             "control) expected exit 0 (unchanged result)")
+        after_end = tmp / "deferred-6zzj"
+        _write_fixture(after_end, readme=_README.replace(prose, (
+            "### Not yet vendored\n\n- item\n\n### Detail\n\n  ###### note\n\n"
+            "- Fixture Full Framework\n")))
+        if run_quiet(after_end) != 0:
+            failures.append("an indented '#' line AFTER the section's end boundary (the 6zzj "
+                            "control) expected exit 0 (the refusal's span ends at the "
+                            "boundary line)")
 
         # 6zu. the backtick-info opener rule ABOVE the section: a ```x`y line is NOT a fence
         #     opener (CommonMark forbids a backtick in a backtick fence's info string), so it is a
@@ -1395,8 +1407,12 @@ def self_test_main():
           "blockquoted heading, a stripping-manufactured decoy heading, and a blockquoted fence "
           "inverting one reading's fence state are each cannot-evaluate, exit 2, naming the first "
           "disagreeing line); a setext underline or thematic-break line, indented code after a "
-          "blank line or a heading, list-held code (a five-space or tab gap) and a list-held "
-          "heading in the deferred span are cannot-evaluate (exit 2); and a pseudo-closing "
+          "blank line or a heading, list-held code (a five-space gap), a tab between a list "
+          "marker and its text (a conservative refusal of a shape CommonMark reads as a plain "
+          "item) and a list-held "
+          "heading in the deferred span are cannot-evaluate (exit 2); an indented '#' line "
+          "after the section's end boundary stays clean (the refusal's span ends at the "
+          "boundary line); and a pseudo-closing "
           "fence above the section (trailing words or U+00A0) does not close, the section below "
           "staying read")
     return 0
