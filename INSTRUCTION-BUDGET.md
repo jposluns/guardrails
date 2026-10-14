@@ -14,7 +14,7 @@ session. One caveat: the loader of the pinned Claude Code build the gate models 
 `.aiqt/core/instruction-budget.toml`) carries its own 120,000-character check on loaded file
 contents, a total limit below that figure (Claude Code behaviour, which can change, not a pack
 guarantee), so budget to 120,000, not 150,000.
-Today the shipped pack itself exceeds that figure: its measured PACK stands at the committed ratchet, 132,775 characters.
+Today the shipped pack itself exceeds that figure: its measured PACK stands at the committed ratchet, 132,775 UTF-16 code units, the unit the budget gate counts.
 The gate prints two totals: PACK, the
 pack's own share, and SESSION, which adds the rest of your `CLAUDE.md` and its imports. Both count
 `.claude/CLAUDE.md` and its imports, and a header for each loaded file with its resolved path relative to

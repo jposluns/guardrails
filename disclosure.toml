@@ -8,11 +8,13 @@
 # is no second copy to drift. All wording below is DRAFT, owed to the Architect's review (D7).
 #
 # The [[code]] and [[noncode]] tables at the end declare, by path prefix, every file the 1.0.5
-# release manifest ships. gen_disclosure.py renders the shipped-code list in the what-it-is-made-of
-# claim from the [[code]] labels (the [[CODE-PATHS]] marker), and tools/check_reference_facts.py
-# requires every release-manifest path to fall under a declared prefix (the longest declared prefix
-# classifies a path), so the public list cannot read complete while the release ships files it does
-# not place.
+# release manifest ships (a prefix ending in / declares a tree; one without declares exactly that
+# file). gen_disclosure.py renders the shipped-code list in the what-it-is-made-of claim from the
+# [[code]] labels (the [[CODE-PATHS]] marker), and tools/check_reference_facts.py requires every
+# release-manifest path to fall under a declared prefix (the longest declared prefix classifies a
+# path) and runs an independent code detector (executable suffixes, script-holding HTML, shebang
+# files) that refuses a detected code path under a [[noncode]] prefix, so the public list cannot
+# read complete while the release ships code it does not name.
 
 title = "AIQT disclosure: what we claim, and what we do not"
 note = "For each thing AIQT does, the claim and its limitation stand side by side, each pointing to the evidence. Where a fact is not yet published, the matrix points to where it will appear rather than implying it."
@@ -31,7 +33,7 @@ evidence = [
 [[row]]
 id = "what-it-is-made-of"
 topic = "What the product is made of"
-claim = "The 1.0.5 chat artefacts, the Claude Skill and the portable instruction files, are prose instructions and reference material only, with no executable code and no network calls. The repository that ships them also carries code, each file listed in the 1.0.5 release manifest: [[CODE-PATHS]]. This repository's own CI code under .github/, outside that manifest, runs the gates on GitHub: on each pull request targeting main, each push to main, and a monthly schedule. On your machine none of it runs on its own: each piece runs only when you run a tool or check, install the plugin or an enforcement hook, or open the site in a browser."
+claim = "The 1.0.5 chat artefacts, the Claude Skill and the portable instruction files, are prose instructions and reference material only, with no executable code and no network calls. The repository that ships them also carries code, each file listed in the 1.0.5 release manifest: [[CODE-PATHS]]. This repository's own CI code under .github/, outside that manifest, runs the quality gates on GitHub on each pull request targeting main and each push to main; a separate scheduled workflow runs the offline standards-currency audit monthly and on manual dispatch. On your machine none of it runs on its own: each piece runs only when you run a tool or check, install the plugin or an enforcement hook, or open the site in a browser."
 limitation = "Instructions cannot do anything your assistant platform cannot already do. The 1.1.0 design adds a guided install and a setup doctor around that tooling, each documented before it ships."
 evidence = [
   { text = "What the files are", href = "/install#pick" },
@@ -115,10 +117,11 @@ evidence = [
   { text = "What AIQT does not do", href = "/evidence#limits" },
 ]
 
-# Shipped-path declaration: every path in the 1.0.5 release manifest falls under exactly one of these
-# prefixes (the longest declared prefix classifies a path). [[code]] rows carry the public label the
-# what-it-is-made-of claim renders; [[noncode]] rows account for the prose, data, and configuration
-# the release also ships.
+# Shipped-path declaration: every path in the 1.0.5 release manifest falls under one of these
+# prefixes (the longest declared prefix classifies a path; a prefix ending in / declares a tree, one
+# without declares exactly that file). [[code]] rows carry the public label the what-it-is-made-of
+# claim renders; [[noncode]] rows account for the prose, data, and configuration the release also
+# ships, and the gate's code detector refuses executable content classified under them.
 
 [[code]]
 prefix = "tools/"
@@ -130,7 +133,7 @@ label = "the Python and shell tooling under tools/ and opf/tools/"
 
 [[code]]
 prefix = "opf/enforcement/"
-label = "the opf enforcement hook, its pre-commit installer, and the CI templates under opf/enforcement/"
+label = "the opf enforcement hooks (the pre-commit hook and the Claude Code deny hook), the pre-commit installer, and the CI template and script under opf/enforcement/"
 
 [[code]]
 prefix = "site/"

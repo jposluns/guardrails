@@ -26,7 +26,9 @@ limitation and its pointer. The load step fails closed (exit 2) before anything 
      non-empty, every row a table with only its allowed keys and a non-empty whitespace-free prefix
      that is unique across both arrays, and on a [[code]] row a guarded plain-language label;
   9. a what-it-is-made-of claim without the [[CODE-PATHS]] marker, or the marker anywhere outside a
-     claim or limitation. The marker renders to the shipped-code list built from the [[code]] labels
+     claim or limitation (title, note, site_base, topic, pending, evidence text and href, a declared
+     prefix, and a code label all refuse it, each asserted by a marker-naming diagnostic). The
+     marker renders to the shipped-code list built from the [[code]] labels
      (declaration order, distinct labels once, joined with semicolons), so the public sentence and
      the release accounting in tools/check_reference_facts.py share one declared source.
 
@@ -181,6 +183,9 @@ def shipped_declaration(data):
             prefix = row.get("prefix")
             if not isinstance(prefix, str) or not prefix or any(ch.isspace() for ch in prefix):
                 raise ValueError("{}: prefix must be a non-empty string with no whitespace".format(where))
+            if MARKER in prefix:
+                raise ValueError("{}: the {} marker belongs only in a row claim or limitation".format(
+                    where, MARKER))
             if prefix in seen:
                 raise ValueError("{}: duplicate prefix {!r}".format(where, prefix))
             seen.add(prefix)
@@ -263,7 +268,7 @@ def validate(data):
                      "evidence": evidence, "pending": pending})
     code_rows, _ = shipped_declaration(data)
     listing = code_paths_list(code_rows)
-    for where, value in (("title", title), ("note", note)):
+    for where, value in (("title", title), ("note", note), ("site_base", site_base)):
         if MARKER in value:
             raise ValueError("{}: the {} marker belongs only in a row claim or limitation".format(
                 where, MARKER))
@@ -381,16 +386,38 @@ def _self_test():
         ("missing noncode declaration", {k: v for k, v in good.items() if k != "noncode"}),
         ("noncode row with a label", {**good, "noncode": [{"prefix": "README.md", "label": "x"}]}),
         ("made-of claim without the marker", {**good, "row": [{**good["row"][0], "claim": "C"}]}),
-        ("marker in a topic", {**good, "row": [{**good["row"][0], "topic": "T " + MARKER}]}),
-        ("marker in the note", {**good, "note": "N " + MARKER}),
+        ("marker in a topic", {**good, "row": [{**good["row"][0], "topic": "T " + MARKER}]},
+         "belongs only in a claim or limitation"),
+        ("marker in the note", {**good, "note": "N " + MARKER},
+         "belongs only in a row claim or limitation"),
+        ("marker in the title", {**good, "title": "T " + MARKER},
+         "belongs only in a row claim or limitation"),
+        ("marker in site_base", {**good, "site_base": "https://aiqt.ai/" + MARKER},
+         "belongs only in a row claim or limitation"),
+        ("marker in a pending", {**good, "row": [{**good["row"][0], "pending": "P " + MARKER}]},
+         "belongs only in a claim or limitation"),
+        ("marker in an evidence text", {**good, "row": [{**good["row"][0], "evidence": [
+         {"text": "e " + MARKER, "href": "/evidence#release"}]}]},
+         "belongs only in a claim or limitation"),
+        ("marker in an evidence href", {**good, "row": [{**good["row"][0], "evidence": [
+         {"text": "e", "href": "/evidence" + MARKER}]}]},
+         "belongs only in a claim or limitation"),
+        ("marker in a code prefix", {**good, "code": [{"prefix": "tools/" + MARKER, "label": "x"},
+         good["code"][1]]}, "belongs only in a row claim or limitation"),
+        ("marker in a noncode prefix", {**good, "noncode": [{"prefix": "README.md" + MARKER}]},
+         "belongs only in a row claim or limitation"),
     ]
     failures = []
-    for label, data in bad:
+    for entry in bad:
+        label, data = entry[0], entry[1]
+        expect = entry[2] if len(entry) > 2 else None
         try:
             validate(data)
             failures.append("MALFORMED INPUT ACCEPTED: {}".format(label))
-        except ValueError:
-            pass
+        except ValueError as exc:
+            if expect is not None and expect not in str(exc):
+                failures.append("{}: refused with {!r}; expected the diagnostic to say {!r}".format(
+                    label, str(exc), expect))
     # Positive cases: a good internal link and a good external https link must both validate.
     good_hrefs = [
         ("good internal link", "/evidence#release"),
@@ -412,12 +439,24 @@ def _self_test():
                 rows[0]["claim"], want))
     except ValueError as exc:
         failures.append("well-formed fixture REFUSED: {}".format(exc))
+    # The limitation substitution is behaviour of its own: a limitation carrying the marker must
+    # render the same shipped-code list the claim does (deleting the limitation replace line is a
+    # mutant this case turns red).
+    try:
+        lim_fixture = {**good, "row": [{**good["row"][0], "limitation": "L: " + MARKER + "."}]}
+        _, _, _, lim_rows = validate(lim_fixture)
+        want_lim = "L: the tooling under tools/; and the JavaScript under site/."
+        if lim_rows[0]["limitation"] != want_lim or MARKER in lim_rows[0]["limitation"]:
+            failures.append("limitation marker substitution rendered {!r}, expected {!r}".format(
+                lim_rows[0]["limitation"], want_lim))
+    except ValueError as exc:
+        failures.append("a limitation carrying the marker REFUSED: {}".format(exc))
     if failures:
         print("FAIL: gen_disclosure self-test")
         for f in failures:
             print("  " + f)
         return 1
-    print("PASS: gen_disclosure self-test ({} refusal classes, {} good hrefs, 1 happy path)".format(
+    print("PASS: gen_disclosure self-test ({} refusal classes, {} good hrefs, 2 happy paths)".format(
         len(bad), len(good_hrefs)))
     return 0
 
