@@ -2954,8 +2954,10 @@ def _git_gate(label, failures):
     block (_gate_identity_failures over _GATE_IMPORT_BINDINGS) and accounts for exactly one record
     per label (_gate_accounting_failures). The identity guarantee, exactly (round-8: the checker
     validates the public capture against its own definition-time reference, so this holds under
-    a co-rebinding of the capture; the checker and that reference are trusted inputs, stated at
-    _gate_identity_failures): a module rebinding that is still in place at a checkpoint is
+    a co-rebinding of the capture; round-9: the checker reads the namespace the gated calls
+    resolve through and takes no reference from a caller; the checker itself is a trusted input
+    carried by review alone, stated at _gate_identity_failures): a module rebinding that is
+    still in place at a checkpoint is
     detected whatever its spelling; a temporary rebinding
     restored between checkpoints, and a local shadow that never rebinds the module, are not
     detected by the identity check (the static backstop covers the spellings it lists), while the
@@ -2981,48 +2983,66 @@ def _git_gate(label, failures):
 # a record whatever the binding. Round-8 (codex 1): _gate_identity_failures holds its OWN
 # definition-time reference to these objects and validates this public capture against it at
 # every checkpoint, so rebinding THIS name together with the gate no longer blinds the
-# checkpoints (the checker and its reference are trusted inputs, stated there).
+# checkpoints. Round-9 (claude 1/2): that reference and the namespace it reads are closure-held,
+# so no caller can supply either; the checker itself is a trusted input that review alone
+# carries, stated there.
 _GATE_IMPORT_BINDINGS = (_git_gate, _git_available)
 
 
-def _gate_identity_failures(failures, where, _ref=_GATE_IMPORT_BINDINGS):
-    """Append a named failure for each module gate/probe binding that is no longer the object
-    captured at import: identity through the module's own namespace, never a spelling scan.
-    Round-8 (codex 1): the reference is _ref, bound ONCE at definition time (import) to the
-    import capture and held on the function object, never reread from the module namespace;
-    the round-7 checker read _GATE_IMPORT_BINDINGS at each call, so rebinding the capture
-    TOGETHER with the gate blinded every checkpoint. The public capture is now validated
-    against _ref at every checkpoint, so that co-rebinding is a named identity failure. This
-    checker and its definition-time reference are TRUSTED INPUTS: a rebinding of
-    _gate_identity_failures itself, or a mutation of its stored default, is outside what the
-    check can observe (review and the static backstop carry that); the check detects drift of
-    the gate, the probe and the public capture, never of itself. The guarantee, exactly
-    (round-7 codex 3 / claude MEDIUM-2; round-8 scopes it to intact trusted inputs): a module
-    rebinding that is still in place at a checkpoint is detected whatever its spelling; a
-    temporary rebinding restored between checkpoints, and a local shadow (a parameter, a local
-    def, class or match capture) that never rebinds the module, are not detected by the identity
-    check; the static backstop covers the spellings it lists, and the per-label accounting
-    (_gate_accounting_failures) fails a run whose gated blocks leave no record whatever the
-    binding. The restore-between-checkpoints escape is reproduced by a disclosed-residual
-    witness in the self-test. The round-5 static checker admitted globals(), sys.modules and
-    import-binding respellings of _git_gate, each of which skipped all six gated blocks beside
-    SELF-TEST PASS (round-6 codex 1 / claude MEDIUM-1). The reviewed probe swap in
-    _not_run_net_vectors is active only inside nested runs whose nonzero exit their caller
-    asserts, so an identity failure recorded there never reaches a PASS. Red-on-revert: the
-    planted rebindings, the planted co-rebinding of the capture and the gate (round-8, red at
-    the round-7 pin), and the rebound-gate nested run, whose output must carry this diagnostic
-    for every checkpoint by name (round-7: one assertion per checkpoint)."""
-    space = vars(sys.modules[__name__])
-    if space.get("_GATE_IMPORT_BINDINGS") is not _ref:
-        failures.append("(git-gate identity) {}: _GATE_IMPORT_BINDINGS is not the capture made "
-                        "at import (round-8: the checkpoints validate the module capture "
-                        "against a definition-time reference held outside the module "
-                        "namespace, so a co-rebinding cannot blind them)".format(where))
-    for name, bound in zip(("_git_gate", "_git_available"), _ref):
-        if space.get(name) is not bound:
-            failures.append("(git-gate identity) {}: {} is not the object captured at import "
-                            "(rebound by some spelling; identity decides, so the spelling does "
-                            "not matter)".format(where, name))
+def _gate_identity_checker(space, ref):
+    """Build _gate_identity_failures ONCE at import (below), over the module namespace and the
+    import capture held in its closure; the docstring of the returned checker states its
+    guarantee, its trusted inputs and its red-on-revert vectors."""
+    def _gate_identity_failures(failures, where):
+        """Append a named failure for each module gate/probe binding that is no longer the object
+        captured at import: identity through the module namespace the gated calls resolve
+        through, never a spelling scan. Round-8 (codex 1): the reference is bound ONCE at
+        definition time (import) to the import capture, never reread from the module namespace;
+        the round-7 checker read _GATE_IMPORT_BINDINGS at each call, so rebinding the capture
+        TOGETHER with the gate blinded every checkpoint. The public capture is validated against
+        that reference at every checkpoint, so that co-rebinding is a named identity failure.
+        Round-9 (claude 1): BOTH the namespace and the reference are closure-held. The namespace
+        is the globals() dict captured at import, the very dict through which the gated calls of
+        _self_test_main_isolated resolve _git_gate (its __globals__), never sys.modules[__name__],
+        so a module object swapped into sys.modules cannot hide an in-place rebinding. The
+        reference is no parameter, so no checkpoint can supply its own (a third argument or a
+        keyword is a TypeError, fail-closed); the round-8 _ref default could be passed the
+        rebound capture explicitly, which restored the round-7 blindness. This checker is a
+        TRUSTED INPUT: a rebinding of the module name _gate_identity_failures, or a store into
+        its closure cells (cell_contents), is outside what the check can observe, and the static
+        backstop has NO rule for either, so review alone carries that boundary; the check
+        detects drift of the gate, the probe and the public capture, never of itself. The
+        guarantee, exactly (round-7 codex 3 / claude MEDIUM-2; round-8 scopes it to an intact
+        checker): a module rebinding that is still in place at a checkpoint is detected whatever
+        its spelling; a temporary rebinding restored between checkpoints, and a local shadow (a
+        parameter, a local def, class or match capture) that never rebinds the module, are not
+        detected by the identity check; the static backstop covers the spellings it lists, and
+        the per-label accounting (_gate_accounting_failures) fails a run whose gated blocks
+        leave no record whatever the binding. The restore-between-checkpoints escape is
+        reproduced by a disclosed-residual witness in the self-test. The round-5 static checker
+        admitted globals(), sys.modules and import-binding respellings of _git_gate, each of
+        which skipped all six gated blocks beside SELF-TEST PASS (round-6 codex 1 / claude
+        MEDIUM-1). The reviewed probe swap in _not_run_net_vectors is active only inside nested
+        runs whose nonzero exit their caller asserts, so an identity failure recorded there
+        never reaches a PASS. Red-on-revert: the planted rebindings, the planted co-rebinding of
+        the capture and the gate (round-8, red at the round-7 pin), the sys.modules swap beside
+        an in-place rebinding and the explicitly supplied reference (round-9, each red at the
+        round-8 pin), and the rebound-gate nested run, whose output must carry this diagnostic
+        for every checkpoint by name (round-7: one assertion per checkpoint)."""
+        if space.get("_GATE_IMPORT_BINDINGS") is not ref:
+            failures.append("(git-gate identity) {}: _GATE_IMPORT_BINDINGS is not the capture "
+                            "made at import (round-8: the checkpoints validate the module "
+                            "capture against a definition-time reference held outside the "
+                            "module namespace, so a co-rebinding cannot blind them)".format(where))
+        for name, bound in zip(("_git_gate", "_git_available"), ref):
+            if space.get(name) is not bound:
+                failures.append("(git-gate identity) {}: {} is not the object captured at "
+                                "import (rebound by some spelling; identity decides, so the "
+                                "spelling does not matter)".format(where, name))
+    return _gate_identity_failures
+
+
+_gate_identity_failures = _gate_identity_checker(globals(), _GATE_IMPORT_BINDINGS)
 
 
 def _gate_accounting_failures(failures, gate_ran):
@@ -3106,7 +3126,9 @@ def _git_gate_alignment_failures(source):
     module bindings by identity at each gated block and at the end, against its own
     definition-time reference, validating the public capture against that reference too
     (round-8: a co-rebinding of the capture together with the gate is a named identity
-    failure; the checker and its reference are trusted inputs), so a module rebinding that is
+    failure; round-9: the namespace and the reference are closure-held, and the checker itself
+    is a trusted input that review alone carries, since this backstop has no rule for it), so a
+    module rebinding that is
     still in place at a checkpoint is detected whatever its spelling; a temporary rebinding
     restored between checkpoints (reproduced by the disclosed-residual witness in the self-test)
     and a local shadow that never rebinds the module are NOT detected by the identity check, and
@@ -3246,7 +3268,7 @@ def _git_gate_alignment_failures(source):
                                 "into an ungated early return)".format(node.lineno))
     for fn in tree.body:
         if isinstance(fn, ast.FunctionDef) and fn.name in ("_git_gate_alignment_failures",
-                                                           "_gate_identity_failures"):
+                                                           "_gate_identity_checker"):
             allowed_ids.update(id(node) for node in ast.walk(fn)
                                if isinstance(node, ast.Constant)
                                and node.value in (probe, "_git_gate"))
@@ -6680,8 +6702,10 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
     # five rules with no planted vector at all (a global declaration, an except alias, a keyword
     # argument, a bytes gate key, the gate-store count; claude MINOR-2), vectored now. Round-8
     # (codex 2): the capture-deletion and zero-_planned_probe-def inputs were already findings
-    # under the round-7 checker; their new fixtures pin the ast.Del arm and BOTH sides of the
-    # def-count bound, each previously unvectored. Round-8 (codex 1): the co-rebinding RUNTIME
+    # under the round-7 checker; their new fixtures pin the ast.Del arm and the LOWER side of the
+    # def-count bound, each previously unvectored (round-9 claude 3: the zero-def fixture pins
+    # the lower side; the earlier two-def vector, round-7, pins the upper side, so together
+    # they pin both sides). Round-8 (codex 1): the co-rebinding RUNTIME
     # vector below was red at the round-7 pin (its checker reread the rebound module capture).
     # Round-6/7: this battery keeps the checker honest as a BACKSTOP; the runtime identity
     # checkpoints (_gate_identity_failures at every gate and at the end) and the per-label
@@ -6970,8 +6994,9 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
     # checkpoints and a local shadow that never rebinds the module sit OUTSIDE that class; the
     # witness below holds the first escape visible, and _gate_identity_failures states the
     # guarantee exactly (round-7). The module key is found BY IDENTITY too, so this test needs no
-    # name literal the static backstop would have to allow.
-    space_idn = vars(sys.modules[__name__])
+    # name literal the static backstop would have to allow. Round-9: the planted rebindings go
+    # into globals(), the namespace the gated calls resolve through, never sys.modules[__name__].
+    space_idn = globals()
     for tag_idn, bound_idn in zip(("the gate", "the probe"), _GATE_IMPORT_BINDINGS):
         name_idn = next((key_idn for key_idn, val_idn in space_idn.items()
                          if val_idn is bound_idn), None)
@@ -7056,6 +7081,67 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
                             "(round-8: the round-7 checker read its reference from the "
                             "rebound module binding and reported nothing; got {})".format(
                                 got_co))
+
+    # Round-9 (claude 1), red at the round-8 pin: a SYS.MODULES SWAP beside an in-place
+    # rebinding. The gate is rebound in the module namespace (key found by identity) while
+    # sys.modules[__name__] holds a decoy module carrying the ORIGINAL objects. The round-8
+    # checker read vars(sys.modules[__name__]) and reported nothing although the gated calls
+    # resolve through the rebound namespace; the checker now reads that namespace itself.
+    import types
+    gate_key_sw = next((key_sw for key_sw, val_sw in space_idn.items()
+                        if val_sw is _GATE_IMPORT_BINDINGS[0]), None)
+    if gate_key_sw is None:
+        failures.append("(git-gate identity) the gate has no module binding, so the "
+                        "sys.modules-swap vector cannot run (that drift is itself a named "
+                        "identity failure above)")
+    else:
+        real_mod_sw = sys.modules[__name__]
+        decoy_sw = types.ModuleType(__name__)
+        vars(decoy_sw).update(space_idn)
+        got_sw = []
+        space_idn[gate_key_sw] = lambda *_args_sw: False
+        sys.modules[__name__] = decoy_sw
+        try:
+            _gate_identity_failures(got_sw, "beside a planted sys.modules swap")
+        finally:
+            sys.modules[__name__] = real_mod_sw
+            space_idn[gate_key_sw] = _GATE_IMPORT_BINDINGS[0]
+        if not any(gate_key_sw in f_sw and "is not the object captured at import" in f_sw
+                   for f_sw in got_sw):
+            failures.append("(git-gate identity) an in-place rebinding of the gate beside a "
+                            "sys.modules swap must name the drifted gate (round-9: the round-8 "
+                            "checker read the swapped module and reported nothing; got "
+                            "{})".format(got_sw))
+
+    # Round-9 (claude 1), red at the round-8 pin: a checkpoint that SUPPLIES the reference. The
+    # gate and the capture are co-rebound (keys found by identity) and the rebound capture is
+    # passed explicitly, positionally and by keyword. The round-8 checker took it as its _ref
+    # and reported nothing; the checker now holds its reference in a closure and accepts only
+    # (failures, where), so either call is a TypeError, never a silent pass.
+    if cap_key_co is not None and gate_key_co is not None:
+        real_cap_ex = space_idn[cap_key_co]
+        rebound_ex = (lambda *_args_ex: False, real_cap_ex[1])
+        for tag_ex, call_ex in (
+                ("positionally", lambda got_ex: _gate_identity_failures(
+                    got_ex, "with a supplied reference", rebound_ex)),
+                ("by keyword", lambda got_ex: _gate_identity_failures(
+                    got_ex, "with a supplied reference", _ref=rebound_ex))):
+            got_ex = []
+            space_idn[gate_key_co] = rebound_ex[0]
+            space_idn[cap_key_co] = rebound_ex
+            try:
+                call_ex(got_ex)
+            except TypeError:
+                refused_ex = True
+            else:
+                refused_ex = False
+            finally:
+                space_idn[cap_key_co] = real_cap_ex
+                space_idn[gate_key_co] = real_cap_ex[0]
+            if not refused_ex:
+                failures.append("(git-gate identity) a reference supplied {} must be refused "
+                                "(round-9: the round-8 checker took the rebound capture as its "
+                                "reference and reported nothing; got {})".format(tag_ex, got_ex))
 
     # Round-7 (fix item 1): the per-label accounting, one unit vector per gate label. Each
     # vector feeds _gate_accounting_failures a record list missing EXACTLY ONE label and
