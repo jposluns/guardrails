@@ -1852,6 +1852,32 @@ _CLOSE_SWEEP_DISPOSITIONS = (
      "false positive: the unwind handler's wrapped close (its OSError suppressed so the in-flight refusal "
      "wins) sits in a handler whose own block ends in a raise, so the wrapped close after the try never "
      "runs after it"),
+    ("tools/orch_register.py", "_made_dirs_swept", "REBIND", "cur_fd", "", 2,
+     "false positive, the P1 ownership-first handoff of the iterative sweep: _swept_closed(cur_fd, ...) runs "
+     "before cur_fd, nxt_fd = nxt_fd, None, so every later close of cur_fd closes the fresh number the "
+     "handoff moved in, never the one already closed"),
+    ("tools/orch_register.py", "_made_dirs_swept", "REBIND", "nxt_fd", "", 4,
+     "false positive: each failure-path _swept_closed(nxt_fd, ...) is followed immediately by nxt_fd = None, "
+     "so no later close of the class reaches the closed number"),
+    ("tools/orch_register.py", "_made_dirs_swept", "TRY", "cur_fd", "cur_fd", 2,
+     "false positive, the two-slot discipline: a body close of cur_fd is the handoff, which re-binds cur_fd "
+     "to the fresh nxt_fd before the finally, and the finally closes only what the slots still hold, each "
+     "exactly once"),
+    ("tools/orch_register.py", "_made_dirs_swept", "TRY", "cur_fd", "nxt_fd", 2,
+     "false positive: nxt_fd is cleared to None by the handoff that closes cur_fd, and the finally closes "
+     "nxt_fd only while the slot still holds an unassigned open descriptor"),
+    ("tools/orch_register.py", "_made_dirs_swept", "TRY", "nxt_fd", "cur_fd", 4,
+     "false positive: each body close of nxt_fd clears its slot (nxt_fd = None) at once, so the finally "
+     "close of cur_fd closes the other slot, never the closed number"),
+    ("tools/orch_register.py", "_made_dirs_swept", "TRY", "nxt_fd", "nxt_fd", 4,
+     "false positive: each body close of nxt_fd clears its slot (nxt_fd = None) at once, so the finally "
+     "close of nxt_fd runs only when the slot holds a later, unassigned open"),
+    ("tools/orch_register.py", "_made_dirs_swept", "AFTER", "nxt_fd", "cur_fd", 2,
+     "false positive: the swallowed-fstat handler closes nxt_fd and clears the slot before its break, so "
+     "the later closes of cur_fd close the other slot, never this number"),
+    ("tools/orch_register.py", "_made_dirs_swept", "AFTER", "nxt_fd", "nxt_fd", 2,
+     "false positive: the swallowed-fstat handler closes nxt_fd and clears the slot before its break, so a "
+     "later close of nxt_fd closes only a later, unassigned open"),
     ("tools/check_release_cut.py", "working_blob", "TRY", "parent", "directory", 1,
      _CS_P1.format("parent, directory = directory, child runs before the close of parent, so the finally closes "
                    "child, never parent")),

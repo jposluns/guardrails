@@ -62,7 +62,10 @@
       (O_EXCL) and then re-checked under the acquired lock (the path still names the created
       file and its size is still zero), so an appender that lands between the creation and the
       lock forces a refusal, never an interleaved row (the serialization there is the
-      exclusive creation plus those under-lock re-checks, not a second validation). The
+      exclusive creation plus those under-lock re-checks, not a second validation; the
+      re-checks catch the cooperating register-row interleavings their identity and size
+      comparisons detect, and other validation inputs, the anchor included, are not
+      revalidated under the lock). The
       write goes through the same
       descriptor the validation read (opened with O_NOFOLLOW, written only while its device and
       inode still match the path and the on-disk size still equals the validated text); a failed
@@ -77,16 +80,20 @@
       RESIDUAL: POSIX offers no race-free proof that the directory found at a name is the one
       mkdir just made, so the entry a created component's no-follow identity read-back finds
       at the name is recorded as this call's own, and the cleanup sweep's identity re-check
-      and its rmdir are two calls; the cleanup's exact bound is therefore: each removal is
-      rmdir of an entry that is an EMPTY directory at removal time, at most one moved-in
-      empty directory per created component (the mkdir-to-stat window) plus the sweep's
-      identity-check-to-rmdir window, and ownership is not guaranteed across either window;
-      never a non-empty directory and never a file. The sweep removes by descriptor, like
-      creation: it re-opens the recorded outer parent by path, descends O_NOFOLLOW one
-      recorded component at a time, re-checks each component's recorded device and inode
-      with a no-follow stat relative to its parent's descriptor and removes it with rmdir
-      relative to that same descriptor, so an ancestor swapped for a symlink during the
-      sweep can never redirect a removal outside the recorded tree.
+      and its rmdir are two calls; the cleanup's exact bound is stated once, at
+      _made_dirs_swept (abbreviated: rmdir of an EMPTY directory only, within the two
+      disclosed windows, inode reuse included; never a non-empty directory and never a
+      file). The sweep removes by descriptor, like creation: it re-opens the recorded
+      outer parent by path (so a rename of the tree before the sweep starts is not
+      followed), descends ITERATIVELY one name at a time with O_NOFOLLOW (a raced,
+      unrecorded middle component is descended through by name and never removed, and a
+      recorded component the sweep cannot reach is left in place and NAMED, never counted
+      absent), re-checks each component's recorded device and inode with a no-follow stat
+      relative to the descriptor of its parent and removes it with rmdir relative to that
+      same descriptor, so an ancestor swapped for a symlink during the sweep can never
+      redirect a removal outside the recorded tree; every descriptor the sweep opens is
+      closed exactly once, and a failed close is reported as a close failure, never as a
+      directory left in place.
   orch_register.py project --register PATH
       Emit an AEI v1 enumeration of the rows whose LATEST status is proposed or accepted and not yet
       landed, as granted open items, so the stop guard itself enforces mistake-to-guardrail
@@ -244,106 +251,223 @@ def _rolled_back(fd, size):
             "remains".format(size))
 
 
+def _swept_closed(fd, where, close_failures):
+    """Close one descriptor the sweep held (on the directory WHERE names), recording a
+    failed close in CLOSE_FAILURES, KEPT APART from the removal outcomes: a failed close
+    is a descriptor-close failure, never a directory left in place, and never raised."""
+    try:
+        os.close(fd)
+    except OSError as exc:
+        close_failures.append("the descriptor the sweep held on {} could not be closed: "
+                              "{}".format(where, exc))
+
+
 def _made_dirs_swept(made_dirs):
     """Remove the directory components THIS CALL observed as its own, innermost first, BY
     DESCRIPTOR, mirroring creation: each entry is (path, st_dev, st_ino), recorded by
     _dirs_created only after its own mkdir succeeded and its identity was read back with a
-    no-follow stat relative to its parent's open descriptor. The sweep re-opens the recorded
-    OUTER parent by path once (exactly as creation opened the deepest existing ancestor) and
-    hands _swept_under that descriptor, so every re-check and every removal below runs
-    relative to an open descriptor, never by re-resolving a string path, and an ancestor
-    swapped for a symlink during the sweep can never redirect a removal outside the recorded
-    tree. A component that is already absent (ENOENT) does not stop the sweep, because an
-    OUTER component may still have been created. An entry this sweep cannot prove to be the
+    no-follow stat relative to the open descriptor on its parent. The sweep re-opens the
+    recorded OUTER parent by path once (so a rename of the whole tree BEFORE the sweep
+    starts is not followed; only a rename after that open is), then walks ITERATIVELY, no
+    recursion and at most two held descriptors however deep the record: it descends one
+    name at a time, each opened O_RDONLY | O_DIRECTORY | O_NOFOLLOW relative to the
+    descriptor above it and identity-read with os.fstat on the opened descriptor (a
+    recorded component must still match its recorded device and inode before the sweep
+    descends through it), removes the innermost recorded component first, and climbs back
+    out step by step, re-checking each climbed-to directory with the same fstat identity
+    read against the identity observed on the way down. The record can be DISCONTINUOUS
+    (a raced mkdir by another actor is used for the descent, never recorded) and can
+    contain ".." components: the sweep descends through an unrecorded intermediate BY
+    NAME, removes nothing that is not recorded, and reports every recorded component it
+    cannot reach that way as left in place and NAMED, never as already absent; only a
+    no-follow lookup that fails with ENOENT under a reached recorded parent reports a
+    component as skipped (already absent).
+    The removal itself re-checks the name with a
+    no-follow os.stat relative to the held parent descriptor (the recorded st_dev and
+    st_ino and a directory mode) and removes with os.rmdir relative to that same
+    descriptor, so an ancestor swapped for a symlink during the sweep can never redirect
+    a removal outside the recorded tree. An entry this sweep cannot prove to be the
     created component (an inspection failure, a changed identity, a non-directory, an
     undescendable parent) is left in place and NAMED, and nothing beneath a kept entry is
-    ever removed; a descriptor this sweep cannot close is named in the outcome, never
-    raised. BOUND (exact, pinned by vectors): each removal is rmdir of an entry that is an
-    EMPTY directory at removal time, at most one moved-in empty directory per created
-    component (the mkdir-to-stat window) plus the identity-check-to-rmdir window (the
-    re-check and the rmdir are two calls, so an empty directory swapped into the name
-    between them is removed; a non-empty one is left in place and named), and ownership is
-    not guaranteed across either window; never a non-empty directory and never a file.
-    Returns (left, skipped): the components left in place (each with its reason) and the
-    already-absent ones."""
-    left, skipped = [], []
+    ever removed. Every descriptor this sweep opens is closed exactly once, in a finally
+    on every path, a non-OSError exception included; a failed close is recorded in the
+    returned close failures, KEPT APART from the removal outcomes, never raised. BOUND
+    (exact, stated once here; every other site abbreviates and says so): each removal is
+    rmdir of an entry that is an EMPTY directory at removal time, at most one moved-in
+    empty directory per created component (the mkdir-to-stat window) plus the
+    identity-check-to-rmdir window (the re-check and the rmdir are two calls, so an empty
+    directory swapped into the name between them is removed; a non-empty one is left in
+    place and named), ownership is not guaranteed across either window, and the
+    device-and-inode re-check cannot detect inode reuse (an empty directory that reuses
+    the recorded device and inode at the recorded name before the re-check is removed as
+    if it were the recorded one); never a non-empty directory and never a file. Returns
+    (left, skipped, close_failures): the components left in place, each with its reason,
+    the already-absent ones, and the descriptor-close failures."""
+    left, skipped, close_failures = [], [], []
     if not made_dirs:
-        return left, skipped
+        return left, skipped, close_failures
     rev_dirs = list(reversed(made_dirs))
+    outer_parent = rev_dirs[0][0].parent
+    # The descent plan: every NAME between the recorded outer parent and the innermost
+    # recorded component, outermost first, each as (name, path, recorded identity), the
+    # identity None for a name _dirs_created did not record (a raced directory of another
+    # actor, descended through, never removed). The plan is lexical; a recorded component
+    # that is not nested under the chain so far cannot be reached by descriptor and is
+    # left in place and named, every recorded component inside it too.
+    chain = []
+    cur_path = outer_parent
+    for j, entry in enumerate(rev_dirs):
+        comp, comp_dev, comp_ino = entry
+        try:
+            parts = comp.relative_to(cur_path).parts
+        except ValueError:
+            parts = ()
+        if not parts:
+            left.extend("{} (not nested under the recorded chain, so the sweep cannot "
+                        "reach it by descriptor)".format(inner)
+                        for inner, _dev, _ino in rev_dirs[j:])
+            break
+        for name in parts[:-1]:
+            cur_path = cur_path / name
+            chain.append((name, cur_path, None))
+        cur_path = cur_path / parts[-1]
+        chain.append((parts[-1], cur_path, (comp_dev, comp_ino)))
+    if not chain:
+        return left, skipped, close_failures
     try:
-        dir_fd = os.open(str(rev_dirs[0][0].parent), os.O_RDONLY | os.O_DIRECTORY)
+        cur_fd = os.open(str(outer_parent), os.O_RDONLY | os.O_DIRECTORY)
     except OSError as exc:
         left.extend("{} (the recorded outer parent {} cannot be opened for the sweep: "
-                    "{})".format(made, rev_dirs[0][0].parent, exc)
+                    "{})".format(made, outer_parent, exc)
                     for made, _dev, _ino in made_dirs)
-        return left, skipped
-    _swept_under(dir_fd, rev_dirs, left, skipped)
+        return left, skipped, close_failures
+    cur_on = str(outer_parent)
+    nxt_fd = None  # the one transient second descriptor a descent or climb step holds
+    observed = []  # observed[i]: the identity the descent read on chain[i]
     try:
-        os.close(dir_fd)
-    except OSError as exc:
-        left.append("{} (the sweep descriptor on the recorded outer parent could not be "
-                    "closed: {})".format(rev_dirs[0][0].parent, exc))
-    return left, skipped
-
-
-def _swept_under(dir_fd, rev_dirs, left, skipped):
-    """One _made_dirs_swept step: REV_DIRS is the outermost-first tail of the recorded
-    components and DIR_FD is an open descriptor on the first entry's recorded parent. The
-    first entry's own removal runs last (children first): while inner components remain,
-    the entry is opened O_RDONLY | O_DIRECTORY | O_NOFOLLOW relative to DIR_FD, the opened
-    descriptor's identity (os.fstat, race-free on the descriptor) must still match the
-    recorded one before the sweep descends through it, and that descent descriptor is
-    closed here (a failed close is recorded in LEFT, never raised; inner components behind
-    an absent entry are reported skipped, behind an unopenable or substituted one left in
-    place and named). The removal itself re-checks the name with a no-follow os.stat
-    relative to DIR_FD (the recorded st_dev and st_ino and a directory mode) and removes
-    with os.rmdir relative to DIR_FD: the re-check and the rmdir are the two calls of the
-    disclosed identity-check-to-rmdir window."""
-    comp, comp_dev, comp_ino = rev_dirs[0]
-    if len(rev_dirs) > 1:
-        nxt = None
         try:
-            nxt = os.open(comp.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-                          dir_fd=dir_fd)
-        except FileNotFoundError:
-            skipped.extend(str(inner) for inner, _dev, _ino in rev_dirs[1:])
+            root_st = os.fstat(cur_fd)
         except OSError as exc:
-            left.extend("{} (its recorded parent {} cannot be descended into: {})".format(
-                inner, comp.name, exc) for inner, _dev, _ino in rev_dirs[1:])
-        if nxt is not None:
+            left.extend("{} (the recorded outer parent {} cannot be inspected: "
+                        "{})".format(made, outer_parent, exc)
+                        for made, _dev, _ino in made_dirs)
+            return left, skipped, close_failures
+        depth = 0          # cur_fd is on chain[depth - 1] (on the outer parent at 0)
+        reach = len(chain)  # chain positions at or past reach are already reported
+        while depth < len(chain) - 1:
+            name, comp_path, rec = chain[depth]
+            deeper = [str(p) for _n, p, r in chain[depth + 1:] if r is not None]
+            kind = ("recorded parent" if rec is not None
+                    else "raced unrecorded intermediate")
             try:
-                nxt_st = os.fstat(nxt)
+                nxt_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                 dir_fd=cur_fd)
+            except FileNotFoundError as exc:
+                if rec is None:
+                    left.extend("{} (its {} {} cannot be descended into: {})".format(
+                        inner, kind, name, exc) for inner in deeper)
+                else:
+                    skipped.extend(deeper)
+                reach = depth + 1
+                break
             except OSError as exc:
-                nxt_st = None
-                left.extend("{} (its recorded parent {} cannot be inspected: {})".format(
-                    inner, comp.name, exc) for inner, _dev, _ino in rev_dirs[1:])
-            if nxt_st is not None and (nxt_st.st_dev, nxt_st.st_ino) == (comp_dev, comp_ino):
-                _swept_under(nxt, rev_dirs[1:], left, skipped)
-            elif nxt_st is not None:
+                left.extend("{} (its {} {} cannot be descended into: {})".format(
+                    inner, kind, name, exc) for inner in deeper)
+                reach = depth + 1
+                break
+            try:
+                nxt_st = os.fstat(nxt_fd)
+            except OSError as exc:
+                left.extend("{} (its {} {} cannot be inspected: {})".format(
+                    inner, kind, name, exc) for inner in deeper)
+                _swept_closed(nxt_fd, str(comp_path), close_failures)
+                nxt_fd = None
+                reach = depth + 1
+                break
+            if rec is not None and (nxt_st.st_dev, nxt_st.st_ino) != rec:
                 left.extend("{} (its recorded parent {} is no longer the directory this "
-                            "call created)".format(inner, comp.name)
-                            for inner, _dev, _ino in rev_dirs[1:])
+                            "call created)".format(inner, name) for inner in deeper)
+                _swept_closed(nxt_fd, str(comp_path), close_failures)
+                nxt_fd = None
+                reach = depth + 1
+                break
+            observed.append((nxt_st.st_dev, nxt_st.st_ino))
+            _swept_closed(cur_fd, cur_on, close_failures)
+            cur_fd, nxt_fd = nxt_fd, None
+            cur_on = str(comp_path)
+            depth += 1
+        pos = depth  # cur_fd is on the parent of chain[pos]
+        while True:
+            name, comp_path, rec = chain[pos]
+            if rec is not None and pos < reach:
+                comp_st = None
+                try:
+                    comp_st = os.stat(name, dir_fd=cur_fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    skipped.append(str(comp_path))
+                except OSError as exc:
+                    left.append("{} (cannot be inspected: {})".format(comp_path, exc))
+                if comp_st is not None:
+                    if ((comp_st.st_dev, comp_st.st_ino) != rec
+                            or not stat.S_ISDIR(comp_st.st_mode)):
+                        left.append("{} (no longer the directory this call "
+                                    "created)".format(comp_path))
+                    else:
+                        try:
+                            os.rmdir(name, dir_fd=cur_fd)
+                        except OSError:
+                            left.append(str(comp_path))
+            if pos == 0:
+                break
+            # Climb back to the parent of chain[pos - 1]. The step that entered the
+            # directory the sweep is on is chain[pos - 1]; its inverse is ".." unless
+            # that step itself was "..", in which case the inverse is the name that
+            # entered the level before it (two consecutive ".." steps cannot be
+            # inverted by name, so the components above them are left in place and
+            # named). The climbed-to directory must match the identity observed on the
+            # way down.
+            expect = observed[pos - 2] if pos >= 2 else (root_st.st_dev, root_st.st_ino)
+            above = str(chain[pos - 2][1]) if pos >= 2 else str(outer_parent)
+            rest = [str(p) for _n, p, r in chain[:pos] if r is not None]
+            if chain[pos - 1][0] != "..":
+                step, flags = "..", os.O_RDONLY | os.O_DIRECTORY
+            elif pos >= 2 and chain[pos - 2][0] != "..":
+                step = chain[pos - 2][0]
+                flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            else:
+                left.extend("{} (the sweep cannot climb back out of consecutive dot-dot "
+                            "steps to reach it)".format(inner) for inner in rest)
+                break
             try:
-                os.close(nxt)
+                nxt_fd = os.open(step, flags, dir_fd=cur_fd)
             except OSError as exc:
-                left.append("{} (the descent descriptor the sweep opened on it could not "
-                            "be closed: {})".format(comp, exc))
-    try:
-        comp_st = os.stat(comp.name, dir_fd=dir_fd, follow_symlinks=False)
-    except FileNotFoundError:
-        skipped.append(str(comp))
-        return
-    except OSError as exc:
-        left.append("{} (cannot be inspected: {})".format(comp, exc))
-        return
-    if ((comp_st.st_dev, comp_st.st_ino) != (comp_dev, comp_ino)
-            or not stat.S_ISDIR(comp_st.st_mode)):
-        left.append("{} (no longer the directory this call created)".format(comp))
-        return
-    try:
-        os.rmdir(comp.name, dir_fd=dir_fd)
-    except OSError:
-        left.append(str(comp))
+                left.extend("{} (the sweep cannot climb back to the directory holding "
+                            "it: {})".format(inner, exc) for inner in rest)
+                break
+            try:
+                up_st = os.fstat(nxt_fd)
+            except OSError as exc:
+                left.extend("{} (the directory the sweep climbed back to cannot be "
+                            "inspected: {})".format(inner, exc) for inner in rest)
+                _swept_closed(nxt_fd, above, close_failures)
+                nxt_fd = None
+                break
+            if (up_st.st_dev, up_st.st_ino) != expect:
+                left.extend("{} (a directory the sweep descended through was moved while "
+                            "the sweep ran, so the component can no longer be "
+                            "reached)".format(inner) for inner in rest)
+                _swept_closed(nxt_fd, above, close_failures)
+                nxt_fd = None
+                break
+            _swept_closed(cur_fd, cur_on, close_failures)
+            cur_fd, nxt_fd = nxt_fd, None
+            cur_on = above
+            pos -= 1
+    finally:
+        if nxt_fd is not None:
+            _swept_closed(nxt_fd, "a directory the sweep reached", close_failures)
+        _swept_closed(cur_fd, cur_on, close_failures)
+    return left, skipped, close_failures
 
 
 def _dirs_created(parent):
@@ -362,11 +486,9 @@ def _dirs_created(parent):
     no race-free proof that the directory found at a name is the one mkdir just made, so the
     entry the no-follow stat finds at the created name is recorded as this call's own; a
     directory moved into that name between the mkdir and the stat is therefore recorded, and
-    the later sweep's exact bound is: each removal is rmdir of an entry that is an EMPTY
-    directory at removal time, at most one moved-in empty directory per created component
-    (this mkdir-to-stat window) plus the sweep's identity-check-to-rmdir window, with
-    ownership not guaranteed across either window; never a non-empty directory and never a
-    file. Raises
+    the later sweep's exact bound is stated once, at _made_dirs_swept (abbreviated: rmdir
+    of an EMPTY directory only, within the two disclosed windows, inode reuse included;
+    never a non-empty directory and never a file). Raises
     CannotEvaluate, with the already-recorded components swept and the sweep's outcome named,
     when the existing ancestor or a component cannot be opened, a component cannot be
     created, its identity cannot be read back, or a descriptor this walk opened cannot be
@@ -436,17 +558,24 @@ def _dirs_created(parent):
 
 def _made_dirs_note(made_dirs):
     """The refusal-message clause for the directory sweep: empty when nothing was planned,
-    else it reports the sweep's actual outcome, naming every component left in place (claims
-    follow the sweep, never the plan)."""
+    else it reports the actual outcome of the sweep, naming every component left in place
+    and, KEPT APART from the removal outcomes, every descriptor the sweep could not close
+    (a failed close is never rendered as a directory left in place; claims follow the
+    sweep, never the plan)."""
     if not made_dirs:
         return ""
-    left, skipped = _made_dirs_swept(made_dirs)
+    left, skipped, close_failures = _made_dirs_swept(made_dirs)
     if left:
-        return ("; directory component(s) this call made could not be removed and were left "
-                "in place: {}".format(", ".join(left)))
-    if skipped:
-        return "; no directory component this call made remains"
-    return "; the directory components this call made were removed"
+        note = ("; directory component(s) this call made could not be removed and were "
+                "left in place: {}".format(", ".join(left)))
+    elif skipped:
+        note = "; no directory component this call made remains"
+    else:
+        note = "; the directory components this call made were removed"
+    if close_failures:
+        note += ("; descriptor close failure(s) in the sweep, not a directory left in "
+                 "place: {}".format("; ".join(close_failures)))
+    return note
 
 
 def _creation_cleanup(fd, path, made_dirs):
@@ -457,8 +586,9 @@ def _creation_cleanup(fd, path, made_dirs):
     created device and inode, size zero), then the directory components this call itself created
     (innermost first, each only while empty; an already-absent component does not stop the
     sweep). Returns the sentence for the refusal message; an entry this helper cannot prove
-    safe to remove is left in place and NAMED, the made directory components included, and the
-    register gate stays the authority over whatever remains."""
+    safe to remove is left in place and NAMED, the made directory components included, a
+    descriptor-close failure is reported as a close failure, never as a directory left in
+    place, and the register gate stays the authority over whatever remains."""
     note = None
     try:
         st_fd = os.fstat(fd)
@@ -476,11 +606,18 @@ def _creation_cleanup(fd, path, made_dirs):
     except OSError as exc:
         note = "the created register could not be removed ({})".format(exc)
     if note is None:
-        left, _skipped = _made_dirs_swept(made_dirs)
+        left, _skipped, close_failures = _made_dirs_swept(made_dirs)
         if left:
-            return ("the created register was removed; directory component(s) this call made "
-                    "could not be removed and were left in place: {}".format(", ".join(left)))
-        return "the created register and the directory components this call made were removed"
+            note = ("the created register was removed; directory component(s) this call "
+                    "made could not be removed and were left in place: {}".format(
+                        ", ".join(left)))
+        else:
+            note = ("the created register and the directory components this call made "
+                    "were removed")
+        if close_failures:
+            note += ("; descriptor close failure(s) in the sweep, not a directory left "
+                     "in place: {}".format("; ".join(close_failures)))
+        return note
     return note + _made_dirs_note(made_dirs)
 
 
@@ -618,11 +755,10 @@ def cmd_append(a):
             # recorded by _dirs_created (identity read back relative to the parent descriptor
             # after each successful mkdir; an uninspectable ancestor refuses before any
             # mkdir) and swept BY DESCRIPTOR on a later refusal, so such a refusal removes
-            # only what this call observed as its own, within the sweep's exact bound: each
-            # removal is rmdir of an entry that is an EMPTY directory at removal time, at
-            # most one moved-in empty directory per created component (the mkdir-to-stat
-            # window) plus the sweep's identity-check-to-rmdir window, ownership not
-            # guaranteed across either window.
+            # only what this call observed as its own, within the sweep's exact bound,
+            # stated once at _made_dirs_swept (abbreviated: rmdir of an EMPTY directory
+            # only, within the two disclosed windows, inode reuse included; never a
+            # non-empty directory and never a file).
             try:
                 made_dirs = _dirs_created(path.parent)
             except CannotEvaluate as exc:
@@ -671,6 +807,9 @@ def cmd_append(a):
         # necessarily taken only after the creation: a cooperating appender that landed between
         # the creation and this lock forces a refusal here, never an interleaved row. For an
         # existing register it narrows the non-cooperating-writer window to after this check.
+        # Only the cooperating register-row interleavings the identity and size comparisons
+        # detect are caught here; other validation inputs (the anchor included) are not
+        # revalidated under the lock.
         size = st_fd.st_size
         if size != len(raw):
             msg = ("append: refused, the register on disk is {} byte(s) but the validated text "
@@ -1738,7 +1877,7 @@ def self_test():
         other_st = os.lstat(str(swap_other))
         os.rmdir(str(swap_dir))
         os.rename(str(swap_other), str(swap_dir))
-        left, skipped = _made_dirs_swept([(swap_dir, swap_st.st_dev, swap_st.st_ino)])
+        left, skipped, _closes = _made_dirs_swept([(swap_dir, swap_st.st_dev, swap_st.st_ino)])
         swap_after = entry_state(swap_dir)
         if (not left or "no longer the directory this call created" not in left[0]
                 or str(swap_dir) not in left[0] or skipped or swap_after is None
@@ -1755,7 +1894,7 @@ def self_test():
         type_st = os.lstat(str(type_dir))
         os.rmdir(str(type_dir))
         type_dir.write_text("not a directory", encoding="utf-8")
-        left, skipped = _made_dirs_swept([(type_dir, type_st.st_dev, type_st.st_ino)])
+        left, skipped, _closes = _made_dirs_swept([(type_dir, type_st.st_dev, type_st.st_ino)])
         if (not left or "no longer the directory this call created" not in left[0]
                 or skipped or entry_state(type_dir) is None):
             failures.append("swept-type: a non-directory at a made component's name must "
@@ -1772,7 +1911,7 @@ def self_test():
         sweep_inner.mkdir()
         sweep_inner_st = os.lstat(str(sweep_inner))
         os.rmdir(str(sweep_inner))
-        left, skipped = _made_dirs_swept(
+        left, skipped, _closes = _made_dirs_swept(
             [(sweep_inner, sweep_inner_st.st_dev, sweep_inner_st.st_ino),
              (sweep_outer, sweep_outer_st.st_dev, sweep_outer_st.st_ino)])
         if left or skipped != [str(sweep_inner)] or entry_state(sweep_outer) is not None:
@@ -1803,7 +1942,7 @@ def self_test():
             anc_made = _dirs_created(repo / "mk7" / "deep")
         finally:
             os.mkdir = real_os_mkdir
-        left, skipped = _made_dirs_swept(anc_made)
+        left, skipped, _closes = _made_dirs_swept(anc_made)
         planted_deep = entry_state(repo / "mk7" / "deep")
         if (len(anc_made) != 2 or skipped or len(left) != 2
                 or "no longer the directory this call created" not in left[0]
@@ -1838,7 +1977,7 @@ def self_test():
             resid_made = _dirs_created(repo / "mk8")
         finally:
             os.mkdir = real_os_mkdir
-        left, skipped = _made_dirs_swept(resid_made)
+        left, skipped, _closes = _made_dirs_swept(resid_made)
         displaced_st = entry_state(repo / "mk8-displaced")
         if (resid_made != [(repo / "mk8", intruder_st.st_dev, intruder_st.st_ino)]
                 or left or skipped or entry_state(repo / "mk8") is not None
@@ -1864,7 +2003,7 @@ def self_test():
         finally:
             os.mkdir = real_os_mkdir
         raced_before = os.lstat(str(repo / "mk6"))
-        left, skipped = _made_dirs_swept(raced_made)
+        left, skipped, _closes = _made_dirs_swept(raced_made)
         raced_after = entry_state(repo / "mk6")
         if ([m[0] for m in raced_made] != [repo / "mk6" / "deep"] or left or skipped
                 or entry_state(repo / "mk6" / "deep") is not None or raced_after is None
@@ -1905,7 +2044,7 @@ def self_test():
         finally:
             os.mkdir = real_os_mkdir
         percomp_ids = [(dev, ino) for _p, dev, ino in percomp_made]
-        left, skipped = _made_dirs_swept(percomp_made)
+        left, skipped, _closes = _made_dirs_swept(percomp_made)
         if (percomp_ids != [(donor_b_st.st_dev, donor_b_st.st_ino),
                             (donor_a_st.st_dev, donor_a_st.st_ino)]
                 or left or skipped or entry_state(repo / "w2a") is not None
@@ -1937,7 +2076,7 @@ def self_test():
 
         os.rmdir = window_swapping_rmdir
         try:
-            left, skipped = _made_dirs_swept(win_made)
+            left, skipped, _closes = _made_dirs_swept(win_made)
         finally:
             os.rmdir = real_os_rmdir
         if (left or skipped or entry_state(repo / "win1") is not None
@@ -1966,7 +2105,7 @@ def self_test():
 
         os.rmdir = window2_swapping_rmdir
         try:
-            left, skipped = _made_dirs_swept(win2_made)
+            left, skipped, _closes = _made_dirs_swept(win2_made)
         finally:
             os.rmdir = real_os_rmdir
         if (left != [str(repo / "win2")] or skipped
@@ -1981,7 +2120,9 @@ def self_test():
             os.rmdir(str(repo / "win2-original"))))
         # ---- an ancestor swapped for a SYMLINK while the sweep runs redirects nothing:
         # every removal goes through the held descriptor (the recorded tree, wherever a
-        # rename moved it), never through a re-resolved string path, so the victim tree the
+        # rename moved it AFTER the sweep opened the recorded outer parent by path; a
+        # rename before the sweep starts is not followed), never through a re-resolved
+        # string path, so the victim tree the
         # symlink names survives and the swapped ancestor is left in place and named (red
         # with the sweep reverted to string paths: the victim's inner directory was removed
         # through the symlink)
@@ -1998,7 +2139,7 @@ def self_test():
 
         os.rmdir = sweep_swapping_rmdir
         try:
-            left, skipped = _made_dirs_swept(sw_made)
+            left, skipped, _closes = _made_dirs_swept(sw_made)
         finally:
             os.rmdir = real_os_rmdir
         if (entry_state(repo / "victim" / "deep") is None or skipped or len(left) != 1
@@ -2074,7 +2215,7 @@ def self_test():
         finally:
             os.mkdir = real_os_mkdir
         x2_entry = os.lstat(str(repo / "x2"))
-        left, skipped = _made_dirs_swept(x2_made)
+        left, skipped, _closes = _made_dirs_swept(x2_made)
         if (len(x2_made) != 1
                 or (x2_made[0][1], x2_made[0][2]) != (x2_entry.st_dev, x2_entry.st_ino)
                 or (x2_made[0][1], x2_made[0][2])
@@ -2120,7 +2261,7 @@ def self_test():
         finally:
             os.open = real_os_open
             os.close = real_os_close
-        left, skipped = _made_dirs_swept(x3_made)
+        left, skipped, _closes = _made_dirs_swept(x3_made)
         if fd_bad or fd_live or len(fd_opens) != 3 or left or skipped:
             failures.append("creation-descriptors-closed-once: the walk must close every "
                             "descriptor it opened exactly once (the ancestor plus one per "
@@ -2167,8 +2308,9 @@ def self_test():
             os.rmdir(str(repo / "anc9-aside"))))
         # ---- a close failure in the creation walk is a named CannotEvaluate, raised only
         # after the sweep ran and with its outcome in the message, never a raw OSError
-        # (red with the descent's close restored to a bare os.close: the injected OSError
-        # escapes the walk unwrapped)
+        # (red with the descent handoff close restored to a bare os.close: the injected
+        # OSError escapes the walk unwrapped; this vector catches its own OSError, so
+        # that failure is attributed here, never to the shared fixture handler)
         c3fail = {"fired": False}
 
         def failing_close(cfd):
@@ -2179,25 +2321,70 @@ def self_test():
             return real_os_close(cfd)
 
         os.close = failing_close
+        c3_refusal = c3_raw = None
         try:
             try:
                 _dirs_created(repo / "c3a" / "c3b")
             except CannotEvaluate as exc:
                 c3_refusal = str(exc)
-            else:
-                c3_refusal = None
+            except OSError as exc:
+                c3_raw = exc
         finally:
             os.close = real_os_close
-        if (c3_refusal is None or "could not be closed" not in c3_refusal
+        if (c3_raw is not None or c3_refusal is None
+                or "could not be closed" not in c3_refusal
                 or "removed" not in c3_refusal or entry_state(repo / "c3a") is not None):
             failures.append("close-failure-cannot-evaluate: a failing close in the creation "
-                            "walk must raise CannotEvaluate naming the step and the sweep's "
-                            "outcome, with the created component removed, got "
-                            "refusal={}".format(c3_refusal))
-        # ---- a close failure inside the sweep is recorded in the sweep's own outcome and
-        # NAMED, with the removals still done, and is never raised (red with the sweep's
-        # close of its descent descriptor unguarded: the injected OSError escapes the
-        # sweep)
+                            "walk must raise CannotEvaluate naming the step and the sweep "
+                            "outcome, never a raw OSError, with the created component "
+                            "removed, got refusal={} raw={!r}".format(c3_refusal, c3_raw))
+        vector_cleanup("close-failure-cannot-evaluate", lambda: (
+            os.rmdir(str(repo / "c3a")) if entry_state(repo / "c3a") is not None
+            else None))
+        # ---- the FINAL close of the creation walk (the descriptor held on the created
+        # register directory itself) is wrapped too: a SINGLE-component creation, whose
+        # only close is that final one, gives a named CannotEvaluate only after the sweep
+        # removed the component, never a raw OSError (red with that close restored to a
+        # bare os.close; this vector catches its own OSError, so that failure is
+        # attributed here, never to the shared fixture handler)
+        c5fail = {"fired": False}
+
+        def final_failing_close(cfd):
+            real_os_close(cfd)
+            if not c5fail["fired"]:
+                c5fail["fired"] = True
+                raise OSError(5, "injected close failure")
+
+        os.close = final_failing_close
+        c5_refusal = c5_raw = None
+        try:
+            try:
+                _dirs_created(repo / "c5")
+            except CannotEvaluate as exc:
+                c5_refusal = str(exc)
+            except OSError as exc:
+                c5_raw = exc
+        finally:
+            os.close = real_os_close
+        if (c5_raw is not None or c5_refusal is None
+                or "could not be closed" not in c5_refusal
+                or "were removed" not in c5_refusal
+                or entry_state(repo / "c5") is not None):
+            failures.append("creation-final-close-wrapped: a single-component creation "
+                            "whose final close fails must raise a named CannotEvaluate "
+                            "after the sweep removed the component, never a raw OSError, "
+                            "got refusal={} raw={!r}".format(c5_refusal, c5_raw))
+        vector_cleanup("creation-final-close-wrapped", lambda: (
+            os.rmdir(str(repo / "c5")) if entry_state(repo / "c5") is not None
+            else None))
+        # ---- a close failure inside the sweep is recorded as a CLOSE failure, KEPT
+        # APART from the removal outcomes, with the removals still done and nothing
+        # raised; the caller refusal clause (_made_dirs_note) renders it as a close
+        # failure, never as a directory left in place (red with the sweep closes
+        # unguarded, and red when a close failure is folded into the left-in-place list:
+        # the note then claims a removed directory was left in place; this vector catches
+        # its own OSError, so that failure is attributed here, never to the shared
+        # fixture handler)
         c4_made = _dirs_created(repo / "c4a" / "c4b")
         c4fail = {"fired": False}
 
@@ -2208,16 +2395,245 @@ def self_test():
                 raise OSError(5, "injected close failure")
 
         os.close = sweep_failing_close
+        c4_note = c4_raw = None
         try:
-            left, skipped = _made_dirs_swept(c4_made)
+            try:
+                c4_note = _made_dirs_note(c4_made)
+            except OSError as exc:
+                c4_raw = exc
         finally:
             os.close = real_os_close
-        if (skipped or len(left) != 1 or "could not be closed" not in left[0]
-                or entry_state(repo / "c4a") is not None
-                or entry_state(repo / "c4a" / "c4b") is not None):
+        if (c4_raw is not None or c4_note is None
+                or "could not be closed" not in c4_note
+                or "not a directory left in place" not in c4_note
+                or "could not be removed" in c4_note
+                or "the directory components this call made were removed" not in c4_note
+                or entry_state(repo / "c4a") is not None):
             failures.append("sweep-close-failure-recorded: a failing close in the sweep "
-                            "must be named in its outcome with the removals still done, "
-                            "never raised, got left={} skipped={}".format(left, skipped))
+                            "must be rendered in the caller refusal clause as a close "
+                            "failure with the removals still done, never as a directory "
+                            "left in place and never raised, got note={} raw={!r}".format(
+                                c4_note, c4_raw))
+        vector_cleanup("sweep-close-failure-recorded", lambda: (
+            os.rmdir(str(repo / "c4a" / "c4b")) if entry_state(repo / "c4a" / "c4b")
+            is not None else None,
+            os.rmdir(str(repo / "c4a")) if entry_state(repo / "c4a") is not None
+            else None))
+        # ---- a DISCONTINUOUS record: a raced mkdir by another actor wins the MIDDLE
+        # component, so creation records the outer and the inner component but never the
+        # middle; the sweep descends through the unrecorded middle BY NAME, removes the
+        # recorded inner component, keeps the raced middle (nothing unrecorded is ever
+        # removed) and NAMES the outer component it cannot remove; nothing is counted
+        # already absent (red when the sweep assumes each recorded component is the
+        # direct child of the previous one: the inner component is then reported absent
+        # and left on disk)
+        rmid = {"fired": False}
+
+        def racing_middle_mkdir(mp, *margs, **mkw):
+            if not rmid["fired"] and os.fspath(mp).endswith("rmb"):
+                rmid["fired"] = True
+                real_os_mkdir(mp, *margs, **mkw)  # another actor wins the race
+            return real_os_mkdir(mp, *margs, **mkw)
+
+        os.mkdir = racing_middle_mkdir
+        try:
+            rmid_made = _dirs_created(repo / "rma" / "rmb" / "rmc")
+        finally:
+            os.mkdir = real_os_mkdir
+        left, skipped, closes = _made_dirs_swept(rmid_made)
+        if ([m[0] for m in rmid_made] != [repo / "rma" / "rmb" / "rmc", repo / "rma"]
+                or skipped or closes or left != [str(repo / "rma")]
+                or entry_state(repo / "rma" / "rmb" / "rmc") is not None
+                or entry_state(repo / "rma" / "rmb") is None):
+            failures.append("raced-middle-component-swept: a component recorded behind a "
+                            "raced unrecorded middle directory must be removed through "
+                            "it, never counted absent, with the raced middle kept and the "
+                            "non-empty outer component named, got made={} left={} "
+                            "skipped={} closes={}".format(rmid_made, left, skipped,
+                                                          closes))
+        vector_cleanup("raced-middle-component-swept", lambda: (
+            os.rmdir(str(repo / "rma" / "rmb")), os.rmdir(str(repo / "rma"))))
+        # ---- a register path containing a dot-dot component records a discontinuous,
+        # non-sibling chain too; the lexical descent reaches both recorded components
+        # through the held descriptors and removes them (red when the sweep assumes
+        # direct children: the component past the dot-dot is then reported absent and
+        # left on disk)
+        dd_made = _dirs_created(repo / "dd1" / ".." / "dd2")
+        left, skipped, closes = _made_dirs_swept(dd_made)
+        if (len(dd_made) != 2 or left or skipped or closes
+                or entry_state(repo / "dd1") is not None
+                or entry_state(repo / "dd2") is not None):
+            failures.append("dotdot-register-path-swept: both recorded components of a "
+                            "dot-dot register path must be removed, got made={} left={} "
+                            "skipped={} closes={}".format(dd_made, left, skipped, closes))
+        # ---- the sweep is ITERATIVE and holds at most two descriptors at a time: a
+        # 1500-component record (deeper than the default interpreter recursion limit and
+        # deeper than the default descriptor limit) is created and swept completely (red
+        # with a recursive sweep: RecursionError)
+        deep_base = repo / "deepbase"
+        deep_base.mkdir()
+        deep_path = deep_base
+        for _i in range(1500):
+            deep_path = deep_path / "d"
+        deep_made = []
+        deep_err = deep_left = deep_skipped = deep_closes = None
+        try:
+            deep_made = _dirs_created(deep_path)
+            deep_left, deep_skipped, deep_closes = _made_dirs_swept(deep_made)
+        except RecursionError as exc:
+            deep_err = exc
+        if (deep_err is not None or len(deep_made) != 1500 or deep_left or deep_skipped
+                or deep_closes or entry_state(deep_base / "d") is not None):
+            failures.append("deep-chain-iterative-sweep: a 1500-component record must be "
+                            "created and swept completely, with no recursion limit and no "
+                            "descriptor exhaustion, got err={!r} made={} left={} "
+                            "skipped={} closes={}".format(deep_err, len(deep_made),
+                                                          deep_left, deep_skipped,
+                                                          deep_closes))
+        vector_cleanup("deep-chain-iterative-sweep", lambda: os.rmdir(str(deep_base)))
+        # ---- every descriptor the sweep opens is closed exactly once even when a
+        # non-OSError exception is injected mid-sweep: the finally unwinds the held
+        # descriptors, the exception propagates, and live-set accounting (as in
+        # creation-descriptors-closed-once) shows no leak and no double close (red
+        # without the finally: every held descriptor leaks)
+        real_os_fstat = os.fstat
+        nleak_made = _dirs_created(repo / "nl1" / "nl2" / "nl3")
+        fd_opens2, fd_live2, fd_bad2 = [], set(), []
+
+        def counting_open2(*oargs, **okw):
+            out = real_os_open(*oargs, **okw)
+            fd_opens2.append(out)
+            fd_live2.add(out)
+            return out
+
+        def counting_close2(cfd):
+            if cfd in fd_live2:
+                fd_live2.discard(cfd)
+            else:
+                fd_bad2.append(cfd)
+            return real_os_close(cfd)
+
+        nleak = {"count": 0}
+
+        def nonos_fstat(ffd, *fargs, **fkw):
+            if isinstance(ffd, int) and ffd in fd_live2:
+                nleak["count"] += 1
+                if nleak["count"] == 2:
+                    raise ValueError("injected non-OSError mid-sweep")
+            return real_os_fstat(ffd, *fargs, **fkw)
+
+        os.open = counting_open2
+        os.close = counting_close2
+        os.fstat = nonos_fstat
+        nleak_err = None
+        try:
+            try:
+                _made_dirs_swept(nleak_made)
+            except ValueError as exc:
+                nleak_err = exc
+        finally:
+            os.open = real_os_open
+            os.close = real_os_close
+            os.fstat = real_os_fstat
+        leaked = list(fd_live2)
+        for lfd in leaked:
+            try:
+                real_os_close(lfd)
+            except OSError:
+                pass
+        if nleak_err is None or leaked or fd_bad2 or len(fd_opens2) < 2:
+            failures.append("sweep-nonoserror-no-descriptor-leak: a non-OSError raised "
+                            "mid-sweep must propagate with every descriptor the sweep "
+                            "opened closed exactly once, got err={!r} opens={} "
+                            "still-open={} double={}".format(nleak_err, fd_opens2,
+                                                             leaked, fd_bad2))
+        vector_cleanup("sweep-nonoserror-no-descriptor-leak", lambda: (
+            os.rmdir(str(repo / "nl1" / "nl2" / "nl3")),
+            os.rmdir(str(repo / "nl1" / "nl2")), os.rmdir(str(repo / "nl1"))))
+        # ---- the sweep descent identity re-check carries its own vector: a DIFFERENT
+        # directory substituted at a recorded parent name (holding the directory the
+        # call actually created, moved inside it) stops the descent; the components
+        # beneath are left in place and named, never removed through the substitute (red
+        # with the descent identity comparison dropped: the recorded inner component is
+        # then removed out of the substitute)
+        z1_made = _dirs_created(repo / "z1" / "z1c")
+        os.rename(str(repo / "z1"), str(repo / "z1-aside"))
+        (repo / "z1").mkdir()
+        os.rename(str(repo / "z1-aside" / "z1c"), str(repo / "z1" / "z1c"))
+        left, skipped, closes = _made_dirs_swept(z1_made)
+        if (skipped or closes or len(left) != 2
+                or "is no longer the directory this call created" not in left[0]
+                or "no longer the directory this call created" not in left[1]
+                or entry_state(repo / "z1" / "z1c") is None
+                or entry_state(repo / "z1-aside") is None):
+            failures.append("sweep-descent-identity-substitution: a different directory "
+                            "substituted at a recorded parent name must stop the descent, "
+                            "the components beneath it left in place and named, got "
+                            "left={} skipped={} closes={}".format(left, skipped, closes))
+        vector_cleanup("sweep-descent-identity-substitution", lambda: (
+            os.rmdir(str(repo / "z1" / "z1c")), os.rmdir(str(repo / "z1")),
+            os.rmdir(str(repo / "z1-aside"))))
+        # ---- O_NOFOLLOW on the sweep descent carries its own vector: the recorded
+        # parent renamed aside and a SYMLINK to it left at its name refuses the descent,
+        # and nothing is removed through the symlink target even though the target IS
+        # the recorded directory (red with O_NOFOLLOW dropped from the descent open: the
+        # open follows the symlink, the identity matches, and the inner component is
+        # removed through it)
+        z2_made = _dirs_created(repo / "z2" / "z2c")
+        os.rename(str(repo / "z2"), str(repo / "z2-victim"))
+        os.symlink(str(repo / "z2-victim"), str(repo / "z2"))
+        left, skipped, closes = _made_dirs_swept(z2_made)
+        if (skipped or closes or len(left) != 2
+                or "cannot be descended into" not in left[0]
+                or "no longer the directory this call created" not in left[1]
+                or entry_state(repo / "z2-victim" / "z2c") is None):
+            failures.append("sweep-descent-nofollow-symlink: a symlink at a recorded "
+                            "parent name must refuse the descent with nothing removed "
+                            "through its target, got left={} skipped={} closes={}".format(
+                                left, skipped, closes))
+        vector_cleanup("sweep-descent-nofollow-symlink", lambda: (
+            os.unlink(str(repo / "z2")), os.rmdir(str(repo / "z2-victim" / "z2c")),
+            os.rmdir(str(repo / "z2-victim"))))
+        # ---- the removal re-check runs relative to the HELD descriptor, never a
+        # re-resolved string path, and that carries its own vector: after the descent,
+        # the recorded parent is renamed aside with an impostor child inside it while a
+        # fresh directory at the recorded string path receives the ORIGINAL recorded
+        # child; the held-descriptor re-check sees the impostor and refuses, naming it
+        # (red with the re-check re-resolving the string path: it sees the recorded
+        # identity there, passes, and the rmdir through the held descriptor removes the
+        # impostor)
+        y1_made = _dirs_created(repo / "y1" / "y1c")
+        (repo / "y1-imp").mkdir()
+        y3swap = {"count": 0}
+
+        def y3_swapping_fstat(ffd, *fargs, **fkw):
+            out = real_os_fstat(ffd, *fargs, **fkw)
+            y3swap["count"] += 1
+            if y3swap["count"] == 2:
+                os.rename(str(repo / "y1" / "y1c"), str(repo / "keepc"))
+                os.rename(str(repo / "y1-imp"), str(repo / "y1" / "y1c"))
+                os.rename(str(repo / "y1"), str(repo / "y1-aside"))
+                real_os_mkdir(str(repo / "y1"))
+                os.rename(str(repo / "keepc"), str(repo / "y1" / "y1c"))
+            return out
+
+        os.fstat = y3_swapping_fstat
+        try:
+            left, skipped, closes = _made_dirs_swept(y1_made)
+        finally:
+            os.fstat = real_os_fstat
+        if (skipped or closes or len(left) != 2
+                or "no longer the directory this call created" not in left[0]
+                or "no longer the directory this call created" not in left[1]
+                or entry_state(repo / "y1-aside" / "y1c") is None
+                or entry_state(repo / "y1" / "y1c") is None):
+            failures.append("sweep-recheck-by-descriptor-not-path: the removal re-check "
+                            "must run relative to the held descriptor and keep the "
+                            "impostor it sees there, got left={} skipped={} "
+                            "closes={}".format(left, skipped, closes))
+        vector_cleanup("sweep-recheck-by-descriptor-not-path", lambda: (
+            os.rmdir(str(repo / "y1" / "y1c")), os.rmdir(str(repo / "y1")),
+            os.rmdir(str(repo / "y1-aside" / "y1c")), os.rmdir(str(repo / "y1-aside"))))
         # an anchor lstat failure that is NOT absence (EIO here) is cannot-evaluate, never the
         # missing-anchor allowance and never an append past an uninspectable authority
         declare(mistakes_register="anchio.jsonl")
@@ -2293,7 +2709,15 @@ def self_test():
           "recorded device and inode with a no-follow stat relative to its parent's "
           "descriptor and removes it with rmdir relative to that same descriptor, so an "
           "ancestor swapped for a symlink during the sweep redirects no removal and the "
-          "victim tree survives; an entry "
+          "victim tree survives, with the descent identity re-check, the descent "
+          "O_NOFOLLOW and the held-descriptor removal re-check each pinned by its own "
+          "red-under-mutant vector; the sweep is iterative and holds at most two "
+          "descriptors however deep the record (probed at a 1500-component record), "
+          "closes every descriptor it opens exactly once in a finally (probed by "
+          "live-set accounting under an injected non-OSError), descends a "
+          "discontinuous record through a raced unrecorded middle component by name, "
+          "removing nothing unrecorded and naming what it cannot reach, never counting "
+          "it absent, and sweeps a dot-dot register path completely; an entry "
           "replaced by another empty directory, or by a non-directory, is left in place and "
           "named; a mkdir raced by another actor is used, never recorded, and survives the "
           "sweep; an outer component swapped aside cannot substitute a planted tree's entry "
@@ -2303,15 +2727,19 @@ def self_test():
           "never a symlink's target's; the creation walk closes every descriptor it opened "
           "exactly once on the clean path, a close failure there is a named cannot-evaluate "
           "raised only after the sweep ran, and a close failure inside the sweep is named "
-          "in the sweep's outcome, never raised and never a raw OSError; the disclosed "
-          "residual is pinned by vectors, with its exact bound: each removal is rmdir of an "
-          "entry that is an EMPTY directory at removal time, at most one moved-in empty "
-          "directory per created component (the mkdir-to-stat window, probed at two "
-          "components in one call, each moved-in directory recorded and removed and each "
-          "displaced created directory surviving) plus the identity-check-to-rmdir window "
-          "(an empty directory swapped in between the sweep's re-check and its rmdir is "
-          "removed, a non-empty one is left in place and named), and ownership is not "
-          "guaranteed across either window; the "
+          "in the sweep's outcome as a close failure, kept apart from the removal "
+          "outcomes (never rendered as a directory left in place, checked in the caller "
+          "refusal clause), never raised and never a raw OSError, and the final close of "
+          "the creation walk is wrapped too (a single-component creation whose final "
+          "close fails is a named cannot-evaluate after the sweep); the disclosed "
+          "residual is pinned by vectors, with its exact bound stated once, at "
+          "_made_dirs_swept (abbreviated: rmdir of an EMPTY directory only, within the "
+          "two disclosed windows, inode reuse included; never a non-empty directory and "
+          "never a file); the mkdir-to-stat window is probed at two components in one "
+          "call (each moved-in directory recorded and removed, each displaced created "
+          "directory surviving) and the identity-check-to-rmdir window with an empty and "
+          "a non-empty swap (the empty one removed, the non-empty one left in place and "
+          "named); the "
           "sweep does not stop at an already-absent component, the outer component is still "
           "removed and the absent one reported skipped, what cannot be removed is named and "
           "left in place, and a created file already gone at the cleanup is said to be "
@@ -2324,7 +2752,10 @@ def self_test():
           "place), while the first row of an absent register is validated before its "
           "exclusive creation and the created file is re-checked under the acquired lock, "
           "identity and size still zero, the serialization there being the exclusive "
-          "creation plus those under-lock re-checks, not a second validation; and every "
+          "creation plus those under-lock re-checks, not a second validation (they catch "
+          "the cooperating register-row interleavings their identity and size "
+          "comparisons detect; other validation inputs, the anchor included, are not "
+          "revalidated under the lock); and every "
           "clean append is re-read with its last row and "
           "verify_lines checked")
     return 0
