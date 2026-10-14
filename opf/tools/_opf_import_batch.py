@@ -226,7 +226,7 @@ def _dos_short_pattern(name):
     for run in range(2, 7):
         cut = 7 - run
         if 0 < cut < len(stem):
-            arms.append("{}~{}{{{}}}".format(re.escape(stem[:cut]), "[0-9]", run))
+            arms.append("{}~[0-9]{{{}}}".format(re.escape(stem[:cut]), run))
     return "(?:{})".format("|".join(arms)) + ext_re
 
 
@@ -591,13 +591,14 @@ def _resolve_links(content, where, local_ids, minted, findings):
 def _refuse_minted_scopes(content, where, minted, findings):
     """The links aliasing rule applied to a block row's `scopes`, the ONLY other record-id-bearing row
     member (enumerated in the module docstring: the record's own `id` is writer-authored and refused,
-    `refs` rows carry locators, `unrecorded` and `history` rows carry schema field names, and no other
-    baseline member holds a record id): a scopes entry spelling a placeholder this batch itself mints
-    is a genuine alias of a batch row and is refused by name; scopes resolve no batch-local key, so a
-    verbatim entry names a record that already exists in the store, and no real id can spell a
-    placeholder. The entry stays in place for _masked_for_validation, so the refusal is the single
-    finding for that entry. A scopes member that is not a list, and a non-string entry, pass through
-    for the validator's own shape findings."""
+    `refs` rows carry locators and notes, `unrecorded` rows carry schema field names, a `history` row
+    carries a schema field name and a verbatim source `value` string, `actor.id` names an actor, and
+    no other baseline member holds a record id): a scopes entry spelling a placeholder this batch
+    itself mints is a genuine alias of a batch row and is refused by name; scopes resolve no
+    batch-local key, so a verbatim entry names a record that already exists in the store, and no
+    real id can spell a placeholder. The entry stays in place for _masked_for_validation, so the
+    refusal is the single finding for that entry. A scopes member that is not a list, and a
+    non-string entry, pass through for the validator's own shape findings."""
     scopes = content.get("scopes")
     if type(scopes) is not list:
         return
@@ -1169,6 +1170,46 @@ def self_test():
                   _refuses(got, INVALID, "lies inside a control area"))
         got = parse_batch(_edited('path = "notes/old.md"', 'path = "worki~1/x"'))
         check("source-path-working-short-prefix-one-digit-valid", got.status == VALID)
+        # The REMAINING tail lengths, one refusal per tail length 4, 5 and 6 and per control name
+        # family, cut stems and extension-bearing names included (a d-digit tail cuts the stem to
+        # 7 - d characters), each beside its ADJACENT acceptance: the same cut stem with one digit
+        # fewer matches no arm and stays a plain product path. Narrowing range(2, 7) to (2, 4),
+        # (2, 5) or (2, 6), skipping the cut arms of a six-character stem, or a cut arm admitting a
+        # shorter run than its cut implies, turns one of these red.
+        for name, bad in (("working-shortname-four-digit", "WOR~1000/x"),
+                          ("working-shortname-five-digit", "WO~10000/x"),
+                          ("working-shortname-six-digit", "W~100000/x"),
+                          ("git-shortname-five-digit", "GI~12345/x"),
+                          ("store-area-shortname-four-digit", "AIQ~1234/x"),
+                          ("pointer-shortname-five-digit", "OP~10000.TOM"),
+                          ("pointer-shortname-six-digit", "O~100000.TOM")):
+            got = parse_batch(_edited('path = "notes/old.md"', 'path = "{}"'.format(bad)))
+            check("source-path-" + name + "-refused",
+                  _refuses(got, INVALID, "lies inside a control area"))
+        for name, good in (("working-short-prefix-three-digit", "wor~100/x"),
+                           ("working-short-prefix-four-digit", "wo~1000/x"),
+                           ("working-short-prefix-five-digit", "w~10000/x"),
+                           ("git-short-prefix-four-digit", "gi~1234/x"),
+                           ("store-area-short-prefix-three-digit", "aiq~123/x"),
+                           ("pointer-short-prefix-four-digit", "op~1000.tom"),
+                           ("pointer-short-prefix-five-digit", "o~10000.tom")):
+            got = parse_batch(_edited('path = "notes/old.md"', 'path = "{}"'.format(good)))
+            check("source-path-" + name + "-valid", got.status == VALID)
+        # The 8.3 arm table itself, pinned LITERALLY for every control name and every digit run,
+        # spelled out as data rather than re-derived at run time: the full-stem any-run arm, each
+        # cut stem with its exact run length, and the cut extension where the name carries one.
+        # A dropped run, a changed cut or a lost extension turns this red.
+        expected_short = {
+            ".git": "(?:git~[0-9]+|gi~[0-9]{5}|g~[0-9]{6})",
+            ".aiqt": "(?:aiqt~[0-9]+|aiq~[0-9]{4}|ai~[0-9]{5}|a~[0-9]{6})",
+            ".working": "(?:workin~[0-9]+|worki~[0-9]{2}|work~[0-9]{3}|wor~[0-9]{4}|wo~[0-9]{5}"
+                        "|w~[0-9]{6})",
+            ".opf.toml": "(?:opf~[0-9]+|op~[0-9]{5}|o~[0-9]{6})\\.tom",
+            ".opf.local.toml": "(?:opfloc~[0-9]+|opflo~[0-9]{2}|opfl~[0-9]{3}|opf~[0-9]{4}"
+                               "|op~[0-9]{5}|o~[0-9]{6})\\.tom",
+        }
+        check("dos-short-patterns-pinned", set(_CONTROL_COMPONENTS) == set(expected_short)
+              and all(_dos_short_pattern(n) == expected_short[n] for n in expected_short))
         # Every declared HFS+-ignorable code point, enumerated INDEPENDENTLY of _HFS_IGNORABLE (the
         # expected set is never re-derived from the implementation): U+200C..U+200F, U+202A..U+202E,
         # U+206A..U+206F and U+FEFF, each dropped by an HFS+ name lookup, so .g<cp>it/x names .git.
@@ -1199,6 +1240,27 @@ def self_test():
         got = parse_batch(_edited('status = "done"\n', 'proposed_from = "open"\nstatus = "done"\n'))
         check("validator-proposed-from-refused", got.status == INVALID
               and any("never carries proposed_from" in f for f in got.findings))
+        # Collection scope pinned (the module docstring's three early stops): a source finding that
+        # is NOT a missing or unusable path, a caller-supplied measurement in [source] included,
+        # leaves row building intact, so the rows' own validator findings ride beside it, while an
+        # UNUSABLE path builds and validates no row and staging's writer-authored refusal still
+        # fires (red when row building is skipped on any source finding, or run on a path finding).
+        got = parse_batch(_edited('path = "notes/old.md"\n', 'path = "notes/old.md"\nsize = 5\n')
+                          .replace(b'status = "done"\n',
+                                   b'proposed_from = "open"\nstatus = "done"\n', 1))
+        check("source-measurement-leaves-row-building-intact", got.status == INVALID
+              and any("caller-supplied measurement 'size'" in f for f in got.findings)
+              and any("never carries proposed_from" in f for f in got.findings))
+        bad_src = _edited('path = "notes/old.md"', 'path = "../x"')
+        bad_src = bad_src.replace(b'key = "r1"\ntype = "backlog_item"\n',
+                                  b'key = "r1"\ntype = "backlog_item"\nid = "XX-1"\n', 1)
+        bad_src = bad_src.replace(b'status = "done"\n',
+                                  b'proposed_from = "open"\nstatus = "done"\n', 1)
+        got = parse_batch(bad_src)
+        check("unusable-source-path-builds-no-row", got.status == INVALID
+              and any("not a canonical product-relative file path" in f for f in got.findings)
+              and any("writer-authored member 'id'" in f for f in got.findings)
+              and not any("proposed_from" in f for f in got.findings))
 
         # A supplied historical timestamp is accepted (the placeholder import clock is the latest
         # instant, so the real bound binds at write time, where the writer re-validates).
@@ -1289,6 +1351,53 @@ def self_test():
               and got.batch.canonical == refed
               and got.batch.rows[0].record["refs"]
               == [{"kind": "path", "locator": bi_ph, "note": wl_ph}])
+        # An `unparsed` entry carrying placeholder-LOOKING text rides the batch the same way:
+        # VALID, byte-identical, and moved into the built import table verbatim.
+        masked_text = _FIXTURE.decode("utf-8").replace(
+            'links = [{key = "w1", rel = "relates"}]',
+            'history = [{field = "title", value = "' + bi_ph + '"}]\n'
+            'links = [{key = "w1", rel = "relates"}]\n'
+            'refs = [{kind = "path", locator = "' + bi_ph + '", note = "' + wl_ph + '"}]', 1)
+        masked_text = masked_text.replace(
+            'title = "Old backlog item"\n',
+            'title = "' + bi_ph + '"\nunparsed = ["' + bi_ph + '"]\n', 1)
+        masked_doc = masked_text.encode("utf-8")
+        got = parse_batch(masked_doc)
+        mrow = got.batch.rows[0]
+        check("placeholder-text-unparsed-preserved", got.status == VALID
+              and got.batch.canonical == masked_doc
+              and mrow.record["import"]["unparsed"] == [bi_ph])
+        # The SEPARATE validation copy, asserted directly: _masked_for_validation re-spells minted
+        # placeholders at EXACTLY the record-id-bearing positions (here the record's own id and the
+        # key-resolved links[0].id) and changes nothing else, so the copy equals the built record
+        # with only those two members re-spelled, the placeholder-LOOKING title, history value,
+        # refs locator and note and unparsed entry preserved verbatim, and the built record itself
+        # untouched (red when a spelling scan re-spells preserved text anywhere in the copy, or
+        # when the helper writes through to the stored record).
+        minted_here = frozenset(r.placeholder_id for r in got.batch.rows)
+        before = copy.deepcopy(mrow.record)
+        masked = _masked_for_validation(mrow.record, minted_here)
+        expected = copy.deepcopy(before)
+        expected["id"] = _validation_mask(bi_ph)
+        expected["links"][0]["id"] = _validation_mask(wl_ph)
+        check("masked-copy-positional-only", masked == expected
+              and masked is not mrow.record and mrow.record == before
+              and masked["title"] == bi_ph
+              and masked["import"]["history"] == [{"field": "title", "value": bi_ph}]
+              and masked["refs"] == [{"kind": "path", "locator": bi_ph, "note": wl_ph}]
+              and masked["import"]["unparsed"] == [bi_ph])
+        # The THIRD record-id-bearing position, `scopes`, asserted by a direct call (a parsed
+        # batch refuses a minted scopes entry before validation, so the arm needs a synthetic
+        # record): a minted entry is re-spelled to its mask, a verbatim entry naming an earlier
+        # run's id is preserved, and the synthetic record is untouched.
+        bk_ph = "imported:{}-01".format(bk)
+        synthetic = {"id": bk_ph, "type": "block", "scopes": [bk_ph, "imported:" + bi + "-7"]}
+        masked_syn = _masked_for_validation(synthetic, frozenset({bk_ph}))
+        check("masked-copy-scopes-position",
+              masked_syn == {"id": _validation_mask(bk_ph), "type": "block",
+                             "scopes": [_validation_mask(bk_ph), "imported:" + bi + "-7"]}
+              and synthetic == {"id": bk_ph, "type": "block",
+                                "scopes": [bk_ph, "imported:" + bi + "-7"]})
         # A returned validator finding labels its row by the PLACEHOLDER spelling, never by the
         # well-formed mask it was judged under: the mask is exactly a spelling a real store
         # record could carry (red when the re-label is dropped).
