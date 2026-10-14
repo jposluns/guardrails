@@ -25,7 +25,8 @@ generator alone cannot assert:
     designated line: the proof line is the FIRST line that opens bold with a digit, and the proof
     wording must open it, while a table-row wording is read on every line its anchor names. Every
     occurrence of a wording on a designated line is read with the whole numeric field captured, and
-    every digit run on a designated line must lie inside an anchored wording match, so a second,
+    every digit run on a designated line (a run of Unicode decimal digits, fullwidth and
+    Arabic-Indic forms included, never ASCII alone) must lie inside an anchored wording match, so a second,
     contradictory, malformed or merely unexplained figure on a designated line fails loud in ANY
     wording, whatever noun, spacing, markup or no-break space surrounds it (a missing anchored
     wording is itself a finding, so a reworded count fails loud, never silently unchecked);
@@ -36,7 +37,10 @@ generator alone cannot assert:
     declared prefix classifies a path, case-sensitively), every declared prefix must classify a
     listed path (one whose every match loses to a longer prefix is reported as overshadowed, not as
     matching nothing), and an independent code detector backs the split: a path with a suffix on a
-    closed executable list, an HTML page holding a script element, or an extensionless file opening
+    closed executable list, an HTML page (decoded as UTF-8, a byte-order mark
+    allowed; one that does not decode as UTF-8 is cannot-evaluate, exit 2, never non-code)
+    containing "<script" anywhere, case-insensitively, a comment included, or an extensionless
+    file opening
     with a shebang line must classify under a [[code]] prefix, so the public sentence cannot read
     complete while the release ships code the declaration places under a non-code prefix or does
     not place at all, and a declared row cannot outlive the files it names;
@@ -53,9 +57,12 @@ no alias, so a stale copy cannot ship silently. A count stated outside the desig
 table rows is not reached (the location binding is what keeps a true explanatory sentence elsewhere
 from being read as a second operative count). The shipped-path declaration leg accounts every release
 path to a declared prefix, and its code detector is a CLOSED list (the executable suffixes it names,
-a script-holding HTML page, an extensionless shebang file): executable content of another kind under
-a non-code prefix is not detected, and a row's plain-language label is a reviewed description this
-gate cannot semantically verify against the files under its prefix, both disclosed residuals. The
+a UTF-8 HTML page containing "<script" case-insensitively anywhere, an extensionless shebang
+file): executable content of another kind under
+a non-code prefix is not detected, the HTML leg deliberately over-detects (a comment-only
+"<script>" inside the page classifies it as code, a conservative reading, never an
+under-detection), and a row's plain-language label is a reviewed description this
+gate cannot semantically verify against the files under its prefix, all disclosed residuals. The
 instruction-budget
 note is pinned to the COMMITTED RATCHET, not to a fresh measurement: the budget gate holds PACK at or
 under the ratchet and prints a note whenever PACK falls below it, so a stale ratchet over a shrunken
@@ -319,8 +326,11 @@ README_COUNT_FACTS = (
 # counts), so a second, contradictory, malformed or merely unexplained figure on a designated line
 # is a finding in ANY wording ('(a draft said 999 rules)', '(999 rule.)', '(1e3 rules)', a no-break
 # space, bold markup, or any noun the page might gain): there is no noun list to evade. Lines other
-# than the designated ones are not scanned (the disclosed location binding).
-_DIGIT_RUN = re.compile(r"[0-9]+")
+# than the designated ones are not scanned (the disclosed location binding). A digit run is a run
+# of ANY Unicode decimal digits (\d on str, the str.isdecimal class), never ASCII alone, so a
+# fullwidth or Arabic-Indic figure beside a valid wording is a finding too; a number spelled out
+# in words is prose, not a digit run (a disclosed residual).
+_DIGIT_RUN = re.compile(r"\d+")
 
 
 def _manifest_entries(path, key, fields):
@@ -421,8 +431,11 @@ def check_readme_counts(root, manifests, findings):
 
 
 # The independent code detector backing the shipped-path declaration: a release path is CODE when its
-# suffix (case-insensitive) is on this CLOSED executable list, when it is an HTML page holding a
-# script element, or when it is extensionless and opens with a shebang line. Closed by design:
+# suffix (case-insensitive) is on this CLOSED executable list, when it is an HTML page that
+# decodes as UTF-8 (a byte-order mark allowed) and contains "<script" case-insensitively
+# ANYWHERE (inside a comment included: a conservative over-detection, disclosed in _path_is_code),
+# or when it is extensionless and opens with a shebang line; an HTML page that does not decode as
+# UTF-8 is cannot-evaluate (exit 2), never non-code. Closed by design:
 # executable content of another kind is not detected (a disclosed residual); the declaration rows
 # stay the reviewed source the detector cross-examines, never replaces.
 _CODE_SUFFIXES = frozenset((".py", ".sh", ".bash", ".js", ".mjs", ".cjs"))
@@ -431,16 +444,26 @@ _HTML_SUFFIXES = frozenset((".html", ".htm"))
 
 def _path_is_code(root, path):
     """True when the shipped file at `path` is executable content under the closed detector. The file
-    is read only where the suffix alone cannot decide (an HTML page: does it hold a script element;
+    is read only where the suffix alone cannot decide (an HTML page: does it contain "<script";
     an extensionless file: does it open with a shebang); a listed file that is then missing or
-    unreadable raises OSError, so run() fails closed (exit 2) rather than guessing."""
+    unreadable raises OSError, so run() fails closed (exit 2) rather than guessing. An HTML page
+    is DECODED AS UTF-8 (a leading UTF-8 byte-order mark allowed) and is code when it contains
+    "<script" case-insensitively ANYWHERE, inside a comment included: a conservative
+    over-detection (the comment-only vector in self-test case 22c pins it), never an
+    under-detection; a page that does not decode as UTF-8 is cannot-evaluate (OSError, exit 2 via
+    run()), never non-code."""
     name = path.rsplit("/", 1)[-1]
     dot = name.rfind(".")
     suffix = name[dot:].lower() if dot > 0 else ""
     if suffix in _CODE_SUFFIXES:
         return True
     if suffix in _HTML_SUFFIXES:
-        return b"<script" in (root / path).read_bytes().lower()
+        try:
+            text = (root / path).read_text(encoding="utf-8-sig")
+        except UnicodeDecodeError as exc:
+            raise OSError("{}: HTML page does not decode as UTF-8, so the script detector cannot "
+                          "evaluate it: {}".format(path, exc))
+        return "<script" in text.lower()
     if dot <= 0:
         with open(root / path, "rb") as handle:
             return handle.read(2) == b"#!"
@@ -520,21 +543,30 @@ def check_release_code_declaration(root, findings, *, declaration=None, sources=
                             "release-manifest path; remove the row or fix the prefix".format(pref))
 
 
-# The full public sentence, both halves bound: the "exceeds that figure" clause (so a page reworded
-# to "no longer exceeds" fails to match, a missing-note finding) and the figure with its unit
-# (UTF-16 code units, the unit tools/check_instruction_budget.py counts and prints).
+# The full public sentence, every part bound: the "budget to 120,000" antecedent (the figure the
+# note's "that figure" names; INSTRUCTION-BUDGET.md reads ", not 150,000" between them), the
+# "exceeds that figure" clause (so a page reworded
+# to "no longer exceeds" fails to match, a missing-note finding) and the figure with its unit and
+# the unit's explanatory suffix
+# (UTF-16 code units, the unit tools/check_instruction_budget.py counts and prints), so changing
+# the unit, dropping it, or rewording its suffix is a missing-note finding.
+_BUDGET_FLOOR = 120000
 _BUDGET_NOTE_RE = re.compile(
-    r"the shipped pack itself exceeds that figure: its measured PACK stands at the committed "
+    r"budget to ([0-9][0-9,]*)(?:, not 150,000)?\.\s*"
+    r"Today the shipped pack itself exceeds that figure: its measured PACK stands at the committed "
     r"ratchet, ([0-9][0-9,]*) UTF-16 code units, the unit the budget gate counts")
 
 
 def check_budget_note(root, findings):
     """The public instruction-budget note against the committed ratchet it states: README.md and
-    INSTRUCTION-BUDGET.md each carry the _BUDGET_NOTE_RE sentence (the exceeds-that-figure half,
-    the figure, and its UTF-16 code-unit label all bound, so rewording any of them away is a
-    finding), the figure must equal the ratchet of .aiqt/core/instruction-budget.toml
-    (thousands-separated, as the pages print it), and the ratchet must still exceed the 120,000
-    figure the note says the shipped pack exceeds. Pinned to
+    INSTRUCTION-BUDGET.md each carry the _BUDGET_NOTE_RE sentence (the 120,000 antecedent the
+    note's "that figure" names, the exceeds-that-figure half,
+    the figure, and its UTF-16 code-unit label with its explanatory suffix all bound, so rewording
+    any of them away is a
+    finding), the stated antecedent must equal _BUDGET_FLOOR, the figure must equal the ratchet of
+    .aiqt/core/instruction-budget.toml
+    (thousands-separated, as the pages print it), and the ratchet must still exceed the
+    _BUDGET_FLOOR figure the note says the shipped pack exceeds. Pinned to
     the COMMITTED ratchet, not a fresh measurement (the budget gate holds PACK at or under the
     ratchet and prints a lower-the-ratchet note when PACK falls below it); a missing or non-integer
     ratchet, and a missing page, fail closed (exit 2)."""
@@ -542,23 +574,29 @@ def check_budget_note(root, findings):
     if not isinstance(ratchet, int) or isinstance(ratchet, bool) or ratchet <= 0:
         raise OSError(".aiqt/core/instruction-budget.toml: ratchet must be a positive integer")
     want = format(ratchet, ",d")
+    floor_want = format(_BUDGET_FLOOR, ",d")
     for rel in ("README.md", "INSTRUCTION-BUDGET.md"):
         text = _read(root / rel)
         hits = _BUDGET_NOTE_RE.findall(text)
         if not hits:
-            findings.append("{}: the instruction-budget note (the shipped pack itself exceeds that "
+            findings.append("{}: the instruction-budget note (budget to 120,000 ... the shipped "
+                            "pack itself exceeds that "
                             "figure: its measured PACK stands at the committed ratchet, N UTF-16 "
                             "code units, the unit the budget gate counts) was not found; if the "
                             "page was reworded, update check_budget_note so the figure stays "
                             "checked".format(rel))
             continue
-        for got in hits:
+        for ante, got in hits:
+            if ante != floor_want:
+                findings.append("{}: the budget note names budget to {} as the antecedent of that "
+                                "figure; this gate binds the antecedent to {}".format(
+                                    rel, ante, floor_want))
             if got != want:
                 findings.append("{}: the budget note states PACK {}; the committed ratchet is "
                                 "{}".format(rel, got, want))
-        if ratchet <= 120000:
-            findings.append("{}: the page says the shipped pack exceeds 120,000, but the committed "
-                            "ratchet is {}; reword the note".format(rel, want))
+        if ratchet <= _BUDGET_FLOOR:
+            findings.append("{}: the page says the shipped pack exceeds {}, but the committed "
+                            "ratchet is {}; reword the note".format(rel, floor_want, want))
 
 
 def run(root):
@@ -663,9 +701,22 @@ def main():
 #  22b. the REAL declaration and release manifest: removing each actual [[code]] row -> at least one
 #      finding, each reviewed rogue path planted in the real manifest -> a finding naming it, and
 #      the unmodified pair -> no findings (the control),
+#  22c. the code detector branch by branch, each vector planted UNDER A POPULATED [[noncode]]
+#      prefix so only _path_is_code can flag it: every closed-list suffix, a mixed-case and a
+#      double suffix, a script-holding HTML page (a comment-only "<script>" and a UTF-8
+#      byte-order-marked page included), and an extensionless shebang file -> a detector finding
+#      naming the path and the prefix; a plain HTML page and a markdown file -> exit 0; an HTML
+#      page that does not decode as UTF-8 -> exit 2 (cannot-evaluate, never non-code); a listed
+#      file missing or unreadable, for each branch that reads the file -> exit 2 (fail-closed),
 #  23. the instruction-budget note: a figure that disagrees with the committed ratchet, a missing
 #      note, a note whose exceeds half was reworded away, and a note kept after the ratchet no
-#      longer exceeds 120,000 -> finding; a missing budget source -> exit 2 (fail-closed).
+#      longer exceeds 120,000 -> finding; a missing budget source -> exit 2 (fail-closed),
+#  23b. the unit binding, on each public surface: the unit changed to "characters", the unit
+#      omitted, or its explanatory suffix altered -> the missing-note finding (asserted by its
+#      diagnostic naming the surface); an antecedent other than 120,000 before "that figure" ->
+#      a finding by its own antecedent diagnostic,
+#  23c. the exceeds boundary: a ratchet exactly at 120,000 -> finding (at-boundary); one unit
+#      above -> clean (just outside).
 # (1, 7, 12, 13, and 15 through 23 are the invariant-bearing cases; the rest complete the fail-closed
 # contract.)
 
@@ -1222,7 +1273,9 @@ def self_test_main():
         #      evasive forms the retired noun list missed: bare and draft nouns (gates, hooks,
         #      rules, warnings, total rules, enforced rules, pinned catalogues), singular nouns
         #      (rule., CI gate, Claude Code hook), a scientific-notation figure (1e3), a doubled
-        #      space, a no-break space, and bold markup. The clean fixture of case 1 is the positive
+        #      space, a no-break space, bold markup, and fullwidth and Arabic-Indic digit runs (the
+#      sweep reads Unicode decimal digits, never ASCII alone). The clean fixture of case 1 is
+#      the positive
         #      control: a true designated line, every digit run inside an anchored wording, passes.
         loose_vectors = (
             ("dupmalformed", "3 clear, single-behaviour rules",
@@ -1256,6 +1309,10 @@ def self_test_main():
              "Mapped to 2 frameworks.** (999 pinned catalogues)"),
             ("cchook", "Mapped to 2 frameworks.**",
              "Mapped to 2 frameworks.** (999 Claude Code hook)"),
+            ("fullwidthrun", "Mapped to 2 frameworks.**",
+             "Mapped to 2 frameworks.** (\uff19\uff19\uff19 rules)"),
+            ("arabicindicrun", "Mapped to 2 frameworks.**",
+             "Mapped to 2 frameworks.** (\u0669\u0669\u0669 rules)"),
         )
         for tag, old, new in loose_vectors:
             if _LANDING.count(old) != 1:
@@ -1518,6 +1575,81 @@ def self_test_main():
         except (OSError, ValueError, ManifestError) as exc:
             failures.append("the real-declaration sweep could not run: {}".format(exc))
 
+        # 22c. the code detector, branch by branch, through the real check: each vector is
+        #      planted under a POPULATED [[noncode]] docs/ prefix of the fixture declaration,
+        #      so a finding can only come from _path_is_code, and the finding must name both
+        #      the path and the docs/ prefix: every closed-list suffix, a mixed-case suffix, a
+        #      double suffix, a script-holding HTML page (a comment-only "<script>" and a
+        #      UTF-8 byte-order-marked page included: the disclosed conservative
+        #      over-detection), and an extensionless shebang file -> a detector finding; a
+        #      plain HTML page and a markdown file -> exit 0 (the populated-prefix control);
+        #      an HTML page that does not decode as UTF-8 (a UTF-16 script page) -> exit 2
+        #      (cannot-evaluate, never non-code); a listed file that is missing or unreadable,
+        #      for each branch that reads the file (HTML, extensionless) -> exit 2
+        #      (fail-closed).
+        docs_decl = _DISCLOSURE + '\n[[noncode]]\nprefix = "docs/"\n'
+
+        def _docs_fixture(tag, relname, payload):
+            base = tmp / ("det-" + tag)
+            _write_fixture(base, disclosure=docs_decl,
+                           release_manifest=_RELEASE_MANIFEST +
+                           '\n[[sources]]\npath = "docs/{}"\n'.format(relname))
+            (base / "docs").mkdir()
+            if payload is not None:
+                (base / "docs" / relname).write_bytes(payload)
+            return base
+
+        detector_code = (
+            ("suffix-py", "a.py", b"print(1)\n"),
+            ("suffix-sh", "b.sh", b"echo 1\n"),
+            ("suffix-bash", "c.bash", b"echo 1\n"),
+            ("suffix-js", "d.js", b"x = 1\n"),
+            ("suffix-mjs", "e.mjs", b"export var x = 1\n"),
+            ("suffix-cjs", "f.cjs", b"x = 1\n"),
+            ("mixed-case", "Tool.PY", b"print(1)\n"),
+            ("double-suffix", "notes.md.js", b"x = 1\n"),
+            ("html-script", "shell.html", b"<!doctype html>\n<script>x = 1</script>\n"),
+            ("html-comment-only", "commented.html",
+             b"<!doctype html>\n<!-- <script> example -->\n"),
+            ("html-bom", "bom.html",
+             "\ufeff<!doctype html>\n<script>x = 1</script>\n".encode("utf-8")),
+            ("extensionless-shebang", "hook", b"#!/bin/sh\necho 1\n"),
+        )
+        for tag, relname, payload in detector_code:
+            code, out = run_out(_docs_fixture(tag, relname, payload))
+            named = "release path 'docs/{}' is code by this gate's detector".format(relname)
+            if code != 1 or named not in out or "prefix 'docs/'" not in out:
+                failures.append("detector vector {} (docs/{}) expected exit 1 with the detector "
+                                "finding naming the path and the docs/ prefix".format(tag, relname))
+        for tag, relname, payload in (
+                ("html-plain", "plain.html", b"<!doctype html>\n<p>no executable content</p>\n"),
+                ("markdown", "about.md", b"# fixture about\n")):
+            if run_quiet(_docs_fixture(tag, relname, payload)) != 0:
+                failures.append("non-code vector {} (docs/{}) expected exit 0".format(tag, relname))
+        utf16page = _docs_fixture("html-utf16", "wide.html",
+                                  "<!doctype html>\n<script>x = 1</script>\n".encode("utf-16"))
+        code, err = run_err(utf16page)
+        if code != 2 or "does not decode as UTF-8" not in err:
+            failures.append("an HTML page that does not decode as UTF-8 expected exit 2 naming "
+                            "the cannot-evaluate cause, never a non-code pass")
+        for tag, relname in (("html-missing", "ghost.html"), ("extensionless-missing", "ghostbin")):
+            if run_quiet(_docs_fixture(tag, relname, None)) != 2:
+                failures.append("a listed but missing docs/{} expected exit 2 (fail-closed)".format(
+                    relname))
+        for tag, relname, payload in (
+                ("html-unreadable", "locked.html", b"<!doctype html>\n<script>x = 1</script>\n"),
+                ("extensionless-unreadable", "lockedbin", b"#!/bin/sh\n")):
+            base = _docs_fixture(tag, relname, payload)
+            unreadable_std = base / "docs" / relname
+            os.chmod(unreadable_std, 0)
+            if os.access(unreadable_std, os.R_OK):
+                skipped.append("22c " + tag)
+            elif run_quiet(base) != 2:
+                failures.append("an unreadable docs/{} expected exit 2 (fail-closed)".format(
+                    relname))
+            os.chmod(unreadable_std, 0o644)
+            unreadable_std = None
+
         # 23. the instruction-budget note: a figure that disagrees with the committed ratchet, a
         #     missing note, and a note kept after the ratchet no longer exceeds 120,000 -> finding; a
         #     missing budget source -> exit 2 (fail-closed).
@@ -1549,6 +1681,67 @@ def self_test_main():
         (nobudget / ".aiqt" / "core" / "instruction-budget.toml").unlink()
         if run_quiet(nobudget) != 2:
             failures.append("a missing instruction-budget source expected exit 2 (fail-closed)")
+
+        # 23b. the unit binding on EACH public surface (README.md and INSTRUCTION-BUDGET.md): the
+        #      unit changed to "characters", the unit omitted, and the explanatory suffix altered
+        #      are each a missing-note finding asserted by its diagnostic naming the surface (the
+        #      regex binds the whole unit tail, so any of the three rewords unbinds the match);
+        #      and the antecedent is bound: a page saying "budget to 140,000" before "that
+        #      figure" is a finding by the antecedent diagnostic.
+        unit_rewords = (
+            ("unit-characters", "132,775 UTF-16 code units", "132,775 characters"),
+            ("unit-omitted", "132,775 UTF-16 code units, the unit", "132,775, the unit"),
+            ("unit-suffix", "the unit the budget gate counts", "the unit the budget gate prints"),
+        )
+        for tag, old, new in unit_rewords:
+            if _BUDGET_NOTE.count(old) != 1:
+                failures.append("unit fixture {}: its target must appear exactly once in "
+                                "_BUDGET_NOTE".format(tag))
+                continue
+            for rel, overrides in (
+                    ("README.md", {"landing": _LANDING.replace(old, new, 1)}),
+                    ("INSTRUCTION-BUDGET.md", {"budget_md": _BUDGET_MD.replace(old, new, 1)})):
+                unitfix = tmp / ("unit-{}-{}".format(tag, rel.split(".")[0].lower()))
+                _write_fixture(unitfix, **overrides)
+                code, out = run_out(unitfix)
+                if (code != 1 or "{}: the instruction-budget note".format(rel) not in out
+                        or "was not found" not in out):
+                    failures.append("budget unit vector {} on {} expected exit 1 with the "
+                                    "missing-note diagnostic".format(tag, rel))
+        for rel, overrides in (
+                ("README.md",
+                 {"landing": _LANDING.replace("budget to 120,000.", "budget to 140,000.", 1)}),
+                ("INSTRUCTION-BUDGET.md",
+                 {"budget_md": _BUDGET_MD.replace("budget to 120,000.", "budget to 140,000.", 1)})):
+            antefix = tmp / ("ante-" + rel.split(".")[0].lower())
+            _write_fixture(antefix, **overrides)
+            code, out = run_out(antefix)
+            if code != 1 or "as the antecedent of that figure" not in out:
+                failures.append("a budget-to-140,000 antecedent on {} expected exit 1 with the "
+                                "antecedent diagnostic".format(rel))
+
+        # 23c. the exceeds boundary is exact: a ratchet of exactly _BUDGET_FLOOR (120,000) no
+        #      longer exceeds the antecedent -> finding; one unit above (120,001) still exceeds
+        #      it -> clean (the at-boundary and just-outside values of the <= comparison).
+        atfloor = tmp / "atfloor"
+        _write_fixture(atfloor,
+                       landing=_LANDING.replace("132,775 UTF-16 code units",
+                                                "120,000 UTF-16 code units"),
+                       budget_md=_BUDGET_MD.replace("132,775 UTF-16 code units",
+                                                    "120,000 UTF-16 code units"),
+                       budget_toml="ratchet = 120000\n")
+        if run_quiet(atfloor) != 1:
+            failures.append("a ratchet exactly at the 120,000 floor expected exit 1 (at-boundary)")
+        overfloor = tmp / "overfloor"
+        _write_fixture(overfloor,
+                       landing=_LANDING.replace("132,775 UTF-16 code units",
+                                                "120,001 UTF-16 code units"),
+                       budget_md=_BUDGET_MD.replace("132,775 UTF-16 code units",
+                                                    "120,001 UTF-16 code units"),
+                       budget_toml="ratchet = 120001\n")
+        if run_quiet(overfloor) != 0:
+            failures.append("a ratchet one unit above the 120,000 floor expected exit 0 "
+                            "(just-outside boundary)")
     finally:
         if unreadable_std is not None:
             os.chmod(unreadable_std, 0o755)  # restore even on an unexpected early exit
@@ -1571,20 +1764,28 @@ def self_test_main():
           "break, the proof line replaced with its wording moved to a later bold numeric line, and a "
           "bold digit line inserted above the proof line, asserted by its own message), a digit run "
           "on a designated line outside every anchored count wording (a signed and a "
-          "thousands-separated duplicate and the reviewed evasive noun, spacing, markup, and "
-          "no-break-space forms included), an unsupported "
+          "thousands-separated duplicate and the reviewed evasive noun, spacing, markup, "
+          "no-break-space, fullwidth-digit, and Arabic-Indic-digit forms included), an unsupported "
           "numeric form (a thousands separator or a leading sign at every wording), a partially "
           "off-platform gates manifest, a removed shipped-path declaration row (in the fixture and, "
           "for every [[code]] row, in the repository's real declaration), a release path under no "
           "declared prefix, a detector-code path classified under a [[noncode]] prefix (the reviewed "
-          "rogue paths, planted in the real release manifest), a declared prefix matching no release "
+          "rogue paths, planted in the real release manifest, and every detector branch through a "
+          "populated fixture [[noncode]] prefix: each closed-list suffix, a mixed-case and a double "
+          "suffix, a script-holding, a comment-only, and a byte-order-marked HTML page, and an "
+          "extensionless shebang file, each finding naming the path and the prefix), a declared "
+          "prefix matching no release "
           "path or overshadowed by longer prefixes (each asserted by its own diagnostic), and a "
           "budget note whose "
-          "figure disagrees with the committed ratchet, is absent, loses its exceeds half to a "
-          "rewording, or outlives a ratchet at or under "
+          "figure disagrees with the committed ratchet, is absent, loses its exceeds half, its "
+          "UTF-16 unit, or the unit's explanatory suffix to a rewording (on each public surface), "
+          "names an antecedent other than 120,000 before that figure, or outlives a ratchet at or "
+          "under "
           "120,000 each report a finding (exit 1); a true explanatory count sentence outside its "
           "designated line, a nested declared prefix pair resolved by the longest prefix (order "
-          "independent), and the repository's real declaration against its real release manifest "
+          "independent), a plain HTML page and a markdown file under a populated [[noncode]] "
+          "prefix, a ratchet one unit above the 120,000 floor, "
+          "and the repository's real declaration against its real release manifest "
           "(the control), stay "
           "clean (exit 0); and a missing page, a missing JSON export, an unreadable standards dir, a "
           "missing/invalid catalogue, an unaliased publisher, a missing enforcement register, rules "
@@ -1593,7 +1794,9 @@ def self_test_main():
           "both, and a non-string hook default, even on an excluded platform, the structural refusals "
           "asserted by their diagnostics), an all-wrong-platform gates or hooks manifest, a "
           "claude-code hook default outside the blocking/warning split, a missing shipped-path "
-          "declaration, a missing or empty release manifest, and a missing instruction-budget source "
+          "declaration, a missing or empty release manifest, an HTML page that does not decode as "
+          "UTF-8, a listed detector file that is missing or unreadable, and a missing "
+          "instruction-budget source "
           "all fail closed (exit 2)" + note)
     return 0
 

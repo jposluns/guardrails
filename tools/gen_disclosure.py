@@ -349,7 +349,9 @@ def _self_test():
                  "limitation": "L",
                  "evidence": [{"text": "e", "href": "/evidence#release"}]}],
     }
-    # (label, mutated data, must fail) for every guard class.
+    # (label, mutated data[, expected diagnostic substring]) for every guard class. Every marker
+    # vector carries a marker-naming expected substring, so the docstring claim that each marker
+    # refusal is asserted by a marker-naming diagnostic is pinned by the assertions themselves.
     bad = [
         ("unknown top key", {**good, "extra": 1}),
         ("unknown row key", {**good, "row": [{**good["row"][0], "limitations": "x"}]}),
@@ -381,31 +383,33 @@ def _self_test():
         ("code row whitespace prefix", {**good, "code": [{"prefix": "to ols/", "label": "x"}, good["code"][1]]}),
         ("code row missing label", {**good, "code": [{"prefix": "tools/"}, good["code"][1]]}),
         ("code row dashed label", {**good, "code": [{"prefix": "tools/", "label": "a" + EN + "b"}, good["code"][1]]}),
-        ("marker inside a code label", {**good, "code": [{"prefix": "tools/", "label": "x " + MARKER}, good["code"][1]]}),
+        ("marker inside a code label", {**good, "code": [{"prefix": "tools/", "label": "x " + MARKER}, good["code"][1]]},
+         "label contains the " + MARKER + " marker"),
         ("duplicate prefix across arrays", {**good, "noncode": [{"prefix": "tools/"}]}),
         ("missing noncode declaration", {k: v for k, v in good.items() if k != "noncode"}),
         ("noncode row with a label", {**good, "noncode": [{"prefix": "README.md", "label": "x"}]}),
         ("made-of claim without the marker", {**good, "row": [{**good["row"][0], "claim": "C"}]}),
         ("marker in a topic", {**good, "row": [{**good["row"][0], "topic": "T " + MARKER}]},
-         "belongs only in a claim or limitation"),
+         "the " + MARKER + " marker belongs only in a claim or limitation"),
         ("marker in the note", {**good, "note": "N " + MARKER},
-         "belongs only in a row claim or limitation"),
+         "the " + MARKER + " marker belongs only in a row claim or limitation"),
         ("marker in the title", {**good, "title": "T " + MARKER},
-         "belongs only in a row claim or limitation"),
+         "the " + MARKER + " marker belongs only in a row claim or limitation"),
         ("marker in site_base", {**good, "site_base": "https://aiqt.ai/" + MARKER},
-         "belongs only in a row claim or limitation"),
+         "the " + MARKER + " marker belongs only in a row claim or limitation"),
         ("marker in a pending", {**good, "row": [{**good["row"][0], "pending": "P " + MARKER}]},
-         "belongs only in a claim or limitation"),
+         "the " + MARKER + " marker belongs only in a claim or limitation"),
         ("marker in an evidence text", {**good, "row": [{**good["row"][0], "evidence": [
          {"text": "e " + MARKER, "href": "/evidence#release"}]}]},
-         "belongs only in a claim or limitation"),
+         "the " + MARKER + " marker belongs only in a claim or limitation"),
         ("marker in an evidence href", {**good, "row": [{**good["row"][0], "evidence": [
          {"text": "e", "href": "/evidence" + MARKER}]}]},
-         "belongs only in a claim or limitation"),
+         "the " + MARKER + " marker belongs only in a claim or limitation"),
         ("marker in a code prefix", {**good, "code": [{"prefix": "tools/" + MARKER, "label": "x"},
-         good["code"][1]]}, "belongs only in a row claim or limitation"),
+         good["code"][1]]},
+         "the " + MARKER + " marker belongs only in a row claim or limitation"),
         ("marker in a noncode prefix", {**good, "noncode": [{"prefix": "README.md" + MARKER}]},
-         "belongs only in a row claim or limitation"),
+         "the " + MARKER + " marker belongs only in a row claim or limitation"),
     ]
     failures = []
     for entry in bad:
