@@ -555,7 +555,8 @@ def emit_checked(document):
     except _decode_error:  # value-free so a hostile decode-error __str__ is never formatted into a diagnostic
         raise EmitError("emitted document did not reparse as TOML; fail-closed")
     except BaseException:  # noqa: BLE001 - fail-closed backstop mirroring emit(): a NON-TOMLDecodeError
-        # reparse or comparison failure (a RecursionError from a >1000-part dotted key on 3.12/3.13, or a
+        # reparse or comparison failure (a RecursionError from deep nesting or, from CPython 3.14.8, a
+        # >1000-part dotted key, or a
         # MemoryError building the second tree or the comparison stack) becomes a value-free EmitError, so
         # emit_checked honours the same no-uncontrolled-exception contract as emit() and U7's `except
         # EmitError` fail-closed path is never bypassed by a leaked exception.
@@ -4511,8 +4512,8 @@ def self_test():
         failures.append("budget/multibyte-restore: the production ceiling was not restored")
 
     # --- emit_checked reparse/compare backstop: ANY non-control-flow failure fails closed to EmitError --
-    # A >1000-part dotted key makes tomllib raise RecursionError (NOT TOMLDecodeError) on 3.12/3.13, and
-    # either the reparse or the comparison can raise MemoryError on a large store-derived model; the
+    # Deep nesting, and from CPython 3.14.8 a >1000-part dotted key, make tomllib raise RecursionError (NOT
+    # TOMLDecodeError), a many-part key can raise MemoryError under a memory limit, and either the reparse or the comparison can raise MemoryError on a large store-derived model; the
     # contract (docstring) and U7's `except EmitError` fail-closed path require these to become EmitError,
     # never escape uncontrolled. Swap the module tomllib for a stub whose loads() raises a
     # non-TOMLDecodeError and assert the conversion; a mutant catching only TOMLDecodeError, or dropping

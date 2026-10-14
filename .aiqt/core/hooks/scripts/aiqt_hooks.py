@@ -108,7 +108,7 @@ lexical scan never sees. An UNPARSEABLE command
 takes the recover-then-allow/deny resolution above (never a silent pass). WITHIN scope (a recognized lossy
 verb: checkout/switch/restore/reset/clean/stash/
 rm/branch) that resolution applies unless the command is a PRISTINE SINGLE BARE 'git <verb>' invocation AND
-the tree is provably clean (or the leading opt-out is set, or the form is genuinely non-destructive), in
+the tree is provably clean (or the form is genuinely non-destructive), in
 which case it ALLOWS. PRISTINE
 SINGLE BARE means, PURELY LEXICALLY (the bash grammar is never parsed): after optional leading KEY=value
 assignments the command is exactly 'git <args>' as ONE simple command, and the RAW string carries NO shell
@@ -130,8 +130,8 @@ entry (only an ignored '!!' entry counts as clean). A pristine bare whole-tree c
 checkout -f, switch --force/--discard-changes) on a probed-dirty tree DENIES; everything else in scope ASKS.
 No recognized lossy verb that would discard WORKING-TREE CONTENT is silently ALLOWED except a pristine bare
 'git <verb>' whose FORM is genuinely non-destructive (checkout -b, reset --soft, clean -n, which ALLOW even
-on a dirty tree), or on a provably-clean tree, or a pristine bare form carrying the leading
-GUARDRAIL_ALLOW_DISCARD=1 opt-out - worst case it ASKS, at the cost of more asks. This guarantee is bounded to
+on a dirty tree), or on a provably-clean tree - worst case it ASKS, at the cost of more asks. No in-band
+override exists (the operator channel is hook configuration). This guarantee is bounded to
 working-tree content: ref-level moves (reset --soft moving HEAD, a merged-branch delete) are reflog-
 recoverable, and the obfuscation/config residuals below are best-effort, not categorical. The HONEST RESIDUAL a lexical hook cannot catch: a git alias or shell
 function renaming git; deliberate token fragmentation or obfuscation of the COMMAND WORD 'git' ITSELF or of
@@ -290,12 +290,13 @@ FAIL_OPEN_EVENTS = STOP_EVENTS + ("SessionStart", "TeammateIdle", "UserPromptSub
 NOTE_CONSTRUCTORS = (
     "_allow_note", "_context_note", "_stop_warn", "_dispatcher_fail_open_warn", "_diff_source_fallback",
     "_discard_recovery_result", "_expbnd_breadth_ask", "_expbnd_fallback", "_expbnd_target_ask",
-    "_gate_weakening_fallback", "_gensrc_fail_ask", "_git_discard_fallback", "_stash_drop_clear_outcome",
+    "_gate_weakening_fallback", "_gensrc_fail_ask", "_stash_drop_clear_outcome",
     "_orch_stop_family")
 DENY_CONSTRUCTORS = (
     "_deny", "_abspth_check_required", "_abspth_check_search_root", "_commit_denial",
     "_commit_identity_fallback", "_commit_msg_subst_fallback", "_deny_missing_tool_name", "_deny_relative",
-    "_deny_with_recovery", "_discard_deny", "_expbnd_breadth_publish_deny", "_protected_line_fallback",
+    "_deny_with_recovery", "_discard_deny", "_expbnd_breadth_publish_deny", "_git_discard_fallback",
+    "_protected_line_fallback",
     "_wrtscp_deny")
 
 def _allow():
@@ -787,38 +788,6 @@ def _skip_heredoc_bodies(command, i, n, heredocs):
     return i
 
 
-def _strip_quoted_heredoc_bodies(command):
-    """ROUND-2 FINDING 17. Return `command` with the BODIES of QUOTED heredocs (<<'EOF'/<<"EOF"/<<\\EOF)
-    removed, so a RAW (regex) scan that runs unconditionally - e.g. git_discard's _raw_has_lossy_git - does
-    not match shell syntax quoted inside heredoc prose. Everything OUTSIDE the quoted-heredoc bodies is
-    preserved verbatim (a real 'git reset --hard <<'EOF'...' still scans as lossy). UNQUOTED heredoc bodies
-    interpolate and stay in scope. Best-effort and conservative: on any ambiguity the text is left in place
-    (the raw scan then over-matches, the safe direction), and multiple heredocs stacked on one line beyond
-    the first are a disclosed over-match residual, never an under-match."""
-    n = len(command)
-    out = []
-    i = 0
-    while i < n:
-        lt = command.find("<<", i)
-        if lt < 0:
-            out.append(command[i:])
-            break
-        parsed = _parse_heredoc_delim(command, lt + 2, n)
-        if parsed is None or not parsed[0]:
-            out.append(command[i:lt + 2])   # not a quoted heredoc: keep the '<<' and continue past it
-            i = lt + 2
-            continue
-        _q, delim, strip_tabs, next_i = parsed
-        nl = command.find("\n", next_i)
-        if nl < 0:
-            out.append(command[i:next_i])    # the opening line has no body yet (no newline): keep, done
-            i = next_i
-            continue
-        out.append(command[i:nl + 1])        # keep through the opening line's newline
-        i = _skip_heredoc_bodies(command, nl + 1, n, [(delim, strip_tabs)])  # drop the body region
-    return "".join(out)
-
-
 def _lex_command(command, partial=False):
     """Lex the raw Bash command into ordered _Segment records. Raises ValueError on an unbalanced quote or
     escape, a NUL, or an unsupported construct (an UNQUOTED heredoc, a here-string, a process substitution, a
@@ -1205,8 +1174,9 @@ def detect_diff_wall(text):
 def diff_wall_stop(data):
     """cnsdif (trust/no-console-diff-dumps), Stop: SURFACE (non-blocking WARN) a final response that is
     a raw diff wall. This layer never blocks; see the module docstring's design note (the wall has
-    already rendered, and a hard Stop block could wedge the session with no documented loop bound). It
-    surfaces via systemMessage on exit 0; the PreToolUse diff_source layer is the hard prevention."""
+    already rendered, and because this layer keeps no loop bound of its own and does not read the
+    documented stop_hook_active field of the Stop input, a hard Stop block could wedge the session).
+    It surfaces via systemMessage on exit 0; the PreToolUse diff_source layer is the hard prevention."""
     if data.get("hook_event_name") not in STOP_EVENTS:
         # Even a mis-wired event only WARNS here: the diff-wall Stop layer is warn-only end to end (the
         # orchestration stop guard, a separate Stop handler, is the one that deliberately denies via exit
@@ -2329,15 +2299,14 @@ def bash_absolute_paths(data):
 # recoverable, else deny-and-educate". For a command that names any recognized lossy git verb (checkout incl
 # -B force-create, switch incl -C/--force-create, restore/reset/clean/stash drop-clear/rm/branch force
 # delete/move/copy/reset) the outcome is ASK(->recover-then-allow/deny) unless the command is a PRISTINE
-# SINGLE BARE 'git <verb>' invocation on a PROVABLY CLEAN tree (or, for that same pristine form, the LEADING
-# opt-out is set). Three outcomes:
+# SINGLE BARE 'git <verb>' invocation on a PROVABLY CLEAN tree. Three outcomes:
 #   ALLOW  exit 0 silent  - the true boundary (a non-git command, no recognized lossy verb, an
 #                           unparseable command with no lossy verb keyword); OR a PRISTINE SINGLE BARE
 #                           'git <verb>' whose FORM is genuinely non-destructive (a bare no-op, reset
 #                           --soft, an unforced branch-create, clean -n, stash push, branch -d); OR a
 #                           PRISTINE SINGLE BARE lossy 'git <verb>' on a PROVABLY CLEAN tree (the config-
 #                           forced porcelain probe reports no tracked change AND no untracked entry), so
-#                           there is nothing to discard; OR the LEADING opt-out on that same pristine form.
+#                           there is nothing to discard.
 #   DENY   permissionDecision deny - a PRISTINE SINGLE BARE WHOLE-TREE-clobbering verb (reset --hard,
 #                           checkout -f with no pathspec, switch --force/--discard-changes) on a tree the
 #                           probe confirms is dirty: the loss is certain.
@@ -2373,23 +2342,42 @@ def bash_absolute_paths(data):
 # Bash tool, or persistent shell/config state set in a prior turn; the recovery/snapshot layer backstops a
 # discard it CAN see, but cannot snapshot content the probe itself cannot see (assume-unchanged/skip-worktree
 # marks or submodule.<name>.ignore hide work from the probe) nor ignored files (git add --all excludes them).
-# An explicit GUARDRAIL_ALLOW_DISCARD truthy assignment LEADING a pristine bare git command opts out to ALLOW.
-# The value capture is `(.*)` (matches an EMPTY value, `GUARDRAIL_ALLOW_DISCARD=`), consulted with fullmatch, so
-# an exact leading assignment with an empty value updates the last-wins value to '' (bash: effective empty =
-# falsy), and `GUARDRAIL_ALLOW_DISCARD=1 GUARDRAIL_ALLOW_DISCARD= git ...` does NOT opt out (the empty final
-# assignment wins). A `(.+)` capture would ignore the empty final assignment and wrongly honour the earlier 1.
-_DISCARD_OPTOUT_RE = re.compile(r"^GUARDRAIL_ALLOW_DISCARD=(.*)$")
-_DISCARD_FALSY = frozenset(("", "0", "false", "no", "off"))  # value (case-insensitive) that is NOT truthy
-# Fallback-only raw-string probes, used when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct). We cannot
-# segment safely, so scan the RAW string for git AND a recognized work-losing verb: any of the
-# always-lossy verbs, or 'branch' in ANY form. On the raw path we do NOT parse branch flags: an unparseable
-# 'git branch -d -f topic <heredoc>' / '-df' / '--del --for' cannot be told from a create or a list, so ANY
-# raw 'git' + 'branch' is treated as lossy and ASKS regardless of a delete flag. This over-asks a benign
-# unparseable 'git branch --list' (rare, safe) and ends the raw-branch silent-allow gap.
-# A hit -> ASK (cannot prove safe); no hit -> ALLOW (the true boundary). Mirrors how diff_source/
-# commit_identity fall back to a conservative raw scan on a parse failure. The opt-out is NOT consulted on
-# this path: the guard cannot parse the command, so it cannot trust an opt-out-looking prefix inside it; an
-# unparseable in-scope command ALWAYS ASKS. The opt-out is honoured ONLY on a PARSEABLE pristine bare command.
+# REMOVED OVERRIDE: a leading GUARDRAIL_ALLOW_DISCARD assignment once short-circuited a pristine bare git
+# command to an unsnapshotted ALLOW. The guarded actor could type it into the very command under guard, so it
+# could not carry the operator-only authority it claimed; it is removed, no in-band override exists, and the
+# operator channel is hook configuration. The assignment is now an ordinary leading env assignment, and no
+# code reads its value to permit anything: only _segment_dir_simple (benign, it redirects nothing) and
+# _removed_prefix_note (reason text only) read the name. When the command without it already names a
+# recognized work-losing git verb and the prefixed command is pristine (it parses and _SHELL_META_RE finds
+# nothing in the raw string), the pristine path decides from the token list plus the raw-scan flag raw_lossy,
+# which the bare command already set (it names a work-losing verb), so the prefixed command gets the
+# decision of the command without it. Outside that bound the value is raw text the raw scans read: a
+# metacharacter, even quoted, makes the command non-pristine; an unbalanced quote makes it unparseable
+# (the fallback then denies every raw-flagged command); and _raw_has_lossy_git matches a lossy keyword
+# inside it, so the decision can differ from the bare one. Neither the non-pristine path nor the fallback
+# reads the name, so there it gets what FOO=<the same value> gets. The pattern accepts
+# both '=' and '+=' and a value spanning newlines (re.DOTALL, used with fullmatch), the token shapes
+# _ENV_ASSIGN_RE treats as a leading assignment; the value capture lets the migration note below see an
+# empty final assignment (bash last-wins) and fold a '+=' append.
+_REMOVED_DISCARD_PREFIX_RE = re.compile(r"GUARDRAIL_ALLOW_DISCARD(\+?)=(.*)", re.DOTALL)
+# MIGRATION (this release only; the next release deletes this sentence, _removed_prefix_note and its
+# self-test vectors rmo-4 and rmo-7; the git_discard residue records the same sunset): every reason the pristine path emits for a command whose leading
+# GUARDRAIL_ALLOW_DISCARD is truthy gains this sentence, so a stale runbook learns the route.
+_REMOVED_DISCARD_PREFIX_NOTE = (
+    " NOTE: the GUARDRAIL_ALLOW_DISCARD prefix no longer overrides this guard (it was removed because the "
+    "guarded assistant could set it itself); for an intentional discard, run 'git stash' (add -u for "
+    "untracked files) and then the discard.")
+# Raw-string probes used when the shared tokenizer cannot parse the command (an unbalanced quote or an
+# unsupported construct) and by the in-scope gate. We cannot segment safely, so scan the RAW string for
+# git AND a recognized work-losing verb: any of the always-lossy verbs, or 'branch' in ANY form. On the
+# raw path we do NOT parse branch flags: an unparseable 'git branch -d -f topic <heredoc>' / '-df' /
+# '--del --for' cannot be told from a create or a list, so ANY raw 'git' + 'branch' is treated as lossy
+# regardless of a delete flag. A hit on an unparseable command -> DENY (D-423-NARROW: the guard cannot
+# prove it safe and cannot establish a snapshot basis); no hit -> ALLOW (the true boundary). This
+# over-denies a benign unparseable 'git branch --list' (rare, safe), a disclosed fallback cost. No
+# override exists on this path (or any other): an unparseable in-scope command DENIES whatever prefix it
+# carries, and the removed-prefix migration note is not emitted here (the guard cannot parse the
+# command's leading assignments).
 _RAW_GIT_RE = re.compile(r"(?i)\bgit\b")
 _RAW_LOSSY_VERB_RE = re.compile(r"(?i)\b(?:checkout|switch|restore|reset|clean|rm|stash)\b")
 _RAW_BRANCH_RE = re.compile(r"(?i)\bbranch\b")
@@ -2412,50 +2400,27 @@ _SHELL_RESERVED_WORDS = frozenset((
     "if", "then", "elif", "else", "fi", "for", "while", "until", "do", "done",
     "case", "esac", "function", "select", "in", "[[", "]]", "{", "}"))
 # The safe alternatives named in every DENY/ASK reason, so the actor is never left without a next step.
-# The opt-out guidance is PATH-AWARE and appended by the caller. The opt-out is honoured on the command AS
-# ISSUED whenever a leading GUARDRAIL_ALLOW_DISCARD=1 prefix short-circuits to ALLOW: on a pristine bare
-# command the leading prefix opts THIS command out (_OPTOUT_PRISTINE), and because that short-circuit fires
-# BEFORE the repository-view-redirect gate, a pristine repository-view-redirected form (a 'git -C <dir>
-# <verb>' or an ambient-GIT_* form that ASKS at that gate) is ALSO opted out by prefixing the command as
-# issued, keeping its -C (_OPTOUT_PRISTINE too). Only on a raw/unparseable or non-pristine command, where no
-# pristine bare form is present to carry the prefix, is the opt-out NOT honoured on the command as issued, so
-# the actor is told to RE-ISSUE the discard as a parseable pristine bare form carrying the prefix
-# (_OPTOUT_REISSUE).
 _DISCARD_ALTS = (
     "Safe alternatives: commit or 'git stash' your work first; scope the revert with an explicit "
     "'-- <paths>'; unstage without touching the worktree via 'git restore --staged' or 'git rm "
     "--cached'; change branch with 'git switch' (it carries non-conflicting changes and aborts rather than "
     "overwrite them).")
-# Opt-out guidance for a PRISTINE bare form, where the leading prefix opts THIS command out.
-_OPTOUT_PRISTINE = (
-    " Or, for a known-safe discard, prefix this command with GUARDRAIL_ALLOW_DISCARD=1 to override this "
-    "guard.")
-# Opt-out guidance for a raw/unparseable or non-pristine form, where the opt-out is NOT honoured on the
-# command as issued: re-issue it as a parseable pristine bare 'git <verb>' with the leading prefix. A
-# repository-view-redirected form does NOT use this: it is pristine-lexically, so its leading prefix opts it
-# out on the command as issued (_OPTOUT_PRISTINE, keeping its -C), short-circuiting before the redirect gate.
-_OPTOUT_REISSUE = (
-    " For a known-safe discard, re-issue it as a parseable pristine bare 'git <verb>' command carrying a "
-    "leading GUARDRAIL_ALLOW_DISCARD=1 prefix; the opt-out is honoured only on that pristine bare form, not "
-    "on the command as issued here.")
 
 
-def _segment_has_optout(tokens):
-    """True when THIS segment carries a truthy GUARDRAIL_ALLOW_DISCARD as a LEADING env-assignment (the
-    documented 'GUARDRAIL_ALLOW_DISCARD=1 git ...' prefix on the git command itself). Only the leading
-    assignment region (the tokens before this segment's command word) is inspected, so the same string
-    buried in an argument does NOT count. The caller consults this ONLY on a segment whose command word is
-    git (GD-41 blocker 4), so an opt-out leading a NON-git command ('GUARDRAIL_ALLOW_DISCARD=1 true; git
-    reset --hard') never disables the guard on the later git command. A value in {'', '0', 'false', 'no',
-    'off'} (case-insensitive) is NOT truthy. When the leading region repeats the assignment, bash last-wins
-    applies: only the LAST GUARDRAIL_ALLOW_DISCARD assignment's value is evaluated (=1 then =0 does NOT opt
-    out)."""
+def _removed_prefix_note(tokens):
+    """MIGRATION (this release only): _REMOVED_DISCARD_PREFIX_NOTE when THIS pristine git segment's leading
+    assignment region carries a truthy final GUARDRAIL_ALLOW_DISCARD value (bash last-wins; an empty value or
+    0, false, no or off, case-insensitive, is not truthy; a '+=' appends to the value an earlier assignment
+    in the same region set), else the empty string. It adds reason text only and changes no decision."""
     last = None
     for tok in tokens[:_command_word_index(tokens)]:
-        m = _DISCARD_OPTOUT_RE.fullmatch(tok)
+        m = _REMOVED_DISCARD_PREFIX_RE.fullmatch(tok)
         if m:
-            last = m.group(1)  # bash last-wins: keep the LAST leading assignment's value, evaluate only it
-    return last is not None and last.lower() not in _DISCARD_FALSY
+            # bash last-wins: keep the LAST leading assignment's value; '+=' appends to it
+            last = ((last or "") + m.group(2)) if m.group(1) else m.group(2)
+    if last is None or last.lower() in ("", "0", "false", "no", "off"):
+        return ""
+    return _REMOVED_DISCARD_PREFIX_NOTE
 
 
 def _raw_has_lossy_git(command):
@@ -3228,7 +3193,9 @@ def _checkout_role(args):
     merge option stays allow. The new-branch NAME of '-b'/'-B' is consumed as that option's ARGUMENT (attached '-bfoo' or
     separated '-b foo') and is NOT char-scanned as force flags, so '-bfoo'/'-bBranch' ALLOW and are never
     mis-read as carrying -f/-B (F-85; see _checkout_switch_parse_options). '-p'/'--patch' (prefix-matched)
-    interactively discards worktree hunks -> scoped. A forced
+    interactively discards worktree hunks -> scoped (R11 DECIDED item 4: git_discard DENIES every
+    -p/--patch spelling through _discard_patch_token before this role is consulted; the scoped
+    role remains the in-scope marker for the clean-parse lossy scan). A forced
     checkout that carries a BARE OPERAND ('checkout -f <operand>') is lexically ambiguous - the operand may
     be a branch (a whole-tree switch) OR a pathspec (a scoped path-restore), and it is no longer
     disambiguated by a rev-parse probe - so it is treated as -> scoped (which ASKS on a not-provably-clean
@@ -3515,29 +3482,12 @@ def _discard_role(sub, args):
 
 # --- outcome text ------------------------------------------------------------------------------------
 
-def _discard_ask_reason(kind, detail, optout=None):
-    """The (reason, banner) pair for an ASK. Stored by the handler and carried into the no-ask decision
-    the role dispatch determines (deny, allow-with-note, or snapshot-then-allow), so a confirmed loss
-    still wins over a recoverable discard; the "ASK" here is historical shorthand per the module's
-    READING KEY FOR "ASK"/"ASKS", not a live outcome. `optout` selects the PATH-AWARE
-    opt-out guidance folded into the reason and the banner: _OPTOUT_PRISTINE (the default) on a pristine
-    bare command, INCLUDING a pristine repository-view-redirected form (its leading GUARDRAIL_ALLOW_DISCARD=1
-    prefix opts THIS command out, short-circuiting even the redirect gate), or _OPTOUT_REISSUE on a
-    raw/unparseable or non-pristine command where no pristine bare form is present, so the opt-out is honoured
-    only on a re-issued pristine bare form, never on the command as issued."""
-    if optout is None:
-        optout = _OPTOUT_PRISTINE
-    reason = ("AIQT rule prsunc (preserve-uncommitted-work): {} {}. Confirm before proceeding, or commit "
-              "or stash your work first. {}{}".format(kind, detail, _DISCARD_ALTS, optout))
-    if optout is _OPTOUT_REISSUE:
-        banner = ("AIQT guardrail: {} - confirm this discard, or re-issue it as a parseable pristine bare "
-                  "'git <verb>' command carrying a leading GUARDRAIL_ALLOW_DISCARD=1 prefix to skip this "
-                  "prompt (the opt-out is not honoured on the command as issued) (rule prsunc)."
-                  .format(kind))
-    else:
-        banner = ("AIQT guardrail: {} - confirm this discard, or prefix GUARDRAIL_ALLOW_DISCARD=1 to skip "
-                  "this prompt (rule prsunc).".format(kind))
-    return (reason, banner)
+def _discard_ask_reason(kind, detail):
+    """The reason for an ASK, carried into the no-ask decision the role dispatch determines (here the deny
+    of _discard_recovery_result when no recovery snapshot could be made); the "ASK" here is historical
+    shorthand per the module's READING KEY FOR "ASK"/"ASKS", not a live outcome."""
+    return ("AIQT rule prsunc (preserve-uncommitted-work): {} {}. Confirm before proceeding, or commit "
+            "or stash your work first. {}".format(kind, detail, _DISCARD_ALTS))
 
 
 def _discard_deny(kind, recovery=""):
@@ -3547,10 +3497,10 @@ def _discard_deny(kind, recovery=""):
     appended to the reason as given (see _deny_with_recovery), so no caller edits a built deny result."""
     reason = ("AIQT rule prsunc (preserve-uncommitted-work): {} would overwrite the working tree, which "
               "currently holds uncommitted or untracked changes the command could destroy, discarding any "
-              "fix you have applied but not yet committed. {}{}"
-              .format(kind, _DISCARD_ALTS, _OPTOUT_PRISTINE)) + recovery
-    banner = ("AIQT guardrail: blocked a git command that would discard uncommitted work (rule prsunc). "
-              "Prefix GUARDRAIL_ALLOW_DISCARD=1 to override.")
+              "fix you have applied but not yet committed. {}"
+              .format(kind, _DISCARD_ALTS)) + recovery
+    banner = ("AIQT guardrail: blocked a git command that would discard uncommitted work (rule prsunc); "
+              "commit or stash first, then retry.")
     return _deny(reason, banner)
 
 
@@ -3618,7 +3568,8 @@ def _ambient_repo_view_override():
 
 def _segment_dir_simple(tokens):
     """True when a git segment names its worktree simply enough that the session dir IS the worktree the
-    command acts on: no leading env-assignment other than the opt-out (a GIT_DIR/GIT_WORK_TREE could
+    command acts on: no leading env-assignment other than the removed GUARDRAIL_ALLOW_DISCARD prefix ('=' or
+    '+=', any value), which redirects nothing (any other, such as a GIT_DIR/GIT_WORK_TREE, could
     redirect it), and no global option before the subcommand (a -C/--git-dir/--work-tree/-c, possibly
     abbreviated or attached, could redirect the worktree or change config). Anything else -> not simple ->
     the handler ASKS rather than trust a clean probe in the session dir. This is the coarse replacement
@@ -3626,8 +3577,8 @@ def _segment_dir_simple(tokens):
     repeatedly fooled into probing a clean dir and silently allowing - F-62/F-64/F-66)."""
     cw_idx = _command_word_index(tokens)
     for tok in tokens[:cw_idx]:
-        if _DISCARD_OPTOUT_RE.match(tok):
-            continue  # the opt-out assignment is benign and is handled separately
+        if _REMOVED_DISCARD_PREFIX_RE.fullmatch(tok):
+            continue  # the removed override's assignment is benign: it redirects nothing
         return False  # some other leading env-assignment: it may redirect the worktree or config
     i = cw_idx + 1  # the token after the 'git' command word
     if i < len(tokens) and tokens[i].startswith("-"):
@@ -3718,8 +3669,8 @@ def _segment_repo_dir(tokens, cwd):
                     redirect is present with NO -C, the session cwd (git discovers the repo from cwd; the
                     --work-tree only moves the worktree). Callers snapshot/probe THIS dir, never --work-tree.
       - None      : no dir-relocating redirect this helper resolves: a bare command, or one carrying only
-                    --git-dir/GIT_DIR (which names the repo directly, not a discoverable dir), -c, or a
-                    non-opt-out env assignment. The caller keeps its own conservative cannot-pin handling.
+                    --git-dir/GIT_DIR (which names the repo directly, not a discoverable dir), -c, or
+                    another leading env assignment. The caller keeps its own conservative cannot-pin handling.
       - "opaque"  : a -C redirect is present but unresolvable (value-less, or relative with no cwd to anchor).
     A --git-dir/GIT_DIR redirect returns None (the repo is named directly, left to the caller's cannot-pin
     path); a combined --git-dir + -C still returns None here, so the caller's --git-dir handling governs."""
@@ -3837,90 +3788,33 @@ def _worktree_within_repo(wt_dir, repo_probe):
     return w == t or w.startswith(t + os.sep)
 
 
-# ROUND-6 FINDING 4. Raw indicators, on the UNPARSEABLE fallback path only, that a lossy git command's
-# target is NOT the session cwd but a redirected worktree/repository the guard cannot resolve (it could not
-# even parse the command): a `git -C <dir>`, a --git-dir/--work-tree redirect, a leading/ambient
-# GIT_DIR=/GIT_WORK_TREE= assignment, or a cd/pushd in the chain. When any is present the session-cwd
-# cleanliness/snapshot basis is UNSOUND (a clean session cwd does not prove the redirected target clean, and
-# a session snapshot would not capture it), so the fallback DENIES-and-educates rather than allow on that
-# basis. Conservative and over-matching (a keyword in prose over-denies, the safe direction), mirroring the
-# other raw fallbacks; it is consulted only after _raw_has_lossy_git has already flagged the command in scope.
-_RAW_DISCARD_REDIRECT_RE = re.compile(
-    r"(?i)(?:^|[\s'\";&|()])(?:cd|pushd)(?=$|[\s'\";&|()])"
-    r"|(?:^|[\s'\";&|()])-C(?=[\s'\"=]|$)"
-    r"|--git-dir\b|--work-tree\b"
-    r"|(?:^|[\s'\";&|()])GIT_DIR="
-    r"|(?:^|[\s'\";&|()])GIT_WORK_TREE=")
-
-
-def _git_discard_fallback(command, cwd=None):
-    """FAIL-SAFE conservative scan when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct): we cannot
-    segment safely, so scan the RAW string. The opt-out is NOT consulted here: the guard cannot parse the
-    command, so it cannot soundly trust an opt-out-looking prefix inside it (a quoted-falsy `="0"`, an
-    interspersed `OTHER=x`, an opt-out on a DIFFERENT command `...=1 true; git`, a captured-truthy `0;` all
-    read as opt-outs to a raw scan), so an unparseable in-scope command ALWAYS ASKS regardless of any leading
-    opt-out-looking prefix. The opt-out is honoured ONLY on a PARSEABLE pristine bare command (see
-    _segment_has_optout). If git is present AND a recognized work-losing verb keyword is present (an
-    always-lossy verb, or 'branch' in any form) -> ASK (cannot prove safe); otherwise ALLOW (the true
-    boundary). Documented best-effort: a genuinely clean but unparseable command that merely mentions a lossy
-    verb keyword may ASK.
-
-    Class C: an unparseable command reaching an ASK is a NON-PRISTINE discard, so it gets the SAME
-    best-effort SESSION-CWD snapshot the non-pristine path takes (base resolvable + tree not provably
-    clean) BEFORE returning the ASK, so a discard that is asked-then-approved is still recoverable. Without
-    it, `git reset --hard <<'EOF'\\n'\\nEOF` (Bash-valid, a tokenizer ValueError) reached ASK with NO recovery
-    ref. The snapshot is decision-INDEPENDENT and best-effort against the session repo only (the verb is
-    unparseable, so the ledger label is a generic 'discard'); on snapshot fail the decision stays ASK with
-    the failure surfaced."""
+def _git_discard_fallback(command):
+    """D-423-NARROW fail-closed fallback when the shared tokenizer cannot parse the command (an unbalanced
+    quote or an unsupported construct): the closed allowlist grammar cannot be applied to a command that
+    cannot be segmented, so the ONLY allow is the true boundary - the raw scan, run on the FULL raw
+    command (ROUND 8: heredoc bodies are no longer stripped on this path; stripping removed text, so
+    it could only hide a real discard and widen acceptance, and the round-7 stripper did exactly that
+    on nested heredoc data), finds no git plus work-losing verb keyword. EVERYTHING that raw scan
+    flags is DENIED-and-educated, read-only commands included (the raw scan cannot tell a real discard
+    from prose or a read-only form), and NO session snapshot or stash preservation is attempted first:
+    a sound snapshot basis cannot be established for a command whose verb and target are unreadable, and
+    the removed best-effort session snapshot-then-allow let an unparseable discard run against a
+    redirected target the session snapshot does not contain. This fallback cost - every unparseable
+    command the raw scan flags is denied, read-only ones included - is disclosed in the manifest
+    residue. No override exists on this path (or any other): an unparseable in-scope command DENIES
+    whatever leading prefix it carries."""
     if not _raw_has_lossy_git(command):
-        return _allow()  # no git, or no recognized work-losing verb: the true boundary
-    if _RAW_DISCARD_REDIRECT_RE.search(command):
-        # ROUND-6 FINDING 4: the unparseable command carries a target redirect (a -C/--git-dir/--work-tree,
-        # a leading/ambient GIT_DIR=/GIT_WORK_TREE=, or a cd/pushd), so its discard target is NOT provably the
-        # session cwd. A clean session cwd cannot prove the redirected target clean and a session snapshot
-        # would not capture it, so it must NOT allow on that basis: DENY-and-educate. Re-issue it as a plain,
-        # parseable 'git <verb>' command run FROM the target repository, or commit or stash first.
-        return _deny(
-            "AIQT rule prsunc (preserve-uncommitted-work): the command could not be parsed by the shell "
-            "lexer and it names a git work-losing verb together with a target redirect (a -C/--git-dir/"
-            "--work-tree, a GIT_DIR=/GIT_WORK_TREE= assignment, or a cd/pushd), so its discard targets a "
-            "worktree or repository this guard cannot resolve; a clean session directory does not prove that "
-            "target clean and a session snapshot would not capture it, so this discard could be "
-            "unrecoverable and is denied rather than run. Re-issue it as a plain, parseable 'git <verb>' "
-            "command from the target repository, or commit or stash your work first. {}".format(_DISCARD_ALTS),
-            "AIQT guardrail: denied an unparseable git discard carrying a target redirect this guard cannot "
-            "resolve to snapshot (rule prsunc); run it from the target repo, or commit or stash first.")
-    base = cwd if isinstance(cwd, str) and cwd else None
-    snap = None
-    if base is not None and _tree_is_clean(base) is not True:  # dirty or probe-uncertain: snapshot first
-        snap = _record_recovery(base, "discard")
-    # SNAPSHOT-THEN-ALLOW: a recoverable discard proceeds once its recovery point exists (hooks never ask).
-    if snap is not None and snap[0] == "ok":
-        return _allow_note(
-            "AIQT guardrail (rule prsunc, preserve-uncommitted-work): the command could not be parsed by the "
-            "shell lexer and it names a git work-losing verb this guard cannot prove safe. A pre-command "
-            "recovery snapshot was saved, so it is allowed. {}".format(_recovery_pointer(snap[1])))
-    if snap is not None and snap[0] == "fail":
-        # A warranted recovery point could NOT be created: an unrecoverable discard denies-and-educates.
-        return _deny(
-            "AIQT rule prsunc (preserve-uncommitted-work): the command could not be parsed by the shell "
-            "lexer and it names a git work-losing verb on a tree that is not provably clean, and no "
-            "pre-command recovery snapshot could be created ({}), so this discard would be unrecoverable; "
-            "denied. Commit or stash your work first, then retry. {}".format(snap[1], _DISCARD_ALTS),
-            "AIQT guardrail: denied an unparseable, unrecoverable git discard (rule prsunc); commit or stash "
-            "first, then retry.")
-    if base is None:
-        # No session cwd, so no recovery snapshot could even be attempted for this unparseable lossy command.
-        return _deny(
-            "AIQT rule prsunc (preserve-uncommitted-work): the command could not be parsed by the shell "
-            "lexer and it names a git work-losing verb, but no session working directory is available to "
-            "take a recovery snapshot, so this discard would be unrecoverable; denied. Re-issue it as a "
-            "parseable bare 'git <verb>' command from the target repository (a leading "
-            "GUARDRAIL_ALLOW_DISCARD=1 prefix then opts out), or commit or stash your work first. {}"
-            .format(_DISCARD_ALTS),
-            "AIQT guardrail: denied an unparseable git discard with no recoverable snapshot (rule prsunc).")
-    # base is set and the tree is provably clean: nothing to discard.
-    return _allow()
+        return _allow()  # no git + work-losing verb anywhere in the raw text: the true boundary
+    return _deny(
+        "AIQT rule prsunc (preserve-uncommitted-work): the command could not be parsed by the shell lexer "
+        "(an unbalanced quote or an unsupported construct) and its raw text names git together with a "
+        "work-losing verb keyword, so this guard cannot establish what it would run or where; under the "
+        "closed allowlist grammar every such unparseable flagged command is denied, read-only ones "
+        "included (the raw scan cannot tell them apart), and no recovery snapshot is attempted (no sound "
+        "snapshot basis exists for an unreadable command). Re-issue it as a plain, parseable 'git <verb>' "
+        "command from the target repository, or commit or stash your work first. {}".format(_DISCARD_ALTS),
+        "AIQT guardrail: denied an unparseable command naming a git work-losing verb (rule prsunc); "
+        "re-issue it as a plain, parseable git command, or commit or stash first.")
 
 
 def _pristine_single_bare_git(command, segments):
@@ -3933,7 +3827,7 @@ def _pristine_single_bare_git(command, segments):
         redirect), and every command/process substitution ($( ), backtick, <( ), >( ));
       * no shell RESERVED-WORD token (if/then/for/while/case/[[/{/... a compound-command keyword);
       * exactly ONE operator-free command segment (guaranteed once no metacharacter is present, asserted);
-      * after optional leading KEY=value env/opt-out assignments, the sole command word is LITERALLY 'git'
+      * after optional leading KEY=value env assignments, the sole command word is LITERALLY 'git'
         (not a path like /usr/bin/git, and not a wrapper such as sudo/env/sh -c/... whose word is not 'git').
     Anything else - a compound, a wrapper/redirect/reserved-word, or a command word that is not literally
     'git' - returns None so the guard ASKS rather than trust the clean probe on a command it cannot read
@@ -3947,7 +3841,7 @@ def _pristine_single_bare_git(command, segments):
     tokens = populated[0][0]
     if any(t in _SHELL_RESERVED_WORDS for t in tokens):
         return None  # a shell reserved word: not a bare git invocation -> ASK
-    idx = _command_word_index(tokens)  # skip leading KEY=value assignments (incl. the opt-out)
+    idx = _command_word_index(tokens)  # skip leading KEY=value assignments
     if idx >= len(tokens) or tokens[idx] != "git":
         return None  # a wrapper, a pathed git, or no command word: not a bare 'git' -> ASK
     return tokens
@@ -4391,7 +4285,9 @@ def _record_stash_recovery(repo):
     """ROUND-2 FINDING 6. Preserve every stash entry under DURABLE refs/aiqt-recovery/ refs before a
     'git stash drop' / 'git stash clear', which is NOT reflog-recoverable after the fact (drop/clear delete
     the stash reflog entry, leaving the stash commit unreachable and GC-eligible). Returns:
-      - ('none', None)  : the repo has NO stash entries, so a drop/clear loses nothing (allow).
+      - ('none', None)  : CONFIRMED absence (the presence probe exited 1 with no output and no error
+                          text), so a drop/clear loses nothing (allow); a failed or malformed probe is
+                          NEVER read as 'none' - it returns ('fail') instead (round-4 codex finding 3).
       - ('ok', info)    : every stash entry was preserved under a durable ref; info = {refs, count}.
       - ('fail', reason): the repo/entries could not be enumerated, or a durable ref could not be written.
     Reads the stash reflog and writes only private refs (no working state) through the scrubbed _recovery_git
@@ -4402,18 +4298,33 @@ def _record_stash_recovery(repo):
         top = _recovery_toplevel(repo)
         if not top:
             return ("fail", "the repository toplevel could not be resolved (a bare or broken git dir)")
-        # `stash list` over the reflog: one line per entry. An absent refs/stash yields an empty list (no
-        # stashes), a genuine 'none'. A non-zero return is a fault -> fail (never a false 'none').
+        # The presence probe: `rev-parse --verify -q refs/stash`. CONFIRMED ABSENCE is exactly rc 1 with
+        # EMPTY stdout and EMPTY stderr (the -q contract for a missing ref): only that silent miss is a
+        # genuine 'none'. EVERY other outcome - rc 128, an I/O or ownership diagnostic, or rc 0 with no
+        # object id - is a FAILED or MALFORMED observation, not evidence of absence, so it is a
+        # preservation FAILURE (the caller denies) rather than a false 'none' that would let a drop/clear
+        # destroy a real stash unpreserved (PR #423 round-4, codex finding 3).
         verify = _recovery_git(repo, ["rev-parse", "--verify", "-q", "refs/stash"], timeout=5)
-        if verify.returncode != 0 or not verify.stdout.strip():
-            return ("none", None)                     # no stash ref at all: nothing to preserve
+        # codex round-5 MEDIUM: compare the ORIGINAL streams, TYPED, with the empty string.
+        _vout = verify.stdout
+        _verr = verify.stderr
+        if verify.returncode == 1 and _vout == "" and _verr == "":
+            return ("none", None)
+        if verify.returncode != 0 or not isinstance(_vout, str) or not _vout.strip():
+            return ("fail", "the stash presence probe failed (rc={}{}), so the stash entries could not be "
+                            "confirmed absent or preserved".format(
+                                verify.returncode,
+                                ": " + _verr.strip() if isinstance(_verr, str) and _verr.strip() else ""))
         listing = _recovery_git(repo, ["reflog", "show", "--no-abbrev", "--format=%H", "refs/stash"],
                                 timeout=10)
         if listing.returncode != 0:
             return ("fail", "the stash reflog could not be enumerated (rc={})".format(listing.returncode))
         shas = [ln.strip() for ln in listing.stdout.splitlines() if ln.strip()]
         if not shas:
-            return ("none", None)
+            # refs/stash was just verified to EXIST, so an empty reflog listing is a malformed observation
+            # (at least the top entry exists and would be lost): a preservation failure, never 'none'.
+            return ("fail", "refs/stash exists but its reflog listed no entries, so the stash entries "
+                            "could not be enumerated for preservation")
         stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
         refs = []
         for idx, sha in enumerate(shas):
@@ -4429,39 +4340,43 @@ def _record_stash_recovery(repo):
     return ("ok", {"refs": refs, "count": len(refs)})
 
 
-def _discard_recovery_result(kind, detail, snap, optout=None):
+def _discard_recovery_result(kind, detail, snap, note=""):
     """The SNAPSHOT-THEN-ALLOW outcome for a recoverable-destructive discard (hooks never ask). snap is
     ('ok', info) (a recovery snapshot was saved), ('fail', reason) (a warranted snapshot could NOT be made),
     or None (no snapshot warranted: a ref-level move or a stash/branch asset a working-tree snapshot cannot
-    hold, which is typically reflog-recoverable). On 'ok' or None the discard is ALLOWED with an
+    hold; a ref/branch move is typically reflog-recoverable, while a resolved stash drop/clear is preserved
+    under durable refs by the caller first, or denied). On 'ok' or None the discard is ALLOWED with an
     informational note; on 'fail' the discard would be unrecoverable, so it is DENIED-and-educated (commit or
-    stash first). `optout` selects the path-aware opt-out guidance folded into the deny wording only (an
-    allow needs none)."""
+    stash first). `note` (the removed-prefix migration sentence, or empty) ends the reason or note."""
     if snap is not None and snap[0] == "fail":
-        reason, _banner = _discard_ask_reason(kind, detail, optout)
         return _deny(
-            reason + " NOTE: no pre-command recovery snapshot could be created ({}), so this discard would "
-                     "be unrecoverable; it is denied rather than run. Commit or stash your work first, then "
-                     "retry.".format(snap[1]),
+            _discard_ask_reason(kind, detail)
+            + " NOTE: no pre-command recovery snapshot could be created ({}), so this discard would "
+              "be unrecoverable; it is denied rather than run. Commit or stash your work first, then "
+              "retry.".format(snap[1]) + note,
             "AIQT guardrail: denied an unrecoverable git discard - no recovery snapshot could be created "
             "(rule prsunc); commit or stash first, then retry.")
     if snap is not None and snap[0] == "ok":
         return _allow_note(
             "AIQT guardrail (rule prsunc, preserve-uncommitted-work): {} {}. A pre-command recovery snapshot "
-            "was saved, so it is allowed. {}".format(kind, detail, _recovery_pointer(snap[1])))
+            "was saved, so it is allowed. {}".format(kind, detail, _recovery_pointer(snap[1])) + note)
     return _allow_note(
         "AIQT guardrail (rule prsunc, preserve-uncommitted-work): {} {}. This guard could not auto-snapshot "
-        "it (a ref-level or stash/branch asset a working-tree snapshot cannot capture, typically "
-        "reflog-recoverable), so it is allowed; ensure any work you need is saved.".format(kind, detail))
+        "it (a ref-level or branch asset a working-tree snapshot cannot capture, which is typically "
+        "reflog-recoverable; a resolved stash drop/clear is NOT reflog-recoverable afterwards and instead "
+        "has its entries preserved under durable refs first, stated in this note when it applies), so it "
+        "is allowed; ensure any work you need is saved.".format(kind, detail)
+        + note)
 
 
-def _stash_drop_clear_outcome(repo, stash_op):
+def _stash_drop_clear_outcome(repo, stash_op, note=""):
     """Preserve every stash entry of `repo` under durable refs/aiqt-recovery/ refs, then return the no-ask
     decision for a 'git stash drop'/'clear' (ROUND-2 FINDING 6, generalized in round-3 finding 2 to the
     -C/compound/redirected forms): 'none' -> ALLOW (no entries to lose), 'ok' -> ALLOW-WITH-NOTE (entries
     preserved under durable refs), 'fail' -> DENY (the entries could not be preserved, so the discard would
     be unrecoverable). The caller has already established `repo` is the repository the command will actually
-    clear (drop/clear is NOT reflog-recoverable afterwards, so a worktree snapshot cannot protect it)."""
+    clear (drop/clear is NOT reflog-recoverable afterwards, so a worktree snapshot cannot protect it).
+    `note` (the removed-prefix migration sentence, or empty) ends the reason or note."""
     st = _record_stash_recovery(repo)
     if st[0] == "none":
         return _allow()  # no stash entries: drop/clear loses nothing
@@ -4470,7 +4385,7 @@ def _stash_drop_clear_outcome(repo, stash_op):
             "AIQT rule prsunc (preserve-uncommitted-work): git stash {} discards saved stash entries and is "
             "NOT reflog-recoverable afterwards, and this guard could not preserve the stash entries under a "
             "recovery ref first ({}), so the discard would be unrecoverable; denied rather than run. Commit "
-            "or apply your stash first, then retry. {}".format(stash_op, st[1], _DISCARD_ALTS),
+            "or apply your stash first, then retry. {}".format(stash_op, st[1], _DISCARD_ALTS) + note,
             "AIQT guardrail: denied an unrecoverable git stash drop/clear - the stash entries could not be "
             "preserved (rule prsunc); apply or commit the stash first, then retry.")
     # ROUND-7 (codex finding 4): bind the advertised stash-recovery command to the TARGET repo with
@@ -4482,41 +4397,20 @@ def _stash_drop_clear_outcome(repo, stash_op):
         "(not reflog-recoverable afterwards). {} stash entr{} were first preserved under durable refs so they "
         "remain recoverable ({}); recover one with 'git -C {} stash apply <ref>'. It is allowed.".format(
             stash_op, st[1]["count"], "y" if st[1]["count"] == 1 else "ies", ", ".join(st[1]["refs"]),
-            shlex.quote(repo)))
+            shlex.quote(repo)) + note)
 
 
-def _deny_with_recovery(kind, snap):
+def _deny_with_recovery(kind, snap, note=""):
     """A DENY (a confirmed whole-tree clobber on a dirty tree) whose reason folds in the recovery outcome,
-    mirroring _discard_recovery_result. The recovery text goes in through _discard_deny's parameter: a
-    deny constructor's result is only ever returned, never unpacked and edited."""
+    mirroring _discard_recovery_result. The recovery text (then `note`, the removed-prefix migration
+    sentence or empty) goes in through _discard_deny's parameter: a deny constructor's result is only ever
+    returned, never unpacked and edited."""
     recovery = ""
     if snap is not None and snap[0] == "ok":
         recovery = " " + _recovery_pointer(snap[1])
     elif snap is not None and snap[0] == "fail":
         recovery = " NOTE: no pre-command recovery snapshot could be created ({}).".format(snap[1])
-    return _discard_deny(kind, recovery)
-
-
-def _cd_target_dir(tokens, cw, base):
-    """Resolve the destination directory of a top-level `cd`/`pushd` segment (`cw` is the command word),
-    against the current effective directory `base`. Returns an absolute-normalized directory path when it
-    can be resolved simply, or None when it cannot (a `popd`, a bare `cd`/`pushd` with no operand, a `cd -`,
-    a relative operand with no `base` to anchor it, or an operand this guard cannot treat as a literal path).
-    Only a single simple literal operand is honoured; anything else is unresolvable so the caller treats the
-    subsequent discard target as unresolved (round-3 finding 1: a discard after a cd it cannot resolve must
-    not be snapshotted against the wrong directory)."""
-    if cw == "popd":
-        return None                                   # returns to an unknowable dir off the pushd stack
-    cwidx = _command_word_index(tokens)
-    operands = [t for t in tokens[cwidx + 1:] if not t.startswith("-")]
-    if len(operands) != 1 or not operands[0] or operands[0] == "-":
-        return None                                   # no operand (HOME/rotate), 'cd -', or ambiguous
-    d = operands[0]
-    if os.path.isabs(d):
-        return os.path.normpath(d)
-    if base is None:
-        return None                                   # a relative cd with no cwd to anchor it
-    return os.path.normpath(os.path.join(base, d))
+    return _discard_deny(kind, recovery + note)
 
 
 def _segment_has_gitdir_redirect(tokens):
@@ -4608,198 +4502,1039 @@ def _gitdir_is_session_repo(tokens, cwd):
     return gd_c == sess_c
 
 
-def _wrapped_git_index(tokens):
-    """ROUND-6 FINDING 3. The index of the first STANDALONE 'git' command token (its basename is 'git') in a
-    segment whose own command word is NOT git, i.e. a WRAPPED git invocation (env/sudo/xargs/timeout/... git
-    <verb>), or None. Matches a real token equal to 'git' (or '/usr/bin/git'), so a 'git <verb>' buried inside
-    a single QUOTED argument ('sh -c "git reset --hard"', 'eval "git reset"') has no standalone git token and
-    is NOT matched here (that fragmented/quoted form stays the disclosed best-effort residual). Purely lexical."""
-    for i, tok in enumerate(tokens):
-        if tok.rsplit("/", 1)[-1] == "git":
-            return i
+# PR #423 D-423-NARROW ROUND 8: the POSITIVE LITERAL closed allowlist grammar for a NON-PRISTINE
+# in-scope command. The round-7 walk MODELLED shell behaviour (heredoc stripping, builtin
+# directory-neutrality, environment tracking) and each round left a sibling of a closed class accepted
+# (R7C blockers 1-4, majors 5-6). ROUND 8 stops modelling: the grammar RECOGNIZES a closed positive
+# language, judged directly on the RAW command string, and denies on the first byte, token, word or
+# shape outside it, so every shell construct the grammar does not spell out is unreachable by
+# construction. The language, exactly:
+#   characters: a token is a BARE word over the class [A-Za-z0-9_./@:=+,%-] or ONE single-quoted
+#     literal (no quote inside, no concatenation with anything adjacent); any other byte anywhere
+#     outside single quotes (a dollar sign, a backquote, a double quote, a backslash, a glob or brace
+#     character, a tilde, <, (, ), |, #, !, a stray ampersand, a carriage return or other control
+#     byte) denies, which by construction rules out every expansion, substitution, heredoc,
+#     here-string, process substitution, pipe, subshell, brace group, comment, background job and
+#     input redirect;
+#   command words, spelled bare and unquoted: git; cd (option flags -P and -L only, exactly ONE
+#     operand, an absolute literal path with no '..' component whose realpath equals its normpath);
+#     and true or : with no arguments. EVERY other command word (echo, printf, test, [, pwd, pushd,
+#     popd, export, eval, source, ., set, unset, alias, a wrapper, an interpreter, a pathed or quoted
+#     or concatenated spelling) and any assignment word (NAME=value) before or in the command-word
+#     position denies, so nothing accepted can change the shell environment, and the directory can
+#     change only through the one modelled cd;
+#   git shape: the only global option is -C <absolute literal path> (same path rules as cd; it may
+#     repeat, each absolute); any other global option (-c, --git-dir, --work-tree, --namespace,
+#     --no-pager, ...) denies, and a GIT_*= token ANYWHERE in the command denies; the bare literal
+#     subcommand is either on the explicit read-only allowlist below - carrying ONLY that
+#     subcommand's vetted option spellings (R9 DECIDED item 1 narrowed by R10,
+#     _DISCARD_READONLY_OPTS: exact value-less flags plus joined-only --opt=value forms, no
+#     abbreviations and no separated value words, each value shape-validated; an unvetted option
+#     denies naming itself, because a read-only subcommand's
+#     own options can run a program or write a file) - or a modelled lossy verb, which
+#     is then preserve-then-allowed exactly as before (stash preservation or a resolved-target
+#     snapshot first, plus the session catch-all snapshot); anything else denies;
+#   joins: the and-and operator, the semicolon and the newline only, each between two populated
+#     simple commands; a TRAILING semicolon and leading or trailing newlines are accepted (bash
+#     runs the same commands), while a trailing and-and and any doubled or misplaced operator
+#     denies; a cd is honoured for a later segment only across and-and joins (across a
+#     semicolon or a newline the cd may have failed with the next command still running, so the
+#     effective directory becomes unprovable and a later discard-capable git segment denies);
+#   redirects: stdout-to-/dev/null, stderr-to-/dev/null and stderr-to-stdout only (none writes a
+#     file); an accepted redirect may directly FOLLOW a completed bare or quoted word (the word
+#     ends at the operator, exactly as bash reads it), an ALL-DIGIT word standing immediately
+#     before '>' is an IO number of which only 2 is accepted (in the 2> forms), repeated accepted
+#     redirects are accepted, and every other redirect, input, read-write, append and clobber
+#     forms included, denies.
+# Accepting a vetted wrapper/interpreter/xargs form stays DEFERRED later work (manifest residue).
+_SAFE_STASH_OPS = frozenset(("list", "show", "apply", "pop", "push", "save", "branch", "create", "store"))
+# The EXPLICIT READ-ONLY git subcommand allowlist with each subcommand's VETTED option grammar
+# (R9 DECIDED item 1, narrowed by R10 DECIDED item 1): a read-only SUBCOMMAND is not a read-only
+# COMMAND LINE, because its own options can run a program (git grep --open-files-in-pager/-O runs
+# one per matching file; git ls-remote --upload-pack/-u runs an arbitrary command string, so
+# ls-remote is DELISTED outright - it also opens network access) or write a file (git log
+# --output=<path> truncates that file). R10 DELISTS the subcommands whose ACCEPTED command line can
+# run a configured program through git itself: help (it launches a man viewer or browser, and a
+# configured man.<tool>.cmd is shell-evaluated) and diff, show and blame (their patch output runs
+# configured textconv and external-diff drivers); -p/--patch is outside every closed option allowlist
+# for the same reason - removed from every option list here (cat-file -p, an object pretty-printer, goes under
+# the same literal rule: an over-deny - use -t/-s/-e or the positional object form) AND denied on
+# the modelled lossy verbs by _discard_patch_token (R11 DECIDED item 4: interactive patch mode
+# renders its hunks through the configured interactive.diffFilter program) - and for-each-ref's
+# --format AND --sort are delisted (R10 item 1 and R11 DECIDED item 2: the %(...) placeholders
+# and the sort atoms include signature fields that run the configured signature program). Each entry
+# maps the subcommand to (value-less flags, value-taking options with a value validator); only
+# these EXACT spellings are accepted - no abbreviation, although git itself accepts an unambiguous
+# long-option prefix - and a value-taking option is accepted ONLY as the joined --opt=value
+# spelling that git itself reads joined, NEVER with a separated value word: for git's optional-
+# value options a separated word is NOT the value but a token git reads in its own right (the R9
+# hole read 'log --pretty --output=<path>' as a vetted value while git read --output as an option
+# and truncated the path), and the short valued spellings (-n, -e, -A, -B, -C, -U, -L) are gone
+# with the separated form (the -<n> shorthand of log/rev-list/shortlog stays). '--' ends the
+# option region (everything after is a positional operand), and a non-option token is a positional
+# operand (a rev, path, pattern or object name): DATA passed to the subcommand, never 'inert' -
+# repository, global or system configuration can make even an accepted read-only command run a
+# configured program (core.fsmonitor on status, textconv drivers, pagers, signature programs; see
+# the residue), so this grammar bounds the COMMAND LINE, never configuration. 'reflog' and
+# 'config' are deliberately absent (reflog expire/delete and config set mutate); 'branch' and
+# 'stash' route through _discard_role/_stash_op_role instead, and an explicit 'stash list'
+# carries NO argument while an explicit 'stash show' carries at most ONE positional stash
+# reference and nothing else, '--' included (_discard_stash_ro_bad, R11 DECIDED items 3-4,
+# enforced on the grammar path AND the pristine single-command path: stash forwards list
+# arguments to git log and show arguments to git diff, where the class R10 delists would ride
+# through, and a retained '--' makes git stash show itself select patch output).
+_RO_INT = re.compile(r"[0-9]+")
+_RO_TEXT = re.compile(r"[^\x00-\x1f\x7f]*")  # free literal data (a pattern, author, date or sort
+# key) carried JOINED to the one vetted option that takes it; EVERY control byte (TAB and LF
+# included) and DEL is refused. The data is passed to the subcommand, never "inert" (see the
+# table comment below).
+# R10 (DECIDED item 1), narrowed by R11 (DECIDED item 1): a log --pretty/--format value is EXACTLY
+# one of the seven NAMED formats, or a format:/tformat:-PREFIXED string over literal text plus an
+# EXPLICIT placeholder allowlist (hash, tree, parent, author and committer fields, decoration,
+# subject, body, encoding, merge mark, %% and %n). EVERY OTHER value DENIES - an abbreviation, a
+# further built-in name (email, mboxrd) and any arbitrary name included - because git resolves an
+# unprefixed value as a format NAME: a built-in or a pretty.<name> CONFIGURATION alias, and a
+# configured alias can itself carry %G. EVERY %G signature placeholder is OUTSIDE the list (a %G
+# value makes the ACCEPTED command run the configured signature program), as are %(...)
+# extensions, %C colour, %x hex bytes and every other spelling.
+_RO_PRETTY = re.compile(
+    r"(?:oneline|short|medium|full|fuller|reference|raw|"
+    r"t?format:(?:[^%\x00-\x1f\x7f]|%(?:%|n|[HhTtPp]|[ac][neldrtiI]|[dDsfbBem]))*)")
+_DISCARD_READONLY_OPTS = {
+    "status": (frozenset(("-s", "--short", "-b", "--branch", "--porcelain", "--ignored")),
+               {"--porcelain": re.compile(r"v1|v2|1|2")}),  # R11: the four documented spellings
+    "log": (frozenset(("--oneline", "--graph", "--decorate", "--no-decorate", "--all", "--stat",
+                       "--numstat", "--shortstat", "--name-only", "--name-status", "--follow",
+                       "--reverse", "--first-parent", "--merges", "--no-merges", "--abbrev-commit",
+                       "--topo-order", "--date-order", "--no-patch", "--not")),
+            {"--max-count": _RO_INT, "--skip": _RO_INT, "--since": _RO_TEXT,
+             "--until": _RO_TEXT, "--author": _RO_TEXT, "--committer": _RO_TEXT,
+             "--grep": _RO_TEXT, "--pretty": _RO_PRETTY, "--format": _RO_PRETTY,
+             "--date": _RO_TEXT}),
+    "rev-parse": (frozenset(("--verify", "-q", "--quiet", "--short", "--abbrev-ref",
+                             "--symbolic-full-name", "--git-dir", "--absolute-git-dir",
+                             "--show-toplevel", "--show-prefix", "--is-inside-work-tree",
+                             "--is-bare-repository", "--is-shallow-repository")),
+                  {"--short": _RO_INT}),
+    "rev-list": (frozenset(("--count", "--all", "--objects", "--not", "--reverse",
+                            "--first-parent", "--topo-order", "--date-order")),
+                 {"--max-count": _RO_INT, "--skip": _RO_INT}),
+    "ls-files": (frozenset(("-s", "--stage", "-z", "-o", "--others", "-c", "--cached", "-d",
+                            "--deleted", "-m", "--modified", "--exclude-standard", "--full-name")),
+                 {}),
+    "ls-tree": (frozenset(("-r", "-t", "-z", "-l", "--long", "--name-only", "--full-tree",
+                           "--full-name")), {}),
+    "cat-file": (frozenset(("-t", "-s", "-e")), {}),
+    "grep": (frozenset(("-i", "-n", "-l", "-L", "-c", "-w", "-F", "-E", "-G", "-P", "-v", "-h",
+                        "-H", "--cached", "--untracked", "--no-index", "--line-number",
+                        "--name-only", "--files-with-matches", "--files-without-match", "--count",
+                        "--fixed-strings", "--extended-regexp", "--basic-regexp", "--perl-regexp",
+                        "--ignore-case", "--word-regexp", "--invert-match")),
+             {"--max-depth": _RO_INT, "--after-context": _RO_INT, "--before-context": _RO_INT,
+              "--context": _RO_INT}),
+    "describe": (frozenset(("--tags", "--all", "--always", "--long", "--dirty", "--exact-match",
+                            "--first-parent")),
+                 {"--abbrev": _RO_INT, "--candidates": _RO_INT, "--match": _RO_TEXT,
+                  "--exclude": _RO_TEXT}),
+    "shortlog": (frozenset(("-s", "--summary", "-n", "--numbered", "-e", "--email", "--all",
+                            "--no-merges", "--merges", "--first-parent")),
+                 {"--since": _RO_TEXT, "--until": _RO_TEXT}),
+    "name-rev": (frozenset(("--name-only", "--tags", "--all", "--always", "--no-undefined")),
+                 {"--refs": _RO_TEXT}),
+    "merge-base": (frozenset(("--all", "--is-ancestor", "--octopus", "--independent",
+                              "--fork-point")), {}),
+    "check-ignore": (frozenset(("-v", "--verbose", "-q", "--quiet", "-z", "--non-matching",
+                                "--no-index")), {}),
+    "check-attr": (frozenset(("-a", "--all", "-z")), {"--source": _RO_TEXT}),
+    "count-objects": (frozenset(("-v", "--verbose", "-H", "--human-readable")), {}),
+    "show-ref": (frozenset(("--head", "--heads", "--tags", "-d", "--dereference", "--verify",
+                            "-q", "--quiet", "--hash", "-s")),
+                 {"--hash": _RO_INT, "--abbrev": _RO_INT}),
+    "for-each-ref": (frozenset(),
+                     {"--count": _RO_INT,
+                      "--contains": _RO_TEXT, "--no-contains": _RO_TEXT, "--merged": _RO_TEXT,
+                      "--no-merged": _RO_TEXT, "--points-at": _RO_TEXT}),
+    "var": (frozenset(("-l",)), {}),
+    "version": (frozenset(("--build-options",)), {}),
+}
+# Derived from the table so the two can never disagree (an entry exists exactly per listed sub).
+_DISCARD_READONLY_SUBS = frozenset(_DISCARD_READONLY_OPTS)
+# log/rev-list/shortlog accept the -<n> max-count shorthand (an exact all-digit spelling).
+_RO_NUM_SHORTHAND_SUBS = frozenset(("log", "rev-list", "shortlog"))
+_RO_NUM_SHORTHAND_RE = re.compile(r"-[0-9]+")
+
+
+def _discard_readonly_args(sub, args):
+    """R9 DECIDED item 1, narrowed by R10 DECIDED item 1: vet every option-shaped argument of an
+    accepted read-only subcommand against that subcommand's exact allowlisted spellings
+    (_DISCARD_READONLY_OPTS, see its block comment). A value-taking option is accepted ONLY in its
+    joined --opt=value spelling: there is NO separated-value consumption, because consuming a
+    following word as a value is how R9 read 'log --pretty --output=<path>' as vetted while git
+    read --output as an option of its own and truncated the path. Returns None when every option
+    is vetted, else the offending spelling, which the caller denies naming it."""
+    flags, valued = _DISCARD_READONLY_OPTS[sub]
+    i = 0
+    n = len(args)
+    while i < n:
+        a = args[i]
+        if a == "--":
+            return None  # end of options: every later token is a positional operand
+        if not a.startswith("-") or a == "-":
+            i += 1  # a positional operand: data passed to the subcommand (see the table comment)
+            continue
+        if a in flags:
+            i += 1
+            continue
+        if a.startswith("--") and "=" in a:
+            name, val = a.split("=", 1)
+            v = valued.get(name)
+            if v is not None and v.fullmatch(val) is not None:
+                i += 1
+                continue
+        if sub in _RO_NUM_SHORTHAND_SUBS and _RO_NUM_SHORTHAND_RE.fullmatch(a) is not None:
+            i += 1
+            continue
+        return a
     return None
 
 
-def _segment_carries_target_redirect(tokens):
-    """ROUND-6 FINDING 3. True when a segment carries a git TARGET-redirect token: a '-C', a
-    --git-dir/--work-tree (bare or '='-attached), or a leading/inline GIT_DIR=/GIT_WORK_TREE= assignment. Used
-    only for a WRAPPED git discard the walk cannot resolve as a depth-0 literal-git segment: such a redirect
-    moves the discard OFF the session cwd, so the session-cwd best-effort snapshot cannot capture it and the
-    discard fails closed (DENY). A wrapped discard with NO redirect acts on the effective cwd, which that
-    best-effort snapshot covers, so it is not flagged here. Conservative token scan (over-detection only
-    over-denies)."""
-    for tok in tokens:
-        if tok == "-C" or tok.startswith("--git-dir") or tok.startswith("--work-tree"):
-            return True
-        if tok.startswith("GIT_DIR=") or tok.startswith("GIT_WORK_TREE="):
-            return True
-    return False
+# The closed positive character class of a BARE literal word (R8 DECIDED item 1) and the closed list
+# of accepted command words (item 2). The token-end set is what may follow a completed token: any
+# other adjacency (a quote starting mid-word, a denied byte) denies.
+_DISCARD_WORD_CHARS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_./@:=+,%-")
+_DISCARD_TOKEN_END = frozenset((" ", "\t", "\n", ";", "&", ">", ""))
+_DISCARD_COMMAND_WORDS = frozenset(("git", "cd", "true", ":"))
+# R8 DECIDED item 3: a GIT_* assignment-shaped token ANYWHERE in the command denies (the accepted
+# words cannot export it, but the closed grammar refuses the spelling outright rather than reason
+# about where it is harmless).
+_DISCARD_GIT_ENV_RE = re.compile(r"GIT_[A-Za-z0-9_]*\+?=")
 
 
-def _nonpristine_discard_actions(segments, cwd):
-    """ROUND-3 FINDINGS 1 and 2. Walk a NON-PRISTINE in-scope command's segments and resolve, for each
-    VISIBLE git discard segment, the effective worktree/repository the discard ACTUALLY acts on, so the
-    recovery snapshot (a worktree discard) or the stash preservation (a `git stash drop`/`clear`) lands on
-    that target rather than blindly on the session cwd. The shell cwd is tracked across TOP-LEVEL `cd`/`pushd`
-    (a `&&`-gated cd applies to the next command with certainty; a `;`/`||`-sequenced one does NOT gate
-    success so the cwd becomes uncertain; a backgrounded `cd &` and a cd inside a subshell `( )` do NOT change
-    the foreground cwd), and each git segment's own -C/--work-tree/GIT_WORK_TREE= redirect is resolved against
-    that cwd. Returns a dict:
-      { 'snapshot_bases': [dir, ...]  # distinct worktree dirs a snappable destructive discard acts on
-        'stash_ops':      [(dir, op)] # each stash drop/clear paired with the repo dir it acts on
-        'unresolved':     bool        # a visible depth-0 discard whose target could NOT be resolved
-        'hidden':         bool        # ROUND-6 FINDING 3: a lossy discard the walk cannot resolve to a
-                                      #   snapshottable target - a git inside a subshell whose cwd a prior
-                                      #   internal cd moved, or a WRAPPED git (env/sudo/... git) carrying a
-                                      #   -C/--git-dir/--work-tree/GIT_DIR=/GIT_WORK_TREE= redirect - so its
-                                      #   target cannot be snapshotted with certainty
-        'saw_actionable': bool }      # any visible worktree-destructive or stash drop/clear discard
-    A caller with unresolved=True OR hidden=True DENIES (fail closed: it cannot snapshot/preserve the exact
-    target). Where a
-    destructive segment acts on the plain session cwd (no cd, no redirect) that cwd is added to
-    snapshot_bases so it is snapshotted through the same path; where no actionable discard is visible
-    (obfuscated verbs, soft/ref-level forms, or an unknown cwd) saw_actionable is False and the caller keeps
-    its existing best-effort session-cwd snapshot."""
-    depth = 0
-    session_cwd = cwd if isinstance(cwd, str) and cwd else None
-    eff = session_cwd
-    eff_certain = True
-    cd_happened = False
-    snapshot_bases = []
-    stash_ops = []
-    unresolved = False
-    saw_actionable = False
-    targets_session = False
-    hidden = False   # ROUND-6 FINDING 3: a lossy discard the walk cannot resolve as a depth-0 literal-git
-    # segment (a subshell-internal cd moved its target, or a WRAPPED git carries a target redirect) -> DENY.
-    subshell_cd_seen = False  # a cd/pushd occurred at depth>0 in the current subshell nesting: a git discard
-    # then running inside that subshell acts on a moved, un-modelled cwd. Reset when depth returns to 0.
+def _stash_op_role(op):
+    if op is None:
+        return "safe"
+    if op in ("drop", "clear"):
+        return "preserve"
+    if op == "export":
+        return "export"
+    if op in _SAFE_STASH_OPS:
+        return "safe"
+    return "deny"
 
-    def _add(seq, item):
-        if item not in seq:
-            seq.append(item)
 
-    for tokens, sep in segments:
-        cw = _command_word(tokens)
-        if cw == "git":
-            sub, args = _git_sub_and_args(tokens)
-            if sub is not None:
-                role, _kind = _discard_role(sub, args)
-                if role != "allow":
-                    if depth != 0 and subshell_cd_seen:
-                        # ROUND-6 FINDING 3: a lossy git discard inside a subshell '( ... )' where a cd/pushd
-                        # earlier in that subshell moved the cwd the walk does not model (e.g.
-                        # '(cd T && git restore -- f)'), so its target cannot be resolved and the session
-                        # snapshot would not capture it -> fail closed (the caller denies). A subshell/command
-                        # substitution with NO internal cd runs at the foreground cwd, so it falls through to
-                        # the normal resolution below and is snapshot-backed there (the C6 design).
-                        hidden = True
-                        saw_actionable = True
-                    elif sub in _SNAPSHOTTABLE_VERBS:
-                        saw_actionable = True
-                        if not eff_certain:
-                            unresolved = True
-                        elif _segment_has_worktree_redirect(tokens):
-                            # ROUND-7 (codex finding 1): --work-tree relocates ONLY the worktree, not the repo.
-                            # An INDEX/REF-only discard (restore --staged, mixed reset, rm --cached) acts on the
-                            # ambient (or -C) repo, so snapshot THAT via _segment_repo_dir (--work-tree ignored).
-                            # A WORKTREE-CONTENT discard destroys content in the --work-tree dir while the index/
-                            # refs stay in the ambient repo: the split cannot be captured by one snapshot, so it
-                            # is unresolved (the caller DENIES) rather than snapshotting the wrong --work-tree.
-                            if _discard_index_only(sub, args):
-                                rd = _segment_repo_dir(tokens, eff)
-                                if rd == "opaque":
-                                    unresolved = True
-                                elif isinstance(rd, str):
-                                    _add(snapshot_bases, rd)
-                                elif eff is None:
-                                    if cd_happened:
-                                        unresolved = True
-                                else:
-                                    _add(snapshot_bases, eff)
-                            else:
-                                unresolved = True
-                        else:
-                            wt = _segment_redirect_worktree(tokens, eff)
-                            if wt == "opaque":
-                                unresolved = True
-                            elif wt is not None:
-                                _add(snapshot_bases, wt)
-                            elif eff is None:
-                                if cd_happened:
-                                    unresolved = True     # a cd to an unresolvable dir preceded the discard
-                                # else: cwd unknown -> keep the best-effort session path (not unresolved)
-                            elif cd_happened:
-                                _add(snapshot_bases, eff)  # a cd'd-into concrete dir
-                            else:
-                                targets_session = True     # plain session cwd
-                    elif sub == "stash":
-                        stash_op = next((a for a in args if not a.startswith("-")), None)
-                        if stash_op in ("drop", "clear"):
-                            saw_actionable = True
-                            if not eff_certain or _segment_has_gitdir_redirect(tokens):
-                                unresolved = True
-                            else:
-                                # ROUND-7 (codex finding 1): stash is a REPO/ref op; its target repo is the
-                                # ambient (or -C) repo, NOT the --work-tree value, so resolve via
-                                # _segment_repo_dir (--work-tree ignored) and preserve THAT repo's stash.
-                                rd = _segment_repo_dir(tokens, eff)
-                                if rd == "opaque":
-                                    unresolved = True
-                                elif isinstance(rd, str):
-                                    _add(stash_ops, (rd, stash_op))
-                                elif eff is None:
-                                    if cd_happened:
-                                        unresolved = True
-                                    # else: cwd unknown -> best-effort session path
-                                else:
-                                    _add(stash_ops, (eff, stash_op))
-                    # a force branch delete/move/copy/reset or stash export is ref-level/reflog-recoverable:
-                    # a worktree snapshot cannot capture it, so no target is resolved here (the existing
-                    # allow-note covers it).
-        elif depth == 0 and cw in ("cd", "pushd", "popd"):
-            if sep == "&":
-                pass                                   # backgrounded: no foreground cwd change
-            elif sep in ("&&", ""):
-                nd = _cd_target_dir(tokens, cw, eff)
-                eff = nd                               # a resolvable dir, or None (subsequent target opaque)
-                cd_happened = True
-            else:                                      # ';' or '||': cd success does not gate the next
-                eff_certain = False
-        elif cw in ("cd", "pushd", "popd"):
-            # a cd/pushd at depth>0 (a subshell-internal cd, e.g. '(cd T && ...)'): the walk does not model
-            # the subshell's cwd, so note it, and a later same-subshell git discard fails closed (finding 3).
-            subshell_cd_seen = True
+def _discard_stash_op(args):
+    # R8 (codex 8) reworked by R9 (codex 2): git resolves the stash operation ONLY from the FIRST
+    # argument. A bare first word is the EXPLICIT operation (git errors on an unknown one, which
+    # _stash_op_role denies). Anything else - no argument, a leading '--', or a leading option of
+    # any spelling (-q, -m <msg>, an attached -m<msg>, --message=<msg>) - is a bare or IMPLICIT
+    # PUSH, in which NO later token is ever an operation: git reads it as a push option, as a
+    # pathspec after '--', or refuses the whole command ("subcommand wasn't specified; 'push'
+    # can't be assumed due to unexpected token ..."), so a stray token or pathspec named drop or
+    # clear can never steer this guard into a wrong op (the R8 skip-the-message walk read 'git
+    # stash -m msg drop' as a drop git never runs, and denied the stray pathspec of 'git stash -m
+    # msg file.txt' that git itself refuses). Returns the explicit op word, or None for a bare or
+    # implicit push (safe).
+    if not args or args[0] == "--" or args[0].startswith("-"):
+        return None
+    return args[0]
+
+
+def _discard_stash_ro_bad(args):
+    """R10 DECIDED item 1, widened by R11 (DECIDED items 3-4): the read-only stash LISTING forms
+    carry almost nothing, because git forwards their arguments to the delisted diff/log class. An
+    explicit 'stash list' carries NO further token (its arguments ride to git log around the
+    vetted log grammar), and an explicit 'stash show' carries AT MOST ONE positional stash
+    reference and nothing else: an option-shaped token rides to git diff (-p selects the patch
+    output whose textconv/external-diff drivers R10 delisted), and a retained '--' makes git stash
+    show itself select patch output, so '--', anything after it, an empty token and a second
+    positional all deny. Returns the offending-token description, or None. Applied by the grammar
+    path AND the pristine single-command path, so the bare single-command spelling cannot ride
+    around the compound rule."""
+    op = _discard_stash_op(args)
+    if op == "list" and len(args) > 1:
+        return "stash list {}".format(args[1])
+    if op == "show":
+        seen_ref = False
+        for tok in args[1:]:
+            if not tok or tok.startswith("-"):  # '-', '--', '-p', --opt=..., an empty quoted token
+                return "stash show {}".format(tok) if tok else "stash show (an empty token)"
+            if seen_ref:
+                return "stash show {}".format(tok)
+            seen_ref = True
+    return None
+
+
+# R11 DECIDED item 4, reworked by R12 DECIDED item 2 and R13 DECIDED item 1: the verbs on
+# which the -p/--patch spelling is DENIED outright (interactive patch mode is outside what this
+# guard can prove safe, because the hunks it renders pass through the operator-configurable
+# interactive.diffFilter setting, the same configuration class whose subcommands R10 delisted).
+# R13 DECIDED item 1: the scan NO LONGER keeps a private copy of the value-taking options (the
+# R12 copy omitted --pathspec-from-file and the --orphan/--conflict values, so the two tables
+# could disagree: a separated filename value spelled -p was read as a real patch flag, a false
+# deny, and a REAL -p standing behind a consumed separated value was never seen); it DERIVES
+# the arity from the SAME closed allowlists the option validator uses (_DISCARD_VERB_OPTS, and
+# _DISCARD_STASH_OP_OPTS for the resolved stash op) through _discard_valued_arity, so the two
+# can never disagree (ONE arity specification). In a short cluster git reads everything after a
+# value-taking letter as that option's attached VALUE ('checkout -bp' names the branch 'p'), so
+# the scan stops there and never reads a value's bytes as flags (the F-85 lesson), and a
+# SEPARATED value word is consumed by that arity BEFORE the scan looks for -p/--patch or a
+# terminator ('stash push -m -- -p' makes '--' the message and the later -p a REAL patch flag,
+# while 'stash push -m -p' makes -p the message itself: git's parser consumes the next word
+# unconditionally). Every OTHER cluster character is read as a FLAG, non-letters included: the
+# digit flags of checkout/restore mean git reads '-2p'/'-3p' as --ours/--theirs plus --patch and
+# enters patch mode, so the scan no longer stops at a non-letter (the old break silently allowed
+# those clusters).
+_DISCARD_PATCH_VERBS = frozenset(("checkout", "restore", "reset", "stash"))
+
+
+def _discard_valued_arity(valued):
+    """The (short option LETTERS, long option NAMES) arity view of the value-taking spellings
+    of one closed allowlist (R13 DECIDED item 1: _DISCARD_VERB_OPTS and _DISCARD_STASH_OP_OPTS
+    are the ONE arity specification; the -p/--patch scan derives its value consumption from
+    them, so the option validator and that scan can never disagree on which option takes a
+    value)."""
+    return ("".join(sorted(v[1] for v in valued if not v.startswith("--"))),
+            tuple(sorted(v[2:] for v in valued if v.startswith("--"))))
+
+
+def _discard_patch_token(sub, args):
+    """The -p/--patch spelling (a conservative '--patch' prefix abbreviation and a 'p' anywhere in
+    a flag cluster included) carried in `sub`'s option region, returned as the SPELLING TYPED,
+    op word included ('git stash push -p', 'git checkout -2p'), or None (R12 DECIDED item 4: the
+    deny names what was typed). For stash, only the push forms take -p (an explicit push or save,
+    or the bare/implicit push); list and show have their own rule (_discard_stash_ro_bad), and git
+    rejects -p on the remaining ops, which keep their existing outcome. A declared value-taking
+    option consumes its value FIRST - the rest of its cluster token when attached, the NEXT token
+    when separated ('--' and '-p' shapes included, exactly as git itself consumes them) - so a
+    value is never read as a flag or a terminator AND a real flag standing after a consumed '--'
+    is still seen; the declared value-taking options are DERIVED from the closed allowlist of the
+    verb (or of the resolved stash op), the same table the option validator reads (R13 DECIDED
+    item 1), never a second copy. Over-recognition is safe here - it denies, never silently
+    allows - mirroring _has_long_prefix, so an ambiguous '--p'/'--pa'/'--pat' prefix denies too,
+    and an unambiguous abbreviation of a declared long value option ('--mess') consumes like its
+    full spelling."""
+    if sub not in _DISCARD_PATCH_VERBS:
+        return None
+    op = None
+    if sub == "stash":
+        op = _discard_stash_op(args)
+        if op not in (None, "push", "save"):
+            return None
+        valued_set = _DISCARD_STASH_OP_OPTS["push" if op is None else op][1]
+        scan = args[1:] if op is not None else args
+    else:
+        valued_set = _DISCARD_VERB_OPTS[sub][1]
+        scan = args
+    valued, long_valued = _discard_valued_arity(valued_set)
+    label = "git {} {}".format(sub, op) if op is not None else "git {}".format(sub)
+    skip_value = False
+    for t in scan:
+        if skip_value:
+            skip_value = False
+            continue  # a prior option's SEPARATED value ('-m -p' is a message), never a flag
+        if t in _EOO_TOKENS:
+            break  # a genuine option terminator (one consumed as a value never reaches here)
+        if t.startswith("--"):
+            name = t.split("=", 1)[0][2:]
+            if name and "patch".startswith(name):
+                return "{} {}".format(label, t)
+            if name and "=" not in t and any(full.startswith(name) for full in long_valued):
+                skip_value = True  # a value-taking long option: the next token is its value
+            continue
+        if t.startswith("-") and t != "-":
+            for i, ch in enumerate(t[1:]):
+                if ch == "p":
+                    return "{} {}".format(label, t)
+                if ch in valued:
+                    if i == len(t) - 2:
+                        skip_value = True  # a bare '-m'/'-b': the value is the NEXT token
+                    break  # the rest of this token is the attached value, never flags
+    return None
+
+
+# R12 DECIDED item 1: the CLOSED per-verb option allowlists of the compound-grammar path. On that
+# path a recognized lossy verb's options were vetted only by the -p/--patch and stash rules, so an
+# accepted compound could carry an option that runs a configured program: git branch --sort and
+# --format take the same signature-bearing sort atoms and %(...) placeholders whose for-each-ref
+# spellings R11 delisted (--sort=signature:grade runs the configured signature program), and
+# --edit-description launches the configured editor. Enumerating bad options is the many-round
+# whack-a-mole; these tables instead enumerate what is ACCEPTED: each verb maps to (value-less
+# flags, value-taking options), EXACT spellings only - no git-accepted abbreviation and no flag
+# cluster ('-fd' is outside the table even where '-f' and '-d' are in it) - and a value-taking
+# option consumes its value by arity: attached ('-bfoo', '--opt=val') or separated ('-b foo',
+# '--opt val'), so a value is never read as an option and a real option is never swallowed as
+# data. ANY option outside the verb's table denies (kind "verbopt"); a non-option token is a
+# positional operand (a ref or pathspec), and '--' ends the option region. git branch deliberately
+# lists NO --sort, --format, --edit-description, --list, --show-current, --contains, --merged or
+# --points-at spelling: the listing/formatting family carries the signature atoms and free
+# placeholders, and the write forms below cover every modelled branch mutation. stash is vetted
+# PER OP by _discard_stash_opt_bad. The role helpers (_discard_role) still classify an accepted
+# option set; these tables only bound which spellings may appear. The pristine single-command
+# path keeps its role-based handling (R12 scope: the compound grammar).
+_DISCARD_VERB_OPTS = {
+    "checkout": (frozenset(("-q", "--quiet", "-f", "--force", "-m", "--merge", "--detach",
+                            "--ours", "--theirs", "-2", "-3", "--ignore-skip-worktree-bits")),
+                 frozenset(("-b", "-B", "--orphan", "--conflict", "--pathspec-from-file"))),
+    "switch": (frozenset(("-q", "--quiet", "-f", "--force", "--discard-changes", "-d", "--detach",
+                          "-m", "--merge", "--guess", "--no-guess", "--no-track")),
+               frozenset(("-c", "-C", "--orphan", "--conflict"))),
+    "restore": (frozenset(("-q", "--quiet", "-W", "--worktree", "-S", "--staged", "--ours",
+                           "--theirs", "--ignore-unmerged", "--ignore-skip-worktree-bits",
+                           "--overlay", "--no-overlay")),
+                frozenset(("-s", "--source", "--conflict", "--pathspec-from-file"))),
+    "reset": (frozenset(("-q", "--quiet", "--hard", "--soft", "--mixed", "--merge", "--keep",
+                         "-N", "--intent-to-add", "--no-refresh", "--refresh")),
+              frozenset(("--pathspec-from-file",))),
+    "rm": (frozenset(("-f", "--force", "-r", "-n", "--dry-run", "--cached", "-q", "--quiet",
+                      "--ignore-unmatch", "--sparse")),
+           frozenset(("--pathspec-from-file",))),
+    "clean": (frozenset(("-n", "--dry-run", "--no-dry-run", "-f", "--force", "-d", "-x", "-X",
+                         "-q", "--quiet")),
+              frozenset(("-e", "--exclude"))),
+    "branch": (frozenset(("-d", "-D", "--delete", "-f", "--force", "-m", "-M", "--move", "-c",
+                          "-C", "--copy", "-r", "--remotes", "-a", "--all", "-q", "--quiet",
+                          "-v", "-vv", "--verbose", "--unset-upstream")),
+               frozenset(("-u", "--set-upstream-to"))),
+}
+# The stash leg of the same R12 DECIDED item 1 rule, keyed by the RESOLVED op word (None, the
+# bare/implicit push, uses the push entry): only these exact spellings may appear after the op.
+# R14 DECIDED item 1: each entry is audited against the option listing of git itself for that
+# sub-command (the 'git stash <op> -h' output of the installed git 2.55.0; create prints none),
+# so a value-taking option is never listed as a flag: the save listing carries
+# "-m, --[no-]message <message>" and "-S, --[no-]staged" exactly as push does, so save carries
+# -m/--message in its VALUE set (the R13 entry listed an empty value set on the false premise
+# that save takes no -m) and the -p scan consumes a message value before it looks for a patch
+# flag. R15 DECIDED item 3: save also lists --no-include-untracked, as push does (both
+# listings carry "-u, --[no-]include-untracked"; the R14 save entry omitted it, an over-deny).
+# The other negated spellings the entries omit (--no-quiet, --no-staged, --no-all and
+# --no-message, for example), --[no-]auto-advance, push's --[no-]pathspec-file-nul and apply's
+# --[no-]label-* values stay unlisted, so the compound path denies them, an over-deny in the
+# safe direction. The numeric-valued -U/--unified and --inter-hunk-context spellings stay
+# unlisted: git refuses a non-numeric value, so a terminator consumed as such a value never
+# reaches patch mode, and the compound path denies the unlisted spelling outright (the safe
+# direction). list lists nothing here because it accepts NO further token, and show accepts
+# at most ONE positional stash reference (both vetted by _discard_stash_ro_bad); export keeps
+# its two documented spellings (the pristine path still treats every export form as not
+# provably safe).
+_DISCARD_STASH_OP_OPTS = {
+    "push": (frozenset(("-q", "--quiet", "-k", "--keep-index", "--no-keep-index", "-u",
+                        "--include-untracked", "--no-include-untracked", "-a", "--all",
+                        "-S", "--staged")),
+             frozenset(("-m", "--message", "--pathspec-from-file"))),
+    "save": (frozenset(("-q", "--quiet", "-k", "--keep-index", "--no-keep-index", "-u",
+                        "--include-untracked", "--no-include-untracked", "-a", "--all",
+                        "-S", "--staged")),
+             frozenset(("-m", "--message"))),
+    "apply": (frozenset(("-q", "--quiet", "--index")), frozenset()),
+    "pop": (frozenset(("-q", "--quiet", "--index")), frozenset()),
+    "drop": (frozenset(("-q", "--quiet")), frozenset()),
+    "clear": (frozenset(), frozenset()),
+    "branch": (frozenset(), frozenset()),
+    "create": (frozenset(), frozenset()),
+    "store": (frozenset(("-q", "--quiet")), frozenset(("-m", "--message"))),
+    "list": (frozenset(), frozenset()),
+    "show": (frozenset(), frozenset()),
+    "export": (frozenset(("--print",)), frozenset(("--to-ref",))),
+}
+
+
+def _discard_opt_scan(flags, valued, scan):
+    """The first option-shaped token in scan outside the closed (flags, valued) allowlist, or None
+    when every option is listed. EXACT spellings only; a listed value-taking option consumes its
+    value by arity (the joined '--opt=val', the attached '-bfoo', or the SEPARATED next token,
+    '--' and option shapes included, exactly as git consumes them); a '--' or --end-of-options
+    not consumed as a value ends the option region; a non-option token is a positional operand."""
+    skip_value = False
+    for a in scan:
+        if skip_value:
+            skip_value = False
+            continue  # a prior value-taking option's SEPARATED value, consumed by arity
+        if a in _EOO_TOKENS:
+            return None  # end of options: every later token is a positional operand
+        if not a.startswith("-") or a == "-":
+            continue  # a positional operand (a ref or pathspec): data, never an option
+        if a in flags:
+            continue
+        if a in valued:
+            skip_value = True  # its value is the next token, whatever its shape
+            continue
+        if a.startswith("--") and "=" in a and a.split("=", 1)[0] in valued:
+            continue  # the joined --opt=value spelling of a listed value option
+        if not a.startswith("--") and len(a) > 2 and a[:2] in valued:
+            continue  # the attached -b<value> spelling of a listed short value option
+        return a
+    return None
+
+
+def _discard_verb_opt_bad(sub, args):
+    """R12 DECIDED item 1: vet every option-shaped token of a recognized non-stash lossy verb on
+    the compound-grammar path against that verb's CLOSED allowlist (_DISCARD_VERB_OPTS, see its
+    block comment). Returns None when every option is listed, else the offending spelling, which
+    the caller denies naming it."""
+    flags, valued = _DISCARD_VERB_OPTS[sub]
+    return _discard_opt_scan(flags, valued, args)
+
+
+def _discard_stash_opt_bad(op, args):
+    """The stash leg of R12 DECIDED item 1: vet the tokens after a resolved stash op against that
+    op's closed allowlist (_DISCARD_STASH_OP_OPTS; a None op is the bare/implicit push and scans
+    every token). Returns None or the offending spelling."""
+    flags, valued = _DISCARD_STASH_OP_OPTS["push" if op is None else op]
+    return _discard_opt_scan(flags, valued, args if op is None else args[1:])
+
+
+def _discard_literal_abs_path(p):
+    """`p` normalized when it is an ABSOLUTE literal path with no '..' component whose realpath equals
+    its normpath (R8 DECIDED items 2-3: no symlink component, so the directory the kernel resolves IS
+    the directory this guard snapshots), else None."""
+    if not p or not os.path.isabs(p) or ".." in p.split("/"):
+        return None
+    norm = os.path.normpath(p)
+    try:
+        real = os.path.realpath(norm)
+    except (OSError, ValueError):
+        return None
+    if real != norm:
+        return None
+    return norm
+
+
+def _discard_lex_redirect(command, i, fd):
+    """Validate ONE redirect whose '>' sits at command[i-1]; `fd` is "2" for the 2> spelling, else
+    "1". The closed grammar accepts exactly >/dev/null, 2>/dev/null and 2>&1 (whitespace before the
+    /dev/null target allowed, and a further accepted redirect may follow directly), none of which
+    writes a file. Returns (next index, None) when accepted,
+    else (i, (kind, what))."""
+    n = len(command)
+    if command[i:i + 1] == ">":
+        return i, ("redir", ("2" if fd == "2" else "") + ">>")
+    if command[i:i + 1] == "&":
+        if fd == "2" and command[i + 1:i + 2] == "1" and command[i + 2:i + 3] in _DISCARD_TOKEN_END:
+            return i + 2, None
+        return i, ("redir", ("2" if fd == "2" else "") + ">&" + command[i + 1:i + 2])
+    j = i
+    while j < n and command[j] in " \t":
+        j += 1
+    k = j
+    while k < n and command[k] in _DISCARD_WORD_CHARS:
+        k += 1
+    target = command[j:k]
+    if target != "/dev/null" or command[k:k + 1] not in _DISCARD_TOKEN_END:
+        return i, ("redir", target or command[j:j + 1] or "(missing target)")
+    return k, None  # a further accepted redirect may follow directly; it is judged on its own
+
+
+def _discard_grammar_lex(command):
+    """Lex the RAW command string under the positive literal grammar. Returns (items, deny): items is
+    the ordered list of ("word", text, quoted) and ("sep", op) entries with op in ("&&", ";", "nl");
+    an ACCEPTED harmless redirect emits nothing (it writes no file), may directly follow a completed
+    bare or quoted word (the word ends at the operator, exactly as bash reads it; an ALL-DIGIT word
+    there is bash's IO number, of which only 2 is accepted), and may be repeated. deny is the first (kind, what)
+    outside the grammar, else None. Judging bytes on the raw string is what makes the grammar closed
+    BY CONSTRUCTION: no quote removal, expansion, heredoc or operator this lexer does not spell out
+    can reach an accepted command, so none needs to be modelled on this path."""
+    items = []
+    i = 0
+    n = len(command)
+    while i < n:
+        ch = command[i]
+        if ch in " \t":
+            i += 1
+            continue
+        if ch == "\n":
+            items.append(("sep", "nl"))
+            i += 1
+            continue
+        if ch == ";":
+            items.append(("sep", ";"))
+            i += 1
+            continue
+        if ch == "&":
+            if command[i + 1:i + 2] == "&":
+                items.append(("sep", "&&"))
+                i += 2
+                continue
+            return items, ("sep", "&")
+        if ch == ">":
+            i, bad = _discard_lex_redirect(command, i + 1, "1")
+            if bad is not None:
+                return items, bad
+            continue
+        if ch == "'":
+            j = command.find("'", i + 1)
+            if j < 0:
+                return items, ("quote", "an unterminated single quote")
+            if command[j + 1:j + 2] not in _DISCARD_TOKEN_END:
+                return items, ("quote", "a single-quoted literal concatenated with adjacent text")
+            items.append(("word", command[i + 1:j], True))
+            i = j + 1
+            continue
+        if ch in _DISCARD_WORD_CHARS:
+            j = i
+            while j < n and command[j] in _DISCARD_WORD_CHARS:
+                j += 1
+            nxt = command[j:j + 1]
+            if nxt == ">":
+                word = command[i:j]
+                if word.isdigit():
+                    # R9 (codex 3): an ALL-DIGIT word standing immediately before '>' is bash's IO
+                    # number, not a word; only 2 is accepted (the 2> forms) and every other number
+                    # keeps its named rejection.
+                    if word == "2":
+                        i, bad = _discard_lex_redirect(command, j + 1, "2")
+                        if bad is not None:
+                            return items, bad
+                        continue
+                    return items, ("redir", word + ">")
+                # A non-digit word ends at the redirect operator, exactly as bash reads it; the '>'
+                # is then judged as its own stdout redirect on the next loop pass.
+                items.append(("word", word, False))
+                i = j
+                continue
+            if nxt == "'":
+                return items, ("quote", "a quote starting inside a word")
+            if nxt not in _DISCARD_TOKEN_END:
+                return items, ("char", nxt)
+            items.append(("word", command[i:j], False))
+            i = j
+            continue
+        return items, ("char", ch)
+    return items, None
+
+
+def _discard_grammar_segments(items):
+    """Fold the lexed item stream into (words, join_after) segments. Between two populated simple
+    commands exactly ONE join is accepted: one '&&' or one ';', either followed by newline
+    continuations, or bare newlines; anything else (a leading or doubled ';' or '&&', a ';' or '&&'
+    after a newline, a trailing '&&') is a bash syntax error or an empty command and denies (fail
+    closed, nothing guessed about what bash would then run). A TRAILING ';' (with trailing newlines)
+    and leading or trailing bare newlines ARE accepted: bash runs the same commands (R9: the stated
+    grammar now says so explicitly). join_after is "&&" or ";" (a bare
+    newline joins like ';': the previous command's success is not established), or None at the end.
+    Returns (segments, deny)."""
+    segments = []
+    cur = []
+    run = []
+
+    def _run_bad():
+        return ("sep", " ".join("<newline>" if s == "nl" else s for s in run))
+
+    for it in items:
+        if it[0] == "word":
+            if run:
+                if any(s != "nl" for s in run[1:]):
+                    return segments, _run_bad()
+                segments.append((cur, "&&" if run[0] == "&&" else ";"))
+                cur = []
+                run = []
+            cur.append((it[1], it[2]))
+        elif run:
+            run.append(it[1])
+        elif cur:
+            run = [it[1]]
+        elif it[1] != "nl":
+            return segments, ("sep", it[1])
+    if run and (run[0] == "&&" or any(s != "nl" for s in run[1:])):
+        return segments, _run_bad()  # a trailing '&&' (or a malformed trailing run) leaves bash waiting
+    if cur:
+        segments.append((cur, None))
+    return segments, None
+
+
+def _discard_cd_target(operands):
+    """The absolute destination of an accepted cd segment, or None when the segment is outside the
+    closed shape (R8 DECIDED item 2): bare option flags -P and -L only, exactly ONE operand, which
+    must be an absolute literal path with no '..' component whose realpath equals its normpath, so
+    the honoured directory IS the directory the shell would enter (no OLDPWD '-', no HOME default, no
+    CDPATH, no directory-stack selector, no symlink divergence). `operands` is the (text, quoted)
+    token list after the bare command word 'cd'."""
+    path = None
+    count = 0
+    for text, quoted in operands:
+        if not quoted and text in ("-P", "-L"):
+            continue
+        if not quoted and text.startswith("-"):
+            return None
+        count += 1
+        path = text
+    if count != 1:
+        return None
+    return _discard_literal_abs_path(path)
+
+
+def _discard_git_segment_grammar(words, eff):
+    """Validate ONE segment whose bare command word is 'git' against the positive grammar. `words` is
+    the full (text, quoted) token list (words[0] is 'git'); `eff` is the tracked effective directory,
+    or None when it is unprovable (a cd not followed through '&&' joins). Returns one of:
+      ("deny", kind, what)         - the segment is outside the grammar (kind names the violation
+                                     class: global/cdir/sub/roopt/stashop/stashro/patch/verbopt/
+                                     dir; what the offending token)
+      ("ok", action, base, label)  - accepted; action is None (a read-only subcommand or a read-only
+                                     stash list/show form, R13 DECIDED item 3: not a lossy
+                                     verb), "lossy" (a recognized lossy verb in a form with
+                                     nothing to preserve: an allow-role form, a safe or export
+                                     stash form, or a force-branch ref move a worktree snapshot
+                                     cannot capture anyway), "consume" (a stash pop or stash
+                                     branch, which APPLIES and then DROPS a stash entry: accepted
+                                     alone, denied by the caller in a compound with another lossy
+                                     verb, R12 DECIDED item 3), "snapshot" (a worktree discard:
+                                     snapshot `base` first) or "stash" (a stash removal: preserve
+                                     the stash of `base` first); label is the subcommand (or the
+                                     stash op word for "stash"/"consume")."""
+    seg_dir = eff
+    i = 1
+    n = len(words)
+    while i < n:
+        text, quoted = words[i]
+        if quoted or not text.startswith("-"):
+            break
+        if text == "-C":
+            val = words[i + 1][0] if i + 1 < n else None
+            nd = _discard_literal_abs_path(val) if val is not None else None
+            if nd is None:
+                return ("deny", "cdir", val if val is not None else "(missing value)")
+            seg_dir = nd
+            i += 2
+            continue
+        return ("deny", "global", text)
+    if i >= n:
+        return ("deny", "sub", "(none)")
+    sub, sub_quoted = words[i]
+    if sub_quoted:
+        return ("deny", "sub", sub)
+    args = [t for t, _q in words[i + 1:]]
+    if sub in _DISCARD_READONLY_SUBS:
+        ro_bad = _discard_readonly_args(sub, args)
+        if ro_bad is not None:
+            return ("deny", "roopt", ro_bad)
+        return ("ok", None, None, sub)
+    if sub not in _RECOGNIZED_VERBS:
+        return ("deny", "sub", sub)
+    if sub in _DISCARD_PATCH_VERBS:
+        p_bad = _discard_patch_token(sub, args)
+        if p_bad is not None:
+            # R11 DECIDED item 4: -p/--patch on a lossy verb selects interactive patch mode,
+            # whose rendered hunks pass through the operator-configurable interactive.diffFilter
+            # setting; deny, never snapshot-then-allow (see _discard_patch_token, which returns
+            # the spelling typed, op word included).
+            return ("deny", "patch", p_bad)
+    if sub == "stash":
+        op = _discard_stash_op(args)
+        srole = _stash_op_role(op)
+        if srole == "deny":
+            return ("deny", "stashop", op)
+        st_bad = _discard_stash_ro_bad(args)
+        if st_bad is not None:
+            # R10 DECIDED item 1, widened by R11 (DECIDED items 3-4): an explicit 'stash list'
+            # carries NO argument and an explicit 'stash show' at most ONE positional stash
+            # reference and nothing else ('--' included); see _discard_stash_ro_bad.
+            return ("deny", "stashro", st_bad)
+        so_bad = _discard_stash_opt_bad(op, args)
+        if so_bad is not None:
+            # R12 DECIDED item 1 (stash leg): only the resolved op's exact option spellings are
+            # accepted; see _DISCARD_STASH_OP_OPTS.
+            return ("deny", "verbopt", so_bad)
+        if op in ("list", "show"):
+            # R13 DECIDED item 3: the read-only stash LISTING forms (arguments already bounded
+            # by _discard_stash_ro_bad above) are NOT a lossy verb: they destroy nothing, so
+            # the stash-consume rule must not count them, and its deny text truthfully names
+            # only lossy verbs. R14 MINOR: this exemption covers list and show ONLY; every
+            # other non-consuming stash form (create, store, export --print; R15: store is not
+            # read-only, it adds an entry to refs/stash) still counts as a lossy segment and
+            # can over-deny a compound with pop or branch, the safe direction.
+            return ("ok", None, None, sub)
+        if srole == "preserve":
+            if seg_dir is None:
+                return ("deny", "dir", "git stash {}".format(op))
+            return ("ok", "stash", seg_dir, op)
+        if op in ("pop", "branch"):
+            # R12 DECIDED item 3: pop (and branch, which drops its source entry on success)
+            # CONSUMES a stash entry; the caller denies it in a compound with another lossy verb,
+            # because the following verb can destroy the just-applied content while the dropped
+            # entry is gone and the pre-command snapshot cannot contain it.
+            return ("ok", "consume", None, op)
+        return ("ok", "lossy", None, sub)  # a safe or export stash form discards no stash entry
+    vo_bad = _discard_verb_opt_bad(sub, args)
+    if vo_bad is not None:
+        # R12 DECIDED item 1: every recognized lossy verb's options are checked against a CLOSED
+        # per-verb allowlist of exact spellings with their arity; any option outside it denies
+        # (git branch --sort/--format carry the signature atoms R11 delisted on for-each-ref).
+        return ("deny", "verbopt", vo_bad)
+    role, _kind = _discard_role(sub, args)
+    if role == "allow":
+        return ("ok", "lossy", None, sub)  # a genuinely non-destructive form of a recognized verb
+    if sub in _SNAPSHOTTABLE_VERBS:
+        if seg_dir is None:
+            return ("deny", "dir", "git {}".format(sub))
+        return ("ok", "snapshot", seg_dir, sub)
+    return ("ok", "lossy", None, sub)  # a force-branch form: a reflog-recoverable ref asset, no snapshot
+
+
+def _discard_positive_grammar(command, cwd):
+    """Judge a NON-PRISTINE in-scope command against the positive literal grammar (D-423-NARROW
+    ROUND 8; see the block comment above _SAFE_STASH_OPS), directly on the RAW command string. `cwd`
+    is the session working directory (the caller already denied when none exists). The effective
+    directory for a git segment starts at `cwd` and changes ONLY through an accepted absolute-literal
+    cd, and only while every join from that cd to the git segment is '&&' (across ';' or a newline
+    the cd may have failed with the next command still running, so the directory becomes UNPROVABLE
+    and a later discard-capable git segment denies; a later accepted cd re-establishes it). R12
+    DECIDED item 3: a compound in which an accepted segment CONSUMES a stash entry (git stash pop,
+    git stash branch) together with ANOTHER segment resolving to a recognized lossy verb (any
+    form) denies outright, because a successful pop applies then drops the entry, so the other
+    verb can destroy the just-applied content while the dropped entry is gone and the pre-command
+    snapshot cannot contain it; a consuming segment alone (or joined only with read-only git
+    segments, stash list and show included (R13 DECIDED item 3),
+    cd, true or ':') keeps its existing handling. Returns a dict:
+      deny            - None, or (kind, what) naming the first grammar violation
+      snapshot_bases  - the resolved repo dir of every accepted worktree-discard segment
+      stash_ops       - (repo dir, op word) of every accepted stash drop/clear segment
+      subs            - the snapshottable subcommands seen (the recovery-ledger verb label)"""
+    out = {"deny": None, "snapshot_bases": [], "stash_ops": [], "subs": set()}
+    items, bad = _discard_grammar_lex(command)
+    if bad is None:
+        segments, bad = _discard_grammar_segments(items)
+    if bad is not None:
+        out["deny"] = bad
+        return out
+    eff = cwd
+    cd_seen = False
+    lossy_segs = 0    # git segments resolving to a recognized lossy verb, whatever their form
+    consume_ops = []  # the op word of every stash-entry-consuming segment (pop, branch)
+    for words, join_after in segments:
+        for text, _quoted in words:
+            if _DISCARD_GIT_ENV_RE.match(text):
+                out["deny"] = ("assign", text.split("=", 1)[0])
+                return out
+        head, head_quoted = words[0]
+        if head_quoted or head not in _DISCARD_COMMAND_WORDS:
+            if not head_quoted and _ENV_ASSIGN_RE.match(head):
+                out["deny"] = ("assign", head.split("=", 1)[0])
+            else:
+                out["deny"] = ("word", head)
+            return out
+        is_cd = False
+        if head in ("true", ":"):
+            if len(words) > 1:
+                out["deny"] = ("word", "{} with arguments".format(head))
+                return out
+        elif head == "cd":
+            nd = _discard_cd_target(words[1:])
+            if nd is None:
+                out["deny"] = ("cdir", " ".join(t for t, _q in words[1:]) or "(no operand)")
+                return out
+            is_cd = True
         else:
-            # ROUND-6 FINDING 3: a segment whose command word is neither git nor a cd-family builtin. A
-            # STANDALONE 'git' token here is a WRAPPED git discard (env/sudo/xargs/timeout/... git <verb>).
-            # When it carries a target redirect (-C/--git-dir/--work-tree/GIT_DIR=/GIT_WORK_TREE=), or runs
-            # inside a subshell whose cwd a prior internal cd moved, its target is off the session cwd (or
-            # unmodellable) and the session snapshot would not capture it, so it cannot be resolved+snapshotted
-            # -> fail closed. A wrapped discard with NO redirect and no moved-subshell-cwd acts on the effective
-            # cwd, which the best-effort session snapshot covers, so it is NOT flagged (e.g. 'env git reset
-            # --hard', or '$(echo git checkout -f)' which runs at the foreground cwd). A git verb
-            # fragmented/quoted into a single token (no standalone 'git') stays the disclosed best-effort residual.
-            gi = _wrapped_git_index(tokens)
-            if gi is not None:
-                wsub, wargs = _git_sub_and_args(tokens[gi:])
-                if wsub is not None:
-                    wrole, _wk = _discard_role(wsub, wargs)
-                    if wrole != "allow" and (_segment_carries_target_redirect(tokens)
-                                             or (depth != 0 and subshell_cd_seen)):
-                        hidden = True
-                        saw_actionable = True
-        if sep == "(":
-            depth += 1
-        elif sep == ")":
-            depth = max(0, depth - 1)
-            if depth == 0:
-                subshell_cd_seen = False   # left the subshell nesting: its internal cd no longer applies
+            res = _discard_git_segment_grammar(words, eff)
+            if res[0] == "deny":
+                out["deny"] = (res[1], res[2])
+                return out
+            _act, _base, _label = res[1], res[2], res[3]
+            if _act is not None:
+                lossy_segs += 1  # every action but None marks a recognized-lossy-verb segment
+            if _act == "snapshot":
+                if _base not in out["snapshot_bases"]:
+                    out["snapshot_bases"].append(_base)
+                out["subs"].add(_label)
+            elif _act == "stash":
+                if (_base, _label) not in out["stash_ops"]:
+                    out["stash_ops"].append((_base, _label))
+            elif _act == "consume":
+                consume_ops.append(_label)
+        if is_cd:
+            cd_seen = True
+            eff = nd if join_after == "&&" else None
+        elif join_after not in ("&&", None) and cd_seen:
+            eff = None
+    if consume_ops and lossy_segs > 1:
+        # R12 DECIDED item 3: a stash-entry-consuming segment (pop, branch) in a compound with
+        # another lossy verb denies BEFORE any preservation or snapshot (the walk is pure; the
+        # caller acts only on an accepted walk), naming the consuming op. A consuming segment
+        # alone keeps its existing handling.
+        out["deny"] = ("stashconsume", "git stash {}".format(consume_ops[0]))
+        return out
+    return out
 
-    if targets_session and session_cwd is not None:
-        _add(snapshot_bases, session_cwd)              # a plain session-cwd discard: snapshot the cwd too
-    return {"snapshot_bases": snapshot_bases, "stash_ops": stash_ops, "hidden": hidden,
-            "unresolved": unresolved, "saw_actionable": saw_actionable}
+
+# The deny texts for each positive-grammar violation class (D-423-NARROW ROUND 8). {0} is the
+# offending byte, token or form, {1} the safe-alternatives text. Every reason names the closed
+# allowlist grammar, so a denial is attributable to the grammar (not to a snapshot failure), and each
+# names the plain spelling that would be accepted. None steers toward a destructive spelling.
+_DISCARD_GRAMMAR_DENY_TEXTS = {
+    "char": (
+        "AIQT rule prsunc (preserve-uncommitted-work): this in-scope command carries the character "
+        "{0!r}, which is outside the closed allowlist grammar's positive literal character class "
+        "(letters, digits and _ . / @ : = + , % - in bare words, single-quoted literals, the joins "
+        "'&&', ';' and newline, and the redirections >/dev/null, 2>/dev/null and 2>&1). Such a "
+        "character can introduce an expansion, substitution, heredoc, pipe, subshell, brace group, "
+        "comment or redirect this guard does not model, so what the command would run or where cannot "
+        "be proven; denied rather than run on a possibly unrecoverable discard. Re-issue it as a "
+        "plain 'git <verb>' command with literal tokens only, or commit or stash your work first. {1}",
+        "AIQT guardrail: denied an in-scope command carrying a character outside the discard guard's "
+        "closed allowlist grammar (rule prsunc); use plain literal tokens, or commit or stash first."),
+    "quote": (
+        "AIQT rule prsunc (preserve-uncommitted-work): this in-scope command carries {0}, which is "
+        "outside the closed allowlist grammar (accepted: a bare literal word, or ONE "
+        "single-quoted literal standing alone as a whole token; no double quotes, no concatenation, "
+        "no quote inside a quote). An unmodelled quoting form can change what the shell runs, so the "
+        "command cannot be proven; denied rather than run. Re-issue it with bare or simply "
+        "single-quoted literal tokens, or commit or stash your work first. {1}",
+        "AIQT guardrail: denied an in-scope command carrying a quoting form outside the discard "
+        "guard's closed allowlist grammar (rule prsunc); use plain literal tokens, or commit or stash "
+        "first."),
+    "sep": (
+        "AIQT rule prsunc (preserve-uncommitted-work): this in-scope command joins its parts with "
+        "{0!r}, which is outside the closed allowlist grammar (accepted joins: '&&', ';' and a "
+        "newline, each between two complete simple commands). An unmodelled join can background, "
+        "pipe or misparse the command, so what would run cannot be proven; denied rather than run. "
+        "Re-issue it as plain commands joined by '&&' alone, or commit or stash your work first. {1}",
+        "AIQT guardrail: denied an in-scope command joined outside the discard guard's closed "
+        "allowlist grammar (rule prsunc); join plain commands with '&&', or commit or stash first."),
+    "word": (
+        "AIQT rule prsunc (preserve-uncommitted-work): a segment of this in-scope command runs {0!r}, "
+        "which is outside the closed allowlist grammar's command words (accepted, spelled bare and "
+        "unquoted: 'git', a 'cd' to one absolute literal path with options -P/-L only, and 'true' or "
+        "':' with no arguments). Any other command word - a wrapper, an interpreter, eval, xargs, a "
+        "builtin that can change the environment or directory, a quoted or concatenated or pathed "
+        "spelling - could hide or redirect the discard, so the command cannot be proven; denied "
+        "rather than run. Re-issue the inner git command as a plain, unwrapped 'git <verb>' from the "
+        "target repository, or commit or stash your work first. {1}",
+        "AIQT guardrail: denied an in-scope command whose command word is outside the discard "
+        "guard's closed allowlist grammar (rule prsunc); re-issue the inner git command plainly, or "
+        "commit or stash first."),
+    "assign": (
+        "AIQT rule prsunc (preserve-uncommitted-work): this in-scope command carries an assignment "
+        "word (NAME=value, or a GIT_* assignment-shaped token), which is outside the closed allowlist "
+        "grammar: no assignment is accepted anywhere on this path (the name is not echoed here), "
+        "because an assignment can redirect the repository view or what the shell resolves, so the "
+        "discard's target cannot be proven; denied rather than run. Re-issue it as a plain "
+        "'git <verb>' command without the assignment, or commit or stash your work first. {1}",
+        "AIQT guardrail: denied a git command carrying an assignment outside the discard guard's "
+        "closed allowlist grammar (rule prsunc); drop the assignment, or commit or stash first."),
+    "global": (
+        "AIQT rule prsunc (preserve-uncommitted-work): a git segment of this in-scope command carries "
+        "the git global option {0!r}, which is outside the closed allowlist grammar (the only "
+        "accepted global option is -C with an absolute literal path): any other global can redirect "
+        "the repository, worktree, index or config view, so the discard's target cannot be proven; "
+        "denied rather than run. Re-issue it without that option, or commit or stash your work "
+        "first. {1}",
+        "AIQT guardrail: denied a git command carrying a global option outside the discard guard's "
+        "closed allowlist grammar (rule prsunc); drop the option, or commit or stash first."),
+    "cdir": (
+        "AIQT rule prsunc (preserve-uncommitted-work): this in-scope command changes or names a "
+        "directory through {0!r}, which is outside the closed allowlist grammar (accepted for cd and "
+        "git -C alike: exactly one ABSOLUTE literal path, no '..' component, whose realpath equals "
+        "its normpath, so no symlink component; cd additionally accepts only the flags -P and -L), "
+        "so the repository the command acts on cannot be resolved; denied rather than run. Re-issue "
+        "it with a literal absolute path, or run it from the target repository, or commit or stash "
+        "your work first. {1}",
+        "AIQT guardrail: denied a git discard whose directory operand is outside the discard guard's "
+        "closed allowlist grammar (rule prsunc); use a literal absolute path, or commit or stash "
+        "first."),
+    "sub": (
+        "AIQT rule prsunc (preserve-uncommitted-work): a git segment of this in-scope command "
+        "resolves to the git subcommand {0!r}, which is outside the closed allowlist grammar "
+        "(neither on the explicit read-only allowlist nor a lossy verb this guard models: checkout/"
+        "switch/restore/reset/rm/clean/stash/branch, each spelled bare), so it cannot be proven "
+        "non-destructive and cannot be snapshotted; denied rather than run. Re-issue it as a "
+        "recognized, provable form, or commit or stash your work first. {1}",
+        "AIQT guardrail: denied a git command whose subcommand is outside the discard guard's closed "
+        "allowlist grammar (rule prsunc); re-issue a recognized form, or commit or stash first."),
+    "roopt": (
+        "AIQT rule prsunc (preserve-uncommitted-work): a read-only git segment of this in-scope "
+        "command carries the option {0!r}, which is outside the closed allowlist grammar's vetted "
+        "option list for that subcommand (exact value-less flags plus joined-only --opt=value "
+        "spellings, each value shape-validated; a git-accepted abbreviation and every separated "
+        "value word are not vetted). An unvetted option can make a read-only "
+        "subcommand run a program (git grep --open-files-in-pager/-O runs one per matching file; "
+        "the delisted git ls-remote --upload-pack/-u runs an arbitrary command string) or write a "
+        "file (the --output forms truncate their target), so the segment cannot be proven "
+        "read-only; denied rather than run. Re-issue it without that option or with a vetted exact "
+        "spelling, or commit or stash your work first. {1}",
+        "AIQT guardrail: denied a git command whose read-only segment carries an option outside "
+        "the discard guard's vetted allowlist (rule prsunc); drop the option, or commit or stash "
+        "first."),
+    "stashop": (
+        "AIQT rule prsunc (preserve-uncommitted-work): this in-scope command names the git stash "
+        "operation {0!r}, which this guard cannot resolve to a modelled literal op word under the "
+        "closed allowlist grammar, so it cannot establish or preserve the stash entries the command "
+        "could affect; denied rather than run. Re-issue it as a plain, modelled git stash operation "
+        "spelled as its own bare word, or apply or commit the stash first. {1}",
+        "AIQT guardrail: denied a git stash command whose operation is outside the discard guard's "
+        "closed allowlist grammar (rule prsunc); re-issue it plainly, or apply or commit the stash "
+        "first."),
+    "stashro": (
+        "AIQT rule prsunc (preserve-uncommitted-work): this in-scope command carries {0!r}, which "
+        "is outside the closed allowlist grammar's stash rule: an explicit 'git stash list' "
+        "carries NO further token, and an explicit 'git stash show' carries at most ONE positional "
+        "stash reference and nothing else (no option-shaped token and no '--'). git forwards stash "
+        "list arguments to git log and stash show arguments to git diff, so an extra token rides "
+        "around the vetted read-only grammar and the delisted diff class (an --output value "
+        "truncates its target file; patch output runs configured textconv and external-diff "
+        "drivers, and a retained '--' makes stash show itself select patch output); denied rather "
+        "than run. Re-issue it as a bare 'git stash list' or a 'git stash show' with at most one "
+        "stash reference, or commit or stash your work first. {1}",
+        "AIQT guardrail: denied a git stash list/show argument outside the discard guard's closed "
+        "allowlist grammar (rule prsunc); use a bare 'stash list' or 'stash show <stash>', or "
+        "commit or stash first."),
+    "verbopt": (
+        "AIQT rule prsunc (preserve-uncommitted-work): a lossy-verb git segment of this in-scope "
+        "command carries the option {0!r}, which is outside the closed allowlist grammar's "
+        "per-verb option list for that verb (exact spellings only, each value-taking option's "
+        "value consumed by its arity; no git-accepted abbreviation and no flag cluster is "
+        "listed). An unlisted option can make even a modelled lossy verb run a configured "
+        "program (git branch --sort and --format carry signature atoms and placeholders that "
+        "run the configured signature program, and --edit-description launches the editor), so "
+        "the segment cannot be proven to stay within what a recovery snapshot preserves; denied "
+        "rather than run. Re-issue it with listed exact option spellings, or commit or stash "
+        "your work first. {1}",
+        "AIQT guardrail: denied a git command whose lossy-verb segment carries an option outside "
+        "the discard guard's closed per-verb allowlist (rule prsunc); drop the option, or commit "
+        "or stash first."),
+    "stashconsume": (
+        "AIQT rule prsunc (preserve-uncommitted-work): this in-scope command runs {0} together "
+        "with another lossy git verb, which is outside the closed allowlist grammar: a successful "
+        "stash pop (or stash branch) APPLIES and then DROPS the stash entry, so the other lossy "
+        "verb can destroy the just-applied content while the dropped entry is no longer in the "
+        "stash, and a pre-command worktree snapshot cannot contain it; denied rather than run. "
+        "Run the stash-consuming command alone first (or use git stash apply, which keeps the "
+        "entry), then re-issue the second command. {1}",
+        "AIQT guardrail: denied a compound that consumes a stash entry together with another "
+        "lossy git verb (rule prsunc); run git stash pop or branch alone (or use stash apply), "
+        "then retry."),
+    "patch": (
+        "AIQT rule prsunc (preserve-uncommitted-work): this in-scope command carries {0!r}, and "
+        "-p/--patch (abbreviations, clustered spellings such as -2p, and a separated option "
+        "value hiding the flag included) is outside the closed allowlist grammar's per-verb "
+        "option allowlists on every modelled lossy verb: interactive patch mode renders its "
+        "hunks through the operator-configurable interactive.diffFilter setting, so even a "
+        "modelled lossy verb would run a configured program before any recovery snapshot could "
+        "matter; denied rather than run. Re-issue the command without -p/--patch (a "
+        "pathspec-scoped spelling), or commit or stash your work first. {1}",
+        "AIQT guardrail: denied a git -p/--patch form whose interactive patch mode runs the "
+        "configured interactive.diffFilter program (rule prsunc); re-issue it without -p/--patch, "
+        "or commit or stash first."),
+    "redir": (
+        "AIQT rule prsunc (preserve-uncommitted-work): a segment of this in-scope command carries "
+        "the redirection {0!r}, which is outside the closed allowlist grammar (accepted: >/dev/null, "
+        "2>/dev/null and 2>&1 only, none of which writes a file), so the redirect could read, "
+        "truncate or overwrite a file this guard cannot snapshot; denied rather than run. Re-issue "
+        "it without the redirection, or commit or stash your work first. {1}",
+        "AIQT guardrail: denied a git discard carrying a redirection the discard guard cannot "
+        "preserve (rule prsunc); drop the redirection, or commit or stash first."),
+    "dir": (
+        "AIQT rule prsunc (preserve-uncommitted-work): {0} runs after a directory change the closed "
+        "allowlist grammar cannot follow through (a cd is honoured only while every join from it to "
+        "the discard is '&&'; across ';' or a newline the cd may have failed with the next command "
+        "still running), so its effective target directory is unprovable and can be neither proven "
+        "clean nor snapshotted; denied rather than run. Re-issue it as a plain 'git <verb>' command "
+        "run from the target repository, or join the chain with '&&' alone, or commit or stash your "
+        "work first. {1}",
+        "AIQT guardrail: denied a git discard whose directory the discard guard's closed allowlist "
+        "grammar cannot establish (rule prsunc); run it from the target repo, or commit or stash "
+        "first."),
+}
+
 
 
 def git_discard(data):
@@ -4816,21 +5551,49 @@ def git_discard(data):
     is a PRISTINE SINGLE BARE 'git <verb>' invocation (see _pristine_single_bare_git: no shell metacharacter
     anywhere even quoted, no reserved word, no wrapper/redirect/compound, and the sole command word literally
     'git') AND either its FORM is genuinely non-destructive, or the working tree is PROVABLY CLEAN (the
-    config-forced porcelain probe reports no tracked change AND no untracked entry), or the LEADING opt-out is
-    set - in which cases ALLOW. A pristine single bare WHOLE-TREE clobber (reset --hard, checkout -f with no
-    pathspec, switch --force/--discard-changes) on a probed-DIRTY tree DENIES. EVERYTHING ELSE in scope ASKS:
-    any shell structure at all (a metacharacter, wrapper, redirect, reserved word, or second segment), an
-    option the form-classifier cannot resolve, a worktree it cannot resolve to the session cwd, an incomplete
-    probe, or a softer/index-only discard. No recognized lossy command that would discard WORKING-TREE CONTENT
-    is silently ALLOWED unless it is a pristine
+    config-forced porcelain probe reports no tracked change AND no untracked entry) - in which cases ALLOW.
+    A pristine single bare WHOLE-TREE clobber (reset --hard, checkout -f with no pathspec, switch
+    --force/--discard-changes) on a probed-DIRTY tree DENIES. EVERYTHING ELSE in scope is judged by the
+    POSITIVE LITERAL closed allowlist grammar (D-423-NARROW ROUND 8, _discard_positive_grammar,
+    judged on the RAW command string): a non-pristine in-scope command is accepted ONLY when every
+    token is a bare literal word over the closed character class (letters, digits and
+    _ . / @ : = + , % -) or ONE standalone single-quoted literal; every command word, spelled bare,
+    is git, a cd to exactly one absolute literal '..'-free realpath-equals-normpath path (flags -P/-L
+    only), or true/':' with no arguments; no assignment word stands in or before a command-word
+    position and no GIT_* assignment-shaped token appears ANYWHERE; a git segment carries no global
+    option but -C <absolute literal path> and its bare subcommand is read-only-listed (carrying
+    ONLY that subcommand's vetted option spellings - R10/R11: value options joined-only; help,
+    diff, show, blame and for-each-ref --format/--sort delisted; -p/--patch outside every closed
+    option allowlist, the modelled lossy verbs included - because an unvetted read-only option
+    can run a program or write a file) or a modelled
+    lossy verb carrying ONLY that verb's closed option allowlist of exact spellings, each
+    value-taking option's value consumed by its arity, with a stash-entry-consuming op (pop,
+    branch) denied in a compound with another lossy verb (then preserve-then-allowed exactly as
+    before: stash preservation or a resolved-target
+    snapshot first, plus the session catch-all snapshot); joins are '&&', ';' and newline only (a
+    trailing ';' or newline is accepted), and
+    redirections >/dev/null, 2>/dev/null and 2>&1 only (each may directly follow a word, which ends
+    at the operator). ANY other byte, quoting form, word, join,
+    redirect or shape DENIES with the grammar reason - every wrapper, interpreter, eval, xargs,
+    find -exec, subshell, brace group, pipe, expansion, substitution, heredoc, builtin, assignment
+    word, unlisted global option or subcommand, unresolvable -C or cd or post-cd join, and every
+    unparseable flagged command (the fallback). No recognized lossy command that would discard
+    WORKING-TREE CONTENT is silently ALLOWED unless it is a pristine
     bare git whose FORM is genuinely non-destructive (checkout -b, reset --soft, clean -n, which ALLOW even on
-    a dirty tree), or on a provably-clean tree, or a pristine bare form carrying the leading
-    GUARDRAIL_ALLOW_DISCARD=1 opt-out - worst case it ASKS; the guarantee is bounded to working-tree content
-    (ref-level moves such as reset --soft moving HEAD or a merged-branch delete are reflog-recoverable) and is
-    best-effort against the disclosed obfuscation/config residuals. Fail-open ALLOW is reserved for the TRUE boundary
-    (a non-Bash or absent tool, a malformed or missing command it cannot read as a discard, a non-git command,
+    a dirty tree), or on a provably-clean tree; no in-band override exists (a leading
+    GUARDRAIL_ALLOW_DISCARD assignment, the removed override, is an ordinary assignment whose value no code
+    reads to permit anything: when the command without it names a recognized work-losing verb and the
+    prefixed command is pristine, it gets the decision of the command without it; otherwise its value is raw
+    text the raw scans read like any other: a metacharacter value takes the non-pristine grammar path and
+    an unbalanced quote takes the deny-on-flag fallback, each exactly as FOO=<the same value> would, while
+    a lossy keyword in the value brings a command into scope exactly as FOO=<the same value> does; the
+    non-pristine path and the unparseable fallback never read the name, so there the prefixed command gets
+    exactly what FOO=<the same value> gets); the guarantee is bounded to
+    working-tree content (ref-level moves such as reset --soft moving HEAD or a merged-branch delete are
+    reflog-recoverable) and is best-effort against the disclosed obfuscation/config residuals. Fail-open ALLOW is
+    reserved for the TRUE boundary (a non-Bash or absent tool, a malformed or missing command it cannot read as a discard, a non-git command,
     or no recognized lossy verb). A wrapper is in scope only while the raw scan still
-    sees a contiguous git verb keyword, so 'any wrapper ASKS' is NOT categorical: a wrapper that ALSO
+    sees a contiguous git verb keyword, so 'any wrapper DENIES' is NOT categorical: a wrapper that ALSO
     fragments the COMMAND WORD 'git' itself or the verb (env git re'set' --hard / eval git re'set' / command
     g'it' reset --hard, whose raw string carries no contiguous 'git'+'reset') reads as 'no recognized lossy
     verb' and is silently ALLOWED - a DISCLOSED best-effort residual, not chased. A real discard whose VERB is
@@ -4851,11 +5614,20 @@ def git_discard(data):
     skipped when no per-user location resolves, the path would land inside the repo, or the write fails), on
     the ALLOW and ASK paths alike (the hook fires once, with no post-approval callback). It NEVER mutates the real index, worktree, HEAD, or any
     branch. If a warranted snapshot cannot be made, a would-be ALLOW is downgraded to ASK ('no recovery point
-    could be created'); an already-ASK/DENY decision is left as-is with the failure surfaced. F-D EXPANSION: a
-    NON-PRISTINE in-scope ASK (a compound/wrapped/redirected snapshottable command) is ALSO snapshot-backed
-    BEST-EFFORT against the SESSION CWD repo (the redirected dir of a non-pristine command is not parsed, so a
-    command that changes into a DIFFERENT repo may be snapshotted at the session repo rather than the target;
-    a same-repo cd is still captured by the whole-tree add --all). See the recovery block comment above
+    could be created'); an already-ASK/DENY decision is left as-is with the failure surfaced. D-423-NARROW:
+    an ACCEPTED non-pristine in-scope command is snapshot-backed against EACH worktree the grammar
+    resolves (a plain git segment's own literal -C chain over the '&&'-followed literal cd chain) PLUS
+    the session cwd as a best-effort catch-all for EVERY in-scope command (a verb that actually acts on
+    the session repository stays recoverable even when no segment resolved it); a resolved plain stash
+    drop/clear first preserves its target repo's stash under durable refs or DENIES; a discard-capable
+    segment whose directory the grammar cannot establish DENIES; and with NO session cwd EVERY
+    non-pristine in-scope command DENIES (fail closed:
+    no catch-all snapshot is possible). That no-cwd deny is DELIBERATELY CONSERVATIVE and catches legitimate
+    workflows: with no session cwd, a compound or assignment-prefixed command whose visible form is
+    non-destructive or non-snapshottable ('git checkout -b nb && echo ok', 'git log | grep branch',
+    "FOO=';' git clean -n", "FOO=';' git reset --soft") is DENIED although its
+    bare single-command form allows - an accepted cost, because a raw-flagged verb the walk cannot see could
+    still act on the unknown cwd. See the recovery block comment above
     _SNAPSHOTTABLE_VERBS. The snapshot cannot capture what the probe cannot see (assume-unchanged/skip-worktree
     marks, submodule.<name>.ignore) or ignored files (git add --all excludes them), so a discard of that
     content is not recoverable here."""
@@ -4873,9 +5645,9 @@ def git_discard(data):
     try:
         segments = _segments(command)
     except ValueError:
-        # Conservative raw scan, not a silent allow. Pass cwd so an unparseable in-scope discard still gets
-        # a best-effort recovery snapshot before the ASK (Class C), mirroring the non-pristine path.
-        return _git_discard_fallback(command, data.get("cwd"))
+        # Conservative raw scan, not a silent allow (D-423-NARROW): an unparseable command the raw scan
+        # flags is denied outright; only a command the scan clears is allowed at the true boundary.
+        return _git_discard_fallback(command)
 
     # Precisely-identified lossy git segments (the clean-parse signal). A git command-word segment whose
     # verb-form is not "allow" is a real in-scope lossy form. Used for the in-scope decision on a
@@ -4897,87 +5669,53 @@ def git_discard(data):
     # setsid/eval defeated the list), so any raw 'git' + work-losing verb is in scope even when the precise
     # `lossy` list is empty (a wrapped or quoted git verb). A non-lossy git command still routes through the
     # pristine path below and allows. Residual: git renamed out of the string (alias/function) -> recovery layer.
-    # ROUND-2 FINDING 17: the unconditional raw scan runs on a copy with QUOTED-heredoc bodies stripped, so a
-    # lossy-verb keyword quoted inside heredoc prose (a 'git reset --hard' example in a here-doc) does not
-    # falsely route the harmless outer command (e.g. 'cat <<'EOF'...') into the discard machinery. A real
-    # lossy verb OUTSIDE the heredoc body is preserved and still caught.
-    raw_lossy = _raw_has_lossy_git(_strip_quoted_heredoc_bodies(command))
+    # ROUND 8 (the R7C BLOCKER-1 class): the unconditional raw scan reads the FULL raw command.
+    # Heredoc bodies are no longer stripped on this path: stripping removes text, so it can only hide
+    # a real discard and widen acceptance (the round-7 stripper erased a real 'git -C stash clear'
+    # behind nested heredoc data). The cost is disclosed: a lossy keyword quoted inside heredoc prose
+    # now brings the harmless outer command in scope, where the positive grammar denies the heredoc
+    # operator itself - an over-deny, the safe direction under D-423-NARROW.
+    raw_lossy = _raw_has_lossy_git(command)
     if not lossy and not raw_lossy:
         return _allow()  # boundary: no git + work-losing verb anywhere
 
     # In scope. Apply the ULTRA-CONSERVATIVE pristine gate: anything that is not a pristine single bare
-    # 'git <verb>' invocation ASKS, without ever consulting the probe (a safe over-ask).
+    # 'git <verb>' invocation is judged by the closed allowlist grammar below, without ever consulting
+    # the probe.
     pristine = _pristine_single_bare_git(command, segments)
     if pristine is None:
         kind = lossy[0][1] if lossy else "a git work-losing verb"
-        # F-D EXPAND (GD-41, Architect-approved): a non-pristine in-scope command still ASKS, but now gets a
-        # BEST-EFFORT recovery point first, so an asked-then-approved compound/wrapped discard is recoverable
-        # (the hook fires once, with no post-approval callback). This is BEST-EFFORT against the SESSION CWD
-        # repo only: we do NOT parse a non-pristine command's redirected dir, so a command that changes into a
-        # DIFFERENT repo may be snapshotted at the session repo rather than the target (a same-repo cd is
-        # still captured by the whole-tree add --all). The snapshot is decision-INDEPENDENT (same
-        # _record_recovery path); on snapshot fail the decision stays ASK with the failure surfaced (never
-        # allow).
-        np_subs = set()
-        for _role, _kind, _toks in lossy:
-            _s, _ = _git_sub_and_args(_toks)
-            if _s is not None:
-                np_subs.add(_s)
-        # This command is ALREADY IN SCOPE (a visible lossy token routed it here), so the snapshot is no
-        # longer gated on lexical snappable-detection: shell quoting/eval can hide WHICH snappable verb an
-        # in-scope command carries (a `re'set'` fragment assembles `reset` at runtime, so np_subs may miss
-        # it), so whenever the base resolves and the tree is NOT provably clean we take the inert best-effort
-        # snapshot regardless of which verb is (or is not) visible. A verb obfuscated so thoroughly that it
-        # evades even the raw scan (a standalone `eval git re'set'`, whose raw string has no contiguous
-        # `reset` for _raw_has_lossy_git to catch) never reaches here at all: it is ALLOWED at the in-scope
-        # boundary above, a DISCLOSED best-effort residual (the classifier's documented obfuscation residual),
-        # not something this snapshot closes. Over-snapshotting a pure stash/branch non-pristine command is an
-        # accepted inert cost (a worktree snapshot cannot capture their asset, but it is never an
-        # under-protection). The np_verb label is best-effort from any visible snappable sub.
+        # D-423-NARROW ROUND 8: a non-pristine in-scope command is accepted ONLY when its RAW text
+        # fits the positive literal grammar (_discard_positive_grammar); anything outside it DENIES with the
+        # grammar reason. An accepted command keeps the preserve-then-allow posture of the pin: every
+        # resolved stash drop/clear preserves its target repository's stash under durable refs first (or
+        # denies), every resolved worktree discard is snapshotted at its resolved target (or denies),
+        # and the SESSION CWD is always snapshotted as the best-effort catch-all for every in-scope
+        # command, so an in-scope verb that actually acts on the session repository stays recoverable
+        # even when no segment resolved it. With NO session cwd every non-pristine in-scope command
+        # DENIES (fail closed: the catch-all snapshot base cannot be resolved; ROUND-8).
         np_cwd = data.get("cwd")
         np_base = np_cwd if isinstance(np_cwd, str) and np_cwd else None
-        np_verb = next(iter(sorted(np_subs & _SNAPSHOTTABLE_VERBS)), "discard")
-        # ROUND-3 FINDINGS 1 and 2: resolve the effective worktree/repository EACH visible discard acts on
-        # (tracking top-level cd/pushd and each git segment's own -C/--work-tree/GIT_WORK_TREE= redirect), so
-        # the snapshot/stash-preservation lands on the repo the command will actually mutate, not blindly on
-        # the session cwd. A `git -C T restore ...; :` or `cd T && git restore ...` now snapshots T, and a
-        # `git -C T stash clear` or `git stash clear; :` now preserves the stash of the repo it clears. Where
-        # the effective target cannot be resolved with certainty (an unresolvable redirect/cd, a ;/||-gated
-        # cd whose success is not guaranteed, or a --git-dir/GIT_DIR-redirected stash), the discard DENIES
-        # (fail closed) rather than note a recovery that would not contain the discarded state.
-        actions = _nonpristine_discard_actions(segments, np_base)
-        if actions["unresolved"]:
+        if np_base is None:
             return _deny(
-                "AIQT rule prsunc (preserve-uncommitted-work): {} runs in a compound/redirected command "
-                "whose effective target worktree or repository this guard cannot resolve with certainty (an "
-                "unresolvable -C/--work-tree/GIT_WORK_TREE= or --git-dir/GIT_DIR redirect, or a cd/pushd "
-                "whose success does not gate the discard), so it cannot snapshot or preserve the exact target "
-                "the command will discard from; denied rather than run on a possibly unrecoverable discard. "
-                "Re-issue it as a plain 'git <verb>' command from the target repository, or commit or stash "
-                "your work first. {}".format(kind, _DISCARD_ALTS),
-                "AIQT guardrail: denied a compound/redirected git discard whose target this guard cannot "
-                "resolve to snapshot (rule prsunc); run it from the target repo, or commit or stash first.")
-        if actions["hidden"]:
-            # ROUND-6 FINDING 3: a lossy discard the walk could not resolve as a depth-0 literal-git segment
-            # (inside a subshell '( ... )', or a WRAPPED 'git' carrying a -C/--git-dir/--work-tree/GIT_DIR=/
-            # GIT_WORK_TREE= redirect off the session cwd). Its target cannot be snapshotted with certainty and
-            # the best-effort session-cwd snapshot would not capture it, so it fails closed: DENY-and-educate
-            # (re-issue it as a plain, unwrapped 'git <verb>' command from the target repository).
-            return _deny(
-                "AIQT rule prsunc (preserve-uncommitted-work): {} runs inside a subshell, or as a wrapped "
-                "'git' invocation (env/sudo/... git) carrying a -C/--git-dir/--work-tree/GIT_DIR=/"
-                "GIT_WORK_TREE= redirect, so its effective target worktree or repository is off the session "
-                "directory and this guard cannot resolve or snapshot it with certainty; denied rather than "
-                "run on a possibly unrecoverable discard. Re-issue it as a plain, unwrapped 'git <verb>' "
-                "command from the target repository, or commit or stash your work first. {}"
-                .format(kind, _DISCARD_ALTS),
-                "AIQT guardrail: denied a subshell/wrapped-and-redirected git discard whose target this guard "
-                "cannot resolve to snapshot (rule prsunc); run it unwrapped from the target repo, or commit or "
-                "stash first.")
-        # Preserve the stash of every RESOLVED stash drop/clear target repo first (fail closed on a repo whose
-        # stash cannot be preserved), so a `git -C T stash clear` / `git stash clear; :` no longer notes a
-        # recovery that omits the cleared stash (round-3 finding 2).
-        for _b, _op in actions["stash_ops"]:
+                "AIQT rule prsunc (preserve-uncommitted-work): {} runs in a compound/wrapped/redirected "
+                "command and no session working directory is available, so this guard can neither prove any "
+                "target tree clean nor take the session-directory recovery snapshot; denied rather than run "
+                "on a possibly unrecoverable discard. Re-issue it as a plain 'git <verb>' command from the "
+                "target repository, or commit or stash your work first. {}".format(kind, _DISCARD_ALTS),
+                "AIQT guardrail: denied a compound/wrapped/redirected git discard with no session directory "
+                "to snapshot (rule prsunc); run it from the target repo, or commit or stash first.")
+        walk = _discard_positive_grammar(command, np_base)
+        if walk["deny"] is not None:
+            g_kind, g_what = walk["deny"]
+            g_reason, g_banner = _DISCARD_GRAMMAR_DENY_TEXTS[g_kind]
+            return _deny(g_reason.format(g_what, _DISCARD_ALTS), g_banner)
+        np_verb = next(iter(sorted(walk["subs"])), "discard")
+        # Preserve the stash of every RESOLVED stash drop/clear target repo first (fail closed on a repo
+        # whose stash cannot be preserved), so a resolved stash removal never notes a recovery that omits
+        # the cleared stash.
+        _stash_preserved = []
+        for _b, _op in walk["stash_ops"]:
             _st = _record_stash_recovery(_b)
             if _st[0] == "fail":
                 return _deny(
@@ -4988,12 +5726,14 @@ def git_discard(data):
                     .format(_op, _b, _st[1], _DISCARD_ALTS),
                     "AIQT guardrail: denied an unrecoverable compound/redirected git stash drop/clear (rule "
                     "prsunc); apply or commit the stash first, then retry.")
-        # Snapshot every worktree the command discards from: each RESOLVED redirect/cd target (round-3 finding
-        # 1) PLUS the session cwd itself, which stays a best-effort catch-all because a snappable verb hidden
-        # by shell quoting/eval/substitution may still discard the cwd (the rec-c6 residual). Any warranted
-        # snapshot that FAILS denies (fail closed), never a note over a target with no recovery point.
-        _bases = list(actions["snapshot_bases"])
-        if np_base is not None and np_base not in _bases:
+            if _st[0] == "ok":
+                _stash_preserved.append("{} stash entr{} of {} under {}".format(
+                    _st[1]["count"], "y" if _st[1]["count"] == 1 else "ies", _b, ", ".join(_st[1]["refs"])))
+        # Snapshot every worktree the command discards from: each RESOLVED target the grammar accepted,
+        # PLUS the session cwd itself, which stays a best-effort catch-all. Any warranted snapshot that
+        # FAILS denies (fail closed), never a note over a target with no recovery point.
+        _bases = list(walk["snapshot_bases"])
+        if np_base not in _bases:
             _bases.append(np_base)
         np_snap = None
         for _b in _bases:
@@ -5010,20 +5750,46 @@ def git_discard(data):
                 if np_snap is None and _s[0] == "ok":
                     np_snap = _s
         return _discard_recovery_result(
-            kind, "is not a pristine single bare 'git <verb>' invocation (it carries a shell "
-                  "metacharacter, wrapper, redirect, reserved word, a second command, or a command word "
-                  "that is not literally 'git'); a recovery snapshot targets the effective worktree(s) it "
-                  "resolved plus the session directory before allowing", np_snap, _OPTOUT_REISSUE)
+            kind, "matches the closed allowlist grammar for a non-pristine command (bare literal "
+                  "tokens; command words git, cd to an absolute literal path, true and ':' only; "
+                  "joins '&&', ';' and newline; redirections to /dev/null and 2>&1 only); a "
+                  "recovery snapshot targets the worktree(s) it resolved plus the session directory "
+                  "before allowing"
+                  + ("; the stash entries it would discard were first preserved under durable refs "
+                     "(not reflog-recoverable otherwise): {}; recover an entry with git stash apply using "
+                     "one of the refs named above, run from its repository".format("; ".join(_stash_preserved))
+                     if _stash_preserved else ""), np_snap)
 
-    # A pristine single bare git command. Honour a truthy LEADING opt-out on it (an explicit override).
-    # This short-circuits BEFORE the recovery layer, so an opt-out discard is NOT snapshot-backed: the
-    # operator has explicitly taken responsibility for having saved the work.
-    if _segment_has_optout(pristine):
-        return _allow()
+    # A pristine single bare git command. No in-band override exists: below, only _segment_dir_simple (benign)
+    # and _removed_prefix_note (text) read a leading GUARDRAIL_ALLOW_DISCARD by name; the raw command string
+    # is read below only through raw_lossy, the scope flag a prefix value can only switch ON (routing to the
+    # F-97 denies), so the prefix's value can make the decision below stricter, never more permissive.
+    # MIGRATION (this release only): every
+    # reason this path emits ends with `note`, the removed-prefix sentence when that prefix is truthy (empty
+    # otherwise), through `alts` (the safe alternatives plus the note) or a helper's `note` parameter.
+    note = _removed_prefix_note(pristine)
+    alts = _DISCARD_ALTS + note
 
     # Re-derive the verb form from the sole pristine git command.
     sub, args = _git_sub_and_args(pristine)
     role, kind = _discard_role(sub, args) if sub is not None else ("allow", None)
+
+    # R11 (DECIDED items 3-4): the -p/--patch rule and the stash list/show argument rule hold on
+    # the PRISTINE single-command path exactly as on the grammar path, decided BEFORE the
+    # view-override and role logic below: a bare in-scope 'git stash list --output=<path>' or
+    # 'git checkout -p' must never ride the pristine allow (or snapshot-then-allow) around the
+    # compound rule. Both checks are purely lexical; the denied command runs nothing, so no
+    # snapshot is warranted.
+    if sub in _DISCARD_PATCH_VERBS:
+        p_bad = _discard_patch_token(sub, args)
+        if p_bad is not None:
+            p_reason, p_banner = _DISCARD_GRAMMAR_DENY_TEXTS["patch"]
+            return _deny(p_reason.format(p_bad, alts), p_banner)
+    if sub == "stash":
+        st_bad = _discard_stash_ro_bad(args)
+        if st_bad is not None:
+            st_reason, st_banner = _DISCARD_GRAMMAR_DENY_TEXTS["stashro"]
+            return _deny(st_reason.format(st_bad, alts), st_banner)
 
     # FAIL-SAFE (EN-6, structural completion): the command's repository view cannot be proven to be the
     # session cwd when EITHER cause is present. (1) A NON-COSMETIC ambient GIT_* var: the probe scrubs it,
@@ -5033,10 +5799,11 @@ def git_discard(data):
     # at a different worktree or config. In EITHER case ANY in-scope pristine form ASKS here - a destructive
     # form OR a genuinely non-destructive allow form (reset --soft, plain switch, clean -n, checkout -b) -
     # BEFORE the role/allow logic below that would otherwise let an allow form through and bypass the fail-
-    # safe. Only the explicit leading opt-out (short-circuited above) bypasses it. A best-effort snapshot of
+    # safe. Nothing bypasses it (no in-band override exists). A best-effort snapshot of
     # the SESSION CWD is still taken on a not-provably-clean snappable tree (the cwd is known even when the
     # target is not): it is inert and provides recovery IF the command acts on the cwd (the common benign
-    # non-redirecting case), but may NOT capture a redirected tree.
+    # non-redirecting case), but may NOT capture a redirected tree. With NO session cwd and no resolved -C
+    # target a DESTRUCTIVE form DENIES below (fail closed, ROUND-8): no base can be probed or snapshotted.
     ambient_override = _ambient_repo_view_override()
     if ambient_override or not _segment_dir_simple(pristine):
         ao_cwd = data.get("cwd")
@@ -5074,7 +5841,7 @@ def git_discard(data):
                 "-c or inline GIT_DIR=/GIT_WORK_TREE= assignment, e.g. an inline '-c alias.<name>=' or a "
                 "redirected 'checkout-index'/'read-tree'); this guard cannot prove it non-destructive and "
                 "cannot snapshot it, so it is denied rather than run on a possible discard. Re-issue as a "
-                "recognized, provable form, or commit or stash your work first. {}".format(sub, _DISCARD_ALTS),
+                "recognized, provable form, or commit or stash your work first. {}".format(sub, alts),
                 "AIQT guardrail: denied a redirected git command whose subcommand this guard cannot prove "
                 "non-destructive (rule prsunc); commit or stash first, or re-issue in a recognized form.")
         # ROUND-6 FINDING 5: a destructive discard carrying a --git-dir/GIT_DIR redirect (which does NOT move
@@ -5094,7 +5861,7 @@ def git_discard(data):
                     "session snapshot cannot capture that redirected index, so this discard could be "
                     "unrecoverable and is denied rather than run. Re-issue it as a plain 'git -C <repo> "
                     "<verb>' command run from the target repository, or commit or stash your work first. {}"
-                    .format(kind or "a git work-losing verb", _DISCARD_ALTS),
+                    .format(kind or "a git work-losing verb", alts),
                     "AIQT guardrail: denied a --git-dir/GIT_DIR-redirected git discard whose repository this "
                     "guard cannot resolve to snapshot (rule prsunc); run it from the target repo, or commit "
                     "or stash first.")
@@ -5119,7 +5886,7 @@ def git_discard(data):
                     "the exact content the command would discard and denies rather than run on a possibly "
                     "unrecoverable discard. Re-issue it as a plain 'git <verb>' command run FROM the target "
                     "working tree (without --work-tree), or commit or stash your work first. {}"
-                    .format(kind or "a git work-losing verb", _DISCARD_ALTS),
+                    .format(kind or "a git work-losing verb", alts),
                     "AIQT guardrail: denied a --work-tree-redirected worktree-content git discard whose split "
                     "index/worktree state this guard cannot snapshot (rule prsunc); run it from the target "
                     "worktree, or commit or stash first.")
@@ -5140,7 +5907,7 @@ def git_discard(data):
                         "cannot resolve, so it cannot preserve the stash the command will actually clear; "
                         "denied rather than run on an unrecoverable discard. Re-issue it as a plain git "
                         "command from the target repository, or apply or commit the stash first. {}"
-                        .format(stash_op, _DISCARD_ALTS),
+                        .format(stash_op, alts),
                         "AIQT guardrail: denied a redirected git stash drop/clear whose repository this guard "
                         "cannot resolve to preserve (rule prsunc); run it from the target repo, or apply or "
                         "commit the stash first.")
@@ -5153,10 +5920,10 @@ def git_discard(data):
                         "entries and is NOT reflog-recoverable afterwards, and no target repository could be "
                         "resolved to preserve them first; denied rather than run on an unrecoverable discard. "
                         "Re-issue it from the target repository, or leave the stash in place. {}"
-                        .format(stash_op, _DISCARD_ALTS),
+                        .format(stash_op, alts),
                         "AIQT guardrail: denied a git stash drop/clear with no resolvable repository to "
                         "preserve the stash first (rule prsunc).")
-                return _stash_drop_clear_outcome(stash_repo, stash_op)
+                return _stash_drop_clear_outcome(stash_repo, stash_op, note)
         if repo_dir == "opaque":
             if destructive:
                 return _deny(
@@ -5165,18 +5932,34 @@ def git_discard(data):
                     "cannot snapshot the repository the command will actually discard from; denied rather "
                     "than run on a possibly unrecoverable discard. Re-issue it as a plain git command from "
                     "the target repository, or commit or stash your work first. {}".format(
-                        kind or "a git work-losing verb", _DISCARD_ALTS),
+                        kind or "a git work-losing verb", alts),
                     "AIQT guardrail: denied a repository-redirected git discard whose target this guard cannot "
                     "resolve to snapshot (rule prsunc); run it from the target repo, or commit or stash first.")
             return _allow_note(
                 "AIQT guardrail (rule prsunc, preserve-uncommitted-work): {} carries a command-local "
                 "repository redirect this guard cannot resolve, but it is a non-destructive form, so it is "
-                "allowed.".format(kind or "a git command"))
+                "allowed.".format(kind or "a git command") + note)
         # ROUND-7 (codex findings 1/2): snapshot the REPO git acts on (repo_dir: a -C target, or the session
         # cwd when only --work-tree/--git-dir/-c is present), never the --work-tree value.
         target_base = repo_dir if isinstance(repo_dir, str) else cwd_base
         target_desc = ("the -C target ({})".format(repo_dir)
                        if isinstance(repo_dir, str) and repo_dir != cwd_base else "the session directory")
+        # ROUND-8 (class-width of the orchestrator-confirmed fail-open): a DESTRUCTIVE verb deciding on this
+        # view-override branch with NO resolvable base (no session cwd and no resolved -C target: a benign
+        # leading assignment such as FOO=1, a -c or other global option, or an ambient GIT_* override, each
+        # with no cwd) used to allow-note with NO snapshot, making the command MORE permissive than its bare
+        # form, which denies on an unresolvable worktree. It now DENIES (fail closed); a non-destructive
+        # form below keeps its ref-level allow-note, matching the bare command.
+        if destructive and target_base is None:
+            return _deny(
+                "AIQT rule prsunc (preserve-uncommitted-work): {} runs under a repository-view override or a "
+                "command-local redirect and no session working directory is available, so this guard can "
+                "neither prove the target tree clean nor take a recovery snapshot; denied rather than run on "
+                "a possibly unrecoverable discard. Re-issue it as a plain git command from the target "
+                "repository, or commit or stash your work first. {}"
+                .format(kind or "a git work-losing verb", alts),
+                "AIQT guardrail: denied a view-overridden git discard with no session directory to snapshot "
+                "(rule prsunc); run it from the target repo, or commit or stash first.")
         ao_snap = None
         if target_base is not None and destructive and _tree_is_clean(target_base) is not True:
             ao_snap = _record_recovery(target_base, sub)
@@ -5186,7 +5969,7 @@ def git_discard(data):
                     "guard could not snapshot ({}), so the discard would be unrecoverable; denied rather "
                     "than run. Re-issue it as a plain git command from the target repository, or commit or "
                     "stash your work first. {}".format(kind or "a git work-losing verb", target_desc,
-                                                       ao_snap[1], _DISCARD_ALTS),
+                                                       ao_snap[1], alts),
                     "AIQT guardrail: denied an unrecoverable worktree-redirected git discard (rule prsunc); "
                     "run it from the target repo, or commit or stash first.")
         return _discard_recovery_result(
@@ -5194,7 +5977,7 @@ def git_discard(data):
             "runs under a non-cosmetic ambient GIT_* variable or carries a command-local redirect "
             "(-C/--git-dir/--work-tree or an inline GIT_DIR=/GIT_WORK_TREE= assignment); the recovery "
             "snapshot targets {} (a --git-dir/GIT_DIR alone leaves the worktree at the session directory)"
-            .format(target_desc), ao_snap, _OPTOUT_PRISTINE)
+            .format(target_desc), ao_snap, note)
 
     if role == "allow" and any(t.lower().startswith(("alias.", "-calias.")) for t in pristine):
         return _deny(
@@ -5202,7 +5985,7 @@ def git_discard(data):
             "('-c alias.<name>=...') that may expand to a work-losing verb this guard cannot resolve or "
             "snapshot; denied rather than run on an unknown discard. Re-issue the command the alias expands "
             "to explicitly (without '-c alias.<name>='), so this guard can classify it, or commit or stash "
-            "your work first. {}".format(_DISCARD_ALTS),
+            "your work first. {}".format(alts),
             "AIQT guardrail: denied an unresolvable git inline alias that may discard work (rule prsunc); "
             "run the aliased command explicitly, or commit or stash first.")
 
@@ -5243,7 +6026,7 @@ def git_discard(data):
             "(checkout/switch/restore/reset/rm/clean/stash/branch); this guard cannot prove it "
             "non-destructive and cannot snapshot it, so it is denied rather than run on a possible discard. "
             "Re-issue as a recognized, provable form, or commit or stash your work first. {}"
-            .format(sub, _DISCARD_ALTS),
+            .format(sub, alts),
             "AIQT guardrail: denied a git command whose subcommand this guard cannot prove non-destructive "
             "(rule prsunc); commit or stash first, or re-issue in a recognized form.")
 
@@ -5257,7 +6040,7 @@ def git_discard(data):
                 "AIQT rule prsunc (preserve-uncommitted-work): {} would run on a working tree that is not "
                 "provably clean and no recovery point could be created ({}), so this discard would be "
                 "unrecoverable; denied rather than run. Commit or stash your work first, then retry. {}"
-                .format(kind or "a git work-losing verb", snap[1], _DISCARD_ALTS),
+                .format(kind or "a git work-losing verb", snap[1], alts),
                 "AIQT guardrail: denied an unrecoverable git discard - no recovery snapshot could be created "
                 "(rule prsunc); commit or stash first, then retry.")
         return _allow()
@@ -5278,12 +6061,12 @@ def git_discard(data):
                     "cannot resolve to the session directory with certainty, so it can neither prove the "
                     "tree clean nor take a recovery snapshot; denied rather than run on a possible "
                     "unrecoverable discard of untracked content. Re-issue it as a plain git command from the "
-                    "target repository, or commit or stash your work first. {}".format(kind, _DISCARD_ALTS),
+                    "target repository, or commit or stash your work first. {}".format(kind, alts),
                     "AIQT guardrail: denied a git clean whose working tree this guard cannot resolve to "
                     "snapshot (rule prsunc); re-issue from the target repo, or commit or stash first.")
             # resolvable + not provably clean: a snapshot was taken above; fold its outcome in (ok ->
             # allow-note, fail -> deny), so a clean with no recovery point never silently allows.
-            return _discard_recovery_result(kind, "removes untracked files, which cannot be recovered", snap)
+            return _discard_recovery_result(kind, "removes untracked files, which cannot be recovered", snap, note)
         if sub == "stash":
             # ROUND-2 FINDING 6: 'git stash drop'/'clear' is NOT reflog-recoverable after the fact (it deletes
             # the stash reflog entry, orphaning the stash commit), so a worktree snapshot cannot protect it.
@@ -5298,15 +6081,15 @@ def git_discard(data):
                         "entries and is NOT reflog-recoverable afterwards, and no session working directory "
                         "is available to preserve the stash entries first; denied rather than run on an "
                         "unrecoverable discard. Re-issue it from the target repository, or leave the stash "
-                        "in place. {}".format(stash_op, _DISCARD_ALTS),
+                        "in place. {}".format(stash_op, alts),
                         "AIQT guardrail: denied an unrecoverable git stash drop/clear with no session "
                         "directory to preserve the stash first (rule prsunc).")
-                return _stash_drop_clear_outcome(base, stash_op)
+                return _stash_drop_clear_outcome(base, stash_op, note)
             # stash export / other ask-classified stash forms discard no stash entry: keep the allow-note.
-            return _discard_recovery_result(kind, "cannot be proven safe offline", snap)
+            return _discard_recovery_result(kind, "cannot be proven safe offline", snap, note)
         # A force branch delete/move/copy/reset: a branch ref is a separate, reflog-recoverable asset a
         # worktree snapshot cannot capture, so it keeps the allow-note.
-        return _discard_recovery_result(kind, "cannot be proven safe offline", snap)
+        return _discard_recovery_result(kind, "cannot be proven safe offline", snap, note)
 
     # A scoped or clobber form (all snapshottable): gate on the clean probe, which must resolve to the
     # session worktree.
@@ -5316,7 +6099,7 @@ def git_discard(data):
             "resolve to the session directory with certainty, so it can neither prove the tree clean nor "
             "take a recovery snapshot; denied rather than run on a possible unrecoverable discard. Re-issue "
             "it as a plain git command from the target repository, or commit or stash your work first. {}"
-            .format(kind, _DISCARD_ALTS),
+            .format(kind, alts),
             "AIQT guardrail: denied a git discard whose working tree this guard cannot resolve to snapshot "
             "(rule prsunc); re-issue from the target repo, or commit or stash first.")
     if clean is True:
@@ -5325,11 +6108,11 @@ def git_discard(data):
         # probe-uncertain: a snapshot was attempted above (snap set); fold its outcome into the ASK reason.
         return _discard_recovery_result(
             kind, "targets a repository whose status probe did not complete, so this guard cannot prove "
-                  "the working tree clean", snap)
+                  "the working tree clean", snap, note)
     # clean is False: the tree holds uncommitted tracked changes or untracked files this verb could reach.
     if role == "clobber":
-        return _deny_with_recovery(kind, snap)  # a confirmed whole-tree loss, still recoverable if approved
-    return _discard_recovery_result(kind, "may discard uncommitted changes in the working tree", snap)
+        return _deny_with_recovery(kind, snap, note)  # a confirmed whole-tree loss, still recoverable if approved
+    return _discard_recovery_result(kind, "may discard uncommitted changes in the working tree", snap, note)
 
 
 _PROTECTED = frozenset(("main", "master"))  # the protected line(s); default {main, master}, source-level config
@@ -6418,7 +7201,12 @@ def _commit_denial(detail):
 def _protected_line_fallback(command):
     """Commit-free push fallback; commit syntax is checked before this path.
 
-    Retain conservative raw push coverage and quoted-heredoc stripping. Hidden
+    R10 (DECIDED item 3): the raw push scan reads the WHOLE command text, with no
+    heredoc stripping at all. Stripping removes text, so any stripping defect can
+    only HIDE a live push from this fail-safe scan (the stacked-heredoc and the
+    nested-quote command-substitution shapes each erased a real force-push from
+    the stripped scan). The disclosed cost is an over-deny: force-push-shaped
+    prose inside a QUOTED heredoc body now denies on this fallback path. Hidden
     commits are checked independently of other Git segments by the commit recognizer.
     """
     syntax = _commit_command_syntax(command)
@@ -6426,7 +7214,7 @@ def _protected_line_fallback(command):
         if syntax.status == "help":
             return _allow()
         return _commit_denial("apparent commit lacks complete proof: " + syntax.detail)
-    scan = _strip_quoted_heredoc_bodies(command)
+    scan = command  # R10: the fallback scans RAW text; no stripping may remove a line from it
     if _RAW_PUSH_RE.search(scan) and (_RAW_PUSH_FORCE_RE.search(scan)
                                       or _RAW_PUSH_DELETE_RE.search(scan)
                                       or _RAW_PUSH_MIRRORCFG_RE.search(scan)):
@@ -15915,11 +16703,11 @@ HANDLERS = {
 # Handler -> event class, so the dispatcher can decide its ERROR posture from the argv MODE alone,
 # without reading the (possibly unreadable) payload. This is the load-bearing half of the fail-closed
 # design: a Stop/SubagentStop handler must NEVER exit 2 ON AN ERROR PATH, because a hard Stop block could
-# re-fire on the forced continuation and wedge the session (an error path keeps no loop bound and reads no
-# stop_hook_active field), so on ANY error (unreadable stdin, JSON parse failure, non-dict payload, or a
-# handler crash) it emits a non-blocking systemMessage warning and exits 0. A DELIBERATE backlog-deny is
-# the intended exception (the documented Stop block mechanism, bounded by the loop cap); only a PreToolUse
-# handler fails closed via exit 2 on error.
+# re-fire on the forced continuation and wedge the session (an error path keeps no loop bound and never
+# consults the stop_hook_active field of the payload), so on ANY error (unreadable stdin, JSON parse
+# failure, non-dict payload, or a handler crash) it emits a non-blocking systemMessage warning and exits 0.
+# A DELIBERATE backlog-deny is the intended exception (the documented Stop block mechanism, bounded by the
+# loop cap); only a PreToolUse handler fails closed via exit 2 on error.
 HANDLER_EVENT = {
     "diff_wall_stop": "Stop",
     "diff_source_pretool": PRETOOL,
@@ -15986,9 +16774,9 @@ def main(argv):
     # A genuinely unknown mode is not identifiable as Stop and is a broken install, so it fails closed
     # via exit 2. But a KNOWN handler invoked with the wrong argv count must NOT reach exit 2 when it is
     # a Stop/SubagentStop handler: a hard exit-2 Stop path could re-fire on the forced continuation and
-    # wedge the session (an error path keeps no loop bound and reads no stop_hook_active field), so a
-    # bad-argv Stop invocation WARNS on exit 0 like every other Stop error path (FIX 2). A bad-argv
-    # PreToolUse handler still fails closed (exit 2).
+    # wedge the session (an error path keeps no loop bound and never consults the stop_hook_active
+    # field of the payload), so a bad-argv Stop invocation WARNS on exit 0 like every other Stop error
+    # path (FIX 2). A bad-argv PreToolUse handler still fails closed (exit 2).
     mode = argv[0] if argv else None
     if mode not in HANDLERS:
         _stderr_note("aiqt_hooks: usage: aiqt_hooks.py <{}>".format("|".join(sorted(HANDLERS))))

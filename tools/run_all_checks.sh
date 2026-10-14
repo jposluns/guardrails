@@ -113,6 +113,7 @@ run_gate "opf-adopt-apply-selftest" python3 -I -B opf/tools/_opf_adopt_apply.py 
 run_gate "opf-adopt-hook-selftest" python3 -I -B opf/tools/_opf_adopt_hook.py --self-test
 run_gate "opf-pack-manifest-selftest" python3 -I -B opf/tools/_opf_pack_manifest.py --self-test
 run_gate "opf-adopt-observe-selftest" python3 -I -B opf/tools/_opf_adopt_observe.py --self-test
+run_gate "opf-adopt-discover-selftest" python3 -I -B opf/tools/_opf_adopt_discover.py --self-test
 run_gate "opf-prompt-pack-selftest" python3 -I -B opf/tools/check_opf_prompt_pack.py --self-test
 run_gate "opf-prompt-pack" python3 -I -B opf/tools/check_opf_prompt_pack.py
 run_gate "opf-enforce-platforms-selftest" python3 -I -B tools/check_opf_enforce_platforms.py --self-test
@@ -176,6 +177,7 @@ run_gate "sized-instructions-selftest" python3 -I -B tools/check_sized_instructi
 run_gate "sized-instructions" python3 -I -B tools/check_sized_instructions.py
 run_gate "instruction-budget-selftest" python3 -I -B tools/check_instruction_budget.py --self-test
 run_gate "instruction-budget" python3 -I -B tools/check_instruction_budget.py
+run_gate "brief-capability-selftest" python3 -I -B tools/check_brief_capability.py --self-test  # no brief in the repository to lint
 run_gate "notice-drift"    python3 -I -B tools/gen_notice.py --check
 run_gate "claude-drift"    python3 -I -B tools/gen_claude.py --check
 run_gate "adapters-drift"  python3 -I -B tools/gen_adapters.py --check
@@ -194,8 +196,12 @@ run_gate "hooks-preview" python3 -I -B tools/check_hooks_preview.py
 run_gate "selftest-execution-selftest" python3 -I -B tools/check_selftest_execution.py --self-test
 run_gate "orch-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite orch-behaviour-selftest
 run_gate "ci-status-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite ci-status-behaviour-selftest
-run_gate "git-fixture-env-selftest" python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-selftest
+run_gate "git-fixture-env-core" python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-core
+run_gate "git-fixture-env-config-combined" python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-combined
+run_gate "git-fixture-env-config-malformed" python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-malformed
+run_gate "git-fixture-env-config-system" python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-system
 run_gate "instruction-budget-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite instruction-budget-selftest
+run_gate "brief-capability-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite brief-capability-selftest
 run_gate "entry-guard-selftest" python3 -I -B tools/check_selftest_execution.py --suite entry-guard-selftest
 run_gate "entry-guard" python3 -I -B tools/check_entry_guard.py
 run_gate "record-drift-selftest" python3 -I -B tools/check_record_drift.py --self-test
@@ -231,8 +237,17 @@ run_gate "placement"      python3 -I -B tools/check_rule_placement.py
 run_gate "applies-selftest" python3 -I -B tools/check_applies.py --self-test
 run_gate "applies"         python3 -I -B tools/check_applies.py
 run_gate "mappings"       python3 -I -B tools/check_mappings.py
+# Repository-only assertion lives outside the shipped tooling: it pins the corpus below and the whole permitted
+# gate invocation in both runners (--config .aiqt/cited-standards.toml and nothing else, so an appended --root
+# is a finding), and validates pack.toml with its owning validator (opf/tools/check_opf_prompt_pack.py).
+run_gate "cited-standards-repo-contract-selftest" python3 -I -B .github/check_cited_standards_contract.py --self-test
+run_gate "cited-standards-repo-contract" python3 -I -B .github/check_cited_standards_contract.py
 run_gate "cited-standards-selftest" python3 -I -B tools/check_cited_standards.py --self-test
-run_gate "cited-standards"          python3 -I -B tools/check_cited_standards.py
+# This repository only: the reviewed corpus adds the OPF prompt-pack members to the rule corpus. The config and
+# the two .github contract scripts are not shipped, so in a tree without them this gate, the newtab-repo-contract
+# gate and the cited-standards-repo-contract gate lines all exit 2 (cannot evaluate) and this runner then ends
+# RESULT: FAIL.
+run_gate "cited-standards"          python3 -I -B tools/check_cited_standards.py --config .aiqt/cited-standards.toml
 run_gate "conformance-selftest" python3 -I -B tools/conformance.py --self-test
 run_gate "conformance"    python3 -I -B tools/conformance.py --root .
 run_gate "commonmark-headings-selftest" python3 -I -B opf/tools/selftest_commonmark_headings.py
