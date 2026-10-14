@@ -702,8 +702,8 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_entry_guard.py
 
-  git-fixture-env:
-    name: Git-fixture-env self-test
+  git-fixture-env-core:
+    name: Git-fixture-env core self-test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -715,9 +715,60 @@ jobs:
         with:
           python-version: '3.14'
 
-      - name: Git-fixture-env behaviour self-test (execution-reconciled)
+      - name: Git-fixture-env core behaviour self-test (execution-reconciled)
         shell: bash
-        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-selftest
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-core
+
+  git-fixture-env-config-combined:
+    name: Git-fixture-env combined config lane
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Git-fixture-env combined config-injection lane (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-combined
+
+  git-fixture-env-config-malformed:
+    name: Git-fixture-env malformed config lane
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Git-fixture-env malformed-config lane (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-malformed
+
+  git-fixture-env-config-system:
+    name: Git-fixture-env system config lane
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Git-fixture-env system-config lane (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-system
 
   registry:
     name: Records, manifest and parity
@@ -846,12 +897,26 @@ jobs:
       - name: Standards mappings
         shell: bash
         run: python3 -I -B tools/check_mappings.py
+      - name: Cited standards repository corpus contract self-test
+        shell: bash
+        run: python3 -I -B .github/check_cited_standards_contract.py --self-test
+      - name: Cited standards repository corpus contract
+        shell: bash
+        run: python3 -I -B .github/check_cited_standards_contract.py
       - name: Cited standards self-test
         shell: bash
         run: python3 -I -B tools/check_cited_standards.py --self-test
+      # This repository only: the reviewed corpus adds the OPF prompt-pack members to the rule corpus; the gate
+      # run without --config keeps the built-in default (the rule files alone). The config and the two .github
+      # contract scripts are not shipped, so in a tree without them this gate, the newtab contract and the
+      # cited-standards contract gate lines all exit 2 (cannot evaluate), and the shipped tools/run_all_checks.sh
+      # there ends RESULT: FAIL. The repository contract above pins the whole invocation of this gate line
+      # (--config .aiqt/cited-standards.toml and nothing else, so an appended --root or any other extra
+      # argument is a finding even when both runners carry the same drifted line) and validates pack.toml
+      # with its owning validator, opf/tools/check_opf_prompt_pack.py, imported and never re-implemented.
       - name: Cited standards
         shell: bash
-        run: python3 -I -B tools/check_cited_standards.py
+        run: python3 -I -B tools/check_cited_standards.py --config .aiqt/cited-standards.toml
 
       - name: Conformance suite self-test
         shell: bash
@@ -961,7 +1026,10 @@ jobs:
       - release
       - generated
       - selftest-execution
-      - git-fixture-env
+      - git-fixture-env-core
+      - git-fixture-env-config-combined
+      - git-fixture-env-config-malformed
+      - git-fixture-env-config-system
       - registry
       - byte-canon-matrix
     runs-on: ubuntu-latest
