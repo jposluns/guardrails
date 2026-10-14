@@ -4367,6 +4367,9 @@ def _watchdog_completion_case(mode):
             release = Path(directory, "release")
             marker = Path(directory, "marker")
             acked = Path(directory, "acked")
+            refused = Path(directory, "refused")
+            stalled = Path(directory, "stalled")
+            diag = Path(directory, "diag")
             real_pdeathsig = emit._fixture_pdeathsig
 
             def hold(arm):
@@ -4402,11 +4405,34 @@ def _watchdog_completion_case(mode):
                     assert time.monotonic() < bound, note
                     time.sleep(0.005)
 
-            def launch_held(arm=True):
+            def subject_exit(target):
+                # The waitpid-style status a lingering zombie records
+                # (/proc stat exit_code, its LAST field): the authoritative
+                # reaper is the nearest subreaper ancestor (the outer
+                # guardian, under the regression runner), so this leg can
+                # only read, never waitpid. None for a reaped entry (a
+                # standalone run reparents the dead orphan to init), for a
+                # non-zombie, and for a withheld field (it then reads 0,
+                # which is also the clean exit no asserted death here can
+                # produce): the capture of the subject fd 2 discriminates
+                # the cause on every path; the status, where observable,
+                # must agree with it.
+                try:
+                    stat = Path("/proc", str(target), "stat").read_bytes()
+                except (FileNotFoundError, ProcessLookupError):
+                    return None
+                fields = stat.rsplit(b")", 1)[1].split()
+                code = int(fields[-1])
+                return code if fields[0] == b"Z" and code != 0 else None
+
+            def launch_held(arm=True, ack_bound=30):
                 import select
                 waiting.unlink(missing_ok=True)
                 release.unlink(missing_ok=True)
                 acked.unlink(missing_ok=True)
+                refused.unlink(missing_ok=True)
+                stalled.unlink(missing_ok=True)
+                diag.unlink(missing_ok=True)
                 marker.unlink(missing_ok=True)
                 child = emit._FixtureProcess(time.monotonic() + _WATCHDOG_FIXTURE_HOLD,
                                              subject=subject_body)
@@ -4414,45 +4440,95 @@ def _watchdog_completion_case(mode):
 
                 def publish_ack(fd):
                     # Guardian-side (the patch below is live at fork time):
-                    # publish only AFTER the real acknowledgment write
-                    # returned, so the ack byte is buffered for the gated
-                    # subject before launch_held returns.
-                    real_ack(fd)
-                    scratch = Path(directory, "acked.tmp")
-                    scratch.write_text("acked", encoding="ascii")
-                    scratch.rename(acked)  # atomic: never a partial publication
+                    # publish the ack marker only on an OBSERVED successful
+                    # acknowledgment write (the helper reports True only when
+                    # os.write wrote the one byte), so a marker always means
+                    # the ack byte is buffered for the gated subject; a failed
+                    # write publishes the refusal instead, which the wait
+                    # below turns into a named launch failure, never a marker.
+                    outcome = acked if real_ack(fd) else refused
+                    scratch = Path(directory, outcome.name + ".tmp")
+                    scratch.write_text(outcome.name, encoding="ascii")
+                    scratch.rename(outcome)  # atomic: never a partial publication
 
-                with patch.object(emit, "_fixture_pdeathsig", lambda: hold(arm)), \
-                        patch.object(emit, "_fixture_ack_subject", publish_ack):
-                    child.start()
-                bound = _watchdog_deadline(30)
-                while not waiting.exists():
-                    assert time.monotonic() < bound, "the subject never reached its gate"
-                    time.sleep(0.005)
-                subject = int(waiting.read_text(encoding="ascii"))
-                # The gated subject publishes its pid BEFORE the guardian sends the
-                # receipt: wait for the receipt to be buffered on the control socket
-                # before any leg kills the guardian, so every leg exercises a
-                # DELIVERED receipt (the no-receipt path is subject-receipt's leg).
-                assert select.select([child.control], [], [], 30)[0], \
-                    "the subject receipt never arrived"
-                # A buffered receipt does not order a kill against the
-                # ownership acknowledgment: the guardian writes the ack byte
-                # strictly AFTER the receipt send, so a SIGKILL landing in
-                # between (seen under host load as F-OPF-WATCHDOG-ORPHAN-TIMING)
-                # hands the gated subject an acknowledgment EOF once released,
-                # and it refuses at _fixture_await_ack (which no leg here
-                # patches out) instead of exercising the stimulus under test;
-                # Flip A then fails as "the flip orphan never ran". Wait for
-                # the guardian-published ack marker, so every kill below lands
-                # only after the ack byte is buffered and a released subject
-                # always reads it. The 30 s bound is a backstop, never pacing:
-                # the marker is published on the launch path itself.
-                bound = _watchdog_deadline(30)
-                while not acked.exists():
-                    assert time.monotonic() < bound, \
-                        "the ownership acknowledgment was never published"
-                    time.sleep(0.005)
+                # The subject's refusal evidence lands on its inherited fd 2
+                # (the traceback, then exit 125): route fd 2 to a per-launch
+                # capture for the window of the fork, so the legs below can
+                # assert WHY their subject died, never only that it died.
+                # Restored before anything else runs in this process.
+                saved_stderr = os.dup(2)
+                try:
+                    capture = os.open(diag, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                    try:
+                        os.dup2(capture, 2)
+                    finally:
+                        os.close(capture)
+                    with patch.object(emit, "_fixture_pdeathsig", lambda: hold(arm)), \
+                            patch.object(emit, "_fixture_ack_subject", publish_ack):
+                        child.start()
+                finally:
+                    os.dup2(saved_stderr, 2)
+                    os.close(saved_stderr)
+                try:
+                    bound = _watchdog_deadline(30)
+                    while not waiting.exists():
+                        assert time.monotonic() < bound, \
+                            "the subject never reached its gate"
+                        time.sleep(0.005)
+                    subject = int(waiting.read_text(encoding="ascii"))
+                    # The gated subject publishes its pid BEFORE the guardian
+                    # sends the receipt: wait for the receipt to be buffered on
+                    # the control socket before any leg kills the guardian, so
+                    # every leg exercises a DELIVERED receipt (the no-receipt
+                    # path is subject-receipt's leg).
+                    assert select.select([child.control], [], [], 30)[0], \
+                        "the subject receipt never arrived"
+                    # A buffered receipt does not order a kill against the
+                    # ownership acknowledgment: the guardian writes the ack
+                    # byte strictly AFTER the receipt send, so a SIGKILL
+                    # landing in between (seen under host load as
+                    # F-OPF-WATCHDOG-ORPHAN-TIMING) hands the gated subject an
+                    # acknowledgment EOF once released, and a released subject
+                    # that reaches the ack read -- Leg 1's refuses EARLIER, at
+                    # _fixture_check_parent -- then refuses at
+                    # _fixture_await_ack (which no leg here patches out)
+                    # instead of exercising the stimulus under test: Flip A
+                    # fails as "the flip orphan never ran", and before this
+                    # wait existed the same window let Leg 1 pass FALSELY, its
+                    # subject refusing at the ack read with the parent check
+                    # removed. Wait for the marker the guardian publishes only
+                    # on an observed successful ack write, so every kill below
+                    # lands only after the ack byte is buffered and a released
+                    # subject that reaches the ack read always reads it. The
+                    # ORDERING no longer depends on host speed; the finite
+                    # bounds still do: this backstop and the subject's 120 s
+                    # hold gate bound the leg either way (at most 90 s of
+                    # bounded waits sit between the subject's waiting
+                    # publication and a leg's release, 30 s of headroom under
+                    # that gate).
+                    bound = _watchdog_deadline(ack_bound)
+                    while not acked.exists():
+                        assert not refused.exists(), \
+                            "the ownership acknowledgment write failed: the launch is refused"
+                        assert time.monotonic() < bound, \
+                            "the ownership acknowledgment was never published"
+                        if not stalled.exists():
+                            # This wait, observably ENTERED: the gate the
+                            # barrier vector's held guardian releases its
+                            # acknowledgment on, so removing this ordering
+                            # wait starves that barrier and turns the vector
+                            # red.
+                            scratch = Path(directory, "stalled.tmp")
+                            scratch.write_text("stalled", encoding="ascii")
+                            scratch.rename(stalled)  # atomic: never partial
+                        time.sleep(0.005)
+                except BaseException:
+                    # A failed launch never leaks its fixture: collect the
+                    # guardian (dead or alive; close() kills and proves the
+                    # receipt-identified subject either way) and surface the
+                    # LAUNCH failure, never the close's.
+                    cancel(child, [])
+                    raise
                 return child, subject
 
             def cancel(child, failures):
@@ -4464,12 +4540,27 @@ def _watchdog_completion_case(mode):
 
             # Leg 1: the guardian dies while the subject is still gated pre-arm;
             # the released subject arms, sees a changed parent, and refuses.
+            # Before the acknowledgment-marker wait above existed this leg
+            # shared the F-OPF-WATCHDOG-ORPHAN-TIMING race as a FALSE-PASS
+            # window: with the parent check removed, an early kill let the
+            # subject refuse at the ack read instead, and the leg passed
+            # without the protection it guards. The refusal REASON and, where
+            # a zombie is still observable, the refusal exit status are
+            # asserted, so a subject dead by the 120 s hold gate (exit 96,
+            # a silent capture) or by an unrelated setup error (a different
+            # traceback) cannot satisfy this leg.
             child, subject = launch_held()
             os.kill(child.pid, signal.SIGKILL)
             await_state(child.pid, ("Z",), "the killed guardian did not exit")
             release.write_text("go", encoding="ascii")
             await_state(subject, (None, "Z"), "the orphaned subject kept running")
             assert not marker.exists(), "an orphaned subject ran its callable"
+            refusal = diag.read_text(encoding="ascii")
+            assert "subject orphaned before supervision" in refusal, \
+                ("the released subject died without its refusal", refusal)
+            status = subject_exit(subject)
+            assert status in (None, 125 << 8), \
+                ("the released subject died otherwise than its refusal exit", status)
             failures = []
             cancel(child, failures)
             assert child.subject_pid == subject, (child.subject_pid, subject)
@@ -4477,7 +4568,11 @@ def _watchdog_completion_case(mode):
 
             # Leg 2: same stimulus, subject NEVER released: the guardian failure is
             # collected without an escalation, and close() itself must kill the
-            # receipt-identified subject and prove its exit.
+            # receipt-identified subject and prove its exit. The gated subject
+            # writes no refusal (it never left its hold gate: an empty
+            # capture) and, where a zombie is still observable, it died by
+            # close()'s SIGKILL, never by the 120 s gate's exit 96 or a setup
+            # error's exit 125.
             child, subject = launch_held()
             os.kill(child.pid, signal.SIGKILL)
             failures = []
@@ -4486,6 +4581,11 @@ def _watchdog_completion_case(mode):
             await_state(subject, (None, "Z"),
                         "close() left the live subject on a guardian failure")
             assert not marker.exists(), "the gated subject ran its callable"
+            assert diag.read_text(encoding="ascii") == "", \
+                "the gated subject left its hold gate"
+            status = subject_exit(subject)
+            assert status in (None, signal.SIGKILL), \
+                ("the gated subject died otherwise than by the close kill", status)
 
             # Flip A: without the parent check (and with pdeathsig disarmed, which
             # a post-death arm cannot help anyway) the released orphan runs its
@@ -4517,6 +4617,103 @@ def _watchdog_completion_case(mode):
                 "flip: the subject died without its kill"
             os.kill(subject, signal.SIGKILL)  # hygiene for the demonstrated leak
             await_state(subject, (None, "Z"), "the flip hygiene did not complete")
+
+            # Barrier: the guardian HOLDS its acknowledgment until this launch
+            # observably reaches the marker wait (the stalled gate that wait
+            # itself publishes), a controlled, file-gated stand-in for the
+            # F-OPF-WATCHDOG-ORPHAN-TIMING scheduling delay -- no sleep and no
+            # host timing. Under Flip A's configuration the released orphan
+            # must RUN its callable, which is only possible when the kill
+            # below landed after the ack byte was buffered; with the ordering
+            # wait removed the gate is never published, the held guardian
+            # never acknowledges, and the launch returns without the marker:
+            # this vector is red.
+            real_ack_subject = emit._fixture_ack_subject
+
+            def held_ack(fd):
+                # Guardian-side: wait, bounded, for the launch path's stalled
+                # gate before the real acknowledgment; a broken gate exits
+                # this guardian loudly rather than wedging the launch.
+                import time as clock
+                bound = _watchdog_deadline(30)
+                while not stalled.exists():
+                    if clock.monotonic() >= bound:
+                        os._exit(97)  # the gate never opened: fail loudly
+                    clock.sleep(0.005)
+                return real_ack_subject(fd)
+
+            with patch.object(emit, "_fixture_check_parent", lambda expected: None), \
+                    patch.object(emit, "_fixture_ack_subject", held_ack):
+                child, subject = launch_held(arm=False)
+                assert acked.exists(), "the barrier launch returned without the marker"
+                os.kill(child.pid, signal.SIGKILL)
+                await_state(child.pid, ("Z",), "the killed guardian did not exit")
+                release.write_text("go", encoding="ascii")
+                bound = _watchdog_deadline(30)
+                while not marker.exists():
+                    assert time.monotonic() < bound, "the barrier orphan never ran"
+                    time.sleep(0.005)
+                failures = []
+                cancel(child, failures)
+                assert failures, "the barrier close was read as clean"
+                await_state(subject, (None, "Z"), "the barrier cleanup did not complete")
+
+            # Refused write: an acknowledgment write that fails with OSError
+            # (EIO in the recorded failure class; /dev/full injects the same
+            # handler deterministically) must surface as the NAMED launch
+            # failure and never as a marker. Red at the pin, where the helper
+            # swallowed the failure and the marker was published anyway.
+            def eio_ack(fd):
+                # Guardian-side: the REAL helper, its write routed at a
+                # descriptor that refuses every write, so its own OSError
+                # path -- not a simulation of it -- reports the failure; the
+                # subject's write end still closes, an EOF as in production.
+                sink = os.open("/dev/full", os.O_WRONLY)
+                try:
+                    return real_ack_subject(sink)
+                finally:
+                    os.close(fd)
+
+            with patch.object(emit, "_fixture_ack_subject", eio_ack):
+                try:
+                    launch_held()
+                except AssertionError as exc:
+                    outcome = str(exc)
+                else:
+                    outcome = None
+            assert outcome == ("the ownership acknowledgment write failed: "
+                               "the launch is refused"), \
+                ("a failed ack write was not the named launch failure", outcome)
+            assert not acked.exists(), \
+                "a failed acknowledgment write published the marker"
+            assert not marker.exists(), "the refused launch ran its callable"
+            leaked = int(waiting.read_text(encoding="ascii"))
+            await_state(leaked, (None, "Z"), "the refused launch leaked its subject")
+
+            # Missing publication: a guardian that dies between the receipt
+            # send and its acknowledgment (the recorded race's own window)
+            # publishes neither outcome, so the marker wait must end in ITS
+            # named failure within its bound and the launch must still clean
+            # up its fixture: never a wedged launch or a leaked gated subject.
+            def dying_ack(fd):
+                # Guardian-side: die unsupervised, exactly where the recorded
+                # SIGKILL landed; nothing can publish after this.
+                os.close(fd)
+                os._exit(98)
+
+            with patch.object(emit, "_fixture_ack_subject", dying_ack):
+                try:
+                    launch_held(ack_bound=5)
+                except AssertionError as exc:
+                    outcome = str(exc)
+                else:
+                    outcome = None
+            assert outcome == "the ownership acknowledgment was never published", \
+                ("a missing publication was not the named launch failure", outcome)
+            assert not acked.exists() and not refused.exists(), \
+                "a dead guardian published an acknowledgment outcome"
+            leaked = int(waiting.read_text(encoding="ascii"))
+            await_state(leaked, (None, "Z"), "the unpublished launch leaked its subject")
     elif mode == "escalation-subject":
         import time
         # QA16 MINOR-2 + QA17 F1: cancelling a wedged guardian is bounded AND kills
@@ -13136,10 +13333,16 @@ def _watchdog_regression_self_test():
         ("launch-cancel", 33), ("fd-hygiene-total", 92), ("nested-keep", 108),
         ("fd-census", 48), ("subject-gc", 32), ("guardian-preload", 20),
         ("subject-receipt", 784), ("subject-ack", 814),
-        # subject-orphan: the pre-fix 1658 timeout sum + 4 * 30 for the
-        # acknowledgment-published wait each of its four launches now makes
-        # before any leg kills the guardian (F-OPF-WATCHDOG-ORPHAN-TIMING).
-        ("subject-orphan", 1658 + 4 * 30),
+        # subject-orphan: the four production legs keep the pre-fix 1658
+        # timeout sum + 4 * 30 for the acknowledgment-published wait each
+        # launch makes before any leg kills the guardian
+        # (F-OPF-WATCHDOG-ORPHAN-TIMING); the three committed acknowledgment
+        # vectors add their declared waits term by term: the barrier flip
+        # 482 (launch 300 + 30 + 30 + 30, guardian zombie 30, orphan marker
+        # 30, cleanup 30, close 2), the refused write 422 (launch 390, leak
+        # check 30, close 2) and the missing publication 397 (its launch
+        # charges a 5 s marker bound: 365, leak check 30, close 2).
+        ("subject-orphan", 1658 + 4 * 30 + 482 + 422 + 397),
         # escalation-subject: 884 is the UPPER bound on the leg's declared
         # timeouts, not an exact base (two of its charges are fixture holds
         # charged at what REMAINS of their 300 s hold when start() runs, so
