@@ -13,8 +13,9 @@ does nothing unless the project commits .aiqt/merge-train.toml on its base branc
 A live run is selected only by an explicit option (--dry-run, --apply, --repo or --pr; without
 --apply it is a dry run). With no arguments at all the tool runs its hermetic self-test and never
 a live run: tools/merge_train.py is the registered runner of the merge-train-selftest suite, and
-the git-fixture-env config-injection lane launches every suite runner with no arguments, under
-the caller's injected (and deliberately poisoned) git configuration, and requires a hermetic exit
+each git-fixture-env config-injection lane (the config-combined, config-malformed and
+config-system suites) launches every suite runner with no arguments, under the caller's
+injected (and deliberately poisoned) git configuration, and requires a hermetic exit
 0, as the other suite runners give. A bare live run could not meet that: it fetches the real
 remote, and its outcome depends on the remote's state (exit 2 while the base tip carries no
 config, then gh and the open PRs once it does). Live runs still read the operator's global and
@@ -1629,7 +1630,7 @@ def load_config(root, base_sha):
             CONFIG_PATH, base_sha))
     try:
         data = tomllib.loads(text)
-    except (tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise FailClosed("malformed %s: %s" % (CONFIG_PATH, exc))
     files, heads = _base_tree(root, base_sha)
     _guard("config-fail-closed")(data, tree=files, head_tree=heads)
@@ -4972,7 +4973,7 @@ def case_cli(tmp):
     proc = subprocess.run([sys.executable, "-I", "-B", str(Path(__file__).resolve()), "--bogus"],
                           capture_output=True, timeout=60, env=_clean_env())
     check("cli/bad-argument-exit2", proc.returncode, 2)
-    # No arguments must select the self-test, never a live run: the config-injection lane launches
+    # No arguments must select the self-test, never a live run: each config-injection lane launches
     # this suite runner bare under poisoned git configuration and requires a hermetic exit 0.
     check("cli/bare-is-self-test", (_mode([]), _mode(["--self-test"])[0]),
           (("self-test", dict(red_on_revert=False)), "self-test"))
@@ -6407,7 +6408,7 @@ def _expected_check_ids():
     try:
         with open(CHECKS_MANIFEST, "rb") as handle:
             data = tomllib.load(handle)
-    except (OSError, tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+    except (OSError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         print("SELF-TEST HARNESS ERROR: cannot read %s: %s" % (CHECKS_MANIFEST, exc),
               file=sys.stderr)
         return None
