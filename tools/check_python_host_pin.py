@@ -115,7 +115,11 @@ Legs, in order:
                                 sign, a backquote, a brace, a bracket, a glob character, a
                                 redirection, a parenthesis and the other shell-active characters,
                                 exit 2, the character named, closing the leak an opener list left
-                                to every expansion class not on it); and no job
+                                to the expansion classes not on it), and so is one whose first
+                                word, after any leading time, -p, -- or coproc word, is a shell
+                                assignment (NAME=value or NAME+=value, a PATH= prefix that
+                                re-points which file the named command runs among them, exit 2,
+                                the assignment named); and no job
                                 that carries a counted or
                                 judge-shaped step, nor any step of such a job, carries env: (a
                                 job-level env: can silence, in CI, every step of the carrying job; an
@@ -230,7 +234,8 @@ value, a nested mapping or sequence, a flow sequence, or a plain null, boolean, 
 number (a conservative spelling classifier) or timestamp (its date and time separated by T, t or any
 run of spaces and tabs) scalar among them), a run: of such a job or of a host-patch job with a line
 shlex cannot tokenize or carrying a ${{ }} expression, a run: line of a host-patch job carrying a
-character outside the closed safe set it is held to (HOST_RUN_SAFE), a
+character outside the closed safe set it is held to (HOST_RUN_SAFE) or whose first word is a shell
+assignment (HOST_RUN_ASSIGNMENT_RE), a
 non-comment line of such a job,
 its header and block-scalar bodies (#-leading body lines
 included) carrying a
@@ -259,13 +264,14 @@ the grammar admits and an echo argument among them, the line still tokenized, so
 expression or a line shlex cannot tokenize there is cannot-evaluate (outside-judge), and so is a
 run: line carrying any character outside the closed safe set it is held to (HOST_RUN_SAFE: a dollar
 sign, a backquote, a brace, a bracket, a glob character, a redirection, a parenthesis and the other
-shell-active characters, each named), and accepts a
+shell-active characters, each named) or one whose first word is a shell assignment (a PATH=
+prefix among them, the assignment named), and accepts a
 step-level shell:,
 working-directory: or if: on it, which changes what, where or whether that step runs; and what the suites
 test is theirs: a step whose run: command starts another interpreter, appends to GITHUB_PATH or GITHUB_ENV,
 changes the checked-out tree, uses a local or composite action, or names an executable that itself
-prints or re-interprets text (a script that echoes the flag among them, out of a text grammar's
-reach) is not judged here.
+prints or re-interprets text (a script that echoes the flag, or env running its arguments as a
+command under an assignment, among them, out of a text grammar's reach) is not judged here.
 tools/check_ci_parity.py is the second holder for those edits: its step grammar accepts only name:, uses:,
 run:, env: and with: as step keys, so a step-level shell:, working-directory: or if: is cannot-evaluate for
 it (measured at this commit on an extra host-patch-job step carrying each of the three: this gate passed,
@@ -289,7 +295,9 @@ carrying an indentation indicator, an anchor or an alias among them), a folded (
 step key of it carrying an upper-case letter, a run: of it whose real parsed value is not one string
 (an empty value, a nested mapping or sequence, a flow sequence, or a plain null, boolean, value-key
 (=), number (a conservative spelling classifier) or
-timestamp scalar among them, refused at its recorded key line by its named kind), a run: of it with a
+timestamp scalar among them, refused at its recorded key line by its named kind; a timestamp is read
+by the YAML 1.1 time fields, so a reader-extension spelling such as 2026-10-14T6:3:5Z, with one-digit
+minutes and seconds, is read as a string), a run: of it with a
 line shlex cannot tokenize or carrying a ${{ }} expression (a #-leading block-body line included), and
 a non-comment line of it, its header and block-scalar bodies (#-leading body lines included) carrying
 a backslash or opening a YAML anchor, alias or tag are each cannot-evaluate, never skipped; the host-patch
@@ -427,17 +435,37 @@ JOBS_ONLY_STEM = "--jobs-o"
 # _ - . / = : @ , + % and the two quote characters " and ' the deletion read models), and any other
 # character makes the line cannot-evaluate (exit 2, the character named): a $, a backquote, a brace,
 # a bracket, a glob * or ?, a redirection < or >, a (, a ), a |, an &, a ;, a !, a ~, a # (the parsed
-# scalar carries no trailing YAML comment, so a # there is command text, not a dropped comment), a
-# backslash (a line continuation among its uses) or any other character. An opener LIST leaked every
-# expansion class not on it (pathname expansion echo --jobs-o*, process substitution
-# source <(printf ...), an eval or a here-string among them); a closed set refuses each of them by
-# the character it must spell. A ${{ }} expression is refused first, with its own wording
-# (_run_line_tokens runs before this scan). Every committed host-patch run: line is ASCII letters,
-# digits, spaces and the - _ . / punctuation, so each passes this grammar unchanged. RESIDUAL: a
-# text grammar cannot reach an executable the line NAMES that itself prints or re-interprets text (a
-# script that echoes the flag among them); that is out of its reach, and nothing broader is claimed.
+# scalar carries no trailing YAML comment, so a # there is command text, not a dropped comment; a
+# QUOTED run: whose text holds " # ", which the opener list passed, is now refused for it, the
+# fail-closed direction), a backslash (a line continuation among its uses) or any other character.
+# An opener LIST leaked expansion classes not on it (pathname expansion echo --jobs-[o]nly,
+# echo --jobs-o* and echo --jobs-o?ly, and process substitution source <(printf ...)); the closed
+# set refuses each of them by the character it must spell. An eval needs no refused character, so
+# the grammar does not refuse one spelled only in safe characters: its line is read by the deletion
+# read like any other. A ${{ }} expression is refused first, with its own wording
+# (_run_line_tokens runs before this scan). The committed host-patch jobs carry five run: lines with
+# four distinct texts, each ASCII letters, digits, spaces and the - _ . / punctuation, so each
+# passes this grammar unchanged. A line the grammar admits is still cannot-evaluate (exit 2, the
+# assignment named) when its first word, once any leading HOST_RUN_PREFIX_WORDS are skipped, is a
+# shell assignment (HOST_RUN_ASSIGNMENT_RE, _leading_assignment): a PATH=tools:/usr/bin prefix is
+# spelled in safe characters only, yet it re-points which file the named command runs. RESIDUAL,
+# the set the module docstring lists: this gate accepts a step-level shell:, working-directory: or
+# if: on a host-patch step, which changes what, where or whether that step runs (under shell:
+# perl {0} the run: text is a perl program, and the safe-set reading above holds for a POSIX shell
+# only; the module docstring names tools/check_ci_parity.py as the second holder for those keys),
+# and it does not judge a step whose run: command starts another interpreter, appends to
+# GITHUB_PATH or GITHUB_ENV, changes the checked-out tree, uses a local or composite action, or
+# names an executable that itself prints or re-interprets text (a script that echoes the flag, or
+# env running its arguments as a command under an assignment, among them).
 HOST_RUN_SAFE = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 \t_-./=:@,+%\"'")
+# A shell assignment word a host-patch run: line may not begin with (_leading_assignment): NAME=value
+# or NAME+=value, its name unquoted. HOST_RUN_PREFIX_WORDS are the words that can stand before such a
+# prefix on one line and keep it an assignment (bash runs time -p PATH=x ls, time -- PATH=x ls and
+# coproc PATH=x ls under the assigned PATH); a line beginning with one of them is read from the next
+# word. Skipping -- or -p where it begins a line can only refuse more.
+HOST_RUN_ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\+?=")
+HOST_RUN_PREFIX_WORDS = frozenset({"time", "-p", "--", "coproc"})
 # The name each refused character is reported by (_refused_run_char); a character not listed is named
 # by its repr.
 HOST_RUN_CHAR_NAMES = {
@@ -541,8 +569,13 @@ BARE_RE = re.compile(r"(?P<indent> *)- +(?P<text>[A-Za-z0-9_./@=+-]+)(?:[ \t]+#.
 # (_non_string_kind). TIMESTAMP_PLAIN_RE covers the date-led timestamp forms that carry a time part,
 # the date and the time separated by T, t or ANY RUN OF SPACES AND TABS (the YAML 1.1 timestamp
 # grammar's separators, so a tab-separated or mixed-whitespace spelling is a named timestamp too; a
-# pure date spelling is digits and signs, already a number to the classifier above). A quoted
-# scalar is a string in every YAML reader and is never matched here.
+# pure date spelling is digits and signs, already a number to the classifier above). The time
+# fields are the YAML 1.1 ones (an hour of one or two digits, two-digit minutes and seconds, an
+# optional fraction, an optional Z or signed zone, whitespace allowed before either), so a date-led
+# value with any other suffix is a string. RESIDUAL: a spelling outside those fields that a reader
+# extension may still resolve to a timestamp (one-digit minutes and seconds, 2026-10-14T6:3:5Z
+# among them) is read as a string here. A quoted scalar is a string in every YAML reader and is
+# never matched here.
 PLAIN_NULLS = frozenset({"~", "null", "Null", "NULL"})
 PLAIN_BOOLS = frozenset({"y", "Y", "n", "N", "yes", "Yes", "YES", "no", "No", "NO", "true", "True",
                          "TRUE", "false", "False", "FALSE", "on", "On", "ON", "off", "Off", "OFF"})
@@ -1081,6 +1114,18 @@ def _refused_run_char(text):
     return None
 
 
+def _leading_assignment(text):
+    """The first word of a host-patch job's run: line, once any leading HOST_RUN_PREFIX_WORDS are
+    skipped, when it is a shell assignment (HOST_RUN_ASSIGNMENT_RE: NAME=value or NAME+=value, a
+    PATH= prefix among them), or None. The words are the raw text split on spaces and tabs: the line
+    already holds only HOST_RUN_SAFE characters, and an assignment's name is unquoted, so a quoted
+    word earlier on the line is never a prefix word and a real assignment prefix is never missed."""
+    for word in text.split():
+        if word not in HOST_RUN_PREFIX_WORDS:
+            return word if HOST_RUN_ASSIGNMENT_RE.match(word) else None
+    return None
+
+
 def _host_flag_findings(job, tree):
     """The outside-judge rule's raw-text read of a HOST_JOBS job's run: values: each PARSED run:
     scalar (ENTRY_RE strips a trailing YAML comment from a one-line plain scalar, so a stem spelled
@@ -1098,7 +1143,9 @@ def _host_flag_findings(job, tree):
     jobs, never a silent pass; and a line carrying any character outside the closed safe set it is
     held to (_refused_run_char, HOST_RUN_SAFE: a dollar sign, a backquote, a brace, a bracket, a
     glob character, a redirection, a parenthesis and the other shell-active characters) is
-    cannot-evaluate the same way, the character named, rather than a reading invented for it. This
+    cannot-evaluate the same way, the character named, rather than a reading invented for it, and
+    so is a line whose first word is a shell assignment (_leading_assignment: a PATH= prefix
+    re-points which file the named command runs), the assignment named. This
     read runs only after the host-job line model has accepted every line as a one-line scalar entry
     (ENTRY_RE): a host-patch job's run: | block scalar is cannot-evaluate at _entry, BEFORE this flag
     read, so a block body never reaches here (an OUTSIDE job's literal block, by contrast, keeps its
@@ -1115,6 +1162,13 @@ def _host_flag_findings(job, tree):
                     "{}:{}: a run: line of the host-patch job {} carries {}, a character outside the "
                     "closed safe set a host-patch run: line is held to; this line cannot-evaluate "
                     "there, never a silent pass".format(WORKFLOW_REL, number, job, named))
+            assigned = _leading_assignment(text)
+            if assigned is not None:
+                raise CannotEvaluate(
+                    "{}:{}: a run: line of the host-patch job {} begins with the shell assignment "
+                    "{}, which changes the environment of the command it prefixes (a PATH= prefix "
+                    "re-points which file that command runs); this line cannot-evaluate there, "
+                    "never a silent pass".format(WORKFLOW_REL, number, job, assigned))
         if any(_names_flag_text(text) for text in value.split("\n")):
             found.append("{}:{}: a run: command of the host-patch job {} names {} once every quote, "
                          "backslash and dollar character is deleted from its raw text (a "
@@ -1466,6 +1520,27 @@ def _mutant(base, name, source, edits):
 
 def _suite_step(job):
     return "      - name: Suite\n        run: " + HOST_SUITES[job] + "\n"
+
+
+def _committed_host_runs():
+    """The text of each run: line of the HOST_JOBS jobs of the committed WORKFLOW_REL (ROOT), in file
+    order, each read with the host-job line model (_entry): the committed-line acceptance controls
+    read these, not module constants."""
+    runs, job = [], None
+    for number, line in enumerate(_read_text(ROOT / WORKFLOW_REL).split("\n"), 1):
+        line = line[:-1] if line.endswith("\r") else line
+        stripped = line.strip(" \t")
+        if not stripped or stripped.startswith("#"):
+            continue
+        header = JOB_RE.fullmatch(line)
+        if header is not None or not line.startswith(" "):
+            job = header.group("id") if header is not None else None
+            continue
+        if job in HOST_JOBS:
+            entry = _entry(job, number, line)
+            if entry[4] == "run":
+                runs.append(str(entry[5]))
+    return runs
 
 
 def _host_job(job):
@@ -2521,16 +2596,19 @@ def _self_test_cases(base):
 
     # FIX-529-R13: a host-patch run: line is held to a CLOSED safe-character grammar, not a list of
     # refused openers: any character outside HOST_RUN_SAFE makes the line cannot-evaluate (exit 2,
-    # the character named). This closes the leak an opener list left to every expansion class not on
-    # it: a pathname-expansion glob (echo --jobs-[o]nly, echo --jobs-o*, echo --jobs-o?ly), a
-    # process substitution (source <(printf ...)), an eval spelled with a refused character and the
-    # round-12 opener forms (an ANSI-C quote, a brace, a backquote and a $( substitution) are each
-    # refused by the character they must spell. Each vector is red under grammar_removed_mutant (the
-    # pin's behaviour, no grammar): the forms whose raw text does not spell the stem --jobs-o then
-    # PASS (exit 0, the [o] glob, the process substitution, the eval and the ANSI-C, brace, backquote
-    # and $( forms, whose o is built or quoted away), and the forms whose raw text already spells the
-    # stem fall back to the deletion read and stay a finding (exit 1, echo --jobs-o*, echo
-    # --jobs-o?ly and the dollar-single-quote --jobs-o$'n'ly).
+    # the character named). BEHAVIOUR CHANGES against the parent commit, which carried the opener
+    # list, in four vectors only: the [o] glob and the process substitution (exit 0 at the parent,
+    # whose raw text does not spell the stem --jobs-o) and the * and ? globs (exit 1 at the parent,
+    # a finding of the deletion read), each now exit 2. PREVIOUSLY REFUSED at the parent (exit 2
+    # through its opener list) and only reworded here, to the refused character: the eval spelled
+    # with a $' opener, the ANSI-C octal and hex quotes, the brace sequence, the backquote and $(
+    # substitutions and the dollar-single-quote --jobs-o$'n'ly. An eval spelled only in safe
+    # characters needs no refused character and is not refused by the grammar (the deletion read
+    # still reads its line). grammar_removed_mutant is NOT the parent: it drops the whole character
+    # refusal, opener list included, so each vector is red under it, exit 0 where the raw text does
+    # not spell the stem (the [o] glob, the process substitution, the eval and the ANSI-C, brace,
+    # backquote and $( forms) and exit 1 where the deletion read still finds it (echo --jobs-o*,
+    # echo --jobs-o?ly and --jobs-o$'n'ly).
     grammar_removed_mutant = _mutant(
         base, "python_host_pin_no_run_grammar_mutant", source,
         (("named = _refused_run_char" + "(text)", "named = None"),))
@@ -2564,14 +2642,46 @@ def _self_test_cases(base):
         check(check_id, (code, _has(lines, named),
                          grammar_removed_mutant.evaluate(root, HOST)[0]), (2, True, removed_code))
 
-    # Acceptance control: every committed host-patch run: line passes the closed grammar unchanged
-    # (no refused character), so no committed line is cannot-evaluate for it.
-    for check_id, committed in (
-            ("jobs/host-job-committed-gate-line-grammar-passes", GATE_RUN),
-            ("jobs/host-job-committed-selftest-line-grammar-passes", GATE_RUN + " --self-test"),
-            ("jobs/host-job-committed-opf-suite-line-grammar-passes", HOST_SUITES[OPF]),
-            ("jobs/host-job-committed-gfe-suite-line-grammar-passes", HOST_SUITES[GFE])):
-        check(check_id, _refused_run_char(committed), None)
+    # A host-patch run: line whose first word is a shell assignment is cannot-evaluate (exit 2, the
+    # assignment named): a safe-character PATH= prefix re-points which file the named command runs
+    # (the parent commit and the closed grammar alone passed it, exit 0), and so does one after a
+    # time -p prefix word, and a += append. Each is red under assignment_removed_mutant (exit 0).
+    # The control after them is ACCEPTANCE ONLY: an assignment-shaped ARGUMENT after the command
+    # word is no prefix and passes (exit 0 at the parent, the pin and under the mutant alike).
+    assignment_removed_mutant = _mutant(
+        base, "python_host_pin_no_run_assignment_mutant", source,
+        (("assigned = _leading_assignment" + "(text)", "assigned = None"),))
+    for check_id, spelling, named in (
+            ("jobs/host-job-path-assignment-cannot-evaluate",
+             "PATH=tools:/usr/bin " + GATE_RUN, "the shell assignment PATH=tools:/usr/bin"),
+            ("jobs/host-job-time-prefixed-assignment-cannot-evaluate",
+             "time -p PATH=tools:/usr/bin " + GATE_RUN, "the shell assignment PATH=tools:/usr/bin"),
+            ("jobs/host-job-append-assignment-cannot-evaluate",
+             "PATH+=:tools " + GATE_RUN, "the shell assignment PATH+=:tools")):
+        extra = "      - name: Extra step\n        run: " + spelling + "\n"
+        root = _fixture(base, workflow=_workflow(((OPF, _suite_step(OPF),
+                                                   _suite_step(OPF) + extra),)))
+        code, lines = evaluate(root, HOST)
+        check(check_id, (code, _has(lines, named),
+                         assignment_removed_mutant.evaluate(root, HOST)[0]), (2, True, 0))
+    extra = "      - name: Extra step\n        run: " + GATE_RUN + " X=1\n"
+    root = _fixture(base, workflow=_workflow(((OPF, _suite_step(OPF), _suite_step(OPF) + extra),)))
+    check("jobs/host-job-assignment-argument-passes", evaluate(root, HOST)[0], 0)
+
+    # Acceptance controls read from the committed .github/workflows/quality.yml (ROOT), not from
+    # module constants: its host-patch jobs carry five run: lines with four distinct texts (the gate
+    # line in each job, the gate self-test line and the two suite lines), and each of them passes the
+    # closed grammar and the assignment refusal unchanged. Each check holds one text: how many
+    # committed lines carry it, and what each refusal returns for it.
+    committed = _committed_host_runs()
+    for check_id, text, count in (
+            ("jobs/host-job-committed-gate-line-grammar-passes", GATE_RUN, 2),
+            ("jobs/host-job-committed-selftest-line-grammar-passes", GATE_RUN + " --self-test", 1),
+            ("jobs/host-job-committed-opf-suite-line-grammar-passes", HOST_SUITES[OPF], 1),
+            ("jobs/host-job-committed-gfe-suite-line-grammar-passes", HOST_SUITES[GFE], 1)):
+        check(check_id, (committed.count(text), _refused_run_char(text), _leading_assignment(text)),
+              (count, None, None))
+    check("jobs/host-job-committed-run-lines-counted", (len(committed), len(set(committed))), (5, 4))
 
     # FIX-529-R10: the number read is the conservative spelling classifier, which covers the
     # fractional sexagesimal forms the previous pattern missed; each vector is red under the mutant
@@ -2641,6 +2751,34 @@ def _self_test_cases(base):
         code, lines = evaluate(root, HOST)
         check(check_id, (code, _has(lines, "a timestamp"),
                          timestamp_mutant.evaluate(root, HOST)[0]), (2, True, 0))
+    # Each OPTIONAL time field of TIMESTAMP_PLAIN_RE has a positive vector (exit 2, a timestamp),
+    # red under a flip of that field alone, which reads the vector as a string (exit 0): a
+    # fraction, a signed offset, a one-digit hour, a lower-case t, a zone-less time and whitespace
+    # before the zone. Each was exit 2 at the parent too (its looser pattern matched any suffix), so
+    # these vectors hold the fields, not a change of behaviour.
+    for check_id, scalar, anchor, replacement in (
+            ("jobs/jobs-only-fraction-timestamp-run-cannot-evaluate", "2026-10-14T06:30:00.5Z",
+             'r"(?:\\.[0-9]*)?' + '(?:[ \\t]*', 'r"(?:[ \\t]*'),
+            ("jobs/jobs-only-signed-offset-timestamp-run-cannot-evaluate",
+             "2026-10-14T06:30:00+05:00",
+             "[ \\t]*(?:Z|[-+][0-9][0-9]?" + "(?::[0-9][0-9])?)", "[ \\t]*(?:Z)"),
+            ("jobs/jobs-only-one-digit-hour-timestamp-run-cannot-evaluate", "2026-10-14T6:30:00Z",
+             "[ \\t]+)[0-9]" + "[0-9]?:", "[ \\t]+)[0-9][0-9]:"),
+            ("jobs/jobs-only-lowercase-t-timestamp-run-cannot-evaluate", "2026-10-14t06:30:00Z",
+             "(?:[Tt]|" + "[ \\t]+)", "(?:T|[ \\t]+)"),
+            ("jobs/jobs-only-zoneless-timestamp-run-cannot-evaluate", "2026-10-14T06:30:00",
+             "[ \\t]*(?:Z|[-+][0-9][0-9]?(?::[0-9][0-9])?)" + ")?",
+             "[ \\t]*(?:Z|[-+][0-9][0-9]?(?::[0-9][0-9])?))"),
+            ("jobs/jobs-only-space-before-zone-timestamp-run-cannot-evaluate",
+             "2026-10-14T06:30:00 Z", "(?:[ \\t]*" + "(?:Z|", "(?:(?:Z|")):
+        field_mutant = _mutant(base, "python_host_pin_timestamp_field_mutant_" + str(len(EXECUTED)),
+                               source, ((anchor, replacement),))
+        root = _fixture(base, workflow=_workflow((("registry", JUDGE_STEP,
+                                                   JUDGE_STEP + second + "      - run: " + scalar
+                                                   + "\n"),)))
+        code, lines = evaluate(root, HOST)
+        check(check_id, (code, _has(lines, "a timestamp"), field_mutant.evaluate(root, HOST)[0]),
+              (2, True, 0))
     # FIX-529-R13: a date-led value whose suffix after the separator is NOT a time (--help after a
     # tab, nonsense after a space, garbage after T) is a STRING, not a timestamp, so the run: passes
     # (exit 0). Each is red under loose_timestamp_mutant (the pin's pattern, whose .+ suffix matched
@@ -2766,10 +2904,11 @@ def _self_test_cases(base):
     root = _fixture(base, workflow=_workflow(((OPF, _suite_step(OPF),
                                                _suite_step(OPF) + comment_extra),)))
     check("jobs/host-job-comment-only-stem-passes", evaluate(root, HOST)[0], 0)
-    # FIX-529-R13: the two block-scalar scopes shown directly. The SAME run: | block (echo ok, then
-    # a #-leading body line) is cannot-evaluate (exit 2) in a HOST-PATCH job, refused by the host-job
-    # line model before the flag read, but ACCEPTED (exit 0) in an OUTSIDE job, whose literal block
-    # keeps its #-leading body line.
+    # FIX-529-R13: the two block-scalar scopes shown directly. A run: | block (echo ok, then a
+    # #-leading body line) is cannot-evaluate (exit 2) in a HOST-PATCH job, refused by the host-job
+    # line model before the flag read. An OUTSIDE job's literal block KEEPS its #-leading body line,
+    # shown observably: when that line carries a ${{ }} expression the run: is cannot-evaluate
+    # (exit 2), and the copy whose block reader drops #-leading body lines passes it (exit 0).
     block_step = ("      - name: Extra step\n        run: |\n"
                   "          echo ok\n          # a note\n")
     host_block = _fixture(base, workflow=_workflow(((OPF, _suite_step(OPF),
@@ -2777,9 +2916,18 @@ def _self_test_cases(base):
     code, lines = evaluate(host_block, HOST)
     check("jobs/host-job-block-scalar-refused-before-flag-read",
           (code, _has(lines, "not a block mapping entry")), (2, True))
+    drop_comment_body_mutant = _mutant(
+        base, "python_host_pin_drop_comment_body_mutant", source,
+        (('body.append(text.strip(' + '" \\t"))',
+          'body.extend([] if text.lstrip(" \\t").startswith("#") else [text.strip(" \\t")])'),))
+    expression_block = ("      - name: Extra step\n        run: |\n"
+                        "          echo ok\n          # ${{ github.sha }}\n")
     outside_block = _fixture(base, workflow=_workflow((("registry", JUDGE_STEP,
-                                                        JUDGE_STEP + second + block_step),)))
-    check("jobs/outside-job-block-scalar-keeps-comment-body", evaluate(outside_block, HOST)[0], 0)
+                                                        JUDGE_STEP + second + expression_block),)))
+    code, lines = evaluate(outside_block, HOST)
+    check("jobs/outside-job-block-scalar-keeps-comment-body",
+          (code, _has(lines, "carries a ${{ }} expression"),
+           drop_comment_body_mutant.evaluate(outside_block, HOST)[0]), (2, True, 0))
 
     for check_id, version, shown in (
             ("interpreter/newer-patch-finding", (3, 14, 8, "final"), "Python 3.14.8 (final)"),
