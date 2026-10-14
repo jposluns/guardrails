@@ -105,7 +105,8 @@ def main():
 # engine both generators use) against their own trees, and a write-mode refusal asserts the target
 # bytes unchanged except where the vector judges the target's state itself; the remaining vectors
 # exercise the matrix's own machinery (the descriptor helpers, the fixtures, and the cleanup of the
-# temporary root, whose removal is verified and any removal error recorded as a failure). Vectors,
+# temporary root and of every surviving nested root, each removal verified by the one helper
+# verified_rmtree and any removal error recorded as a failure). Vectors,
 # each asserted on its exact exit:
 #   T1  legacy layout: the bytes equal the pre-registry join; --check 0; a rewrite changes nothing.
 #   T2  composed layout: exact golden bytes (one before-rules and one after-rules block); idempotent.
@@ -192,8 +193,13 @@ def main():
 #       at both boundaries, and one whose sentinel closes all fail, each exit nonzero with the
 #       named NOT RUN failure and no PASS text, the second never raising and leaving no temporary
 #       root behind; that a non-OSError raised by the first enumeration propagates with the
-#       temporary root removed; and that a run whose own temporary root refuses removal records
-#       the cleanup failure by name and exits nonzero with no PASS text.
+#       temporary root removed; that a run whose own temporary root refuses removal records the
+#       cleanup failure by name and exits nonzero with no PASS text; that a recovery-rerun whose
+#       vector (f) recovery removal is denied records the named recovery failure and exits
+#       nonzero with no PASS text (every recovery removal of a surviving nested root goes
+#       through the same verified cleanup, so a recovery failure blocks PASS); and that a run
+#       whose root removal returns without deleting the root and without reporting any error
+#       records the named surviving-root failure and exits nonzero with no PASS text.
 #   T35 on a nested target, an exception other than OSError raised at the rename (a stand-in for an
 #       interrupt) propagates with a note naming the temporary file it left by its path from the root;
 #       the target unchanged and the file left there.
@@ -211,8 +217,10 @@ def main():
 #       Vectors force each of the three cases and assert the recorded (cause, errno) pair exactly;
 #       the ordinary leg is also rerun with each cause failing environmentally, in both modes, each
 #       rerun asserting the printed note's cause and delimited errno (rendered from the recorded
-#       pair by the one formatter t38_note), and the forced-bind leg is rerun while socket creation
-#       is refused, so it can never fall back to a real socket.
+#       pair by the one formatter t38_note), and the forced-bind leg is rerun with socket.socket
+#       refused, so a fallback that creates a real socket through that constructor is caught
+#       (the rerun patches socket.socket only; a socket reached without calling it, through a
+#       name bound before the patch, is outside what this vector discriminates).
 
 _APEX = ("---\ncorpus-id: prjint1\norigin: pack\nfamily: aiqt\napex: true\nslug: project-integrity\n---\n"
          "\n# Project integrity\n\nApex text.\n")
@@ -229,8 +237,10 @@ _BLOCK_Z = ("OPF-Z", "AGENTS.md", "after-rules", 1, "opf/blocks/z.md", _Z_INNER 
 
 def self_test_main(nested_run=False):
     # nested_run=True marks a run an end-to-end vector makes of this same matrix: such a run
-    # skips those vectors itself, so the matrix nests one level at a time, and its exit code and
-    # output are judged by the vector in the outer run.
+    # skips those vectors itself, and its exit code and output are judged by the vector in the
+    # outer run. nested_run="recovery-rerun" (made only by vector (g)) is the one exception:
+    # that run skips every end-to-end vector except (f), whose recovery removal the outer
+    # vector denies, so a denied recovery is driven end to end and nesting stays bounded.
     import errno
     import hashlib
     import io
@@ -327,6 +337,23 @@ def self_test_main(nested_run=False):
         print("SELF-TEST ERROR: no writable temporary directory: {}".format(exc), file=sys.stderr)
         return 2
 
+    def verified_rmtree(made, label):
+        # Every temporary-root removal is judged, never assumed: a removal error is recorded as
+        # a failure, never suppressed, and the root must really be gone afterwards, so a removal
+        # that reports no error yet leaves the root behind is a failure too. Vector (f) below
+        # drives a denied removal end to end, vector (g) a denied recovery removal, and vector
+        # (h) a removal that returns without deleting the root and without reporting any error.
+        removal_errors = []
+        if os.path.lexists(made):
+            shutil.rmtree(made, onexc=lambda _fn, pth, exc: removal_errors.append(
+                "{}: {}".format(pth, exc)))
+        if removal_errors:
+            failures.append("{}: the temporary root {} was not fully removed: {}".format(
+                label, made, "; ".join(removal_errors)))
+        elif os.path.lexists(made):
+            failures.append("{}: the temporary root {} still exists although its removal "
+                            "reported no error".format(label, made))
+
     def open_fds():
         """The open descriptors (the sentinel left out), or None when no trustworthy enumeration is
         available. A sentinel descriptor opened for this call must appear in the listing: one that
@@ -368,9 +395,9 @@ def self_test_main(nested_run=False):
     # The T34 verdict for one before/after enumeration pair: None only when the accounting ran and the
     # descriptors match. An enumeration open_fds could not trust (either side None: unlistable, the
     # sentinel omitted or unopenable, or its close failed) is a named NOT RUN failure, never a pass:
-    # the PASS text claims no descriptor is
-    # left open, which only the accounting can establish, and a leak behind an unlistable or truncated
-    # /proc/self/fd and /dev/fd would otherwise pass unseen.
+    # the PASS text claims no descriptor is left open, which only the accounting can establish,
+    # and a leak behind an unlistable or truncated /proc/self/fd and /dev/fd would otherwise
+    # pass unseen.
     def fd_accounting_failure(before, after):
         if before is None or after is None:
             return ("T34 NOT RUN: no trustworthy descriptor enumeration {} the matrix (the sentinel "
@@ -1664,11 +1691,10 @@ def self_test_main(nested_run=False):
         #     retried (a close can fail after releasing the descriptor, so a retry could close an
         #     unrelated one); and a listing that omits the sentinel descriptor is None as well,
         #     never a partial accounting; a None pair is the named NOT RUN failure, on either side
-        #     or both. The omitted sentinel's number is the
-        #     one its open really returned (recorded, then dropped from the real listing), never
-        #     assumed to be 3 or above: with a standard descriptor closed, the sentinel can take 0, 1
-        #     or 2. The genuinely leaking writer under unavailable enumeration is vector (c) below,
-        #     end to end.
+        #     or both. The omitted sentinel's number is the one its open really returned
+        #     (recorded, then dropped from the real listing), never assumed to be 3 or above:
+        #     with a standard descriptor closed, the sentinel can take 0, 1 or 2. The genuinely
+        #     leaking writer under unavailable enumeration is vector (c) below, end to end.
         real_listdir = os.listdir
         real_os_open = os.open
 
@@ -1772,7 +1798,8 @@ def self_test_main(nested_run=False):
         #     nonzero with the named NOT RUN failure and no PASS text. Red on a revert to the old
         #     condition that skipped the accounting when fds_before was None. Each nested run skips
         #     the end-to-end vectors (nested_run=True), so the matrix nests one level at a time,
-        #     once here and once in each of (d), (e) and (f) below.
+        #     once here and once in each of (d), (e), (f) and (h) below; vector (g) nests two
+        #     levels, through the recovery-rerun it makes and the vector (f) run inside it.
         if not nested_run:
             real_close = os.close
             in_writer, leaked = [], []
@@ -1879,7 +1906,7 @@ def self_test_main(nested_run=False):
                 failures.append("T34 vector: the close-failing matrix run left a temporary root "
                                 "behind: {!r}".format(surviving))
                 for made in surviving:
-                    shutil.rmtree(made, ignore_errors=True)
+                    verified_rmtree(made, "T34 vector recovery")
 
             # (e) End to end: this same matrix, run nested with its FIRST descriptor enumeration
             #     raising a non-OSError (one open_fds cannot absorb), must propagate that exact
@@ -1926,8 +1953,14 @@ def self_test_main(nested_run=False):
                 failures.append("T34 vector: the first-enumeration crash left a temporary root "
                                 "behind: {!r}".format(enum_surviving))
                 for made in enum_surviving:
-                    shutil.rmtree(made, ignore_errors=True)
+                    verified_rmtree(made, "T34 vector recovery")
 
+        # Vector (f) also runs in a nested_run="recovery-rerun" run: vector (g) below makes
+        # such a run and denies the recovery removal inside its vector (f), so a denied recovery
+        # is driven end to end with bounded nesting (a recovery-rerun skips every other
+        # end-to-end vector, and the runs vector (f) itself makes stay nested_run=True).
+        if not nested_run or nested_run == "recovery-rerun":
+            real_mkdtemp = tempfile.mkdtemp
             # (f) End to end: this same matrix, run nested with its own temporary root refusing
             #     removal (the root's open denied, which aborts the cleanup's rmtree at the top),
             #     must record the cleanup failure by name and exit nonzero with no PASS text: red
@@ -1967,21 +2000,106 @@ def self_test_main(nested_run=False):
                                 "text, got exit {} ending: {}".format(
                                     denial_code, denial_out.strip()[-300:]))
             for made in denial_roots:
-                if os.path.exists(made):
-                    shutil.rmtree(made, ignore_errors=True)
+                verified_rmtree(made, "cleanup vector recovery")
+
+        if not nested_run:
+            # (g) End to end: this same matrix, rerun as nested_run="recovery-rerun" so that
+            #     the vector (f) of that rerun itself runs, with the recovery removal its vector
+            #     (f) makes of the denied nested root denied as well, must record the named
+            #     recovery failure and exit nonzero with no PASS text: red when the recovery
+            #     suppresses removal errors (ignore_errors=True), where the denied nested root
+            #     would survive behind a green PASS of the rerun.
+            recovery_roots, recovery_denials = [], []
+            outer_real_mkdtemp = tempfile.mkdtemp
+
+            def recovery_root_recording_mkdtemp(*a, **k):
+                made = outer_real_mkdtemp(*a, **k)
+                recovery_roots.append(made)
+                return made
+
+            def recovery_denying_open(path, *a, **k):
+                # The first recorded root is the temporary root of the rerun itself; the second
+                # is the root of the nested run made by the vector (f) of the rerun. The denial
+                # inside that vector (f) raises before reaching this open, so the first open
+                # this wrapper sees for the nested root is its recovery removal.
+                if len(recovery_roots) > 1 and os.fspath(path) == recovery_roots[1]:
+                    recovery_denials.append(path)
+                    raise PermissionError(errno.EACCES, "injected: the recovery removal is "
+                                          "denied", str(path))
+                return real_os_open(path, *a, **k)
+
+            recovery_buf = io.StringIO()
+            tempfile.mkdtemp = recovery_root_recording_mkdtemp
+            os.open = recovery_denying_open
+            try:
+                with redirect_stdout(recovery_buf), redirect_stderr(recovery_buf):
+                    recovery_code = self_test_main(nested_run="recovery-rerun")
+            finally:
+                os.open = real_os_open
+                tempfile.mkdtemp = outer_real_mkdtemp
+            recovery_out = recovery_buf.getvalue()
+            if not recovery_denials:
+                failures.append("recovery vector: the injected denial never reached the recovery "
+                                "removal of the rerun, so the vector judged nothing")
+            if (recovery_code == 0 or "SELF-TEST PASS" in recovery_out
+                    or "cleanup vector recovery" not in recovery_out
+                    or "was not fully removed" not in recovery_out):
+                failures.append("recovery vector: a rerun whose vector (f) recovery removal is "
+                                "denied must exit nonzero with the named recovery failure and no "
+                                "PASS text, got exit {} ending: {}".format(
+                                    recovery_code, recovery_out.strip()[-300:]))
+            for made in recovery_roots:
+                verified_rmtree(made, "recovery vector recovery")
+
+            # (h) End to end: this same matrix, run nested with the removal of its temporary
+            #     root returning without deleting the root and without reporting any error (a
+            #     silent no-op rmtree that never calls onexc), must record the named
+            #     surviving-root failure and exit nonzero with no PASS text: red when the
+            #     root-absence check after an error-free removal is dropped, where the surviving
+            #     root would hide behind a green PASS.
+            noop_roots, noop_fired = [], []
+            real_rmtree = shutil.rmtree
+
+            def noop_root_recording_mkdtemp(*a, **k):
+                made = outer_real_mkdtemp(*a, **k)
+                noop_roots.append(made)
+                return made
+
+            def root_noop_rmtree(path, *a, **k):
+                if noop_roots and os.fspath(path) == noop_roots[0]:
+                    noop_fired.append(path)
+                    return None
+                return real_rmtree(path, *a, **k)
+
+            noop_buf = io.StringIO()
+            tempfile.mkdtemp = noop_root_recording_mkdtemp
+            shutil.rmtree = root_noop_rmtree
+            try:
+                with redirect_stdout(noop_buf), redirect_stderr(noop_buf):
+                    noop_code = self_test_main(nested_run=True)
+            finally:
+                shutil.rmtree = real_rmtree
+                tempfile.mkdtemp = outer_real_mkdtemp
+            noop_out = noop_buf.getvalue()
+            if not noop_fired:
+                failures.append("cleanup vector: the injected no-op removal never reached the "
+                                "temporary root of the nested run, so the vector judged nothing")
+            if (noop_code == 0 or "SELF-TEST PASS" in noop_out
+                    or "still exists although its removal reported no error" not in noop_out):
+                failures.append("cleanup vector: a matrix run whose root removal returns without "
+                                "deleting the root and without reporting any error must exit "
+                                "nonzero with the named surviving-root failure and no PASS text, "
+                                "got exit {} ending: {}".format(
+                                    noop_code, noop_out.strip()[-300:]))
+            for made in noop_roots:
+                verified_rmtree(made, "cleanup vector recovery")
     finally:
-        # The cleanup's outcome is judged, never assumed: rmtree once suppressed every removal
-        # error here (ignore_errors=True), so a denied removal left the root behind a green PASS.
-        # A removal error is recorded as a failure, and the root must really be gone afterwards;
-        # vector (f) above drives the denied removal end to end.
-        cleanup_errors = []
-        shutil.rmtree(tmp, onexc=lambda _fn, pth, exc: cleanup_errors.append("{}: {}".format(pth, exc)))
-        if cleanup_errors:
-            failures.append("cleanup: the temporary root {} was not fully removed: {}".format(
-                tmp, "; ".join(cleanup_errors)))
-        elif os.path.lexists(tmp):
-            failures.append("cleanup: the temporary root {} still exists although its removal "
-                            "reported no error".format(tmp))
+        # The outcome of the cleanup is judged, never assumed: rmtree once suppressed every
+        # removal error here (ignore_errors=True), so a denied removal left the root behind a
+        # green PASS. verified_rmtree records a removal error as a failure and requires the root
+        # gone afterwards; vector (f) above drives the denied removal end to end, and vector (h)
+        # the removal that reports no error yet leaves the root standing.
+        verified_rmtree(tmp, "cleanup")
 
     if failures:
         print("SELF-TEST FAIL:")
