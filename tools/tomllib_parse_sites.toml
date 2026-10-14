@@ -800,6 +800,16 @@ count = 1
 class = "EXEMPT"
 reason = "valueerror-passthrough"
 
+# the self-test seam that saves and restores tomllib.loads and tomllib.load around an injected
+# MemoryError at the parse call (real memory exhaustion cannot be provoked safely)
+[[site]]
+path = "tools/check_brief_capability.py"
+function = "_injected_memory_exhaustion"
+form = "alias"
+count = 2
+class = "EXEMPT"
+reason = "test-code"
+
 [[site]]
 path = "tools/check_crosswalk.py"
 function = "self_test"

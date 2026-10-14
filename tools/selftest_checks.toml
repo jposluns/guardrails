@@ -1599,6 +1599,7 @@ expected-check-ids = [
   "table/not-toml-2",
   "table/deep-nesting-2",
   "table/overlong-integer-2",
+  "table/injected-memory-exhaustion-2",
   # ---------- structure ----------
   "structure/dash-list-refused",
   "structure/nested-list-refused",
@@ -1813,6 +1814,7 @@ expected-check-ids = [
   "main/bare-malformed-table-2",
   "main/manifest-deep-nesting-harness-error",
   "main/manifest-overlong-integer-harness-error",
+  "main/manifest-injected-memory-exhaustion-harness-error",
   # ---------- red on revert: each blocking rule, form and exemption patched out flips its fixture ----------
   "revert/s1-red",
   "revert/s1-exec-tags-red",
