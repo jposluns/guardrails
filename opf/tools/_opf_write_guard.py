@@ -1054,7 +1054,12 @@ def lease_held_message(pfd, name, lease_rel, verb):
                     detail = ("a present lease with an OVERSIZED payload (over the 65536-byte bound, so it is "
                               "never read as a lease and no holder is taken from a prefix of it)")
                 else:
-                    data = tomllib.loads(raw.decode("utf-8"))
+                    try:
+                        data = tomllib.loads(raw.decode("utf-8"))
+                    except (ValueError, RecursionError, MemoryError):
+                        # disposed at the parse (deep nesting, a many-part key, an over-long integer or
+                        # undecodable bytes keep the generic detail); the outer handler stays the backstop
+                        data = None
                     if isinstance(data, dict):
                         detail = "held by {!r} (operation {!r}, acquired_at {!r})".format(
                             data.get("holder"), data.get("operation"), data.get("acquired_at"))
@@ -1204,7 +1209,12 @@ def lease_holder_of(raw, cause=None):
             return "no holder named (the lease is {})".format(cause)
         return "no holder named ({})".format(_UNREAD_ENTRY.get(cause, "the lease was not read"))
     try:
-        data = tomllib.loads(raw.decode("utf-8"))
+        try:
+            data = tomllib.loads(raw.decode("utf-8"))
+        except (ValueError, RecursionError, MemoryError):
+            # disposed at the parse (deep nesting, a many-part key, an over-long integer or undecodable
+            # bytes fall through to the malformed-replacement text); the outer handler stays the backstop
+            data = None
         if isinstance(data, dict) and data.get("holder") is not None:
             return "holder {!r}".format(data.get("holder"))
     except Exception:  # noqa: BLE001  diagnostic only; an unreadable replacement still refuses above
@@ -1301,7 +1311,10 @@ def _closed_lease_model(raw):
     payload each refuse upstream rather than ever reaching the holder comparison."""
     try:
         data = tomllib.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
+    except (UnicodeDecodeError, ValueError, RecursionError, MemoryError):
+        # RecursionError: tomllib's refusal of deep nesting and (CPython 3.14.8 on) a 1001-part key, and
+        # MemoryError, a many-part key under a memory limit: such a lease is malformed like any other and
+        # recovery refuses it as held.
         return None
     if not isinstance(data, dict) or set(data) != set(_opf_check.LEASE_TOP_KEYS):
         return None

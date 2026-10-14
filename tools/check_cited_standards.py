@@ -333,7 +333,7 @@ def load_config(path):
         raise CannotEvaluate("config {} cannot be read: {}".format(path, exc))
     # ValueError and RecursionError too: tomllib raises a bare ValueError past the int-string digit limit and a
     # RecursionError on deep nesting, the same family _standards.load_manifests catches.
-    except (tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise CannotEvaluate("config {} is not valid TOML: {}".format(path, exc))
     unknown = sorted(set(data) - CONFIG_KEYS)
     if unknown:

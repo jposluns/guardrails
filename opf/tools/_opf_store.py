@@ -785,12 +785,53 @@ def _parse_store_toml(relpath, data):
         # ValueError base so a present-but-unparseable input is a fail-closed StoreError, never a crash
         # (check-fails-closed-on-unreadable; unreadable includes present-but-unparseable).
         raise StoreError("cannot parse {} ({})".format(relpath, exc))
-    except RecursionError as exc:
-        # A deeply-nested TOML value overflows the parser's recursion: a present-but-unparseable input is a
-        # fail-closed StoreError (the caller routes it to CANNOT-EVALUATE), never an uncontrolled crash
+    except (RecursionError, MemoryError) as exc:
+        # tomllib raises RecursionError on a deeply-nested value and, from CPython 3.14.8, on a key of more
+        # than 1000 dotted parts, and a many-part key can exhaust memory first (MemoryError under a memory
+        # limit): a present-but-unparseable input is a fail-closed StoreError (the caller routes it to
+        # CANNOT-EVALUATE), never an uncontrolled crash, and its message names both causes
         # (check-fails-closed-on-unreadable; unreadable includes present-but-unparseable).
-        raise StoreError("cannot parse {} (input nesting is too deep; present but unparseable): {}".format(
-            relpath, exc))
+        raise StoreError("cannot parse {} (input nesting is too deep or a dotted key has too many parts; present "
+                         "but unparseable): {}".format(relpath, exc))
+
+
+# Self-test seam for that RecursionError class, shared by the opf self-tests. _ST_DEEP_TOML nests a value past
+# the recursion limit; _ST_LONG_KEY_TOML is a 1001-part key, which raises only where tomllib caps key parts
+# (CPython 3.14.8 on) or under _StKeyPartCap, which emulates that cap on an interpreter without it.
+_ST_DEEP_TOML = "deep = " + "[" * 5000 + "]" * 5000 + "\n"
+_ST_LONG_KEY_TOML = "k" + ".k" * 1000 + " = 1\n"
+
+
+class _StKeyPartCap:
+    """While held, tomllib refuses a key of more than 1000 parts with RecursionError (or the class given,
+    MemoryError to emulate a many-part key under a memory limit): tomllib._parser.parse_key is rebound on
+    entry and restored on exit. The given class is injected even when the underlying parse_key refuses the
+    key first (an interpreter with its own cap, CPython 3.14.8 on, raises RecursionError inside it), so the
+    class a vector asserts never depends on the host. Self-test only; a vector asserts the class, never
+    this message."""
+
+    def __init__(self, kind=RecursionError):
+        self._kind = kind
+
+    def __enter__(self):
+        real = self._real = tomllib._parser.parse_key
+        kind = self._kind
+
+        def capped(src, pos):
+            try:
+                pos, key = real(src, pos)
+            except (RecursionError, MemoryError):
+                # the interpreter's own key-part cap fired first; still inject the requested class
+                raise kind("emulated key-part cap") from None
+            if len(key) > 1000:
+                raise kind("emulated key-part cap")
+            return pos, key
+        tomllib._parser.parse_key = capped
+        return self
+
+    def __exit__(self, *exc_info):
+        tomllib._parser.parse_key = self._real
+        return False
 
 
 def _immediate_subdirs(store_root_fd, working_rel):
@@ -3918,6 +3959,38 @@ def self_test():
                   and "stale" not in hs_seam.views)
         finally:
             os.close(hs_wfd)
+
+        # tomllib's RecursionError (a deeply-nested value, and a 1001-part key under the emulated cap) is a
+        # StoreError naming both causes, so a long dotted key is never reported as nesting alone.
+        def recursion_refusal(text, capped):
+            try:
+                if capped:
+                    with _StKeyPartCap(capped):
+                        _parse_store_toml("m/manifest.toml", text.encode("utf-8"))
+                else:
+                    _parse_store_toml("m/manifest.toml", text.encode("utf-8"))
+            except StoreError as exc:
+                return type(exc.__context__).__name__, str(exc)
+            except Exception as exc:  # noqa: BLE001  an escape is a failed check, never a suite abort
+                return "escaped " + type(exc).__name__, ""
+            return "parsed", ""
+        # Message-free: the class tomllib raised and this module's own refusal text, never the parser's or the
+        # emulation's message, so a native 3.14.8 cap with any message of its own still passes.
+        rec_head = ("cannot parse m/manifest.toml (input nesting is too deep or a dotted key has too many parts; "
+                    "present but unparseable): ")
+        for label, text, capped, kind in (("deep-nesting", _ST_DEEP_TOML, None, "RecursionError"),
+                                          ("1001-part-key", _ST_LONG_KEY_TOML, RecursionError, "RecursionError"),
+                                          ("many-part-key-memory", _ST_LONG_KEY_TOML, MemoryError, "MemoryError")):
+            got_kind, got_text = recursion_refusal(text, capped)
+            check("recursion-{}-names-both-causes".format(label),
+                  got_kind == kind and got_text.startswith(rec_head))
+        # The emulation injects the class it is given even when an underlying key-part cap (here the
+        # emulation itself, standing in for a CPython 3.14.8 interpreter cap) refuses the key first with
+        # RecursionError: the memory vector must observe MemoryError, never the underlying class.
+        with _StKeyPartCap(RecursionError):
+            got_kind, got_text = recursion_refusal(_ST_LONG_KEY_TOML, MemoryError)
+        check("recursion-many-part-key-memory-independent-of-underlying-cap",
+              got_kind == "MemoryError" and got_text.startswith(rec_head))
 
     finally:
         shutil.rmtree(base, ignore_errors=True)
