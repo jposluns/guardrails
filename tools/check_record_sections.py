@@ -308,7 +308,7 @@ def load_config(path, allow_absent=False):
     # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
     # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
     # on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise GateError("cannot parse config {} ({})".format(path, exc))
     if not isinstance(data, dict) or set(data) != TOP_KEYS:
         raise GateError("{}: top-level keys must be exactly {}".format(path, sorted(TOP_KEYS)))
