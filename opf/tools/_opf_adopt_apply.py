@@ -536,7 +536,7 @@ def _plan_digest_of(plan_bytes):
     missing or malformed digest."""
     try:
         doc = tomllib.loads(plan_bytes.decode("utf-8"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise AdoptApplyError("the plan carries no readable plan_digest ({}); fail-closed".format(exc))
     digest = doc.get("plan_digest") if isinstance(doc, dict) else None
     _plan_hex(digest)
@@ -1386,7 +1386,7 @@ def check_apply_ops(run_id, phase, ops, staged, committed=None, moves=None, comm
                                 "[adoption] identity (spec 4.2)".format(target))
             derived = emit_inventory(run_id, derive_rows(run_id, ops[:-1], staged), phase, claimed)
         except (AdoptApplyError, KeyError, TypeError, AttributeError, UnicodeDecodeError,
-                tomllib.TOMLDecodeError) as exc:
+                tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
             findings.append("no inventory can be derived from this transaction ({})".format(exc))
         else:
             if staged.get(target) != derived:
@@ -2945,7 +2945,12 @@ def _init_store_scaffold(first_adoption, changelog_created):
     if changelog_created:
         scaffold[init_op.CHANGELOG_RELPATH] = "sha256:" + _sha256(init_op._CHANGELOG_PAYLOAD)
     scaffold[init_op.PROVENANCE_RELPATH] = None
-    for view in tomllib.loads(manifest)["views"].values():
+    try:
+        views = tomllib.loads(manifest)["views"]
+    except (ValueError, RecursionError, MemoryError) as exc:   # UnicodeDecodeError, TOMLDecodeError included
+        raise AdoptApplyError("the default manifest does not parse as TOML ({}); "
+                              "fail-closed".format(exc))
+    for view in views.values():
         scaffold[view["target"]] = None
     return "{}/{}".format(machine, store.MANIFEST_NAME), scaffold
 
@@ -2989,7 +2994,11 @@ def _init_store_external_destinations():
     the CHANGELOG.md deliverable; every declared view is store-scope). Derived from the manifest
     itself so the disposition preflight can never drift from what init publishes around."""
     import _opf_init
-    doc = tomllib.loads(_opf_init.build_manifest())
+    try:
+        doc = tomllib.loads(_opf_init.build_manifest())
+    except (ValueError, RecursionError, MemoryError) as exc:   # UnicodeDecodeError, TOMLDecodeError included
+        raise AdoptApplyError("the default manifest does not parse as TOML ({}); "
+                              "fail-closed".format(exc))
     targets = {d.get("target") for d in doc.get("deliverables", {}).values() if isinstance(d, dict)}
     targets |= {v.get("target") for v in doc.get("views", {}).values() if isinstance(v, dict)}
     return sorted(t for t in targets
@@ -3072,7 +3081,7 @@ def _init_store_bundle_listed(root_fd, model, run_id):
             rows = _opf_check._evidence_rows(home, KIND, run_id,
                                              tomllib.loads(data.decode("utf-8")))
         except (ValueError, TypeError, KeyError, UnicodeDecodeError,
-                tomllib.TOMLDecodeError) as exc:
+                tomllib.TOMLDecodeError, RecursionError, MemoryError) as exc:
             raise AdoptApplyError("the evidence inventory {} cannot be read ({}); "
                                   "fail-closed".format(entry["path"], exc))
         for row in rows:
@@ -4190,7 +4199,7 @@ def _canonical_model(rel, data):
     only: a hand edit that leaves canonical bytes is caught by the row's old_digest, not here."""
     try:
         model = tomllib.loads(data.decode("utf-8"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError, RecursionError) as exc:
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise AdoptApplyError("{!r} does not parse as TOML ({}); this slice re-emits a whole file only "
                               "through the canonical TOML emitter, never a text substitution "
                               "(fail-closed)".format(rel, exc))
@@ -4275,7 +4284,8 @@ def _store_model(context, manifest):
     # earlier in this transaction (a redundant pair, disclosed).
     try:
         model = tomllib.loads(data.decode("utf-8"))
-    except (AttributeError, UnicodeDecodeError, tomllib.TOMLDecodeError, RecursionError) as exc:
+    except (AttributeError, UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError,
+            MemoryError) as exc:
         raise AdoptApplyError("the store manifest {!r} does not parse as TOML ({}); "
                               "fail-closed".format(manifest, exc))
     if store.validate_manifest(model).status != store.VALID:
@@ -4395,7 +4405,11 @@ def _compose_register_unmanaged(op_row, context):
     except EmitError as exc:
         raise AdoptApplyError("the registered manifest cannot be emitted canonically ({}); "
                               "fail-closed".format(exc))
-    reparsed = tomllib.loads(new_bytes.decode("utf-8"))
+    try:
+        reparsed = tomllib.loads(new_bytes.decode("utf-8"))
+    except (ValueError, RecursionError, MemoryError) as exc:   # UnicodeDecodeError, TOMLDecodeError included
+        raise AdoptApplyError("the registered manifest does not reparse as TOML ({}); nothing is "
+                              "rewritten (fail-closed)".format(exc))
     back = _without_last_entry(reparsed, entry, model)
     if back is None or not _model_equal(back, model):
         raise AdoptApplyError("the registered manifest is not the prior manifest plus exactly the one "
@@ -5375,7 +5389,7 @@ def _canonical_toml(data, label):
     try:
         doc = tomllib.loads(data.decode("utf-8"))
         canonical = emit_checked(doc).encode("utf-8")
-    except (ValueError, RecursionError, EmitError) as exc:   # UnicodeDecodeError, TOMLDecodeError included
+    except (ValueError, RecursionError, MemoryError, EmitError) as exc:   # UnicodeDecodeError, TOMLDecodeError included
         raise AdoptApplyError("{} is unreadable or malformed TOML ({}); fail-closed".format(label, exc))
     if canonical != data:
         raise AdoptApplyError("{} is not in its canonical emitted form (a hand edit, comment or reordering); "
@@ -12390,6 +12404,71 @@ def _self_test_checks():
     check("compose-retirement-committed-pair-mode-refused", any("pinned mode" in f for f in check_apply_ops(
         rid, RETIREMENT_PHASE, *sealed([gone], {}, RETIREMENT_PHASE), committed=committed_copy,
         committed_modes={copy: 0o600})))
+
+    # The tomllib parse-site floor (tools/check_python_floor.py, tomllib leg): each production parse of
+    # this module disposes of RecursionError, MemoryError and the ValueError family in its own function,
+    # converting it to the refusal path (AdoptApplyError, or a derivation finding), never an escaping
+    # parse error. Deep nesting feeds a real RecursionError and an over-long integer literal a real bare
+    # ValueError; MemoryError shares each handler (the static floor scan is its per-site guard, as the
+    # tomllib leg discloses).
+    import _opf_init
+    deep_toml = ("x = " + "[" * 6000 + "]" * 6000).encode("utf-8")
+    long_int_toml = ("x = " + "9" * 5000).encode("utf-8")
+    check("toml-floor-plan-digest-deep-nesting-refused",
+          "no readable plan_digest" in (refusal(_plan_digest_of, deep_toml) or ""))
+    check("toml-floor-canonical-toml-deep-nesting-refused",
+          "unreadable or malformed TOML" in (refusal(_canonical_toml, deep_toml, "the probe") or ""))
+    check("toml-floor-canonical-model-deep-nesting-refused",
+          "does not parse as TOML" in (refusal(_canonical_model, "probe.toml", deep_toml) or ""))
+    check("toml-floor-canonical-model-long-integer-refused",
+          "does not parse as TOML" in (refusal(_canonical_model, "probe.toml", long_int_toml) or ""))
+    deep_staged = dict(good[1], **{inventory_rel(rid): deep_toml})
+    check("toml-floor-inventory-deep-nesting-refused",
+          any("no inventory can be derived" in f for f in findings_of(good[0], deep_staged)))
+    for probe_label, probe_payload in (("deep-nesting", deep_toml), ("long-integer", long_int_toml)):
+        probe_ctx = RegistrationContext(mock.Mock(staged={man: probe_payload}, ops=[]))
+        probe_ctx.rewrites[man] = dict(op="write", path=man)
+        check("toml-floor-store-model-{}-refused".format(probe_label),
+              "does not parse as TOML" in (refusal(_store_model, probe_ctx, man) or ""))
+    with mock.patch.object(_opf_init, "build_manifest", lambda: deep_toml.decode("utf-8")):
+        check("toml-floor-init-scaffold-deep-nesting-refused",
+              "does not parse as TOML" in (refusal(_init_store_scaffold, True, True) or ""))
+        check("toml-floor-init-destinations-deep-nesting-refused",
+              "does not parse as TOML" in (refusal(_init_store_external_destinations) or ""))
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        probe_inv = home + "/inventory.toml"
+        (Path(temp) / probe_inv).parent.mkdir(parents=True)
+        (Path(temp) / probe_inv).write_bytes(deep_toml)
+        probe_fd = os.open(temp, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            probe_model = dict(entries=[dict(kind="file", path=probe_inv, digest=_D_ZERO)])
+            check("toml-floor-bundle-inventory-deep-nesting-refused",
+                  "cannot be read" in (refusal(_init_store_bundle_listed, probe_fd, probe_model, rid) or ""))
+        finally:
+            os.close(probe_fd)
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        (Path(temp) / keep).parent.mkdir(parents=True)
+        (Path(temp) / keep).write_bytes(b"kept\n")
+        register_fd = os.open(temp, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            probe_manifest = _opf_init.build_manifest().encode("utf-8")
+            probe_ops = mock.Mock(staged={man: probe_manifest}, ops=[], root_fd=register_fd, run_id=rid)
+            probe_ctx = RegistrationContext(probe_ops, reg_store, None, {keep: plan_digest(b"kept\n")})
+            probe_ctx.rewrites[man] = dict(op="write", path=man)
+            probe_row = dict(op="register-unmanaged", entry=keep, old_digest=plan_digest(probe_manifest),
+                             new_digest=_D_ZERO)
+            real_emit, emitted = emit_checked, []
+
+            def emit_deep(model):
+                emitted.append(model)
+                return real_emit(model) if len(emitted) == 1 else deep_toml.decode("utf-8")
+
+            with mock.patch.dict(globals(), dict(emit_checked=emit_deep)):
+                probe_why = refusal(_compose_register_unmanaged, probe_row, probe_ctx)
+            check("toml-floor-register-reparse-deep-nesting-refused",
+                  probe_why is not None and "does not reparse as TOML" in probe_why)
+        finally:
+            os.close(register_fd)
 
     # 16f: reversal. The retirement stage aborts at its final op (its inventory publication) and the
     # journal's reverse-order rollback restores the removed frozen sources byte-exact and removes the

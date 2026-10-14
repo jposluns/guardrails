@@ -2364,6 +2364,16 @@ def _select(run, binding):
     return "fresh", None
 
 
+def _planned_view_targets():
+    """The default manifest declares the initial view destinations; its re-parse here disposes of
+    RecursionError, MemoryError and the ValueError family itself (the tomllib parse-site floor,
+    tools/check_python_floor.py), refusing as InitOperationError, never an escaping parse error."""
+    try:
+        return {v["target"] for v in tomllib.loads(_opf_init.build_manifest())["views"].values()}
+    except (ValueError, RecursionError, MemoryError) as exc:   # UnicodeDecodeError, TOMLDecodeError included
+        raise InitOperationError("the default manifest does not parse as TOML ({}); refused".format(exc))
+
+
 def _fresh_plan(run, binding, head, ancestral, git, admitted=(), operation_id=None,
                 admitted_dirs=()):
     """Preflight a FRESH adoption under the mutex and produce its immutable plan: no pointer, no
@@ -2436,7 +2446,7 @@ def _fresh_plan(run, binding, head, ancestral, git, admitted=(), operation_id=No
                                          "mode, size and digest; foreign content is never adopted "
                                          "by init".format(path))
         planned = set(BOOTSTRAP_SOURCE_ROSTER) | {PROVENANCE_RELPATH, CHANGELOG_RELPATH}
-        planned |= {v["target"] for v in tomllib.loads(_opf_init.build_manifest())["views"].values()}
+        planned |= _planned_view_targets()
         clash = sorted(set(want_files) & planned)
         if clash:
             raise InitOperationError("admitted .working file(s) {} occupy planned destinations; an "
@@ -3176,6 +3186,17 @@ def _run_self_test_isolated():
     manual = "sha256:" + hashlib.sha256((json.dumps(pairs, separators=(",", ":"))
                                          + "\n").encode("ascii")).hexdigest()
     ok("D-basis-independent-fixture", manual == source_digest)
+
+    # The tomllib parse-site floor (tools/check_python_floor.py, tomllib leg): the planned-view-target
+    # parse disposes of RecursionError, MemoryError and the ValueError family in its own function,
+    # refusing as InitOperationError. Deep nesting feeds a real RecursionError; MemoryError shares the
+    # handler (the static floor scan is its per-site guard).
+    real_build_manifest = _opf_init.build_manifest
+    _opf_init.build_manifest = lambda: "x = " + "[" * 6000 + "]" * 6000
+    try:
+        refuses("D-planned-views-deep-nesting", _planned_view_targets, needle="does not parse as TOML")
+    finally:
+        _opf_init.build_manifest = real_build_manifest
 
     # --- pure: provenance build + validate --------------------------------------------------------
     text = build_bootstrap_provenance(_mk_basis(), payloads)

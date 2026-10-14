@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "26ae7d39244b1952266c4fd1c3de1a679c78fb65df9bb13063322b847c523b8f"
+tree-sha256 = "c50a24bb58eb945540b40b9c0e8c67a3cd97073da60d1243133d8c72e3acbb8b"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2666,8 +2666,8 @@ sha256 = "65ee9364396ac733e6717e905aaa50665ab68a091e97b6a82b47b56d3a5129ea"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_apply.py"
-bytes = 976702
-sha256 = "7ba11faa638101c67fd559ec129d2704d5ca0e3ce459329bd32587717c035de9"
+bytes = 982053
+sha256 = "a7822f9f42bb97a4885f31e6ec743e35531545af97a9cb6bf624da8bd1b65bd9"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_complete.py"
@@ -2696,8 +2696,8 @@ sha256 = "24dc739648f0f51f44a16a57168ab4425ddcd77ad09ce11d28639812f9acfd64"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_state.py"
-bytes = 110257
-sha256 = "052891354f9fe02b7b1b80d345f43e3b3029ee8d45552319049b7759bb2cf922"
+bytes = 110962
+sha256 = "a2da6050b0d85e0a34afac111086c554d175a630355692b3c125cf43b57ef5c7"
 
 [[sources]]
 path = "opf/tools/_opf_changelog.py"
@@ -2706,8 +2706,8 @@ sha256 = "785012cc91281f47261281a8bb412f8c56cd0201815d7e1ce43e1d1ee4010697"
 
 [[sources]]
 path = "opf/tools/_opf_check.py"
-bytes = 351821
-sha256 = "e252df76f025c472e645638f268c284d5539d634b5b923852b0d70d10454bd42"
+bytes = 352561
+sha256 = "e6c1a9cc42fb067d5e122f2282ff7bcf33f50472084cd45dab40a52a47e572f4"
 
 [[sources]]
 path = "opf/tools/_opf_emit.py"
@@ -2736,8 +2736,8 @@ sha256 = "77afb1dcded7f7990f1c2055b5a13c5df0c8fff59505f3e8da5b4a0608350334"
 
 [[sources]]
 path = "opf/tools/_opf_init_operation.py"
-bytes = 260513
-sha256 = "9f4cdcd0b412834cff9e31382eead085cf2003d5d4c5427f17815c6ea07567bd"
+bytes = 261773
+sha256 = "1d19471c1adb2d4233d207071b4b272d305a661770a47ddc398dfc027e14f7f3"
 
 [[sources]]
 path = "opf/tools/_opf_init_p0.py"
@@ -3786,8 +3786,8 @@ sha256 = "9159f0c51f6269626c2c446b4db76977b6d5fe84bc9cfe4cd9df50bafc6944f0"
 
 [[sources]]
 path = "tools/tomllib_parse_sites.toml"
-bytes = 22314
-sha256 = "311b5a1269b981e25558871305a4b6b8de4e9b7bce1218875582a8620bad498c"
+bytes = 26270
+sha256 = "ae4c45f451576dd540ab8e2d95e488915216d10ef82fc7eab020692f5b694d0b"
 
 [[artifacts]]
 artifact-id = "claude:.claude/RULES-INDEX.md"

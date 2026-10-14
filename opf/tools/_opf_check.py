@@ -2060,7 +2060,7 @@ def _prove_adoption_plan(raw, run_id):
         body = dict(plan)
         claimed = body.pop("plan_digest", None)
         sealed = "sha256:" + hashlib.sha256(_opf_emit.emit_checked(body).encode("utf-8")).hexdigest()
-    except (TypeError, ValueError, RecursionError, _opf_emit.EmitError) as exc:
+    except (TypeError, ValueError, RecursionError, MemoryError, _opf_emit.EmitError) as exc:
         raise ValueError("the adoption bundle's {} is malformed TOML ({})".format(ADOPTION_PLAN_NAME, exc))
     if canonical != raw or claimed != sealed:
         raise ValueError("the adoption bundle's {} is not a canonical plan whose plan_digest seals its own "
@@ -3559,6 +3559,19 @@ def self_test():
         checked += 1
         if not cond:
             failures.append(name)
+
+    # The tomllib parse-site floor (tools/check_python_floor.py, tomllib leg): _prove_adoption_plan
+    # disposes of RecursionError, MemoryError and the ValueError family at its parse, refusing as its
+    # contract ValueError. Deep nesting feeds a real RecursionError; MemoryError shares the handler
+    # (the static floor scan is its per-site guard).
+    try:
+        _prove_adoption_plan(("x = " + "[" * 6000 + "]" * 6000).encode("utf-8"),
+                             "adopt-20260917T120000Z-0123456789abcdef")
+        deep_why = None
+    except ValueError as exc:
+        deep_why = str(exc)
+    check("adoption-plan-deep-nesting-refused-as-valueerror",
+          deep_why is not None and "malformed TOML" in deep_why)
 
     TS = "2026-06-01T00:00:00Z"
 
