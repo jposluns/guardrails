@@ -58,12 +58,14 @@ a reviewed declaration this gate trusts, not a fact it can prove offline (no ful
 compare against). It fails closed on an unreadable/malformed input and on a new publisher family that has
 no alias, so a stale copy cannot ship silently. A count stated outside the designated proof line and
 table rows is not reached (the location binding is what keeps a true explanatory sentence elsewhere
-from being read as a second operative count), and on a designated line a number written in letters
-that carry no Unicode numeric value (spelled out in words, or a Roman numeral typed with Latin
-letters) is not read by the numeric sweep. The shipped-path declaration leg accounts every release
-path to a declared prefix, and its code detector is a CLOSED list (the executable suffixes it names,
-a UTF-8 HTML page containing "<script" case-insensitively anywhere, an extensionless shebang
-file): executable content of another kind under
+from being read as a second operative count), and on a designated line the numeric sweep inspects
+the page's source characters, not rendered figures, so a number written with characters that carry
+no Unicode numeric value is not read: a number spelled out in words, a Roman numeral typed with
+Latin letters, and a numeric-looking symbol (keycap ten U+1F51F, the hundred points symbol
+U+1F4AF, the die faces U+2680 to U+2685, for example). The shipped-path declaration leg
+accounts every release path to a declared prefix, and its code detector is a CLOSED list (the
+executable suffixes it names, a UTF-8 HTML page containing "<script" case-insensitively anywhere,
+an extensionless shebang file): executable content of another kind under
 a non-code prefix is not detected, the HTML leg deliberately over-detects (a comment-only
 "<script>" inside the page classifies it as code, a conservative reading, never an
 under-detection), and a row's plain-language label is a reviewed description this
@@ -338,10 +340,12 @@ README_COUNT_FACTS = (
 # digits alone: decimal digits in every script (fullwidth and Arabic-Indic included), superscript
 # and subscript digits, circled, parenthesized and dingbat numerals, Roman numeral characters,
 # vulgar fractions, and CJK numerals. Lines other than the designated ones are not scanned (the
-# disclosed location binding). The one residual on a designated line: a number written in letters
-# that carry no Unicode numeric value (spelled out in words, "nine hundred", or a Roman numeral
-# typed with Latin letters, "IX") is prose this sweep does not read (disclosed in the module
-# docstring).
+# disclosed location binding). The sweep inspects the page's source characters, not rendered
+# figures, so the residual on a designated line is a number written with characters that carry no
+# Unicode numeric value: a number spelled out in words ("nine hundred"), a Roman numeral typed
+# with Latin letters ("IX"), or a numeric-looking symbol (keycap ten U+1F51F, the hundred points
+# symbol U+1F4AF, the die faces U+2680 to U+2685, for example) is not read (disclosed in the
+# module docstring; self-test case 20f pins each named symbol as not read).
 def _numeric_runs(text, start, end):
     """Yield (run_start, run_end) for every maximal run of numeric characters (each one
     unicodedata.numeric() gives a value) in text[start:end]."""
@@ -418,9 +422,11 @@ def check_readme_counts(root, manifests, findings):
     vulgar fractions and CJK numerals included) that sits outside every anchored wording match on
     its line is a finding, whatever noun, spacing, markup or no-break space surrounds it, so a
     second, contradictory, malformed or merely unexplained figure written with numeric characters
-    cannot ship on a designated line in any wording. The one residual: a number written in letters
-    that carry no numeric value (spelled out in words, or a Roman numeral typed with Latin letters)
-    is not read."""
+    cannot ship on a designated line in any wording. The sweep inspects source characters, not
+    rendered figures, so the residual is a number written with characters that carry no Unicode
+    numeric value: a number spelled out in words, a Roman numeral typed with Latin letters, or a
+    numeric-looking symbol (keycap ten, the hundred points symbol, a die face, for example) is not
+    read."""
     exp = expected_counts(root, manifests)
     text = _read(root / "README.md")
     designated = {}
@@ -482,12 +488,15 @@ def _path_is_code(root, path):
     cannot change the result, since it can never sit inside "<script") and is code when it
     contains "<script" case-insensitively ANYWHERE, inside a comment included: a conservative
     over-detection (the comment-only vector in self-test case 22c pins it), never an
-    under-detection. A page holding a NUL byte (a UTF-16 or UTF-32 page without a byte-order mark
-    is valid UTF-8 full of NULs) or not decoding as UTF-8 is cannot-evaluate (OSError, exit 2 via
-    run()), never non-code. This fail-closed reading is bounded by the one caller,
-    check_release_code_declaration, which calls the detector only for a release path whose
-    longest declared prefix is [[noncode]]: a page under a [[code]] prefix is never read, so its
-    encoding is not checked by this gate."""
+    under-detection. The operational contract is a refusal: a page that is not valid UTF-8, or
+    whose decoded text holds a NUL, is cannot-evaluate (OSError, exit 2 via run()), never
+    non-code. The NUL refusal is what catches the ASCII HTML fixtures of self-test case 22c
+    encoded as UTF-16 or UTF-32 without a byte-order mark, which decode as UTF-8 holding NULs; a
+    page with non-ASCII text in those encodings may instead fail to decode or decode without a
+    NUL, so the refusal, not the encoding, is the contract. This fail-closed reading is bounded
+    by the one caller, check_release_code_declaration, which calls the detector only for a
+    release path whose longest declared prefix is [[noncode]]: a page under a [[code]] prefix is
+    never read, so its encoding is not checked by this gate."""
     name = path.rsplit("/", 1)[-1]
     dot = name.rfind(".")
     suffix = name[dot:].lower() if dot > 0 else ""
@@ -500,9 +509,9 @@ def _path_is_code(root, path):
             raise OSError("{}: HTML page does not decode as UTF-8, so the script detector cannot "
                           "evaluate it: {}".format(path, exc))
         if "\x00" in text:
-            raise OSError("{}: HTML page holds a NUL byte (a UTF-16 or UTF-32 page without a "
-                          "byte-order mark reads this way), so the script detector cannot "
-                          "evaluate it".format(path))
+            raise OSError("{}: HTML page holds a NUL byte (an ASCII page encoded as UTF-16 or "
+                          "UTF-32 without a byte-order mark reads this way), so the script "
+                          "detector cannot evaluate it".format(path))
         return "<script" in text.lower()
     if dot <= 0:
         with open(root / path, "rb") as handle:
@@ -590,8 +599,8 @@ def check_release_code_declaration(root, findings, *, declaration=None, sources=
 # the unit's explanatory suffix
 # (UTF-16 code units, the unit tools/check_instruction_budget.py counts and prints), bound through
 # the sentence terminator (the period, then whitespace or the end of the page), so changing the
-# unit, dropping it, rewording its suffix, or extending the suffix ("counts in bytes") is a
-# missing-note finding.
+# unit, dropping it, rewording its suffix, extending the suffix ("counts in bytes"), or gluing
+# text after the period ("counts.in bytes") is a missing-note finding.
 _BUDGET_FLOOR = 120000
 _BUDGET_NOTE_RE = re.compile(
     r"budget to ([0-9][0-9,]*)(?:, not 150,000)?\.\s*"
@@ -728,6 +737,9 @@ def main():
 #      space, bold markup, fullwidth and Arabic-Indic digits, superscript, subscript, circled and
 #      dingbat numerals, a Roman numeral character, a vulgar fraction, CJK numerals); the clean
 #      fixture of case 1 is the positive control for a true designated line,
+#  20f. the disclosed residual witness: each named numeric-looking symbol that carries no Unicode
+#      numeric value (keycap ten, the hundred points symbol, each die face) on the designated
+#      proof line -> exit 0 (not read by the sweep, as the module docstring discloses),
 #  21. a missing ENFORCEMENT.md, rules folder, gates or hooks manifest -> exit 2, a malformed gates or
 #      hooks manifest (a non-table `gate = "ab"` / `hook = "ab"` value, a non-table element inside the
 #      array, an entry with no platform or a non-string platform, gate and hook forms both, and a
@@ -758,9 +770,12 @@ def main():
 #      note, a note whose exceeds half was reworded away, and a note kept after the ratchet no
 #      longer exceeds 120,000 -> finding; a missing budget source -> exit 2 (fail-closed),
 #  23b. the unit binding, on each public surface: the unit changed to "characters", the unit
-#      omitted, its explanatory suffix altered, or the suffix extended past its sentence end
-#      ("counts in bytes.", "counts, in bytes.") -> the missing-note finding (asserted by its
-#      diagnostic naming the surface); an antecedent other than 120,000 before "that figure" ->
+#      omitted, its explanatory suffix altered, the suffix extended past its sentence end
+#      ("counts in bytes.", "counts, in bytes."), or non-whitespace glued after the period
+#      ("counts.in bytes.") -> the missing-note finding (asserted by its diagnostic naming the
+#      surface); the period at the end of the page and the period followed by whitespace and
+#      another sentence -> clean (the two ends the terminator accepts); an antecedent other
+#      than 120,000 before "that figure" ->
 #      a finding by its own antecedent diagnostic; the antecedent with the ", not 150,000" aside
 #      (INSTRUCTION-BUDGET.md's real wording) -> clean, and an aside naming another figure -> the
 #      missing-note finding,
@@ -1390,6 +1405,24 @@ def self_test_main():
                 failures.append("a contradictory or malformed figure in another wording ({}) expected "
                                 "exit 1".format(tag))
 
+        # 20f. the disclosed residual witness: the sweep inspects source characters, so each named
+        #      numeric-looking symbol that carries no Unicode numeric value (keycap ten U+1F51F,
+        #      the hundred points symbol U+1F4AF, and each die face U+2680 to U+2685) on the
+        #      designated proof line is NOT read and the page stays clean (exit 0). A sweep
+        #      widened to read any of them turns its vector red, so the module docstring's
+        #      disclosure must change with it.
+        for tag, symbol in (("keycapten", "\U0001f51f"), ("hundredpoints", "\U0001f4af"),
+                            ("dieface1", "\u2680"), ("dieface2", "\u2681"),
+                            ("dieface3", "\u2682"), ("dieface4", "\u2683"),
+                            ("dieface5", "\u2684"), ("dieface6", "\u2685")):
+            residual = tmp / ("residual-" + tag)
+            _write_fixture(residual, landing=_LANDING.replace(
+                "Mapped to 2 frameworks.**", "Mapped to 2 frameworks.** ({} rules)".format(symbol), 1))
+            if run_quiet(residual) != 0:
+                failures.append("a numeric-looking symbol with no Unicode numeric value ({}) on the "
+                                "proof line expected exit 0 (the disclosed residual: the sweep "
+                                "does not read it)".format(tag))
+
         # 21. missing or malformed count sources fail closed (exit 2), never a silent pass: a missing
         #     ENFORCEMENT.md, rules folder, or hooks manifest; a gates manifest that is not an array of
         #     tables (`gate = "ab"`) or whose entry lacks the counted field; and an all-wrong-platform
@@ -1653,8 +1686,9 @@ def self_test_main():
         #      file -> a detector finding; a plain .html and .htm page, a page naming "Script"
         #      without a tag, and a markdown file -> exit 0 (the populated-prefix controls); an
         #      HTML page that does not decode as UTF-8 (a UTF-16 script page with its byte-order
-        #      mark) or that holds a NUL byte (UTF-16 and UTF-32 script pages without a mark,
-        #      which decode as UTF-8 full of NULs, and a NUL inside a UTF-8 page) -> exit 2
+        #      mark) or that holds a NUL byte (the ASCII script page encoded as UTF-16 and UTF-32
+        #      without a mark, which decodes as UTF-8 holding NULs, and a NUL inside a UTF-8
+        #      page) -> exit 2
         #      asserted by its diagnostic (cannot-evaluate, never non-code); a listed file that
         #      is missing or unreadable,
         #      for each branch that reads the file (HTML, extensionless) -> exit 2
@@ -1773,9 +1807,12 @@ def self_test_main():
         # 23b. the unit binding on EACH public surface (README.md and INSTRUCTION-BUDGET.md): the
         #      unit changed to "characters", the unit omitted, the explanatory suffix altered, and
         #      the suffix extended past its sentence end ("counts in bytes.", "counts, in bytes.")
-        #      are each a missing-note finding asserted by its diagnostic naming the surface (the
-        #      regex binds the whole unit tail through the sentence terminator, so any of these
-        #      rewords unbinds the match);
+        #      and non-whitespace glued after the period ("counts.in bytes.", the vector that
+        #      turns red when only the (?!\S) end condition is removed) are each a missing-note
+        #      finding asserted by its diagnostic naming the surface (the regex binds the whole
+        #      unit tail through the sentence terminator, so any of these rewords unbinds the
+        #      match); the period at the end of the page and the period followed by a space and
+        #      another sentence stay clean (the terminator's two accepting ends);
         #      and the antecedent is bound: a page saying "budget to 140,000" before "that
         #      figure" is a finding by the antecedent diagnostic.
         unit_rewords = (
@@ -1786,6 +1823,8 @@ def self_test_main():
              "the unit the budget gate counts in bytes."),
             ("unit-suffix-clause", "the unit the budget gate counts.",
              "the unit the budget gate counts, in bytes."),
+            ("unit-suffix-glued", "the unit the budget gate counts.",
+             "the unit the budget gate counts.in bytes."),
         )
         for tag, old, new in unit_rewords:
             if _BUDGET_NOTE.count(old) != 1:
@@ -1802,6 +1841,26 @@ def self_test_main():
                         or "was not found" not in out):
                     failures.append("budget unit vector {} on {} expected exit 1 with the "
                                     "missing-note diagnostic".format(tag, rel))
+        # The terminator's accepting ends, on each surface: the period as the last character of
+        # the page (the note's trailing newline removed; a terminator that demands a following
+        # whitespace character turns this red) and the period followed by a space and another
+        # sentence (a terminator that demands a line end turns this red) -> clean.
+        for tag, what, old, new in (
+                ("end-of-page", "the end of the page", "the unit the budget gate counts.\n",
+                 "the unit the budget gate counts."),
+                ("space-after", "a space and another sentence", "the unit the budget gate counts.\n",
+                 "the unit the budget gate counts. The gate prints it.\n")):
+            for rel, page in (("README.md", _LANDING), ("INSTRUCTION-BUDGET.md", _BUDGET_MD)):
+                if not page.endswith(old):
+                    failures.append("terminator control {}: {} fixture must end with the note's "
+                                    "period and newline".format(tag, rel))
+                    continue
+                key = "landing" if rel == "README.md" else "budget_md"
+                endfix = tmp / ("term-{}-{}".format(tag, rel.split(".")[0].lower()))
+                _write_fixture(endfix, **{key: page[:-len(old)] + new})
+                if run_quiet(endfix) != 0:
+                    failures.append("a budget note whose period is followed by {} on {} expected "
+                                    "exit 0".format(what, rel))
         for rel, overrides in (
                 ("README.md",
                  {"landing": _LANDING.replace("budget to 120,000.", "budget to 140,000.", 1)}),
@@ -1892,15 +1951,20 @@ def self_test_main():
           "path or overshadowed by longer prefixes (each asserted by its own diagnostic), and a "
           "budget note whose "
           "figure disagrees with the committed ratchet, is absent, loses its exceeds half, its "
-          "UTF-16 unit, or the unit's explanatory suffix to a rewording or an extension past the "
-          "sentence end (on each public surface), names an antecedent other than 120,000 before "
+          "UTF-16 unit, or the unit's explanatory suffix to a rewording, an extension past the "
+          "sentence end, or text glued after the period (on each public surface), names an "
+          "antecedent other than 120,000 before "
           "that figure or an aside other than \", not 150,000\", or outlives a ratchet at or "
           "under "
           "120,000 each report a finding (exit 1); a true explanatory count sentence outside its "
-          "designated line, a nested declared prefix pair resolved by the longest prefix (order "
+          "designated line, a keycap ten, hundred points, or die face symbol on the proof line "
+          "(the disclosed residual: no Unicode numeric value, not read), a nested declared "
+          "prefix pair resolved by the longest prefix (order "
           "independent), a plain .html and .htm page, a page naming Script without a tag, and a "
           "markdown file under a populated [[noncode]] "
-          "prefix, a budget note carrying the \", not 150,000\" aside, a ratchet one unit above "
+          "prefix, a budget note carrying the \", not 150,000\" aside, a budget note whose period "
+          "ends the page or is followed by a space and another sentence (on each public "
+          "surface), a ratchet one unit above "
           "the 120,000 floor, "
           "and the repository's real declaration against its real release manifest "
           "(the control), stay "
