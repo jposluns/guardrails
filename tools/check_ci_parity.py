@@ -106,10 +106,11 @@ TWO WORKFLOWS. The CI side is the union of the named workflows in CI_WORKFLOWS:
 quality.yml and msg-leaks.yml, which holds the message/metadata leak scan alone
 so that only its one job re-runs on a PR title/body edit. A gate may run in
 either file and is still one member. Each named workflow is required: a missing
-or unreadable one is cannot-evaluate (exit 2), never an empty side. The job-set,
-result-masking and aggregator rules above apply to each file on its own, so the
-one-job msg-leaks.yml is its own status; that branch protection requires it
-beside Quality gates is not checked here. msg-leaks.yml may run only that scan
+or unreadable one is cannot-evaluate (exit 2), never an empty side. The
+job-set, step-shell, result-masking and aggregator rules above apply to each
+file on its own, so the one-job msg-leaks.yml is its own status; that branch
+protection requires it beside Quality gates is not checked here. msg-leaks.yml
+may run only that scan
 and its self-test (MSG_LEAKS_WORKFLOW_MEMBERS): any other member there is a
 relocation finding (exit 1), because a gate moved from quality.yml into
 msg-leaks.yml leaves the aggregated Quality gates status silently and re-runs
@@ -1967,18 +1968,20 @@ def _result_masking_findings(job_ids, job_fields):
 
 
 def _step_shell_findings(steps):
-    """Return a finding for every step with a run: key and no STEP_SHELL_LINE."""
+    """Return a finding for every step with a run: key and no STEP_SHELL_LINE;
+    the message names the workflow holding the step (module docstring, Step
+    shell)."""
     findings = []
     for step in steps:
         if step["run"] and not step["shell"]:
             findings.append(Finding(
                 "required-status",
                 step["job"],
-                "step {!r} at line {} in job {!r} has a run: key without {}; a "
-                "workflow or job defaults.run.shell would then choose the "
-                "program its command runs under, so the gate need not run "
-                "or fail its step".format(
-                    step["name"], step["line"], step["job"],
+                "step {!r} at line {} in job {!r} of {} has a run: key "
+                "without {}; a workflow or job defaults.run.shell would then "
+                "choose the program its command runs under, so the gate need "
+                "not run or fail its step".format(
+                    step["name"], step["line"], step["job"], step["source"],
                     STEP_SHELL_LINE),
             ))
     return findings
@@ -2572,7 +2575,7 @@ def extract_ci(text, source=CI_SOURCE):
             current_mapping = None
             item = stripped[2:]
             current_step = dict(
-                job=current_job[:-1], line=line_number,
+                source=source, job=current_job[:-1], line=line_number,
                 name=item[5:].strip() if item.startswith("name:") else item,
                 run=False, shell=[])
             steps.append(current_step)
@@ -5875,6 +5878,9 @@ def self_test():
                      ()),
             "step-key")
 
+    # 35 TWO WORKFLOWS: the msg-leaks.yml split (module docstring, TWO
+    # WORKFLOWS and TRIGGER). Relabelled from a second 34 series so 34 above
+    # names only the step-shell vectors.
     msg_scan = "python3 -I -B " + MSG_LEAKS_SCAN
     msg_selftest = msg_scan + " --self-test"
     msg_waiver = ({
@@ -5916,47 +5922,47 @@ def self_test():
                 "{}: no trigger-shape diagnostic holds {!r}: {!r}".format(
                     name, diagnostic, report.diagnostics))
 
-    case("34a two workflows: the scan alone in msg-leaks.yml, with edited",
+    case("35a two workflows: the scan alone in msg-leaks.yml, with edited",
          evaluate(local_msg, quality_side, msg_waiver, msg_side), 0,
          active={("ci-only", MSG_LEAKS_SCAN)})
-    scan_case("34b msg-leaks.yml dropped: the scan self-test is local-only",
+    scan_case("35b msg-leaks.yml dropped: the scan self-test is local-only",
               quality_side, (), 1, ("local-only", "stale-allowlist"),
               (MSG_LEAKS_SCAN + " --self-test",))
-    scan_case("34c edited back on quality.yml is a trigger finding",
+    scan_case("35c edited back on quality.yml is a trigger finding",
               with_on(ci_fixture(common), edited), msg_side, 1, ("trigger",))
-    scan_case("34d msg-leaks.yml without edited is a trigger finding",
+    scan_case("35d msg-leaks.yml without edited is a trigger finding",
               quality_side, ((MSG_LEAKS_CI_SOURCE, with_on(scan_text, defaults)),),
               1, ("trigger",))
-    scan_case("34e msg-leaks.yml with no pull_request trigger is a trigger "
+    scan_case("35e msg-leaks.yml with no pull_request trigger is a trigger "
               "finding", quality_side, ((MSG_LEAKS_CI_SOURCE, scan_text),),
               1, ("trigger",))
     block_list = "  pull_request:\n    types:\n      - opened\n      - synchronize\n"
-    scan_case("34f a block-list edited item on quality.yml is a trigger finding",
+    scan_case("35f a block-list edited item on quality.yml is a trigger finding",
               with_on(ci_fixture(common),
                       block_list + "      - reopened\n      - edited\n"),
               msg_side, 1, ("trigger",))
-    scan_case("34g a block list without edited on quality.yml passes",
+    scan_case("35g a block list without edited on quality.yml passes",
               with_on(ci_fixture(common), block_list + "      - reopened\n"),
               msg_side, 0)
-    scan_case("34h a block list with all four types on msg-leaks.yml passes",
+    scan_case("35h a block list with all four types on msg-leaks.yml passes",
               quality_side,
               ((MSG_LEAKS_CI_SOURCE, with_on(
                   scan_text, block_list + "      - reopened\n      - edited\n")),),
               0)
-    scan_case("34i edited on pull_request_target of quality.yml is a trigger "
+    scan_case("35i edited on pull_request_target of quality.yml is a trigger "
               "finding",
               with_on(ci_fixture(common), "  pull_request_target:\n    types: [edited]\n"),
               msg_side, 1, ("trigger",))
-    scan_case("34j a one-line on: list gives msg-leaks.yml default types only",
+    scan_case("35j a one-line on: list gives msg-leaks.yml default types only",
               quality_side,
               ((MSG_LEAKS_CI_SOURCE, scan_text.replace(
                   "name: Test\n", "name: Test\non: [push, pull_request]\n", 1)),),
               1, ("trigger",))
-    scan_case("34k a one-line on: list on quality.yml passes (no edited)",
+    scan_case("35k a one-line on: list on quality.yml passes (no edited)",
               ci_fixture(common).replace(
                   "name: Test\n", "name: Test\non: [push, pull_request]\n", 1),
               msg_side, 0)
-    scan_case("34l the scan and edited in one workflow pass (the rule follows "
+    scan_case("35l the scan and edited in one workflow pass (the rule follows "
               "the scan, not a file name)",
               with_on(ci_fixture(common + (msg_selftest, msg_scan)), edited),
               (), 0)
@@ -5972,7 +5978,7 @@ def self_test():
              "  pull_request:\n    types: [opened, {x: edited}]\n"),
             ("an indent-5 item under types:",
              "  pull_request:\n    types:\n     - edited\n")):
-        scan_case("34m a trigger shape outside the subset is cannot-evaluate: "
+        scan_case("35m a trigger shape outside the subset is cannot-evaluate: "
                   + label, with_on(ci_fixture(common), shape), msg_side, 2)
 
     def without_msg_workflow(path):
@@ -5981,12 +5987,12 @@ def self_test():
         return path.read_bytes()
 
     missing_msg = run_paths(LOCAL_PATH, CI_PATH, ALLOWLIST, without_msg_workflow)
-    case("34n a missing msg-leaks.yml is cannot-evaluate, never an empty side",
+    case("35n a missing msg-leaks.yml is cannot-evaluate, never an empty side",
          missing_msg, 2)
     count += 1
     if not any(item.source == MSG_LEAKS_CI_SOURCE and item.code == "read-error"
                for item in missing_msg.diagnostics):
-        failures.append("34n the missing workflow is not named: {!r}".format(
+        failures.append("35n the missing workflow is not named: {!r}".format(
             missing_msg.diagnostics))
     labelled = evaluate(local_msg, quality_side, msg_waiver, (
         (MSG_LEAKS_CI_SOURCE, with_on(scan_text, edited) + "bogus: 1\n"),))
@@ -5994,7 +6000,7 @@ def self_test():
     if not any(item.source == MSG_LEAKS_CI_SOURCE
                and item.code == "unknown-top-key"
                for item in labelled.diagnostics):
-        failures.append("34o a msg-leaks.yml diagnostic does not carry its own "
+        failures.append("35o a msg-leaks.yml diagnostic does not carry its own "
                         "source: {!r}".format(labelled.diagnostics))
 
     # FIX-551: quoted keys, whitespace before a colon, indentless sequences
@@ -6003,7 +6009,7 @@ def self_test():
     # first three spellings formerly read as a key they are not, so GitHub
     # saw a types: list this rule did not; a keyless line is refused because
     # YAML reads it as a scalar, as an explicit '?' key entry (the one
-    # keyless form YAML does read as a key, exercised under 34r), or as a
+    # keyless form YAML does read as a key, exercised under 35r), or as a
     # document error, never as a plain key this rule could follow, so this
     # rule cannot know what GitHub would run there.
     edited_flow = "[opened, synchronize, reopened, edited]"
@@ -6019,9 +6025,9 @@ def self_test():
              "    - reopened\n    - edited\n"),
             ("a keyless line under the event",
              "  pull_request:\n    frobnicate\n")):
-        scan_case("34p quality.yml trigger shape is cannot-evaluate: " + label,
+        scan_case("35p quality.yml trigger shape is cannot-evaluate: " + label,
                   with_on(ci_fixture(common), shape), msg_side, 2)
-        scan_case("34p msg-leaks.yml trigger shape is cannot-evaluate: "
+        scan_case("35p msg-leaks.yml trigger shape is cannot-evaluate: "
                   + label, quality_side,
                   ((MSG_LEAKS_CI_SOURCE, with_on(scan_text, shape)),), 2)
 
@@ -6033,8 +6039,8 @@ def self_test():
     # the other way around; and a non-standard indent for the on: block or an
     # event's properties hid the whole block from this rule while GitHub
     # still reads it. Each is now cannot-evaluate on both workflows.
-    # FIX-551-R4: each 34r vector also requires its OWN branch's diagnostic,
-    # as 34s does: the exit code alone cannot tell two refusal branches
+    # FIX-551-R4: each 35r vector also requires its OWN branch's diagnostic,
+    # as 35s does: the exit code alone cannot tell two refusal branches
     # apart, so a branch whose removal re-routes its shape to another refusal
     # formerly stayed green.
     for label, shape, named in (
@@ -6057,17 +6063,17 @@ def self_test():
             ("types: with no space after its colon",
              "  pull_request:\n    types:" + edited_flow + "\n",
              "key 'types' under pull_request has no space after its colon")):
-        scan_case("34r quality.yml trigger shape is cannot-evaluate: " + label,
+        scan_case("35r quality.yml trigger shape is cannot-evaluate: " + label,
                   with_on(ci_fixture(common), shape), msg_side, 2,
                   diagnostic=named)
-        scan_case("34r msg-leaks.yml trigger shape is cannot-evaluate: "
+        scan_case("35r msg-leaks.yml trigger shape is cannot-evaluate: "
                   + label, quality_side,
                   ((MSG_LEAKS_CI_SOURCE, with_on(scan_text, shape)),), 2,
                   diagnostic=named)
 
     # FIX-551-R2: the indent-4 sequence branch is pinned on its own named
     # diagnostic. Dropping the branch still refuses the line (it has no
-    # colon), so the 34p exit code alone cannot tell the two refusals apart;
+    # colon), so the 35p exit code alone cannot tell the two refusals apart;
     # the message can.
     indentless = evaluate(
         local_msg,
@@ -6079,7 +6085,7 @@ def self_test():
                and "indentless sequence" in item.message
                for item in indentless.diagnostics):
         failures.append(
-            "34s the indent-4 sequence item is not refused by the named "
+            "35s the indent-4 sequence item is not refused by the named "
             "indentless-sequence branch: {!r}".format(indentless.diagnostics))
 
     # FIX-551-R4 (PR 551 round-3 reviews): the top-level on: header itself is
@@ -6118,35 +6124,35 @@ def self_test():
             ("an explicit '?' on key",
              "? on\n: [pull_request]\n",
              "names on without a colon")):
-        scan_case("34t quality.yml on: header is cannot-evaluate: " + label,
+        scan_case("35t quality.yml on: header is cannot-evaluate: " + label,
                   with_on_header(ci_fixture(common), header), msg_side, 2,
                   diagnostic=named)
-        scan_case("34t msg-leaks.yml on: header is cannot-evaluate: " + label,
+        scan_case("35t msg-leaks.yml on: header is cannot-evaluate: " + label,
                   quality_side,
                   ((MSG_LEAKS_CI_SOURCE, with_on_header(scan_text, header)),),
                   2, diagnostic=named)
-    scan_case("34t a plain scalar on: value on quality.yml is not refused "
+    scan_case("35t a plain scalar on: value on quality.yml is not refused "
               "(no edited: pass)",
               with_on_header(ci_fixture(common), "on: push\n"), msg_side, 0)
-    scan_case("34t a one-line flow list after on: on quality.yml is not "
+    scan_case("35t a one-line flow list after on: on quality.yml is not "
               "refused (no edited: pass)",
               with_on_header(ci_fixture(common), "on: [push, pull_request]\n"),
               msg_side, 0)
-    scan_case("34t a block on: value on quality.yml stays read (edited there "
+    scan_case("35t a block on: value on quality.yml stays read (edited there "
               "is still a trigger finding)",
               with_on(ci_fixture(common), edited), msg_side, 1, ("trigger",))
-    scan_case("34t a plain scalar on: value on msg-leaks.yml is not refused "
+    scan_case("35t a plain scalar on: value on msg-leaks.yml is not refused "
               "(missing edited: a trigger finding)",
               quality_side,
               ((MSG_LEAKS_CI_SOURCE, with_on_header(scan_text, "on: push\n")),),
               1, ("trigger",))
-    scan_case("34t a one-line flow list after on: on msg-leaks.yml is not "
+    scan_case("35t a one-line flow list after on: on msg-leaks.yml is not "
               "refused (default types lack edited: a trigger finding)",
               quality_side,
               ((MSG_LEAKS_CI_SOURCE,
                 with_on_header(scan_text, "on: [push, pull_request]\n")),),
               1, ("trigger",))
-    scan_case("34t a block on: value with edited on msg-leaks.yml stays read "
+    scan_case("35t a block on: value with edited on msg-leaks.yml stays read "
               "(pass)", quality_side, msg_side, 0)
 
     # FIX-551-R5 (PR 551 round-4 reviews): spellings YAML also reads as the
@@ -6168,14 +6174,14 @@ def self_test():
              "\ufeffon:\n" + edited, "text-format")):
         outer = evaluate(local_msg, with_on_header(ci_fixture(common), header),
                          msg_waiver, msg_side)
-        case("34v quality.yml unrecognized on: spelling refused by the outer "
+        case("35v quality.yml unrecognized on: spelling refused by the outer "
              "parser: " + label, outer, 2)
         count += 1
         if not any(item.code == named_code for item in outer.diagnostics):
-            failures.append("34v {}: no {} diagnostic: {!r}".format(
+            failures.append("35v {}: no {} diagnostic: {!r}".format(
                 label, named_code, outer.diagnostics))
         if any(item.code == "trigger-shape" for item in outer.diagnostics):
-            failures.append("34v {}: refused by the trigger rule instead of "
+            failures.append("35v {}: refused by the trigger rule instead of "
                             "the outer parser: {!r}".format(
                                 label, outer.diagnostics))
 
@@ -6195,10 +6201,10 @@ def self_test():
             ("whitespace before the event colon",
              "  pull_request :\n    types: " + edited_flow + "\n",
              "on: key 'pull_request ' holds whitespace before its colon")):
-        scan_case("34u quality.yml indent-2 on: key is cannot-evaluate: "
+        scan_case("35u quality.yml indent-2 on: key is cannot-evaluate: "
                   + label, with_on(ci_fixture(common), shape), msg_side, 2,
                   diagnostic=named)
-        scan_case("34u msg-leaks.yml indent-2 on: key is cannot-evaluate: "
+        scan_case("35u msg-leaks.yml indent-2 on: key is cannot-evaluate: "
                   + label, quality_side,
                   ((MSG_LEAKS_CI_SOURCE, with_on(scan_text, shape)),), 2,
                   diagnostic=named)
@@ -6207,15 +6213,40 @@ def self_test():
     # msg-leaks.yml is a relocation finding (the CI side is the union of both
     # files, so set parity alone would stay green while the aggregated
     # Quality gates status silently lost the gate); the scan itself and its
-    # self-test are the allowed members, which 34a already holds green.
+    # self-test are the allowed members, which 35a already holds green.
     moved = "python3 -I -B tools/check_git_option_table.py"
-    scan_case("34q a gate moved from quality.yml into msg-leaks.yml is a "
+    scan_case("35q a gate moved from quality.yml into msg-leaks.yml is a "
               "relocation finding",
               with_on(ci_fixture(tuple(
                   item for item in common if item != moved)), defaults),
               ((MSG_LEAKS_CI_SOURCE, with_on(
                   ci_fixture((msg_selftest, msg_scan, moved)), edited)),),
               1, ("relocation",))
+
+    # FIX-551-R6: the step-shell rule is pinned on msg-leaks.yml by its own
+    # vector. ci_fixture writes shell: bash into every step, so before this
+    # vector no case removed the line on the msg-leaks.yml side, and a
+    # mutant applying _step_shell_findings to quality.yml alone passed every
+    # vector. The findings must be exactly the one step-shell finding naming
+    # msg-leaks.yml, so an extra finding of another kind cannot satisfy this
+    # vector either.
+    shell_dropped = evaluate(
+        local_msg, quality_side, msg_waiver,
+        ((MSG_LEAKS_CI_SOURCE, with_on(
+            scan_text.replace("        " + STEP_SHELL_LINE + "\n", "", 1),
+            edited)),))
+    case("35w a msg-leaks.yml run step without shell: bash is a finding",
+         shell_dropped, 1, ("required-status",))
+    count += 1
+    expected_shell = [
+        finding for finding in shell_dropped.findings
+        if finding.kind == "required-status"
+        and MSG_LEAKS_CI_SOURCE in finding.message
+        and "without " + STEP_SHELL_LINE in finding.message]
+    if len(shell_dropped.findings) != 1 or len(expected_shell) != 1:
+        failures.append(
+            "35w expected exactly one step-shell finding naming {}: "
+            "{!r}".format(MSG_LEAKS_CI_SOURCE, shell_dropped.findings))
 
     if failures:
         print("SELF-TEST FAIL:")
