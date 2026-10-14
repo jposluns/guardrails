@@ -45,7 +45,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import selftest_git_fixture_env as _gfe  # noqa: E402
 import _selftest_exit_report  # noqa: E402
 import _git_fixture_env  # noqa: E402
-import _optlevel  # noqa: E402  the engine import put opf/tools on sys.path
+# opf/tools is put on sys.path HERE, as the engine does, so this runner's own search-root row in
+# tools/check_import_closure.py states a real insertion instead of an engine-import side effect
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "opf" / "tools"))
+import _optlevel  # noqa: E402  level-0 parses for the mutants, shared with opf/tools
 from selftest_git_fixture_env import (  # noqa: E402
     CANNOT_EVALUATE, CHECKS_MANIFEST, CONFIG_EXCLUSIONS, CONFIG_MEMBER_BOUNDS,
     CONFIG_MEMBER_BOUND_DEFAULT, CONFIG_MEMBER_DRAIN_SECONDS, CONFIG_MEMBER_REAP_SECONDS,
