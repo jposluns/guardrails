@@ -555,8 +555,10 @@ jobs:
       - name: Entry-guard gate
         run: python3 -I -B tools/check_entry_guard.py
       - name: Import-closure self-test
+        shell: bash
         run: python3 -I -B tools/check_import_closure.py --self-test
       - name: Import-closure gate
+        shell: bash
         run: python3 -I -B tools/check_import_closure.py
 
   git-fixture-env:
