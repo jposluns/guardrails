@@ -802,8 +802,9 @@ _STOP_FIELD_CLAIM_FILES = (
 )
 _STOP_FIELD_CLAIM_GLOBS = (".preview/*.py", ".preview/*.md")
 # A sentence another change is rewriting, tolerated verbatim until it lands (a (path, sentence) pair). The
-# allowance admits only the pattern matches that fall inside an occurrence of its sentence in its named
-# path; an empty sentence, or one that no pattern matches, is refused as a failure, and an entry whose path
+# allowance admits only the pattern matches that fall inside the single occurrence of its sentence in its
+# named path; an empty sentence, one that no pattern matches, a bare pattern match, or one that occurs more
+# than once in its file (overlapping occurrences included) is refused as a failure, and an entry whose path
 # is not scanned, or whose sentence no longer occurs in that path, is a stale-allowance failure until the
 # entry is removed, so the allowance can neither outlive the sentence nor suppress a match elsewhere.
 # Empty today: the last pending rewrite (the orch-stop-guard residue) landed with PR 473.
@@ -825,7 +826,8 @@ def _stop_field_claim_failures(root=None, pending=_STOP_FIELD_CLAIM_PENDING):
     found one, or an inventory .py the scan did not find is a recorded failure, never a clean result. A
     pending allowance is scoped to its named path and to its own sentence: an empty sentence, one that no
     pattern matches, one that is itself exactly a pattern match (a bare phrase would admit itself wherever
-    it occurs), or one that occurs more than once in its file is refused; an allowance whose path is not
+    it occurs), or one that occurs more than once in its file (overlapping occurrences included: a
+    second occurrence may start inside the first) is refused; an allowance whose path is not
     scanned, or whose sentence is absent from that path, is a stale-allowance failure; and only the
     pattern matches that fall entirely inside the single occurrence of the sentence are admitted, so a
     match reaching outside the sentence on either edge is still reported."""
@@ -917,10 +919,13 @@ def _stop_field_claim_failures(root=None, pending=_STOP_FIELD_CLAIM_PENDING):
         elif sentence not in folded[rel]:
             out.append("(stop-field-claim-pending) the pending allowance for {} no longer matches that file; the rewrite "
                        "it waited for has landed, so remove the entry from _STOP_FIELD_CLAIM_PENDING".format(rel))
-        elif folded[rel].count(sentence) > 1:
+        elif folded[rel].find(sentence, folded[rel].find(sentence) + 1) != -1:
+            # str.count skips overlapping occurrences, so the second occurrence is searched from
+            # first + 1, and the lookahead count in the message counts overlapping occurrences too
             out.append("(stop-field-claim-pending-multiple) the pending allowance sentence for {} occurs {} "
                        "times in that file, so it would admit every occurrence instead of one sentence; "
-                       "name a longer sentence that occurs exactly once".format(rel, folded[rel].count(sentence)))
+                       "name a longer sentence that occurs exactly once".format(
+                           rel, len(re.findall("(?={})".format(re.escape(sentence)), folded[rel]))))
         else:
             start = folded[rel].find(sentence)
             admitted.setdefault(rel, []).append((start, start + len(sentence)))
@@ -945,23 +950,30 @@ def _test_stop_field_claim_check(failures, tmp):
     carries no preview hook, and fixed-read removes ENFORCEMENT.md. Every vector whose expected findings
     have deterministic text compares the COMPLETE finding multiset verbatim (path, label and matched
     phrase, with multiplicity), so a missing finding replaced by a duplicate of another, or an unexpected
-    inventory, read or pending failure, is red, never filtered away (the duplicate-substitution probe pins
-    that property itself); the read-failure vectors (no-preview, no-sums, bad-sums, fixed-read) pin the
-    finding count, the label and the diagnostic prefix, because the OS error text varies. Each phrasing
-    the repository carried is caught with its pinned match multiset, and one fixture exercises each
-    alternation branch of patterns 0 to 3, each quote character of pattern 0 (backtick, apostrophe,
-    double quote) and both loop-bound widenings ("built-in" and the hyphen), so dropping or narrowing a
-    pattern or its quote class is red; a scenario phrasing and the documented fact pass; a legitimate
-    scenario sentence that matches a pattern is reported, is admitted only by a pending allowance scoped
-    to its own path and to the single occurrence of its own sentence (an empty sentence, one that no
-    pattern matches, a bare pattern match and a sentence occurring more than once are refused and
-    suppress nothing, and a match reaching outside the sentence on either edge, left and right each
-    pinned, is still reported), and neither a cross-file nor an unscanned-path allowance suppresses it
-    (the unscanned path is itself reported); missing or malformed coverage (no .preview directory, a
-    missing or unreadable SHA256SUMS, a forbidden line separator anywhere in the inventory, CR and CRLF
-    spellings included, a third token on an inventory line, a bad hash, a duplicate name, a zero-byte
-    listing with a hook present, an inventory entry the scan did not find, a glob that matches nothing,
-    an unreadable fixed-list file) is reported, never clean."""
+    inventory, read or pending failure, is red, never filtered away; the duplicate-substitution probes
+    drive the comparison helper itself (through a separate failure sink that must record a mismatch) with
+    a duplicated finding list and with a same-length different-finding list, so a helper weakened to a
+    length check is red. The read-failure vectors pin every finding with only the variable OS error text
+    normalized: no-preview compares the complete normalized multiset (each fixed-list path and label
+    kept, the two glob diagnostics pinned verbatim, the inventory diagnostic's fixed text kept) and
+    refuses a read finding replaced by a duplicate of another; no-sums, bad-sums and fixed-read pin the
+    single diagnostic's count, label and prefix. Each phrasing the repository carried is caught with its
+    pinned match multiset, and one fixture exercises each alternation branch of patterns 0 to 3, each
+    quote character of pattern 0 (backtick, apostrophe, double quote), both loop-bound widenings
+    ("built-in" and the hyphen) and one fixture per undocumented order, so dropping either undocumented
+    pattern, or narrowing any other pattern or the quote class, is red; a scenario phrasing and the
+    documented fact pass; a legitimate scenario sentence that matches a pattern is reported, is admitted
+    only by a pending allowance scoped to its own path and to the single occurrence of its own sentence
+    (an empty sentence, one that no pattern matches, a bare pattern match and a sentence occurring more
+    than once, including a second occurrence starting inside the first, are refused and suppress nothing,
+    and a match reaching outside the sentence on either edge, left and right each pinned, is still
+    reported), and neither a cross-file nor an unscanned-path allowance suppresses it (the unscanned path
+    is itself reported); missing or malformed coverage (no .preview directory, a missing or unreadable
+    SHA256SUMS, a forbidden line separator anywhere in the inventory, with one fixture per
+    SUMS_BREAK_CHARS character, the CRLF spelling included, and the shared constant's full value pinned,
+    a third token on an inventory line, a bad hash, a duplicate name, a zero-byte listing with a hook
+    present, an inventory entry the scan did not find, a glob that matches nothing, an unreadable
+    fixed-list file) is reported, never clean."""
     base = tmp / "stop-field-claim"
 
     def build(name, files, sums=True):
@@ -990,10 +1002,24 @@ def _test_stop_field_claim_check(failures, tmp):
                 "Stop and SubagentStop), and a legitimate matching sentence needs a path-scoped "
                 "_STOP_FIELD_CLAIM_PENDING allowance".format(rel, phrase))
 
-    def expect(tag, got, want):
+    def expect(tag, got, want, sink=None):
         if sorted(got) != sorted(want):
-            failures.append("(stop-field-claim-{}) finding multiset mismatch: want {}, got {}".format(
-                tag, sorted(want), sorted(got)))
+            (failures if sink is None else sink).append(
+                "(stop-field-claim-{}) finding multiset mismatch: want {}, got {}".format(
+                    tag, sorted(want), sorted(got)))
+
+    def normalized(finding):
+        # only the variable OS error text is replaced; every path, label and fixed diagnostic
+        # sentence must still match verbatim
+        inventory_prefix = "(stop-field-claim-inventory) cannot read .preview/SHA256SUMS: "
+        inventory_suffix = ("; without the inventory the preview scan cannot be reconciled, so this is "
+                            "a failure")
+        if finding.startswith(inventory_prefix) and finding.endswith(inventory_suffix):
+            return inventory_prefix + "<os error>" + inventory_suffix
+        read_prefix = "(stop-field-claim-read) cannot read "
+        if finding.startswith(read_prefix) and ": " in finding[len(read_prefix):]:
+            return read_prefix + finding[len(read_prefix):].split(": ", 1)[0] + ": <os error>"
+        return finding
 
     claims = (
         ("as last_assistant_message (there is NO stop_hook_active field in the current Stop payload).",
@@ -1052,7 +1078,8 @@ def _test_stop_field_claim_check(failures, tmp):
     expect("stale", stale, [
         "(stop-field-claim-pending) the pending allowance for .preview/hook.py no longer matches that "
         "file; the rewrite it waited for has landed, so remove the entry from _STOP_FIELD_CLAIM_PENDING"])
-    # a refused allowance (an empty sentence, or one that no pattern matches) is reported and
+    # a refused allowance (an empty sentence, one that no pattern matches, a bare pattern match, or a
+    # sentence occurring more than once, overlapping occurrences included) is reported and
     # suppresses nothing
     both = scenario + " Also: there is no stop_hook_active field in the Stop payload."
     root = build("refused", {".preview/hook.py": both + "\n"})
@@ -1106,6 +1133,16 @@ def _test_stop_field_claim_check(failures, tmp):
         "sentence that occurs exactly once",
         claim_finding(".preview/hook.py", "no stop_hook_active"),
         claim_finding(".preview/hook.py", "no stop_hook_active")])
+    # str.count misses an overlapping second occurrence, so a sentence whose second occurrence starts
+    # inside the first must still be refused as pending-multiple
+    root = build("overlap-allow", {".preview/hook.py": "no stop_hook_active no stop_hook_active no\n"})
+    got = _stop_field_claim_failures(root, pending=((".preview/hook.py", "no stop_hook_active no"),))
+    expect("overlap-allow", got, [
+        "(stop-field-claim-pending-multiple) the pending allowance sentence for .preview/hook.py occurs 2 "
+        "times in that file, so it would admit every occurrence instead of one sentence; name a longer "
+        "sentence that occurs exactly once",
+        claim_finding(".preview/hook.py", "no stop_hook_active"),
+        claim_finding(".preview/hook.py", "no stop_hook_active")])
     # a legitimate scenario sentence that matches a pattern is reported; with every required input
     # populated, the allowance scoped to its own path admits it down to a COMPLETE finding set of zero,
     # so a rejected allowance, an inventory failure or a read failure is red; a cross-file allowance
@@ -1124,14 +1161,29 @@ def _test_stop_field_claim_check(failures, tmp):
         "(stop-field-claim-pending-unscanned) the pending allowance for docs/typo.md names a path this "
         "check does not scan (or could not read); point the entry at a scanned path or remove it",
         claim_finding(".preview/hook.py", "no stop_hook_active")])
-    # missing, malformed or unreconciled preview coverage is reported, never clean
-    (base / "no-preview").mkdir(parents=True)
-    got = _stop_field_claim_failures(base / "no-preview", pending=())
-    if (len(got) != len(_STOP_FIELD_CLAIM_FILES) + len(_STOP_FIELD_CLAIM_GLOBS) + 1
-            or len([f for f in got if "(stop-field-claim-glob)" in f]) != len(_STOP_FIELD_CLAIM_GLOBS)
-            or len([f for f in got if "(stop-field-claim-inventory" in f]) != 1):
-        failures.append("(stop-field-claim-no-preview) a missing .preview directory must report each empty "
-                        "glob, the unreadable inventory and each unreadable fixed-list file: {}".format(got))
+    # missing, malformed or unreconciled preview coverage is reported, never clean; the no-preview
+    # findings are compared as a complete normalized multiset (only the OS error text replaced), so a
+    # read finding replaced by a duplicate of another is red, as the substitution probe below pins
+    missing = base / "no-preview"
+    missing.mkdir(parents=True)
+    got = _stop_field_claim_failures(missing, pending=())
+    want = ["(stop-field-claim-read) cannot read {}: <os error>".format(rel)
+            for rel in _STOP_FIELD_CLAIM_FILES]
+    want.extend("(stop-field-claim-glob) the glob {} matched nothing under {}; missing preview "
+                "coverage is a failure, not a clean result".format(pattern, missing)
+                for pattern in _STOP_FIELD_CLAIM_GLOBS)
+    want.append("({}) cannot read .preview/SHA256SUMS: <os error>; without the inventory the preview "
+                "scan cannot be reconciled, so this is a failure".format("stop-field-claim-inventory"))
+    expect("no-preview", [normalized(f) for f in got], want)
+    reads = [f for f in got if f.startswith("({}) ".format("stop-field-claim-read"))]
+    if len(reads) >= 2:
+        substituted = [reads[0] if f == reads[-1] else f for f in got]
+        sink = []
+        expect("no-preview-substituted", [normalized(f) for f in substituted], want, sink=sink)
+        if not sink:
+            failures.append("(stop-field-claim-no-preview-substituted) a no-preview finding list with one "
+                            "fixed-list read finding replaced by a duplicate of another must not satisfy "
+                            "the normalized multiset comparison: {}".format(substituted))
     root = build("no-sums", {".preview/hook.py": clean + "\n"}, sums=False)
     got = _stop_field_claim_failures(root, pending=())
     if len(got) != 1 or "(stop-field-claim-inventory) cannot read" not in got[0]:
@@ -1185,7 +1237,26 @@ def _test_stop_field_claim_check(failures, tmp):
                 "before comment and blank lines are skipped)".format(number, code))
 
     row = "{}  hook.py".format("0" * 64)
+    import check_hooks_preview
+    # the claim check and parse_sums share this constant, so a character removed from it would widen
+    # both parsers together; every character has a fixture below, and the full ordered value is pinned
+    # here by code point
+    if [ord(ch) for ch in check_hooks_preview.SUMS_BREAK_CHARS] != [
+            0x000D, 0x000B, 0x000C, 0x001C, 0x001D, 0x001E, 0x0085, 0x2028, 0x2029]:
+        failures.append("(stop-field-claim-break-chars) check_hooks_preview.SUMS_BREAK_CHARS must hold "
+                        "exactly CR, VT, FF, FS, GS, RS, NEL, U+2028 and U+2029: {!r}".format(
+                            check_hooks_preview.SUMS_BREAK_CHARS))
     for name, sums, want in (
+            ("fs-sums", row + "\N{INFORMATION SEPARATOR FOUR}\n",
+             [break_finding(1, ord("\N{INFORMATION SEPARATOR FOUR}")), no_hook]),
+            ("gs-sums", row + "\N{INFORMATION SEPARATOR THREE}\n",
+             [break_finding(1, ord("\N{INFORMATION SEPARATOR THREE}")), no_hook]),
+            ("rs-sums", row + "\N{INFORMATION SEPARATOR TWO}\n",
+             [break_finding(1, ord("\N{INFORMATION SEPARATOR TWO}")), no_hook]),
+            ("ps-blank-sums", "\N{PARAGRAPH SEPARATOR}\n" + row + "\n",
+             [break_finding(1, ord("\N{PARAGRAPH SEPARATOR}"))]),
+            ("ff-comment-sums", "# note\N{FORM FEED}note\n" + row + "\n",
+             [break_finding(1, ord("\N{FORM FEED}"))]),
             ("crlf-sums", row + "\r\n", [break_finding(1, 0x000D), no_hook]),
             ("cr-sums", row + "\r", [break_finding(1, 0x000D), no_hook]),
             ("nel-blank-sums", "\x85\n" + row + "\n", [break_finding(1, 0x0085)]),
@@ -1201,11 +1272,23 @@ def _test_stop_field_claim_check(failures, tmp):
     want = [claim_finding(".preview/hook.py", "no stop_hook_active"),
             claim_finding(".preview/hook.py", "Stop payload has no stop_hook_active")]
     expect("dup-substitution-base", got, want)
-    substituted = [got[0], got[0]] if len(got) == 2 else list(got)
-    if len(substituted) == 2 and sorted(substituted) == sorted(want):
+    # both probes drive expect itself, through a separate sink so the expected rejection is not a suite
+    # failure: a duplicated list and a same-length different-finding list must each record a mismatch,
+    # so an expect weakened to a length check is red here
+    substituted = [got[0], got[0]] if len(got) == 2 else [want[0], want[0]]
+    sink = []
+    expect("dup-substitution", substituted, want, sink=sink)
+    if not sink:
         failures.append("(stop-field-claim-dup-substitution) a finding list with one finding replaced by "
                         "a duplicate of the other must not satisfy the multiset comparison the vectors "
                         "above use: {}".format(substituted))
+    altered = [want[0], claim_finding(".preview/other.py", "no stop_hook_active")]
+    sink = []
+    expect("dup-substitution-altered", altered, want, sink=sink)
+    if not sink:
+        failures.append("(stop-field-claim-dup-substitution-altered) a same-length finding list holding a "
+                        "different finding in place of an expected one must not satisfy the multiset "
+                        "comparison the vectors above use: {}".format(altered))
     root = build("empty-glob", {".preview/SHA256SUMS": "# no hooks\n"})
     got = _stop_field_claim_failures(root, pending=())
     expect("empty-glob", got, [
