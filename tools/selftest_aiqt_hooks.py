@@ -7960,7 +7960,7 @@ def _main_isolated(monitor):
         for _ct_label, _ct_cmd, _ct_want in _ct_r7:
             gexpect(_ct_label, _ct_cmd, _ct_want)
         # Round 8: printf is never a benign earlier command and echo is benign only with plain literal words; a run
-        # joined to an earlier command by '||' notes (by '&&' it denies since round 10, D-469-AND-DENY); a limiting
+        # joined to an earlier command by '||' notes (by '&&' it denies since round 10); a limiting
         # grep option is matched at any abbreviation length; a stage reads its stdin when any input operand or file
         # option names it; the rg grammar carries -./--hidden and the negations its --help names (r8-x: codex,
         # r8-c: claude).
@@ -8075,7 +8075,7 @@ def _main_isolated(monitor):
         # Round 10 (answers QA round 9): a grep directory mode is resolved in option order, so a later -d read or
         # skip undoes -r; every stdin name, file option and rg grammar entry has a pin its mutant fails; a stdin
         # path is normalised lexically; a run joined by '&&' to known-benign commands denies, by '||' notes
-        # (r9-x: codex, r9-c: claude, r9-d: decision D-469-AND-DENY).
+        # (r9-x: codex, r9-c: claude, r9-d: the decision that a '&&' join denies).
         _ct_r9 = [
             ('(gw-r9-x1.1) grep -r then -d read reads its stdin, notes',
              'pytest | grep -r -d read -m 1 x', 'allow-note'),

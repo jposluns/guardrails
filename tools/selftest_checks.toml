@@ -1155,7 +1155,7 @@ expected-check-ids = [
   "revert/prefix-scan-red",
   "revert/scope-normalizer-red",
   "revert/comment-shape-red",
-  # ---------- enumerated grammar (D-389-ENUMERATED-GRAMMAR) ----------
+  # ---------- enumerated grammar (input outside it exits 2) ----------
   "exit/byte-order-mark-2",
   "exit/dotted-key-frontmatter-2",
   "exit/at-value-frontmatter-2",
