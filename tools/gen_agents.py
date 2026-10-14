@@ -131,7 +131,8 @@ def main():
 #   T18 a rule body holding a marker-like line, composed target: exit 2.
 #   T19 a target that is a symlink (to a file outside the tree, or dangling), a target under a symlinked
 #       directory, and a target that is a directory: exit 2 in both modes; the outside file and directory
-#       and the sibling target are unchanged, and nothing is created through the link.
+#       and the sibling target are unchanged, and nothing is created through the link (decided by
+#       os.lstat, so a vector's faulty engine leaving a dangling symlink there fails the leg).
 #   T20 a legacy target already in sync is not judged: a rule body holding a marker-like line writes once
 #       and then rewrites as exit 0 (the guard runs only on a target whose bytes would change).
 #   T21 a write keeps the target's ordinary permission bits and drops its set-user-ID and sticky bits
@@ -202,10 +203,15 @@ def main():
 #       the named surviving-root failure and exits nonzero with no PASS text; that reruns each
 #       keeping one end-to-end vector, vector (c) with the removal of its nested root a silent
 #       no-op, and vector (g) or (h) with its recovery removal denied, record the named failure
-#       of that vector and exit nonzero with no PASS text; and that a root whose state cannot
-#       be established (beneath a parent without search permission, where that binds the
-#       runner, and with an lstat error injected before and after the removal on every runner)
-#       is a named cannot-verify failure of verified_rmtree, never read as absent.
+#       of that vector and exit nonzero with no PASS text; that reruns each keeping vector (d)
+#       or (e), with every presence query of its nested root failing, record that vector's
+#       surviving-root failure and the named cannot-verify failure of its recovery, and exit
+#       nonzero with no PASS text; and that a root whose state cannot be established (beneath
+#       a parent without search permission, where that binds the runner, and with an lstat
+#       error injected before and after the removal on every runner) is a named cannot-verify
+#       failure of verified_rmtree, its whole diagnostic asserted (label, root, phase and
+#       error), never read as absent: before the removal, the removal is withheld; after it,
+#       the root is gone.
 #   T35 on a nested target, an exception other than OSError raised at the rename (a stand-in for an
 #       interrupt) propagates with a note naming the temporary file it left by its path from the root;
 #       the target unchanged and the file left there.
@@ -248,7 +254,9 @@ def self_test_main(nested_run=False):
     # removal inside that vector is driven end to end and nesting stays bounded:
     # "recovery-rerun" (made by vector (g)) keeps (f), whose recovery removal the outer vector
     # denies; "leak-rerun" (made by vector (i)) keeps (c); "recovery-vector-rerun" (made by
-    # vector (j)) keeps (g); and "noop-vector-rerun" (made by vector (k)) keeps (h).
+    # vector (j)) keeps (g); "noop-vector-rerun" (made by vector (k)) keeps (h);
+    # "closefail-rerun" (made by vector (l)) keeps (d); and "enum-rerun" (made by vector (m))
+    # keeps (e).
     import errno
     import hashlib
     import io
@@ -304,9 +312,10 @@ def self_test_main(nested_run=False):
         return root
 
     def drive(root, check, targets=None):
+        # The engine is reached through ac, so a vector can stand a faulty engine in its place.
         buf = io.StringIO()
         with redirect_stdout(buf), redirect_stderr(buf):
-            code = run(root, check, targets or agents_only, "tools/gen_agents.py", corpus_bodies)
+            code = ac.run(root, check, targets or agents_only, "tools/gen_agents.py", corpus_bodies)
         return code, buf.getvalue()
 
     def expect(label, root, check, want, targets=None, unchanged=True, fail_list=None):
@@ -358,6 +367,23 @@ def self_test_main(nested_run=False):
         except OSError as exc:
             return exc
         return True
+
+    def entry_state(path, label, fail_list=None):
+        # A directory entry for a negative assertion: its os.lstat result, or None when it is
+        # absent. Path.exists() and Path.is_file() follow a symlink, so a dangling link reads as
+        # absent, and answer False for every OSError, so a negative assertion built on them
+        # passes on an entry they cannot see. Only FileNotFoundError is absence; any other
+        # OSError is recorded as a named cannot-evaluate failure (and None returned, the
+        # failure already keeping the run red). fail_list: where that failure lands; the
+        # matrix's own list by default.
+        sink = failures if fail_list is None else fail_list
+        try:
+            return os.lstat(path)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            sink.append("{}: cannot evaluate whether {} exists: {}".format(label, path, exc))
+            return None
 
     def verified_rmtree(made, label, fail_list=None):
         # Every temporary-root removal is judged, never assumed: a removal error is recorded as
@@ -693,7 +719,7 @@ def self_test_main(nested_run=False):
         gem.write_bytes(mutated("T15", gem.read_bytes(), b"gemini line", b"gemini lime"))
         copilot.unlink()
         expect("T15 adapters with GEMINI.md refused", root, False, 2, targets=adapter_pair)
-        if copilot.exists():
+        if entry_state(copilot, "T15") is not None:
             failures.append("T15: copilot-instructions.md was written although GEMINI.md was refused")
         # The mirror: the SECOND target (copilot) refused, so the first (GEMINI.md, absent) is not written.
         pasted_block = b"<!-- NOTE:BEGIN (generated) -->\nhand text\n<!-- NOTE:END -->\n"
@@ -703,7 +729,7 @@ def self_test_main(nested_run=False):
         copilot.write_bytes(copilot.read_bytes() + pasted_block)
         gem.unlink()
         expect("T15 adapters with copilot refused", root, False, 2, targets=adapter_pair)
-        if gem.exists():
+        if entry_state(gem, "T15") is not None:
             failures.append("T15: GEMINI.md was written although copilot-instructions.md was refused")
 
         # T16. No rule corpus: exit 2 in both modes, nothing deleted and nothing created.
@@ -777,12 +803,47 @@ def self_test_main(nested_run=False):
                 failures.append("T19 {}: a file outside the tree was written or created".format(label))
             if read(gem) != gem_before:
                 failures.append("T19 {}: the sibling target GEMINI.md was written".format(label))
-        root = tree(ac.registry_text(), blocks=())
-        os.symlink(outside / "absent.md", root / AGENTS_REL)
-        expect("T19 a dangling symlinked target", root, True, 2)
-        expect("T19 a dangling symlinked target", root, False, 2)
-        if (outside / "absent.md").exists():
-            failures.append("T19: a dangling symlinked target created a file outside the tree")
+        # The dangling-link leg is one function the vector below reruns under a faulty engine.
+        # Nothing may appear at the link's outside target, decided by entry_state (os.lstat), so
+        # an entry Path.exists() cannot see (a dangling symlink, or one it cannot inspect) fails.
+        dangling_created = "T19: a dangling symlinked target created an entry outside the tree"
+
+        def t19_dangling_leg(fail_list):
+            root = tree(ac.registry_text(), blocks=())
+            os.symlink(outside / "absent.md", root / AGENTS_REL)
+            expect("T19 a dangling symlinked target", root, True, 2, fail_list=fail_list)
+            expect("T19 a dangling symlinked target", root, False, 2, fail_list=fail_list)
+            if entry_state(outside / "absent.md", "T19", fail_list) is not None:
+                fail_list.append(dangling_created)
+
+        t19_dangling_leg(failures)
+        # Vector: a faulty engine that returns its refusal for this fixture and then leaves a
+        # dangling symlink at the link's outside target must fail the leg: red when the leg
+        # checks that target with Path.exists(), which reads a dangling link as absent.
+        real_engine = ac.run
+        planted, planting_failures = [], []
+
+        def link_planting_run(*a, **k):
+            code = real_engine(*a, **k)
+            if not planted:
+                os.symlink(outside / "nowhere.md", outside / "absent.md")
+                planted.append(True)
+            return code
+
+        ac.run = link_planting_run
+        try:
+            t19_dangling_leg(planting_failures)
+        finally:
+            ac.run = real_engine
+            if planted:
+                os.unlink(outside / "absent.md")
+        if not planted:
+            failures.append("T19 vector: the faulty engine never planted its dangling symlink, so "
+                            "the vector judged nothing")
+        if planting_failures != [dangling_created]:
+            failures.append("T19 vector: an engine that leaves a dangling symlink at the outside "
+                            "target must fail the dangling-link leg with {!r} alone, got "
+                            "{!r}".format(dangling_created, planting_failures))
         root = tree(ac.registry_text(), blocks=())
         (root / AGENTS_REL).mkdir()
         expect("T19 a directory as target", root, True, 2, unchanged=False)  # read() cannot read a directory
@@ -1583,7 +1644,10 @@ def self_test_main(nested_run=False):
                 fail_list.append("T38: expected one read-leg open of the final name, saw {}".format(read_opens))
             if nested_refusal + " (a FIFO with no reader, a socket, or a device" not in out:
                 fail_list.append("T38: the refusal is not the engine's, naming {}: {}".format(nested, out.strip()))
-            if (root / nested).is_file() or nested_strays(root):
+            # Only the bound socket (or nothing, where none was bound) may stand at the name; the
+            # entry is read by entry_state (os.lstat), so one that cannot be inspected fails too.
+            left = entry_state(root / nested, "T38", fail_list)
+            if (left is not None and not stat.S_ISSOCK(left.st_mode)) or nested_strays(root):
                 fail_list.append("T38: the socket was replaced or a temporary file was left: {}".format(
                     nested_strays(root)))
             if notes and force is None:
@@ -1843,31 +1907,40 @@ def self_test_main(nested_run=False):
         probe_parent = tmp / "cleanup-probe"
         probe_root = probe_parent / "root"
         probe_root.mkdir(parents=True)
+        # Each leg asserts the whole diagnostic (cannot_verify_named): its label, the exact root
+        # path, the phase and the error text, so a diagnostic reduced to its phase phrase fails.
+        def cannot_verify_named(made, when, err):
+            return ("cleanup probe: the state of the temporary root {} cannot be verified {} its "
+                    "removal: {}".format(made, when, err))
+
         probe_failures = []
         os.chmod(probe_parent, 0o600)
         try:
             try:
-                os.lstat(probe_root)
-                search_binds = False
-            except PermissionError:
-                search_binds = True
-            if search_binds:
+                os.lstat(str(probe_root))
+                search_denial = None
+            except PermissionError as exc:
+                search_denial = exc
+            if search_denial:
                 verified_rmtree(str(probe_root), "cleanup probe", fail_list=probe_failures)
         finally:
             os.chmod(probe_parent, 0o700)
-        if not search_binds:
+        if not search_denial:
             print("SELF-TEST NOTE: cleanup real-mode leg not applicable (a root beneath a parent "
                   "without search permission can still be inspected here: root or another DAC "
                   "bypass); the injected lstat legs below still drive the cannot-verify failures")
-        elif (len(probe_failures) != 1
-              or "cannot be verified before its removal" not in probe_failures[0]):
+        elif probe_failures != [cannot_verify_named(probe_root, "before", search_denial)]:
             failures.append("cleanup vector: a root beneath a parent without search permission "
-                            "must be a named cannot-verify failure, never a silent pass, got "
-                            "{!r}".format(probe_failures))
+                            "must be the named cannot-verify failure {!r}, never a silent pass, "
+                            "got {!r}".format(cannot_verify_named(probe_root, "before",
+                                                                  search_denial), probe_failures))
 
         def cannot_verify_leg(when, inject_errno):
             # One injected leg: os.lstat of the leg's root raises inject_errno before the removal
-            # (when="before") or only once a real removal of it has run (when="after").
+            # (when="before") or only once a real removal of it has run (when="after"). Before
+            # it, the removal must be withheld (no rmtree call, the root left standing); after
+            # it, the removal must have run, and the root's absence is checked independently
+            # with the real os.lstat restored.
             leg_root = tmp / "cleanup-probe-{}".format(when) / "root"
             leg_root.mkdir(parents=True)
             real_lstat, real_leg_rmtree = os.lstat, shutil.rmtree
@@ -1882,9 +1955,9 @@ def self_test_main(nested_run=False):
 
             def uninspectable_lstat(path, *a, **k):
                 if os.fspath(path) == str(leg_root) and (when == "before" or removed):
-                    injected.append(path)
-                    raise OSError(inject_errno, "injected: the root cannot be inspected",
-                                  str(path))
+                    exc = OSError(inject_errno, "injected: the root cannot be inspected", str(path))
+                    injected.append(exc)
+                    raise exc
                 return real_lstat(path, *a, **k)
 
             os.lstat = uninspectable_lstat
@@ -1897,11 +1970,21 @@ def self_test_main(nested_run=False):
             if not injected:
                 failures.append("cleanup vector: the injected lstat error never reached the "
                                 "check {} the removal, so the vector judged nothing".format(when))
-            if (len(leg_failures) != 1
-                    or "cannot be verified {} its removal".format(when) not in leg_failures[0]):
+            elif leg_failures != [cannot_verify_named(leg_root, when, injected[0])]:
                 failures.append("cleanup vector: a root whose lstat fails {} its removal must be "
-                                "a named cannot-verify failure, never read as absent, got "
-                                "{!r}".format(when, leg_failures))
+                                "the named cannot-verify failure {!r}, never read as absent, got "
+                                "{!r}".format(when, cannot_verify_named(leg_root, when,
+                                                                         injected[0]),
+                                              leg_failures))
+            present = root_presence(str(leg_root))
+            if when == "before" and (removed or present is not True):
+                failures.append("cleanup vector: a root whose state cannot be verified before "
+                                "its removal must not be removed, got {} removal call(s) and "
+                                "presence {!r}".format(len(removed), present))
+            if when == "after" and (not removed or present is not False):
+                failures.append("cleanup vector: the leg whose lstat fails only after the removal "
+                                "must remove the root, got {} removal call(s) and presence "
+                                "{!r}".format(len(removed), present))
 
         cannot_verify_leg("before", errno.EACCES)
         cannot_verify_leg("after", errno.EIO)
@@ -1917,8 +2000,9 @@ def self_test_main(nested_run=False):
         #     Each nested run skips the end-to-end vectors (nested_run=True), so the matrix nests
         #     one level at a time, once here and once in each of (d), (e), (f) and (h) below;
         #     vector (g) nests two levels, through the recovery-rerun it makes and the vector (f)
-        #     run inside it, and vectors (i), (j) and (k) rerun the matrix keeping only (c), (g)
-        #     or (h) among the end-to-end vectors, so (j) nests three levels.
+        #     run inside it, and vectors (i), (j), (k), (l) and (m) rerun the matrix keeping
+        #     only (c), (g), (h), (d) or (e) among the end-to-end vectors, so (j) nests three
+        #     levels.
         if not nested_run or nested_run == "leak-rerun":
             leak_roots = []
             real_mkdtemp = tempfile.mkdtemp
@@ -1986,7 +2070,7 @@ def self_test_main(nested_run=False):
                 for made in leak_surviving:
                     verified_rmtree(made, "T34 vector recovery")
 
-        if not nested_run:
+        if not nested_run or nested_run == "closefail-rerun":
             # (d) End to end: this same matrix, run nested with every sentinel close failing (the
             #     real close performed, then EIO raised), must exit nonzero with the named NOT RUN
             #     failure and no PASS text, never raise, and must leave no temporary root behind.
@@ -1994,9 +2078,11 @@ def self_test_main(nested_run=False):
             #     root, and the never-raise and NOT RUN assertions catch a swallowed close
             #     failure; a revert to a bare sentinel close is caught before this vector runs,
             #     by the unit close vector above, and the non-OSError crash past the first
-            #     enumeration is vector (e) below.
+            #     enumeration is vector (e) below. Vector (l) below drives its surviving-root
+            #     assertion with a root whose state cannot be established.
             nested_roots = []
             real_mkdtemp = tempfile.mkdtemp
+            real_close = os.close
 
             def root_recording_mkdtemp(*a, **k):
                 made = real_mkdtemp(*a, **k)
@@ -2048,12 +2134,15 @@ def self_test_main(nested_run=False):
                 for made in surviving:
                     verified_rmtree(made, "T34 vector recovery")
 
+        if not nested_run or nested_run == "enum-rerun":
             # (e) End to end: this same matrix, run nested with its FIRST descriptor enumeration
             #     raising a non-OSError (one open_fds cannot absorb), must propagate that exact
             #     exception, caught here outside the matrix, and must still remove its temporary
             #     root through the guarded region's cleanup: red on the placement-only revert that
             #     moves the first enumeration back before the try, where the crash would skip the
-            #     cleanup and leave the root behind.
+            #     cleanup and leave the root behind. Vector (m) below drives its surviving-root
+            #     assertion with a root whose state cannot be established.
+            real_mkdtemp = tempfile.mkdtemp
             enum_roots, enum_fired = [], []
             enum_crash = RuntimeError("injected: the first descriptor enumeration crashed")
 
@@ -2317,6 +2406,74 @@ def self_test_main(nested_run=False):
                                     "got exit {} ending: {}".format(
                                         label, mode, named.format(target), rerun_code,
                                         rerun_out.strip()[-300:]))
+                for made in rerun_roots:
+                    verified_rmtree(made, "{} recovery".format(label))
+
+            # (l) and (m) End to end: this same matrix, rerun keeping vector (d)
+            #     (nested_run="closefail-rerun") or vector (e) (nested_run="enum-rerun"), with
+            #     every presence query of the nested root that vector records (the second
+            #     recorded root) raising EIO, at os.lstat and at os.stat alike, so the nested
+            #     run's own cleanup cannot verify that root and leaves it standing. The vector
+            #     must count the root as surviving, record its own failure, and recover it
+            #     through verified_rmtree, which records the named cannot-verify failure, so the
+            #     rerun exits nonzero with no PASS text: red when that vector's surviving-root
+            #     predicate reads presence through os.path.exists (or os.path.lexists), which
+            #     answers False for an OSError and so reads the uninspectable root as absent.
+            def uninspectable_root_rerun(mode):
+                rerun_roots, fired = [], []
+                rerun_real_mkdtemp = tempfile.mkdtemp
+                real_stat, real_lstat = os.stat, os.lstat
+
+                def rerun_recording_mkdtemp(*a, **k):
+                    made = rerun_real_mkdtemp(*a, **k)
+                    rerun_roots.append(made)
+                    return made
+
+                def uninspectable(real_query):
+                    def query(path, *a, **k):
+                        if (len(rerun_roots) > 1 and not isinstance(path, int)
+                                and os.fspath(path) == rerun_roots[1]):
+                            fired.append(path)
+                            raise OSError(errno.EIO, "injected: the nested root cannot be "
+                                          "inspected", os.fspath(path))
+                        return real_query(path, *a, **k)
+                    return query
+
+                rerun_buf = io.StringIO()
+                tempfile.mkdtemp = rerun_recording_mkdtemp
+                os.stat, os.lstat = uninspectable(real_stat), uninspectable(real_lstat)
+                try:
+                    with redirect_stdout(rerun_buf), redirect_stderr(rerun_buf):
+                        rerun_code = self_test_main(nested_run=mode)
+                finally:
+                    os.stat, os.lstat = real_stat, real_lstat
+                    tempfile.mkdtemp = rerun_real_mkdtemp
+                target = rerun_roots[1] if len(rerun_roots) > 1 else None
+                return rerun_code, rerun_buf.getvalue(), fired, target, rerun_roots
+
+            for label, mode, vector_failure in (
+                    ("uninspectable close-failing root vector", "closefail-rerun",
+                     "T34 vector: the close-failing matrix run left a temporary root behind (or "
+                     "one whose state cannot be verified): {!r}"),
+                    ("uninspectable crash root vector", "enum-rerun",
+                     "T34 vector: the first-enumeration crash left a temporary root behind (or "
+                     "one whose state cannot be verified): {!r}")):
+                rerun_code, rerun_out, fired, target, rerun_roots = uninspectable_root_rerun(mode)
+                named = ("T34 vector recovery: the state of the temporary root {} cannot be "
+                         "verified before its removal: {}".format(target, OSError(
+                             errno.EIO, "injected: the nested root cannot be inspected", target)))
+                if not fired:
+                    failures.append("{}: the injected presence error never reached the nested "
+                                    "root it targets, so the vector judged nothing".format(label))
+                if (rerun_code == 0 or "SELF-TEST PASS" in rerun_out
+                        or vector_failure.format([target]) not in rerun_out
+                        or named not in rerun_out):
+                    failures.append("{}: a nested_run={!r} rerun whose nested root cannot be "
+                                    "inspected must exit nonzero with the vector's failure {!r} "
+                                    "and the named recovery failure {!r}, and no PASS text, got "
+                                    "exit {} ending: {}".format(
+                                        label, mode, vector_failure.format([target]), named,
+                                        rerun_code, rerun_out.strip()[-300:]))
                 for made in rerun_roots:
                     verified_rmtree(made, "{} recovery".format(label))
     finally:

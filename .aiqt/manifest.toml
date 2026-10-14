@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "94840fce0459dcf71c9a8ba821ce342b4a3c000f2e8915feba7227e30a27c3e5"
+tree-sha256 = "7f51af5dff80b7869fc05965102243a2ee1ed870efcb94ac622337d33677de34"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -137,7 +137,7 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 [[sources]]
 path = ".aiqt/core/renderers.toml"
 bytes = 3068
-sha256 = "1479bdb28c0c7643b9e920f596d2aa2d66450121a77eff6a2ed967454cb876af"
+sha256 = "8caf7ab4d93e43ea58081dea949cc1a8d3f2e01c9d76b9a3415a7ca392a96d61"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -3541,8 +3541,8 @@ sha256 = "783a0eb4e035a7c4c73af119236bf496ab1c4d7bc57d49ae42db5e14cb0b812d"
 
 [[sources]]
 path = "tools/gen_agents.py"
-bytes = 140971
-sha256 = "736bbb99c8d8b8fb233483f4b7330f43a1bddb05230cfc1c46f692819a1f7dd8"
+bytes = 151352
+sha256 = "40cadfea2c3cc0c513550e96d331baf80983c201937dc208d3996e97a5b7c8c7"
 
 [[sources]]
 path = "tools/gen_changelog.py"
