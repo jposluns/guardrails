@@ -19,7 +19,9 @@ assignment or annotated assignment to the bare name, or that spells it as an ide
 string-valued AST field, as a string the bounded fold computes equal to the name (a comparison against
 the string or a third or later call argument aside; the fold also reads a supported decode of spelled
 bytes, a REFUSAL-ONLY input, so a name assembled through one is refused like a spelled one, under the
-same two exemptions), or as
+same two exemptions, each NODE-LOCAL: it accepts only the outer value in that position, while a
+descendant equal to the name is judged in its own position, so decoded bytes that already spell it are
+refused where the decode reads them, as its receiver or as the first argument of str), or as
 a dot- or colon-separated component of a
 folded path string, or that keys a RECOGNIZED module-namespace access (a subscript of a bare vars() or
 globals() call, or a setattr or delattr call on a sys.modules entry) with anything the bounded fold
@@ -350,7 +352,10 @@ def _unsupported_binding(tree):
     a run-time TypeError, are never folded): any expression
     _folded_strings computes to exactly 'RENDERER_DECL' is refused unless _inert allows it as one of
     the TWO EXEMPT USES, a comparison operand or a third or later positional argument of a call with no
-    starred argument before it, and any folded value whose dot- or colon-separated components include the
+    starred argument before it (each exemption is NODE-LOCAL: _inert reads only the node's own parent, so
+    a descendant of an exempt value that folds to the name, such as the spelled bytes a decode reads, is
+    judged in its own position and refused there unless that position is itself exempt), and any folded
+    value whose dot- or colon-separated components include the
     name is refused with NO exemption, because a resolver splits such a path at run time and reaches the
     declared value through it (pkgutil.resolve_name('pkg.RENDERER_DECL'), pkgutil.resolve_name
     ('pkg:RENDERER_DECL'), operator.attrgetter('m.RENDERER_DECL')); this file's own scan never
@@ -544,11 +549,19 @@ def _declared_renderer_stems(tools_dir):
     decode forms included (a no-keyword <folded bytes>.decode() with no argument or with one
     ASCII-compatible codec literal, and a no-keyword two-argument str(<folded bytes>, <ASCII-compatible
     codec literal>)), is held to the same exact-name rule as a spelled name, whatever route consumes it,
-    and the two exact-name EXEMPT USES below apply to a decode-derived string too: a comparison operand
-    (('RENDERER_' + b'DECL'.decode()) == 'x') and a third or later positional argument with no starred
-    argument before it are accepted, exactly as the spelled name is there; the dot- and colon-component
-    rule has no exemption, so a fold whose components include the name is refused in those positions
-    too. The decode fold is REFUSAL-ONLY input and never accepts a key. What stays unseen is a name
+    and the two exact-name EXEMPT USES below apply to a decode-derived string too. Each exemption is
+    NODE-LOCAL: it accepts only the outer value that sits directly in the exempt position (a comparison
+    operand, or a third or later positional argument with no starred argument before it), and every
+    descendant of that value is still checked on its own, in its own position. So the comparison operand
+    (('RENDERER_' + b'DECL'.decode()) == 'x') and the third argument of
+    f(None, None, 'RENDERER_' + b'DECL'.decode()) are accepted, since no part of either folds to the
+    name; but bytes a decode reads, an operand of an inner + and an f-string part are never in an exempt
+    position, so such a descendant equal to the name is refused whatever the outer value's position:
+    the decode receiver in b'RENDERER_DECL'.decode() == 'x' and in f(None, None,
+    b'RENDERER_DECL'.decode()), and the first argument of str in f(None, None,
+    str(b'RENDERER_DECL', 'ascii')), are each refused. The dot- and colon-component rule has no
+    exemption, so a fold whose components include the name is refused in those positions too. The decode
+    fold is REFUSAL-ONLY input and never accepts a key. What stays unseen is a name
     computed by a route the fold
     does not read (a join, %-formatting, str.format, a case change, chr, a decode of computed bytes,
     codecs.decode, an unbound bytes.decode(...) call, a computed or keyword codec, an errors argument, a
@@ -789,7 +802,8 @@ def main():
 #       format spec renders a different string at run time, a bytes-valued replacement field (bare, with
 #       !s, or a bytes + bytes concatenation: each renders b'...' at run time) or a mixed-kind + in
 #       either order (str + bytes and bytes + str, each a run-time TypeError) stays allowed; the fold
-#       must not over-match any of them.
+#       must not over-match any of them. A name assembled through a supported decode stays allowed as a
+#       comparison operand and as a third positional argument when no part of it folds to the name.
 #   (p) the bounded string fold keeps no value longer than _FOLD_CAP.
 #   (q) this file passes its own scan (a renderer-free tools/*.py that discovery reads like any other).
 #   (r) a RECOGNIZED module-namespace access (a vars() or globals() subscript in any context, del
@@ -802,6 +816,12 @@ def main():
 #       name, is reported with the matching text, while a constant non-reserved key, a
 #       folded non-reserved concatenation and a constant-name setattr on a sys.modules entry stay
 #       accepted.
+#   (s) each exemption is node-local: a supported decode of bytes that already spell the name, as a
+#       comparison operand or a third positional argument, and a two-argument str of such bytes as a
+#       third positional argument, are each reported with the exact-name text, because the inner bytes
+#       sit in a position that is not exempt.
+#   (t) a self-test that cannot create its temporary directory exits 2 and leaves RENDERERS the same
+#       object it found, so an in-process caller never inherits the self-test roster.
 
 _HELPER = "VALUE = 1\n"
 
@@ -1009,7 +1029,10 @@ _WHERE_MESSAGES = (
 # concatenation (b'DECL'.decode('utf-16') produces a DIFFERENT string than the latin-1 reading; folding
 # it by reusing the latin-1 value would refuse a string the run time never produces); each must stay
 # allowed, and each bytes control goes red if the bytes fold is extended back into replacement fields,
-# mixed +, one-argument str or a non-ASCII-compatible codec.
+# mixed +, one-argument str or a non-ASCII-compatible codec. The last two put a name assembled through a
+# supported decode in each exempt position, where no part of it folds to the name on its own (the
+# exemption is node-local, case (s)); each goes red under a scan that refuses every call-derived fold in
+# an exempt position.
 _ALLOWED_USES = (
     ("comparison", "def is_decl(name):\n    return name == 'RENDERER_DECL' or 'RENDERER_DECL' != name\n"),
     ("mention in a longer string", "NOTE = 'this module carries no RENDERER_DECL'\n"),
@@ -1025,6 +1048,9 @@ _ALLOWED_USES = (
     ("bytes-plus-str concatenation", "NOTE = b'RENDERER_' + 'DECL'\n"),
     ("one-argument str of bytes concatenation", "NOTE = 'RENDERER_' + str(b'DECL')\n"),
     ("non-ASCII-compatible decode concatenation", "NOTE = 'RENDERER_' + b'DECL'.decode('utf-16')\n"),
+    ("decode-derived comparison operand", "NOTE = ('RENDERER_' + b'DECL'.decode()) == 'x'\n"),
+    ("decode-derived third positional argument", "def f(a, b, c):\n    return c\n"
+                                                 "f(None, None, 'RENDERER_' + b'DECL'.decode())\n"),
 )
 
 # (r) unlisted tools/gen_beta.py bodies keying a module namespace with something the fold cannot reduce,
@@ -1085,6 +1111,19 @@ _FOLDED_KEYS = (
     ("constant sys.modules setattr", "import sys\nsetattr(sys.modules[__name__], 'BETA_FLAG', 1)\n"),
 )
 
+# (s) unlisted tools/gen_beta.py bodies whose outer value sits in an exempt position while a DESCENDANT
+# folds to the reserved name in a position that is not exempt (the receiver of a decode, the first
+# argument of str): each exemption is node-local, so each must be reported with the exact-name text, and
+# each goes red under a scan that extends an exemption from an exempt value to its descendants.
+_EXACT_NAME_TEXT = "the string 'RENDERER_DECL' outside a comparison or a later call argument"
+_NESTED_NAMES = (
+    ("spelled-bytes decode as a comparison operand", "NOTE = b'RENDERER_DECL'.decode() == 'x'\n"),
+    ("spelled-bytes decode as a third positional argument",
+     "def f(a, b, c):\n    return c\nf(None, None, b'RENDERER_DECL'.decode())\n"),
+    ("two-argument str of spelled bytes as a third positional argument",
+     "def f(a, b, c):\n    return c\nf(None, None, str(b'RENDERER_DECL', 'ascii'))\n"),
+)
+
 
 def _fixture(base, entry_body, helper_body=_HELPER):
     tools = base / "tools"
@@ -1102,8 +1141,6 @@ def self_test_main():
     from contextlib import redirect_stdout, redirect_stderr
 
     global RENDERERS
-    saved = RENDERERS
-    RENDERERS = ("gen_alpha",)
 
     def run_quiet(root, check):
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
@@ -1124,11 +1161,23 @@ def self_test_main():
                 rc = "raised SystemExit({!r})".format(exc.code)
         return rc, err.getvalue()
 
+    def run_nested():
+        # A nested self-test run (case (t)): its exit code AND its stderr text, so an exit 2 for an
+        # unrelated reason cannot pass for the temporary-directory refusal.
+        err = io.StringIO()
+        with redirect_stdout(io.StringIO()), redirect_stderr(err):
+            rc = self_test_main()
+        return rc, err.getvalue()
+
     try:
         tmp = Path(tempfile.mkdtemp(prefix="aiqt-gen-renderers-selftest-"))
     except OSError as exc:
         print("SELF-TEST ERROR: no writable temporary directory: {}".format(exc), file=sys.stderr)
         return 2
+    # RENDERERS is replaced only once the temporary directory exists, so the early return above leaves an
+    # in-process caller's roster in place and every later exit passes through the restoring finally (t).
+    saved = RENDERERS
+    RENDERERS = ("gen_alpha",)
     failures = []
     try:
         # (a) conformant + determinism. The second generation must SUCCEED before its output is compared,
@@ -1496,6 +1545,41 @@ def self_test_main():
                 failures.append("an unlisted tools/gen_beta.py keying a module namespace by a {} expected "
                                 "--check exit 0 (the key folds to a non-reserved constant string)"
                                 .format(label))
+
+        # (s) each exemption is node-local: a descendant of an exempt value that folds to the name is judged
+        # in its own position and refused there; each fixture asserts the exact-name text itself, so a
+        # refusal for an unrelated reason cannot keep it green.
+        for label, body in _NESTED_NAMES:
+            case = tmp / ("nested-" + label.replace(" ", "-"))
+            _fixture(case, _ENTRY_GOOD)
+            if run_quiet(case, check=False) != 0:
+                failures.append("nested name {}: fixture generation expected exit 0".format(label))
+            (case / "tools" / "gen_beta.py").write_text(body, encoding="utf-8")
+            rc, err = run_refused(case, check=True)
+            if rc != 2 or _EXACT_NAME_TEXT not in err:
+                failures.append("an unlisted tools/gen_beta.py holding a {} expected --check exit 2 "
+                                "reporting {!r} (an exemption is node-local), got exit {} with diagnostic "
+                                "tail {!r}".format(label, _EXACT_NAME_TEXT, rc, err.strip()[-160:]))
+
+        # (t) a self-test that cannot create its temporary directory exits 2 and leaves RENDERERS as it found
+        # it, the same object, so an in-process caller never inherits the self-test roster. A tuple distinct
+        # from the one the self-test installs stands in for the caller's roster, and tempfile.mkdtemp raises
+        # PermissionError for the nested run; both are restored before the result is judged.
+        outer, probe, real_mkdtemp = RENDERERS, ("gen_probe",), tempfile.mkdtemp
+
+        def _no_tmp(*args, **kwargs):
+            raise PermissionError("injected: no writable temporary directory")
+
+        RENDERERS, tempfile.mkdtemp = probe, _no_tmp
+        try:
+            rc, err = run_nested()
+        finally:
+            leaked, RENDERERS, tempfile.mkdtemp = RENDERERS, outer, real_mkdtemp
+        if rc != 2 or "no writable temporary directory" not in err or leaked is not probe:
+            failures.append("a self-test whose temporary directory cannot be created expected exit 2 "
+                            "reporting no writable temporary directory with RENDERERS still the "
+                            "caller's object, got exit {!r}, RENDERERS {!r} and diagnostic tail {!r}"
+                            .format(rc, leaked, err.strip()[-160:]))
     finally:
         RENDERERS = saved
         shutil.rmtree(tmp, ignore_errors=True)
@@ -1516,10 +1600,13 @@ def self_test_main():
           "declaration alone renders, a UTF-8 BOM parses, {} refusal messages name where the binder runs, an "
           "unreadable file is reported as a read failure, {} exempt or non-matching uses of the name stay "
           "allowed (allowed uses, never proof of inertness), {} computed module-namespace keys are reported "
-          "as unfoldable while {} folded non-reserved keys stay accepted, the string fold stays bounded, "
+          "as unfoldable while {} folded non-reserved keys stay accepted, {} descendants of an exempt value "
+          "that fold to the name are refused (each exemption is node-local), a self-test that cannot create "
+          "its temporary directory exits 2 leaving RENDERERS unchanged, the string fold stays bounded, "
           "and this file passes its own scan".format(
               len(_UNSUPPORTED_BINDINGS), len(_REBOUND), len(_MUTATED), len(_COOKIES), len(_DEEP),
-              len(_WHERE_MESSAGES), len(_ALLOWED_USES), len(_UNFOLDABLE_KEYS), len(_FOLDED_KEYS)))
+              len(_WHERE_MESSAGES), len(_ALLOWED_USES), len(_UNFOLDABLE_KEYS), len(_FOLDED_KEYS),
+              len(_NESTED_NAMES)))
     return 0
 
 
