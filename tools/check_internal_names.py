@@ -32,7 +32,12 @@ is checked over the WHOLE working tree, walked fail-closed with the skips and te
 over SCOPE_RELPATHS: no file in the tree carries one, so this layer has no legitimate occurrence to exempt.
 A line carrying an internal-allow marker is exempt here as well. In this layer a file that is not valid
 UTF-8 is skipped, as the whole-tree leak gate skips it; a scoped surface that is not valid UTF-8 still
-fails closed.
+fails closed. The walk reads untracked and git-ignored files too (everything on disk outside the skipped
+directories), does not follow a symlinked directory, and reads a file only when its suffix is one of the
+leak gate's TEXT_SUFFIXES or it has no suffix, so a file under any other suffix (a .csv, say) is not read.
+A bare ordinal with no further segment (D-3) is not matched. An unlistable directory, an unreadable file
+and a non-regular file (a FIFO) each fail closed with exit 2; a file that vanishes between the walk and
+the read is a fail-closed finding, as in the scoped layer.
 
 DISCLOSED SCOPE LIMITS. SCOPE_RELPATHS is a HAND-MAINTAINED allowlist with no drift-guard: a new QA-suite
 surface must be ADDED HERE BY HAND to be covered, and a surface not yet listed is out of this gate's reach
@@ -45,7 +50,8 @@ not an automatic one.
 Exit 0 clean, 1 on any finding or a malformed hashes file, 2 on a read error (fail-closed). `--self-test`
 proves the gate FAILS on a seeded internal name (a provenance id, a host path, a hashed codename, and a
 maintainer-decision id of each shape anywhere in the tree) and passes clean generic content, so removing a
-layer makes a case fail.
+layer makes a case fail. It also runs the real scan over planted trees to prove the tree-wide layer is wired
+in and fails closed on an unreadable file, an unlistable directory, a FIFO and a vanished file.
 """
 import sys
 
@@ -473,8 +479,15 @@ def _self_test():
                     badarg, proc.returncode))
 
         # The subprocess-spawning cases below carry a sentinel so a child (which re-enters --self-test)
-        # skips them rather than recursing without bound.
-        if os.environ.get("AIQT_INTERNAL_NAMES_SELFTEST_CHILD") != "1":
+        # skips them rather than recursing without bound. A run that finds the sentinel already set has
+        # skipped cases 14 to 16, so it records a failure rather than passing without them; the only child
+        # launched with it (case 15) is judged on its SELF-TEST marker alone, which a failure still prints.
+        not_exercised = []
+        if os.environ.get("AIQT_INTERNAL_NAMES_SELFTEST_CHILD") == "1":
+            failures.append("AIQT_INTERNAL_NAMES_SELFTEST_CHILD=1 is set in this run, so cases 14 to 16 (the FIFO "
+                            "probes, the sibling-shadow run, and the tree-wide layer's wiring and fail-closed "
+                            "exits) did not run; unset it to run the whole self-test")
+        else:
             childenv = dict(os.environ, AIQT_INTERNAL_NAMES_SELFTEST_CHILD="1")
             toolsdir = str(Path(__file__).resolve().parent)
 
@@ -532,6 +545,8 @@ def _self_test():
             #     isolated: the self-test must actually RUN (it emits its SELF-TEST marker). Reverting the
             #     sys.path.append import fix to an index-0 insertion puts the script dir first, so under -I the
             #     sibling shadows check_leaks' `import hashlib` and silently exits 0 before the self-test runs.
+            #     The child runs with the sentinel set, so it reports cases 14 to 16 as not run (a failure
+            #     that still carries the marker); this case judges only that the self-test ran at all.
             sib = Path(tempfile.mkdtemp(prefix="aiqt-internal-names-sibling-"))
             try:
                 for name in ("check_internal_names.py", "_walk.py", "check_leaks.py"):
@@ -575,12 +590,108 @@ def _self_test():
                                         "named: {}), got rc={} out={!r}".format(
                                             "holding" if planted else "without", want, planted,
                                             proc.returncode, proc.stdout))
+
+                # 16 (continued). DISCRIMINATING (the tree-wide layer FAILS CLOSED in the real scan): each input
+                #     below is planted alone, outside SCOPE_RELPATHS, in the otherwise clean tree above. An
+                #     unreadable file, an unlistable directory and a FIFO each exit 2 with the read-error
+                #     diagnostic naming the input; a file that vanishes between the walk listing it and the read
+                #     exits 1 with the fail-closed vanished finding naming it, as in the scoped layer. Skipping an
+                #     OSError in scan_tree_decision_ids, skipping a vanished file, an rglob walk (which lists
+                #     nothing under an unlistable directory and bypasses the walker the vanish probe wraps), and
+                #     a main() that swallows the tree layer's OSError each fail at least one probe. A plant this
+                #     platform cannot produce (an unreadable entry when permissions do not bind, as for root, or
+                #     a FIFO without os.mkfifo) is named in the summary as not exercised, never passed silently.
+                gate = str(wired / "tools" / "check_internal_names.py")
+                readerr = "error: cannot read a required input"
+
+                def expect_fail_closed(label, script_args, want, stream, needles):
+                    try:
+                        proc = subprocess.run([sys.executable, "-I", "-B", *script_args], capture_output=True,
+                                              text=True, env=childenv, timeout=120)
+                    except subprocess.TimeoutExpired:
+                        failures.append("the tree-wide scan over {} timed out, not failed closed".format(label))
+                        return
+                    text = proc.stdout if stream == "stdout" else proc.stderr
+                    if proc.returncode != want or not all(n in text for n in needles):
+                        failures.append("the tree-wide scan over {} expected exit {} with {!r} on {}, got rc={} "
+                                        "out={!r} err={!r}".format(label, want, needles, stream, proc.returncode,
+                                                                   proc.stdout, proc.stderr))
+
+                unreadable = wired / "docs" / "unreadable.md"
+                unreadable.write_text("plain text\n", encoding="utf-8")
+                os.chmod(str(unreadable), 0)
+                try:
+                    try:
+                        unreadable.read_bytes()
+                        not_exercised.append("an unreadable file (permissions do not bind here)")
+                    except PermissionError:
+                        expect_fail_closed("an unreadable file", (gate,), 2, "stderr",
+                                           (readerr, "docs/unreadable.md"))
+                finally:
+                    os.chmod(str(unreadable), 0o600)
+                    unreadable.unlink()
+
+                locked = wired / "notes" / "locked"
+                locked.mkdir(parents=True)
+                (locked / "inner.md").write_text("plain text\n", encoding="utf-8")
+                os.chmod(str(locked), 0)
+                try:
+                    try:
+                        os.listdir(str(locked))
+                        not_exercised.append("an unlistable directory (permissions do not bind here)")
+                    except PermissionError:
+                        expect_fail_closed("an unlistable directory", (gate,), 2, "stderr",
+                                           (readerr, "notes/locked"))
+                finally:
+                    os.chmod(str(locked), 0o700)
+                    shutil.rmtree(wired / "notes")
+
+                pipe = wired / "docs" / "pipe.md"
+                made = False
+                if hasattr(os, "mkfifo"):
+                    try:
+                        os.mkfifo(str(pipe))
+                        made = True
+                    except OSError:
+                        made = False
+                if made:
+                    try:
+                        expect_fail_closed("a FIFO", (gate,), 2, "stderr",
+                                           (readerr, "docs/pipe.md is present but not a regular file"))
+                    finally:
+                        pipe.unlink()
+                else:
+                    not_exercised.append("a FIFO (os.mkfifo unavailable or refused)")
+
+                (wired / "docs" / "vanish.md").write_text("plain text\n", encoding="utf-8")
+                vanish_probe = (
+                    "import sys\n"
+                    "sys.path.append({tools!r})\n"
+                    "import check_internal_names as cin\n"
+                    "listed = cin.walk_files\n"
+                    "def vanishing_walk(*args, **kwargs):\n"
+                    "    for p in listed(*args, **kwargs):\n"
+                    "        if p.name == 'vanish.md':\n"
+                    "            p.unlink()\n"
+                    "        yield p\n"
+                    "cin.walk_files = vanishing_walk\n"
+                    "sys.exit(cin.main())\n"
+                ).format(tools=str(wired / "tools"))
+                expect_fail_closed("a file that vanishes during the walk", ("-c", vanish_probe), 1, "stdout",
+                                   ("docs/vanish.md: file vanished during the tree scan; fail-closed",))
             finally:
+                for entry in (wired / "docs" / "unreadable.md", wired / "notes" / "locked"):
+                    try:
+                        os.chmod(str(entry), 0o700)
+                    except OSError:
+                        pass
                 shutil.rmtree(wired, ignore_errors=True)
 
         # 17. DISCRIMINATING (maintainer-decision id SHAPES, tree-wide): one synthetic id of each decision
-        #     shape, planted in docs/ (outside SCOPE_RELPATHS), is caught by scan_tree_decision_ids; removing
-        #     DECISION_ID, or narrowing a head or segment class so a shape no longer matches, fails its case.
+        #     shape, planted in docs/ (outside SCOPE_RELPATHS), is caught by scan_tree_decision_ids, and so is
+        #     the first shape planted outside docs/ (a suffix-less file at the tree root and a page in site/);
+        #     removing DECISION_ID, or narrowing a head or segment class so a shape no longer matches, fails
+        #     its case.
         #     Each non-id token class seen in the tree is a negative control that must stay unflagged, and an
         #     internal-allow line is exempt as for the other shapes. The ids are SYNTHETIC (the 000 ordinal
         #     and the SYNTHETIC word name no real decision) and assembled at runtime, so no contiguous
@@ -617,6 +728,18 @@ def _self_test():
                 f = scan_tree_decision_ids(tree)
                 if f:
                     failures.append("a non-id token ({}) expected no decision-id finding, got {}".format(shape, f))
+            # The same id outside docs/: a suffix-less file at the tree root (read, as every file with no
+            # suffix is) and a listed text suffix in a nested directory, each named by its own path.
+            note.unlink()
+            for rel in ("NOTICE", "site/pages/index.html"):
+                elsewhere = tree / rel
+                elsewhere.parent.mkdir(parents=True, exist_ok=True)
+                elsewhere.write_text("Decided under {} here.\n".format(positives[0][1]), encoding="utf-8")
+                f = scan_tree_decision_ids(tree)
+                if f != ["{}:1: internal maintainer-decision id".format(rel)]:
+                    failures.append("a decision id in {} (outside docs/) expected one tree-wide finding, got "
+                                    "{}".format(rel, f))
+                elsewhere.unlink()
         finally:
             shutil.rmtree(tree, ignore_errors=True)
     finally:
@@ -646,7 +769,12 @@ def _self_test():
           "word segments, a segment carrying a digit, a final one-letter segment) is caught anywhere in the tree, "
           "outside the scoped surfaces too, by the real scan as well as by scan_tree_decision_ids, while a bare "
           "ordinal, a lower-case check id, label or prose word and a D- glued to a longer word are not, and an "
-          "internal-allow line holding a decision id is exempt.")
+          "internal-allow line holding a decision id is exempt; in the real scan the tree-wide layer fails "
+          "closed outside the scoped surfaces on every plant this platform can produce (any it cannot is listed "
+          "below as not exercised): an unreadable file, an unlistable directory and a FIFO each exit 2 naming "
+          "the input, and a file that vanishes during the walk is a fail-closed finding naming it.")
+    if not_exercised:
+        print("NOT EXERCISED on this platform (so not proven by this run): " + "; ".join(not_exercised) + ".")
     return 0
 
 

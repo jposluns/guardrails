@@ -37,7 +37,7 @@ RELEASING steps 6a/6b; see _post_release_head); whole-surface delta otherwise, w
 strictly increase over the newest row); --repin --target V (10.4 adopter mode, rollback branch keyed on the
 pin-history match plus wholesale target validation plus recorded authorization); --self-test.
 
-Launch (QA round 5 decision): a plain run re-executes the COMMITTED copy of this
+Launch (a design decision): a plain run re-executes the COMMITTED copy of this
 gate. Stage 1 (the launched file: standard library only, no checkout import, no sys.path change)
 materializes HEAD's committed tree through a verified re-hashing walk and re-executes
 tools/check_release_delta.py from that materialization under -I -B with a fresh pycache prefix; stage 2
@@ -90,7 +90,7 @@ except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships to
     os._exit(2)
 
 
-# ===== STAGE 1: re-execute the COMMITTED gate (QA round 5 decision) =================================
+# ===== STAGE 1: re-execute the COMMITTED gate (a design decision) ===================================
 # Round 5 demonstrated that vetting checkout code from INSIDE a process
 # that already imported it cannot close the class: an untracked shadow module imported later (an
 # untracked tools/tempfile.py), a crafted __pycache__ .pyc behind a byte-identical .py, and a
@@ -242,7 +242,7 @@ _GIT_DIR_MARKERS = ("HEAD", "objects", "refs", "commondir", "gitdir")
 
 def _stage1_repository_in_ancestry(*dirs):
     """False ONLY when an inspection that is a SUPERSET of git's own repository discovery finds
-    nothing (a QA round 8 decision); the ONE helper both absence predicates use. For
+    nothing (the superset-of-discovery decision); the ONE helper both absence predicates use. For
     every directory given, BOTH its lexical ancestry (os.path.abspath) and its physical ancestry
     (os.path.realpath) are walked up to `/`: `git -C` changes into the directory, so discovery
     walks the PHYSICAL ancestors, and a symlinked launch path past a damaged ancestor otherwise
@@ -1859,8 +1859,8 @@ def _assert_gate_code_matches_head(root, head_oid):
     patch of this very function) can run arbitrary code and fabricate any verdict; no in-process
     self-comparison can defend a process against its own launcher. What this check closes is the
     demonstrated R4-1 class: an in-place checkout edit changing the verdict of an otherwise honest
-    launch. CI runs the gate on a fresh clone, where the checkout and HEAD coincide. QA round 5
-    decision: under the two-stage launch this check runs INSIDE the committed
+    launch. CI runs the gate on a fresh clone, where the checkout and HEAD coincide. By design,
+    under the two-stage launch this check runs INSIDE the committed
     copy (stage 2), where it pins the stage-2 materialized modules to the judged HEAD; the
     launch-control residual concentrates entirely in the stage-1 launched file."""
     pack, files = _gate_module_files()
@@ -1976,7 +1976,7 @@ def _post_release_head(root, prev_row, release_rows, head_version):
     blob it consumes against the requesting id (_release_schema), so a decoy GIT_DIR, an
     object-directory overlay, or an overwritten loose object cannot substitute a judged byte.
 
-    QA round-5 decision: a plain launch re-executes the COMMITTED copy of this
+    By design, a plain launch re-executes the COMMITTED copy of this
     gate from a verified materialization of HEAD (stage 1), so no checkout Python file beyond the
     launched file itself (an untracked shadow module, a crafted __pycache__ .pyc, a planted sibling)
     participates in this branch; every child validator launches under -I -B with a fresh pycache
@@ -2506,7 +2506,7 @@ def _committed_post_release_state(root, head_oid):
 
 def run(root):
     try:
-        # BRANCH ROUTING FROM COMMITTED OBJECTS ONLY (QA round-5 claude M1; part of the round-5
+        # BRANCH ROUTING FROM COMMITTED OBJECTS ONLY (QA round-5 claude M1; part of the committed-copy
         # re-execution decision): whether the post-release branch runs is decided from HEAD's
         # COMMITTED copies of the routing records (the release rows and the changelog head version),
         # read through the verified funnel, never from the checkout.
@@ -4376,7 +4376,7 @@ def _post_release_e2e(tmp, failures, only=None):
                                     "copy (got rc={}: {})".format(labelV, proc_v.returncode,
                                                                    out_v.strip()[-300:]))
 
-    # ---- QA round 5 decision: launch re-execution and committed routing -----------------------------
+    # ---- Committed-copy decision: launch re-execution and committed routing -------------------------
     # The launch-attack cases drive the EXACT CI launch (python3 -I -B tools/check_release_delta.py) so
     # the stage-1 re-execution of the COMMITTED gate copy is itself under test, not the in-process
     # run(). They use a DEDICATED fresh fixture (immune to any prior case's state) carrying a STALE
@@ -4764,7 +4764,7 @@ def _post_release_e2e(tmp, failures, only=None):
                 finally:
                     _shutil7.rmtree(nr7, ignore_errors=True)
 
-        # ---- QA round 8 decision: absence holds only when an inspection that
+        # ---- Superset-of-discovery decision: absence holds only when an inspection that
         # is a SUPERSET of git discovery finds nothing. Each case plants the checkout tripwire;
         # the CLI must exit 2 from stage 1 and BOTH absence predicates must refuse. (R8 symlinked
         # launch) carries codex blocker 1 and claude F1 reproductions A and B: `git -C` walks the
@@ -7169,7 +7169,7 @@ def main():
               "--self-test is a mixed or incomplete mode and is rejected fail-closed", file=sys.stderr)
         return 2
     if mode == "stage2":
-        # Stage 2 of the re-execution (QA round 5 decision): this process IS the
+        # Stage 2 of the re-execution (a design decision): this process IS the
         # committed copy, launched by stage 1 from a verified materialization of HEAD's tree. Sanity:
         # the running gate file must live under the named tree; then judge the named repository.
         tree = Path(opts["stage2_tree"]).resolve()
