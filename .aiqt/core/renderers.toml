@@ -12,7 +12,7 @@ entrypoint = "tools/gen_agents.py"
 semantics-revision = 1
 targets = ["AGENTS.md"]
 closure = ["tools/gen_agents.py", "tools/_adapter_compose.py", "tools/_gen_common.py", "tools/_standards.py", "tools/gen_rules.py"]
-code-digest = "90d52114693eb897f82217ff78b6d78c274a51ee3ed1d4b6002d126ea6fb13e7"
+code-digest = "fe74cd69d443c3b03ffc19600aa0520ca243a44c22b93d0046776f75ddaa5e6f"
 
 [[renderer]]
 renderer-id = "adapters"
@@ -20,7 +20,7 @@ entrypoint = "tools/gen_adapters.py"
 semantics-revision = 1
 targets = ["GEMINI.md", ".github/copilot-instructions.md"]
 closure = ["tools/gen_adapters.py", "tools/_adapter_compose.py", "tools/_gen_common.py", "tools/_standards.py", "tools/gen_agents.py", "tools/gen_rules.py"]
-code-digest = "159b8c43d02c3e89fdbcf7c32bade3b6aa62ba80439b4956fb4126b50a628569"
+code-digest = "039175dc284bb8603862efd61a7a2bb875262f12e4e7b097acb8820e622f69db"
 
 [[renderer]]
 renderer-id = "claude"
@@ -28,7 +28,7 @@ entrypoint = "tools/gen_claude.py"
 semantics-revision = 1
 targets = [".claude/RULES-INDEX.md", "CLAUDE.md"]
 closure = ["tools/gen_claude.py", "tools/_adapter_compose.py", "tools/_gen_common.py", "tools/_standards.py", "tools/gen_agents.py", "tools/gen_rules.py"]
-code-digest = "2263a869173d8f438d3d31cff3c93e5ae950c197c5bc0a57cd79ec9b1944ed1c"
+code-digest = "b108f8375fc679a81046562eefcde671eb7578208cd1668110cb576a17a8391d"
 
 [[renderer]]
 renderer-id = "cursor"
@@ -52,7 +52,7 @@ entrypoint = "tools/gen_skill.py"
 semantics-revision = 2
 targets = ["site/downloads/aiqt/", "site/downloads/aiqt-instructions.txt", "site/downloads/aiqt-skill.zip", "site/downloads/aiqt-skill-1.0.6.zip"]
 closure = ["tools/gen_skill.py", "tools/_adapter_compose.py", "tools/_gen_common.py", "tools/_standards.py", "tools/check_sized_instructions.py", "tools/gen_agents.py", "tools/gen_mappings.py", "tools/gen_rules.py"]
-code-digest = "db225e62d25faf4a98b54e1ff6d0170f4963305302facd77dd8e7da6ab68e77d"
+code-digest = "c14d7370f729497034506400be54cdfc05e262b0f237bbf4ab4b7403c992ce93"
 
 [[renderer]]
 renderer-id = "worker-pack"
