@@ -4392,14 +4392,13 @@ def self_test():
               imported_content_checks_landed())
         # The SAME predicate under controlled versions, rosters, and wirings (every patched name
         # restored in finally; no store fixture runs inside this block). The empty, out-of-roster,
-        # reused-id, unprefixed, collision, multi-id, homes-2-only, omission, and no-generation
-        # vectors assert the False side at a raised support, and each arm is discriminated ON ITS
-        # OWN: deleting the non-empty, membership, prefix, disjointness, or generation-floor
-        # condition from the predicate, one at a time, reds a committed vector in an ordinary
-        # suite run, and so does weakening the prefix test to any id, the membership subset
-        # to an overlap, either of those tests to only the first or only the last roster id
-        # in tuple order, or the collision test to one position or to an all-colliding
-        # roster (the multi-id and collision vectors below).
+        # reused-id, unprefixed and spelling, collision, battery, homes-2-only, omission, and
+        # no-generation vectors assert the False side at a raised support, and each arm is
+        # discriminated ON ITS OWN: deleting the non-empty, membership, prefix, disjointness, or
+        # generation-floor condition from the predicate, one at a time, reds a committed vector
+        # in an ordinary suite run. The generated batteries below also pin the prefix,
+        # collision, and membership tests against narrowing to a single sorted rank or a single
+        # tuple position; their comment states the exact coverage and the set-order residual.
         _icc_prev_ssv = _opf_store.SUPPORTED_SPEC_VERSION
         _icc_prev_homes = _opf_store.SUPPORTED_HOMES
         _icc_prev_roster = IMPORTED_CONTENT_CHECKS
@@ -4439,98 +4438,114 @@ def self_test():
             check("imported-content-gate-reused-id-red-once-supported",
                   not imported_content_checks_landed())
             # ONLY the prefix arm refuses a FRESH non-prefixed id wired into every required
-            # roster (a NEW id, so disjointness passes; wired, so membership passes).
-            _icc_g["IMPORTED_CONTENT_CHECKS"] = ("C-NEWCONTENT",)
+            # roster (a NEW id, so disjointness passes; wired, so membership passes), and likewise
+            # each id below that differs from the exact prefix only in spelling: lower case,
+            # mixed case, a leading space, surrounding spaces, a leading tab. The rows stay red
+            # when the prefix test folds case (cid.upper()) or strips whitespace (cid.strip()).
+            # A trailing-only space keeps the exact prefix ("C-IMPORTED-A " starts with it), so
+            # the prefix arm accepts it and no row here asserts otherwise.
+            _icc_spelled = ("C-NEWCONTENT", "c-imported-A", "C-Imported-A", " C-IMPORTED-A",
+                            " C-IMPORTED-A ", "\tC-IMPORTED-A")
             _icc_g["required_checks"] = (
-                lambda homes, _rc=_icc_prev_rc: _rc(homes) + ("C-NEWCONTENT",))
+                lambda homes, _rc=_icc_prev_rc, _w=_icc_spelled: _rc(homes) + _w)
+            _icc_unpref_one = []
+            for _icc_cid in _icc_spelled:
+                _icc_g["IMPORTED_CONTENT_CHECKS"] = (_icc_cid,)
+                _icc_unpref_one.append(imported_content_checks_landed())
             check("imported-content-gate-unprefixed-new-id-red-once-supported",
-                  not imported_content_checks_landed())
-            # ONLY the disjointness arm refuses a roster holding a C-IMPORTED- prefixed id that
-            # ALSO sits in REQUIRED_CHECKS, and likewise one that ALSO sits in HOMES2_CHECKS,
-            # while EVERY roster id is wired into every required roster, so membership passes.
-            # Three-id rosters place the colliding id in the middle, at both ends, and
-            # reversed: the vectors stay red when the collision test is narrowed to only the
-            # first or only the last roster id, and when it is inverted to refuse only an
-            # all-colliding roster (the two fresh ids never collide). Each patched roster is
-            # staged back between vectors and restored again in finally.
+                  _icc_unpref_one == [False] * 6)
+            # Generated batteries for the multi-id arms (a one-id roster cannot tell all() from
+            # any(), a subset from an overlap, or any-collides from all-collide). _icc_battery
+            # takes literal rows of (sorted rank, offender, three ids) and a stage step that
+            # wires the offender in as the arm under test needs, then evaluates every row in
+            # each of the six tuple orders of _icc_orders (written here, never shared with the
+            # predicate). It reads True only when every evaluation gives the wanted verdict,
+            # every roster is a reordering of its row ids with the offender at the written
+            # rank, the written ranks are exactly the ones stated, and the stated number of
+            # distinct (offender, roster) cases was evaluated.
+            # Membership and collision batteries: ONE id set, C-IMPORTED-A, -B and -C, with the
+            # offender in turn its smallest, middle and largest id, 18 cases each. Every roster
+            # is evaluated three times, once with each of its ids as the sole offender, so a
+            # test narrowed to one or two ids picked from the roster alone (a tuple position, a
+            # sorted rank, the set iteration order) misses the offender in at least one case and
+            # reads True there, under every hash seed; the membership battery also reds an
+            # overlap, the collision batteries a test refusing only an all-colliding roster.
+            # Prefix battery: whether an id carries the prefix belongs to the id, not to the
+            # wiring, so the offender cannot rotate within one set; and a non-prefixed id never
+            # sorts between two C-IMPORTED- ids (any id between them carries the prefix too), so
+            # the offender sits at rank 0 or 2 only, in four sets, 24 cases: red under any(), any
+            # one sorted rank, ranks 0 and 1 only, ranks 1 and 2 only, and any one or two tuple
+            # positions. A test of ranks 0 and 2 only is equivalent to the full prefix test, so
+            # no vector can red it. Residual: a prefix test narrowed to the first id in SET
+            # iteration order escapes this battery under any hash seed that iterates the
+            # offender of every set first in every order, so it is not red under every seed.
+            _icc_orders = ((0, 1, 2), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1), (2, 1, 0))
+            _icc_trio = ("C-IMPORTED-A", "C-IMPORTED-B", "C-IMPORTED-C")
+            _icc_rotated = ((0, "C-IMPORTED-A", _icc_trio), (1, "C-IMPORTED-B", _icc_trio),
+                            (2, "C-IMPORTED-C", _icc_trio))
+
+            def _icc_battery(rows, ranks, stage, count, want):
+                verdicts, cases = [], set()
+                placed = sorted(rank for rank, _, _ in rows) == sorted(ranks)
+                for rank, offender, ids in rows:
+                    stage(offender)
+                    for order in _icc_orders:
+                        roster = tuple(ids[i] for i in order)
+                        _icc_g["IMPORTED_CONTENT_CHECKS"] = roster
+                        verdicts.append(imported_content_checks_landed())
+                        cases.add((offender, roster))
+                        placed = (placed and sorted(roster) == sorted(ids)
+                                  and sorted(roster).index(offender) == rank)
+                return (placed and len(verdicts) == count and len(cases) == count
+                        and verdicts == [want] * count)
+
+            def _icc_unwire(offender):
+                wired = tuple(cid for cid in _icc_trio if cid != offender)
+                _icc_g["required_checks"] = (
+                    lambda homes, _rc=_icc_prev_rc, _w=wired: _rc(homes) + _w)
+
+            def _icc_collide_required(offender):
+                _icc_g["REQUIRED_CHECKS"] = _icc_prev_req + (offender,)
+
+            def _icc_collide_homes2(offender):
+                _icc_g["HOMES2_CHECKS"] = _icc_prev_h2 + (offender,)
+
+            # ONLY the disjointness arm refuses: the offender ALSO sits in REQUIRED_CHECKS, then in
+            # HOMES2_CHECKS, while EVERY id is wired into every required roster, so membership
+            # passes. Each patched roster is staged back after its battery and restored again in
+            # finally.
             _icc_g["required_checks"] = (
-                lambda homes, _rc=_icc_prev_rc: _rc(homes) + ("C-IMPORTED-A", "C-IMPORTED-B"))
-            _icc_g["REQUIRED_CHECKS"] = _icc_prev_req + ("C-IMPORTED-X",)
-            _icc_req_coll = []
-            for _icc_roster in (("C-IMPORTED-A", "C-IMPORTED-X", "C-IMPORTED-B"),
-                                ("C-IMPORTED-B", "C-IMPORTED-X", "C-IMPORTED-A"),
-                                ("C-IMPORTED-X", "C-IMPORTED-A", "C-IMPORTED-B"),
-                                ("C-IMPORTED-A", "C-IMPORTED-B", "C-IMPORTED-X")):
-                _icc_g["IMPORTED_CONTENT_CHECKS"] = _icc_roster
-                _icc_req_coll.append(imported_content_checks_landed())
+                lambda homes, _rc=_icc_prev_rc, _w=_icc_trio: _rc(homes) + _w)
             check("imported-content-gate-required-collision-red-once-supported",
-                  _icc_req_coll == [False, False, False, False])
+                  _icc_battery(_icc_rotated, (0, 1, 2), _icc_collide_required, 18, False))
             _icc_g["REQUIRED_CHECKS"] = _icc_prev_req
-            _icc_g["HOMES2_CHECKS"] = _icc_prev_h2 + ("C-IMPORTED-X",)
-            _icc_g["required_checks"] = (
-                lambda homes, _rc=_icc_prev_rc:
-                _rc(homes) + ("C-IMPORTED-X", "C-IMPORTED-A", "C-IMPORTED-B"))
-            _icc_h2_coll = []
-            for _icc_roster in (("C-IMPORTED-A", "C-IMPORTED-X", "C-IMPORTED-B"),
-                                ("C-IMPORTED-B", "C-IMPORTED-X", "C-IMPORTED-A"),
-                                ("C-IMPORTED-X", "C-IMPORTED-A", "C-IMPORTED-B"),
-                                ("C-IMPORTED-A", "C-IMPORTED-B", "C-IMPORTED-X")):
-                _icc_g["IMPORTED_CONTENT_CHECKS"] = _icc_roster
-                _icc_h2_coll.append(imported_content_checks_landed())
             check("imported-content-gate-homes2-collision-red-once-supported",
-                  _icc_h2_coll == [False, False, False, False])
+                  _icc_battery(_icc_rotated, (0, 1, 2), _icc_collide_homes2, 18, False))
             _icc_g["HOMES2_CHECKS"] = _icc_prev_h2
-            # Multi-id rosters pin NAMED weakenings of the prefix and membership arms (a one-id
-            # roster cannot tell all() from any(), or a subset from an overlap; this is not a
-            # blanket every-id guarantee). Each red roster holds THREE ids with exactly one
-            # offender: a fresh non-prefixed id wired into every required roster for the
-            # prefix arm, an unwired C-IMPORTED- id for the membership arm. The offender sits
-            # in the middle, at both ends, and reversed, so each arm stays red when weakened
-            # to any id, to an overlap, or to only the first or only the last roster id in
-            # tuple order. A weakening to one arbitrary set-order id escapes a roster whenever
-            # the id it reads happens to be the offender, so no single roster reds it under
-            # every hash seed: two more rosters over fresh names repeat the middle placement,
-            # and the three independent rosters red it under each seed the review swept (0
-            # through 6), still not under every seed there is. The same three ids fully wired
-            # read True, so no red comes from the roster size.
+            # ONLY the prefix arm refuses: each set holds one fresh non-prefixed offender, and
+            # every id is wired into every required roster.
             _icc_g["required_checks"] = (
                 lambda homes, _rc=_icc_prev_rc: _rc(homes) + (
-                    "C-IMPORTED-A", "C-IMPORTED-B", "C-NEWCONTENT",
-                    "C-IMPORTED-D", "C-IMPORTED-E", "C-FRESHCONTENT",
-                    "C-IMPORTED-F", "C-IMPORTED-G", "C-PLAINCONTENT"))
-            _icc_unpref = []
-            for _icc_roster in (("C-IMPORTED-A", "C-NEWCONTENT", "C-IMPORTED-B"),
-                                ("C-IMPORTED-B", "C-NEWCONTENT", "C-IMPORTED-A"),
-                                ("C-NEWCONTENT", "C-IMPORTED-A", "C-IMPORTED-B"),
-                                ("C-IMPORTED-A", "C-IMPORTED-B", "C-NEWCONTENT"),
-                                ("C-IMPORTED-D", "C-FRESHCONTENT", "C-IMPORTED-E"),
-                                ("C-IMPORTED-F", "C-PLAINCONTENT", "C-IMPORTED-G")):
-                _icc_g["IMPORTED_CONTENT_CHECKS"] = _icc_roster
-                _icc_unpref.append(imported_content_checks_landed())
+                    "C-AFRESHCONTENT", "C-IMPORTED-A", "C-IMPORTED-B",
+                    "C-BASECONTENT", "C-IMPORTED-D", "C-IMPORTED-E",
+                    "C-IMPORTED-F", "C-IMPORTED-G", "C-NEWCONTENT",
+                    "C-IMPORTED-H", "C-IMPORTED-K", "C-PLAINCONTENT"))
             check("imported-content-gate-multi-id-unprefixed-red-once-supported",
-                  _icc_unpref == [False] * 6)
-            _icc_g["required_checks"] = (
-                lambda homes, _rc=_icc_prev_rc: _rc(homes) + (
-                    "C-IMPORTED-A", "C-IMPORTED-C", "C-IMPORTED-D",
-                    "C-IMPORTED-F", "C-IMPORTED-G", "C-IMPORTED-K"))
-            _icc_partly = []
-            for _icc_roster in (("C-IMPORTED-A", "C-IMPORTED-B", "C-IMPORTED-C"),
-                                ("C-IMPORTED-C", "C-IMPORTED-B", "C-IMPORTED-A"),
-                                ("C-IMPORTED-B", "C-IMPORTED-A", "C-IMPORTED-C"),
-                                ("C-IMPORTED-A", "C-IMPORTED-C", "C-IMPORTED-B"),
-                                ("C-IMPORTED-D", "C-IMPORTED-E", "C-IMPORTED-F"),
-                                ("C-IMPORTED-G", "C-IMPORTED-H", "C-IMPORTED-K")):
-                _icc_g["IMPORTED_CONTENT_CHECKS"] = _icc_roster
-                _icc_partly.append(imported_content_checks_landed())
+                  _icc_battery(
+                      ((0, "C-AFRESHCONTENT", ("C-AFRESHCONTENT", "C-IMPORTED-A", "C-IMPORTED-B")),
+                       (0, "C-BASECONTENT", ("C-BASECONTENT", "C-IMPORTED-D", "C-IMPORTED-E")),
+                       (2, "C-NEWCONTENT", ("C-IMPORTED-F", "C-IMPORTED-G", "C-NEWCONTENT")),
+                       (2, "C-PLAINCONTENT", ("C-IMPORTED-H", "C-IMPORTED-K", "C-PLAINCONTENT"))),
+                      (0, 0, 2, 2), lambda offender: None, 24, False))
+            # ONLY the membership arm refuses: the offender is the one id left unwired.
             check("imported-content-gate-multi-id-partly-wired-red-once-supported",
-                  _icc_partly == [False] * 6)
-            _icc_g["IMPORTED_CONTENT_CHECKS"] = (
-                "C-IMPORTED-A", "C-IMPORTED-B", "C-IMPORTED-C")
+                  _icc_battery(_icc_rotated, (0, 1, 2), _icc_unwire, 18, False))
+            # Green control over the same 18 cases: every id wired and nothing colliding reads
+            # True, so no red above comes from the roster size or the order.
             _icc_g["required_checks"] = (
-                lambda homes, _rc=_icc_prev_rc: _rc(homes) + (
-                    "C-IMPORTED-A", "C-IMPORTED-B", "C-IMPORTED-C"))
+                lambda homes, _rc=_icc_prev_rc, _w=_icc_trio: _rc(homes) + _w)
             check("imported-content-gate-multi-id-wired-green-once-supported",
-                  imported_content_checks_landed())
+                  _icc_battery(_icc_rotated, (0, 1, 2), lambda offender: None, 18, True))
             # Supported, the legitimate activation wiring: a NEW id joined into
             # required_checks(h) for every generation reads True, and the SAME id wired ONLY
             # into the homes-2 roster stays red while generation 1 is supported, because an
