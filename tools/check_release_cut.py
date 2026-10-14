@@ -1845,6 +1845,9 @@ _CLOSE_SWEEP_DISPOSITIONS = (
     ("tools/gen_skill.py", "_open_dir_fd", "TRY", "prev", "fd", 1,
      _CS_P1.format("prev, fd = fd, nxt runs before os.close(prev), so the handler closes nxt (or nothing, once "
                    "an absent component left fd None), never prev")),
+    ("tools/orch_register.py", "_dirs_created", "TRY", "prev", "dir_fd", 1,
+     _CS_P1.format("prev, dir_fd = dir_fd, nxt runs before os.close(prev), so the handler closes nxt, never "
+                   "prev")),
     ("tools/check_release_cut.py", "working_blob", "TRY", "parent", "directory", 1,
      _CS_P1.format("parent, directory = directory, child runs before the close of parent, so the finally closes "
                    "child, never parent")),

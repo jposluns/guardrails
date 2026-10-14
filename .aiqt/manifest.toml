@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "e0eb79c4a86c1bb5853c3e9f87d025d25c4982a02da473ae0a06b1dcef76f3c5"
+tree-sha256 = "14b4ebd8d642aa0322ef1fd4aa141324941df93249f50ef0e6478623a02239fb"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3376,8 +3376,8 @@ sha256 = "e4fbc6cccdfb032cd5c0f6fecba4fdde40e4ed510435643b2bcba573151b6616"
 
 [[sources]]
 path = "tools/check_mistakes_register.py"
-bytes = 94426
-sha256 = "0b3862a6dc4a4d0906eb54dbc7d3526052091843cedfb82ee599b9eb23c33663"
+bytes = 95221
+sha256 = "9f9424f0098bff8fc14d0ba695e44144f94d445360bcce140421cc4890ae666e"
 
 [[sources]]
 path = "tools/check_msg_leaks.py"
@@ -3446,8 +3446,8 @@ sha256 = "6bc8f8e89f8983d0d418e35dfaa96eda8aec0aa7274162dc61748906fcb695ba"
 
 [[sources]]
 path = "tools/check_release_cut.py"
-bytes = 156410
-sha256 = "81b082419ed38e94edb9a8d748b97eeeef31da11fa9b095ecf2468b19b18411e"
+bytes = 156625
+sha256 = "527fd4dd7e5e1904c8c505b1132df37c351fd6eaee37867c88d7a7ca3c5378c6"
 
 [[sources]]
 path = "tools/check_release_delta.py"
@@ -3681,8 +3681,8 @@ sha256 = "26b2e951fe7c452e19c919e04bbc2cf3854eefd085fe3f10399678b84b4d5b9a"
 
 [[sources]]
 path = "tools/orch_register.py"
-bytes = 95835
-sha256 = "8e4703258cf07974c3f8e10164eb214ad097b5edd91f297f4ed211c44cdcc125"
+bytes = 107357
+sha256 = "97a99adaa7062606dd3e2154b0e695187ecf85e455c8fc12559a5e1fe62503c9"
 
 [[sources]]
 path = "tools/pin.py"

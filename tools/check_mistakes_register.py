@@ -43,7 +43,7 @@ validation root from this gate's own installed location (gate_root: the nearest 
 requires git itself to confirm that root as a repository toplevel (confirmed_root: rev-parse
 --show-toplevel, realpath-compared) BEFORE any registry or register is read: an unresolvable,
 uninspectable or unconfirmed root is cannot-evaluate (exit 2), never a cwd fallback and never a
-trusted marker. Every git subprocess this gate runs (the root probe and the authority reads:
+trusted marker. Every PRODUCTION git call this gate makes (the root probe and the authority reads:
 ls-files, merge-base, show, cat-file) runs under git_authority_env(), with EVERY GIT_-prefixed
 environment variable removed (GIT_DIR, GIT_WORK_TREE, GIT_COMMON_DIR, GIT_INDEX_FILE,
 GIT_OBJECT_DIRECTORY, GIT_ALTERNATE_OBJECT_DIRECTORIES, GIT_CEILING_DIRECTORIES,
@@ -51,10 +51,14 @@ GIT_DISCOVERY_ACROSS_FILESYSTEM, GIT_CONFIG*, GIT_NAMESPACE included), so a call
 environment never redirects discovery or an authority read, and ONLY the config-ISOLATION pins
 re-applied, each at the single subtractive value the self-test scrub sets (GIT_CONFIG_NOSYSTEM at
 "1", GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM at os.devnull), so a scrubbed self-test's authority
-reads keep reading NO system or global git configuration while a pin at any other value (a config
-FILE of the caller's choosing can carry core.worktree or safe.directory) stays removed; HOME and
+reads keep reading NO system or global git configuration while a pin at any other value stays
+removed as DEFENCE IN DEPTH (a caller-valued pin names a config file of the caller's choosing;
+HOME and XDG_CONFIG_HOME stay, so a caller who controls the environment can already name a
+global config file, and the drop narrows that surface rather than closing a boundary); HOME and
 the on-disk git configuration are kept (the live reads need the caller's safe.directory
-trust). With a confirmed root but no
+trust). The self-test's own FIXTURE SETUP git calls (init, add, commit) run under the scrubbed
+fixture environment, which carries the same config-isolation pins, not under
+git_authority_env(). With a confirmed root but no
 registry, or no declared
 register path, the live leg is NOT APPLICABLE and the self-test carries the assurance in CI; registry
 PRESENCE is an explicit lstat whose only absence answer is ENOENT (a dangling or uninspectable
@@ -117,16 +121,18 @@ def _pairs_without_duplicates(pairs):
 
 def git_authority_env():
     """A copy of the CURRENT process environment with every GIT_-prefixed variable removed and
-    ONLY the config-ISOLATION pins re-applied, for EVERY git subprocess this gate and the
-    appender run (the root-confirmation probe and the authority reads: ls-files, merge-base,
-    show, cat-file, rev-parse). A caller-supplied GIT_DIR, GIT_WORK_TREE, GIT_COMMON_DIR,
+    ONLY the config-ISOLATION pins re-applied, for every PRODUCTION git call this gate and
+    the appender make (the root-confirmation probe and the authority reads: ls-files,
+    merge-base, show, cat-file, rev-parse); the self-tests' fixture setup calls instead
+    inherit the scrubbed fixture environment, which carries the same pins. A
+    caller-supplied GIT_DIR, GIT_WORK_TREE, GIT_COMMON_DIR,
     GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY, GIT_ALTERNATE_OBJECT_DIRECTORIES,
     GIT_CEILING_DIRECTORIES, GIT_DISCOVERY_ACROSS_FILESYSTEM, GIT_CONFIG* or GIT_NAMESPACE
     would redirect git's repository discovery or its object, ref and index reads to a
     repository of the caller's choosing (git exports several of these to hook children; an
     environment-supplied config source, GIT_CONFIG_PARAMETERS or the GIT_CONFIG_COUNT/KEY/VALUE
-    family or a config FILE named by a caller-valued GIT_CONFIG_GLOBAL or GIT_CONFIG_SYSTEM,
-    can carry core.worktree or safe.directory), so an unscrubbed probe could confirm a root
+    family included, can carry configuration such as safe.directory), so an unscrubbed
+    probe could confirm a root
     that is only a marker and an unscrubbed authority read could consult the wrong repository.
     The drop is the allowlist stance the pack's other scrubs take: EVERY GIT_-prefixed
     variable, not an enumerated family. THREE pins are then re-applied, each ONLY at the exact
@@ -136,7 +142,10 @@ def git_authority_env():
     read, and its worst effect is a lost trust entry, on which git fails and this gate refuses
     (fail closed). The pins are GIT_CONFIG_NOSYSTEM at "1" (skip the system config), and
     GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM at os.devnull (an EMPTY config in place of the
-    global and system files); a pin at ANY other value is dropped with the rest. This keeps a
+    global and system files); a pin at ANY other value is dropped with the rest, as DEFENCE
+    IN DEPTH rather than a boundary (HOME and XDG_CONFIG_HOME are KEPT, so a caller who
+    controls the environment can already name a global config file; the drop narrows that
+    surface). This keeps a
     scrubbed self-test's config isolation intact across the probe and the authority reads (the
     fixture-environment suite's system lane plants a system git config and fails a member
     whose git call sheds the pins). HOME, XDG_CONFIG_HOME and the on-disk git configuration
@@ -1550,10 +1559,12 @@ def self_test():
           "or an empty .git directory refuses with exit 2, a caller GIT_DIR and GIT_DIR plus "
           "GIT_WORK_TREE included, and writes no anchor for a declared external register, "
           "while a confirmed root still answers NOT APPLICABLE or bootstraps its anchor); "
-          "every git subprocess runs under the authority environment (a caller GIT_INDEX_FILE "
-          "never flips the tracked decision, every GIT_-prefixed variable is dropped, and only "
-          "the scrub's exact-valued config-isolation pins survive, a pin at a caller's own "
-          "value included among the dropped); the shared marker walk selects the nearest "
+          "every PRODUCTION git call (the root probe and the authority reads) runs under the "
+          "authority environment (a caller GIT_INDEX_FILE never flips the tracked decision, "
+          "every GIT_-prefixed variable is dropped, and only the scrub's exact-valued "
+          "config-isolation pins survive, a pin at a caller's own value included among the "
+          "dropped; the self-test's fixture setup calls inherit the scrubbed fixture "
+          "environment instead); the shared marker walk selects the nearest "
           ".git entry whatever its type (a dangling .git symlink is selected and refused, an "
           "uninspectable marker is cannot-evaluate, never a walk past it, and a nested empty "
           ".git directory is refused by the realpath comparison); a landed check_ref whose "

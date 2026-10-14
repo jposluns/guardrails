@@ -11,8 +11,8 @@
       The appender validates in the register gate's own context: the validation root is the
       nearest enclosing git repository of this appender's own installed location, never the
       repository that merely contains the register and never a root derived from where this
-      invocation runs (an appender installed outside any git repository refuses with exit 2;
-      it does not take the cwd fallback the gate's live leg has); the id family comes from
+      invocation runs (an appender installed outside any git repository refuses with exit 2);
+      the id family comes from
       that root's registry declaration (.aiqt/orchestration.local.json or
       .aiqt/orchestration.json) that names the register path, and two declarations resolving to
       the same register path (or to one file through hard links) are refused as ambiguous. Before anything is written, the register
@@ -46,10 +46,11 @@
       that cannot be acquired) exits 2; each
       refusal names its reasons on stderr and leaves every row other appenders wrote
       byte-identical (a refusal taken under the acquired lock after the exclusive first-row
-      creation removes the file and the directory components this call itself created, each
-      component recorded only after its own mkdir succeeded and removed only after its
-      identity, st_dev and st_ino, is re-confirmed, with an uninspectable ancestor refusing
-      before any mkdir, but only
+      creation removes the file and the directory components this call observed as its own
+      (each component created with mkdir relative to an open descriptor on its parent
+      directory, recorded only after a no-follow identity stat relative to that same
+      descriptor, and removed only after its identity, st_dev and st_ino, is re-confirmed),
+      with an uninspectable ancestor refusing before any mkdir, but only
       while that file is still this call's own empty file; a lock that cannot be acquired on
       the created file leaves that empty file in place, because removal without the lock could
       race a cooperating appender; anything else is left in place and the refusal says so).
@@ -67,7 +68,13 @@
       re-check catches one that lands between the validation and the write, any other is caught
       later by the mistakes-register gate, not here. A second RESIDUAL: the hard-link conflict
       check on the registry declarations is point-in-time; a hard link created after that
-      check is not caught by this appender and is left to the register gate.
+      check is not caught by this appender and is left to the register gate. A third
+      RESIDUAL: POSIX offers no race-free proof that the directory found at a name is the one
+      mkdir just made, so the entry a created component's no-follow identity read-back finds
+      at the name is recorded as this call's own; a directory moved into that name between
+      the mkdir and the read-back can therefore be recorded, and the cleanup's worst case is
+      the removal of that one EMPTY directory (the sweep removes with rmdir only), never a
+      non-empty directory and never a file.
   orch_register.py project --register PATH
       Emit an AEI v1 enumeration of the rows whose LATEST status is proposed or accepted and not yet
       landed, as granted open items, so the stop guard itself enforces mistake-to-guardrail
@@ -130,9 +137,9 @@ def _gate_root():
     answer is ENOENT, so a dangling .git symlink is SELECTED, never walked past, and left for
     the git confirmation to refuse, and any other inspection failure raises CannotEvaluate,
     never reads as absence). The gate validates a DECLARED register against THIS root, not
-    against the repository that happens to contain the register. Unlike the gate's historic
-    live leg, this resolver has NO cwd fallback: an appender installed outside any git
-    repository returns None and cmd_append refuses with exit 2, so a validation root is never
+    against the repository that happens to contain the register. This resolver has NO cwd
+    fallback: an appender installed outside any git repository returns None and cmd_append
+    refuses with exit 2, so a validation root is never
     derived from where the invocation runs. The returned candidate is only a MARKER until
     cmd_append requires git itself to confirm it (check_mistakes_register.confirmed_root,
     under a scrubbed git environment), so a marker that is not a repository is refused, never
@@ -226,9 +233,11 @@ def _rolled_back(fd, size):
 
 
 def _made_dirs_swept(made_dirs):
-    """Remove the directory components THIS CALL created, innermost first: each entry is
-    (path, st_dev, st_ino), recorded by _dirs_created only AFTER its own mkdir succeeded, and
-    each is removed only after os.lstat re-confirms that recorded identity and a directory
+    """Remove the directory components THIS CALL observed as its own, innermost first: each
+    entry is (path, st_dev, st_ino), recorded by _dirs_created only after its own mkdir
+    succeeded and its identity was read back with a no-follow stat relative to its parent's
+    open descriptor, and each is removed only after os.lstat re-confirms that recorded
+    identity and a directory
     mode, and only while empty. A component that is already absent (ENOENT) does not stop the
     sweep, because an OUTER component may still have been created. An entry this sweep cannot
     prove to be the created component (an inspection failure, a changed identity, a
@@ -259,14 +268,25 @@ def _made_dirs_swept(made_dirs):
 
 def _dirs_created(parent):
     """Create the register directory PARENT's missing components and return the components
-    THIS CALL created, innermost first, each as (path, st_dev, st_ino) recorded only AFTER its
-    own os.mkdir succeeded and its identity was read back, so a later cleanup removes exactly
-    what this call made and nothing else (never a pre-existing directory). The absence walk
-    inspects each ancestor through the shared entry_state (ENOENT is the only absence), so an
-    UNINSPECTABLE ancestor refuses BEFORE any mkdir runs. A component that appears between the
-    walk and its mkdir (FileExistsError) is another actor's directory: used, never recorded.
-    Raises CannotEvaluate, with the already-created components swept and the sweep's outcome
-    named, when a component cannot be created or its identity cannot be read back."""
+    this call OBSERVED as its own, innermost first, each as (path, st_dev, st_ino). Each
+    component is created with os.mkdir RELATIVE to an open descriptor on its parent directory
+    and its identity is read back with a no-follow os.stat relative to that SAME descriptor,
+    never by re-resolving the string path, so an outer component swapped aside after its
+    creation cannot substitute another tree's entry for the identity read-back. The deepest
+    EXISTING ancestor is opened O_RDONLY (a parent that is searchable but not readable
+    refuses here rather than creating blind) and the walk descends O_NOFOLLOW, one component
+    at a time. The absence walk inspects each ancestor through the shared entry_state (ENOENT
+    is the only absence), so an UNINSPECTABLE ancestor refuses BEFORE any mkdir runs. A
+    component that appears between the walk and its mkdir (FileExistsError) is another
+    actor's directory: used for the descent, never recorded. DISCLOSED RESIDUAL: POSIX offers
+    no race-free proof that the directory found at a name is the one mkdir just made, so the
+    entry the no-follow stat finds at the created name is recorded as this call's own; a
+    directory moved into that name between the mkdir and the stat is therefore recorded, and
+    the later sweep's worst case is the removal of that one EMPTY directory (rmdir only,
+    after the identity re-check), never a non-empty directory and never a file. Raises
+    CannotEvaluate, with the already-recorded components swept and the sweep's outcome named,
+    when the existing ancestor or a component cannot be opened, a component cannot be
+    created, or its identity cannot be read back."""
     missing = []
     anc = parent
     while anc != anc.parent:
@@ -275,20 +295,44 @@ def _dirs_created(parent):
         missing.append(anc)
         anc = anc.parent
     made = []
-    for comp in reversed(missing):
-        try:
-            os.mkdir(str(comp))
-        except FileExistsError:
-            continue
-        except OSError as exc:
-            raise CannotEvaluate("{}{}".format(exc, _made_dirs_note(made)))
-        try:
-            comp_st = os.lstat(str(comp))
-        except OSError as exc:
-            raise CannotEvaluate("the created directory component {} cannot be read back "
-                                 "({}) and was left in place{}".format(
-                                     comp, exc, _made_dirs_note(made)))
-        made.insert(0, (comp, comp_st.st_dev, comp_st.st_ino))
+    if not missing:
+        return made
+    try:
+        dir_fd = os.open(str(missing[-1].parent), os.O_RDONLY | os.O_DIRECTORY)
+    except OSError as exc:
+        raise CannotEvaluate("the existing ancestor {} cannot be opened to create the "
+                             "register directory under it ({})".format(
+                                 missing[-1].parent, exc))
+    try:
+        for comp in reversed(missing):
+            try:
+                os.mkdir(comp.name, dir_fd=dir_fd)
+            except FileExistsError:
+                pass  # another actor's directory: used for the descent, never recorded
+            except OSError as exc:
+                raise CannotEvaluate("{}{}".format(exc, _made_dirs_note(made)))
+            else:
+                try:
+                    comp_st = os.stat(comp.name, dir_fd=dir_fd, follow_symlinks=False)
+                except OSError as exc:
+                    raise CannotEvaluate("the created directory component {} cannot be read "
+                                         "back ({}) and was left in place{}".format(
+                                             comp, exc, _made_dirs_note(made)))
+                made.insert(0, (comp, comp_st.st_dev, comp_st.st_ino))
+            if comp != missing[0]:
+                try:
+                    nxt = os.open(comp.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                  dir_fd=dir_fd)
+                except OSError as exc:
+                    raise CannotEvaluate("the directory component {} cannot be opened to "
+                                         "create its children ({}){}".format(
+                                             comp, exc, _made_dirs_note(made)))
+                prev, dir_fd = dir_fd, nxt  # held first: a raising close cannot strand nxt
+                os.close(prev)
+    except BaseException:
+        os.close(dir_fd)
+        raise
+    os.close(dir_fd)
     return made
 
 
@@ -472,10 +516,12 @@ def cmd_append(a):
             # First row: the register was absent at the read, so create it exclusively; a file
             # that appeared since is never appended to blindly (O_EXCL refuses it, symlinks
             # included). A row refused by the validation never reaches this point, so its
-            # directory stays absent; the directory components this call itself creates are
-            # recorded by _dirs_created (identity read back after each successful mkdir; an
-            # uninspectable ancestor refuses before any mkdir) so a refusal past this point
-            # removes exactly them, never a pre-existing directory.
+            # directory stays absent; the directory components this call creates are
+            # recorded by _dirs_created (identity read back relative to the parent descriptor
+            # after each successful mkdir; an uninspectable ancestor refuses before any
+            # mkdir) so a refusal past this point removes only what this call observed as
+            # its own, bounded by _dirs_created's one disclosed residual (an empty directory
+            # moved into a created name between the mkdir and its identity read-back).
             try:
                 made_dirs = _dirs_created(path.parent)
             except CannotEvaluate as exc:
@@ -595,7 +641,7 @@ def self_test():
     failures = []
     # The appender resolves the register gate's own root (production: _gate_root(), the
     # nearest .git entry above the appender's own installed location, git-confirmed by
-    # _root_validated and with NO cwd fallback, unlike the gate live leg's repo_root());
+    # _root_validated and with NO cwd fallback);
     # each fixture stands in its own repository, so the resolution is routed at the fixture
     # root under test and restored in the finally.
     gate_root = {"root": None}
@@ -1380,10 +1426,10 @@ def self_test():
         excl_reg = repo / "mk2" / "deep" / "excl.jsonl"
         real_os_open = os.open
 
-        def refusing_open(p, flags, *oargs):
+        def refusing_open(p, flags, *oargs, **okw):
             if str(p) == str(excl_reg) and (flags & os.O_EXCL):
                 raise OSError(13, "injected exclusive-creation failure")
-            return real_os_open(p, flags, *oargs)
+            return real_os_open(p, flags, *oargs, **okw)
 
         os.open = refusing_open
         try:
@@ -1570,19 +1616,154 @@ def self_test():
             failures.append("uninspectable-ancestor-refuses: a refused walk still created a "
                             "component")
         # the sweep removes a component only while its recorded identity still matches: an
-        # entry REPLACED after its creation (same name, different entry) is left in place and
-        # named, never removed
+        # entry REPLACED by ANOTHER EMPTY DIRECTORY (same name, demonstrably different
+        # identity: the replacement is created BESIDE the original, so the two inodes exist
+        # at once, then renamed into the name) is left in place and NAMED, never removed,
+        # so the device-and-inode comparison itself, not the directory type check alone,
+        # carries this vector
         swap_dir = repo / "swapdir"
         swap_dir.mkdir()
         swap_st = os.lstat(str(swap_dir))
+        swap_other = repo / "swapdir-other"
+        swap_other.mkdir()
+        other_st = os.lstat(str(swap_other))
         os.rmdir(str(swap_dir))
-        swap_dir.write_text("not a directory", encoding="utf-8")
+        os.rename(str(swap_other), str(swap_dir))
         left, skipped = _made_dirs_swept([(swap_dir, swap_st.st_dev, swap_st.st_ino)])
-        if not left or "no longer the directory this call created" not in left[0] \
-                or skipped or entry_state(swap_dir) is None:
-            failures.append("swept-identity: a replaced component must be left in place and "
-                            "named, got left={} skipped={}".format(left, skipped))
-        swap_dir.unlink()
+        swap_after = entry_state(swap_dir)
+        if (not left or "no longer the directory this call created" not in left[0]
+                or str(swap_dir) not in left[0] or skipped or swap_after is None
+                or not stat.S_ISDIR(swap_after.st_mode)
+                or (swap_after.st_dev, swap_after.st_ino)
+                != (other_st.st_dev, other_st.st_ino)):
+            failures.append("swept-identity: a replacing empty directory must survive and "
+                            "be named, got left={} skipped={}".format(left, skipped))
+        os.rmdir(str(swap_dir))
+        # a component replaced by a NON-DIRECTORY (a regular file) is the separate TYPE
+        # leg of the same re-check: left in place and named, never removed
+        type_dir = repo / "typedir"
+        type_dir.mkdir()
+        type_st = os.lstat(str(type_dir))
+        os.rmdir(str(type_dir))
+        type_dir.write_text("not a directory", encoding="utf-8")
+        left, skipped = _made_dirs_swept([(type_dir, type_st.st_dev, type_st.st_ino)])
+        if (not left or "no longer the directory this call created" not in left[0]
+                or skipped or entry_state(type_dir) is None):
+            failures.append("swept-type: a non-directory at a made component's name must "
+                            "be left in place and named, got left={} skipped={}".format(
+                                left, skipped))
+        type_dir.unlink()
+        # an already-absent INNER component does not stop the sweep: the OUTER component
+        # is still removed and the absent one is reported as skipped (red when the ENOENT
+        # branch stops the sweep instead of continuing)
+        sweep_outer = repo / "sweepout"
+        sweep_outer.mkdir()
+        sweep_outer_st = os.lstat(str(sweep_outer))
+        sweep_inner = sweep_outer / "inner"
+        sweep_inner.mkdir()
+        sweep_inner_st = os.lstat(str(sweep_inner))
+        os.rmdir(str(sweep_inner))
+        left, skipped = _made_dirs_swept(
+            [(sweep_inner, sweep_inner_st.st_dev, sweep_inner_st.st_ino),
+             (sweep_outer, sweep_outer_st.st_dev, sweep_outer_st.st_ino)])
+        if left or skipped != [str(sweep_inner)] or entry_state(sweep_outer) is not None:
+            failures.append("absent-component-sweep-continues: the outer component must "
+                            "still be removed and the absent inner one reported skipped, "
+                            "got left={} skipped={}".format(left, skipped))
+        # the identity read-back is RELATIVE to the created component's parent descriptor:
+        # an OUTER component swapped aside after its creation (renamed away, a planted
+        # tree moved into its pathname) can no longer substitute the planted tree's entry
+        # for the identity, so the sweep leaves the planted entry in place and NAMED and
+        # removes nothing another actor made (red under a string-path identity read-back,
+        # which records the planted entry and removes it)
+        planted = repo / "mk7-planted"
+        (planted / "deep").mkdir(parents=True)
+        planted_deep_st = os.lstat(str(planted / "deep"))
+        ancswap = {"fired": False}
+
+        def ancestor_swapping_mkdir(mp, *margs, **mkw):
+            out = real_os_mkdir(mp, *margs, **mkw)
+            if not ancswap["fired"] and os.fspath(mp).endswith("deep"):
+                ancswap["fired"] = True
+                os.rename(str(repo / "mk7"), str(repo / "mk7-aside"))
+                os.rename(str(planted), str(repo / "mk7"))
+            return out
+
+        os.mkdir = ancestor_swapping_mkdir
+        try:
+            anc_made = _dirs_created(repo / "mk7" / "deep")
+        finally:
+            os.mkdir = real_os_mkdir
+        left, skipped = _made_dirs_swept(anc_made)
+        planted_deep = entry_state(repo / "mk7" / "deep")
+        if (len(anc_made) != 2 or skipped or len(left) != 2
+                or "no longer the directory this call created" not in left[0]
+                or planted_deep is None
+                or (planted_deep.st_dev, planted_deep.st_ino)
+                != (planted_deep_st.st_dev, planted_deep_st.st_ino)
+                or entry_state(repo / "mk7-aside" / "deep") is None):
+            failures.append("made-dir-ancestor-swap: the planted tree must be left in "
+                            "place and named, never removed, got made={} left={} "
+                            "skipped={}".format(anc_made, left, skipped))
+        # the DISCLOSED RESIDUAL, pinned: a directory moved into a created component's
+        # NAME between the mkdir and the identity read-back (same parent, so the parent
+        # descriptor cannot tell the two apart) is recorded as made, and the worst case is
+        # the removal of exactly that one EMPTY directory; the directory this call
+        # actually created survives under its displaced name
+        intruder = repo / "mk8-intruder"
+        intruder.mkdir()
+        intruder_st = os.lstat(str(intruder))
+        nameswap = {"fired": False}
+
+        def name_swapping_mkdir(mp, *margs, **mkw):
+            out = real_os_mkdir(mp, *margs, **mkw)
+            if not nameswap["fired"] and os.fspath(mp).endswith("mk8"):
+                nameswap["fired"] = True
+                os.rename(str(repo / "mk8"), str(repo / "mk8-displaced"))
+                os.rename(str(intruder), str(repo / "mk8"))
+            return out
+
+        os.mkdir = name_swapping_mkdir
+        try:
+            resid_made = _dirs_created(repo / "mk8")
+        finally:
+            os.mkdir = real_os_mkdir
+        left, skipped = _made_dirs_swept(resid_made)
+        displaced_st = entry_state(repo / "mk8-displaced")
+        if (resid_made != [(repo / "mk8", intruder_st.st_dev, intruder_st.st_ino)]
+                or left or skipped or entry_state(repo / "mk8") is not None
+                or displaced_st is None or not stat.S_ISDIR(displaced_st.st_mode)):
+            failures.append("name-swap-residual: the moved-in empty directory is recorded "
+                            "and removed (the disclosed worst case) and the displaced "
+                            "created directory survives, got made={} left={} "
+                            "skipped={}".format(resid_made, left, skipped))
+        # a mkdir RACED by another actor (FileExistsError: the name appears between the
+        # walk and this call's own mkdir) is used, never recorded: the sweep removes the
+        # component this call did make and the raced directory survives untouched
+        raced = {"fired": False}
+
+        def racing_mkdir(mp, *margs, **mkw):
+            if not raced["fired"] and os.fspath(mp).endswith("mk6"):
+                raced["fired"] = True
+                real_os_mkdir(mp, *margs, **mkw)  # another actor wins the race
+            return real_os_mkdir(mp, *margs, **mkw)
+
+        os.mkdir = racing_mkdir
+        try:
+            raced_made = _dirs_created(repo / "mk6" / "deep")
+        finally:
+            os.mkdir = real_os_mkdir
+        raced_before = os.lstat(str(repo / "mk6"))
+        left, skipped = _made_dirs_swept(raced_made)
+        raced_after = entry_state(repo / "mk6")
+        if ([m[0] for m in raced_made] != [repo / "mk6" / "deep"] or left or skipped
+                or entry_state(repo / "mk6" / "deep") is not None or raced_after is None
+                or (raced_after.st_dev, raced_after.st_ino)
+                != (raced_before.st_dev, raced_before.st_ino)):
+            failures.append("raced-mkdir-never-recorded: only the component this call made "
+                            "may be recorded or removed, got made={} left={} "
+                            "skipped={}".format(raced_made, left, skipped))
+        os.rmdir(str(repo / "mk6"))
         # an anchor lstat failure that is NOT absence (EIO here) is cannot-evaluate, never the
         # missing-anchor allowance and never an append past an uninspectable authority
         declare(mistakes_register="anchio.jsonl")
@@ -1651,11 +1832,19 @@ def self_test():
           "back to the validated size, a failed rollback disclosed with exactly the seed plus "
           "the injected partial bytes remaining) are refused as cannot-evaluate (exit 2); a "
           "refusal under the acquired lock after the first-row creation removes the created "
-          "file and the directory components the call made and names the removal (each "
-          "component recorded only after its own mkdir succeeded and removed only after its "
-          "identity is re-confirmed, a replaced entry left in place and named; the sweep "
-          "does not stop at an already-absent component, what cannot be removed is named "
-          "and left in place, and a created file already gone at the cleanup is said to be "
+          "file and the directory components the call observed as its own and names the "
+          "removal (each component created and identity-read relative to an open descriptor "
+          "on its parent and removed only after that identity is re-confirmed; an entry "
+          "replaced by another empty directory, or by a non-directory, is left in place and "
+          "named; a mkdir raced by another actor is used, never recorded, and survives the "
+          "sweep; an outer component swapped aside cannot substitute a planted tree's entry "
+          "for the identity read-back, so the planted entry is left in place and named; the "
+          "disclosed residual is pinned by a vector: a directory moved into a created name "
+          "between the mkdir and the identity read-back is recorded, its removal bounded to "
+          "that one empty directory, with the displaced created directory surviving; the "
+          "sweep does not stop at an already-absent component, the outer component is still "
+          "removed and the absent one reported skipped, what cannot be removed is named and "
+          "left in place, and a created file already gone at the cleanup is said to be "
           "already gone); every "
           "refusal leaves the rows other appenders wrote byte-identical (the disclosed "
           "failed-rollback residual excepted); the register validates in the gate root's own "
