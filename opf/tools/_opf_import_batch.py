@@ -654,7 +654,7 @@ def parse_batch(data):
         return BatchValidation(CANNOT_EVALUATE, ["import batch is not UTF-8 (fail-closed): {}".format(exc)])
     try:
         doc = tomllib.loads(text)
-    except (ValueError, RecursionError) as exc:
+    except (ValueError, RecursionError, MemoryError) as exc:
         # TOMLDecodeError is a ValueError; the bare ValueError also covers tomllib refusing an
         # over-long integer literal at CPython's digit limit, graded the same way (fail-closed).
         return BatchValidation(CANNOT_EVALUATE, ["import batch is not parseable TOML (fail-closed): "
