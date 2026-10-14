@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "b6934d563540d12ed6a383a84904a8f5d45946cc11c3276821bcc911217fa8a0"
+tree-sha256 = "f46882828d15333e99dd55cd06c82c755a733f30a5b600639c64dd6996743f84"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3581,8 +3581,8 @@ sha256 = "45dc4e2a261c1d8036a23a74ba149ca92220c665d45a61dd060f464e0238f464"
 
 [[sources]]
 path = "tools/gen_hooks.py"
-bytes = 145680
-sha256 = "4f77f4ce73b504f398775c49f4a70b3475527716163a20f82545e56993b39cdf"
+bytes = 159550
+sha256 = "0d21d568ec3926a5b4e784fa8de581f09be8654c600072f0e87326e93308a71e"
 
 [[sources]]
 path = "tools/gen_install.py"

@@ -507,11 +507,17 @@ def main():
 #  26. the same discipline for a KeyboardInterrupt raised while the child is alive,
 #  27. a SECONDARY failure inside the staged cleanup (a persistent drain error, a kill error, an
 #      exhausted bounded reap, a close error on either pipe, a non-timeout wait failure, a
-#      close failure whose own __str__ or __repr__ raises) never replaces the original
+#      non-timeout drain error FOLLOWED by a non-timeout wait failure, a close failure whose
+#      own __str__ or __repr__ raises or whose render returns a raising str subclass, a
+#      leftover-removal error whose own render raises) never replaces the original
 #      exception: the original still re-raises, the secondary failure is a NAMED failure entry
-#      (rendered through a guarded helper with a constant fallback), the child is reaped (or
-#      its unreaped state named) with the child TMPDIR removed, and a child whose exit status
-#      was already collected is never signalled again,
+#      (rendered through a guarded helper that returns an exact built-in str, with a constant
+#      fallback), the child is reaped (or its unreaped state named) with the child TMPDIR
+#      removed, a child whose exit status was already collected is not signalled again by the
+#      staged cleanup (the returncode gate NARROWS, not eliminates, the reused-pid hazard),
+#      and the case's own rescue of a deliberately-unreaped child is verified: a rescue kill
+#      or wait failure is a named entry, and a child still uncollected after the rescue is a
+#      named failure, so the case can never PASS with a live child,
 #  28. _rmtree_verified never follows a symlink out of the tree it removes (a directory symlink
 #      inside the tree pointing at an OUTSIDE directory leaves that directory's mode unchanged;
 #      the symlink is unlinked, never chmodded through), and treats only a confirmed absence
@@ -519,6 +525,8 @@ def main():
 #      failure, never a silent success. A ROOT that is a symlink is never walked, also
 #      when its unlink fails: the retry walk requires an lstat-confirmed directory, and an
 #      unremovable root link is a named failure with the outside tree untouched.
+#      Confinement holds up to the disclosed replacement race between an entry's lstat
+#      classification and the chmod or walk that follows (stated at the helper).
 
 _APEX = """---
 corpus-id: apex01
@@ -651,9 +659,13 @@ class _FixtureUnavailable(Exception):
 # for the child (the Linux prctl PR_SET_PDEATHSIG) is a possible LATER layer for that residue;
 # it is not built here.
 # An interruption of the suite DURING a spawn, before the child handle is stored, is the
-# same residual shape: that child keeps running until its own code exits or an outer
-# process-group kill ends it (disclosed at _run_bounded; the earlier mask and
-# handle-publication mechanisms for that window were removed as unprovable).
+# same residual shape, with one sharpening: a TOP-LEVEL child runs in its OWN session and
+# process group, so a kill of this suite's process group, or a terminal interrupt, does
+# NOT reach it; it survives until it exits by itself (a BLOCKED child need never exit) or
+# until a supervisor signals its session or its pid. A NESTED suite's children share
+# their driver's process group, so an outer group kill reaches those. (Disclosed at
+# _run_bounded; the earlier mask and handle-publication mechanisms for that window were
+# removed as unprovable.)
 
 
 # The DEFAULT hard bound on a self-test child interpreter: a healthy child finishes in well under a
@@ -679,9 +691,9 @@ _REAP_WAIT_BOUND = 10
 
 
 def self_test_main(_nested=False):
-    # _nested=True is passed ONLY by the code text of the case-22 and case-23 child drivers, so a
-    # nested suite skips cases 22 to 29 instead of recursing; it is an explicit internal argument,
-    # never an inherited environment variable.
+    # _nested=True is passed ONLY by the code text of the case-22, case-23 and case-29 child
+    # drivers, so a nested suite skips cases 22 to 29 instead of recursing; it is an explicit
+    # internal argument, never an inherited environment variable.
     import io
     import shutil
     import signal
@@ -716,18 +728,23 @@ def self_test_main(_nested=False):
         # cleanup handler would replace the original exception or skip the later
         # stages. A failing render falls back to the repr, a failing repr to the type
         # name, and a failing type-name render to a constant, so building a diagnostic
-        # can never itself fail (case 27 holds this with vectors whose __str__ and
-        # __repr__ raise).
+        # can never itself fail. The result is ALWAYS an exact built-in str:
+        # str.__str__ copies a subclass's character data without calling any of the
+        # subclass's own methods, so a render that legally returns a str SUBCLASS
+        # whose own __str__ or __format__ raises cannot escape later, when the
+        # diagnostic that embeds this text is itself formatted (case 27 holds this
+        # with vectors whose __str__ and __repr__ raise and one whose render returns
+        # exactly such a subclass).
         try:
-            return str(exc)
+            return str.__str__(str(exc))
         except BaseException:
             pass
         try:
-            return repr(exc)
+            return str.__str__(repr(exc))
         except BaseException:
             pass
         try:
-            return "<unrenderable {} instance>".format(type(exc).__name__)
+            return str.__str__("<unrenderable {} instance>".format(type(exc).__name__))
         except BaseException:
             return "<unrenderable exception>"
 
@@ -876,9 +893,13 @@ def self_test_main(_nested=False):
         # later stages; only one raised inside a guarded stage is contained. DISCLOSED,
         # not covered, the spawn window too: an interruption delivered DURING the spawn,
         # before the child handle is stored in proc, can leave that child running with
-        # no handle for the staged cleanup to kill; such a child runs until its own code
-        # exits (every fixture here sleeps at most 40s) or until an outer kill of this
-        # suite's process group ends it. Earlier rounds tried to close that window with
+        # no handle for the staged cleanup to kill. A TOP-LEVEL child is started in its
+        # OWN session and process group (start_new_session below), so a kill of this
+        # suite's process group, or a terminal interrupt, does NOT reach it: it survives
+        # until it exits by itself (a BLOCKED child need never exit; no lifetime bound
+        # is claimed) or until a supervisor signals its session or its pid. A NESTED
+        # suite's children share their driver's process group, so an outer group kill
+        # reaches those. Earlier rounds tried to close that window with
         # a signal mask around the spawn and a Popen subclass publishing the handle from
         # inside __init__; each mechanism left a narrower uncovered window of its own
         # (the mask was set before its restoring try was entered, the publication still
@@ -1021,8 +1042,11 @@ def self_test_main(_nested=False):
         try:
             # The spawn window is DISCLOSED above, not covered: an interruption landing
             # inside Popen() or at this assignment, before proc holds the handle, leaves
-            # a child the staged cleanup cannot kill (it runs until its own code exits
-            # or an outer kill of this suite's process group ends it).
+            # a child the staged cleanup cannot kill. A top-level child is in its OWN
+            # session and process group, which a kill of this suite's group or a
+            # terminal interrupt does not reach: it survives until it exits by itself
+            # (a BLOCKED child need never exit) or until a supervisor signals its
+            # session or its pid; a nested suite's children share their driver's group.
             proc = subprocess.Popen(
                 [sys.executable, "-I", "-B", "-c", code_text],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -1042,10 +1066,14 @@ def self_test_main(_nested=False):
         except OSError as exc:
             _cleanup_stages(kill=True)
             if proc is None:
-                # The spawn itself failed: an exec-failed child is normally reaped
-                # INSIDE Popen with its returncode set, so the returncode-gated stages
-                # above do not signal it again; the close and removal stages still ran.
-                failures.append("{}: could not launch the bounded child ({})".format(label, exc))
+                # The spawn itself failed: proc is None, so the kill, reap and close
+                # stages were all skipped (each is gated on a recorded handle; an
+                # exec-failed child is reaped INSIDE Popen itself) and only the
+                # removal stage ran. The diagnostic renders through _exc_text, so an
+                # exception whose own render raises, or returns a raising str
+                # subclass, still becomes a named failure.
+                failures.append("{}: could not launch the bounded child ({})"
+                                .format(label, _exc_text(exc)))
                 return None, ""
             raise
         except BaseException:
@@ -1053,7 +1081,8 @@ def self_test_main(_nested=False):
             # region: the staged cleanup kills and reaps the recorded child (cases 26
             # and 27 exercise this path), then the ORIGINAL exception re-raises. With no
             # recorded handle (the DISCLOSED spawn window above) there is nothing to
-            # kill; the close and removal stages still run.
+            # kill or close (the kill, reap and close stages are all gated on the
+            # recorded handle); only the removal stage still runs.
             _cleanup_stages(kill=True)
             raise
         _cleanup_stages(kill=False)
@@ -1384,8 +1413,16 @@ def self_test_main(_nested=False):
         except OSError as exc:
             failures.append("an adopter run must never delete the adopter .claude/settings.json ({})".format(
                 exc))
-        _require_absent(bare / ".claude", "bare adopter tree",
-                        "an adopter run must never create .claude/ or .claude/settings.json")
+
+        def _check_bare_adopter_absence():
+            # The REAL bare-adopter absence check; the 20b/21b vectors below re-drive
+            # THIS call site under an injected lstat refusal, so a bypass here (a bare
+            # os.path.lexists at the call site) goes red, not only a helper revert.
+            _require_absent(bare / ".claude", "bare adopter tree",
+                            "an adopter run must never create .claude/ or "
+                            ".claude/settings.json")
+
+        _check_bare_adopter_absence()
         if not (adopter / HOOKS_JSON_REL).is_file():
             failures.append("adopter tree: the plugin surface must still generate")
 
@@ -1430,6 +1467,16 @@ def self_test_main(_nested=False):
             except OSError as exc:
                 raise _FixtureUnavailable("os.mkfifo: {}".format(exc)) from exc
         bad_markers.append(("a FIFO", _plant_fifo))
+
+        def _check_marker_absence(label, badm):
+            # The REAL bad-marker absence check (one call per planted marker); the
+            # 20b/21b vectors below re-drive THIS call site under an injected lstat
+            # refusal, so a call-site bypass goes red, not only a helper revert.
+            _require_absent(badm / ".claude" / "settings.json",
+                            "a marker that is {}".format(label),
+                            "a marker that is {} must not render project settings"
+                            .format(label))
+
         for i, (label, plant) in enumerate(bad_markers):
             badm = tmp / "badmarker{}".format(i)
             badm.mkdir()
@@ -1455,10 +1502,7 @@ def self_test_main(_nested=False):
                 code = run_project(badm, check=False)
             if code != 2:
                 failures.append("a marker that is {} expected exit 2 (fail-closed)".format(label))
-            _require_absent(badm / ".claude" / "settings.json",
-                            "a marker that is {}".format(label),
-                            "a marker that is {} must not render project settings"
-                            .format(label))
+            _check_marker_absence(label, badm)
         at_bound = tmp / "markerbound"
         at_bound.mkdir()
         _build_project_tree(at_bound, authoring=False)
@@ -1468,15 +1512,19 @@ def self_test_main(_nested=False):
 
         # 20b/21b. The strengthened absence checks FAIL CLOSED on an lstat refusal: a
         #     PermissionError is injected at exactly the bare-adopter path and at a
-        #     bad-marker settings path, and each must become the named cannot-verify
-        #     failure. Red with a bare os.path.lexists in _require_absent: lexists
-        #     swallows exactly this error and reports absence, so the named failure
-        #     never appears.
+        #     bad-marker settings path, and each REAL call site above (the extracted
+        #     check functions the suite itself ran) is re-driven under the injection,
+        #     so the named cannot-verify failure must come out of the same code path
+        #     the suite relies on. Red with a bare os.path.lexists either inside
+        #     _require_absent or at a call site: lexists swallows exactly this error
+        #     and reports absence, so the named failure never appears.
         real_lstat_abs = os.lstat
-        for _abs_what, _abs_path in (
-                ("the bare-adopter absence check", bare / ".claude"),
+        for _abs_what, _abs_path, _abs_check in (
+                ("the bare-adopter absence check", bare / ".claude",
+                 _check_bare_adopter_absence),
                 ("the bad-marker absence check",
-                 tmp / "badmarker0" / ".claude" / "settings.json")):
+                 tmp / "badmarker0" / ".claude" / "settings.json",
+                 lambda: _check_marker_absence("other content", tmp / "badmarker0"))):
 
             def _refusing_abs_lstat(path, *args, _target=str(_abs_path), **kwargs):
                 if str(path) == _target:
@@ -1487,8 +1535,7 @@ def self_test_main(_nested=False):
             before_abs = len(failures)
             os.lstat = _refusing_abs_lstat
             try:
-                _require_absent(_abs_path, _abs_what,
-                                "unexpected presence verdict (self-test fault)")
+                _abs_check()
             finally:
                 os.lstat = real_lstat_abs
             added_abs = failures[before_abs:]
@@ -1760,29 +1807,44 @@ def self_test_main(_nested=False):
             # 27. Secondary failures inside the staged cleanup never replace the original
             #     exception: each vector injects the ORIGINAL communicate OSError plus
             #     secondary faults TARGETING ONE failure mode (the non-drain vectors also
-            #     inject a drain exhaustion to reach their stage, and the kill-error and
-            #     exhausted-reap vectors alter kill and wait behavior as auxiliaries, so
+            #     inject a drain exhaustion to reach their stage, and the kill-error,
+            #     exhausted-reap, wait-error, drain-wait-error and rescue-error vectors
+            #     alter kill and wait behavior as auxiliaries, so
             #     "one fault" names the TARGET, not the number of injections), then holds
             #     that the original re-raised, the targeted fault is a NAMED entry, the
             #     child was reaped (or its unreaped state named) and the child TMPDIR
-            #     removed (the interrupt-removal vector's leftover is BY DESIGN and the
-            #     case removes it itself). The injected entries are then removed from the
+            #     removed (the interrupt-removal and render-removal leftovers are BY
+            #     DESIGN and the case removes them itself). The injected entries are
+            #     then removed from the
             #     failure list: the vector proves they were produced; they are not real
             #     failures. Every vector PINS both reap bounds against the literal
             #     contract (timeout=10 for the drain and for each wait, spelled as
             #     literals, never read from the implementation's constants), snapshots
             #     returncode and pipe state AT THE RE-RAISE (before the case's own
             #     rescue), and the close vectors hold that a failing close never skips
-            #     the sibling close. The kill-error and exhausted-reap vectors leave the
-            #     real child alive or unreaped BY DESIGN; the case collects it before
-            #     returning, so nothing outlives the case.
-            #     The wait-error vector holds that a NON-timeout wait failure is a
-            #     named entry; the render vectors hold that a secondary failure whose
-            #     OWN __str__ or __repr__ raises still becomes a named entry (the
-            #     guarded render with a constant fallback) without replacing the
-            #     original or skipping the later stages; and the already-reaped vector
-            #     holds that a child whose exit status was already collected is never
-            #     signalled again.
+            #     the sibling close. The kill-error, exhausted-reap, wait-error,
+            #     drain-wait-error and rescue-error vectors leave the real child alive
+            #     or unreaped BY DESIGN; the case's RESCUE collects it before
+            #     returning, the rescue's own kill and wait errors are NAMED entries
+            #     (never swallowed), and a child still uncollected after the rescue is
+            #     a NAMED failure, so no vector can PASS with a live child (the
+            #     rescue-error vector drives both rescue faults and then reaps the
+            #     child through a final collection).
+            #     The wait-error and drain-wait-error vectors hold that a NON-timeout
+            #     wait failure is a named entry on BOTH stage-2 branches (after a
+            #     drain exhaustion and after a non-timeout drain failure); wait-error
+            #     refuses the stage-2 re-kill, as kill-error does, so its not-reaped
+            #     entry never depends on whether the re-kill's internal poll already
+            #     collected the child. The render vectors hold that a secondary
+            #     failure whose OWN __str__ or __repr__ raises, or whose render
+            #     returns a str subclass that itself raises on __str__ or __format__,
+            #     still becomes a named entry (the guarded render returns an exact
+            #     built-in str with a constant fallback) without replacing the
+            #     original or skipping the later stages, at the stage-3 close and at
+            #     the leftover removal; and the already-reaped vector holds that a
+            #     child whose exit status was already collected is not signalled again
+            #     by the staged cleanup (the returncode gate narrows, not eliminates,
+            #     the reused-pid hazard).
             def _secondary_fault_case(kind):
                 label27 = "case 27 ({})".format(kind)
                 base = tmp / "case27-{}".format(kind)
@@ -1829,6 +1891,30 @@ def self_test_main(_nested=False):
                     def __repr__(self):
                         raise RuntimeError("repr render failure (self-test fault)")
 
+                class _EvilStr(str):
+                    # A str SUBCLASS whose own __str__ and __format__ raise: str(exc)
+                    # may legally return it, and only a helper that normalizes to an
+                    # exact built-in str keeps it out of the later .format of the
+                    # diagnostic that embeds the rendered text.
+                    def __str__(self):
+                        raise RuntimeError("subclass str escape (self-test fault)")
+
+                    def __format__(self, spec):
+                        raise RuntimeError("subclass format escape (self-test fault)")
+
+                class _SubclassRendered(Exception):
+                    # Its __str__ SUCCEEDS but returns the raising subclass above.
+                    def __str__(self):
+                        return _EvilStr(
+                            "subclass-rendered close failure (self-test fault)")
+
+                class _RaisingStrOSError(OSError):
+                    # An OSError whose __str__ raises: the leftover-removal handler
+                    # must render it through the guarded helper, never directly.
+                    def __str__(self):
+                        raise RuntimeError(
+                            "leftover removal str render failure (self-test fault)")
+
                 def _fault_communicate(self, *args, **kwargs):
                     if state["stage"] == "first":
                         state["stage"] = "drain"
@@ -1849,6 +1935,10 @@ def self_test_main(_nested=False):
                         if kind == "render-repr":
                             state["real_stdout"], self.stdout = (
                                 self.stdout, _FailingClose("stdout", _RaisingBoth))
+                        if kind == "render-strsub":
+                            state["real_stdout"], self.stdout = (
+                                self.stdout,
+                                _FailingClose("stdout", _SubclassRendered))
                         if kind == "close-stdout":
                             state["real_stdout"], self.stdout = (
                                 self.stdout, _FailingClose("stdout"))
@@ -1857,7 +1947,7 @@ def self_test_main(_nested=False):
                                 self.stderr, _FailingClose("stderr"))
                         raise original
                     state["drain_timeout"] = kwargs.get("timeout", "no-timeout-argument")
-                    if kind == "drain-error":
+                    if kind in ("drain-error", "drain-wait-error"):
                         raise OSError("injected drain failure (self-test fault)")
                     raise subprocess.TimeoutExpired(
                         cmd="injected drain exhaustion (self-test fault)", timeout=0)
@@ -1868,9 +1958,12 @@ def self_test_main(_nested=False):
                         # cleanup never reaches a kill once the status is collected.
                         state["kill_attempts"].append("direct")
                         return None
-                    # Refusing the kill (and, for the exhausted reap, the re-kill: a real
-                    # kill would reap the zombie through its poll) keeps the vector pure.
-                    if kind in ("kill-error", "reap-exhausted") and self is state["proc"]:
+                    # Refusing the kill (and the stage-2 re-kill for the exhausted-reap,
+                    # wait-error and rescue-error vectors: a real kill would reap a dead
+                    # child through its internal poll, so wait-error's not-reaped entry
+                    # would otherwise depend on timing) keeps each vector pure.
+                    if kind in ("kill-error", "reap-exhausted", "wait-error",
+                                "rescue-error") and self is state["proc"]:
                         raise OSError("injected kill failure (self-test fault)")
                     return real_kill(self)
 
@@ -1884,9 +1977,10 @@ def self_test_main(_nested=False):
                             state["wait_timeouts"].append(args[0])
                         else:
                             state["wait_timeouts"].append("no-timeout-argument")
-                    if kind == "wait-error" and self is state["proc"]:
+                    if kind in ("wait-error", "drain-wait-error") and self is state["proc"]:
                         raise OSError("injected wait failure (self-test fault)")
-                    if kind in ("kill-error", "reap-exhausted") and self is state["proc"]:
+                    if kind in ("kill-error", "reap-exhausted",
+                                "rescue-error") and self is state["proc"]:
                         raise subprocess.TimeoutExpired(
                             cmd="injected wait exhaustion (self-test fault)", timeout=0)
                     return real_wait(self, *args, **kwargs)
@@ -1896,7 +1990,7 @@ def self_test_main(_nested=False):
                             and pgid == state["proc"].pid:
                         state["kill_attempts"].append("group")
                         return None
-                    if kind == "kill-error":
+                    if kind in ("kill-error", "rescue-error"):
                         raise OSError("injected group-kill failure (self-test fault)")
                     if kind == "interrupt-group-kill":
                         raise KeyboardInterrupt(
@@ -1904,7 +1998,7 @@ def self_test_main(_nested=False):
                     return real_killpg(pgid, sig)
 
                 def _fault_rmtree(path, *args, **kwargs):
-                    if (kind == "interrupt-removal"
+                    if (kind in ("interrupt-removal", "render-removal")
                             and not state["removal_interrupted"]
                             and os.path.basename(str(path)).startswith("bounded-child-")):
                         state["removal_interrupted"] = True
@@ -1958,14 +2052,54 @@ def self_test_main(_nested=False):
                         os.killpg = real_killpg
                     leftover = state["proc"]
                     if leftover is not None and leftover.returncode is None:
+                        # The rescue is itself VERIFIED: its kill and wait errors are
+                        # NAMED entries recorded apart from the injected staged-cleanup
+                        # entries, and a child whose exit status is still uncollected
+                        # after the rescue is a NAMED failure, so no vector can PASS
+                        # while its child is alive (the rescue-error vector drives
+                        # both rescue faults and holds all three names, then reaps the
+                        # child through a final collection after its bookkeeping).
                         try:
+                            if kind == "rescue-error":
+                                raise OSError(
+                                    "injected rescue kill failure (self-test fault)")
                             real_kill(leftover)
-                        except OSError:
-                            pass
+                        except OSError as rescue_exc:
+                            failures.append("case 27 ({}): the rescue kill of the "
+                                            "leftover child (pid {}) failed ({}); a "
+                                            "rescue failure is a named entry, never a "
+                                            "silent pass".format(
+                                                kind, leftover.pid,
+                                                _exc_text(rescue_exc)))
                         try:
+                            if kind == "rescue-error":
+                                raise OSError(
+                                    "injected rescue wait failure (self-test fault)")
                             real_wait(leftover, timeout=10)
-                        except (subprocess.TimeoutExpired, OSError):
-                            pass
+                        except (subprocess.TimeoutExpired, OSError) as rescue_exc:
+                            failures.append("case 27 ({}): the rescue wait for the "
+                                            "leftover child (pid {}) failed ({}); a "
+                                            "rescue failure is a named entry, never a "
+                                            "silent pass".format(
+                                                kind, leftover.pid,
+                                                _exc_text(rescue_exc)))
+                        if leftover.returncode is None:
+                            failures.append("case 27 ({}): the rescue could not "
+                                            "collect the leftover child (pid {}); the "
+                                            "case must FAIL rather than PASS with a "
+                                            "live child".format(kind, leftover.pid))
+                        if kind == "rescue-error" and leftover.returncode is None:
+                            # The vector's own FINAL collection, after both injected
+                            # rescue faults were named: kill and reap the child here, and
+                            # a failure of this collection is itself a named entry.
+                            try:
+                                real_kill(leftover)
+                                real_wait(leftover, timeout=10)
+                            except (subprocess.TimeoutExpired, OSError) as final_exc:
+                                failures.append("case 27 (rescue-error): the final "
+                                                "collection of the leftover child (pid {}) "
+                                                "failed ({})".format(leftover.pid,
+                                                                     _exc_text(final_exc)))
                     for saved in (state["real_stdout"], state["real_stderr"]):
                         if saved is not None:
                             saved.close()
@@ -1984,9 +2118,24 @@ def self_test_main(_nested=False):
                     "interrupt-removal": (
                         "injected removal interrupt (self-test fault)",),
                     "wait-error": ("injected wait failure (self-test fault)",
+                                   "injected kill failure (self-test fault)",
                                    "was not reaped within"),
+                    "drain-wait-error": (
+                        "injected drain failure (self-test fault)",
+                        "injected wait failure (self-test fault)",
+                        "was not reaped within"),
+                    "rescue-error": (
+                        "injected kill failure (self-test fault)",
+                        "was not reaped within",
+                        "injected rescue kill failure (self-test fault)",
+                        "injected rescue wait failure (self-test fault)",
+                        "the rescue could not collect"),
                     "render-str": ("unrenderable close failure (self-test fault)",),
                     "render-repr": ("<unrenderable _RaisingBoth instance>",),
+                    "render-strsub": (
+                        "subclass-rendered close failure (self-test fault)",),
+                    "render-removal": (
+                        "injected removal interrupt (self-test fault)",),
                     "already-reaped": (),
                 }[kind]
                 for want in expected:
@@ -1999,7 +2148,8 @@ def self_test_main(_nested=False):
                         failures.append(entry)
                 if kind in ("drain-error", "close-stdout", "close-stderr",
                             "interrupt-group-kill", "interrupt-removal",
-                            "render-str", "render-repr", "already-reaped") and \
+                            "render-str", "render-repr", "render-strsub",
+                            "render-removal", "already-reaped") and \
                         state["returncode_at_reraise"] is None:
                     failures.append("case 27 ({}): the exit status of the child was never "
                                     "collected at the re-raise (before this case's own "
@@ -2026,7 +2176,7 @@ def self_test_main(_nested=False):
                                     "and is never a target"
                                     .format(state["kill_attempts"]))
                 if kind in ("close-stdout", "close-stderr",
-                            "render-str", "render-repr"):
+                            "render-str", "render-repr", "render-strsub"):
                     failing = "stderr" if kind == "close-stderr" else "stdout"
                     sibling = "stdout" if kind == "close-stderr" else "stderr"
                     if failing not in state["close_attempts"]:
@@ -2051,30 +2201,69 @@ def self_test_main(_nested=False):
                                     "before the injected fault".format(kind))
                     return
                 child_tmpdir = beacon.read_text(encoding="utf-8").partition(" ")[2]
-                if kind == "interrupt-removal":
+                if kind in ("interrupt-removal", "render-removal"):
                     # The injected interrupt left the child TMPDIR behind BY DESIGN (the
                     # stage-4 guard named it; no retry ran); this case removes the
-                    # leftover itself so nothing outlives it.
+                    # leftover itself so nothing outlives it. The render-removal vector
+                    # drives THIS removal handler under an injected OSError whose own
+                    # __str__ raises: the diagnostic below renders through _exc_text,
+                    # so the entry is still NAMED instead of the render escaping (red
+                    # with the exception formatted directly).
                     if not state["removal_interrupted"]:
-                        failures.append("case 27 (interrupt-removal): the injected "
-                                        "removal interrupt never fired")
+                        failures.append("case 27 ({}): the injected removal interrupt "
+                                        "never fired".format(kind))
+                    before_rm = len(failures)
                     if child_tmpdir:
                         try:
+                            if kind == "render-removal":
+                                raise _RaisingStrOSError(
+                                    "injected leftover-removal failure "
+                                    "(self-test fault)")
                             real_rmtree27(child_tmpdir)
                         except FileNotFoundError:
                             pass
                         except OSError as exc:
-                            failures.append("case 27 (interrupt-removal): could not "
-                                            "remove the leftover child TMPDIR {!r} ({})"
-                                            .format(child_tmpdir, exc))
+                            failures.append("case 27 ({}): could not remove the "
+                                            "leftover child TMPDIR {!r} ({})"
+                                            .format(kind, child_tmpdir,
+                                                    _exc_text(exc)))
+                    if kind == "render-removal":
+                        added_rm = failures[before_rm:]
+                        del failures[before_rm:]
+                        if not any(
+                                "could not remove the leftover child TMPDIR" in entry
+                                and "injected leftover-removal failure "
+                                    "(self-test fault)" in entry
+                                for entry in added_rm):
+                            failures.append("case 27 (render-removal): a leftover-"
+                                            "removal error whose own __str__ raises "
+                                            "must still be a NAMED entry through the "
+                                            "guarded render, never an escaping render "
+                                            "exception; got entries {!r}"
+                                            .format(added_rm))
+                        for entry in added_rm:
+                            if ("injected leftover-removal failure "
+                                    "(self-test fault)") not in entry:
+                                failures.append(entry)
+                        if child_tmpdir:
+                            try:
+                                real_rmtree27(child_tmpdir)
+                            except FileNotFoundError:
+                                pass
+                            except OSError as exc:
+                                failures.append("case 27 (render-removal): could not "
+                                                "remove the leftover child TMPDIR "
+                                                "{!r} ({})".format(child_tmpdir,
+                                                                   _exc_text(exc)))
                 elif not child_tmpdir or not _confirmed_absent(child_tmpdir, label27):
                     failures.append("case 27 ({}): the child TMPDIR {!r} was not removed "
                                     "(or its absence could not be confirmed)"
                                     .format(kind, child_tmpdir))
 
             _vector_kinds = ["drain-error", "kill-error", "close-stdout", "close-stderr",
-                             "interrupt-removal", "wait-error", "render-str",
-                             "render-repr", "already-reaped"]
+                             "interrupt-removal", "wait-error", "drain-wait-error",
+                             "rescue-error", "render-str", "render-repr",
+                             "render-strsub", "render-removal", "already-reaped"]
             if hasattr(os, "killpg"):
                 # The exhausted-reap and group-kill-interrupt vectors need the group
                 # kill: the first so its injected kill refusal never has to block a REAL
@@ -2391,16 +2580,23 @@ def self_test_main(_nested=False):
              "an injected communicate OSError and KeyboardInterrupt each kill, REAP (exit "
              "status collected" + sigkill_proof + ") and clean up the live child before "
              "re-raising, a secondary cleanup failure is a named entry that never replaces "
-             "the original exception, even one whose own __str__ or __repr__ raises "
-             "(rendered through a guarded helper with a constant fallback), a non-timeout "
-             "wait failure is a named entry, a child whose exit status was already "
-             "collected is never signalled again, an absence check whose lstat is refused "
-             "is a named cannot-verify failure, a fault in the final suite removal is "
+             "the original exception, even one whose own __str__ or __repr__ raises or "
+             "whose render returns a raising str subclass (the guarded helper renders an "
+             "exact built-in str with a constant fallback; its render vectors inject at "
+             "the stage-3 close and at the leftover removal), a non-timeout wait failure "
+             "is a named entry on both stage-2 branches (alone and after a non-timeout "
+             "drain failure), a child whose exit status was already collected is not "
+             "signalled again by the staged cleanup, a case-27 rescue failure or a child "
+             "still uncollected after the rescue is a named failure (so no case passes "
+             "with a live child), an absence check whose lstat is refused is a named "
+             "cannot-verify failure driven at the real call sites, a fault in the final "
+             "suite removal is "
              "printed beside the escaping original instead of replacing it, "
              "and the removal helper neither follows a symlink out of its tree" +
              rootlink_proof + ", nor chmods "
              "an entry it cannot classify (a named failure instead), nor counts "
-             "an unverifiable absence as removed")
+             "an unverifiable absence as removed, up to the disclosed replacement race "
+             "between an entry's lstat classification and the chmod or walk that follows")
     print("SELF-TEST PASS: a conformant manifest generates and regenerates drift-clean; every rendered "
           "launcher runs isolated (args[0] == '-I'); hooks.json "
           "drift and a plugin hooks/ orphan fail the check; an unknown corpus-id, an empty residue, "
