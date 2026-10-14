@@ -54,15 +54,21 @@ question-list template fixes them:
   Also CANNOT_EVALUATE naming the line, anywhere in the body:
   * A line that reads as an answer marker but is not one, read as a renderer shows it (CommonMark
     backslash escapes of ASCII punctuation and named, decimal and hex character references, decoded
-    once, left to right): past leading whitespace, emphasis, heading, quote, bullet and ordered-list
+    once, left to right: a numeric reference is its code point, U+FFFD standing in for zero,
+    surrogates and values past U+10FFFF, and a named reference is only an exact HTML5 entity-table
+    name with its semicolon, an unknown name staying literal; renderers differ on control code
+    points, so a line is refused when either that reading or the html.unescape reading, which
+    remaps 128..159 through Windows-1252 and drops some control code points, reads as a marker):
+    past leading whitespace, emphasis, heading, quote, bullet and ordered-list
     marks ("1. ", "1) "), backslashes, the blank glyph U+2800 and ignorable characters (category Cf
     and the pinned Default_Ignorable_Code_Point table), interleaved in any order and consumed whole,
     a Q (or a lookalike letter), digits of any script and a full stop (or a lookalike), emphasis runs
     permitted inside the marker, compared after NFKC normalisation of the marker-shaped head, then
     whitespace, emphasis, U+2800 or the line's end; so "Q\uff11.", "Q\u0663.", a zero-width or
     variation-selector character inside "Q4.", "  Q4.", "- Q4.", "**Q4.**", "\u00a0***Q4.***",
-    "Q4\\.", "&#81;4.", "Q4&period;", "Q*4*.", "**Q**4.", "1. Q4." and "\u2800Q4." are refused, in
-    answers, findings, blockquotes and fenced blocks alike, however long the prefix runs.
+    "Q4\\.", "&#81;4.", "Q4&period;", "Q*4*.", "**Q**4.", "1. Q4.", "\u2800Q4.", "&#133;Q4." and
+    "Q4.&#31;" are refused, in answers, findings, blockquotes and fenced blocks alike, however long
+    the prefix runs.
   * A construct that can hide text from rendered view, outside fenced blocks, inline code spans and
     blockquote lines: raw HTML ("<" then "!", "?", or an optional "/" and a tag name ending at
     whitespace, "/", ">" or the line's end, which opens a comment, an HTML block or inline HTML; an
@@ -232,7 +238,9 @@ definitions, images, link titles that run on, quote-mark character references), 
 lookalikes, lazy blockquote continuation, indented code after a fence or a heading, a fence after a
 list marker, the question marker, pin matching, repeated pins, commit-only pins, strict decoding, CRLF
 transport, indented code blocks, ambient GIT_ variables, replace refs, blob re-hashing on both read
-paths, the pinned tree and both runtime scanners. These have a fixture but no flip/ check, since they
+paths, the pinned tree and both runtime scanners; a recording seam also shows the NFKC input for the
+two U+FDFA runtime fixtures is the bounded head only (whole-remainder normalisation fails those two
+checks on any host, however fast). These have a fixture but no flip/ check, since they
 sit inside the parser's loop or another guard also refuses the same input: each closed-shape refusal
 (missing, repeated, out-of-order and extra answers, text before Q1., a heading in the findings
 section, a second findings line, VERDICT and QA-COMPLETE placement, a "Verdict:" line inside an
@@ -268,6 +276,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 
 import hashlib
 import html
+import html.entities
 import json
 import os
 import re
@@ -754,6 +763,7 @@ def _marker_ignorable(char):
 # character reference (named, decimal or hex, semicolon-terminated; ENTITY_RE's grammar).
 MARKER_SOURCE_RE = re.compile(r"\\([!-/:-@\[-`{-~])"
                               r"|&(?:#[0-9]{1,7}|#[xX][0-9A-Fa-f]{1,6}|[A-Za-z][A-Za-z0-9]{1,31});")
+_NUMERIC_REFERENCE_RE = re.compile(r"&#(?:([0-9]{1,7})|[xX]([0-9A-Fa-f]{1,6}));")
 # Characters whose NFKC forms a marker match can consume up to its one-character lookahead:
 # MARKER_DECORATION, the Q forms and the stops; whitespace and digits of any script are tested per
 # character (_marker_material), so fullwidth and mathematical forms stay in.
@@ -761,19 +771,38 @@ _MARKER_ALPHABET = frozenset(MARKER_DECORATION + "Qq\u024a\u024b\u051a\u051b.\u0
 _ASCII_MATERIAL = frozenset(char for char in map(chr, range(128))
                             if char.isspace() or char.isdigit() or char in _MARKER_ALPHABET)
 _MATERIAL_CACHE = {}
+# The seam _marker_scan normalises the head through, so the self-test can record its NFKC input.
+_marker_normalize = unicodedata.normalize
 
 
-def _marker_rendered(line):
+def _reference_commonmark(reference):
+    """reference (one MARKER_SOURCE_RE character reference) as CommonMark decodes it: a numeric
+    reference is its code point by value, U+FFFD standing in for zero, surrogates and values past
+    U+10FFFF; a named reference is looked up, semicolon included, in the HTML5 entity table, and an
+    unknown name ("&notit;", "&ampx;") stays literal. html.unescape differs on both: it remaps
+    128..159 through Windows-1252, drops some control code points and matches legacy names without
+    their semicolon; _marker_candidate scans that reading too."""
+    match = _NUMERIC_REFERENCE_RE.fullmatch(reference)
+    if match is None:
+        return html.entities.html5.get(reference[1:], reference)
+    point = int(match.group(1)) if match.group(1) is not None else int(match.group(2), 16)
+    if point == 0 or 0xD800 <= point <= 0xDFFF or point > 0x10FFFF:
+        return "\ufffd"
+    return chr(point)
+
+
+def _marker_rendered(line, reference=_reference_commonmark):
     """line as a renderer shows it to the marker scan: backslash escapes and character references
-    (MARKER_SOURCE_RE) decoded once, left to right; decoded text is never rescanned, so a
-    backslash-escaped reference stays literal text. An unknown entity name stays literal too, as
-    CommonMark leaves it."""
+    (MARKER_SOURCE_RE) decoded once, left to right, each through the reference argument
+    (_reference_commonmark, or html.unescape for the legacy reading); decoded text is never
+    rescanned, so a backslash-escaped reference stays literal text. An unknown entity name stays
+    literal too, as CommonMark leaves it."""
     if "\\" not in line and "&" not in line:
         return line
     pieces, at = [], 0
     for match in MARKER_SOURCE_RE.finditer(line):
         pieces.append(line[at:match.start()])
-        pieces.append(match.group(1) or html.unescape(match.group(0)))
+        pieces.append(match.group(1) or reference(match.group(0)))
         at = match.end()
     pieces.append(line[at:])
     return "".join(pieces)
@@ -782,8 +811,10 @@ def _marker_rendered(line):
 def _marker_material(char):
     """Whether char can sit inside a marker match: every character of its NFKC form is whitespace, a
     digit or in _MARKER_ALPHABET. The first character of a head that is not material is kept as the
-    match's one-character lookahead and ends the head, so NFKC runs over the marker-shaped head only,
-    never the whole line (U+FDFA normalises to 18 characters; a 16 MiB run of it must not multiply)."""
+    match's one-character lookahead and ends the head, so NFKC is bounded at the first non-material
+    character; an entirely marker-material line is normalised whole (U+FDFA, whose NFKC form is 18
+    characters, is not marker material and ends the head, so a 16 MiB run of it feeds NFKC one or
+    two characters, never the line)."""
     cached = _MATERIAL_CACHE.get(char)
     if cached is None:
         cached = all(c.isspace() or c.isdigit() or c in _MARKER_ALPHABET
@@ -794,7 +825,22 @@ def _marker_material(char):
 
 def _marker_candidate(line):
     """Whether line reads as an answer marker "QN." to an eye on the rendered text, backslash escapes
-    and character references decoded first (_marker_rendered): past a permitted prefix of whitespace
+    and character references decoded first (_marker_rendered). Renderers differ on control code
+    points ("&#133;" is U+0085 NEL under the CommonMark code-point rule and U+2026 under the
+    html.unescape HTML5 rule, which also drops "&#31;"), so the line is refused when either reading
+    scans as a marker (_marker_scan): a conservative union, erring toward refusal, never toward a
+    pass."""
+    rendered = _marker_rendered(line)
+    if _marker_scan(rendered):
+        return True
+    if "\\" not in line and "&" not in line:
+        return False
+    legacy = _marker_rendered(line, html.unescape)
+    return legacy != rendered and _marker_scan(legacy)
+
+
+def _marker_scan(line):
+    """Whether the decoded line scans as an answer marker: past a permitted prefix of whitespace
     of any script, emphasis, heading, quote, bullet and ordered-list marks (LIST_MARK_RE), backslashes,
     the blank glyph U+2800 and ignorable characters (_marker_ignorable), interleaved in any order and
     consumed whole, a Q or a letter that looks like one, digits of any script and a full stop or one
@@ -807,7 +853,6 @@ def _marker_candidate(line):
     ("[Q4.](x)") at the start of a line is not a candidate, its first source character being a
     backtick or a bracket, and an ignorable dropped directly after the stop leaves the lookahead on
     the character after it."""
-    line = _marker_rendered(line)
     index, length = 0, len(line)
     while index < length:
         char = line[index]
@@ -830,7 +875,7 @@ def _marker_candidate(line):
             head.append(char)
             if not _marker_material(char):
                 break
-    return bool(MARKER_RE.match(unicodedata.normalize("NFKC", "".join(head))))
+    return bool(MARKER_RE.match(_marker_normalize("NFKC", "".join(head))))
 
 
 def _unread_fence(line):
@@ -1854,13 +1899,20 @@ def _self_test_cases(fx):
     # decimal and named character references, emphasis inside the marker, an ordered-list mark or
     # the blank glyph U+2800 before it. The form feed and unit separator discriminate the isspace
     # clause of the prefix loop; U+E0100, a supplementary variation selector, discriminates the
-    # pinned default-ignorable table's E0000..E0FFF range.
+    # pinned default-ignorable table's E0000..E0FFF range. The NEL (U+0085) and unit-separator
+    # references discriminate the CommonMark code-point decode against the html.unescape reading,
+    # which maps them to U+2026 or drops them; either reading as a marker refuses the line.
     for check_id, line in (
             ("shape/escaped-stop-marker-cannot-evaluate", "Q4\\. Additional answer"),
             ("shape/decimal-reference-q-marker-cannot-evaluate", "&#81;4. Additional answer"),
             ("shape/decimal-reference-stop-marker-cannot-evaluate", "Q4&#46; Additional answer"),
             ("shape/named-reference-stop-marker-cannot-evaluate", "Q4&period; Additional answer"),
             ("shape/nbsp-reference-marker-cannot-evaluate", "&nbsp;Q4. Additional answer"),
+            ("shape/nel-decimal-reference-marker-cannot-evaluate", "&#133;Q4. Additional answer"),
+            ("shape/nel-hex-reference-marker-cannot-evaluate", "&#x85;Q4. Additional answer"),
+            ("shape/nel-reference-after-stop-marker-cannot-evaluate", "Q4.&#133;Additional answer"),
+            ("shape/unit-separator-decimal-reference-marker-cannot-evaluate", "Q4.&#31;Additional answer"),
+            ("shape/unit-separator-hex-reference-marker-cannot-evaluate", "Q4.&#x1f;Additional answer"),
             ("shape/inner-emphasis-digit-marker-cannot-evaluate", "Q*4*. Additional answer"),
             ("shape/inner-bold-q-marker-cannot-evaluate", "**Q**4. Additional answer"),
             ("shape/bold-escaped-stop-marker-cannot-evaluate", "**Q4\\.** Additional answer"),
@@ -2153,6 +2205,19 @@ def _self_test_cases(fx):
           (len(bare_ligature.encode("utf-8")), _capped_run(fx, bare_ligature, "linear")),
           (MAX_INPUT_BYTES, (0, "PASS")))
 
+    # The deterministic head bound: a recording seam shows the NFKC input is the head only (marker
+    # material up to and including the first non-material character), whatever the host speed;
+    # reverting to whole-remainder normalisation feeds the seam the entire line and fails these.
+    def _normalised_heads(delivery, head):
+        line = next((text for _, text in _lines(delivery) if text.startswith(head)), "")
+        seen = []
+        recorder = lambda form, text: seen.append(text) or unicodedata.normalize(form, text)
+        _patched("_marker_normalize", recorder, lambda: _marker_candidate(line))
+        return seen
+
+    check("runtime/marker-ligature-nfkc-head-only", _normalised_heads(ligature_run, "Q\ufdfa"), ["Q\ufdfa"])
+    check("runtime/ligature-nfkc-head-only", _normalised_heads(bare_ligature, "\ufdfa"), ["\ufdfa"])
+
     # Pin, decode, git
     mismatch = _mixed(OTHER_SHA)
     check("pin/sha-mismatch-cannot-evaluate", verdict(fx.run(mismatch)), "CANNOT_EVALUATE")
@@ -2176,6 +2241,8 @@ def _self_test_cases(fx):
     check("flip/decode-strict",
           verdict(_patched("_decode", lambda raw, label: raw.decode("utf-8", "replace"),
                            lambda: fx.run(undecodable))), "PASS")
+    check("decode/unknown-entity-name-stays-literal",
+          (_marker_rendered("&notit;"), _marker_rendered("&ampx;")), ("&notit;", "&ampx;"))
     check("git/unresolvable-sha-cannot-evaluate",
           refusal(fx.run(_mixed(OTHER_SHA), pin=OTHER_SHA), "git cat-file"), refused)
     plain = fx.base / "plain"
@@ -2410,6 +2477,9 @@ GRAMMAR_PROBES = (
     ("_marker_candidate", "Q4\\. x", True), ("_marker_candidate", "&#81;4. x", True),
     ("_marker_candidate", "Q4&#46; x", True), ("_marker_candidate", "Q4&period; x", True),
     ("_marker_candidate", "&nbsp;Q4. x", True), ("_marker_candidate", "Q*4*. x", True),
+    ("_marker_candidate", "&#133;Q4. x", True), ("_marker_candidate", "&#x85;Q4. x", True),
+    ("_marker_candidate", "Q4.&#133;x", True), ("_marker_candidate", "Q4.&#31;x", True),
+    ("_marker_candidate", "Q4.&#x1f;x", True), ("_marker_candidate", "Q&#1;4. x", True),
     ("_marker_candidate", "**Q**4. x", True), ("_marker_candidate", "**Q4\\.** x", True),
     ("_marker_candidate", "1. Q4. x", True), ("_marker_candidate", "1) Q4. x", True),
     ("_marker_candidate", "123456789. Q4. x", True), ("_marker_candidate", "\u2800Q4. x", True),
