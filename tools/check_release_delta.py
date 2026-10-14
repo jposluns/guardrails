@@ -2921,7 +2921,8 @@ def _not_run(failures, case, cause):
 # MINOR-4; round-4 codex 1 / claude MINOR-2; round-5 codex 1/2/4). Round-6 (codex 1 / claude
 # MEDIUM-1): that static scan is a BACKSTOP; the runtime guarantee is _GATE_IMPORT_BINDINGS (gate
 # and probe captured at import), _gate_identity_failures (identity at each gated block and at the
-# end) and the per-label accounting in _self_test_main_isolated.
+# end; its exact guarantee and disclosed limits are stated there) and the per-label accounting
+# (_gate_accounting_failures, one red-on-revert vector per label since round-7).
 # Reviewed sites in _self_test_main_isolated that reach git CODE without a gate (round-4 claude
 # MINOR-3): the duplicate-CLI main() calls are rejected at option parsing before any git runs; the
 # single-named-ref-read anchor cases run with _rev_parse/_object_type stubbed; the R6
@@ -2949,11 +2950,15 @@ def _git_gate(label, failures):
     round-2 codex MAJOR): when the probe fails, the gated block is a recorded NOT RUN failure naming the
     block, never a silent skip beside a PASS, so a TRANSIENTLY failed probe at one gate can no longer
     leave its block unrun while a later probe succeeds and the suite still prints SELF-TEST PASS.
-    Round-6: the self-test also verifies the gate and probe BINDINGS by identity at each gated
+    Round-6/7: the self-test also verifies the gate and probe BINDINGS by identity at each gated
     block (_gate_identity_failures over _GATE_IMPORT_BINDINGS) and accounts for exactly one record
-    per label, so a rebound or bypassed gate is a named failure at run time.
+    per label (_gate_accounting_failures). The identity guarantee, exactly: a module rebinding that
+    is still in place at a checkpoint is detected whatever its spelling; a temporary rebinding
+    restored between checkpoints, and a local shadow that never rebinds the module, are not
+    detected by the identity check (the static backstop covers the spellings it lists), while the
+    accounting still fails a run whose gated blocks leave no record.
     Red-on-revert: the transient-availability scenarios and the rebound-gate run in
-    _not_run_net_vectors."""
+    _not_run_net_vectors (round-7: one assertion per identity checkpoint and per gate label)."""
     if _git_available():
         return True
     _not_run(failures, label, "git is unavailable at this block's probe (QA round-4 codex R4-3 / "
@@ -2964,27 +2969,58 @@ def _git_gate(label, failures):
 # Round-6 (codex 1 / claude MEDIUM-1): the gate function and the availability probe objects,
 # captured ONCE at import as a module-private constant. The self-test verifies at each gated
 # block and again at the end that the module's _git_gate and _git_available are THESE exact
-# objects (identity, read through the module's own namespace), so a rebinding by ANY spelling,
-# where rounds 4 to 6 each produced a new one, is a named failure at run time; the static
-# _git_gate_alignment_failures scan below stays as a backstop only.
+# objects (identity, read through the module's own namespace). The guarantee, exactly (round-7
+# codex 3 / claude MEDIUM-2): a module rebinding that is still in place at a checkpoint is
+# detected whatever its spelling, where rounds 4 to 6 each produced a new one; a temporary
+# rebinding restored between checkpoints, and a local shadow that never rebinds the module, are
+# not detected by the identity check; the static _git_gate_alignment_failures scan below covers
+# the spellings it lists, and the per-label accounting catches a gate that leaves blocks without
+# a record whatever the binding.
 _GATE_IMPORT_BINDINGS = (_git_gate, _git_available)
 
 
 def _gate_identity_failures(failures, where):
     """Append a named failure for each module gate/probe binding that is no longer the object
     captured at import (_GATE_IMPORT_BINDINGS): identity through the module's own namespace,
-    never a spelling scan. The round-5 static checker admitted globals(), sys.modules and
+    never a spelling scan. The guarantee, exactly (round-7 codex 3 / claude MEDIUM-2): a module
+    rebinding that is still in place at a checkpoint is detected whatever its spelling; a
+    temporary rebinding restored between checkpoints, and a local shadow (a parameter, a local
+    def, class or match capture) that never rebinds the module, are not detected by the identity
+    check; the static backstop covers the spellings it lists, and the per-label accounting
+    (_gate_accounting_failures) fails a run whose gated blocks leave no record whatever the
+    binding. The restore-between-checkpoints escape is reproduced by a disclosed-residual
+    witness in the self-test. The round-5 static checker admitted globals(), sys.modules and
     import-binding respellings of _git_gate, each of which skipped all six gated blocks beside
     SELF-TEST PASS (round-6 codex 1 / claude MEDIUM-1). The reviewed probe swap in
     _not_run_net_vectors is active only inside nested runs whose nonzero exit their caller
     asserts, so an identity failure recorded there never reaches a PASS. Red-on-revert: the
-    planted rebindings and the rebound-gate nested run in the self-test."""
+    planted rebindings and the rebound-gate nested run, whose output must carry this diagnostic
+    for every checkpoint by name (round-7: one assertion per checkpoint)."""
     space = vars(sys.modules[__name__])
     for name, bound in zip(("_git_gate", "_git_available"), _GATE_IMPORT_BINDINGS):
         if space.get(name) is not bound:
             failures.append("(git-gate identity) {}: {} is not the object captured at import "
                             "(rebound by some spelling; identity decides, so the spelling does "
                             "not matter)".format(where, name))
+
+
+def _gate_accounting_failures(failures, gate_ran):
+    """The per-label accounting (round-6 codex 1 / claude MEDIUM-1; extracted round-7 so each
+    label's obligation has its own red-on-revert vector): every gate label must account for
+    exactly one record, its gated body's last statement (an entry in gate_ran) or its NOT RUN
+    line (already in failures), so a bypassed or vanished block is a named failure at run time
+    whatever the gate binding looked like. Red-on-revert: the per-label unit vectors in the
+    self-test (each feeds this check a record list missing exactly one label and requires the
+    diagnostic naming that label and no other) and the rebound-gate nested run, whose output
+    must name every label."""
+    for label_acct in _GIT_GATE_LABELS:
+        ran_acct = gate_ran.count(label_acct)
+        notrun_acct = sum(1 for f_acct in failures
+                          if f_acct.startswith("NOT RUN: " + label_acct))
+        if ran_acct + notrun_acct != 1:
+            failures.append("(git-gate accounting) {!r}: exactly one record per gate label is "
+                            "required (body ran, or its NOT RUN line); got ran={}, "
+                            "not-run={}".format(label_acct, ran_acct, notrun_acct))
 
 
 def _git_gate_alignment_failures(source):
@@ -3027,18 +3063,31 @@ def _git_gate_alignment_failures(source):
         GeneratorExp or TypeAlias inside the gate treated as a DEFERRED scope (either carries the
         probe out of the gate uncalled); and the `_GATE_IMPORT_BINDINGS` capture required exactly
         once at module top level.
+      - round-7: a binding of EITHER name by a match capture (MatchAs.name, MatchStar.name or
+        MatchMapping.rest) or by a class definition (binding nodes the round-6 scan missed); any
+        call through a _GATE_IMPORT_BINDINGS subscript (an indirect probe or an uncounted gate
+        call through the import capture); any store or delete of _GATE_IMPORT_BINDINGS other
+        than the one reviewed capture (a co-rebinding would blind the identity checkpoints);
+        and, in _not_run_net_vectors, more or less than one def of _planned_probe and any use of
+        _planned_probe other than as the reviewed probe-store value (a second def or a direct
+        call would wrap real_probe into an ungated early return).
     This check is a BACKSTOP (round-6 codex 1 / claude MEDIUM-1): rounds 4 to 6 each produced a new
     spelling, and a spelling scan over Python source cannot be closed. Its residual is every DYNAMIC
     spelling (a name assembled at run time from string fragments, an attribute chain through another
     module), and a git-dependent block with NO probe at all stays invisible to it (git absence there
     surfaces as an unnamed exception, fail-closed but not a named NOT RUN); the round-5 scope note
     stands: exec/eval are refused across tools/ and opf/tools/ by the maintenance-pin scan, outside
-    its counted per-function dynamic-site exceptions. The guarantee is carried at run time instead:
-    _GATE_IMPORT_BINDINGS captures the gate and probe objects once at import,
-    _gate_identity_failures verifies BOTH module bindings by identity at each gated block and at the
-    end, and the per-label accounting in _self_test_main_isolated requires exactly one record per
-    gate label (its body ran, or its NOT RUN line). The self-test plants every refused shape above
-    and requires each to be a finding."""
+    its counted per-function dynamic-site exceptions. The guarantee is carried at run time
+    instead, and it is exactly this (round-7 codex 3 / claude MEDIUM-2): _GATE_IMPORT_BINDINGS
+    captures the gate and probe objects once at import, and _gate_identity_failures verifies BOTH
+    module bindings by identity at each gated block and at the end, so a module rebinding that is
+    still in place at a checkpoint is detected whatever its spelling; a temporary rebinding
+    restored between checkpoints (reproduced by the disclosed-residual witness in the self-test)
+    and a local shadow that never rebinds the module are NOT detected by the identity check, and
+    this backstop covers only the spellings it lists; the per-label accounting
+    (_gate_accounting_failures) requires exactly one record per gate label (its body ran, or its
+    NOT RUN line), so skipped blocks never sit silently beside SELF-TEST PASS whatever the
+    binding. The self-test plants every refused shape above and requires each to be a finding."""
     import ast
     tree = ast.parse(source)
     findings = []
@@ -3149,6 +3198,26 @@ def _git_gate_alignment_failures(source):
                 findings.append("line {}: real_probe is used outside _planned_probe and the "
                                 "restore statement (round-6: an ungated early return through "
                                 "the reviewed alias)".format(node.lineno))
+        # Round-7: _planned_probe is the only reviewed wrapper around real_probe, so its def
+        # count and its uses are pinned: a second def, or a use other than as the reviewed
+        # probe-store value, wraps real_probe into an ungated early return.
+        planned_defs = [inner for inner in ast.walk(fn)
+                        if isinstance(inner, (ast.FunctionDef, ast.AsyncFunctionDef))
+                        and inner.name == "_planned_probe"]
+        if len(planned_defs) != 1:
+            findings.append("line(s) {}: exactly one def of _planned_probe in "
+                            "_not_run_net_vectors (round-7: a second def could wrap real_probe "
+                            "for an ungated early return)".format(
+                                ", ".join(str(d.lineno) for d in planned_defs) or "none"))
+        planned_use_ids = {id(stmt.value) for stmt in probe_stores
+                           if isinstance(stmt.value, ast.Name)
+                           and stmt.value.id == "_planned_probe"}
+        for node in ast.walk(fn):
+            if (isinstance(node, ast.Name) and node.id == "_planned_probe"
+                    and id(node) not in planned_use_ids):
+                findings.append("line {}: _planned_probe is used other than as the reviewed "
+                                "probe-store value (round-7: a direct call wraps real_probe "
+                                "into an ungated early return)".format(node.lineno))
     for fn in tree.body:
         if isinstance(fn, ast.FunctionDef) and fn.name in ("_git_gate_alignment_failures",
                                                            "_gate_identity_failures"):
@@ -3166,9 +3235,11 @@ def _git_gate_alignment_failures(source):
                 and all(isinstance(elt, ast.Name) for elt in stmt.value.elts)
                 and [elt.id for elt in stmt.value.elts] == ["_git_gate", probe]]
     capture_ids = set()
+    capture_target_ids = set()
     if len(captures) == 1:
         allowed_ids.add(id(captures[0].value.elts[1]))
         capture_ids.add(id(captures[0].value.elts[0]))
+        capture_target_ids.add(id(captures[0].targets[0]))
     else:
         findings.append("line(s) {}: the import-time gate/probe capture must appear exactly "
                         "once at module top level (round-6: the runtime identity check reads "
@@ -3220,6 +3291,30 @@ def _git_gate_alignment_failures(source):
         elif isinstance(node, ast.keyword) and node.arg in (probe, "_git_gate"):
             findings.append("line {}: the gate or probe name bound as a keyword argument "
                             "(round-6)".format(node.lineno))
+        elif (isinstance(node, (ast.MatchAs, ast.MatchStar))
+                and node.name in (probe, "_git_gate")):
+            findings.append("line {}: {} bound by a match capture pattern (round-7: MatchAs and "
+                            "MatchStar are binding nodes the round-6 scan missed)".format(
+                                node.lineno, node.name))
+        elif isinstance(node, ast.MatchMapping) and node.rest in (probe, "_git_gate"):
+            findings.append("line {}: {} bound by a match mapping rest pattern (round-7: a "
+                            "binding node the round-6 scan missed)".format(
+                                node.lineno, node.rest))
+        elif isinstance(node, ast.ClassDef) and node.name in (probe, "_git_gate"):
+            findings.append("line {}: {} bound by a class definition (round-7: a class statement "
+                            "rebinds or shadows the name)".format(node.lineno, node.name))
+        elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Subscript)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "_GATE_IMPORT_BINDINGS"):
+            findings.append("line {}: a call through a _GATE_IMPORT_BINDINGS subscript (round-7: "
+                            "an indirect probe or an uncounted gate call through the import "
+                            "capture)".format(node.lineno))
+        elif (isinstance(node, ast.Name) and node.id == "_GATE_IMPORT_BINDINGS"
+                and isinstance(node.ctx, (ast.Store, ast.Del))
+                and id(node) not in capture_target_ids):
+            findings.append("line {}: _GATE_IMPORT_BINDINGS is rebound or deleted outside the "
+                            "reviewed import-time capture (round-7: the identity checkpoints "
+                            "read it, so a co-rebinding would blind them)".format(node.lineno))
     gate_calls = sorted((node for node in ast.walk(tree) if isinstance(node, ast.Call)
                          and isinstance(node.func, ast.Name) and node.func.id == "_git_gate"),
                         key=lambda call: (call.lineno, call.col_offset))
@@ -3361,9 +3456,14 @@ def _not_run_net_vectors(tmp, failures):
     block named, the final one included), so a revert of any single gate's recorded failure is red. A git
     that STOPS honouring info/grafts makes the grafts case a STANDING NOT RUN failure of this self-test
     on that host (fail-closed and disclosed, resolved by porting the case, never by skipping it).
-    Round-6 (codex 1 / claude MEDIUM-1): a third gate scenario REBINDS _git_gate itself to an
-    always-False stand-in; the nested run must exit nonzero, name the identity drift and name the
-    unaccounted gate labels, keeping the runtime identity and accounting checks red-on-revert."""
+    Round-6 (codex 1 / claude MEDIUM-1) and round-7 (fix item 1): a third gate scenario REBINDS
+    _git_gate itself to an always-False stand-in; the nested run must exit nonzero and its output
+    must carry the identity diagnostic for EACH of the seven checkpoints by name and the
+    accounting diagnostic for EACH of the six gate labels, so removing any one checkpoint call or
+    dropping any one label from the accounting is red under its own assertion. The FIRST nested
+    run (the failed temp-allocation scenario) doubles as the gate-0 lost-git vector (round-7
+    codex 4 / claude MINOR-5): with the toml-class fixture commit made to fail after a successful
+    probe, that run must record the block's NOT RUN naming the observed cause."""
     import tempfile
     # The nested self-test (the self_test_main entry, which sets up its own git lifecycle) with ONLY the
     # end-to-end temp allocation failing. It cannot recurse: without that temp directory it never reaches
@@ -3375,16 +3475,35 @@ def _not_run_net_vectors(tmp, failures):
             raise PermissionError("injected: no writable temp directory")
         return real_mkdtemp(*args, **kwargs)
 
+    # Round-7 (codex 4 / claude MINOR-5): the same nested run carries the gate-0 lost-git vector.
+    # The toml-class fixture commit (the only caller passing this message) fails AFTER its gate's
+    # successful probe; the nested run must record that block's NOT RUN naming the OBSERVED cause
+    # (the exception type and text), never a silent skip or an unnamed traceback.
+    real_init_commit = _git_init_commit
+
+    def _lost_git_commit(repo, msg, init=True):
+        if msg == "toml class fixtures":
+            raise FileNotFoundError("injected: git vanished after the probe")
+        return real_init_commit(repo, msg, init)
+
     out = io.StringIO()
     tempfile.mkdtemp = _no_e2e_tmp
+    globals()["_git_init_commit"] = _lost_git_commit
     try:
         with redirect_stdout(out), redirect_stderr(io.StringIO()):
             rc = self_test_main()
     finally:
         tempfile.mkdtemp = real_mkdtemp
+        globals()["_git_init_commit"] = real_init_commit
     if rc == 0 or "NOT RUN: every end-to-end case" not in out.getvalue():
         failures.append("(NOT RUN temp) a failed end-to-end temp-directory allocation must record a NOT RUN "
                         "failure and exit nonzero, never a partial PASS (got rc={}: {})".format(
+                            rc, out.getvalue().strip()[-300:]))
+    if ("NOT RUN: " + _GIT_GATE_LABELS[0] not in out.getvalue()
+            or "FileNotFoundError: injected: git vanished after the probe" not in out.getvalue()):
+        failures.append("(NOT RUN git-gate) gate 0 lost git: a fixture commit that fails after "
+                        "this block's successful probe must be the block's NOT RUN failure "
+                        "naming the observed cause (got rc={}: {})".format(
                             rc, out.getvalue().strip()[-300:]))
 
     # The corpus-dependent fixtures, each with a control that plants and a corpus that cannot.
@@ -3516,9 +3635,15 @@ def _not_run_net_vectors(tmp, failures):
 
     # Round-6 (codex 1 / claude MEDIUM-1): a REBOUND GATE must be a NAMED failure at run time,
     # never six silently skipped blocks beside SELF-TEST PASS (the round-5 static checker admitted
-    # a globals()/sys.modules rebinding of _git_gate, and the runtime check is identity, not
-    # spelling, so this one rebinding stands for them all). The nested self-test must exit
-    # nonzero, name the identity drift, and name the unaccounted gate labels.
+    # a globals()/sys.modules rebinding of _git_gate; an IN-PLACE module rebinding is caught by
+    # identity whatever its spelling, so this one rebinding stands for that class, while the
+    # restored-between-checkpoints and local-shadow escapes are disclosed at
+    # _gate_identity_failures). Round-7 (fix item 1): the nested run must exit nonzero and its
+    # output must carry the identity diagnostic for EVERY checkpoint by name (the six gate labels
+    # and the end-of-suite checkpoint) and the accounting diagnostic for EVERY gate label, one
+    # assertion each, so removing one checkpoint call or dropping one label from the accounting
+    # is red under its own assertion, never satisfied by a diagnostic another checkpoint or the
+    # identity unit test produced.
     real_gate = _GATE_IMPORT_BINDINGS[0]
     globals()["_git_gate"] = lambda label, failures: False
     out = io.StringIO()
@@ -3531,13 +3656,17 @@ def _not_run_net_vectors(tmp, failures):
     if rc == 0:
         failures.append("(NOT RUN git-gate) rebound gate: the nested self-test must exit nonzero, "
                         "never SELF-TEST PASS beside six silently skipped blocks")
-    if "(git-gate identity)" not in text or "captured at import" not in text:
-        failures.append("(NOT RUN git-gate) rebound gate: the runtime identity check must name "
-                        "the drifted binding (output ended {!r})".format(text.strip()[-300:]))
-    if "(git-gate accounting)" not in text:
-        failures.append("(NOT RUN git-gate) rebound gate: the per-label accounting must name a "
-                        "block with neither record (output ended {!r})".format(
-                            text.strip()[-300:]))
+    for where_chk in _GIT_GATE_LABELS + ("at the end of the self-test",):
+        if ("(git-gate identity) " + where_chk
+                + ": _git_gate is not the object captured at import") not in text:
+            failures.append("(NOT RUN git-gate) rebound gate: the identity checkpoint {!r} must "
+                            "name the drifted gate binding (output ended {!r})".format(
+                                where_chk, text.strip()[-300:]))
+    for label_chk in _GIT_GATE_LABELS:
+        if "(git-gate accounting) {!r}".format(label_chk) not in text:
+            failures.append("(NOT RUN git-gate) rebound gate: the per-label accounting must name "
+                            "the unaccounted block {!r} (output ended {!r})".format(
+                                label_chk, text.strip()[-300:]))
 
 
 def _real_pack_e2e(tmp, failures):
@@ -6509,13 +6638,23 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
     # _not_run_net_vectors, an alias / functools.partial / rebinding of _git_gate, decorator,
     # default and annotation probes on the gate, a class-body probe, an unrelated early-return
     # alias, a duplicated and a nested real_probe swap, and a bool and a float label index) each
-    # returned [] from the round-4 checker; and the round-6 shapes (a globals()/sys.modules/import
+    # returned [] from the round-4 checker; the round-6 shapes (a globals()/sys.modules/import
     # rebinding or lookup of _git_gate, a parameter shadowing of the probe, a generator-expression
-    # and a type-alias escape, an early return through real_probe, a zero-swap stand-in, a third
-    # globals() store, and a duplicated or missing import capture) each returned [] from the
-    # round-5 checker. Round-6: this battery keeps the checker honest as a BACKSTOP; the runtime
-    # identity checks (_gate_identity_failures at every gate and at the end) and the per-label
-    # accounting before the verdict carry the guarantee. Residual
+    # and a type-alias escape, an early return through real_probe, a zero-swap stand-in, and a
+    # third globals() store) each returned [] from the round-5 checker, while the round-6
+    # duplicated import capture drew TWO round-5 findings (an indirect probe reference and an
+    # indirect gate reference, neither capture-specific) and the missing capture cannot be
+    # evaluated at round-5 at all, that revision having no capture to remove (round-7 codex 4 /
+    # claude MINOR-3 corrected the earlier claim that every round-6 shape returned []); and the
+    # round-7 shapes (the match captures and the class-definition binding, the calls through a
+    # _GATE_IMPORT_BINDINGS subscript, the capture co-rebinding, and the second def of and the
+    # ungated call to _planned_probe) each returned [] from the round-6 checker, which also had
+    # five rules with no planted vector at all (a global declaration, an except alias, a keyword
+    # argument, a bytes gate key, the gate-store count; claude MINOR-2), vectored now.
+    # Round-6/7: this battery keeps the checker honest as a BACKSTOP; the runtime identity
+    # checkpoints (_gate_identity_failures at every gate and at the end) and the per-label
+    # accounting (_gate_accounting_failures) before the verdict carry the guarantee, whose exact
+    # statement and disclosed limits live at _gate_identity_failures. Residual
     # (disclosed): a git-dependent block with NO probe at all is invisible to the static check; see
     # the checker docstring.
     own_source = Path(__file__).resolve().read_text(encoding="utf-8")
@@ -6587,7 +6726,46 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
              "string reference to _git_gate"),
             ("a planted duplicate import capture (round-6)",
              "_GATE_IMPORT_BINDINGS = (" + "_git_gate, " + "_git_available)\n",
-             "capture must appear exactly")):
+             "capture must appear exactly"),
+            ("a planted match capture of _git_gate (round-7)",
+             "def _planted_matchas_vector(x):\n    match x:\n        case _git_gate:\n"
+             "            pass\n",
+             "match capture pattern"),
+            ("a planted match star capture of the probe (round-7)",
+             "def _planted_matchstar_vector(x):\n    match x:\n        case [*_git_available]:\n"
+             "            pass\n",
+             "match capture pattern"),
+            ("a planted match mapping rest capture (round-7)",
+             "def _planted_matchmap_vector(x):\n    match x:\n        case {**_git_gate}:\n"
+             "            pass\n",
+             "match mapping rest"),
+            ("a planted class-definition binding of the probe (round-7)",
+             "def _planted_class_vector():\n    class _git_available:\n        pass\n",
+             "bound by a class definition"),
+            ("a planted probe call through the import capture (round-7)",
+             "def _planted_capture_probe_vector():\n    return _GATE_IMPORT_BINDINGS[1]()\n",
+             "call through a _GATE_IMPORT_BINDINGS subscript"),
+            ("a planted gate call through the import capture (round-7)",
+             "def _planted_capture_gate_vector(failures):\n"
+             "    return _GATE_IMPORT_BINDINGS[0](_GIT_GATE_LABELS[0], failures)\n",
+             "call through a _GATE_IMPORT_BINDINGS subscript"),
+            ("a planted co-rebinding of the import capture (round-7)",
+             "_GATE_IMPORT_BINDINGS = (lambda label, failures: False, lambda: True)\n",
+             "rebound or deleted outside the reviewed import-time capture"),
+            ("a planted global declaration of the probe (round-6 rule, vectored round-7)",
+             "def _planted_global_vector():\n    global _git_available\n",
+             "global or nonlocal declaration"),
+            ("a planted except alias of _git_gate (round-6 rule, vectored round-7)",
+             "def _planted_except_vector():\n    try:\n        pass\n"
+             "    except Exception as _git_gate:\n        pass\n",
+             "except alias"),
+            ("a planted keyword-argument binding of _git_gate (round-6 rule, vectored round-7)",
+             "def _planted_kw_vector():\n    return dict(_git_gate=None)\n",
+             "keyword argument"),
+            ("a planted bytes-keyed lookup of _git_gate (round-6 rule, vectored round-7)",
+             "def _planted_gate_bytes_vector():\n"
+             "    return globals()[b\"_git_gate\".decode()]()\n",
+             "bytes reference to _git_gate")):
         gotg = _git_gate_alignment_failures(own_source + "\n\n" + plantg)
         if not any(wantg in fg for fg in gotg):
             failures.append("(git-gate alignment) {} must be a finding naming {!r} (got {})".format(
@@ -6686,7 +6864,16 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
                  "exactly once"),
                 ("a third globals() probe store (round-6)",
                  _swap_line + "    globals()[\"" + "_git_available\"] = real_probe\n",
-                 "the stores are counted")):
+                 "the stores are counted"),
+                ("a second def of _planned_probe (round-7)",
+                 _swap_line + "    def _planned_probe():\n        return real_probe()\n",
+                 "exactly one def of _planned_probe"),
+                ("an ungated call to _planned_probe (round-7)",
+                 _swap_line + "    if not _planned_probe():\n        return\n",
+                 "other than as the reviewed probe-store value"),
+                ("a third globals() gate store (round-6 rule, vectored round-7)",
+                 _swap_line + "    globals()[\"" + "_git_gate\"] = None\n",
+                 "store(s) of the gate name")):
             gots5 = _git_gate_alignment_failures(own_source.replace(_swap_line, repls, 1))
             if not any(wants in f5 for f5 in gots5):
                 failures.append("(git-gate alignment) {} in _not_run_net_vectors (round-5) must "
@@ -6728,9 +6915,12 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
 
     # Round-6: the RUNTIME identity check, red-on-revert for the rebinding class the static scan
     # kept missing across rounds 4 to 6: identity through the module's own namespace decides, so
-    # one rebinding stands for every spelling (a globals() store, a sys.modules attribute store,
-    # an import binding). The module key is found BY IDENTITY too, so this test needs no name
-    # literal the static backstop would have to allow.
+    # one IN-PLACE module rebinding stands for every spelling of that class (a globals() store, a
+    # sys.modules attribute store, an import binding). A temporary rebinding restored between
+    # checkpoints and a local shadow that never rebinds the module sit OUTSIDE that class; the
+    # witness below holds the first escape visible, and _gate_identity_failures states the
+    # guarantee exactly (round-7). The module key is found BY IDENTITY too, so this test needs no
+    # name literal the static backstop would have to allow.
     space_idn = vars(sys.modules[__name__])
     for tag_idn, bound_idn in zip(("the gate", "the probe"), _GATE_IMPORT_BINDINGS):
         name_idn = next((key_idn for key_idn, val_idn in space_idn.items()
@@ -6756,6 +6946,67 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
     if got_idn:
         failures.append("(git-gate identity) intact bindings must pass the identity check "
                         "(got {})".format(got_idn))
+
+    # Round-7 (codex 3 / claude MEDIUM-2) DISCLOSED-RESIDUAL WITNESS: a temporary rebinding
+    # restored between checkpoints escapes the identity check BY DESIGN (checkpoints observe
+    # states, never the dispatch between them). The witness reproduces the escape: a stand-in
+    # gate is bound, dispatched through the module namespace, and restored between two
+    # checkpoint reads; the failure list must stay empty and the stand-in must have run.
+    # Strengthening dispatch (binding gated calls to the captured object) would turn this
+    # witness red, so the residual retires deliberately, never silently.
+    gate_name_res = next((key_res for key_res, val_res in space_idn.items()
+                          if val_res is _GATE_IMPORT_BINDINGS[0]), None)
+    if gate_name_res is not None:
+        got_res = []
+        _gate_identity_failures(got_res, "before a temporary rebinding")
+        ran_res = []
+        space_idn[gate_name_res] = lambda *_args_res: bool(ran_res.append(True))
+        try:
+            stood_res = space_idn[gate_name_res]("a label the stand-in ignores", [])
+        finally:
+            space_idn[gate_name_res] = _GATE_IMPORT_BINDINGS[0]
+        _gate_identity_failures(got_res, "after the restore")
+        if got_res or ran_res != [True] or stood_res is not False:
+            failures.append("(git-gate identity) the restore-between-checkpoints witness moved: "
+                            "a temporary rebinding restored between checkpoints is the DISCLOSED "
+                            "residual of the identity check, expected to reproduce until dispatch "
+                            "itself is bound to the captured object (got failures={}, ran={}, "
+                            "returned={!r})".format(got_res, ran_res, stood_res))
+
+    # Round-7 (fix item 1): the per-label accounting, one unit vector per gate label. Each
+    # vector feeds _gate_accounting_failures a record list missing EXACTLY ONE label and
+    # requires the diagnostic naming that label and no other, so dropping any single label
+    # from the accounting is red under its own vector, never masked by a diagnostic a
+    # different label produced. The intact, NOT-RUN-record and duplicate-record cases pin
+    # both sides of the exactly-one bound (0 records and 2 records are each findings; 1,
+    # from either source, never is).
+    got_av = []
+    _gate_accounting_failures(got_av, list(_GIT_GATE_LABELS))
+    if got_av:
+        failures.append("(git-gate accounting) a complete record list must satisfy the "
+                        "accounting (got {})".format(got_av))
+    for miss_av, miss_label_av in enumerate(_GIT_GATE_LABELS):
+        got_av = []
+        _gate_accounting_failures(got_av, [lab_av for lab_av in _GIT_GATE_LABELS
+                                           if lab_av is not miss_label_av])
+        named_av = [f_av for f_av in got_av
+                    if "(git-gate accounting) {!r}".format(miss_label_av) in f_av]
+        if len(got_av) != 1 or len(named_av) != 1:
+            failures.append("(git-gate accounting) label {} left unaccounted must draw exactly "
+                            "one diagnostic, naming {!r} (got {})".format(
+                                miss_av, miss_label_av, got_av))
+    got_av = ["NOT RUN: " + _GIT_GATE_LABELS[0] + ": its probe failed (unit vector)"]
+    _gate_accounting_failures(got_av, list(_GIT_GATE_LABELS[1:]))
+    if len(got_av) != 1:
+        failures.append("(git-gate accounting) a NOT RUN line is a label's one record and must "
+                        "satisfy the accounting (got {})".format(got_av[1:]))
+    got_av = []
+    _gate_accounting_failures(got_av, list(_GIT_GATE_LABELS) + [_GIT_GATE_LABELS[0]])
+    if not any("(git-gate accounting) {!r}".format(_GIT_GATE_LABELS[0]) in f_av
+               and "ran=2" in f_av for f_av in got_av):
+        failures.append("(git-gate accounting) a DUPLICATE record (ran=2) must be a finding "
+                        "naming the label; exactly one is a two-sided bound (got {})".format(
+                            got_av))
 
     # QA round-9 codex minor: the drift consumer requires EXACTLY ONE DRIFT-STATES record. A
     # duplicate (identical or contradictory) and a malformed record are failures that a later
@@ -6797,9 +7048,12 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
     import tempfile as _tempfile
     # The fixture commit is REAL git work (init/add/commit with check=True), so it runs behind
     # a named gate (round-4 claude MINOR-3); git absent at the START stops the whole suite in
-    # fixture_git_lifecycle, which raises RuntimeError: self-test requires git (round-5), and git
-    # LOST BETWEEN this block's successful probe and its fixture commit is caught below and
-    # recorded as this block's NOT RUN (round-6 codex 6), never an unnamed traceback.
+    # fixture_git_lifecycle, which raises RuntimeError: self-test requires git (round-5), and a
+    # fixture commit that fails AFTER this block's successful probe is caught below and recorded
+    # as this block's NOT RUN naming the OBSERVED cause, the exception type and text (round-6
+    # codex 6; round-7 codex 4 / claude MINOR-5: a CalledProcessError can also mean a refused
+    # commit, so the message no longer asserts git was lost, and the first nested run in
+    # _not_run_net_vectors carries the in-suite vector), never an unnamed traceback.
     _gate_identity_failures(failures, _GIT_GATE_LABELS[0])
     if _git_gate(_GIT_GATE_LABELS[0], failures):
         with _tempfile.TemporaryDirectory(prefix="aiqt-delta-toml-class-") as tc_dir:
@@ -6809,8 +7063,10 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
             try:
                 _git_init_commit(tc_repo, "toml class fixtures")
             except (OSError, subprocess.CalledProcessError) as tc_exc:
-                _not_run(failures, _GIT_GATE_LABELS[0], "git was lost between this block's "
-                         "successful probe and its fixture commit ({})".format(tc_exc))
+                _not_run(failures, _GIT_GATE_LABELS[0], "its fixture commit failed after this "
+                         "block's successful probe ({}: {}); a lost git and a refused commit "
+                         "both land here, fail-closed under the observed cause".format(
+                             type(tc_exc).__name__, tc_exc))
             else:
                 prev_digits = sys.get_int_max_str_digits()
                 sys.set_int_max_str_digits(4300)
@@ -7978,18 +8234,13 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
 
     # Round-6 (codex 1 / claude MEDIUM-1): the gate and probe bindings are verified BY IDENTITY at
     # each gated block above and here at the end, and every gate label must account for exactly
-    # one record, its body's last statement or its NOT RUN line, so a rebound gate (any spelling)
-    # and a bypassed or vanished block are each a named failure at run time, whatever the static
-    # backstop missed.
+    # one record, its body's last statement or its NOT RUN line (_gate_accounting_failures,
+    # extracted round-7 with one red-on-revert vector per label), so a module rebinding still in
+    # place at a checkpoint and a bypassed or vanished block are each a named failure at run time,
+    # whatever the static backstop missed; the restored-rebinding and local-shadow escapes are
+    # disclosed at _gate_identity_failures.
     _gate_identity_failures(failures, "at the end of the self-test")
-    for label_acct in _GIT_GATE_LABELS:
-        ran_acct = gate_ran.count(label_acct)
-        notrun_acct = sum(1 for f_acct in failures
-                          if f_acct.startswith("NOT RUN: " + label_acct))
-        if ran_acct + notrun_acct != 1:
-            failures.append("(git-gate accounting) {!r}: exactly one record per gate label is "
-                            "required (body ran, or its NOT RUN line); got ran={}, "
-                            "not-run={}".format(label_acct, ran_acct, notrun_acct))
+    _gate_accounting_failures(failures, gate_ran)
 
     if failures:
         print("SELF-TEST FAIL:")
