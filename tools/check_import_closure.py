@@ -77,9 +77,11 @@ Rules (each self-test vector is caught by exactly its rule, and passes with that
                      that function's own table as a plain local bound by no import statement: a parameter, or
                      a name a statement of the body binds, not global, nonlocal or free. Third, no
                      comprehension or generator expression anywhere in that function binds the name as a
-                     for-target: the floor version inlines a list, set or dict comprehension into the def
-                     around it, and the merged symbol for a target that shadows a local reads as a plain
-                     local there, so the table alone cannot tell the two bindings apart. The exemption is a
+                     for-target: a conservative keep, not a condition the floor version's scoping needs
+                     (an inlined comprehension's target leaks nowhere, so a body read outside every
+                     comprehension still resolves to the def's own binding, and where only a comprehension
+                     binds the name the table reads the body reference as global, kept by the second
+                     condition); it can only over-report, and its vectors pin the kept sites. The exemption is a
                      binding rule, not a value proof: the binding is
                      local and fixed at compile time, so the name resolves to that variable and never to a
                      module-level or builtin binding; what the variable holds is not proven, and a local that
@@ -92,10 +94,15 @@ Rules (each self-test vector is caught by exactly its rule, and passes with that
                      an enclosing def binds the name; every reference in a list, set or dict comprehension or
                      a generator expression (targets, body, conditions and every iterable, the first
                      included); every parameter and return annotation and a type alias's value (the floor
-                     version evaluates them lazily, in annotation scopes); and everything a type-parameter
-                     scope holds (a type parameter list with its bounds, constraints and defaults, a generic
-                     class's bases and keywords and a generic def's defaults: the floor version reads them
-                     against the definition's type-parameter scope, where a class namespace can intervene).
+                     version evaluates them lazily, in annotation scopes); everything a type-parameter
+                     scope holds (a type parameter list with its bounds, constraints and defaults, and a
+                     generic class's bases and keywords: the floor version reads them against the
+                     definition's type-parameter scope, where a class namespace can intervene); and a
+                     generic def's defaults, kept as a stated conservative policy and not by the floor
+                     version's scoping: it evaluates a def's defaults in the enclosing scope, generic or
+                     not (def f[T](x=T) raises NameError, and def f[help](x=help) reads the enclosing
+                     help, never the type parameter), so this keep can only over-report, and its own
+                     vectors pin the kept sites.
                      A site as before: a module-scope or class-body binding (names there are looked
                      up at run time and can fall through to the globals or the builtins, so a conditional,
                      deleted or later binding proves nothing), a comprehension target, a global or nonlocal
@@ -103,7 +110,8 @@ Rules (each self-test vector is caught by exactly its rule, and passes with that
                      statement binds (import imp in the scope that reads imp), a name any scope imports under a
                      global or nonlocal declaration, a reference to no binding in the file (the builtin
                      __import__), every reference in a file with a * import, every ambiguity (two lambdas on one
-                     line, a def named genexpr beside a generator expression on its line, a source symtable
+                     line, a def named genexpr beside a generator expression on its line, a def named
+                     listcomp beside a class-body annotation's comprehension on its line, a source symtable
                      cannot read), and a dunder
                      watched name (__import__, __builtins__, __loader__, __path__, __spec__) wherever it is
                      bound, since binding one rebinds the import machinery itself; and an import statement, a
@@ -1356,11 +1364,14 @@ def _scoped_children(node, scope, inner=None, body=False):
     table proves its own locals) starts a chain of its own: a list, set or dict comprehension and a generator
     expression (all of it, the first iterable included), a type parameter list with its bounds, constraints and
     defaults, every parameter and return annotation (the floor version evaluates them lazily, in annotation
-    scopes), a type alias's value, a generic class's bases and keywords and a generic def's defaults (the floor
-    version reads them against the definition's type-parameter scope), and a class body. A def's or class's
-    decorators, a non-generic def's defaults and a non-generic class's bases and keywords run as plain
-    expressions where the definition runs, so they keep the position they are read in; so does the annotation of
-    an annotated assignment, which in a function body the floor version never evaluates at all."""
+    scopes), a type alias's value, a generic class's bases and keywords (the floor version reads them against
+    the definition's type-parameter scope), a generic def's defaults (a stated conservative policy, not the
+    floor version's scoping: it evaluates a def's defaults in the enclosing scope, generic or not, so the
+    False position here can only over-report, and the generic-default vectors pin the kept sites), and a
+    class body. A def's or class's decorators, a non-generic def's defaults and a non-generic class's bases
+    and keywords run as plain expressions where the definition runs, so they keep the position they are read
+    in; so does the annotation of an annotated assignment, which in a function body the floor version never
+    evaluates at all."""
     if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
         return [(child, scope, False, True) for child in ast.iter_child_nodes(node)]
     if isinstance(node, ast.TypeAlias):
@@ -1446,10 +1457,15 @@ RESOLVED_NAME_FIELDS = ((ast.Name, "id"), (ast.arg, "arg"), (ast.ExceptHandler, 
 def _comprehension_bound(tree, identities):
     """{def or lambda identity: every name under a for-target of a comprehension or generator expression anywhere
     in that function, nested scopes included}: no reference to such a name is ever exempt anywhere in that
-    function. The floor version inlines a list, set or dict comprehension into the function around it, and the
-    function's own symbol for a target that shadows its local reads as a plain local there (the merged symbol
-    carries no comprehension flag), so the function's table alone cannot tell the two bindings apart; a name a
-    target merely reads (a subscript's base or index) is swept in too, an over-keep, never an exemption."""
+    function. A conservative keep, not a condition the floor version's scoping needs: every reference inside a
+    comprehension or generator expression is already kept by its position (_scoped_children), an inlined
+    comprehension's target leaks nowhere, so a body read outside them resolves to the function's own binding
+    (the floor version inlines a list, set or dict comprehension into the function around it, and the
+    function's own symbol for a target that shadows its local reads as a plain local there, the merged symbol
+    carrying no comprehension flag), and where only a comprehension binds the name the table reads a body
+    reference as global, kept by _plain_local. The keep can only over-report, and its vectors pin the kept
+    sites; a name a target merely reads (a subscript's base or index) is swept in too, an over-keep, never an
+    exemption."""
     out = dict()
     stack = [(tree, ())]
     while stack:
@@ -1477,9 +1493,12 @@ def _scope_tables(tree, source, identities):
     own scope analysis (the standard library symtable module over the same source); the walk that puts each
     reference in its syntactic position is this gate's own (_scoped_children), and the site vectors pin, shape by
     shape, that a position it marks as a def or lambda body resolves in that function's own table. A scope more
-    than one table could match (two lambdas on one line, or a def named genexpr beside a generator expression on
-    its line, whose table is also function-kind and named genexpr) is left unmatched, and every reference in an
-    unmatched scope keeps its site. A tainted name is one some scope binds by an import statement under a global
+    than one table could match (two lambdas on one line; a def named genexpr beside a generator expression on
+    its line, whose table is also function-kind and named genexpr; or a def named listcomp beside a class-body
+    annotation's comprehension on its line, a comprehension in an annotation scope that can see a class body
+    not being inlined, so its table too is function-kind and named listcomp) is left unmatched, and every
+    reference in an unmatched scope keeps its site. A tainted name is one some scope binds by an import
+    statement under a global
     or nonlocal declaration (run that import and an enclosing def's local, or the module's name, becomes the
     imported module), so no reference to it is ever suppressed. A source symtable cannot read gives no tables:
     every reference then keeps its site."""
@@ -1526,7 +1545,8 @@ def _kept(name, scope, body, tables, tainted, comp_bound, starred):
     __builtins__ or __path__ rebinds the import machinery itself, so every occurrence is reviewed), any
     reference in a file with a * import, any reference whose syntactic position is not a def or lambda body
     itself (body, _scoped_children: a comprehension, a generator expression, an annotation, a type-parameter
-    scope, a type alias's value, a class body and the module level keep every site), a scope no symbol table
+    scope, a type alias's value, a generic def's defaults, a class body and the module level keep every site),
+    a scope no symbol table
     matches (a source symtable cannot read, and every ambiguity, among them), a name a comprehension or
     generator expression anywhere in that function binds as a target (comp_bound), and a name its own table
     does not hold or _plain_local does not prove. False only for the one exemption, a binding rule and not a
@@ -1614,9 +1634,13 @@ def dynamic_sites(tree, source, names, members):
     generator expression anywhere in that function binds the name as a target (_comprehension_bound); the
     binding is then that variable's, never a module-level or builtin one (a binding rule, not a value proof).
     Every other occurrence stays a site: a free (closure) read, every reference in a comprehension, generator
-    expression, annotation, type-parameter scope or type alias's value, a module or class-body resolution, an
-    import binding, a global or nonlocal declared name, a type-parameter binding, a dunder, every reference in
-    a file with a * import, and every ambiguity."""
+    expression, parameter or return annotation, type-parameter scope or type alias's value (the annotation of
+    an annotated assignment is no such position: in a function body the floor version never evaluates it, and
+    a watched name there is read like any other expression of the scope that holds the statement, the rule
+    text's stated exception), a generic def's defaults (a stated conservative policy: the floor version
+    evaluates them in the enclosing scope, so the keep can only over-report), a module or class-body
+    resolution, an import binding, a global or nonlocal declared name, a type-parameter binding, a dunder,
+    every reference in a file with a * import, and every ambiguity."""
     parents = dict()
     for node in ast.walk(tree):
         for child in ast.iter_child_nodes(node):
@@ -3232,6 +3256,21 @@ _SITE_VECTORS = (
     ("a generic def's annotation read in its type-parameter scope",
      "def outer():\n    help = 0\n    def g[help](x: help):\n        return x\n    return g\n",
      ("outer | #1: help", "outer | #2: help")),
+    # Round-13: a generic def's defaults stay sites as a stated conservative policy, not by the floor
+    # version's scoping: it evaluates a def's defaults in the enclosing scope, generic or not (def f[T](x=T)
+    # raises NameError, and def f[help](x=help) reads the enclosing help, never the type parameter), so the
+    # keep can only over-report; these two default vectors pin the kept sites, and each catches the
+    # generic-defaults widening mutant that drops only the not-generic condition on the defaults line. The
+    # bound vector after them catches the widening of a type alias's type-parameter list.
+    ("a generic def's positional default read where the def runs, kept as a site",
+     "def outer():\n    help = 0\n    def g[T](x=help):\n        return x\n    return g\n",
+     ("outer | #1: help",)),
+    ("a generic def's keyword-only default read where the def runs, kept as a site",
+     "def outer():\n    help = 0\n    def g[T](*, x=help):\n        return x\n    return g\n",
+     ("outer | #1: help",)),
+    ("a generic type alias's bound read in its type-parameter scope",
+     "def outer():\n    help = 0\n    type A[T: help] = int\n    return A\n",
+     ("outer | #1: help",)),
     # Round-11: the exemption is a binding rule, not a value proof. A plain local can still hold import machinery
     # obtained another way (a parameter, an eval or another unwatched dynamic call), and the gate reports nothing
     # for it: the disclosed residual, pinned here. A source symtable rejects keeps every site.
@@ -3949,10 +3988,17 @@ MUTANTS = (
     ("local-binding-taint-kept", "    if sym.get_name() in tainted:\n        return False\n",
      "    if False:\n        return False\n",
      "an import under a nonlocal declaration taints the enclosing local"),
-    # Round-12: not removals but the widenings rounds 9 to 12 walked back, each put back one at a time and
-    # caught by its own vector: the exemption widened to a free variable, to every name regardless of
-    # compile-time locality, to what a comprehension or generator expression holds, to a type-parameter list,
-    # to an annotation, to a type alias's value, and to a generic definition's bases, keywords and defaults.
+    # Round-12 and Round-13: not removals but widenings, each put back one at a time and caught by its own
+    # vector. What each widening mutant covers, exactly: free-widened a free variable; local-proven every name
+    # regardless of compile-time locality; comprehension-widened what a list, set or dict comprehension or a
+    # generator expression holds; type-params-widened a def's or class's type-parameter list;
+    # alias-type-params-widened a type alias's type-parameter list; annotation-widened a parameter annotation;
+    # returns-widened a return annotation; alias-value-widened a type alias's value;
+    # generic-definition-widened a generic class's bases and keywords; and generic-defaults-widened with
+    # generic-defaults-widened-kwonly (one mutation, bound to the positional and to the keyword-only default
+    # vector) a generic def's defaults, the stated conservative policy. The class-body position has no
+    # widening mutant: a class scope never matches a symbol table (_scope_tables), so
+    # local-binding-unmatched-kept keeps its sites even widened, and no vector could tell that widening apart.
     ("local-binding-free-widened", "    if sym.is_free():\n        return False\n",
      "    if sym.is_free():\n        return True\n",
      "a closure read of a def's plain local"),
@@ -3987,6 +4033,18 @@ MUTANTS = (
      "                out.append((child, scope, body and not generic, True))\n",
      "                out.append((child, scope, body, True))\n",
      "a generic class's base read in its type-parameter scope"),
+    ("local-binding-alias-type-params-widened",
+     "        out.extend((child, scope, False, True) for child in node.type_params)\n",
+     "        out.extend((child, scope, body, True) for child in node.type_params)\n",
+     "a generic type alias's bound read in its type-parameter scope"),
+    ("local-binding-generic-defaults-widened",
+     "                out.extend((d, scope, body and not generic, True)\n",
+     "                out.extend((d, scope, body, True)\n",
+     "a generic def's positional default read where the def runs, kept as a site"),
+    ("local-binding-generic-defaults-widened-kwonly",
+     "                out.extend((d, scope, body and not generic, True)\n",
+     "                out.extend((d, scope, body, True)\n",
+     "a generic def's keyword-only default read where the def runs, kept as a site"),
     # Each (node type, field) pair of RESOLVED_NAME_FIELDS removed in turn: its occurrences then stay sites, so
     # its own suppression vector fails.
     ("resolved-name-read", '(ast.Name, "id"), ', "", "a walrus target"),
