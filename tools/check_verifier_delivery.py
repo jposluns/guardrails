@@ -80,14 +80,23 @@ question-list template fixes them:
     decimal or six hexadecimal digits: html.unescape converts a decimal digit run through int(),
     which raises past the interpreter conversion limit (sys.get_int_max_str_digits(), 4300
     digits), so such a line is refused by a bounded pre-scan of digit-run length before any decode
-    runs, in body lines and fenced content alike; an over-long or undecodable reference is
-    CANNOT_EVALUATE, never a crash and never a pass.
-  * A line that reads as a VERDICT line or as the QA-COMPLETE line under its CommonMark rendering,
-    its legacy html.unescape reading or the raw line with the non-whitespace Cc controls dropped,
-    while its raw text is not that line: the canonical boundary is read from the raw text alone
-    (that parse is unchanged), so an encoded or control-padded boundary ("VERDICT&#58; BLOCKERS
-    FOUND", "QA&#45;COMPLETE", "QA&#45COMPLETE", a U+0001 inside either word), duplicated or not,
-    anywhere in the body, is refused, never read as content.
+    runs. The pre-scan reads every raw body line before any block is segmented: ordinary text,
+    fenced content and fence opening lines, their info strings included (the fence grammar drops
+    an info string, so a scan after segmentation would never see one); an over-long or
+    undecodable reference is CANNOT_EVALUATE, never a crash and never a pass.
+  * A line whose letter skeleton reads as a boundary outside the canonical boundary position: the
+    skeleton is the line with its character references decoded (html.unescape, semicolonless
+    legacy forms included, after the over-long pre-scan above), every character that is not an
+    ASCII letter dropped (backslash escapes, emphasis and underscore marks, control, format and
+    ignorable characters, punctuation and whitespace all fall away) and the letters lower-cased;
+    a skeleton that begins with "verdictnoblockers" or "verdictblockersfound" or equals
+    "qacomplete" is refused unless the line is the canonical VERDICT or QA-COMPLETE line at its
+    canonical position, read from the raw text alone (that parse is unchanged). ONE fail-closed
+    test over every body line wherever it sits: ordinary text, fenced and indented code content,
+    fence opening lines (info strings included) and blockquote lines alike, so an encoded,
+    emphasised, control-padded, escape-masked or fenced boundary ("VERDICT&#58; BLOCKERS FOUND",
+    "V*ER*DICT: BLOCKERS FOUND", "__VERDICT__: BLOCKERS FOUND", "QA&#45;COMPLETE" inside any
+    fence, a U+0001 inside either word), duplicated or not, is refused, never read as content.
   * A VERDICT value holding a whitespace separator other than space or tab (U+001C and U+0085
     included): str.split would fold it into a clean verdict, so the value is refused, never
     normalised.
@@ -229,9 +238,10 @@ match a file another finding names; a findings section naming no file is checked
 tree; findings written after the last answer without the exact "## Findings" line (a
 bulleted "- MAJOR:", "### Findings" or "Findings:") are read as text of the last answer, so their words
 can answer a question that does not ask for a quote and their quotes can answer one that does (each
-quote still held to that answer's files); an answer word need not answer the question (only an exact restatement is caught); a literal format or
-default-ignorable character inside a would-be VERDICT or QA-COMPLETE word is not stripped by the
-boundary refusal (only the non-whitespace Cc controls are dropped), so such a line stays content. False FAIL: a
+quote still held to that answer's files); an answer word need not answer the question (only an exact restatement is caught); the boundary
+skeleton keeps ASCII letters only, so a boundary spelled with non-ASCII letters that render like
+ASCII letters (a homoglyph: Cyrillic, fullwidth or mathematical letter forms) keeps no skeleton
+letter and stays content, the skeleton residual. False FAIL: a
 double-quoted word used as a scare quote ("belt and braces"), not an example in "(e.g. ...)", is held to
 the tree; a quote of the brief's own text is held to the tree like any other; an answer that names a
 file absent from the tree its question does not name (a placeholder path without a placeholder
@@ -268,8 +278,11 @@ code spans read across lines, the content of a fence indented four or more colum
 definitions, images, link titles that run on, quote-mark character references), answer-marker
 lookalikes, lazy blockquote continuation, indented code after a fence or a heading, a fence after a
 list marker, the question marker, pin matching, repeated pins, commit-only pins, strict decoding, the numeric decode
-bounds, the over-long reference pre-scan (live through the CLI, in a fence included), the encoded,
-control-padded and semicolonless boundary refusal, the escape-aware legacy branch, the
+bounds, the over-long reference pre-scan (live through the CLI, in fenced content and in fence
+info strings included), the letter-skeleton boundary refusal (encoded, emphasised, control-padded,
+escape-masked, semicolonless and fenced forms, live through the CLI with the vector line number
+asserted, plus prose and code acceptance controls and a flip/ check), the noncharacter decode
+readings, the escape-aware legacy branch, the
 verdict-value separator refusal, the missing-Cc-clause static guard, CRLF
 transport, indented code blocks, ambient GIT_ variables, replace refs, blob re-hashing on both read
 paths, the pinned tree and both runtime scanners; a recording seam also shows the NFKC input for the
@@ -883,7 +896,10 @@ def _marker_rendered(line):
 
 
 # The escape-aware legacy decode, cached per token: one 16 MiB line can repeat a reference
-# millions of times, and the cache keeps that at one html.unescape call per distinct token.
+# millions of times, and the cache keeps that at one html.unescape call per distinct CACHED
+# token. The cache holds at most 4096 entries, so a token first seen once the cache is full is
+# decoded on every call (each decode still bounded by the token grammar): the one-decode
+# promise holds for cached tokens only.
 _LEGACY_TOKEN_CACHE = {}
 
 
@@ -906,7 +922,9 @@ def _marker_escape_aware(line):
     """The round-9 escape-aware legacy reading: backslash escapes decoded as _marker_rendered
     decodes them, and each tokenized character reference (MARKER_SOURCE_RE) decoded through
     html.unescape (_legacy_reference), so "Q&#65535;4\\. x", "Q4\\.&#65535; x" and
-    "Q&#xFFFF;4\\. x" read "Q4. x" (U+FFFF is dropped where CommonMark substitutes U+FFFD). Kept
+    "Q&#xFFFF;4\\. x" read "Q4. x" (html.unescape drops U+FFFF; the CommonMark reading keeps the
+    raw code point, _reference_commonmark returning chr(0xFFFF), so only this escape-aware
+    reading shows that marker; decode/noncharacter-reference-readings pins both decodes). Kept
     beside the whole-line html.unescape reading as a further refusal branch, a union, never a
     replacement."""
     pieces, at = [], 0
@@ -1087,69 +1105,58 @@ def _verdict_of(line):
     return rest.strip(" \t")
 
 
-# The non-whitespace Cc controls (C0, DEL and C1; the whitespace controls, tab to carriage
-# return, the information separators U+001C to U+001F and U+0085, stay whitespace): a renderer
-# shows one as nothing, a box or a replacement glyph, so a boundary word holding one can read as
-# the boundary ("VER" then U+0001 then "DICT:").
-_CC_NON_WHITESPACE = frozenset(char for char in map(chr, list(range(0x00, 0x20)) + list(range(0x7F, 0xA0)))
-                               if not char.isspace())
-_CC_STRIP_TABLE = {ord(char): None for char in _CC_NON_WHITESPACE}
-_CC_TRIGGER_RE = re.compile(r"[\x00-\x08\x0e-\x1b\x7f-\x84\x86-\x9f]")
-# The first character, spaces and tabs aside, that can open a boundary under some reading: V or
-# v (VERDICT, any case), Q (QA-COMPLETE), an emphasis mark or an escape before VERDICT, a
-# character reference, or a dropped Cc control. Any other first character survives every reading
-# this grammar takes, so the line is no boundary candidate and nothing is decoded for it.
-_BOUNDARY_HEAD_CHARS = frozenset("VvQ*&\\") | _CC_NON_WHITESPACE
 # A whitespace separator inside a VERDICT value other than space or tab (U+001C and U+0085
 # included): str.split would fold it into a clean verdict, so the value is refused
 # (_parse_delivery), never normalised.
 _ODD_WHITESPACE_RE = re.compile(r"[^\S \t]")
+# The letter skeleton drops every character that is not an ASCII letter, so emphasis and
+# underscore marks, backslash escapes, control, format and default-ignorable characters,
+# punctuation and whitespace all fall away before the boundary skeletons are compared.
+_SKELETON_STRIP_RE = re.compile(r"[^A-Za-z]+")
+# The letter skeletons of the canonical boundary lines: a VERDICT value may carry trailing
+# text (the raw parse keeps it), so the two verdict skeletons are prefix tests; the
+# QA-COMPLETE skeleton is exact.
+_VERDICT_SKELETONS = ("verdictnoblockers", "verdictblockersfound")
+_COMPLETE_SKELETON = "qacomplete"
 
 
-def _boundary_readings(line):
-    """(name, reading) pairs under which a renderer can show line otherwise than its raw text:
-    the CommonMark rendering (_marker_rendered), the legacy whole-line html.unescape reading, and
-    the raw line with the non-whitespace Cc controls dropped. A reading equal to the raw line is
-    not yielded, and no legacy decode runs on a line _undecodable_reference refuses (the parse
-    refuses that line outright before any reading is taken)."""
-    if _undecodable_reference(line) is not None:
-        return
-    if "\\" in line or "&" in line:
-        rendered = _marker_rendered(line)
-        if rendered != line:
-            yield "CommonMark", rendered
-    if "&" in line:
-        legacy = html.unescape(line)
-        if legacy != line:
-            yield "legacy html.unescape", legacy
-    if _CC_TRIGGER_RE.search(line):
-        yield "control-stripped", line.translate(_CC_STRIP_TABLE)
+def _letter_skeleton(line):
+    """line as the fail-closed boundary test reads it: character references decoded through
+    html.unescape (numeric and named, the semicolonless legacy forms included; the bounded
+    digit-run pre-scan has already refused any over-long reference, so this decode never
+    converts an unbounded digit run), then every character that is not an ASCII letter dropped
+    and the letters lower-cased. A reference that decodes to punctuation or to nothing
+    ("&#45;", "&#65535;") takes its own letters (an "x", hex digits, an entity name) out of
+    the skeleton, and one that decodes to an ASCII letter ("&#86;") puts that letter in."""
+    return _SKELETON_STRIP_RE.sub("", html.unescape(line) if "&" in line else line).lower()
 
 
 def _boundary_shown(line):
-    """A refusal description when a reading of line (_boundary_readings) is a VERDICT line or the
-    QA-COMPLETE line while its raw text is neither, or None. The canonical boundary parse reads
-    the raw text alone and is unchanged; this refuses a line a renderer can show as a boundary
-    where that parse reads content ("VERDICT&#58; BLOCKERS FOUND", "QA&#45;COMPLETE", a U+0001
-    inside either word), never a second boundary parse. DISCLOSED RESIDUAL: only the
-    non-whitespace Cc controls are stripped, so a literal format or default-ignorable character
-    inside a boundary word stays content."""
-    head = line.lstrip(" \t")[:1]
-    if not head or head not in _BOUNDARY_HEAD_CHARS:
+    """A refusal description when the letter skeleton of line (_letter_skeleton) begins with a
+    canonical VERDICT skeleton or equals the QA-COMPLETE skeleton, or None: ONE fail-closed
+    test, applied by _parse_delivery to every delivery-body line wherever it sits (ordinary
+    text, fenced and indented code content, fence opening lines and their info strings,
+    blockquote lines), with only the canonical boundary lines at their canonical positions
+    exempted, by the caller. It replaces the round-9 to round-11 enumerated readings
+    (CommonMark, legacy, control-stripped), each of which a composition or markup form
+    rendered around (D-475-BOUNDARY-SKELETON); the canonical boundary parse (_verdict_of,
+    _verdict_value, _delivery_body) reads the raw text alone and is unchanged. DISCLOSED
+    RESIDUAL: the skeleton keeps ASCII letters only, so a boundary spelled with non-ASCII
+    letters that render like ASCII letters (a homoglyph: Cyrillic, fullwidth or mathematical
+    letter forms) keeps no skeleton letter and stays content."""
+    skeleton = _letter_skeleton(line)
+    if skeleton == _COMPLETE_SKELETON:
+        shown = "the {} line".format(COMPLETE_LINE)
+    elif skeleton.startswith(_VERDICT_SKELETONS):
+        shown = "a VERDICT line"
+    else:
         return None
-    if _verdict_of(line) is not None or line.rstrip(" \t") == COMPLETE_LINE:
-        return None
-    for name, reading in _boundary_readings(line):
-        if _verdict_of(reading) is not None:
-            shown = "a VERDICT line"
-        elif reading.rstrip(" \t") == COMPLETE_LINE:
-            shown = "the {} line".format(COMPLETE_LINE)
-        else:
-            continue
-        return ("a line that reads as {} under its {} reading while its raw text is not that line"
-                " (the canonical boundary is read from the raw text alone; an encoded or"
-                " control-padded boundary is refused, never read as content)".format(shown, name))
-    return None
+    return ("a line whose letter skeleton (character references decoded, every character that is"
+            " not an ASCII letter dropped, case folded) reads as {} outside the canonical"
+            " boundary position (the canonical boundary is read from the raw text alone at its"
+            " canonical position; a boundary shown anywhere else, encoded, emphasised,"
+            " control-padded, escape-masked, fenced or quoted, is refused, never read as"
+            " content)".format(shown))
 
 
 def _after_block_end(previous):
@@ -1209,14 +1216,18 @@ def _parse_delivery(lines, question_count):
     answer; one VERDICT line; then a QA-COMPLETE line, after which come only blank lines and, as the
     delivery's last non-blank line, the harness line exactly. Any other shape, and any construct that
     can hide text from rendered view or reads as a marker without being one, is CannotEvaluate naming
-    the line: a boundary is never inferred from free text."""
-    segments = _segments(lines, strict=True)
+    the line: a boundary is never inferred from free text. The over-long reference pre-scan runs over
+    every raw body line first, before any block is segmented, fence opening lines and their info
+    strings included; once the shape is read, the letter-skeleton boundary test (_boundary_shown)
+    also runs over every raw body line, exempting only the two canonical boundary lines at their
+    canonical positions."""
     last = next((number for number, text in reversed(lines) if text.strip()), None)
     answers, sections = [], []
     current = None
     verdict = None
     phase = "answers"
     expected = 1
+    complete_at = None
     quote_run = []
     count = [0]
 
@@ -1224,6 +1235,16 @@ def _parse_delivery(lines, question_count):
         raise CannotEvaluate("delivery line {}: {} (closed delivery shape: the SHA line, then Q1. to Q{}. in "
                              "order, an optional {!r} section, one VERDICT line, then {})".format(
                                  number, what, question_count, FINDINGS_HEADING, COMPLETE_LINE))
+
+    # The bounded pre-scan of over-long numeric references, over every raw body line before any
+    # block is segmented: ordinary text, fence opening lines and their info strings (the fence
+    # grammar keeps only the marker, so a scan after segmentation would never see an info
+    # string), fenced content, indented code and blockquote lines alike, naming the line.
+    for number, text in lines:
+        undecodable = _undecodable_reference(text)
+        if undecodable:
+            refuse(number, _undecodable_refusal(undecodable))
+    segments = _segments(lines, strict=True)
 
     def add(quote):
         count[0] += 1
@@ -1243,10 +1264,6 @@ def _parse_delivery(lines, question_count):
             flush()
             if _lazy_continuation(after_quote, "```"):
                 refuse(number, "a fenced block directly after a blockquote line (leave a blank line after a quote)")
-            for offset, text in enumerate(payload, 1):
-                undecodable = _undecodable_reference(text)
-                if undecodable:
-                    refuse(number + offset, _undecodable_refusal(undecodable))
             inner = _fenced_answer_head(payload)
             if inner is not None:
                 refuse(number + inner + 1, "an answer heading inside the fenced block opened at line {} (or a line "
@@ -1275,12 +1292,6 @@ def _parse_delivery(lines, question_count):
             refuse(number, "a line directly after a blockquote line that is not one (CommonMark reads it into the "
                            "quote; leave a blank line after a quote)")
         after_quote = False
-        undecodable = _undecodable_reference(payload)
-        if undecodable:
-            refuse(number, _undecodable_refusal(undecodable))
-        boundary = _boundary_shown(payload)
-        if boundary:
-            refuse(number, boundary)
         if not (payload.startswith("Q") and ANSWER_HEAD_RE.match(payload)) and _marker_candidate(payload):
             refuse(number, "a line that reads as an answer marker but is not \"QN.\" in ASCII at column 0 "
                            "(lookalike or non-ASCII characters, escapes or character references that render as one, "
@@ -1310,6 +1321,7 @@ def _parse_delivery(lines, question_count):
             if payload.rstrip(" \t") != COMPLETE_LINE:
                 refuse(number, "text between the VERDICT line and {}".format(COMPLETE_LINE))
             phase = "complete"
+            complete_at = number
             continue
         head = ANSWER_HEAD_RE.match(payload) if payload.startswith("Q") else None
         value = _verdict_of(payload)
@@ -1362,6 +1374,18 @@ def _parse_delivery(lines, question_count):
         refuse(end, "no VERDICT line")
     if phase != "complete":
         refuse(end, "no {} line after the VERDICT line".format(COMPLETE_LINE))
+    # The letter-skeleton boundary sweep (ONE fail-closed test, D-475-BOUNDARY-SKELETON), over
+    # every raw body line: ordinary text, fenced and indented code content, fence opening lines
+    # and their info strings, and blockquote lines alike. Only the two lines the canonical raw
+    # parse accepted as the VERDICT and QA-COMPLETE boundaries are exempt; any other line whose
+    # skeleton reads as a boundary, a raw boundary line inside a fence included, is refused by
+    # name (a raw boundary line outside a fence and out of place is refused by the shape above).
+    for number, text in lines:
+        if number == verdict["line"] or number == complete_at:
+            continue
+        shown = _boundary_shown(text)
+        if shown:
+            refuse(number, shown)
     return answers, sections, verdict
 
 
@@ -1759,6 +1783,7 @@ FIXTURE_FILES = {
     "README.md": "Only the root readme carries this line.\n",
     ".preview/README.md": "| Tool | Role |\n| pattern-self-match.py | matches its own pattern |\n",
     "docs/crlf.md": "Stored with CRLF line ends.\r\nSecond stored line.\r\n",
+    "docs/encoded.md": "QA&#45;COMPLETE\nverdict = parse(x)\n",
     "VERSION": "0.0.1-fixture\n",
 }
 BRIEF_MIXED = ("Synthetic review brief.\nBRIEF-PIN: {pin}\n\n"
@@ -2117,7 +2142,8 @@ def _self_test_cases(fx):
     # reference literal. The C1 and literal control rows discriminate the non-whitespace Cc clause
     # of _marker_ignorable, in a reference before the marker, inside it and as a literal code point.
     # The escape-aware rows decode only under the round-9 tokenized reading (_marker_escape_aware):
-    # html.unescape drops U+FFFF where CommonMark substitutes U+FFFD, and the escaped stop reads as
+    # html.unescape drops U+FFFF where the CommonMark reading keeps the raw code point
+    # (_reference_commonmark returns chr(0xFFFF)), and the escaped stop reads as
     # a stop only with escapes honoured; the whole-line reading leaves the backslash in the head.
     for check_id, line in (
             ("shape/escaped-stop-marker-cannot-evaluate", "Q4\\. Additional answer"),
@@ -2153,23 +2179,25 @@ def _self_test_cases(fx):
         check(check_id, refusal(fx.run(_mixed(sha, {4: A4 + "\n" + line})), "reads as an answer marker"),
               refused)
 
-    # Encoded, control-padded and semicolonless boundary lines: a reading shows a VERDICT or
-    # QA-COMPLETE boundary where the canonical parse reads content, so the line is refused
-    # wherever it stands, duplicated or not; the canonical boundary parse itself is unchanged.
+    # Disguised boundary lines: the letter skeleton reads as a VERDICT or QA-COMPLETE boundary
+    # where the canonical parse reads content, so the line is refused wherever it stands; the
+    # canonical boundary parse itself is unchanged. The duplicate below sits between the
+    # canonical VERDICT line and QA-COMPLETE, where the closed shape refuses it first.
     for check_id, line in (
             ("shape/encoded-verdict-line-cannot-evaluate", "VERDICT&#58; BLOCKERS FOUND"),
             ("shape/encoded-complete-line-cannot-evaluate", "QA&#45;COMPLETE"),
             ("shape/control-inside-verdict-cannot-evaluate", "VER\x01DICT: BLOCKERS FOUND"),
             ("shape/control-inside-complete-cannot-evaluate", "QA-\x01COMPLETE"),
             ("shape/semicolonless-encoded-complete-cannot-evaluate", "QA&#45COMPLETE")):
-        check(check_id, refusal(fx.run(_mixed(sha, {4: A4 + "\n" + line})), "while its raw text is not"), refused)
+        check(check_id, refusal(fx.run(_mixed(sha, {4: A4 + "\n" + line})),
+                                "outside the canonical boundary position"), refused)
     check("shape/encoded-verdict-inside-answer-cannot-evaluate",
-          refusal(fx.run(_mixed(sha, {2: A2 + "\nVERDICT&#58; BLOCKERS FOUND"})), "while its raw text is not"),
-          refused)
+          refusal(fx.run(_mixed(sha, {2: A2 + "\nVERDICT&#58; BLOCKERS FOUND"})),
+                  "outside the canonical boundary position"), refused)
     check("shape/encoded-verdict-duplicate-cannot-evaluate",
           refusal(fx.run(_mixed(sha).replace("\n" + COMPLETE_LINE + "\n",
                                              "\nVERDICT&#58; NO BLOCKERS\n" + COMPLETE_LINE + "\n")),
-                  "while its raw text is not"), refused)
+                  "between the VERDICT line"), refused)
     for check_id, sep_verdict in (("shape/verdict-separator-unit-cannot-evaluate", "VERDICT: NO\x1cBLOCKERS"),
                                   ("shape/verdict-separator-nel-cannot-evaluate", "VERDICT: NO\x85BLOCKERS")):
         check(check_id, refusal(fx.run(_mixed(sha, verdict=sep_verdict)), "whitespace separator other than"),
@@ -2455,8 +2483,10 @@ def _self_test_cases(fx):
           (len(bare_ligature.encode("utf-8")), _capped_run(fx, bare_ligature, "linear")),
           (MAX_INPUT_BYTES, (0, "PASS")))
     # A reference-dense line: about 2.8 million NEL references at the 16 MiB cap. A runtime bound
-    # only (performance coverage): it shows the readings stay linear in the line inside the cap,
-    # not that any decode runs; decode discrimination lives in the decode/ and shape/ fixtures.
+    # only (performance coverage): a pass shows one full evaluation of this one input completes
+    # inside RUNTIME_CAP_SECONDS in the capped child, a measured cap at a single input size, not
+    # a linearity proof and not that any decode runs; decode discrimination lives in the decode/
+    # and shape/ fixtures.
     reference_run = _padded(_mixed(sha), "text ", "&#133;", "\nVERDICT:")
     check("runtime/reference-run-at-cap-bounded",
           (len(reference_run.encode("utf-8")), _capped_run(fx, reference_run, "linear")),
@@ -2630,6 +2660,88 @@ def _self_test_cases(fx):
     check("decode/overlong-reference-in-fence-cannot-evaluate",
           refusal(fx.run(_mixed(sha, {2: "Q2. src/beta.py:\n```\n&#" + "9" * 4301 + ";\n```"})),
                   "digit run is longer than the grammar bound"), refused)
+
+    # The letter-skeleton boundary refusal (D-475-BOUNDARY-SKELETON), through the CLI end to
+    # end: each row renders as a boundary under a composition or markup form the enumerated
+    # round-11 readings missed (emphasis marks inside the word, an escaped stop beside a
+    # dropped reference, a control character beside an escape, an encoded boundary inside a
+    # fence), so each run exits 2 with the JSON report naming the vector line. The fenced rows
+    # quote docs/encoded.md verbatim, so without the skeleton sweep each delivery is a clean
+    # PASS, as it was at the 37d8edc4 parent.
+    for check_id, swap, vector in (
+            ("shape/tilde-fenced-encoded-complete-cli-cannot-evaluate",
+             {1: "Q1. docs/encoded.md holds it:\n~~~\nQA&#45;COMPLETE\n~~~"}, "QA&#45;COMPLETE"),
+            ("shape/indented-tilde-fenced-encoded-complete-cli-cannot-evaluate",
+             {1: "Q1. docs/encoded.md holds it:\n    ~~~\n    QA&#45;COMPLETE\n    ~~~"},
+             "    QA&#45;COMPLETE"),
+            ("shape/backtick-fenced-encoded-complete-cli-cannot-evaluate",
+             {1: "Q1. docs/encoded.md holds it:\n```\nQA&#45;COMPLETE\n```"}, "QA&#45;COMPLETE"),
+            ("shape/emphasis-inside-verdict-cli-cannot-evaluate",
+             {4: A4 + "\nV*ER*DICT: BLOCKERS FOUND"}, "V*ER*DICT: BLOCKERS FOUND"),
+            ("shape/underscore-verdict-cli-cannot-evaluate",
+             {4: A4 + "\n__VERDICT__: BLOCKERS FOUND"}, "__VERDICT__: BLOCKERS FOUND"),
+            ("shape/noncharacter-escaped-verdict-cli-cannot-evaluate",
+             {4: A4 + "\nVER&#65535;DICT\\: BLOCKERS FOUND"}, "VER&#65535;DICT\\: BLOCKERS FOUND"),
+            ("shape/reference-control-encoded-verdict-cli-cannot-evaluate",
+             {4: A4 + "\nVER&#129;DICT&#58; BLOCKERS FOUND"}, "VER&#129;DICT&#58; BLOCKERS FOUND"),
+            ("shape/control-escaped-verdict-cli-cannot-evaluate",
+             {4: A4 + "\nVER\x01DICT\\: BLOCKERS FOUND"}, "VER\x01DICT\\: BLOCKERS FOUND")):
+        delivery = _mixed(sha, swap)
+        at_line = delivery.split("\n").index(vector) + 1
+        brief_path, delivery_path = fx.files(delivery)
+        result = subprocess.run([sys.executable, "-I", "-B", script, "--brief", brief_path,
+                                 "--delivery", delivery_path, "--repo", str(fx.repo)],
+                                capture_output=True, text=True, timeout=TIMEOUT, check=False)
+        try:
+            shown = json.loads(result.stdout)
+            reason = " ".join(shown["reasons"])
+            got = (result.returncode, shown["verdict"],
+                   "delivery line {}:".format(at_line) in reason, "letter skeleton" in reason)
+        except (ValueError, KeyError, TypeError):
+            got = (result.returncode, None, False, False)
+        check(check_id, got, (2, "CANNOT_EVALUATE", True, True))
+    tilde_fenced = _mixed(sha, {1: "Q1. docs/encoded.md holds it:\n~~~\nQA&#45;COMPLETE\n~~~"})
+    check("flip/shape-boundary-skeleton",
+          verdict(_patched("_boundary_shown", lambda line: None, lambda: fx.run(tilde_fenced))), "PASS")
+    # Named acceptance controls: prose and code mention verdicts and blockers without beginning
+    # a boundary skeleton, so every line stays content and the delivery stays clean.
+    prose_controls = _mixed(sha, {
+        1: "Q1. docs/encoded.md: the code line reads\n```\nverdict = parse(x)\n```",
+        3: "Q3. No blockers were found in the verdict path. docs/gamma.md says "
+           "\"Only gamma carries this exact sentence.\"",
+        4: A4 + "\nThe verdict is clear."})
+    check("shape/boundary-skeleton-prose-controls-pass", verdict(fx.run(prose_controls)), "PASS")
+    # The over-long reference pre-scan reads fence opening lines too: before round 12 the fence
+    # grammar dropped the info string before any scan (_segments keeps only the marker), so an
+    # over-long reference there was never seen; the pre-scan now runs over every raw body line
+    # before segmentation and refuses the opening line by number, through the CLI end to end.
+    for check_id, info in (
+            ("decode/overlong-decimal-in-fence-info-cli-cannot-evaluate", "&#" + "9" * 4301 + ";"),
+            ("decode/overlong-hex-in-fence-info-cli-cannot-evaluate", "&#x" + "f" * 4301 + ";"),
+            ("decode/overlong-semicolonless-in-fence-info-cli-cannot-evaluate", "&#" + "9" * 4301)):
+        opener = "~~~" + info
+        delivery = _mixed(sha, {4: A4 + "\n" + opener + "\n~~~"})
+        at_line = delivery.split("\n").index(opener) + 1
+        brief_path, delivery_path = fx.files(delivery)
+        result = subprocess.run([sys.executable, "-I", "-B", script, "--brief", brief_path,
+                                 "--delivery", delivery_path, "--repo", str(fx.repo)],
+                                capture_output=True, text=True, timeout=TIMEOUT, check=False)
+        try:
+            shown = json.loads(result.stdout)
+            reason = " ".join(shown["reasons"])
+            got = (result.returncode, shown["verdict"], "delivery line {}:".format(at_line) in reason,
+                   "digit run is longer than the grammar bound" in reason)
+        except (ValueError, KeyError, TypeError):
+            got = (result.returncode, None, False, False)
+        check(check_id, got, (2, "CANNOT_EVALUATE", True, True))
+    # _reference_commonmark keeps the raw code point for a noncharacter reference (chr(point):
+    # only zero, surrogates and values past U+10FFFF become U+FFFD) where the legacy
+    # html.unescape decode drops it, so only the escape-aware reading shows this marker; the
+    # _marker_escape_aware comment states exactly that, and this check pins it.
+    check("decode/noncharacter-reference-readings",
+          (_reference_commonmark("&#65535;"), _legacy_reference("&#65535;"),
+           _marker_escape_aware("Q&#65535;4\\. x")),
+          ("\uffff", "", "Q4. x"))
     check("bare/static-tables-valid", _static_config_problems(), [])
     check("bare/broken-grammar-refused", bool(_patched("ANSWER_HEAD_RE", never, _static_config_problems)), True)
     check("bare/broken-quote-pairs-refused",
@@ -2794,8 +2906,19 @@ GRAMMAR_PROBES = (
     ("_undecodable_reference", "&#x1234567; x", True), ("_undecodable_reference", "&#x123456; x", False),
     ("_boundary_shown", "VERDICT&#58; BLOCKERS FOUND", True), ("_boundary_shown", "QA&#45;COMPLETE", True),
     ("_boundary_shown", "VER\x01DICT: BLOCKERS FOUND", True), ("_boundary_shown", "QA-\x01COMPLETE", True),
-    ("_boundary_shown", "QA&#45COMPLETE", True), ("_boundary_shown", "VERDICT: BLOCKERS FOUND", False),
-    ("_boundary_shown", "QA-COMPLETE", False),
+    ("_boundary_shown", "QA&#45COMPLETE", True), ("_boundary_shown", "V*ER*DICT: BLOCKERS FOUND", True),
+    ("_boundary_shown", "__VERDICT__: BLOCKERS FOUND", True),
+    ("_boundary_shown", "VER&#65535;DICT\\: BLOCKERS FOUND", True),
+    ("_boundary_shown", "VER&#129;DICT&#58; BLOCKERS FOUND", True),
+    ("_boundary_shown", "VER\x01DICT\\: BLOCKERS FOUND", True),
+    # The skeleton test itself exempts nothing: raw canonical boundary text matches too, and
+    # _parse_delivery exempts only the canonical lines at their canonical positions.
+    ("_boundary_shown", "VERDICT: BLOCKERS FOUND", True), ("_boundary_shown", "QA-COMPLETE", True),
+    # Negative controls: prose and code that mention verdicts and blockers do not begin a
+    # boundary skeleton, so each stays content while _boundary_shown returns None for it.
+    ("_boundary_shown", "The verdict is clear.", False),
+    ("_boundary_shown", "Q3. No blockers were found in the verdict path.", False),
+    ("_boundary_shown", "verdict = parse(x)", False),
     ("_unread_fence", "- ```", True), ("_unread_fence", "```", False),
 )
 
