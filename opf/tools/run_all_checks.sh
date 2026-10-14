@@ -48,6 +48,7 @@ run_gate "opf-adopt-hook-selftest"     python3 -I -B "$here/_opf_adopt_hook.py" 
 run_gate "opf-adopt-complete-selftest" python3 -I -B "$here/_opf_adopt_complete.py" --self-test
 run_gate "opf-pack-manifest-selftest"  python3 -I -B "$here/_opf_pack_manifest.py" --self-test
 run_gate "opf-adopt-observe-selftest"  python3 -I -B "$here/_opf_adopt_observe.py" --self-test
+run_gate "opf-adopt-discover-selftest" python3 -I -B "$here/_opf_adopt_discover.py" --self-test
 run_gate "opf-prompt-pack-selftest"    python3 -I -B "$here/check_opf_prompt_pack.py" --self-test
 run_gate "opf-prompt-pack"             python3 -I -B "$here/check_opf_prompt_pack.py"
 run_gate "opf-oplock-selftest"         python3 -I -B "$here/_opf_oplock.py" --self-test

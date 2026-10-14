@@ -695,12 +695,16 @@ def _read_toml_contained(root_fd, relpath, *, with_raw=False):
     return (data, parsed) if with_raw else parsed
 
 
-def _read_store_bytes_contained(root_fd, relpath):
+def _read_store_bytes_contained(root_fd, relpath, allowance=None):
     """The byte half of _read_toml_contained: read a contained store CONTROL file's exact bytes beneath
     root_fd, no-follow, singly-linked, capped. Returns the raw bytes, or None when the file (or a
     parent) is absent; StoreError on any unreadable shape. Split out so the descriptor-bound discovery
     (discover_machine_store_fd) can keep the EXACT bytes it parses for the resolved manifest rather
-    than re-opening it by path (round-5 defect 1)."""
+    than re-opening it by path (round-5 defect 1). `allowance`, when given, meters the read: a
+    one-element list holding the bytes the caller still allows its store reads, the read stopping at the
+    smaller of MAX_STORE_READ_BYTES and that remainder (never a byte past it) and the bytes read deducted
+    from it, a file that does not fit refused. None (every caller but source discovery) reads unmetered,
+    exactly as before."""
     try:
         st = _journal._lstat_contained(root_fd, relpath)
     except (_journal.JournalError, OSError) as exc:
@@ -728,13 +732,25 @@ def _read_store_bytes_contained(root_fd, relpath):
     if st.st_size > MAX_STORE_READ_BYTES:
         raise StoreError("{} is {} bytes, over the {}-byte store-read cap (fail-closed)".format(
             relpath, st.st_size, MAX_STORE_READ_BYTES))
+    limit = None
+    if allowance is not None:
+        # A metered read is bounded DURING the read, not only classified after it: a file grown between
+        # this lstat and the read stops at the limit, so it can outrun neither the per-file cap nor the
+        # budget the caller charged for its store reads (source discovery; SECA resource-bounds).
+        limit = min(MAX_STORE_READ_BYTES, allowance[0])
+        if st.st_size > limit:
+            raise StoreError("{} is {} bytes, over the {} bytes left of the read allowance (fail-closed)".format(
+                relpath, st.st_size, limit))
     try:
         # F-R17-A1: a STORE control file (a manifest or a `.opf.toml`/`.opf.local.toml` pointer) is refused
         # when it is multiply-linked. The decision is made on the OPENED fd's stat inside _read_contained,
         # not the pre-open _lstat_contained probe above, so a hardlink to an out-of-tree victim cannot let a
         # resolved store posture silently track the victim inode. This reader serves ONLY manifest and pointer
         # paths, so the single-link requirement covers both without touching generic product reads.
-        data, _ = _journal._read_contained(root_fd, relpath, require_single_link=True)
+        if limit is None:
+            data, _ = _journal._read_contained(root_fd, relpath, require_single_link=True)
+        else:
+            data, _ = _journal._read_contained(root_fd, relpath, require_single_link=True, cap=limit)
     except (_journal.JournalError, OSError) as exc:
         _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
         # _read_contained maps its open/read errors to JournalError, but its post-open os.fstat can still
@@ -745,12 +761,15 @@ def _read_store_bytes_contained(root_fd, relpath):
         raise StoreError("cannot read {} ({})".format(relpath, exc))
     # Re-check the bytes ACTUALLY read against the cap: the pre-open lstat size is bound to the file as it
     # was BEFORE the open, so a store file swapped in or grown between that lstat and the open (a TOCTOU race
-    # on an adopter-controlled tree) is refused here rather than parsed over the cap. Residual: the bytes are
-    # read before this refusal, so a concurrently-growing file is bounded at classification, not mid-read
+    # on an adopter-controlled tree) is refused here rather than parsed over the cap. Residual: an unmetered
+    # read reads the bytes before this refusal, so a concurrently-growing file is bounded at classification
+    # (and by the journal product-read ceiling), not mid-read; a metered read stops at its limit instead
     # (SECA resource-bounds; disclose-guard-residuals).
     if len(data) > MAX_STORE_READ_BYTES:
         raise StoreError("{} read {} bytes, over the {}-byte store-read cap (a raced swap or growth past "
                          "the pre-open size; fail-closed)".format(relpath, len(data), MAX_STORE_READ_BYTES))
+    if allowance is not None:
+        allowance[0] -= len(data)
     return data
 
 
@@ -895,7 +914,7 @@ def discover_machine_store(store_root_fd, store_root, accept_tokens=None):
     return _discovery_result(matches, legacy)
 
 
-def discover_machine_store_fd(store_root_fd, accept_tokens=None):
+def discover_machine_store_fd(store_root_fd, accept_tokens=None, allowance=None):
     """Descriptor-bound sibling of discover_machine_store (round-5 defect 1): the `.working` LISTING
     descriptor is held for the whole discovery and every listed name's manifest is read BENEATH it,
     so a `.working` swapped in after the listing is never read (the rounds-2-4 invariant: every name
@@ -904,7 +923,8 @@ def discover_machine_store_fd(store_root_fd, accept_tokens=None):
     status is "one", the resolved manifest's EXACT bytes as read through the held descriptor (None
     otherwise), so a descriptor-bound caller (resolve_store_fd, the adoption planner) parses the very
     bytes discovery matched rather than re-opening the manifest by path. Statuses, details, StoreError
-    behaviour and `accept_tokens` are exactly discover_machine_store's."""
+    behaviour and `accept_tokens` are exactly discover_machine_store's. `allowance` meters each manifest
+    read (_read_store_bytes_contained); None reads unmetered."""
     accept = (STANDARD_TOKEN,) if accept_tokens is None else tuple(accept_tokens)
     wfd = _open_working_dir_fd(store_root_fd, WORKING_DIRNAME)
     if wfd is None:
@@ -915,7 +935,7 @@ def discover_machine_store_fd(store_root_fd, accept_tokens=None):
 
         def load(name):
             rel = "{}/{}".format(name, MANIFEST_NAME)
-            data = _read_store_bytes_contained(wfd, rel)   # StoreError propagates (fail-closed)
+            data = _read_store_bytes_contained(wfd, rel, allowance)   # StoreError propagates (fail-closed)
             if data is None:
                 return None
             parsed = _parse_store_toml("{}/{}".format(WORKING_DIRNAME, rel), data)
@@ -1045,11 +1065,16 @@ def _target_store_root(target, product_root):
     return Path(product_root) / path
 
 
-def _read_pointer_target(product_root_fd, relpath):
+def _read_pointer_target(product_root_fd, relpath, allowance=None):
     """The Target named by a pointer file at the product root, or None when the file is absent. Raises
     StoreError when the file is present but unreadable, unparseable, or carries no usable
-    `[store].target` (a pointer that names nothing is malformed, not absent)."""
-    data = _read_toml_contained(product_root_fd, relpath)
+    `[store].target` (a pointer that names nothing is malformed, not absent). `allowance` meters the
+    read as _read_store_bytes_contained states; None reads unmetered."""
+    if allowance is None:
+        data = _read_toml_contained(product_root_fd, relpath)
+    else:
+        raw = _read_store_bytes_contained(product_root_fd, relpath, allowance)
+        data = None if raw is None else _parse_store_toml(relpath, raw)
     if data is None:
         return None
     store = data.get("store")
@@ -1218,7 +1243,7 @@ def _resolve_at(store_root, source, target, pointer, accept_tokens=None):
                       store_root=store_root, pointer_source=source)
 
 
-def resolve_store_fd(product_root_fd, product_root, accept_tokens=None):
+def resolve_store_fd(product_root_fd, product_root, accept_tokens=None, allowance=None):
     """Descriptor-bound resolve_store (round-5 defect 1), for a caller that already HOLDS the product
     root open and keeps that descriptor for every subsequent read (the adoption planner, which opened
     it with the _open_dir_nofollow walk). Nothing is re-resolved by path: the pointer files are read
@@ -1232,16 +1257,19 @@ def resolve_store_fd(product_root_fd, product_root, accept_tokens=None):
     manifest's exact bytes as read through the listing descriptor (None unless RESOLVED), so the
     caller parses the same bytes discovery matched instead of re-opening the manifest by path.
     `product_root` is the path the held descriptor was opened from, used only for pointer-target
-    resolution and reporting; `accept_tokens` as in resolve_store. Statuses and details follow
+    resolution and reporting; `accept_tokens` as in resolve_store. `allowance` meters every pointer and
+    manifest read (_read_store_bytes_contained), so a caller that charged resolution to its own budget
+    (source discovery) is never read past that charge; a read that does not fit is CANNOT-EVALUATE. None
+    (investigation and every other caller) reads unmetered. Statuses and details follow
     resolve_store/_resolve_at."""
     product_root = Path(product_root)
     if not _containment.probe():
         return Resolution(CANNOT_EVALUATE, "race-free containment primitive absent; fail-closed",
                           product_root=product_root), None
     try:
-        local = _read_pointer_target(product_root_fd, LOCAL_POINTER_REL)
+        local = _read_pointer_target(product_root_fd, LOCAL_POINTER_REL, allowance)
         # The local override wins WHOLESALE (spec 4.3), exactly as in resolve_store (MAJOR 1).
-        committed = _read_pointer_target(product_root_fd, POINTER_REL) if local is None else None
+        committed = _read_pointer_target(product_root_fd, POINTER_REL, allowance) if local is None else None
     except StoreError as exc:
         _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
         return Resolution(CANNOT_EVALUATE, str(exc), product_root=product_root), None
@@ -1264,7 +1292,7 @@ def resolve_store_fd(product_root_fd, product_root, accept_tokens=None):
                 target=target, pointer_source=source, product_root=product_root), None
     try:
         status, machine_dir, detail, manifest_raw = discover_machine_store_fd(
-            product_root_fd, accept_tokens=accept_tokens)
+            product_root_fd, accept_tokens=accept_tokens, allowance=allowance)
     except StoreError as exc:
         _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
         return Resolution(CANNOT_EVALUATE, str(exc), store_root=product_root, target=target,
@@ -2780,6 +2808,40 @@ def self_test():
         big_manifest = manifest_text() + chr(10) + "#" + ("x" * (MAX_STORE_READ_BYTES + 16))
         m8_root = build_store(manifest=big_manifest)
         check("m8-oversized-manifest-cannot-eval", resolve_store(m8_root).status == CANNOT_EVALUATE)
+
+        # m8b: a METERED read (the allowance source discovery passes resolve_store_fd) deducts what it read,
+        # refuses a file larger than the allowance left before opening it, and, for a file found larger only
+        # at the read (one grown after its lstat), stops at the limit: the read never takes a byte past it.
+        _m8b = base / "m8b-metered"; _m8b.mkdir()
+        (_m8b / "f.toml").write_bytes(b"a = 1\n")
+        _m8b_real_read = os.read
+        _m8b_bytes = [0]
+
+        def _m8b_read(fd_arg, n_arg):
+            block = _m8b_real_read(fd_arg, n_arg)
+            _m8b_bytes[0] += len(block)
+            return block
+        _m8b_fd = os.open(str(_m8b), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.read = _m8b_read
+            _m8b_left = [10]
+            check("m8b-metered-read-deducts",
+                  _guard(lambda: _read_store_bytes_contained(_m8b_fd, "f.toml", _m8b_left)) == b"a = 1\n"
+                  and _m8b_left == [4])
+            _m8b_left = [5]
+            _m8b_bytes[0] = 0
+            check("m8b-metered-over-allowance-refused-unread",
+                  _guard(lambda: _read_store_bytes_contained(_m8b_fd, "f.toml", _m8b_left)) == "RAISED"
+                  and _m8b_left == [5] and _m8b_bytes[0] == 0)
+            _m8b_bytes[0] = 0
+            check("m8b-stop-at-cap-reads-no-byte-past",
+                  _guard(lambda: _journal._read_contained(_m8b_fd, "f.toml", cap=4)) == "RAISED"
+                  and _m8b_bytes[0] == 4)
+            check("m8b-stop-at-cap-exact-fit",
+                  _guard(lambda: _journal._read_contained(_m8b_fd, "f.toml", cap=6)[0]) == b"a = 1\n")
+        finally:
+            os.read = _m8b_real_read
+            os.close(_m8b_fd)
 
         # ---- round-2 reconcile-draft fix vectors (fail pre-fix, pass post-fix) ------------------------
         # The FIFO-hang alarm marker MUST NOT derive from OSError: a reader's own `except OSError`

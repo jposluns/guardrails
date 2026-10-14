@@ -20628,6 +20628,7 @@ def _self_tests():
     ("opf-observe", _opf_observe.self_test),
     ("opf-absorb", _opf_absorb.self_test),
     ("opf-record", _opf_record.self_test),
+    ("opf-write-guard", _opf_write_guard.self_test),
     ("opf-adopt-apply", _opf_adopt_apply.self_test),
     ("opf-adopt-state", _opf_adopt_state.self_test),
     ("opf-fuzz", _opf_fuzz.self_test),

@@ -354,7 +354,9 @@ a staged plan has a recoverable transaction. In homes 2, ordinary transaction op
 those of an open transaction being recovered, MUST NOT equal, descend from, or contain `journals/`;
 a legacy store's transactions and recovery keep their legacy operand handling, and no shipped writer
 targets that home. Capability-bound journal APIs MUST derive their destinations from kind and run
-identity. Homes 2 has no legacy journal transport: no homes-1 journal is carried into `journals/`,
+identity. An ID reservation under `allocations/` MUST be created exclusively and create-only,
+made durable before it is relied on and never rewritten, so an interrupted publication leaves
+no reservation or the complete one (section 8.2). Homes 2 has no legacy journal transport: no homes-1 journal is carried into `journals/`,
 and a homes-2 store is never recovered from one (section 15).
 These comparisons are byte-exact: on a case-insensitive or normalizing filesystem, a differently
 cased or composed spelling can alias a reserved home and is not caught. Discovery precedes the
@@ -935,6 +937,21 @@ MUST NOT be reused, even when a record is superseded, refuted, or its work rever
 rewrites, and store relocation MUST NOT touch `counters.toml`. Re-adoption MUST seed both series
 from a pinned ancestral snapshot and MUST refuse a missing required namespace; it MUST NOT zero-seed
 prior ancestry. Only a genuinely first adoption MAY start its counters at zero.
+
+At homes 2 the claim additionally begins with one irrevocable reservation,
+`journals/<kind>/allocations/<run-id>.toml` (sections 4.2 and 8.8), which MUST hold exactly
+`format = "opf.journal.allocation/v1"`, the run's `kind`, `run_id` and `operation_id`, and a
+non-empty `[claims]` table mapping each claimed counter key, a record namespace or, for a run of
+the import engine, a quoted imported-series `"imported:<NS>"` key, to that run's new high-water
+value, an integer of at least 1 and at most `2**63 - 1` so every conforming TOML reader can parse
+it. A reservation MUST NOT be rewritten, and a reservation request finding an existing entry for
+the same run MUST be refused unless the entry reads back byte-identical to the exact payload the
+request would publish, in which case the request MUST re-establish the entry's durability before
+relying on it; a refusal is not evidence that the run holds its numbers. The next-ID derivation
+applies per series key: at homes 2 the next ID under a counter key, the clean `<NS>` and quoted
+`"imported:<NS>"` number lines independently, is one more than the maximum of the `counters.toml`
+high-water and every reservation's `[claims]` value for that counter key, so recovery MUST treat
+a reserved number as issued even where no published record carries it.
 
 ### 8.3 The record envelope
 
