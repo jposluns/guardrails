@@ -317,26 +317,38 @@ def self_test_main(nested_run=False):
         available. A sentinel descriptor opened for this call must appear in the listing: one that
         omits it is incomplete and fails closed as None, exactly like an unlistable directory, so
         the accounting never trusts a listing shown to drop descriptors. A sentinel that cannot be
-        opened (an unopenable /dev/null) is None too, inside this guarded call, so the matrix still
-        reaches its named NOT RUN failure and its cleanup rather than crashing past them. Residual:
+        opened (an unopenable /dev/null) is None too, and so is one whose close fails: that close
+        is attempted exactly once, never blindly retried (after a failed close the descriptor's
+        state is unknown, so a retry could close an unrelated descriptor), and either way the
+        matrix still reaches its named NOT RUN failure and its cleanup rather than crashing past
+        them. Residual:
         a partial listing that still holds the sentinel and happens to match its counterpart can
         hide a leak; the sentinel refutes a listing that drops it, it does not prove completeness."""
         try:
             sentinel = os.open(os.devnull, os.O_RDONLY)
         except OSError:
             return None  # no sentinel could be opened: fail closed, like an unlistable directory
+        result = None
+        close_failed = False
         try:
             for fd_dir in ("/proc/self/fd", "/dev/fd"):
                 try:
                     names = os.listdir(fd_dir)
                 except OSError:
                     continue
-                if str(sentinel) not in names:
-                    return None  # an incomplete listing: fail closed, never a partial accounting
-                return sorted(name for name in names if name != str(sentinel))
+                if str(sentinel) in names:
+                    result = sorted(name for name in names if name != str(sentinel))
+                # The first listable directory decides either way: a listing that omits the
+                # sentinel leaves result None, an incomplete listing never a partial accounting.
+                break
         finally:
-            os.close(sentinel)
-        return None
+            try:
+                os.close(sentinel)  # exactly once: a failed close is never blindly retried
+            except OSError:
+                close_failed = True
+        if close_failed:
+            return None  # the sentinel close failed: fail closed, like an unlistable directory
+        return result
 
     # The T34 verdict for one before/after enumeration pair: None only when the accounting ran and the
     # descriptors match. An enumeration open_fds could not trust (either side None: unlistable, or the
@@ -345,10 +357,11 @@ def self_test_main(nested_run=False):
     # /proc/self/fd and /dev/fd would otherwise pass unseen.
     def fd_accounting_failure(before, after):
         if before is None or after is None:
-            return ("T34 NOT RUN: no trustworthy descriptor enumeration {} the matrix (neither "
-                    "/proc/self/fd nor /dev/fd could be listed, or the listing omitted its sentinel "
-                    "descriptor), so the descriptor accounting did not run and a leaked descriptor "
-                    "would pass unseen".format("before" if before is None else "after"))
+            return ("T34 NOT RUN: no trustworthy descriptor enumeration {} the matrix (the sentinel "
+                    "could not be opened or its close failed, neither /proc/self/fd nor /dev/fd "
+                    "could be listed, or the listing omitted its sentinel descriptor), so the "
+                    "descriptor accounting did not run and a leaked descriptor would pass "
+                    "unseen".format("before" if before is None else "after"))
         if after != before:
             return "T34: descriptors leaked across the matrix: {} open before, {} after".format(
                 len(before), len(after))
@@ -357,8 +370,9 @@ def self_test_main(nested_run=False):
     # The T21 fixture: mode 0o5751 with the sticky bit verified held. A platform refusing the sticky
     # bit (or quietly dropping it) is a named NOT RUN failure, never a fallback to 0o4751: this
     # engine's fchmod sets the temporary file's mode before the write, and the write then clears
-    # set-user-ID on a runner without CAP_FSETID, so set-user-ID alone cannot discriminate there,
-    # and under such a fallback an engine keeping special permission bits would pass unseen.
+    # set-user-ID on a Linux runner without the CAP_FSETID capability (elsewhere, on any
+    # unprivileged runner), so set-user-ID alone cannot discriminate there, and under such a
+    # fallback an engine keeping special permission bits would pass unseen.
     def sticky_fixture_failure(path):
         try:
             os.chmod(path, 0o5751)
@@ -372,8 +386,12 @@ def self_test_main(nested_run=False):
                     "discriminator did not take".format(mode))
         return None
 
-    fds_before = open_fds()
     try:
+        # The first enumeration runs inside this guarded region: even a failure open_fds cannot
+        # absorb (a non-OSError) then reaches the cleanup below, instead of leaving the temporary
+        # root behind as a crash before this region once did.
+        fds_before = open_fds()
+
         # T1. Legacy layout: the pre-registry join, byte for byte, and stable.
         root = tree(ac.registry_text(), blocks=())
         expect("T1 legacy first write", root, False, 0, unchanged=False)
@@ -705,9 +723,12 @@ def self_test_main(nested_run=False):
             saved_umask = os.umask(0o022)
             try:
                 root = tree(ac.registry_text(), blocks=(), agents=legacy_golden)
-                # Set-user-ID and sticky bits beyond the ordinary 0o751: the write drops both, and the
-                # sticky bit (which no write clears) makes a kept one visible even to an unprivileged
-                # runner. A fixture without the sticky bit cannot be evaluated (sticky_fixture_failure,
+                # Set-user-ID and sticky bits beyond the ordinary 0o751: the engine's fchmod applies
+                # the source mode masked to 0o777, dropping both, and a write clears set-user-ID (on
+                # Linux, unless the writer holds CAP_FSETID; elsewhere, when unprivileged) in an
+                # engine that kept it; the sticky bit (which no write clears) makes a kept one
+                # visible even to an unprivileged runner. A fixture without the sticky bit cannot
+                # be evaluated (sticky_fixture_failure,
                 # a named NOT RUN failure): the rest of the leg is then skipped, the failure already
                 # keeping the run red.
                 t21_fixture = sticky_fixture_failure(root / AGENTS_REL)
@@ -788,12 +809,17 @@ def self_test_main(nested_run=False):
         # (c) The faulty engine's own outcome, asserted separately and never conditioned on what the
         # fixture returned: on a 0o5751 fixture an engine keeping special permission bits must succeed
         # (exit 0, so an unrelated engine refusal cannot satisfy this vector) and leave the sticky bit
-        # standing, the very outcome the leg's whole-mode assertion refuses. Where the platform
-        # refuses the sticky bit, t21_leg above already recorded the named NOT RUN failure, so nothing
-        # passes silently.
+        # standing, and (d) below then reruns the leg under that same engine and requires its
+        # whole-mode assertion to refuse that outcome. Where the platform refuses the sticky bit,
+        # t21_leg above already recorded the named NOT RUN failure; a refusal isolated to this
+        # vector pair's own fixture is recorded here as its own failure, never skipped silently.
         vec_root = tree(ac.registry_text(), blocks=(), agents=legacy_golden)
         (vec_root / ".aiqt" / "core" / "rules" / "r1.md").write_text(new_rule, encoding="utf-8")
-        if sticky_fixture_failure(vec_root / AGENTS_REL) is None:
+        vec_fixture = sticky_fixture_failure(vec_root / AGENTS_REL)
+        if vec_fixture is not None:
+            failures.append("T21 vector: the faulty-engine fixture was refused, so the special-bit "
+                            "discriminator vectors did not run: {}".format(vec_fixture))
+        else:
             special = stat.S_IMODE(os.stat(vec_root / AGENTS_REL).st_mode) & 0o7000
             real_fchmod = ac.os.fchmod
 
@@ -814,6 +840,19 @@ def self_test_main(nested_run=False):
                 failures.append("T21 vector: the special-bit-keeping engine left mode {:o} without "
                                 "the sticky bit: the fixture no longer discriminates a kept special "
                                 "bit".format(vec_kept))
+            # (d) The leg under the same faulty engine: its whole-mode assertion (kept != 0o751,
+            # never masked down to the ordinary bits) must record the kept special bit as its own
+            # failure, red when that assertion is removed or weakened to kept & 0o777.
+            vec_failures = []
+            ac.os.fchmod = special_bit_keeping_fchmod
+            try:
+                t21_leg(vec_failures)
+            finally:
+                ac.os.fchmod = real_fchmod
+            if not any("ordinary permission bits" in f for f in vec_failures):
+                failures.append("T21 vector: under the special-bit-keeping engine, the leg must "
+                                "refuse the kept special bit through its whole-mode assertion, got "
+                                "{!r}".format(vec_failures))
 
         # T22. A parent directory swapped for a symlink AFTER the write-side walk cannot redirect the
         #      write: the temporary create and the rename go through the directory descriptor the walk
@@ -1363,16 +1402,32 @@ def self_test_main(nested_run=False):
         #      bind the socket, or answers the open with another errno (a sandbox can refuse it with
         #      EPERM), the wrapper raises ENXIO in its place, so the engine's mapping is judged either
         #      way. The engine's refusal is generic and never carries the environment's own answer, so
-        #      that answer (the errno of the socket creation, bind or open failure) is recorded in a
-        #      printed SELF-TEST NOTE instead, and the whole leg is one function the vectors below rerun
-        #      with each failure forced, asserting the recorded cause.
+        #      that answer (the errno of the socket creation, bind or open failure) is recorded as a
+        #      (cause, errno, text) triple and printed in a SELF-TEST NOTE, and the whole leg is one
+        #      function the vectors below rerun with each failure forced, asserting the recorded
+        #      (cause, errno) pair exactly. The forced bind failure is reached through a controlled
+        #      socket object, so it never depends on this environment allowing real socket creation;
+        #      real socket operations stay in the ordinary leg, and the socket-creation-denied vector
+        #      below covers that refusal end to end, including the printed note.
         def t38_leg(check, fail_list, force=None, forced_errno=None):
             # force: None, or "socket", "bind" or "open", raising forced_errno at that step; "open"
-            # simulates a bound socket, so the forced errno is answered by the read-leg open itself.
+            # simulates a bound socket, so the forced errno is answered by the read-leg open itself,
+            # and "bind" binds a controlled socket object, so its injection is reached even where
+            # real socket creation is refused. Each recorded note is a (cause, errno, text) triple
+            # whose cause names the failing step.
             root = tree(ac.registry_text(), blocks=())
             (root / ".github").mkdir()
             (root / nested).write_bytes(b"old line\n")
             sockets, bound, read_opens, notes = [], [], [], []
+
+            class BindRefusingSocket:
+                # Controlled: the forced bind failure must reach its injection even where this
+                # environment refuses real socket creation; real sockets stay in the ordinary leg.
+                def bind(self, _path):
+                    raise OSError(forced_errno, os.strerror(forced_errno))
+
+                def close(self):
+                    pass
 
             def to_socket():
                 (root / nested).unlink()
@@ -1382,20 +1437,21 @@ def self_test_main(nested_run=False):
                 try:
                     if force == "socket":
                         raise OSError(forced_errno, os.strerror(forced_errno))
-                    sk = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                    sk = BindRefusingSocket() if force == "bind" else socket.socket(
+                        socket.AF_UNIX, socket.SOCK_STREAM)
                 except OSError as exc:
-                    notes.append("socket creation failed with errno {} ({})".format(exc.errno, exc.strerror))
+                    notes.append(("socket", exc.errno, "socket creation failed with errno {} "
+                                  "({})".format(exc.errno, exc.strerror)))
                     return
                 sockets.append(sk)
                 here = os.getcwd()
                 os.chdir(root / ".github")  # a relative bind stays under the AF_UNIX path length limit
                 try:
-                    if force == "bind":
-                        raise OSError(forced_errno, os.strerror(forced_errno))
                     sk.bind(nested_name)
                     bound.append(True)
                 except OSError as exc:
-                    notes.append("bind failed with errno {} ({})".format(exc.errno, exc.strerror))
+                    notes.append(("bind", exc.errno,
+                                  "bind failed with errno {} ({})".format(exc.errno, exc.strerror)))
                 finally:
                     os.chdir(here)
 
@@ -1413,7 +1469,8 @@ def self_test_main(nested_run=False):
                     return real_open(path, flags, *a, **k)
                 except OSError as exc:
                     if exc.errno != errno.ENXIO:
-                        notes.append("the open answered errno {} ({})".format(exc.errno, exc.strerror))
+                        notes.append(("open", exc.errno,
+                                      "the open answered errno {} ({})".format(exc.errno, exc.strerror)))
                         raise OSError(errno.ENXIO, os.strerror(errno.ENXIO), path) from None
                     raise
 
@@ -1439,10 +1496,12 @@ def self_test_main(nested_run=False):
             if notes and force is None:
                 # The environment's own answer, outside the engine's generic refusal (which never
                 # carries it): printed even where the leg passes on the injected ENXIO. The forced
-                # vector reruns below assert the recorded notes directly, without this print.
+                # vector reruns below assert the recorded notes directly; the socket-creation-denied
+                # vector asserts this print itself, so a removed note delivery goes red.
                 print("SELF-TEST NOTE: T38 ({}): no bound socket answered the read-leg open with its "
                       "own ENXIO; {}; ENXIO was injected in its place, so the engine's mapping was "
-                      "still judged".format("--check" if check else "write", "; ".join(notes)))
+                      "still judged".format("--check" if check else "write",
+                                            "; ".join(text for _cause, _errno, text in notes)))
             return notes
 
         for check in (True, False):
@@ -1450,25 +1509,57 @@ def self_test_main(nested_run=False):
 
         # T38 vectors: each forced environmental failure (socket creation, bind, a non-ENXIO answer at
         # the open) must leave the engine's generic ENXIO refusal judged with no failure of the leg's
-        # own, and must be recorded, with its errno, in the notes the SELF-TEST NOTE prints: the
-        # engine's refusal never carries it.
-        for force, forced_errno, cause in (
-                ("socket", errno.EPERM, "socket creation failed with errno"),
-                ("bind", errno.EACCES, "bind failed with errno"),
-                ("open", errno.EPERM, "the open answered errno")):
+        # own, and must be recorded as exactly its (cause, errno) pair: the engine's refusal never
+        # carries it, a substring match over the text would let a wrong errno pass (errno 1 is a
+        # prefix of 13), and the bind case forces EACCES precisely so a swapped errno goes red.
+        for force, forced_errno in (("socket", errno.EPERM),
+                                    ("bind", errno.EACCES),
+                                    ("open", errno.EPERM)):
             vec_failures = []
             notes = t38_leg(False, vec_failures, force=force, forced_errno=forced_errno)
             if vec_failures:
                 failures.append("T38 vector (forced {} failure): the engine mapping was not judged "
                                 "cleanly: {!r}".format(force, vec_failures))
-            if not any("{} {}".format(cause, forced_errno) in n for n in notes):
-                failures.append("T38 vector (forced {} failure): the recorded cause must say {!r}, "
-                                "got {!r}".format(force, "{} {}".format(cause, forced_errno), notes))
+            if [(cause, err) for cause, err, _text in notes] != [(force, forced_errno)]:
+                failures.append("T38 vector (forced {} failure): the recorded cause must be exactly "
+                                "the ({!r}, {}) pair, got {!r}".format(
+                                    force, force, forced_errno, notes))
+
+        # T38 vector (socket creation refused, end to end): with real socket creation refused, the
+        # ordinary leg (force=None) must still pass on the injected ENXIO, record the refusal as its
+        # exact (cause, errno) pair, and deliver it through the printed SELF-TEST NOTE: red when the
+        # print is removed. This is the vector covering a host that refuses socket creation, which
+        # the forced-bind vector above (a controlled socket object) no longer touches.
+        real_socket = socket.socket
+
+        def refusing_socket(*_a, **_k):
+            raise OSError(errno.EPERM, "injected: socket creation refused")
+
+        vec_failures = []
+        note_buf = io.StringIO()
+        socket.socket = refusing_socket
+        try:
+            with redirect_stdout(note_buf):
+                notes = t38_leg(False, vec_failures)
+        finally:
+            socket.socket = real_socket
+        if vec_failures:
+            failures.append("T38 vector (socket creation refused): the engine mapping was not judged "
+                            "cleanly: {!r}".format(vec_failures))
+        if [(cause, err) for cause, err, _text in notes] != [("socket", errno.EPERM)]:
+            failures.append("T38 vector (socket creation refused): the recorded cause must be exactly "
+                            "the (socket, {}) pair, got {!r}".format(errno.EPERM, notes))
+        note_out = note_buf.getvalue()
+        if ("SELF-TEST NOTE: T38" not in note_out
+                or "socket creation failed with errno {} (".format(errno.EPERM) not in note_out):
+            failures.append("T38 vector (socket creation refused): the environmental cause was not "
+                            "delivered as a printed SELF-TEST NOTE, got {!r}".format(note_out))
 
         # T34. Descriptor accounting over every other vector (T1-T33, T35 to T38). An enumeration
-        #      open_fds cannot trust on either side (unavailable, or omitting its sentinel) is a
-        #      named NOT RUN failure (fd_accounting_failure), never a pass: the PASS text claims no
-        #      descriptor is left open, which only an accounting that ran can establish.
+        #      open_fds cannot trust on either side (unavailable, omitting its sentinel, or with the
+        #      sentinel unopenable or its close failed) is a named NOT RUN failure
+        #      (fd_accounting_failure), never a pass: the PASS text claims no descriptor is left
+        #      open, which only an accounting that ran can establish.
         fds_after = open_fds()
         t34 = fd_accounting_failure(fds_before, fds_after)
         if t34 is not None:
@@ -1488,8 +1579,11 @@ def self_test_main(nested_run=False):
                 failures.append("T34 vector: a held-open descriptor was not reported as a leak: "
                                 "{!r}".format(leak))
         # (b) open_fds fails closed: with os.listdir refusing both descriptor directories the result
-        #     is None; with its sentinel unopenable (/dev/null refused) it is None; and a listing that
-        #     omits the sentinel descriptor is None too, never a partial accounting; a None pair is
+        #     is None; with its sentinel unopenable (/dev/null refused) it is None; with the sentinel
+        #     close failing it is None too, that close attempted exactly once and never blindly
+        #     retried (a close can fail after releasing the descriptor, so a retry could close an
+        #     unrelated one); and a listing that omits the sentinel descriptor is None as well,
+        #     never a partial accounting; a None pair is
         #     the named NOT RUN failure, on either side or both. The omitted sentinel's number is the
         #     one its open really returned (recorded, then dropped from the real listing), never
         #     assumed to be 3 or above: with a standard descriptor closed, the sentinel can take 0, 1
@@ -1548,6 +1642,43 @@ def self_test_main(nested_run=False):
         if partial_listing is not None:
             failures.append("T34 vector: a listing omitting the sentinel descriptor must fail "
                             "closed as None, got {!r}".format(partial_listing))
+
+        # The sentinel close failing: the descriptor is recorded at its open, its close performs the
+        # real close and then raises, and open_fds must fail closed as None after exactly one close
+        # attempt, never a blind retry of a descriptor whose state is unknown.
+        real_os_close = os.close
+        close_fail_fds = []
+        close_attempts = []
+
+        def close_fail_recording_open(path, *a, **k):
+            fd = real_os_open(path, *a, **k)
+            if path == os.devnull:
+                close_fail_fds.append(fd)
+            return fd
+
+        def sentinel_close_failing_close(fd):
+            if fd in close_fail_fds or fd in close_attempts:
+                close_attempts.append(fd)
+                if close_attempts.count(fd) == 1:
+                    close_fail_fds.remove(fd)
+                    real_os_close(fd)  # the close happened; the raise reports it as failed
+                    raise OSError(errno.EIO, "injected: the sentinel close failed")
+                return None  # a retried close: judged by the count below, never performed again
+            return real_os_close(fd)
+
+        os.open = close_fail_recording_open
+        os.close = sentinel_close_failing_close
+        try:
+            close_fail_result = open_fds()
+        finally:
+            os.open = real_os_open
+            os.close = real_os_close
+        if close_fail_result is not None:
+            failures.append("T34 vector: with its sentinel close failing, open_fds must fail closed "
+                            "as None, got {!r}".format(close_fail_result))
+        if len(close_attempts) != 1:
+            failures.append("T34 vector: the failed sentinel close must be attempted exactly once, "
+                            "never blindly retried, saw {} attempts".format(len(close_attempts)))
         for label, before, after in (("before the matrix", None, fds_after or ["0"]),
                                      ("after the matrix", fds_before or ["0"], None),
                                      ("on both sides", None, None)):
@@ -1559,8 +1690,9 @@ def self_test_main(nested_run=False):
         #     boundaries around a genuinely leaking writer (the first engine close inside a
         #     _write_target call is dropped, so that writer leaves its descriptor open), must exit
         #     nonzero with the named NOT RUN failure and no PASS text. Red on a revert to the old
-        #     condition that skipped the accounting when fds_before was None. The nested run skips
-        #     this vector (nested_run=True), so the matrix nests exactly once.
+        #     condition that skipped the accounting when fds_before was None. Each nested run skips
+        #     the end-to-end vectors (nested_run=True), so the matrix nests one level at a time,
+        #     once here and once in (d) below.
         if not nested_run:
             real_close = os.close
             in_writer, leaked = [], []
@@ -1608,6 +1740,64 @@ def self_test_main(nested_run=False):
                                 "boundaries around a leaking writer must exit nonzero with the named "
                                 "NOT RUN failure and no PASS text, got exit {} ending: {}".format(
                                     nested_code, nested_out.strip()[-300:]))
+
+            # (d) End to end: this same matrix, run nested with every sentinel close failing (the
+            #     real close performed, then EIO raised), must exit nonzero with the named NOT RUN
+            #     failure and no PASS text, never raise, and must leave no temporary root behind:
+            #     red on a revert that lets the close failure escape open_fds, which would crash
+            #     past the first enumeration, and red again if such a crash ever skips the cleanup
+            #     of the temporary root.
+            nested_roots = []
+            real_mkdtemp = tempfile.mkdtemp
+
+            def root_recording_mkdtemp(*a, **k):
+                made = real_mkdtemp(*a, **k)
+                nested_roots.append(made)
+                return made
+
+            closefail_sentinels = []
+
+            def closefail_recording_open(path, *a, **k):
+                fd = real_os_open(path, *a, **k)
+                if path == os.devnull:
+                    closefail_sentinels.append(fd)
+                return fd
+
+            def closefail_failing_close(fd):
+                if fd in closefail_sentinels:
+                    closefail_sentinels.remove(fd)
+                    real_close(fd)  # the close happened; the raise reports it as failed
+                    raise OSError(errno.EIO, "injected: the sentinel close failed")
+                return real_close(fd)
+
+            closefail_buf = io.StringIO()
+            tempfile.mkdtemp = root_recording_mkdtemp
+            os.open = closefail_recording_open
+            os.close = closefail_failing_close
+            try:
+                with redirect_stdout(closefail_buf), redirect_stderr(closefail_buf):
+                    try:
+                        closefail_code = self_test_main(nested_run=True)
+                    except Exception as exc:  # a crash past the guard: judged red below
+                        closefail_code = "raised {}: {}".format(type(exc).__name__, exc)
+            finally:
+                os.close = real_close
+                os.open = real_os_open
+                tempfile.mkdtemp = real_mkdtemp
+            closefail_out = closefail_buf.getvalue()
+            surviving = [made for made in nested_roots if os.path.exists(made)]
+            if (not isinstance(closefail_code, int) or closefail_code == 0
+                    or "SELF-TEST PASS" in closefail_out
+                    or "T34 NOT RUN" not in closefail_out):
+                failures.append("T34 vector: a matrix run with its sentinel closes failing must "
+                                "exit nonzero with the named NOT RUN failure and no PASS text, "
+                                "never raise, got {!r} ending: {}".format(
+                                    closefail_code, closefail_out.strip()[-300:]))
+            if surviving:
+                failures.append("T34 vector: the close-failing matrix run left a temporary root "
+                                "behind: {!r}".format(surviving))
+                for made in surviving:
+                    shutil.rmtree(made, ignore_errors=True)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1639,8 +1829,9 @@ def self_test_main(nested_run=False):
           "a socket swapped in after the read-side walk; a failed write leaves its temporary file, never "
           "deleting a foreign file at that name, and an interrupt at the rename carries a note naming it "
           "by its path from the root; and no descriptor is left open in an enumeration verified to "
-          "hold its sentinel (an unlistable or sentinel-omitting listing is a named NOT RUN failure, "
-          "never a pass, and a partial listing keeping the sentinel could still hide a leak).")
+          "hold its sentinel (an unlistable or sentinel-omitting listing, and a sentinel that cannot "
+          "be opened or whose close fails, is a named NOT RUN failure, never a pass, and a partial "
+          "listing keeping the sentinel could still hide a leak).")
     return 0
 
 
