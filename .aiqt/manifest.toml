@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "cf56cba560925d47dce414c023375d579a09aeb7fb48ee95311cc257ef155bd8"
+tree-sha256 = "058ca249f6ee73d792432ab7b71a5ba1d48a100e9edff1a89bad9ca783d3fc1b"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2311,8 +2311,8 @@ sha256 = "ab5fe8567f34444474d5e58acd61fde9490254e86d38578dae4b5ade7a21da86"
 
 [[sources]]
 path = ".preview/stamp-truth-stop.py"
-bytes = 460752
-sha256 = "0d40b83593e2378001915d99646bd096eb11595e1180b529693fd386498cb006"
+bytes = 460762
+sha256 = "d8b4f393dae9b8d846b423ea4b5fcf627637d4d2f1c9ebc22ac19a661e82b1f2"
 
 [[sources]]
 path = ".preview/unbounded-wait.py"

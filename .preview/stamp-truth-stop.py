@@ -5345,7 +5345,7 @@ def _self_test():
 
         # -- round 38 (backlog FIX-STAMP-TRUTH-STOP-CAP: an absent stop_hook_active field is not a new turn) --
         def r38_ev(self, sdir, final, append=None):
-            """One Stop whose payload carries NO stop_hook_active field; returns (outcome kind, notes)."""
+            """One Stop from a test payload that omits the stop_hook_active field; returns (outcome kind, notes)."""
             if append:
                 self.write(append, "a")
             notes = []
