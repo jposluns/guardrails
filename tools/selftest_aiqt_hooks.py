@@ -3890,8 +3890,15 @@ def _main_isolated(monitor):
         pexpect("(pl-d) plain push to main allows", "git push origin main", "allow", cwd=plr)
         pexpect("(pl-e) '+' refspec to a feature branch allows",
                 "git push origin +my-feature", "allow", cwd=plr)
-        pexpect("(pl-e2) '+main:feature' forces only feature: allows",
-                "git push origin +main:feature", "allow", cwd=plr)
+        # FIX-560-R2: the raw-text backstop reads the whole command; a + refspec is a force spelling,
+        # so pairing it with a protected name denies even though the parsed path proves the forced
+        # destination is only the feature ref (a disclosed over-denial, the safe direction). The same
+        # shape with no protected name keeps the parsed reading.
+        pexpect('(pl-e2) a forced src:dst whose SOURCE is the protected name: the raw-text backstop denies (FIX-560-R2)',
+                'git push origin +main:feature', 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
+        pexpect('(pl-e2b) the same forced src:dst with no protected name anywhere: allows',
+                'git push origin +dev:feature', 'allow', cwd=plr)
 
         # Force spellings: -f, clustered, with-lease bare and =value, if-includes, a conservative long
         # prefix, the refs/heads/ qualifier, src:dst destination matching, and the master name.
@@ -3909,21 +3916,30 @@ def _main_isolated(monitor):
                 "git push --force origin refs/heads/main", "deny", cwd=plr)
         pexpect("(pl-f8) src:dst matches the DESTINATION: feature:main denies",
                 "git push --force origin feature:main", "deny", cwd=plr)
-        pexpect("(pl-f9) main:feature forces only feature: allows",
-                "git push --force origin main:feature", "allow", cwd=plr)
+        pexpect('(pl-f9) a forced src:dst naming the protected SOURCE: the raw-text backstop denies (FIX-560-R2 over-denial)',
+                'git push --force origin main:feature', 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
+        pexpect('(pl-f9b) the same forced src:dst with an unprotected source: allows',
+                'git push --force origin dev:feature', 'allow', cwd=plr)
         pexpect("(pl-f10) push --force to master denies", "git push --force origin master", "deny",
                 cwd=plr)
 
         # Argument-aware flags (the F-94/F-82 lesson): an '-o' VALUE is never scanned as flags or read
         # as a refspec, and a non-force long option sharing a prefix letter is not force.
-        pexpect("(pl-g1) '-of' is -o with attached value 'f', not force",
-                "git push -of origin main", "allow", cwd=plr)
+        pexpect('(pl-g1) the -of attached-value false-hit beside the protected name: the raw-text backstop denies (FIX-560-R2 over-denial)',
+                'git push -of origin main', 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
+        pexpect('(pl-g1b) -of with no protected name keeps the parsed -o value reading: allows',
+                'git push -of origin dev', 'allow', cwd=plr)
         pexpect("(pl-g2) separated '-o force' value is not a flag",
                 "git push -o force origin my-feature", "allow", cwd=plr)
         pexpect("(pl-g3) --follow-tags is not force", "git push --follow-tags origin main", "allow",
                 cwd=plr)
-        pexpect("(pl-g4) a separated --push-option value naming main is consumed, not a refspec",
-                "git push --force --push-option main origin my-feature", "allow", cwd=plr)
+        pexpect('(pl-g4) a consumed option value spelling the protected name beside a force flag: the raw-text backstop denies (FIX-560-R2 over-denial)',
+                'git push --force --push-option main origin my-feature', 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
+        pexpect('(pl-g4b) the same consumed option value with no protected name: allows',
+                'git push --force --push-option dev origin my-feature', 'allow', cwd=plr)
 
         # A forced sweep the guard cannot prove misses the protected names ASKS.
         pexpect("(pl-h1) forced wildcard refspec denies (fail-safe: unprovable protected-line rewrite)",
@@ -4704,34 +4720,86 @@ def _main_isolated(monitor):
         pexpect("(pl-r6f2-guard) a force-push hidden after an ANSI-C $'EOF' heredoc is now seen and DENIES "
                 "(finding 2)", _f2cmd, "deny", cwd=plr)
 
-        # CLAUDE-F1: the protected_line raw FALLBACK strips QUOTED-heredoc bodies before scanning, so a
-        # 'git push --force ... main' that appears only inside a quoted heredoc body (literal data, here forced
-        # to the fallback by a process substitution the lexer cannot parse) no longer FALSE-DENIES. Revert the
-        # _strip_quoted_heredoc_bodies pass in the fallback and this flips to 'deny' (the body over-matches).
-        pexpect("(pl-cf1) push-force inside a QUOTED heredoc body (fallback) does not false-deny (CLAUDE-F1)",
-                "cat <(echo x) <<'EOF'\ngit push -f origin main\nEOF", "allow", cwd=plr)
+        # FIX-560-R2 REVERSES CLAUDE-F1 here, deliberately: the raw-text backstop scans the WHOLE
+        # unstripped command, because the quoted-heredoc strip could also remove a REAL line that a
+        # mis-paired reading took for body text. Push-shaped prose naming a protected branch inside a
+        # quoted heredoc body therefore now DENIES: the disclosed over-denial, the safe direction.
+        pexpect('(pl-cf1) push-force prose inside a QUOTED heredoc body now denies via the raw-text backstop (FIX-560-R2 disclosed over-denial)',
+                "cat <(echo x) <<'EOF'\ngit push -f origin main\nEOF", 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
         # DISCRIMINATION: a REAL force-push OUTSIDE the quoted heredoc body, on the same unparseable command,
         # is preserved by the body-strip and still DENIES (no under-deny introduced).
         pexpect("(pl-cf1-outside) a real force-push OUTSIDE the quoted heredoc body still DENIES (CLAUDE-F1)",
                 "git push -f origin main <(echo x)", "deny", cwd=plr)
 
-        # FIX-PUSH-LEX-NESTED: a << heredoc opener quoted inside a nested command/parameter
-        # substitution (a dollar-paren, a backquote, or a brace expansion) that is itself nested in
-        # double quotes is DATA at any depth, never a heredoc opener, so it can no longer swallow the
-        # following line. Each form hiding a protected force-push is now SEEN and DENIES; the identical
-        # lines carrying only a harmless command still ALLOW (the discrimination control).
-        pexpect("(pl-lexnest-dollar-paren) a force-push hidden behind a nested-quote heredoc opener DENIES",
-                'echo "$(echo "<<\'EOF\'")"\ngit push --force origin main', "deny", cwd=plr)
-        pexpect("(pl-lexnest-dollar-paren-ctl) the same nested-quote form with only a harmless command ALLOWS",
-                'echo "$(echo "<<\'EOF\'")"\necho done', "allow", cwd=plr)
-        pexpect("(pl-lexnest-backquote) a force-push hidden behind a nested-quote heredoc opener DENIES",
-                'echo "`echo "<<\'EOF\'"`"\ngit push --force origin main', "deny", cwd=plr)
-        pexpect("(pl-lexnest-backquote-ctl) the same nested-quote form with only a harmless command ALLOWS",
-                'echo "`echo "<<\'EOF\'"`"\necho done', "allow", cwd=plr)
-        pexpect("(pl-lexnest-brace) a force-push hidden behind a nested-quote heredoc opener DENIES",
-                'echo "${x:-"<<\'EOF\'"}"\ngit push --force origin main', "deny", cwd=plr)
-        pexpect("(pl-lexnest-brace-ctl) the same nested-quote form with only a harmless command ALLOWS",
-                'echo "${x:-"<<\'EOF\'"}"\necho done', "allow", cwd=plr)
+        # FIX-560-R2: these three nested-quote forms (the round-1 motivators) hid a following
+        # force-push from the base lexer. The round-1 lexer change is REVERTED (its quoting model is a
+        # best-effort reading of bash, not a guarantee); the forms now DENY through the raw-text
+        # backstop, which scans the unmodified command on every call. The identical lines carrying
+        # only a harmless command still ALLOW (the discrimination control).
+        pexpect('(pl-lexnest-dollar-paren) a force-push behind a nested-quote heredoc opener DENIES via the raw-text backstop',
+                'echo "$(echo "<<\'EOF\'")"\ngit push --force origin main', 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
+        pexpect('(pl-lexnest-dollar-paren-ctl) the same nested-quote form with only a harmless command ALLOWS',
+                'echo "$(echo "<<\'EOF\'")"\necho done', 'allow', cwd=plr)
+        pexpect('(pl-lexnest-backquote) a force-push behind a nested-quote heredoc opener DENIES via the raw-text backstop',
+                'echo "`echo "<<\'EOF\'"`"\ngit push --force origin main', 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
+        pexpect('(pl-lexnest-backquote-ctl) the same nested-quote form with only a harmless command ALLOWS',
+                'echo "`echo "<<\'EOF\'"`"\necho done', 'allow', cwd=plr)
+        pexpect('(pl-lexnest-brace) a force-push behind a nested-quote heredoc opener DENIES via the raw-text backstop',
+                'echo "${x:-"<<\'EOF\'"}"\ngit push --force origin main', 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
+        pexpect('(pl-lexnest-brace-ctl) the same nested-quote form with only a harmless command ALLOWS',
+                'echo "${x:-"<<\'EOF\'"}"\necho done', 'allow', cwd=plr)
+
+        # FIX-560-R2 regression vectors: each DENIES via the raw-text backstop and each was a SILENT
+        # ALLOW at the reviewed round-1 commit (a nested-quote mis-pairing swallowed the push line, and
+        # a benign leading git segment suppressed the old raw fallback). Forms: a comment or a heredoc
+        # body inside a nested substitution (with and without a leading benign git segment), a nested
+        # heredoc whose body looks like a closing quote, and a commented close-paren that fakes a
+        # heredoc opener. The same shapes carrying only a harmless command ALLOW (controls).
+        pexpect('(pl-560r2-comment-paren) a push hidden by a quoting mis-read DENIES via the raw-text backstop',
+                'git status\necho "$(echo hi # (\n)"\ngit push --force origin main\necho ")"', 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
+        pexpect('(pl-560r2-comment-apostrophe) a push hidden by a quoting mis-read DENIES via the raw-text backstop',
+                'git status\necho "$(echo hi # it\'s\n)"\ngit push --force origin main\necho "\')"', 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
+        pexpect('(pl-560r2-heredoc-paren) a push hidden by a quoting mis-read DENIES via the raw-text backstop',
+                'git status\necho "$(cat <<\'EOF\'\n(\nEOF\n)"\ngit push --force origin main\necho ")"', 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
+        pexpect('(pl-560r2-heredoc-quote) a push hidden by a quoting mis-read DENIES via the raw-text backstop',
+                'git status\necho "$(cat <<\'EOF\'\n\'\nEOF\n)"\ngit push --force origin main\necho \')"\'\\\'', 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
+        pexpect('(pl-560r2-heredoc-unquoted) a push hidden by a quoting mis-read DENIES via the raw-text backstop',
+                'git status\necho "$(cat <<EOF\n(\nEOF\n)"\ngit push --force origin main\necho ")"', 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
+        pexpect('(pl-560r2-nested-heredoc-close) a push hidden by a quoting mis-read DENIES via the raw-text backstop',
+                'echo "$(cat <<\'EOF\'\n)"<<\'X\'\nEOF\n)"\ngit push --force origin main', 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
+        pexpect('(pl-560r2-commented-close) a push hidden by a quoting mis-read DENIES via the raw-text backstop',
+                'echo "$(echo ok # )\n echo "<<\'EOF\'"\n)"\ngit push --force origin main', 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
+        pexpect('(pl-560r2-commented-close-heredoc) a push hidden by a quoting mis-read DENIES via the raw-text backstop',
+                'echo "$(echo a # )" <<\'EOF\'\n)"\ngit push --force origin main\nEOF', 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
+        pexpect('(pl-560r2-comment-paren-ctl) the same shape carrying only a harmless command ALLOWS',
+                'git status\necho "$(echo hi # (\n)"\necho done\necho ")"', 'allow', cwd=plr)
+        pexpect('(pl-560r2-heredoc-paren-ctl) the same shape carrying only a harmless command ALLOWS',
+                'git status\necho "$(cat <<\'EOF\'\n(\nEOF\n)"\necho done\necho ")"', 'allow', cwd=plr)
+        pexpect('(pl-560r2-nested-heredoc-close-ctl) the same shape carrying only a harmless command ALLOWS',
+                'echo "$(cat <<\'EOF\'\n)"<<\'X\'\nEOF\n)"\necho done', 'allow', cwd=plr)
+        pexpect('(pl-560r2-commented-close-heredoc-ctl) the same shape carrying only a harmless command ALLOWS',
+                'echo "$(echo a # )" <<\'EOF\'\n)"\necho done\nEOF', 'allow', cwd=plr)
+        # The disclosed over-denial, witnessed: push-shaped PROSE naming a protected branch inside a
+        # quoted heredoc body DENIES (red at the round-1 pin, whose stripped fallback allowed it), and
+        # the same prose nested inside a substitution denies too.
+        pexpect('(pl-560r2-prose) push-shaped prose in a plain quoted heredoc body DENIES (FIX-560-R2 disclosed over-denial)',
+                "cat <<'EOF'\ngit push --force origin main\nEOF", 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
+        pexpect('(pl-560r2-prose-nested) push-shaped prose in a quoted heredoc nested in a substitution DENIES too (same disclosure)',
+                'echo "$(cat <<\'EOF\'\nDo not run git push --force origin main\nEOF\n)"', 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
 
         # Push retains its HEAD probe. Commit uses the separate bounded proof probe.
         _orig_head = aiqt_hooks._head_branch
@@ -5405,23 +5473,28 @@ def _main_isolated(monitor):
             failures.append("(f17-outside) a real 'git reset --hard' OUTSIDE a quoted heredoc must still be "
                             "in scope (not a boundary allow); finding 17 preserves it")
 
-        # FIX-PUSH-LEX-NESTED (lexer + a second consumer): a nested-quote << opener is data at any
-        # depth, so the hidden git command is a visible segment and git_discard keeps a hidden reset
-        # in scope rather than silently allowing it at the true boundary.
-        for _xnm, _xhead in (
-                ("dollar-paren", 'echo "$(echo "<<\'EOF\'")"'),
-                ("backquote", 'echo "`echo "<<\'EOF\'"`"'),
-                ("brace", 'echo "${x:-"<<\'EOF\'"}"'),
-        ):
-            _xcmd = _xhead + '\ngit push --force origin main'
-            texpect("(tok-lexnest-{}) a nested-quote heredoc opener is data; the hidden git push is a visible final segment".format(_xnm),
-                    (len(_argv(_xcmd)), _argv(_xcmd)[-1]),
-                    (2, ["git", "push", "--force", "origin", "main"]))
-            _xro = aiqt_hooks.git_discard({"hook_event_name": "PreToolUse", "tool_name": "Bash",
-                                           "tool_input": {"command": _xhead + '\ngit reset --hard HEAD~1'}, "cwd": brr})[1]
-            if not isinstance(_xro, dict):
-                failures.append("(gd-lexnest-{}) a git reset --hard hidden behind a nested-quote heredoc "
-                                "opener must stay IN SCOPE for git_discard, not a boundary silent allow".format(_xnm))
+
+        # FIX-560-R2 (the git_discard side): the round-1 lexer and strip changes are REVERTED (the
+        # quoting model is a best-effort reading of bash, not a guarantee); the push class is closed in
+        # protected_line by the raw-text backstop instead. git_discard therefore behaves as before the
+        # reverted change again, asserted on the DECISION AND REASON, not only the response shape:
+        # (a) the finding-17 idiom, work-losing prose in a QUOTED heredoc body nested inside a
+        # substitution, strips from the raw scan again (a silent exit-0 allow); (b) a real reset after
+        # a nested-quote line is a VISIBLE segment again, so the prsunc note names the SPECIFIC verb
+        # (the round-1 mis-lex degraded it to the generic work-losing wording).
+        _f17n = aiqt_hooks.git_discard({'hook_event_name': 'PreToolUse', 'tool_name': 'Bash',
+                                       'tool_input': {'command': 'echo "$(cat <<\'EOF\'\nmention git reset --hard HEAD~1 in prose\nEOF\n)"'},
+                                       'cwd': brr})
+        if _f17n != (0, None, None):
+            failures.append(
+                '(gd-f17-nested) work-losing prose inside a quoted heredoc body nested in a substitution must strip from the git_discard raw scan (a silent allow), got {!r}'.format(_f17n))
+        _rst560 = aiqt_hooks.git_discard({'hook_event_name': 'PreToolUse', 'tool_name': 'Bash',
+                                         'tool_input': {'command': 'git status\necho "$(echo hi # (\n)"\ngit reset --hard HEAD~1\necho ")"'},
+                                         'cwd': brr})
+        _rst560_note = _rst560[1].get('systemMessage', '') if isinstance(_rst560[1], dict) else ''
+        if _rst560[0] != 0 or 'git reset --hard is not a pristine' not in _rst560_note:
+            failures.append(
+                '(gd-560r2-reset-reason) a visible reset after a nested-quote line must stay in scope with the SPECIFIC verb named in the prsunc note, got {!r}'.format(_rst560))
 
         # === L11: additional diff-source vectors (the AIRTIGHT-NARROW contract) =======================
         dexpect("(l11-d1) bare git diff denies", "git diff", "deny")
@@ -5811,15 +5884,26 @@ def _main_isolated(monitor):
         dexpect("(qa-b5j) a nested 'dev' component ('git diff > foo/dev/x') is a plain file -> allows",
                 "git diff > foo/dev/x", "allow")
 
-        # Force detection is VALUE-AWARE: a force spelling in an option-value position is not a flag.
-        pexpect("(pl-v1) '-o --force' is the push-option value, not force",
-                "git push -o --force origin main", "allow", cwd=plr)
-        pexpect("(pl-v2) '--push-option --force' is its value, not force",
-                "git push --push-option --force origin main", "allow", cwd=plr)
+        # FIX-560-R2: the parsed path still reads these spellings as option VALUES, but the raw-text
+        # backstop sees the push verb, a force spelling and a protected name in the raw string and
+        # denies (a disclosed over-denial); with no protected name the value reading shows.
+        pexpect('(pl-v1) a value-position force spelling beside the protected name: the raw-text backstop denies',
+                'git push -o --force origin main', 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
+        pexpect('(pl-v1b) the same value-position spelling with no protected name is the consumed value: allows',
+                'git push -o --force origin dev', 'allow', cwd=plr)
+        pexpect('(pl-v2) the long-option value spelling beside the protected name: the raw-text backstop denies',
+                'git push --push-option --force origin main', 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
+        pexpect('(pl-v2b) the same long-option value with no protected name is its value: allows',
+                'git push --push-option --force origin dev', 'allow', cwd=plr)
         # Operand ROLES: the first bare operand is the repository, never judged as a destination; and
         # the restored --recurse-submodules value-skip means a truly refspec-less force still probes.
-        pexpect("(pl-w1) a remote literally named 'main' is not a protected refspec",
-                "git push --force main my-feature", "allow", cwd=plr)
+        pexpect('(pl-w1) a remote literally named like the protected branch beside a force flag still trips the raw-text backstop: denies (FIX-560-R2 over-denial)',
+                'git push --force main my-feature', 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
+        pexpect('(pl-w1b) a remote named dev is not read as a refspec: allows',
+                'git push --force dev my-feature', 'allow', cwd=plr)
         pexpect("(pl-w2) '-f --recurse-submodules on-demand origin' is refspec-less: probes and denies on main",
                 "git push -f --recurse-submodules on-demand origin", "deny", cwd=plr)
         # Fallback widening: a quote-anchored '+refspec' under a wrapper, and the delete spellings.
@@ -5829,14 +5913,17 @@ def _main_isolated(monitor):
                 "env git push --delete origin main", "deny", cwd=plr)
         pexpect("(pl-x3) an unparseable ':main' delete denies via the fallback",
                 'git push origin :main "unbalanced', "deny", cwd=plr)
-        # Disclosed residuals, witnessed so the residue cannot drift from reality: ANY benign parsed
-        # git segment - earlier OR later - suppresses the wrapped-catch (best-effort, not chased),
-        # and --dry-run with a force spelling over-denies (the safe direction).
-        pexpect("(pl-r1) DISCLOSED residual: a benign git segment BEFORE a wrapped force-push allows",
-                "git status && env git push --force origin main", "allow", cwd=plr)
-        pexpect("(pl-r1b) DISCLOSED residual: a benign git segment AFTER a wrapped force-push also "
-                "suppresses the wrapped-catch and allows",
-                "env git push --force origin main && git status", "allow", cwd=plr)
+        # FIX-560-R2 CLOSES the old pl-r1/pl-r1b residual for pushes naming a protected branch: the
+        # raw-text backstop runs on EVERY call, so a benign git segment before or after a wrapped
+        # force-push no longer suppresses the scan. A wrapped force-push naming NO protected branch
+        # keeps the old suppression residual: the broad fallback still runs only when no git segment
+        # was lexed, because run unconditionally it would deny every feature-branch force-push.
+        pexpect('(pl-r1) a benign git segment BEFORE a wrapped force-push to the protected branch no longer hides it: the raw-text backstop denies (FIX-560-R2)',
+                'git status && env git push --force origin main', 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
+        pexpect('(pl-r1b) a benign git segment AFTER a wrapped force-push to the protected branch no longer hides it either: denies (FIX-560-R2)',
+                'env git push --force origin main && git status', 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
         pexpect("(pl-r2) DISCLOSED over-deny: --dry-run --force to main still denies",
                 "git push --dry-run --force origin main", "deny", cwd=plr)
 

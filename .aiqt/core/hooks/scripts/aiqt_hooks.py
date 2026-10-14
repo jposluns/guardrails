@@ -296,7 +296,7 @@ DENY_CONSTRUCTORS = (
     "_deny", "_abspth_check_required", "_abspth_check_search_root", "_commit_denial",
     "_commit_identity_fallback", "_commit_msg_subst_fallback", "_deny_missing_tool_name", "_deny_relative",
     "_deny_with_recovery", "_discard_deny", "_expbnd_breadth_publish_deny", "_protected_line_fallback",
-    "_wrtscp_deny")
+    "_raw_push_guard", "_wrtscp_deny")
 
 def _allow():
     """A clean pass: no decision at all (never an explicit allow, which would bypass the user's own
@@ -409,111 +409,6 @@ _Segment = collections.namedtuple(
                  "argv_leading_tilde"))
 
 
-def _skip_quoting(command, i, n):
-    """Skip the quote or substitution opened at command[i]: a single or double quote, a backquote, or a
-    $( command substitution or ${ parameter expansion. Return the index just past the whole construct.
-    A substitution nested in a double-quoted string opens a FRESH quoting context whose own quotes nest, so
-    an inner quote never closes an outer string and a << quoted at any depth stays data, never a heredoc
-    opener. Iterative (an explicit context stack), linear, stdlib-only. Raises ValueError on an unterminated
-    context so the caller fails closed rather than mis-pairing a later quote."""
-    c = command[i]
-    if c == "'":
-        stack = ["sq"]
-        i += 1
-    elif c == '"':
-        stack = ["dq"]
-        i += 1
-    elif c == "`":
-        stack = ["bq"]
-        i += 1
-    elif c == "$" and i + 1 < n and command[i + 1] == "(":
-        stack = ["paren"]
-        i += 2
-    elif c == "$" and i + 1 < n and command[i + 1] == "{":
-        stack = ["brace"]
-        i += 2
-    else:
-        raise ValueError("not a quoting opener")
-    while stack:
-        if i >= n:
-            raise ValueError("unterminated quote or substitution")
-        top = stack[-1]
-        c = command[i]
-        if top == "sq":
-            j = command.find("'", i)
-            if j < 0:
-                raise ValueError("unterminated single quote")
-            i = j + 1
-            stack.pop()
-            continue
-        if top == "bq":
-            if c == chr(92) and i + 1 < n:
-                i += 2
-            elif c == "`":
-                i += 1
-                stack.pop()
-            else:
-                i += 1
-            continue
-        if c == chr(92):
-            if i + 1 >= n:
-                raise ValueError("unterminated escape")
-            i += 2
-            continue
-        if top == "dq":
-            if c == '"':
-                i += 1
-                stack.pop()
-                continue
-            if c == "`":
-                stack.append("bq")
-                i += 1
-                continue
-            if c == "$" and i + 1 < n and command[i + 1] == "(":
-                stack.append("paren")
-                i += 2
-                continue
-            if c == "$" and i + 1 < n and command[i + 1] == "{":
-                stack.append("brace")
-                i += 2
-                continue
-            i += 1
-            continue
-        if c == "'":
-            stack.append("sq")
-            i += 1
-            continue
-        if c == '"':
-            stack.append("dq")
-            i += 1
-            continue
-        if c == "`":
-            stack.append("bq")
-            i += 1
-            continue
-        if c == "$" and i + 1 < n and command[i + 1] == "(":
-            stack.append("paren")
-            i += 2
-            continue
-        if c == "$" and i + 1 < n and command[i + 1] == "{":
-            stack.append("brace")
-            i += 2
-            continue
-        if top == "paren":
-            if c == "(":
-                stack.append("paren")
-            elif c == ")":
-                stack.pop()
-            i += 1
-            continue
-        if c == "{":
-            stack.append("brace")
-        elif c == "}":
-            stack.pop()
-        i += 1
-    return i
-
-
 def _read_word(command, i, n):
     """Read exactly ONE shell word starting at index i (which must be at a word character, never a space,
     newline, or metacharacter). Returns (text, opaque, started, all_digits, leading_tilde, new_i): text is
@@ -596,12 +491,6 @@ def _read_word(command, i, n):
                         continue
                     chars.append("\\")  # a backslash before any other char is literal inside "..."
                     i += 1
-                    continue
-                if d == "`" or (d == "$" and i + 1 < n and command[i + 1] in "({"):
-                    _sub_start = i
-                    i = _skip_quoting(command, i, n)
-                    opaque = True
-                    chars.append(command[_sub_start:i])
                     continue
                 if d in "$`":
                     opaque = True
@@ -905,42 +794,31 @@ def _strip_quoted_heredoc_bodies(command):
     preserved verbatim (a real 'git reset --hard <<'EOF'...' still scans as lossy). UNQUOTED heredoc bodies
     interpolate and stay in scope. Best-effort and conservative: on any ambiguity the text is left in place
     (the raw scan then over-matches, the safe direction), and multiple heredocs stacked on one line beyond
-    the first are a disclosed over-match residual, never an under-match."""
+    the first are a disclosed over-match residual, never an under-match. This strip is itself
+    a best-effort reading of bash, not a guarantee. FIX-560-R2: the protected-line push guard
+    no longer consumes it (its backstop and fallback scan the unstripped text); the git_discard
+    raw scan still does."""
     n = len(command)
     out = []
     i = 0
     while i < n:
-        c = command[i]
-        if c in ('"', "'", "`") or (c == "$" and i + 1 < n and command[i + 1] in "({"):
-            try:
-                j = _skip_quoting(command, i, n)
-            except ValueError:
-                out.append(command[i:])
-                break
-            out.append(command[i:j])
-            i = j
+        lt = command.find("<<", i)
+        if lt < 0:
+            out.append(command[i:])
+            break
+        parsed = _parse_heredoc_delim(command, lt + 2, n)
+        if parsed is None or not parsed[0]:
+            out.append(command[i:lt + 2])   # not a quoted heredoc: keep the '<<' and continue past it
+            i = lt + 2
             continue
-        if c == chr(92) and i + 1 < n:
-            out.append(command[i:i + 2])
-            i += 2
+        _q, delim, strip_tabs, next_i = parsed
+        nl = command.find("\n", next_i)
+        if nl < 0:
+            out.append(command[i:next_i])    # the opening line has no body yet (no newline): keep, done
+            i = next_i
             continue
-        if c == "<" and i + 1 < n and command[i + 1] == "<":
-            parsed = _parse_heredoc_delim(command, i + 2, n)
-            if parsed is None or not parsed[0]:
-                out.append("<<")
-                i += 2
-                continue
-            _q, delim, strip_tabs, next_i = parsed
-            nl = command.find("\n", next_i)
-            if nl < 0:
-                out.append(command[i:next_i])
-                i = next_i
-                continue
-            out.append(command[i:nl + 1])
-            i = _skip_heredoc_bodies(command, nl + 1, n, [(delim, strip_tabs)])
-            continue
-        out.append(c)
-        i += 1
+        out.append(command[i:nl + 1])        # keep through the opening line's newline
+        i = _skip_heredoc_bodies(command, nl + 1, n, [(delim, strip_tabs)])  # drop the body region
     return "".join(out)
 
 
@@ -950,7 +828,10 @@ def _lex_command(command, partial=False):
     '{fd}>' redirect, or a malformed redirect), so the caller falls back conservatively rather than acting on
     a partially-cleaned command. A QUOTED heredoc (<<'EOF'/<<"EOF"/<<\\EOF) is NOT unsupported: its literal
     body is EXCLUDED from analysis (round-2 finding 17) so a guard never fires on shell syntax quoted inside
-    heredoc prose. Linear, non-recursive, stdlib-only.
+    heredoc prose. This quoting model is a best-effort reading of bash, not a guarantee (a
+    comment, heredoc body or nested substitution can read differently under bash), so the push
+    guard never depends on it: _raw_push_guard rescans the raw text on every protected_line
+    call (FIX-560-R2). Linear, non-recursive, stdlib-only.
 
     When partial is True the raise-on-error contract is replaced by a best-effort one: instead of raising,
     the lexer returns (segments, complete), where segments are the COMPLETE segments recovered before the
@@ -6540,18 +6421,60 @@ def _commit_denial(detail):
         "AIQT guardrail: denied a protected or unproved direct commit (rule artbr1).")
 
 
+def _raw_push_match(command):
+    """True when the RAW, unmodified command string pairs a git push with a force, delete or
+    mirror spelling AND a protected branch name: the FIX-560-R2 backstop predicate, evaluated
+    with no lexing, no stripping and no quoting model. protected_line tests it on EVERY call
+    and returns _raw_push_guard on a match."""
+    return bool(_RAW_PUSH_RE.search(command)
+                and (_RAW_PUSH_FORCE_RE.search(command) or _RAW_PUSH_DELETE_RE.search(command)
+                     or _RAW_PUSH_MIRRORCFG_RE.search(command))
+                and _RAW_PROTECTED_RE.search(command))
+
+
+def _raw_push_guard(command):
+    """FIX-560-R2: the raw-text push backstop, the unconditional deny for a _raw_push_match
+    hit (a git push paired with a force, delete or mirror spelling AND a protected branch name
+    in the RAW, unmodified command string, read with no lexing, no stripping and no quoting
+    model). protected_line tests the predicate on EVERY call, before the commit-grammar
+    reading and the lexer, so no parse outcome and no harmless
+    git segment elsewhere in the command can stand it down: a shell-quoting model inside a hook
+    cannot track comments, heredoc bodies and nested substitutions the way bash does, so the
+    push guard no longer depends on one. DISCLOSED COST (the safe direction): push-shaped prose
+    naming a protected branch inside any heredoc body, quoted string, comment or commit message
+    now DENIES (an over-denial, witnessed by pl-cf1 and the pl-560r2 vectors). A force or delete
+    spelling that names no protected branch is NOT matched here: it is judged by the parsed
+    classifier (force to a feature ref stays allowed) and, for wrapped or unparseable commands,
+    by the broader _protected_line_fallback raw scan."""
+    return _deny(
+            "AIQT rule prtbrn (protected-branch-integrity): the raw command text pairs a git push "
+            "with a force, delete or mirror spelling and a protected branch name. This backstop "
+            "reads the whole submitted text on every call, including quoted strings, comments and "
+            "heredoc bodies, because a quoting model inside a hook cannot track those the way bash "
+            "does; push-shaped prose naming a protected branch is denied too (a disclosed "
+            "over-denial, the safe direction). The protected line changes only through a reviewed, "
+            "verified merge. Re-issue the work without force-push-to-protected text anywhere in "
+            "the command text. " + _PROTECTED_ALTS,
+            "AIQT guardrail: denied a command whose raw text shows a force, delete or mirror push "
+            "naming a protected branch (rule prtbrn, raw-text backstop); push to a feature branch "
+            "and merge on green.")
+
+
 def _protected_line_fallback(command):
     """Commit-free push fallback; commit syntax is checked before this path.
 
-    Retain conservative raw push coverage and quoted-heredoc stripping. Hidden
-    commits are checked independently of other Git segments by the commit recognizer.
+    Retain conservative raw push coverage over the RAW, unstripped text. FIX-560-R2: the
+    former quoted-heredoc stripping could remove a real line that a mis-paired reading took
+    for body text, so no stripping removes any line from this scan; quoted prose can
+    over-match here (the safe direction). Hidden commits are checked independently of other
+    Git segments by the commit recognizer.
     """
     syntax = _commit_command_syntax(command)
     if syntax.status != "outside":
         if syntax.status == "help":
             return _allow()
         return _commit_denial("apparent commit lacks complete proof: " + syntax.detail)
-    scan = _strip_quoted_heredoc_bodies(command)
+    scan = command  # FIX-560-R2: raw and unstripped; stripping could remove a real, mis-paired line
     if _RAW_PUSH_RE.search(scan) and (_RAW_PUSH_FORCE_RE.search(scan)
                                       or _RAW_PUSH_DELETE_RE.search(scan)
                                       or _RAW_PUSH_MIRRORCFG_RE.search(scan)):
@@ -6575,6 +6498,11 @@ def protected_line(data):
     opaque script or unparseable fragmentation; other commit-producing verbs and
     other tools remain outside this boundary. Server protection does not validate
     this pre-execution proof. Push coverage retains its existing separate limits.
+
+    FIX-560-R2: a raw-text backstop (_raw_push_guard) scans the unmodified command on every
+    call, before any parsing, and denies a force/delete/mirror push spelling paired with a
+    protected branch name wherever it appears; the shell lexer below remains a best-effort
+    reading of bash, not a guarantee.
     """
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: protected_line wired to unexpected event {!r}; failing closed"
@@ -6590,6 +6518,11 @@ def protected_line(data):
             "AIQT rule prtbrn (protected-branch-integrity): the Bash payload carried no readable command "
             "string, so the protected-line check could not run; failing closed.",
             "AIQT guardrail: denied a Bash call with no readable command (rule prtbrn, fail-closed).")
+    # FIX-560-R2: the raw-text backstop runs first, on every call, ahead of the commit-grammar
+    # reading and the lexer, so no parse outcome suppresses it. _raw_push_guard states the
+    # disclosed over-denial.
+    if _raw_push_match(command):
+        return _raw_push_guard(command)
     deadline = time.monotonic() + _COMMIT_SECONDS
     syntax = _commit_command_syntax(command)
     if syntax.status == "help":
@@ -6646,6 +6579,12 @@ def protected_line(data):
                 "(rule prtbrn); push to a feature branch and merge on green.")
     if pending_deny is not None:
         return _deny(*pending_deny)
+    # The BROAD raw fallback (force/delete spellings with NO protected-name requirement) still
+    # runs only when no git segment was lexed: run on every call it would deny every force-push
+    # to a FEATURE branch (pl-b). The protected-name class no longer depends on this gate:
+    # _raw_push_guard already scanned the raw text on every call (FIX-560-R2), so a harmless
+    # earlier or later git segment can no longer suppress that scan (the old pl-r1/pl-r1b
+    # residual, now closed for pushes naming a protected branch).
     if not saw_git and _RAW_GIT_RE.search(command):
         return _protected_line_fallback(command)
     return _allow()
