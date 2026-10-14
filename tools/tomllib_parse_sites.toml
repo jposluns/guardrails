@@ -601,7 +601,7 @@ reason = "test-code"
 path = "opf/tools/check_opf_homes.py"
 function = "boundary_self_test.<lambda>"
 form = "call"
-count = 3
+count = 5
 class = "EXEMPT"
 reason = "test-code"
 
