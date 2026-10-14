@@ -213,15 +213,64 @@ def _declaration(tree, where):
 _FOLD_CAP = 64
 
 
+def _ascii_compatible(codec):
+    """Whether codec decodes EVERY single ASCII byte, probed one byte at a time, to that character. utf-16
+    and cp500 fail the probe outright; unicode_escape and utf-7 fail it because a lone backslash or a
+    lone + is an incomplete sequence (a whole-string probe would let unicode_escape through although an
+    escape pair means a different string at run time); an unknown or non-text codec raises and is
+    declined the same way. A declined codec is never folded and its decode stays in the residual
+    _declared_renderer_stems discloses."""
+    try:
+        return all(bytes([i]).decode(codec) == chr(i) for i in range(128))
+    except (LookupError, ValueError):
+        return False
+
+
+def _folded_decode(node, folded, from_bytes):
+    """The str value of a decode call the bounded fold computes EXACTLY, by decoding the spelled bytes
+    with the named codec, or None. Folded: <folded bytes>.decode() with no argument (utf-8),
+    <folded bytes>.decode(<codec literal>) and a two-argument str(<folded bytes>, <codec literal>), each
+    with no keyword and only an ASCII-compatible codec literal (_ascii_compatible). The route test is
+    syntactic (a shadowed str or a bytes subclass still folds), which can only over-refuse, the safe
+    direction. Every other decode spelling stays unfolded and is in the disclosed residual: codecs.decode,
+    an unbound bytes.decode(...) call, a computed or keyword codec, an errors argument, a one- or
+    three-argument str(...), and a codec literal that is not ASCII-compatible. Spelled bytes the named
+    codec refuses are not folded either: at run time that expression raises instead of producing a name."""
+    if node.keywords:
+        return None
+    if isinstance(node.func, ast.Attribute) and node.func.attr == "decode" and len(node.args) <= 1:
+        receiver, codec_args = node.func.value, node.args
+    elif isinstance(node.func, ast.Name) and node.func.id == "str" and len(node.args) == 2:
+        receiver, codec_args = node.args[0], node.args[1:]
+    else:
+        return None
+    if id(receiver) not in from_bytes:
+        return None
+    codec = "utf-8"
+    if codec_args:
+        if not (isinstance(codec_args[0], ast.Constant) and isinstance(codec_args[0].value, str)):
+            return None
+        codec = codec_args[0].value
+    if not _ascii_compatible(codec):
+        return None
+    try:
+        return folded[id(receiver)].encode("latin-1").decode(codec)
+    except ValueError:
+        return None
+
+
 def _folded_strings(tree):
     """{id(node): str} for every expression node whose string value a BOUNDED constant fold computes: a str
     constant (an implicit concatenation is already one), a bytes constant decoded as latin-1 (every byte
     decodes, so a spelled bytes name or path is judged by the same rules as a str one; a consumer such as
     pickle reads spelled bytes directly, with no decode in the source), an f-string whose every part is
     such a STR value (a replacement field with no conversion other than !s and no format spec; a
-    bytes-valued field renders b'...' at run time, bare or under !s, so it is never folded), and a + of
+    bytes-valued field renders b'...' at run time, bare or under !s, so it is never folded), a + of
     two such operands of the SAME kind (str+str or bytes+bytes; a str-plus-bytes + is a run-time
-    TypeError, so it is never folded). Folded bottom-up over the reversed breadth-first walk, where every
+    TypeError, so it is never folded), and a supported decode of a folded BYTES node to the exact str the
+    run time produces (_folded_decode: .decode() bare or with one ASCII-compatible codec literal, and a
+    two-argument str(<bytes>, <codec literal>)), so a name decoded piecewise and then concatenated folds
+    like a spelled one. Folded bottom-up over the reversed breadth-first walk, where every
     child precedes its parent, so a long chain needs no recursion; a value longer than _FOLD_CAP is
     dropped."""
     folded = {}
@@ -250,6 +299,8 @@ def _folded_strings(tree):
                 value = None
             else:
                 value = left + right
+        elif isinstance(node, ast.Call):
+            value = _folded_decode(node, folded, from_bytes)
         else:
             continue
         if value is not None and len(value) <= _FOLD_CAP:
@@ -417,15 +468,22 @@ def _declared_renderer_stems(tools_dir):
     colon-separated components, such as a str.format or string.Formatter replacement-field path, by
     bracket field ('0[RENDERER_DECL]') or by a brace-framed attribute dot ('{0.RENDERER_DECL}', where the
     braces keep the dot-component rule from matching): string.Formatter().format resolves the brace-framed
-    template, while string.Formatter().get_field takes the unbraced field name ('0.RENDERER_DECL'), and
-    each route reaches the declared value; or pickle opcode text (a GLOBAL frame is newline-separated and
+    template and reaches the declared value, and that brace-framed format route is the one that passes,
+    while the unbraced get_field spelling of the same field ('0.RENDERER_DECL') is a plain dot-separated
+    path the dot-component rule refuses; or pickle opcode text (a GLOBAL frame is newline-separated and
     a STACK_GLOBAL frame length-prefixed, so a spelled pickle reaches a module attribute with no dot or
     colon in sight);
     a name or resolver path computed any other way (a join, %-formatting, str.format, a case change, a
-    decode of computed bytes, chr, an f-string format spec), folded to more than _FOLD_CAP characters, or
+    decode of computed bytes, chr, an f-string format spec), decoded from spelled bytes by a route the
+    fold does not compute (the fold computes ONLY a no-keyword <folded bytes>.decode() with no argument
+    or with one ASCII-compatible codec literal, and a no-keyword two-argument str(<folded bytes>,
+    <ASCII-compatible codec literal>); codecs.decode, an unbound bytes.decode(...) call, a computed or
+    keyword codec, an errors argument, and a one- or three-argument str(...) each stay unfolded), folded
+    to more than _FOLD_CAP characters, or
     spelled as a bytes literal that run-time code decodes with a codec that is not ASCII-compatible
     (utf-16, cp500 or unicode_escape, through bytes.decode or codecs.decode: the latin-1 fold reads those
-    bytes as a DIFFERENT string than the decode produces), then stored
+    bytes as a DIFFERENT string than the decode produces, and the decode fold declines every codec that
+    fails its per-byte ASCII probe rather than guess), then stored
     through setattr(module, name, ...), globals()[name] = ..., globals().update({name: ...}), handed to a
     resolver (pkgutil.resolve_name, operator.attrgetter, importlib) or consumed by any other namespace
     write or read; the literal name consumed through one of the two EXEMPT USES, by a comparison operand
@@ -621,7 +679,9 @@ def main():
 #       setdefault, __setitem__, dict.__setitem__, operator.setitem), a dict-display or keyword update, a
 #       variable holding the name, an f-string, split f-string, a concatenated, spelled-bytes or
 #       split-bytes key (folded decoded as latin-1; a bytes + bytes chain folds before the run-time
-#       decode), an import naming it, an
+#       decode), a key assembled by decoding spelled bytes and then concatenating (decoded bytes + str,
+#       str + decoded bytes, decoded + decoded, and a two-argument str(bytes, codec); _folded_decode
+#       computes the decode of a folded bytes node exactly), an import naming it, an
 #       import from it (the module position), an import of a package rooted at it (the dotted module
 #       position), a match-mapping rest, a match-star name, and a later argument that a starred argument
 #       before it can shift to the key position)
@@ -634,7 +694,8 @@ def main():
 #       alone also refuses two bindings; each _MUTATED in-place change to the declared dict (a subscript
 #       store, an update call, a chained-assignment alias, a module attribute read, a class-pattern keyword
 #       read, a pkgutil.resolve_name path string, an operator.attrgetter path string spelled as str, as
-#       bytes decoded at run time or split across a bytes + bytes concatenation) also fails closed, so
+#       bytes decoded at run time or split across a bytes + bytes concatenation, and a subscript key
+#       decoded from spelled bytes piecewise and then concatenated) also fails closed, so
 #       none of these routes can make the value Python runs differ from the value read.
 #   (k) a PEP 263 cookie cannot hide a declaration: a UTF-7 cookie that makes a UTF-8 comment a declaration,
 #       and any other non-UTF-8 cookie, fail --check (exit 2); a UTF-8 BOM is parsed as Python parses it.
@@ -749,6 +810,14 @@ _UNSUPPORTED_BINDINGS = (
     ("concatenated subscript key", "globals()['RENDERER_' + 'DECL'] = {}\n".format(_DECL_LITERAL)),
     ("bytes subscript key", "vars()[b'RENDERER_DECL'.decode()] = {}\n".format(_DECL_LITERAL)),
     ("split-bytes subscript key", "vars()[(b'RENDERER_' + b'DECL').decode()] = {}\n".format(_DECL_LITERAL)),
+    ("decoded-bytes-plus-str subscript key",
+     "vars()[b'RENDERER_'.decode() + 'DECL'] = {}\n".format(_DECL_LITERAL)),
+    ("str-plus-decoded-bytes subscript key",
+     "vars()['RENDERER_' + b'DECL'.decode()] = {}\n".format(_DECL_LITERAL)),
+    ("decoded-plus-decoded subscript key",
+     "vars()[b'RENDERER_'.decode() + b'DECL'.decode()] = {}\n".format(_DECL_LITERAL)),
+    ("two-argument-str subscript key",
+     "vars()['RENDERER_' + str(b'DECL', 'ascii')] = {}\n".format(_DECL_LITERAL)),
     ("import naming it", "from gen_alpha import RENDERER_DECL as other\nother['semantics-revision'] = 99\n"),
     ("import from it", "from RENDERER_DECL import x\n"),
     ("dotted import root", "import RENDERER_DECL.sub\n"),
@@ -804,6 +873,8 @@ _MUTATED = (
      + "import operator, types\n"
        "operator.attrgetter((b'm.RENDERER_' + b'DECL').decode())"
        "(types.SimpleNamespace(m=sys.modules[__name__]))['semantics-revision'] = 99\n"),
+    ("a decode-then-concatenate subscript key", _ENTRY_GOOD
+     + "vars()[b'RENDERER_'.decode() + b'DECL'.decode()]['semantics-revision'] = 99\n"),
 )
 
 # (k) unlisted tools/gen_beta.py bodies (bytes) a coding cookie must not hide; '+AAo-' is UTF-7 for a newline.
@@ -840,8 +911,11 @@ _WHERE_MESSAGES = (
 # with !s, and a bytes + bytes concatenation: each renders b'...' at run time, never the decoded text)
 # and a mixed-kind + in each order (str + bytes and bytes + str, each a run-time TypeError, so neither
 # produces the name at all; folding any of these as if it were the plain value would refuse a harmless
-# mention); each must stay allowed, and each bytes control goes red if the bytes fold is extended back
-# into replacement fields or mixed +.
+# mention), a one-argument str(bytes) concatenation (str(b'DECL') renders "b'DECL'", never the decoded
+# text) and a non-ASCII-compatible decode concatenation (b'DECL'.decode('utf-16') produces a DIFFERENT
+# string than the latin-1 reading; folding it by reusing the latin-1 value would refuse a string the run
+# time never produces); each must stay allowed, and each bytes control goes red if the bytes fold is
+# extended back into replacement fields, mixed +, one-argument str or a non-ASCII-compatible codec.
 _ALLOWED_USES = (
     ("comparison", "def is_decl(name):\n    return name == 'RENDERER_DECL' or 'RENDERER_DECL' != name\n"),
     ("mention in a longer string", "NOTE = 'this module carries no RENDERER_DECL'\n"),
@@ -855,6 +929,8 @@ _ALLOWED_USES = (
     ("f-string concatenated-bytes replacement field", "NOTE = f\"RENDERER_{b'DE' + b'CL'}\"\n"),
     ("str-plus-bytes concatenation", "NOTE = 'RENDERER_' + b'DECL'\n"),
     ("bytes-plus-str concatenation", "NOTE = b'RENDERER_' + 'DECL'\n"),
+    ("one-argument str of bytes concatenation", "NOTE = 'RENDERER_' + str(b'DECL')\n"),
+    ("non-ASCII-compatible decode concatenation", "NOTE = 'RENDERER_' + b'DECL'.decode('utf-16')\n"),
 )
 
 
@@ -952,17 +1028,24 @@ def self_test_main():
         # (a). The generation must SUCCEED before its output is compared (the same shape as (a) and (c));
         # the two injection controls exercise the _closure_failure HELPER itself, not its call site: one
         # proves that output written by a run that then reports failure is never accepted, and one proves
-        # that a generation returning 0 after writing the FIRST output back over the edited one fails the
+        # that a generation returning 0 after writing the UNEDITED output back over the edited one fails the
         # unchanged-code-digest comparison (reverting that comparison to read_text would compare str
         # against bytes and pass vacuously; this control is what turns that revert red).
         edited = tmp / "edited"
         _fixture(edited, _ENTRY_GOOD, helper_body="VALUE = 2\n")
 
+        # This control keeps its OWN bytes baseline rather than sharing (a)'s first: were first shared
+        # here, reverting the determinism section to text (its baseline, comparison and restoration
+        # together) would turn this comparison and the injected writer below into a str/bytes TypeError
+        # that aborts the run before the collected CRLF failure is printed, instead of leaving the CRLF
+        # line-ending control as the one that goes red.
+        unedited = (good / RENDERERS_REL).read_bytes()
+
         def _closure_failure(generate):
             rc = generate(edited, False)
             if rc != 0:
                 return "closure completeness: generation expected exit 0, got {}".format(rc)
-            if (edited / RENDERERS_REL).read_bytes() == first:
+            if (edited / RENDERERS_REL).read_bytes() == unedited:
                 return "closure completeness: a helper edit did not change the code-digest"
             return None
 
@@ -973,9 +1056,9 @@ def self_test_main():
                 "closure completeness: generation expected exit 0, got 2":
             failures.append("closure control: an injected failure after a real generation expected a "
                             "recorded failure, not acceptance of the written output")
-        if _closure_failure(lambda root, check: ((root / RENDERERS_REL).write_bytes(first), 0)[1]) != \
+        if _closure_failure(lambda root, check: ((root / RENDERERS_REL).write_bytes(unedited), 0)[1]) != \
                 "closure completeness: a helper edit did not change the code-digest":
-            failures.append("closure control: a generation that returns 0 after writing the first output "
+            failures.append("closure control: a generation that returns 0 after writing the unedited output "
                             "back over the edited one expected the unchanged-code-digest failure (the "
                             "comparison branch itself, not only the rc branch, must be exercised)")
 
@@ -1038,8 +1121,8 @@ def self_test_main():
             rc, err = run_refused(case, check=True)
             if rc != 2 or "unsupported use of RENDERER_DECL" not in err:
                 failures.append("an unlisted tools/gen_beta.py binding RENDERER_DECL by {} expected --check "
-                                "exit 2 naming an unsupported use (fail-closed), got exit {}"
-                                .format(label, rc))
+                                "exit 2 naming an unsupported use (fail-closed), got exit {} with "
+                                "diagnostic tail {!r}".format(label, rc, err.strip()[-160:]))
 
         # (i) a *.py entry that is not a regular file is refused, never skipped.
         def _dangling(p):
@@ -1108,7 +1191,11 @@ def self_test_main():
             if rc != 2 or "unsupported use of RENDERER_DECL" not in err:
                 failures.append("a listed generator changing RENDERER_DECL in place through {} expected "
                                 "generation exit 2 naming an unsupported use (the value run would differ "
-                                "from the value read), got exit {}".format(label, rc))
+                                "from the value read), got exit {} with diagnostic tail {!r}"
+                                .format(label, rc, err.strip()[-160:]))
+            elif (case / RENDERERS_REL).exists():
+                failures.append("a listed generator changing RENDERER_DECL in place through {} was refused "
+                                "but still wrote {}".format(label, RENDERERS_REL))
 
         # (k) a coding cookie cannot hide a declaration; a UTF-8 BOM parses as Python parses it.
         for label, data in _COOKIES:
@@ -1189,7 +1276,8 @@ def self_test_main():
 
         # (o) every control stays allowed: a comparison against the string, a third positional argument, a
         # longer string mentioning it, the f-string !r, !a and format-spec mentions, the three bytes
-        # replacement fields and the two mixed-kind + orders; each is an exempt use or a non-matching
+        # replacement fields, the two mixed-kind + orders, the one-argument str(bytes) concatenation and
+        # the non-ASCII-compatible decode concatenation; each is an exempt use or a non-matching
         # string, never proof of inertness.
         for label, body in _ALLOWED_USES:
             case = tmp / ("allowed-" + label.replace(" ", "-"))
