@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "5fe3b237fbf4d67786fa7df6e860fc9bbccd82ba744fd8164756f8b703f87562"
+tree-sha256 = "f204c749201f894271903935f4391ba96adc3568132fc3504414d60d861460b7"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -61,8 +61,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 285946
-sha256 = "490848c2ebfab22b4db3d69bb230feaa3e07afff9e7aaac7d011eba6cb4a6f72"
+bytes = 286291
+sha256 = "20128b969742de7cfa921407c5fa333401f529bc10b4e9cd3aef76772924a5bb"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -2331,8 +2331,8 @@ sha256 = "e9bbf7da0e25d113ca0f33db652fd131283a00e234f29bb0dfde29ef1d2da965"
 
 [[sources]]
 path = "DISCLOSURE.md"
-bytes = 9289
-sha256 = "6cf1a0ec5ddfadb9e738b4c4b2be0b9277e286ab6d16c079d064d247e0be0cbd"
+bytes = 9638
+sha256 = "92ad71db451805c90672bea6ebef758da089bf4248f09fa19db61ce4e27c2a66"
 
 [[sources]]
 path = "ENFORCEMENT.md"
@@ -2346,8 +2346,8 @@ sha256 = "e74907144039f7e02ff6535ae5da718a21c0ec24733ab430e0f2fe62b94c10b1"
 
 [[sources]]
 path = "INSTRUCTION-BUDGET.md"
-bytes = 3620
-sha256 = "69f8f86c7cffea2e32053206f510bb89c086a164f606886e006d3081309f97d5"
+bytes = 3742
+sha256 = "ae09b3125b9898a105777f4249e5b5917e7e8adaefc30999495b25d1c34e59b5"
 
 [[sources]]
 path = "LICENSE"
@@ -2361,8 +2361,8 @@ sha256 = "aaf972bbdd8b8520076c1bb6f9d701fab580ed6fd34a91c2ba125d39d463aa11"
 
 [[sources]]
 path = "README.md"
-bytes = 4893
-sha256 = "7d4f5a11ea17c16f506308a55426c334c2941f9dc625479e163c246d481bc301"
+bytes = 5015
+sha256 = "1bfed56c45f65fbec100e5406583c27abd8ada9331862bf152c9a6162ba9914e"
 
 [[sources]]
 path = "RELEASING.md"
@@ -2406,8 +2406,8 @@ sha256 = "63d8e3c586b876cf601fbde6bbb5158aa3aae4a5ff492538d01c8c952e5966a3"
 
 [[sources]]
 path = "disclosure.toml"
-bytes = 10675
-sha256 = "1513c1fb1abea741bde8ed0ee13506fcc460e3abf57ff180bdcc063e1b17b3ae"
+bytes = 13410
+sha256 = "cdacd4ca9eb6bdfc5a293882b4f52935ac8dd08e8cee029130d534c68062a603"
 
 [[sources]]
 path = "docs/_shell.html"
@@ -3076,8 +3076,8 @@ sha256 = "a82589ee16ad95ab042402cefbaea05661b8bc47f8c61f1aca0756a4b4c867ea"
 
 [[sources]]
 path = "site/disclosure.html"
-bytes = 16732
-sha256 = "10e234622b70e945204756e2b3cf322baf7f17d707eef4c31373008e638da09b"
+bytes = 17081
+sha256 = "f1c8eae73bb430c26dcf14ddabe63e5d6a2fee40e262c5ce3a7843fd5462d018"
 
 [[sources]]
 path = "site/downloads/aiqt-instructions-1_5k.txt"
@@ -3446,8 +3446,8 @@ sha256 = "d04be78bc38e93932e0f2830a4bf293e991f2d4955db773629fffc2575269586"
 
 [[sources]]
 path = "tools/check_reference_facts.py"
-bytes = 65814
-sha256 = "00b50e2cad792c8366eda27ef6755d3ab55e80959a29835182f1736e4b093f9e"
+bytes = 83526
+sha256 = "58925d974089a4b5b6472f367411305722e0a36d70048cb73e7027380329b0ca"
 
 [[sources]]
 path = "tools/check_release_build.py"
@@ -3566,8 +3566,8 @@ sha256 = "aa774883e5efd63b0333845f6e4262a9af5cc97d277e5e7f55ce2c39cb4aa7fd"
 
 [[sources]]
 path = "tools/gen_disclosure.py"
-bytes = 17667
-sha256 = "a144602fc0d8e9a7565d6b89fdcde50f6fb74c3a98923dfc4f5ae23f8b635481"
+bytes = 25012
+sha256 = "ca153fa44d3c19acea699efd48525d27f9a5f505e4c133704a6d84602fe700c2"
 
 [[sources]]
 path = "tools/gen_enforceability.py"

@@ -22,14 +22,23 @@ generator alone cannot assert:
     and with the hook total checked against its blocking/warning split, so the page cannot print a
     split that does not sum to the total beside it), the standards manifests, and the enforcement
     register's summary, then compared with README.md's anchored wordings, each bound to its one
-    designated line (the bold proof line or its named table row), read at every occurrence on that
-    line, and capturing the whole numeric field (a missing anchored wording is itself a finding, so
+    designated line: the proof line is the FIRST line that opens bold with a digit, and the proof
+    wording must open it, while a table-row wording is read on every line its anchor names. Every
+    occurrence of a wording on a designated line is read with the whole numeric field captured, and
+    every count-shaped figure on a designated line (a number before a counted noun, signed and
+    thousands-separated forms included) must equal its recomputed figure, so a second, contradictory
+    or malformed figure fails loud in ANY wording (a missing anchored wording is itself a finding, so
     a reworded count fails loud, never silently unchecked);
-  - the disclosure's shipped-code category list (the what-it-is-made-of and data-handling rows of
-    disclosure.toml, rendered to DISCLOSURE.md and site/disclosure.html by gen_disclosure): every
-    executable path the release manifest (.aiqt/manifest.toml) lists must fall under a named code
-    category, and both rows must name every category the manifest populates, so the public sentence
-    cannot read complete while the release ships code the sentence does not name.
+  - the disclosure's shipped-path declaration (the [[code]]/[[noncode]] prefix rows of disclosure.toml,
+    the same validated source gen_disclosure renders the public shipped-code sentence from): every
+    path the release manifest (.aiqt/manifest.toml) lists must fall under a declared prefix (the
+    longest declared prefix classifies a path, case-sensitively), and every declared prefix must
+    match a listed path, so the public sentence cannot read complete while the release ships files
+    the declaration does not place, and a declared row cannot outlive the files it names;
+  - the public instruction-budget note: README.md and INSTRUCTION-BUDGET.md each state the shipped
+    pack's measured PACK figure as the committed ratchet of .aiqt/core/instruction-budget.toml; the
+    stated figure must equal that ratchet, and the ratchet must still exceed the 120,000 figure the
+    note says the pack exceeds.
 
 BEST-EFFORT RESIDUAL (disclosed per the pack's own rule): this gate checks the specific fact copies
 enumerated above; it is not a semantic-equivalence prover for arbitrary prose, and `catalogue = "full"` is
@@ -37,9 +46,12 @@ a reviewed declaration this gate trusts, not a fact it can prove offline (no ful
 compare against). It fails closed on an unreadable/malformed input and on a new publisher family that has
 no alias, so a stale copy cannot ship silently. A count stated outside the designated proof line and
 table rows is not reached (the location binding is what keeps a true explanatory sentence elsewhere
-from being read as a second operative count). The code-category leg classifies the release manifest's
-paths by suffix (.py, .sh, .js): an executable committed without one of those suffixes (such as a
-pre-commit hook file) is not reached by that leg on its own, a disclosed residual.
+from being read as a second operative count). The shipped-path declaration leg accounts every release
+path to a declared prefix; a row's plain-language label is a reviewed description this gate cannot
+semantically verify against the files under its prefix, a disclosed residual. The instruction-budget
+note is pinned to the COMMITTED RATCHET, not to a fresh measurement: the budget gate holds PACK at or
+under the ratchet and prints a note whenever PACK falls below it, so a stale ratchet over a shrunken
+pack is surfaced there, not here.
 
   check_reference_facts.py              exit 0 clean, 1 finding, 2 unreadable/missing input (fail-closed)
   check_reference_facts.py --self-test
@@ -67,6 +79,7 @@ from _gen_common import repo_root, load_toml  # noqa: E402
 from _standards import load_manifests, ManifestError, KINDS, STATUSES, CATALOGUES  # noqa: E402
 from gen_mappings import RELATION, RELATION_PROSE, STATUS_PILL, STATUS_DESC  # noqa: E402
 from check_standards_currency import POLICY  # noqa: E402
+from gen_disclosure import shipped_declaration  # noqa: E402
 
 # Publisher -> the short family token the public parentheticals use. Deliberately explicit: a NEW publisher
 # family fails closed here (exit 2 via ManifestError) until an alias is chosen, so a family can never ship
@@ -247,56 +260,68 @@ def check_json_subset_denominator(root, manifests, findings):
 # captured field with a literal space, so a successful match can never end inside a longer number.
 _NUM = r"(?<![0-9,.+-])([0-9]+)"
 
-# The landing page's anchored count wordings (label, line anchor, wording, expected-count keys). Each
-# wording is REQUIRED and BOUND to its designated line of README.md: the anchor names the line (the bold
-# proof line, or the named cell opening its table row), and the wording is then read at EVERY occurrence
-# on that line (finditer, bounded to the line) and nowhere else. A stale count, a silently reworded
-# count sentence, a wording split across a line break, and a second contradictory figure on the
-# designated line all fail loud, while a true explanatory count sentence on any other line is never
-# read as an operative count (a count stated outside the designated lines is not reached; disclosed in
-# the module docstring). Neither an anchor nor a wording can span a line break: the wording search is
-# bounded to the anchored line, and the wordings hold only literals that match no line ending.
+# The landing page's anchored count wordings (label, line anchor, anchor mode, wording, expected-count
+# keys). Each wording is REQUIRED and BOUND to its designated line of README.md. Mode "proof": the
+# designated line is the FIRST line the anchor matches (the first line opening bold with a digit), and
+# the wording must match exactly at the anchor's end, so a replaced proof line with its wording moved
+# to a later bold numeric line is a missing-wording finding, never a silent relocation. Mode "row": the
+# wording is read on every line the anchor names (the named cell opening its table row). On a
+# designated line, every occurrence of the wording is read (finditer, bounded to the line) and the
+# wording is searched nowhere else, and the _LOOSE_COUNTS sweep below validates every other
+# count-shaped figure on the line, so a stale count, a silently reworded count sentence, a wording
+# split across a line break, and a second contradictory figure on the designated line all fail loud,
+# while a true explanatory count sentence on any other line is never read as an operative count (a
+# count stated outside the designated lines is not reached; disclosed in the module docstring).
+# Neither an anchor nor a wording can span a line break: the wording search is bounded to the anchored
+# line, and the wordings hold only literals that match no line ending.
 README_COUNT_FACTS = (
     ("proof line",
      r"(?m)^\*\*(?=[0-9])",
+     "proof",
      _NUM + r" rules\. " + _NUM + r" CI gates that check this repository\. " + _NUM +
      r" Claude Code hooks shipped as an opt-in plugin\. Mapped to " + _NUM + r" frameworks\.\*\*",
      ("rules", "gates", "hooks", "frameworks")),
     ("rules row",
      r"(?m)^\| \*\*The standard\*\* \| ",
+     "row",
      _NUM + r" clear, single-behaviour rules\b",
      ("rules",)),
     ("controls row",
      r"(?m)^\| \*\*Technical controls\*\* \| ",
+     "row",
      _NUM + r" CI gates that check this repository and " + _NUM +
      r" Claude Code hooks shipped as an opt-in plugin \(" + _NUM + r" blocking, " + _NUM + r" warning\)",
      ("gates", "hooks", "blocking", "warning")),
     ("enforcement figure",
      r"(?m)^\| \*\*Technical controls\*\* \| ",
+     "row",
      r"\bToday " + _NUM + r" of the " + _NUM +
      r" rules are linked to at least one shipped gate or hook\b",
      ("enforced", "rules")),
     ("crosswalk row",
      r"(?m)^\| \*\*A standards crosswalk\*\* \| ",
+     "row",
      r"\bto " + _NUM + r" pinned external control catalogues\b",
      ("frameworks",)),
 )
 
-# The disclosure's shipped-code category map: every executable path (_CODE_SUFFIXES) the release
-# manifest lists must start with one of these prefixes (first match wins, so opf/site/ JavaScript is
-# opf/ code), and both _CODE_ROWS of disclosure.toml must carry the token of every category the
-# manifest populates. A code path under no prefix fails closed (exit 2) until a category is added
-# here AND named on the public pages, so the pages' category list cannot drift behind the release.
-_CODE_SUFFIXES = (".py", ".sh", ".js")
-_CODE_CATEGORIES = (
-    ("tools/", "tools/"),
-    ("opf/", "opf/"),
-    (".preview/", ".preview/"),
-    ("plugin/", "hooks plugin"),
-    (".aiqt/core/hooks/", "hooks plugin"),
-    ("site/", "site/"),
+# Every count-shaped figure on a designated line, however worded: a LOOSE numeric field (signed and
+# thousands-separated forms INCLUDED, so a malformed figure is read rather than skipped) before one of
+# the counted nouns. Each hit must equal the recomputed figure exactly, so a second, contradictory or
+# malformed figure on a designated line is a finding even when its surrounding wording is none of the
+# anchored forms above ("(a draft said 999 rules)", "(999 rules.)", "Today 999 of the 3 rules are
+# enforced."). Lines other than the designated ones are not scanned (the disclosed location binding).
+_LOOSE_NUM = r"([+-]?[0-9][0-9,.]*)"
+_LOOSE_COUNTS = (
+    (_LOOSE_NUM + r" of the " + _LOOSE_NUM + r" rules\b", ("enforced", "rules")),
+    (_LOOSE_NUM + r" (?:clear, single-behaviour )?rules\b", ("rules",)),
+    (_LOOSE_NUM + r" CI gates\b", ("gates",)),
+    (_LOOSE_NUM + r" Claude Code hooks\b", ("hooks",)),
+    (_LOOSE_NUM + r" blocking\b", ("blocking",)),
+    (_LOOSE_NUM + r" warning\b", ("warning",)),
+    (_LOOSE_NUM + r" frameworks\b", ("frameworks",)),
+    (_LOOSE_NUM + r" (?:pinned external control )?catalogues\b", ("frameworks",)),
 )
-_CODE_ROWS = ("what-it-is-made-of", "data-handling")
 
 
 def _manifest_entries(path, key, fields):
@@ -351,63 +376,117 @@ def expected_counts(root, manifests):
 
 def check_readme_counts(root, manifests, findings):
     """The landing page's count claims against the manifests they summarize. Anchored, not fuzzy: each
-    README_COUNT_FACTS wording must be present ON ITS DESIGNATED LINE (the line its anchor names), every
-    occurrence of the wording on that line is read (finditer bounded to the line, so a second,
-    contradictory figure on the designated line is a finding too), and the wording is searched nowhere
-    else, so a true explanatory count sentence on another line is never read as an operative count."""
+    README_COUNT_FACTS wording must be present ON ITS DESIGNATED LINE (mode "proof": the first line its
+    anchor matches, with the wording opening the line at the anchor's end; mode "row": every line its
+    anchor names), every occurrence of the wording on a designated line is read (finditer bounded to
+    the line), and the wording is searched nowhere else, so a true explanatory count sentence on
+    another line is never read as an operative count. Every designated line is then swept with
+    _LOOSE_COUNTS, so a second, contradictory or malformed count-shaped figure on it is a finding in
+    ANY wording, signed and thousands-separated forms included."""
     exp = expected_counts(root, manifests)
     text = _read(root / "README.md")
-    for label, anchor, wording, keys in README_COUNT_FACTS:
+    designated = {}
+    for label, anchor, mode, wording, keys in README_COUNT_FACTS:
         want = tuple(str(exp[k]) for k in keys)
         wording_re = re.compile(wording)
         found = False
-        for start in re.finditer(anchor, text):
+        starts = list(re.finditer(anchor, text))
+        if mode == "proof":
+            starts = starts[:1]
+        for start in starts:
             end = text.find("\n", start.end())
             end = len(text) if end < 0 else end
-            for hit in wording_re.finditer(text, start.end(), end):
+            designated.setdefault((start.start(), end), label)
+            if mode == "proof" and wording_re.match(text, start.end(), end):
                 found = True
+            for hit in wording_re.finditer(text, start.end(), end):
+                if mode != "proof":
+                    found = True
                 if hit.groups() != want:
                     findings.append("README.md: {} states {} for ({}); the manifests give {}".format(
                         label, "/".join(hit.groups()), ", ".join(keys), "/".join(want)))
         if not found:
-            findings.append("README.md: anchored count wording not found ({}); if the page was reworded, "
-                            "update README_COUNT_FACTS so the counts stay checked".format(label))
+            findings.append("README.md: anchored count wording not found at its designated line ({}); "
+                            "if the page was reworded or the proof line moved, update "
+                            "README_COUNT_FACTS so the counts stay checked".format(label))
+    for (line_start, line_end), label in sorted(designated.items()):
+        line = text[line_start:line_end]
+        for pattern, keys in _LOOSE_COUNTS:
+            want = tuple(str(exp[k]) for k in keys)
+            for hit in re.finditer(pattern, line):
+                if hit.groups() != want:
+                    findings.append("README.md: a count-shaped figure on the designated {} line reads "
+                                    "{} for ({}); the manifests give {}".format(
+                                        label, "/".join(hit.groups()), ", ".join(keys),
+                                        "/".join(want)))
 
 
-def check_disclosure_code_categories(root, findings):
-    """The disclosure's shipped-code category list against the release manifest it summarizes: every
-    executable path (_CODE_SUFFIXES) in .aiqt/manifest.toml must fall under a _CODE_CATEGORIES prefix
-    (a path under none is OSError, exit 2 fail-closed, never a silently unnamed category), and each
-    _CODE_ROWS row of disclosure.toml must name the token of every category the manifest populates, so
-    the public shipped-code sentence cannot read complete while the release ships code it does not
-    name. A missing manifest or a malformed sources array is OSError (exit 2)."""
+def check_release_code_declaration(root, findings):
+    """Every path the release manifest ships against the disclosure's [[code]]/[[noncode]] declaration
+    (gen_disclosure.shipped_declaration, the same validated source the public shipped-code sentence is
+    rendered from, so the prose and this gate cannot read two different shapes). A path is classified
+    by the LONGEST declared prefix that starts it (case-sensitive, byte for byte), so declaring a tree
+    and a subtree is unambiguous and no ordering rule exists. A path under NO declared prefix, and a
+    declared prefix matching NO release path, are findings; a missing or malformed declaration and a
+    missing, empty, or malformed release manifest fail closed (exit 2). Row prose is never matched:
+    the public sentence renders from the same declaration, so a path named in a limitation can no
+    longer satisfy a category."""
+    try:
+        code_rows, noncode_rows = shipped_declaration(load_toml(root / "disclosure.toml"))
+    except ValueError as exc:
+        raise OSError("disclosure.toml: {}".format(exc))
+    prefixes = [r["prefix"] for r in code_rows] + [r["prefix"] for r in noncode_rows]
     sources = load_toml(root / ".aiqt" / "manifest.toml").get("sources")
-    if not isinstance(sources, list) or not all(isinstance(s, dict) for s in sources):
-        raise OSError(".aiqt/manifest.toml: [[sources]] must be an array of tables")
-    needed = {}
+    if not isinstance(sources, list) or not sources or not all(isinstance(s, dict) for s in sources):
+        raise OSError(".aiqt/manifest.toml: [[sources]] must be a non-empty array of tables")
+    used = set()
     for entry in sources:
         path = entry.get("path")
-        if not isinstance(path, str):
+        if not isinstance(path, str) or not path:
             raise OSError(".aiqt/manifest.toml: a [[sources]] entry has no string path")
-        if not path.endswith(_CODE_SUFFIXES):
+        hits = [pref for pref in prefixes if path.startswith(pref)]
+        if not hits:
+            findings.append(".aiqt/manifest.toml: release path {!r} falls under no declared [[code]] or "
+                            "[[noncode]] prefix of disclosure.toml; declare it so the public "
+                            "shipped-code list stays complete".format(path))
             continue
-        token = next((tok for prefix, tok in _CODE_CATEGORIES if path.startswith(prefix)), None)
-        if token is None:
-            raise OSError(".aiqt/manifest.toml: code path {!r} falls under no disclosure code category; "
-                          "add it to _CODE_CATEGORIES and name it in the disclosure rows".format(path))
-        needed.setdefault(token, path)
-    rows = {r.get("id"): r for r in load_toml(root / "disclosure.toml").get("row", [])
-            if isinstance(r, dict) and r.get("id") in _CODE_ROWS}
-    for rid in _CODE_ROWS:
-        row = rows.get(rid)
-        if row is None:
-            findings.append("disclosure.toml: no {} row to carry the shipped-code category list".format(rid))
+        used.add(max(hits, key=len))
+    for pref in prefixes:
+        if pref not in used:
+            findings.append("disclosure.toml: declared shipped-path prefix {!r} matches no "
+                            "release-manifest path; remove the row or fix the prefix".format(pref))
+
+
+_BUDGET_NOTE_RE = re.compile(r"its measured PACK stands at the committed ratchet, ([0-9][0-9,]*) characters")
+
+
+def check_budget_note(root, findings):
+    """The public instruction-budget note against the committed ratchet it states: README.md and
+    INSTRUCTION-BUDGET.md each carry the _BUDGET_NOTE_RE sentence, its figure must equal the ratchet
+    of .aiqt/core/instruction-budget.toml (thousands-separated, as the pages print it), and the
+    ratchet must still exceed the 120,000 figure the note says the shipped pack exceeds. Pinned to
+    the COMMITTED ratchet, not a fresh measurement (the budget gate holds PACK at or under the
+    ratchet and prints a lower-the-ratchet note when PACK falls below it); a missing or non-integer
+    ratchet, and a missing page, fail closed (exit 2)."""
+    ratchet = load_toml(root / ".aiqt" / "core" / "instruction-budget.toml").get("ratchet")
+    if not isinstance(ratchet, int) or isinstance(ratchet, bool) or ratchet <= 0:
+        raise OSError(".aiqt/core/instruction-budget.toml: ratchet must be a positive integer")
+    want = format(ratchet, ",d")
+    for rel in ("README.md", "INSTRUCTION-BUDGET.md"):
+        text = _read(root / rel)
+        hits = _BUDGET_NOTE_RE.findall(text)
+        if not hits:
+            findings.append("{}: the instruction-budget note (its measured PACK stands at the "
+                            "committed ratchet, N characters) was not found; if the page was "
+                            "reworded, update check_budget_note so the figure stays checked".format(rel))
             continue
-        text = "{} {}".format(row.get("claim", ""), row.get("limitation", ""))
-        for token, example in sorted(needed.items()):
-            if token not in text:
-                findings.append("disclosure.toml {}: the shipped-code list does not name {!r}; the "
-                                "release manifest lists code there (e.g. {})".format(rid, token, example))
+        for got in hits:
+            if got != want:
+                findings.append("{}: the budget note states PACK {}; the committed ratchet is "
+                                "{}".format(rel, got, want))
+        if ratchet <= 120000:
+            findings.append("{}: the page says the shipped pack exceeds 120,000, but the committed "
+                            "ratchet is {}; reword the note".format(rel, want))
 
 
 def run(root):
@@ -420,7 +499,8 @@ def run(root):
         fams = expected_families(manifests)
         check_meta(root, fams, findings)
         check_disclosure(root, fams, findings)
-        check_disclosure_code_categories(root, findings)
+        check_release_code_declaration(root, findings)
+        check_budget_note(root, findings)
         check_enum_table(root, findings)
         check_parity(findings)
         check_deferred(root, manifests, findings)
@@ -483,16 +563,28 @@ def main():
 #      (every occurrence on the designated line is read),
 #  20c. the enforcement sentence or the crosswalk coverage split onto the next line -> a
 #      missing-anchored-wording finding (no pattern matches across a line break),
+#  20d. the proof line replaced and its full wording moved to a later bold numeric line -> a
+#      missing-anchored-wording finding (the designated proof line is the FIRST bold-digit line and
+#      the wording must open it),
+#  20e. a contradictory or malformed figure on a designated line in a wording that is NOT an anchored
+#      form (a signed duplicate beside the valid wording, a parenthetical draft figure, a reworded
+#      enforcement figure, a bare parenthetical count, a thousands-separated duplicate) -> finding
+#      (the _LOOSE_COUNTS sweep),
 #  21. a missing ENFORCEMENT.md, rules folder, gates or hooks manifest -> exit 2, a malformed gates or
-#      hooks manifest (a non-table `gate = "ab"` / `hook = "ab"` entry, an entry with no platform or a
-#      non-string platform, and a non-string default on ANY platform, an excluded one included) or an
-#      all-wrong-platform manifest -> exit 2, a claude-code hook whose default is outside the
-#      blocking/warning split -> exit 2, and a partially-off-platform gates manifest -> finding (the
-#      filtered count disagrees with the page),
-#  22. the shipped-code category leg: a populated category the disclosure rows do not name, and a
-#      missing shipped-code row -> finding; a manifest code path under no category, and a missing
-#      release manifest -> exit 2 (fail-closed).
-# (1, 7, 12, 13, and 15 through 22 are the invariant-bearing cases; the rest complete the fail-closed
+#      hooks manifest (a non-table `gate = "ab"` / `hook = "ab"` value, a non-table element inside the
+#      array, an entry with no platform or a non-string platform, gate and hook forms both, and a
+#      non-string default on ANY platform, an excluded one included) or an all-wrong-platform manifest
+#      -> exit 2, a claude-code hook whose default is outside the blocking/warning split -> exit 2,
+#      and a partially-off-platform gates manifest -> finding (the filtered count disagrees with the
+#      page); where the refusal's provenance carries the claim, its diagnostic is asserted too (21b),
+#  22. the shipped-path declaration leg: removing any declared row, a release path under no declared
+#      prefix, and a declared prefix matching no release path -> finding; a nested prefix pair stays
+#      clean (the longest declared prefix classifies); a missing declaration, and a missing or empty
+#      release manifest -> exit 2 (fail-closed),
+#  23. the instruction-budget note: a figure that disagrees with the committed ratchet, a missing
+#      note, and a note kept after the ratchet no longer exceeds 120,000 -> finding; a missing budget
+#      source -> exit 2 (fail-closed).
+# (1, 7, 12, 13, and 15 through 23 are the invariant-bearing cases; the rest complete the fail-closed
 # contract.)
 
 _MANIFEST = (
@@ -551,9 +643,10 @@ _JSON = (
     '}\n'
 )
 
-# The disclosure fixture carries the standards-mappings row (the parenthetical leg) and the two
-# shipped-code rows (the code-category leg); each code row names every category _RELEASE_MANIFEST
-# populates.
+# The disclosure fixture carries the standards-mappings row (the parenthetical leg), the two
+# shipped-code prose rows, and the [[code]]/[[noncode]] declaration the shipped-path leg checks: every
+# declared prefix is populated by a _RELEASE_MANIFEST path, and every _RELEASE_MANIFEST path falls
+# under exactly one declared prefix, so each declaration-removal case leaves a path unplaced.
 _DISCLOSURE = (
     'title = "d"\nnote = "n"\nsite_base = "https://example.org"\n\n'
     '[[row]]\nid = "standards-mappings"\ntopic = "Standards mappings"\n'
@@ -570,7 +663,15 @@ _DISCLOSURE = (
     'claim = "The repository ships code: the tooling under tools/ and opf/, the preview hook scripts '
     'under .preview/, the hooks plugin, and the JavaScript under site/."\n'
     'limitation = "Some checks and tools make network requests when run."\n'
-    'evidence = [\n  { text = "Data", href = "/tech-details#qa-where" },\n]\n'
+    'evidence = [\n  { text = "Data", href = "/tech-details#qa-where" },\n]\n\n'
+    '[[code]]\nprefix = "tools/"\nlabel = "the tooling under tools/"\n\n'
+    '[[code]]\nprefix = "opf/tools/"\nlabel = "the tooling under opf/tools/"\n\n'
+    '[[code]]\nprefix = ".preview/"\nlabel = "the preview hook scripts under .preview/"\n\n'
+    '[[code]]\nprefix = "plugin/"\nlabel = "the hooks plugin"\n\n'
+    '[[code]]\nprefix = ".aiqt/core/hooks/"\nlabel = "the hooks plugin source"\n\n'
+    '[[code]]\nprefix = "site/"\nlabel = "the JavaScript under site/"\n\n'
+    '[[noncode]]\nprefix = "README.md"\n\n'
+    '[[noncode]]\nprefix = "ENFORCEMENT.md"\n'
 )
 
 
@@ -594,6 +695,13 @@ _ENFORCEMENT_MD = (
     "| Enforced | 1 |\n| Preview only | 0 |\n| Pending | 0 |\n| None | 2 |\n"
 )
 
+# The instruction-budget fixtures for the budget-note leg: the committed ratchet, and the public note
+# stating it (the same sentence in the landing README and in INSTRUCTION-BUDGET.md).
+_BUDGET_TOML = "ratchet = 132775\n"
+_BUDGET_NOTE = ("Budget note: budget to 120,000. Today the shipped pack itself exceeds that figure: "
+                "its measured PACK stands at the committed ratchet, 132,775 characters.\n")
+_BUDGET_MD = "# Fixture Budget\n\n" + _BUDGET_NOTE
+
 _LANDING = (
     "# Fixture Landing\n\n"
     "**3 rules. 2 CI gates that check this repository. 2 Claude Code hooks shipped as an opt-in "
@@ -604,13 +712,15 @@ _LANDING = (
     "shipped gate or hook. | Controls |\n"
     "| **A standards crosswalk** | Mappings from the rules to 2 pinned external control catalogues. "
     "| Mappings |\n"
+    "\n" + _BUDGET_NOTE
 )
 
-# The release-manifest fixture: one code path in every _CODE_CATEGORIES bucket plus a non-code source
-# (the code-category leg classifies executable suffixes only).
+# The release-manifest fixture: at least one path under every declared fixture prefix, code and
+# non-code, so removing any single declared row leaves a path unplaced (a finding).
 _RELEASE_MANIFEST = (
     'format-version = 1\nrelease-version = "0.0.0"\n\n'
     '[[sources]]\npath = "README.md"\n\n'
+    '[[sources]]\npath = "ENFORCEMENT.md"\n\n'
     '[[sources]]\npath = "tools/fixture_check.py"\n\n'
     '[[sources]]\npath = "tools/fixture_status.sh"\n\n'
     '[[sources]]\npath = "opf/tools/fixture_tool.py"\n\n'
@@ -622,11 +732,12 @@ _RELEASE_MANIFEST = (
 
 
 def _write_fixture(base, manifests=None, readme=None, page=None, disclosure=None, json_export=None,
-                   landing=None, release_manifest=None):
+                   landing=None, release_manifest=None, budget_toml=None, budget_md=None):
     """Write a complete clean fixture tree, overridable per component for a case's single mutation.
     `manifests` is a list of (stem, name, publisher, edition, kind, catalogue); `landing` overrides the
     README.md the counts leg reads; `release_manifest` overrides the .aiqt/manifest.toml the
-    code-category leg reads."""
+    shipped-path declaration leg reads; `budget_toml` and `budget_md` override the instruction-budget
+    source and page the budget-note leg reads."""
     if manifests is None:
         manifests = [("full", "Fixture Full Framework", "OWASP Foundation", "1.0", "control", "full"),
                      ("subset", "Fixture Subset Framework", "ISO/IEC", "2023", "guidance", "subset")]
@@ -657,6 +768,10 @@ def _write_fixture(base, manifests=None, readme=None, page=None, disclosure=None
     (core / "hooks" / "manifest.toml").write_text(_HOOKS_TOML, encoding="utf-8")
     (base / "ENFORCEMENT.md").write_text(_ENFORCEMENT_MD, encoding="utf-8")
     (base / "README.md").write_text(landing if landing is not None else _LANDING, encoding="utf-8")
+    (core / "instruction-budget.toml").write_text(
+        budget_toml if budget_toml is not None else _BUDGET_TOML, encoding="utf-8")
+    (base / "INSTRUCTION-BUDGET.md").write_text(
+        budget_md if budget_md is not None else _BUDGET_MD, encoding="utf-8")
     (base / ".aiqt" / "manifest.toml").write_text(
         release_manifest if release_manifest is not None else _RELEASE_MANIFEST, encoding="utf-8")
 
@@ -674,6 +789,17 @@ def self_test_main():
                 return run(root)
             except SystemExit as exc:
                 return "raised SystemExit({!r})".format(exc.code)
+
+    def run_err(root):
+        """(exit, stderr) so a fail-closed case can assert its refusing diagnostic, not only its exit
+        code (the structure-check provenance the 21b comment claims)."""
+        err = io.StringIO()
+        with redirect_stdout(io.StringIO()), redirect_stderr(err):
+            try:
+                code = run(root)
+            except SystemExit as exc:
+                code = "raised SystemExit({!r})".format(exc.code)
+        return code, err.getvalue()
 
     try:
         tmp = Path(tempfile.mkdtemp(prefix="aiqt-reference-facts-gate-selftest-"))
@@ -972,6 +1098,42 @@ def self_test_main():
         if run_quiet(splitcross) != 1:
             failures.append("the crosswalk coverage split onto the next line expected exit 1")
 
+        # 20d. the proof line REPLACED and the full wording moved to a later bold numeric line -> a
+        #      missing-anchored-wording finding: the designated proof line is the FIRST bold-digit
+        #      line, and the wording must open it, so a relocated proof line can never stand in.
+        proofmoved = tmp / "proofmoved"
+        _write_fixture(proofmoved, landing=_LANDING.replace(
+            "**3 rules.", "**Proof removed.\n**2026 note: 3 rules.", 1))
+        if run_quiet(proofmoved) != 1:
+            failures.append("a replaced proof line with its wording on a later bold line expected "
+                            "exit 1")
+
+        # 20e. a contradictory or malformed figure on a designated line in ANY wording -> finding (the
+        #      _LOOSE_COUNTS sweep): a signed duplicate beside the valid wording, a parenthetical
+        #      draft figure, a reworded enforcement figure, a bare parenthetical count on the proof
+        #      line, and a thousands-separated duplicate after the valid split.
+        loose_vectors = (
+            ("dupmalformed", "3 clear, single-behaviour rules",
+             "-3 clear, single-behaviour rules; 3 clear, single-behaviour rules"),
+            ("draftrules", "3 clear, single-behaviour rules across",
+             "3 clear, single-behaviour rules (a draft said 999 rules) across"),
+            ("enfreword", "shipped gate or hook. ",
+             "shipped gate or hook. Today 999 of the 3 rules are enforced. "),
+            ("parenrules", "Mapped to 2 frameworks.**", "Mapped to 2 frameworks.** (999 rules.)"),
+            ("dupseparated", "(1 blocking, 1 warning).",
+             "(1 blocking, 1 warning) (a draft said 1,001 blocking)."),
+        )
+        for tag, old, new in loose_vectors:
+            if _LANDING.count(old) != 1:
+                failures.append("loose-count fixture {}: its target must appear exactly once in "
+                                "_LANDING".format(tag))
+                continue
+            loosed = tmp / ("loose-" + tag)
+            _write_fixture(loosed, landing=_LANDING.replace(old, new, 1))
+            if run_quiet(loosed) != 1:
+                failures.append("a contradictory or malformed figure in another wording ({}) expected "
+                                "exit 1".format(tag))
+
         # 21. missing or malformed count sources fail closed (exit 2), never a silent pass: a missing
         #     ENFORCEMENT.md, rules folder, or hooks manifest; a gates manifest that is not an array of
         #     tables (`gate = "ab"`) or whose entry lacks the counted field; and an all-wrong-platform
@@ -1025,19 +1187,23 @@ def self_test_main():
             failures.append("a partially off-platform gates manifest expected exit 1 (the filtered "
                             "count disagrees with the page)")
 
-        # 21b. malformed hooks manifests fail closed (exit 2), each red when the hook field tuple drops
-        #      "default" or the hooks structure check is removed: a non-string default on an EXCLUDED
-        #      platform (the platform filter must never hide a malformed entry), a missing platform, a
-        #      non-string platform, and a non-table entry; plus a missing gates manifest, and a
-        #      claude-code hook whose default is outside the blocking/warning split the page prints.
+        # 21b. malformed hooks and gates manifests fail closed (exit 2), with the refusing diagnostic
+        #      asserted where the claim depends on WHICH validation refused. Measured mutant matrix,
+        #      not an aspiration: offbad is red both when the hook field tuple drops "default" and
+        #      when the hooks structure check is removed; badhplat, badhook, badgplat, and mixedhook
+        #      are red only when the structure check is removed; nohplat and nogates are red under
+        #      NEITHER mutant and stay as plain fail-closed regression coverage (without the structure
+        #      check a missing platform still exits 2 through the caught KeyError, and a missing gates
+        #      manifest never reaches hook validation).
         offbad = tmp / "offbad"
         _write_fixture(offbad)
         (offbad / ".aiqt" / "core" / "hooks" / "manifest.toml").write_text(
             _HOOKS_TOML + '\n[[hook]]\nid = "fixture-hook-off"\nrules = []\n'
             'platform = "other"\ndefault = 123\n', encoding="utf-8")
-        if run_quiet(offbad) != 2:
-            failures.append("a non-string hook default on an excluded platform expected exit 2 "
-                            "(fail-closed)")
+        code, err = run_err(offbad)
+        if code != 2 or "has no string 'default'" not in err:
+            failures.append("a non-string hook default on an excluded platform expected exit 2 naming "
+                            "the default field (fail-closed)")
         nohplat = tmp / "nohplat"
         _write_fixture(nohplat)
         (nohplat / ".aiqt" / "core" / "hooks" / "manifest.toml").write_text(
@@ -1048,14 +1214,32 @@ def self_test_main():
         _write_fixture(badhplat)
         (badhplat / ".aiqt" / "core" / "hooks" / "manifest.toml").write_text(
             _HOOKS_TOML.replace('platform = "claude-code"', "platform = 3", 1), encoding="utf-8")
-        if run_quiet(badhplat) != 2:
-            failures.append("a non-string hook platform expected exit 2 (fail-closed)")
+        code, err = run_err(badhplat)
+        if code != 2 or "has no string 'platform'" not in err:
+            failures.append("a non-string hook platform expected exit 2 naming the platform field")
+        badgplat = tmp / "badgplat"
+        _write_fixture(badgplat)
+        (badgplat / ".aiqt" / "core" / "gates" / "manifest.toml").write_text(
+            _GATES_TOML.replace('platform = "ci"', "platform = 3", 1), encoding="utf-8")
+        code, err = run_err(badgplat)
+        if code != 2 or "has no string 'platform'" not in err:
+            failures.append("a non-string gate platform expected exit 2 naming the platform field")
         badhook = tmp / "badhook"
         _write_fixture(badhook)
         (badhook / ".aiqt" / "core" / "hooks" / "manifest.toml").write_text(
             'hook = "ab"\n', encoding="utf-8")
-        if run_quiet(badhook) != 2:
-            failures.append("a hooks manifest of hook = \"ab\" expected exit 2 (fail-closed)")
+        code, err = run_err(badhook)
+        if code != 2 or "must be an array of tables" not in err:
+            failures.append("a hooks manifest of hook = \"ab\" expected exit 2 naming the structure")
+        mixedhook = tmp / "mixedhook"
+        _write_fixture(mixedhook)
+        (mixedhook / ".aiqt" / "core" / "hooks" / "manifest.toml").write_text(
+            'hook = [ { id = "a", rules = [], platform = "claude-code", default = "block" }, "ab" ]\n',
+            encoding="utf-8")
+        code, err = run_err(mixedhook)
+        if code != 2 or "must be an array of tables" not in err:
+            failures.append("a non-table element inside the hook array expected exit 2 naming the "
+                            "structure")
         nogates = tmp / "nogates"
         _write_fixture(nogates)
         (nogates / ".aiqt" / "core" / "gates" / "manifest.toml").unlink()
@@ -1070,29 +1254,101 @@ def self_test_main():
             failures.append("a claude-code hook with a default outside the split expected exit 2 "
                             "(fail-closed)")
 
-        # 22. the shipped-code category leg: a populated category the disclosure rows do not name, or
-        #     a missing shipped-code row -> finding; a code path under no category, or a missing
-        #     release manifest -> exit 2 (fail-closed).
-        nocatname = tmp / "nocatname"
-        _write_fixture(nocatname, disclosure=_DISCLOSURE.replace(
-            "the preview hook scripts under .preview/, ", ""))
-        if run_quiet(nocatname) != 1:
-            failures.append("a populated code category the disclosure rows do not name expected exit 1")
-        nocoderow = tmp / "nocoderow"
-        _write_fixture(nocoderow, disclosure=_DISCLOSURE.replace('id = "data-handling"',
-                                                                 'id = "data-handling-x"'))
-        if run_quiet(nocoderow) != 1:
-            failures.append("a missing shipped-code disclosure row expected exit 1")
-        roguecode = tmp / "roguecode"
-        _write_fixture(roguecode, release_manifest=_RELEASE_MANIFEST +
-                       '\n[[sources]]\npath = "scripts/rogue_helper.py"\n')
-        if run_quiet(roguecode) != 2:
-            failures.append("a manifest code path under no category expected exit 2 (fail-closed)")
+        # 22. the shipped-path declaration leg: removing ANY declared row leaves its release path
+        #     unplaced -> finding; each shipped form the retired suffix map missed (another suffix, a
+        #     case variant, an HTML shell, a CI template, an extensionless hook) added to the release
+        #     manifest -> finding; a declared prefix matching no release path -> finding; a nested
+        #     prefix pair classifies by the longest prefix -> clean; a missing declaration, and a
+        #     missing or empty release manifest -> exit 2 (fail-closed).
+        decl_rows = (
+            ("notools", '[[code]]\nprefix = "tools/"\nlabel = "the tooling under tools/"\n\n'),
+            ("noopftools", '[[code]]\nprefix = "opf/tools/"\nlabel = "the tooling under opf/tools/"\n\n'),
+            ("nopreview", '[[code]]\nprefix = ".preview/"\nlabel = "the preview hook scripts under .preview/"\n\n'),
+            ("noplugin", '[[code]]\nprefix = "plugin/"\nlabel = "the hooks plugin"\n\n'),
+            ("nohookssrc", '[[code]]\nprefix = ".aiqt/core/hooks/"\nlabel = "the hooks plugin source"\n\n'),
+            ("nosite", '[[code]]\nprefix = "site/"\nlabel = "the JavaScript under site/"\n\n'),
+            ("noreadme", '[[noncode]]\nprefix = "README.md"\n\n'),
+            ("noenfmd", '[[noncode]]\nprefix = "ENFORCEMENT.md"\n'),
+        )
+        for tag, row_text in decl_rows:
+            if _DISCLOSURE.count(row_text) != 1:
+                failures.append("declaration-removal fixture {}: its row must appear exactly once in "
+                                "_DISCLOSURE".format(tag))
+                continue
+            dropped = tmp / ("drop-" + tag)
+            _write_fixture(dropped, disclosure=_DISCLOSURE.replace(row_text, "", 1))
+            if run_quiet(dropped) != 1:
+                failures.append("removing the {} declaration row expected exit 1 (its release path is "
+                                "left unplaced)".format(tag))
+        rogue_paths = (
+            "opf/site/theme.js", "docs/helper.mjs", "scripts/run.bash", "scripts/Tool.PY",
+            "docs/_shell.html", "ci/github-actions.yml", "scripts/rogue.mjs",
+            "scripts/rogue_helper.py", "opf/enforcement/precommit/pre-commit",
+        )
+        for pos, rogue in enumerate(rogue_paths):
+            rogued = tmp / ("rogue-{}".format(pos))
+            _write_fixture(rogued, release_manifest=_RELEASE_MANIFEST +
+                           '\n[[sources]]\npath = "{}"\n'.format(rogue))
+            if run_quiet(rogued) != 1:
+                failures.append("release path {!r} under no declared prefix expected exit 1".format(
+                    rogue))
+        staledecl = tmp / "staledecl"
+        _write_fixture(staledecl, disclosure=_DISCLOSURE +
+                       '\n[[code]]\nprefix = "ci/"\nlabel = "a CI template"\n')
+        if run_quiet(staledecl) != 1:
+            failures.append("a declared prefix matching no release path expected exit 1")
+        nestdecl = tmp / "nestdecl"
+        _write_fixture(
+            nestdecl,
+            disclosure=_DISCLOSURE +
+            '\n[[code]]\nprefix = "docs/_shell.html"\nlabel = "an HTML shell with an inline script"\n'
+            '\n[[noncode]]\nprefix = "docs/"\n',
+            release_manifest=_RELEASE_MANIFEST +
+            '\n[[sources]]\npath = "docs/_shell.html"\n\n[[sources]]\npath = "docs/about.md"\n')
+        if run_quiet(nestdecl) != 0:
+            failures.append("a nested prefix pair (docs/ and docs/_shell.html) expected exit 0 (the "
+                            "longest declared prefix classifies the path)")
+        nodecl = tmp / "nodecl"
+        _write_fixture(nodecl, disclosure=_DISCLOSURE[:_DISCLOSURE.index("[[code]]")])
+        if run_quiet(nodecl) != 2:
+            failures.append("a disclosure without the shipped-path declaration expected exit 2 "
+                            "(fail-closed)")
+        emptyrel = tmp / "emptyrel"
+        _write_fixture(emptyrel, release_manifest=
+                       'format-version = 1\nrelease-version = "0.0.0"\nsources = []\n')
+        if run_quiet(emptyrel) != 2:
+            failures.append("an empty release-manifest sources array expected exit 2 (fail-closed)")
         nomanifest = tmp / "nomanifest"
         _write_fixture(nomanifest)
         (nomanifest / ".aiqt" / "manifest.toml").unlink()
         if run_quiet(nomanifest) != 2:
             failures.append("a missing release manifest expected exit 2 (fail-closed)")
+
+        # 23. the instruction-budget note: a figure that disagrees with the committed ratchet, a
+        #     missing note, and a note kept after the ratchet no longer exceeds 120,000 -> finding; a
+        #     missing budget source -> exit 2 (fail-closed).
+        budgetdrift = tmp / "budgetdrift"
+        _write_fixture(budgetdrift, landing=_LANDING.replace("132,775 characters",
+                                                             "132,776 characters"))
+        if run_quiet(budgetdrift) != 1:
+            failures.append("a budget note stating a figure other than the ratchet expected exit 1")
+        budgetmissing = tmp / "budgetmissing"
+        _write_fixture(budgetmissing, budget_md="# Fixture Budget\n\nNo note here.\n")
+        if run_quiet(budgetmissing) != 1:
+            failures.append("a page without the budget note expected exit 1")
+        budgetlow = tmp / "budgetlow"
+        _write_fixture(budgetlow,
+                       landing=_LANDING.replace("132,775 characters", "100,000 characters"),
+                       budget_md=_BUDGET_MD.replace("132,775 characters", "100,000 characters"),
+                       budget_toml="ratchet = 100000\n")
+        if run_quiet(budgetlow) != 1:
+            failures.append("a budget note kept after the ratchet fell to 120,000 or below expected "
+                            "exit 1")
+        nobudget = tmp / "nobudget"
+        _write_fixture(nobudget)
+        (nobudget / ".aiqt" / "core" / "instruction-budget.toml").unlink()
+        if run_quiet(nobudget) != 2:
+            failures.append("a missing instruction-budget source expected exit 2 (fail-closed)")
     finally:
         if unreadable_std is not None:
             os.chmod(unreadable_std, 0o755)  # restore even on an unexpected early exit
@@ -1111,18 +1367,25 @@ def self_test_main():
           "rendered with an edition denominator in the registry row or the reverse-view <p>, a subset "
           "framework carrying ids_total in the JSON export, a landing-page count that disagrees with its "
           "manifests (every captured figure drifted alone), a missing or broken anchored count wording "
-          "(every wording broken alone, and the enforcement and crosswalk wordings split across a line "
-          "break), a second contradictory figure on a designated line, an unsupported numeric form (a "
-          "thousands separator or a leading sign at every wording), a partially off-platform gates "
-          "manifest, and a populated shipped-code category or shipped-code row the disclosure does not "
-          "carry each report a finding (exit 1); a true explanatory count sentence outside its designated "
-          "line stays clean (exit 0, one aside per anchored wording); and a missing page, a missing JSON "
-          "export, an unreadable standards dir, a missing/invalid catalogue, an unaliased publisher, a "
-          "missing enforcement register, rules folder, gates or hooks manifest, a malformed gates or "
-          "hooks manifest (a non-table entry, a missing or non-string platform, and a non-string hook "
-          "default, even on an excluded platform), an all-wrong-platform gates or hooks manifest, a "
-          "claude-code hook default outside the blocking/warning split, a missing release manifest, and "
-          "a release code path under no disclosure category all fail closed (exit 2)" + note)
+          "(every wording broken alone, the enforcement and crosswalk wordings split across a line "
+          "break, and the proof line replaced with its wording moved to a later bold numeric line), a "
+          "second contradictory or malformed figure on a designated line (in the anchored wording and "
+          "in other wordings, a signed and a thousands-separated duplicate included), an unsupported "
+          "numeric form (a thousands separator or a leading sign at every wording), a partially "
+          "off-platform gates manifest, a removed shipped-path declaration row, a release path under "
+          "no declared prefix, a declared prefix matching no release path, and a budget note whose "
+          "figure disagrees with the committed ratchet, is absent, or outlives a ratchet at or under "
+          "120,000 each report a finding (exit 1); a true explanatory count sentence outside its "
+          "designated line, and a nested declared prefix pair resolved by the longest prefix, stay "
+          "clean (exit 0); and a missing page, a missing JSON export, an unreadable standards dir, a "
+          "missing/invalid catalogue, an unaliased publisher, a missing enforcement register, rules "
+          "folder, gates or hooks manifest, a malformed gates or hooks manifest (a non-table value, a "
+          "non-table element inside the array, a missing or non-string platform, gate and hook forms "
+          "both, and a non-string hook default, even on an excluded platform, the structural refusals "
+          "asserted by their diagnostics), an all-wrong-platform gates or hooks manifest, a "
+          "claude-code hook default outside the blocking/warning split, a missing shipped-path "
+          "declaration, a missing or empty release manifest, and a missing instruction-budget source "
+          "all fail closed (exit 2)" + note)
     return 0
 
 
