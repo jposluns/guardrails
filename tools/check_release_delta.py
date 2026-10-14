@@ -2918,7 +2918,10 @@ def _not_run(failures, case, cause):
 # _git_gate, one _git_gate call per label, the label indices in source order as exact ints, no
 # indirect reference to the probe or to _git_gate) is enforced by _git_gate_alignment_failures
 # over the module source in the self-test, never left to a comment (PR #530 QA round-3 claude
-# MINOR-4; round-4 codex 1 / claude MINOR-2; round-5 codex 1/2/4).
+# MINOR-4; round-4 codex 1 / claude MINOR-2; round-5 codex 1/2/4). Round-6 (codex 1 / claude
+# MEDIUM-1): that static scan is a BACKSTOP; the runtime guarantee is _GATE_IMPORT_BINDINGS (gate
+# and probe captured at import), _gate_identity_failures (identity at each gated block and at the
+# end) and the per-label accounting in _self_test_main_isolated.
 # Reviewed sites in _self_test_main_isolated that reach git CODE without a gate (round-4 claude
 # MINOR-3): the duplicate-CLI main() calls are rejected at option parsing before any git runs; the
 # single-named-ref-read anchor cases run with _rev_parse/_object_type stubbed; the R6
@@ -2946,7 +2949,11 @@ def _git_gate(label, failures):
     round-2 codex MAJOR): when the probe fails, the gated block is a recorded NOT RUN failure naming the
     block, never a silent skip beside a PASS, so a TRANSIENTLY failed probe at one gate can no longer
     leave its block unrun while a later probe succeeds and the suite still prints SELF-TEST PASS.
-    Red-on-revert: the transient-availability scenarios in _not_run_net_vectors."""
+    Round-6: the self-test also verifies the gate and probe BINDINGS by identity at each gated
+    block (_gate_identity_failures over _GATE_IMPORT_BINDINGS) and accounts for exactly one record
+    per label, so a rebound or bypassed gate is a named failure at run time.
+    Red-on-revert: the transient-availability scenarios and the rebound-gate run in
+    _not_run_net_vectors."""
     if _git_available():
         return True
     _not_run(failures, label, "git is unavailable at this block's probe (QA round-4 codex R4-3 / "
@@ -2954,11 +2961,38 @@ def _git_gate(label, failures):
     return False
 
 
+# Round-6 (codex 1 / claude MEDIUM-1): the gate function and the availability probe objects,
+# captured ONCE at import as a module-private constant. The self-test verifies at each gated
+# block and again at the end that the module's _git_gate and _git_available are THESE exact
+# objects (identity, read through the module's own namespace), so a rebinding by ANY spelling,
+# where rounds 4 to 6 each produced a new one, is a named failure at run time; the static
+# _git_gate_alignment_failures scan below stays as a backstop only.
+_GATE_IMPORT_BINDINGS = (_git_gate, _git_available)
+
+
+def _gate_identity_failures(failures, where):
+    """Append a named failure for each module gate/probe binding that is no longer the object
+    captured at import (_GATE_IMPORT_BINDINGS): identity through the module's own namespace,
+    never a spelling scan. The round-5 static checker admitted globals(), sys.modules and
+    import-binding respellings of _git_gate, each of which skipped all six gated blocks beside
+    SELF-TEST PASS (round-6 codex 1 / claude MEDIUM-1). The reviewed probe swap in
+    _not_run_net_vectors is active only inside nested runs whose nonzero exit their caller
+    asserts, so an identity failure recorded there never reaches a PASS. Red-on-revert: the
+    planted rebindings and the rebound-gate nested run in the self-test."""
+    space = vars(sys.modules[__name__])
+    for name, bound in zip(("_git_gate", "_git_available"), _GATE_IMPORT_BINDINGS):
+        if space.get(name) is not bound:
+            failures.append("(git-gate identity) {}: {} is not the object captured at import "
+                            "(rebound by some spelling; identity decides, so the spelling does "
+                            "not matter)".format(where, name))
+
+
 def _git_gate_alignment_failures(source):
     """The _GIT_GATE_LABELS/_git_gate alignment as an AST CHECK over module source, not a comment (PR
     #530 QA round-3 claude MINOR-4; round-4 codex 1 / claude MINOR-2 widened it beyond bare-name
-    calls; round-5 codex 1/2/4 and claude MINOR-2 scoped the allowances exactly). Findings (empty
-    when aligned):
+    calls; round-5 codex 1/2/4 and claude MINOR-2 scoped the allowances exactly; round-6 codex 1 /
+    claude MEDIUM-1 narrowed it to a BACKSTOP behind the runtime identity and accounting checks).
+    Findings (empty when aligned):
       - any Name reference to _git_available outside the EXECUTABLE BODY of the single top-level
         _git_gate def (a bare call, an alias, a callback element, and equally a call in a
         decorator, a default or an annotation of the gate, which runs at definition time, or in
@@ -2981,13 +3015,30 @@ def _git_gate_alignment_failures(source):
       - a _git_gate call count different from len(_GIT_GATE_LABELS), and the i-th _git_gate call in
         source order not passing the literal _GIT_GATE_LABELS[i] with an index of EXACT type int
         (a swapped or computed index would name the WRONG block on failure; round-5: bool is an int
-        subclass and 0.0 == 0, so either would satisfy an equality-only test).
-    Residual (disclosed): a git-dependent block with NO probe at all is invisible to this check (git
-    absence there surfaces as an unnamed exception, fail-closed but not a named NOT RUN), and a probe
-    name assembled at runtime from string fragments is not detected (round-5 scope note: exec/eval
-    are refused across tools/ and opf/tools/ by the maintenance-pin scan, outside its counted
-    per-function dynamic-site exceptions). The self-test plants every refused shape above and
-    requires each to be a finding."""
+        subclass and 0.0 == 0, so either would satisfy an equality-only test);
+      - round-6: a binding of EITHER name as a parameter, a global/nonlocal declaration, an except
+        alias or a keyword argument (a parameter default such as a lambda bound to the probe name
+        resolves the gate's own body call to the parameter); string, bytes, attribute and import
+        references to _git_gate exactly as for the probe (a globals()/sys.modules store or lookup,
+        a getattr key, an import binding); real_probe used anywhere but inside _planned_probe or as
+        the restore statement's value (an ungated early return through the reviewed alias); ZERO
+        `real_probe = _git_available` swaps (a stand-in bound under the reviewed name) refused like
+        two; the globals() stores of both names COUNTED against the reviewed code (two each); a
+        GeneratorExp or TypeAlias inside the gate treated as a DEFERRED scope (either carries the
+        probe out of the gate uncalled); and the `_GATE_IMPORT_BINDINGS` capture required exactly
+        once at module top level.
+    This check is a BACKSTOP (round-6 codex 1 / claude MEDIUM-1): rounds 4 to 6 each produced a new
+    spelling, and a spelling scan over Python source cannot be closed. Its residual is every DYNAMIC
+    spelling (a name assembled at run time from string fragments, an attribute chain through another
+    module), and a git-dependent block with NO probe at all stays invisible to it (git absence there
+    surfaces as an unnamed exception, fail-closed but not a named NOT RUN); the round-5 scope note
+    stands: exec/eval are refused across tools/ and opf/tools/ by the maintenance-pin scan, outside
+    its counted per-function dynamic-site exceptions. The guarantee is carried at run time instead:
+    _GATE_IMPORT_BINDINGS captures the gate and probe objects once at import,
+    _gate_identity_failures verifies BOTH module bindings by identity at each gated block and at the
+    end, and the per-label accounting in _self_test_main_isolated requires exactly one record per
+    gate label (its body ran, or its NOT RUN line). The self-test plants every refused shape above
+    and requires each to be a finding."""
     import ast
     tree = ast.parse(source)
     findings = []
@@ -3006,7 +3057,8 @@ def _git_gate_alignment_failures(source):
     for gate_def in top_defs:
         for inner in ast.walk(gate_def):
             if inner is not gate_def and isinstance(
-                    inner, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                    inner, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda,
+                            ast.GeneratorExp, ast.TypeAlias)):
                 nested_ids.update(id(sub) for sub in ast.walk(inner))
         # Round-5 (codex 1): only the EXECUTABLE BODY of the gate may call the probe. Scanning
         # gate_def.body keeps the signature (decorators, defaults, annotations) out of the
@@ -3039,9 +3091,12 @@ def _git_gate_alignment_failures(source):
         inner_scope = set()
         for inner in ast.walk(fn):
             if inner is not fn and isinstance(
-                    inner, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+                    inner, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef,
+                            ast.GeneratorExp, ast.TypeAlias)):
                 inner_scope.update(id(sub) for sub in ast.walk(inner))
         swaps = []
+        probe_stores, gate_stores = [], []
+        restore_ids = set()
         for stmt in ast.walk(fn):
             if not isinstance(stmt, ast.Assign) or id(stmt) in inner_scope:
                 continue
@@ -3054,53 +3109,124 @@ def _git_gate_alignment_failures(source):
                         and isinstance(target.value.func, ast.Name)
                         and target.value.func.id == "globals" and not target.value.args
                         and isinstance(target.slice, ast.Constant)
-                        and target.slice.value == probe):
+                        and target.slice.value in (probe, "_git_gate")):
                     allowed_ids.add(id(target.slice))
-        if len(swaps) == 1:
-            allowed_ids.add(id(swaps[0].value))
-        elif len(swaps) > 1:
+                    (probe_stores if target.slice.value == probe else gate_stores).append(stmt)
+                    if (target.slice.value == probe and isinstance(stmt.value, ast.Name)
+                            and stmt.value.id == "real_probe"):
+                        restore_ids.add(id(stmt.value))
+        # Round-6: ZERO swaps are refused like two (a stand-in probe bound under the reviewed
+        # target name would otherwise read as the allowance), and the globals() stores of BOTH
+        # names are counted against the reviewed code, never just allow-listed by shape.
+        if len(swaps) != 1:
             findings.append("line(s) {}: the reviewed `real_probe = {}` swap must appear exactly "
-                            "once in the direct scope of _not_run_net_vectors".format(
-                                ", ".join(str(stmt.lineno) for stmt in swaps), probe))
+                            "once in the direct scope of _not_run_net_vectors (round-6: zero and "
+                            "two are both refused)".format(
+                                ", ".join(str(stmt.lineno) for stmt in swaps) or "none", probe))
+        else:
+            allowed_ids.add(id(swaps[0].value))
+        for stores, count in ((probe_stores, 2), (gate_stores, 2)):
+            if len(stores) != count:
+                findings.append("line(s) {}: {} globals() store(s) of the {} name in the direct "
+                                "scope of _not_run_net_vectors; the reviewed code has exactly {} "
+                                "(round-6: the stores are counted)".format(
+                                    ", ".join(str(stmt.lineno) for stmt in stores) or "none",
+                                    len(stores), "probe" if stores is probe_stores else "gate",
+                                    count))
+        # Round-6 (claude MEDIUM-2): real_probe is itself an indirect probe handle; it may be
+        # USED only inside _planned_probe and as the restore statement's value, so an ungated
+        # early return through the reviewed alias is a finding.
+        planned_ids = set()
+        for inner in ast.walk(fn):
+            if (isinstance(inner, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and inner.name == "_planned_probe"):
+                planned_ids.update(id(sub) for sub in ast.walk(inner))
+        swap_target_ids = {id(stmt.targets[0]) for stmt in swaps}
+        for node in ast.walk(fn):
+            if (isinstance(node, ast.Name) and node.id == "real_probe"
+                    and id(node) not in planned_ids and id(node) not in restore_ids
+                    and id(node) not in swap_target_ids):
+                findings.append("line {}: real_probe is used outside _planned_probe and the "
+                                "restore statement (round-6: an ungated early return through "
+                                "the reviewed alias)".format(node.lineno))
     for fn in tree.body:
-        if isinstance(fn, ast.FunctionDef) and fn.name == "_git_gate_alignment_failures":
+        if isinstance(fn, ast.FunctionDef) and fn.name in ("_git_gate_alignment_failures",
+                                                           "_gate_identity_failures"):
             allowed_ids.update(id(node) for node in ast.walk(fn)
-                               if isinstance(node, ast.Constant) and node.value == probe)
+                               if isinstance(node, ast.Constant)
+                               and node.value in (probe, "_git_gate"))
+    # Round-6: the import-time capture the runtime identity check reads; the exact reviewed
+    # tuple, exactly once at module top level, is the one allowed indirect reference to the
+    # gate and probe objects.
+    captures = [stmt for stmt in tree.body
+                if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1
+                and isinstance(stmt.targets[0], ast.Name)
+                and stmt.targets[0].id == "_GATE_IMPORT_BINDINGS"
+                and isinstance(stmt.value, ast.Tuple) and len(stmt.value.elts) == 2
+                and all(isinstance(elt, ast.Name) for elt in stmt.value.elts)
+                and [elt.id for elt in stmt.value.elts] == ["_git_gate", probe]]
+    capture_ids = set()
+    if len(captures) == 1:
+        allowed_ids.add(id(captures[0].value.elts[1]))
+        capture_ids.add(id(captures[0].value.elts[0]))
+    else:
+        findings.append("line(s) {}: the import-time gate/probe capture must appear exactly "
+                        "once at module top level (round-6: the runtime identity check reads "
+                        "it; zero loses that check and a second could alias the probe)".format(
+                            ", ".join(str(stmt.lineno) for stmt in captures) or "none"))
     for node in ast.walk(tree):
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             for alias in node.names:
-                if probe in (alias.name, alias.asname):
-                    findings.append("line {}: import of {} (round-5: an import alias is an "
-                                    "indirect probe outside the named gate)".format(
-                                        node.lineno, probe))
+                for bound in (probe, "_git_gate"):
+                    if bound in (alias.name, alias.asname):
+                        findings.append("line {}: import of {} (round-5/6: an import alias or "
+                                        "binding is an indirect probe or a rebound gate outside "
+                                        "the named gate)".format(node.lineno, bound))
     for node in ast.walk(tree):
         if isinstance(node, ast.Name) and node.id == probe and id(node) not in allowed_ids:
             if id(node) in nested_ids:
-                findings.append("line {}: a {} reference inside a nested function escapes "
-                                "_git_gate (an exported closure would probe unnamed on "
-                                "failure)".format(node.lineno, probe))
+                findings.append("line {}: a {} reference inside a nested or deferred scope "
+                                "escapes _git_gate (an exported closure, generator or type "
+                                "alias would probe unnamed on failure)".format(
+                                    node.lineno, probe))
             else:
                 findings.append("line {}: {} is referenced outside _git_gate (a bare, aliased or "
                                 "callback probe, unnamed on failure)".format(node.lineno, probe))
-        elif isinstance(node, ast.Attribute) and node.attr == probe:
-            findings.append("line {}: attribute reference to {} (an indirect probe bypasses the "
-                            "named gate)".format(node.lineno, probe))
-        elif (isinstance(node, ast.Constant) and node.value == probe
+        elif isinstance(node, ast.Attribute) and node.attr in (probe, "_git_gate"):
+            findings.append("line {}: attribute reference to {} (round-6: an indirect probe or a "
+                            "sys.modules gate rebinding bypasses the named gate)".format(
+                                node.lineno, node.attr))
+        elif (isinstance(node, ast.Constant) and node.value in (probe, "_git_gate")
                 and id(node) not in allowed_ids):
-            findings.append("line {}: string reference to {} (a getattr, globals() or sys.modules "
-                            "lookup bypasses the named gate)".format(node.lineno, probe))
+            findings.append("line {}: string reference to {} (round-6: a getattr, globals() or "
+                            "sys.modules lookup or store bypasses or rebinds the named "
+                            "gate)".format(node.lineno, node.value))
         elif (isinstance(node, ast.Constant) and isinstance(node.value, bytes)
-                and node.value == probe.encode("ascii")):
-            findings.append("line {}: bytes reference to {} (round-5: a decoded-bytes globals() "
+                and node.value in (probe.encode("ascii"), "_git_gate".encode("ascii"))):
+            findings.append("line {}: bytes reference to {} (round-5/6: a decoded-bytes globals() "
                             "or getattr key routes around the named gate)".format(
-                                node.lineno, probe))
+                                node.lineno, node.value.decode("ascii")))
+        elif isinstance(node, ast.arg) and node.arg in (probe, "_git_gate"):
+            findings.append("line {}: {} bound as a parameter (round-6: a signature binding "
+                            "shadows the module binding inside the very function that calls "
+                            "the probe)".format(node.lineno, node.arg))
+        elif isinstance(node, (ast.Global, ast.Nonlocal)) and (
+                probe in node.names or "_git_gate" in node.names):
+            findings.append("line {}: a global or nonlocal declaration of the gate or probe name "
+                            "(round-6: a rebinding route)".format(node.lineno))
+        elif isinstance(node, ast.ExceptHandler) and node.name in (probe, "_git_gate"):
+            findings.append("line {}: the gate or probe name bound as an except alias (round-6: "
+                            "a binding route the Name scan missed)".format(node.lineno))
+        elif isinstance(node, ast.keyword) and node.arg in (probe, "_git_gate"):
+            findings.append("line {}: the gate or probe name bound as a keyword argument "
+                            "(round-6)".format(node.lineno))
     gate_calls = sorted((node for node in ast.walk(tree) if isinstance(node, ast.Call)
                          and isinstance(node.func, ast.Name) and node.func.id == "_git_gate"),
                         key=lambda call: (call.lineno, call.col_offset))
     direct_call_ids = {id(call.func) for call in gate_calls}
     for node in ast.walk(tree):
         if (isinstance(node, ast.Name) and node.id == "_git_gate"
-                and id(node) not in direct_call_ids):
+                and id(node) not in direct_call_ids and id(node) not in capture_ids):
             findings.append("line {}: _git_gate is referenced other than by a direct call "
                             "(round-5: an alias, functools.partial or rebinding would route a "
                             "gated block around the counted, ordered calls)".format(node.lineno))
@@ -3234,7 +3360,10 @@ def _not_run_net_vectors(tmp, failures):
     block, and still dispatch the final gate's case sets) and with git unavailable at every gate (every
     block named, the final one included), so a revert of any single gate's recorded failure is red. A git
     that STOPS honouring info/grafts makes the grafts case a STANDING NOT RUN failure of this self-test
-    on that host (fail-closed and disclosed, resolved by porting the case, never by skipping it)."""
+    on that host (fail-closed and disclosed, resolved by porting the case, never by skipping it).
+    Round-6 (codex 1 / claude MEDIUM-1): a third gate scenario REBINDS _git_gate itself to an
+    always-False stand-in; the nested run must exit nonzero, name the identity drift and name the
+    unaccounted gate labels, keeping the runtime identity and accounting checks red-on-revert."""
     import tempfile
     # The nested self-test (the self_test_main entry, which sets up its own git lifecycle) with ONLY the
     # end-to-end temp allocation failing. It cannot recurse: without that temp directory it never reaches
@@ -3384,6 +3513,31 @@ def _not_run_net_vectors(tmp, failures):
         if scenario.startswith("transient") and sorted(final_ran) != ["e2e", "net", "real-pack"]:
             failures.append("(NOT RUN git-gate) transient probe: the final gate must dispatch all "
                             "three case sets when its probe succeeds (ran {})".format(final_ran))
+
+    # Round-6 (codex 1 / claude MEDIUM-1): a REBOUND GATE must be a NAMED failure at run time,
+    # never six silently skipped blocks beside SELF-TEST PASS (the round-5 static checker admitted
+    # a globals()/sys.modules rebinding of _git_gate, and the runtime check is identity, not
+    # spelling, so this one rebinding stands for them all). The nested self-test must exit
+    # nonzero, name the identity drift, and name the unaccounted gate labels.
+    real_gate = _GATE_IMPORT_BINDINGS[0]
+    globals()["_git_gate"] = lambda label, failures: False
+    out = io.StringIO()
+    try:
+        with redirect_stdout(out), redirect_stderr(io.StringIO()):
+            rc = self_test_main()
+    finally:
+        globals()["_git_gate"] = real_gate
+    text = out.getvalue()
+    if rc == 0:
+        failures.append("(NOT RUN git-gate) rebound gate: the nested self-test must exit nonzero, "
+                        "never SELF-TEST PASS beside six silently skipped blocks")
+    if "(git-gate identity)" not in text or "captured at import" not in text:
+        failures.append("(NOT RUN git-gate) rebound gate: the runtime identity check must name "
+                        "the drifted binding (output ended {!r})".format(text.strip()[-300:]))
+    if "(git-gate accounting)" not in text:
+        failures.append("(NOT RUN git-gate) rebound gate: the per-label accounting must name a "
+                        "block with neither record (output ended {!r})".format(
+                            text.strip()[-300:]))
 
 
 def _real_pack_e2e(tmp, failures):
@@ -6340,6 +6494,10 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
     from _git_fixture_env import scrub_git_environment
     scrub_git_environment()
     failures = []
+    # Round-6 per-block accounting (codex 1 / claude MEDIUM-1): each gated block appends its
+    # label here as its body's LAST statement; the gate records a NOT RUN failure instead when
+    # its probe fails; the final verdict requires EXACTLY ONE record per gate label.
+    gate_ran = []
 
     # PR #530 QA round-3 claude MINOR-4, round-4 codex 1 / claude MINOR-2, round-5 codex 1/2/4: the
     # _GIT_GATE_LABELS/_git_gate alignment is a CHECK over the module source, not a comment, and it
@@ -6351,9 +6509,15 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
     # _not_run_net_vectors, an alias / functools.partial / rebinding of _git_gate, decorator,
     # default and annotation probes on the gate, a class-body probe, an unrelated early-return
     # alias, a duplicated and a nested real_probe swap, and a bool and a float label index) each
-    # returned [] from the round-4 checker. Residual
-    # (disclosed): a git-dependent block with NO probe at all is invisible to this check; see the
-    # checker docstring.
+    # returned [] from the round-4 checker; and the round-6 shapes (a globals()/sys.modules/import
+    # rebinding or lookup of _git_gate, a parameter shadowing of the probe, a generator-expression
+    # and a type-alias escape, an early return through real_probe, a zero-swap stand-in, a third
+    # globals() store, and a duplicated or missing import capture) each returned [] from the
+    # round-5 checker. Round-6: this battery keeps the checker honest as a BACKSTOP; the runtime
+    # identity checks (_gate_identity_failures at every gate and at the end) and the per-label
+    # accounting before the verdict carry the guarantee. Residual
+    # (disclosed): a git-dependent block with NO probe at all is invisible to the static check; see
+    # the checker docstring.
     own_source = Path(__file__).resolve().read_text(encoding="utf-8")
     align = _git_gate_alignment_failures(own_source)
     if align:
@@ -6406,7 +6570,24 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
              "other than by a direct call"),
             ("a planted rebinding of _git_gate (round-5)",
              "_git_gate = lambda label, failures: False\n",
-             "other than by a direct call")):
+             "other than by a direct call"),
+            ("a planted globals() rebinding of _git_gate (round-6)",
+             "globals()[\"_git_gate\"] = lambda label, failures: False\n",
+             "string reference to _git_gate"),
+            ("a planted sys.modules rebinding of _git_gate (round-6)",
+             "sys.modules[__name__]._git_gate = lambda label, failures: False\n",
+             "attribute reference to _git_gate"),
+            ("a planted import binding of _git_gate (round-6)",
+             "from planted_mod import replacement as _git_gate\n",
+             "import of _git_gate"),
+            ("a planted getattr lookup of _git_gate (round-6)",
+             "def _planted_gate_lookup_vector(failures):\n"
+             "    return getattr(sys.modules[__name__], \"_git_gate\")("
+             "_GIT_GATE_LABELS[0], failures)\n",
+             "string reference to _git_gate"),
+            ("a planted duplicate import capture (round-6)",
+             "_GATE_IMPORT_BINDINGS = (" + "_git_gate, " + "_git_available)\n",
+             "capture must appear exactly")):
         gotg = _git_gate_alignment_failures(own_source + "\n\n" + plantg)
         if not any(wantg in fg for fg in gotg):
             failures.append("(git-gate alignment) {} must be a finding naming {!r} (got {})".format(
@@ -6424,7 +6605,7 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
             "    def _esc():\n        return " + "_git_available()\n"
             "    globals()[\"_escaped_gate_probe\"] = _esc\n    if _esc():\n")
         gote = _git_gate_alignment_failures(_escaped)
-        if not any("escapes" in fg and "_git_gate" in fg for fg in gote):
+        if not any("escapes _git_gate" in fg for fg in gote):
             failures.append("(git-gate alignment) a probe closure escaping _git_gate must be a "
                             "finding (got {})".format(gote))
         # Round-5 (codex 1): a class-body call inside the gate sits outside its executable body.
@@ -6436,6 +6617,19 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
         if not any("outside _git_gate" in fc for fc in gotc):
             failures.append("(git-gate alignment) a class-body probe inside _git_gate (round-5) "
                             "must be a finding naming outside _git_gate (got {})".format(gotc))
+        # Round-6: a GENERATOR EXPRESSION and a TYPE ALIAS are deferred scopes; either carries
+        # the probe out of the gate uncalled, and whoever evaluates the exported object probes
+        # OUTSIDE the gate, unnamed on failure.
+        for tag_esc, plant_esc in (
+                ("a generator-expression escape",
+                 "    globals()[\"_planted_escape\"] = (" + "_git_available() for _ in (0,))\n"),
+                ("a type-alias escape",
+                 "    type _PlantedAlias = " + "_git_available()\n")):
+            got_esc = _git_gate_alignment_failures(own_source.replace(
+                _gate_probe_line + "\n", plant_esc + _gate_probe_line + "\n"))
+            if not any("escapes _git_gate" in f_esc for f_esc in got_esc):
+                failures.append("(git-gate alignment) {} from the gate body (round-6: a deferred "
+                                "scope) must be a finding (got {})".format(tag_esc, got_esc))
     # Round-5 (codex 1): definition-time probes in the signature of the gate; each EDITS the def
     # line (an appended second def trips the one-def finding, never the targeted one).
     _gate_def_line = "\ndef _git_gate(label, failures):\n"
@@ -6455,6 +6649,16 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
                 failures.append("(git-gate alignment) {} on _git_gate (round-5: the probe is "
                                 "allowed only in the executable body of the gate) must be a "
                                 "finding (got {})".format(tagd, gotd))
+        # Round-6 (codex 3): a PARAMETER named after the probe shadows the module binding inside
+        # the gate itself, so the body's probe call resolves to the parameter; ast.arg bindings
+        # are findings now.
+        got_param = _git_gate_alignment_failures(own_source.replace(
+            _gate_def_line,
+            "\ndef _git_gate(label, failures, " + "_git_available=lambda: True):\n"))
+        if not any("bound as a parameter" in f_param for f_param in got_param):
+            failures.append("(git-gate alignment) a parameter shadowing of the probe (round-6) "
+                            "must be a finding naming the parameter binding (got {})".format(
+                                got_param))
     # Round-5 (codex 2): the swap allowance is the exact reviewed assignment, in the direct
     # scope of _not_run_net_vectors, exactly once; anything else there is a finding.
     _swap_line = "    real_probe = " + "_git_available\n"
@@ -6473,7 +6677,16 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
                  "    def _planted_nested_swap():\n"
                  "        real_probe = " + "_git_available\n        return real_probe()\n"
                  + _swap_line,
-                 "outside _git_gate")):
+                 "outside _git_gate"),
+                ("an early return through the reviewed alias (round-6)",
+                 _swap_line + "    if not real_probe():\n        return\n",
+                 "outside _planned_probe"),
+                ("a zero-swap stand-in probe (round-6)",
+                 "    real_probe = lambda: True\n",
+                 "exactly once"),
+                ("a third globals() probe store (round-6)",
+                 _swap_line + "    globals()[\"" + "_git_available\"] = real_probe\n",
+                 "the stores are counted")):
             gots5 = _git_gate_alignment_failures(own_source.replace(_swap_line, repls, 1))
             if not any(wants in f5 for f5 in gots5):
                 failures.append("(git-gate alignment) {} in _not_run_net_vectors (round-5) must "
@@ -6501,6 +6714,48 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
         if not any("source order" in fg for fg in gots):
             failures.append("(git-gate alignment) a swapped label index must be a finding naming "
                             "the source order (got {})".format(gots))
+
+    # Round-6: the import capture itself, edited OUT (the duplicate is an appended vector above).
+    _capture_line = "_GATE_IMPORT_BINDINGS = (" + "_git_gate, " + "_git_available)\n"
+    if own_source.count(_capture_line) != 1:
+        failures.append("(git-gate alignment) expected exactly one import-capture line to edit "
+                        "for the round-6 zero-capture vector")
+    else:
+        got_cap = _git_gate_alignment_failures(own_source.replace(_capture_line, "", 1))
+        if not any("capture must appear exactly" in f_cap for f_cap in got_cap):
+            failures.append("(git-gate alignment) a missing import capture (round-6: the runtime "
+                            "identity check reads it) must be a finding (got {})".format(got_cap))
+
+    # Round-6: the RUNTIME identity check, red-on-revert for the rebinding class the static scan
+    # kept missing across rounds 4 to 6: identity through the module's own namespace decides, so
+    # one rebinding stands for every spelling (a globals() store, a sys.modules attribute store,
+    # an import binding). The module key is found BY IDENTITY too, so this test needs no name
+    # literal the static backstop would have to allow.
+    space_idn = vars(sys.modules[__name__])
+    for tag_idn, bound_idn in zip(("the gate", "the probe"), _GATE_IMPORT_BINDINGS):
+        name_idn = next((key_idn for key_idn, val_idn in space_idn.items()
+                         if val_idn is bound_idn), None)
+        if name_idn is None:
+            # Already rebound before this test ran (the rebound-gate nested run reaches here):
+            # that drift is itself a named identity failure, and the per-gate and end-of-suite
+            # identity checks name it with the drifted binding.
+            failures.append("(git-gate identity) the object captured at import for {} is bound "
+                            "to no module name (rebound before this test ran)".format(tag_idn))
+            continue
+        got_idn = []
+        space_idn[name_idn] = lambda *_args_idn: False
+        try:
+            _gate_identity_failures(got_idn, "under a planted rebinding")
+        finally:
+            space_idn[name_idn] = bound_idn
+        if not any("captured at import" in f_idn and name_idn in f_idn for f_idn in got_idn):
+            failures.append("(git-gate identity) a rebinding of {} must be an identity failure "
+                            "naming {} (got {})".format(tag_idn, name_idn, got_idn))
+    got_idn = []
+    _gate_identity_failures(got_idn, "with the bindings intact")
+    if got_idn:
+        failures.append("(git-gate identity) intact bindings must pass the identity check "
+                        "(got {})".format(got_idn))
 
     # QA round-9 codex minor: the drift consumer requires EXACTLY ONE DRIFT-STATES record. A
     # duplicate (identical or contradictory) and a malformed record are failures that a later
@@ -6541,39 +6796,51 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
     # refusal) under another.
     import tempfile as _tempfile
     # The fixture commit is REAL git work (init/add/commit with check=True), so it runs behind
-    # a named gate (round-4 claude MINOR-3): with git LOST AFTER the suite starts it is a recorded
-    # NOT RUN naming the block, never an unnamed traceback (round-5: git absent at the START stops
-    # the whole suite in fixture_git_lifecycle, which raises RuntimeError: self-test requires git).
+    # a named gate (round-4 claude MINOR-3); git absent at the START stops the whole suite in
+    # fixture_git_lifecycle, which raises RuntimeError: self-test requires git (round-5), and git
+    # LOST BETWEEN this block's successful probe and its fixture commit is caught below and
+    # recorded as this block's NOT RUN (round-6 codex 6), never an unnamed traceback.
+    _gate_identity_failures(failures, _GIT_GATE_LABELS[0])
     if _git_gate(_GIT_GATE_LABELS[0], failures):
         with _tempfile.TemporaryDirectory(prefix="aiqt-delta-toml-class-") as tc_dir:
             tc_repo = Path(tc_dir)
             (tc_repo / "bigint.toml").write_text("big = " + "9" * 4400 + "\n", encoding="utf-8")
             (tc_repo / "deep.toml").write_text("deep = 1  # injected-overflow\n", encoding="utf-8")
-            _git_init_commit(tc_repo, "toml class fixtures")
-            prev_digits = sys.get_int_max_str_digits()
-            sys.set_int_max_str_digits(4300)
-            real_loads, real_load = tomllib.loads, tomllib.load
-
-            def overflowing_loads(text, **kwargs):
-                if "injected-overflow" in text:
-                    raise RecursionError("injected parser overflow")
-                return real_loads(text, **kwargs)
-
-            tomllib.loads = overflowing_loads
-            tomllib.load = lambda fp, **kwargs: overflowing_loads(fp.read().decode("utf-8"), **kwargs)
             try:
-                for tc_name, tc_needle in (("bigint.toml", ""), ("deep.toml", "injected parser overflow")):
-                    try:
-                        _show_toml(tc_repo, "HEAD", tc_name)
-                        failures.append("_show_toml accepted {}".format(tc_name))
-                    except GateError as exc:
-                        if tc_needle not in str(exc):
-                            failures.append("_show_toml refused {} without its finding ({})".format(tc_name, exc))
-                    except (ValueError, RecursionError) as exc:
-                        failures.append("_show_toml let a bare {} escape on {}".format(type(exc).__name__, tc_name))
-            finally:
-                tomllib.loads, tomllib.load = real_loads, real_load
-                sys.set_int_max_str_digits(prev_digits)
+                _git_init_commit(tc_repo, "toml class fixtures")
+            except (OSError, subprocess.CalledProcessError) as tc_exc:
+                _not_run(failures, _GIT_GATE_LABELS[0], "git was lost between this block's "
+                         "successful probe and its fixture commit ({})".format(tc_exc))
+            else:
+                prev_digits = sys.get_int_max_str_digits()
+                sys.set_int_max_str_digits(4300)
+                real_loads, real_load = tomllib.loads, tomllib.load
+
+                def overflowing_loads(text, **kwargs):
+                    if "injected-overflow" in text:
+                        raise RecursionError("injected parser overflow")
+                    return real_loads(text, **kwargs)
+
+                tomllib.loads = overflowing_loads
+                tomllib.load = lambda fp, **kwargs: overflowing_loads(fp.read().decode("utf-8"),
+                                                                      **kwargs)
+                try:
+                    for tc_name, tc_needle in (("bigint.toml", ""),
+                                               ("deep.toml", "injected parser overflow")):
+                        try:
+                            _show_toml(tc_repo, "HEAD", tc_name)
+                            failures.append("_show_toml accepted {}".format(tc_name))
+                        except GateError as exc:
+                            if tc_needle not in str(exc):
+                                failures.append("_show_toml refused {} without its finding "
+                                                "({})".format(tc_name, exc))
+                        except (ValueError, RecursionError) as exc:
+                            failures.append("_show_toml let a bare {} escape on {}".format(
+                                type(exc).__name__, tc_name))
+                finally:
+                    tomllib.loads, tomllib.load = real_loads, real_load
+                    sys.set_int_max_str_digits(prev_digits)
+                gate_ran.append(_GIT_GATE_LABELS[0])
 
     # QA round-11 claude F1: main() reached by IMPORTING this module (never through the `if
     # __name__ == "__main__" and sys.argv[1:] == []` guard that invokes _stage1_main) leaves
@@ -7178,6 +7445,7 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
 
     # --- materialize_tree_raw preserves git file modes (round-7 finding 4) ------------------------
     import stat as _stat
+    _gate_identity_failures(failures, _GIT_GATE_LABELS[1])
     if _git_gate(_GIT_GATE_LABELS[1], failures):
         import shutil as _sh4
         import tempfile as _tf4
@@ -7202,6 +7470,7 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
                                 "(finding 4)")
         finally:
             _sh4.rmtree(mtmp, ignore_errors=True)
+        gate_ran.append(_GIT_GATE_LABELS[1])
 
     # --- bump computation --------------------------------------------------------------------------
     if _claimed_rank("1.0.0", "1.0.1") != PATCH or _claimed_rank("1.0.0", "1.1.0") != MINOR \
@@ -7304,10 +7573,15 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
                 '[[release]]\nversion = "1.1.0"\n', encoding="utf-8")
             (u / DISPOSITIONS_REL).write_text("format-version = 1\n", encoding="utf-8")
             rc_u, err_u = _run_quiet_root_err(u)
-            if rc_u != 2 or "cannot resolve" not in err_u:
+            # Round-6 (claude MINOR-2): the needle carries the PLANTED commit id: the bare
+            # "cannot resolve" substring was also satisfied by the HEAD-resolution GateError of
+            # a git that RUNS but FAILS ("git cannot resolve HEAD at ..."), not only by an
+            # absent git's distinct message.
+            if rc_u != 2 or "cannot resolve {!r}".format("a" * 40 + "^{commit}") not in err_u:
                 failures.append("unreachable predecessor: expected fail-closed exit 2 naming the "
-                                "unresolvable commit (round-5: an absent git also exits 2, which "
-                                "must not satisfy this assertion), got rc={} stderr={!r}".format(
+                                "unresolvable PLANTED commit (round-5/6: an absent git and a git "
+                                "that runs but fails also exit 2, and neither may satisfy this "
+                                "assertion), got rc={} stderr={!r}".format(
                                     rc_u, err_u.strip()[-200:]))
 
             # === REAL run()/CLI MALFORMED-INPUT FIXTURES (finding 9) ===================================
@@ -7393,6 +7667,7 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
             # object). Commit 1 carries a malformed clause inventory; the working tree (HEAD) carries a
             # one-row releases record pointing at commit 1, so run() resolves the predecessor via git show
             # and the strict inventory validator fails closed exit 2 BEFORE any delta leg runs.
+            _gate_identity_failures(failures, _GIT_GATE_LABELS[2])
             if _git_gate(_GIT_GATE_LABELS[2], failures):
                 def _predecessor_dupclause(dirname):
                     repo = tmp / dirname
@@ -7423,11 +7698,13 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
                 if _run_quiet_root(_predecessor_dupclause("m-pred-dupclause")) != 2:
                     failures.append("real run(): a duplicate clause-id in the PREDECESSOR inventory must "
                                     "fail closed exit 2 (finding 1, predecessor object)")
+                gate_ran.append(_GIT_GATE_LABELS[2])
 
             # (predecessor ownership via git PLUMBING, VC-4 QA #11) build a real two-commit git repo with
             # an ownership map and tracked files; _ownership_classes_at must read the FIRST commit's tree
             # via git show / git ls-tree (never a materialized worktree) and classify it, while HEAD carries
             # an extra file. Env is neutralized (git_tracked strips GIT_*; commits use a fixed identity).
+            _gate_identity_failures(failures, _GIT_GATE_LABELS[3])
             if _git_gate(_GIT_GATE_LABELS[3], failures):
                 repo = tmp / "own-repo"
                 (repo / ".aiqt" / "core").mkdir(parents=True)
@@ -7464,6 +7741,7 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
                     if len(wt) != 1:
                         failures.append("predecessor ownership: a worktree was materialized ({} listed); "
                                         "the git-show path must create none".format(len(wt)))
+                gate_ran.append(_GIT_GATE_LABELS[3])
 
             # === REAL FULL-PACK TWO-RELEASE run() (finding 9, findings 1 + 2) =========================
             # A COMPLETE pack tree (a `git archive HEAD` of this repo) is committed as the predecessor
@@ -7514,6 +7792,7 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
             finally:
                 globals()["_git"] = _real_g6
 
+            _gate_identity_failures(failures, _GIT_GATE_LABELS[4])
             if _git_gate(_GIT_GATE_LABELS[4], failures):
                 # ---- QA round-6 codex majors 3/4 / claude 2, extended round 7 (claude F1/F2):
                 # the drift advisory reads nothing it must not, blocks on nothing, and classifies
@@ -7686,13 +7965,31 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
                     if mark6.exists():
                         failures.append("{}: the core.sshCommand marker RAN; a lazy fetch "
                                         "started a transport mid-read".format(label6p))
+                gate_ran.append(_GIT_GATE_LABELS[4])
 
+            _gate_identity_failures(failures, _GIT_GATE_LABELS[5])
             if _git_gate(_GIT_GATE_LABELS[5], failures):
                 _real_pack_not_run_vectors(tmp, failures)
                 _not_run_net_vectors(tmp, failures)
                 _e2e_git_cases(tmp, failures)
+                gate_ran.append(_GIT_GATE_LABELS[5])
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+    # Round-6 (codex 1 / claude MEDIUM-1): the gate and probe bindings are verified BY IDENTITY at
+    # each gated block above and here at the end, and every gate label must account for exactly
+    # one record, its body's last statement or its NOT RUN line, so a rebound gate (any spelling)
+    # and a bypassed or vanished block are each a named failure at run time, whatever the static
+    # backstop missed.
+    _gate_identity_failures(failures, "at the end of the self-test")
+    for label_acct in _GIT_GATE_LABELS:
+        ran_acct = gate_ran.count(label_acct)
+        notrun_acct = sum(1 for f_acct in failures
+                          if f_acct.startswith("NOT RUN: " + label_acct))
+        if ran_acct + notrun_acct != 1:
+            failures.append("(git-gate accounting) {!r}: exactly one record per gate label is "
+                            "required (body ran, or its NOT RUN line); got ran={}, "
+                            "not-run={}".format(label_acct, ran_acct, notrun_acct))
 
     if failures:
         print("SELF-TEST FAIL:")

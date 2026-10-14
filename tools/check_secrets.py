@@ -402,19 +402,25 @@ def _read_scan_text(path):
     (round-4: the round-3 strict decode lost the whole wide view to one bad unit, and an even-length
     suffixless UTF-32-BE file fell through to a binary SKIP), so a UTF-32-marked file ALWAYS keeps
     its wide view; and because FF FE 00 00 is BOTH the UTF-32-LE mark and a UTF-16-LE mark followed
-    by U+0000, a file with that mark whose strict UTF-32 decode fails and whose length is EVEN also
+    by U+0000, a file with that mark whose UTF-32 surrogatepass decode fails and whose length is EVEN
+    also
     keeps the UTF-16 surrogatepass reading as a THIRD view (round-5: the round-4 mark-alone branch
     hid the token of a UTF-16-LE file with a leading U+0000 from every view, where round-3, decided
     by a successful decode, had fallen through to the UTF-16 branch). Residuals (round-5, disclosed):
     a mark in the MIDDLE of a file selects no wide view; mixed-width content behind one leading mark
     is decoded at that mark width only (the overlapping-mark case above is the one kept mixed
     reading); and stray bytes in the middle of a UTF-32 file misalign every later unit, so the
-    replace decode recovers only a truncated FINAL unit. The UTF-16 decode uses
+    replace decode recovers only a truncated FINAL unit; and (round-6) an ODD-length file beginning
+    with the overlapping FF FE 00 00 mark takes the UTF-32 branch by its mark alone and keeps no
+    UTF-16 reading (the even-length condition above), so a UTF-16-LE token in it is missed by both
+    kept views, while the suffixless one is still decoded and scanned under the UTF-32 NOTE, never
+    skipped as binary with a named SKIP line. The UTF-16 decode uses
     errors="surrogatepass", so a UTF-16-marked file of EVEN
     length ALWAYS gets the wide view: an unpaired surrogate decodes to its lone code point instead
     of costing the whole view and hiding a well-formed UTF-16 token elsewhere in the file (round-3
-    claude MEDIUM-1). Only an ODD-length UTF-16-marked file yields no wide view; it is judged as any
-    other non-UTF-8 file: a SUFFIXLESS one is treated as binary and skipped, as the existing rule
+    claude MEDIUM-1). Only an ODD-length UTF-16-marked file whose first four bytes are not the
+    overlapping UTF-32-LE mark (that one keeps its UTF-32 views; the round-6 residual above) yields
+    no wide view; it is judged as any other non-UTF-8 file: a SUFFIXLESS one is treated as binary and skipped, as the existing rule
     (_is_scan_candidate) defines, and a declared-text one keeps the lossless view."""
     data = path.read_bytes()
     try:
@@ -434,7 +440,8 @@ def _read_scan_text(path):
             wide32 = data.decode("utf-32", errors="replace")
             if data[:2] == codecs.BOM_UTF16_LE and len(data) % 2 == 0:
                 # round-5 (claude 1): FF FE 00 00 is BOTH the UTF-32-LE mark and a UTF-16-LE mark
-                # followed by U+0000, so when the strict UTF-32 decode fails and the data also
+                # followed by U+0000, so when the UTF-32 surrogatepass decode fails (round-6: that
+                # decode is the deciding one; the replace decode never raises) and the data also
                 # reads as even-length UTF-16, the UTF-16 reading is KEPT as a further view (the
                 # round-4 mark-alone branch dropped the round-3 UTF-16 fallback and hid the token
                 # of a UTF-16-LE file with a leading U+0000 from every view).
@@ -866,7 +873,10 @@ def _self_test() -> int:
         # Round-5 (codex 3): the surrogatepass-then-replace ORDER, pinned at the unit level.
         # Token findings cannot discriminate surrogatepass from a replace-only decode: a lone
         # surrogate and U+FFFD are both non-word, non-break placeholders beside an ASCII token,
-        # so every scan assertion above stays green under a replace-only mutant. The decoded
+        # so the SURROGATE-BEARING token fixtures above (lone_sur*, u32le_sur*, u32be_sur*) stay
+        # green under a replace-only mutant (round-6: NOT every assertion does; the u16le_nul
+        # overlap rows go red under it, because a replace decode that succeeds never enters the
+        # except branch that keeps the UTF-16 reading). The decoded
         # wide view must therefore carry the LONE CODE POINT itself (lossless for the wide
         # view), which a replace-only mutant turns into U+FFFD.
         sur_path = troot / "u32sur_unit.txt"
