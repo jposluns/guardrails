@@ -188,7 +188,7 @@ files are served from this repository's main branch; for a raw download, use
 | `pattern-self-match.py` | `9687140625e12fe271c20a876f01642f5cdd374197ad12850f24078cd0eb9660` | [pattern-self-match.py](pattern-self-match.py) |
 | `record-remove-check.py` | `9ad3454daf7ea104a62ef022957f06e2584cdaff8d2d595dbcf2a0a8cfc9c366` | [record-remove-check.py](record-remove-check.py) |
 | `rerun-pass-check.py` | `d4c07f5d45b7d56b30635cb849282375a4ef664820cb26d9f97b5a0e99339431` | [rerun-pass-check.py](rerun-pass-check.py) |
-| `stamp-truth-stop.py` | `a75252c52f17a31bc6fe7cba2b9ac8968c5037b608cceee7b4c5a07339365ec4` | [stamp-truth-stop.py](stamp-truth-stop.py) |
+| `stamp-truth-stop.py` | `3908e08c730317574e11656860401d5ad4c5475038b0c915873810ddcee5f6a2` | [stamp-truth-stop.py](stamp-truth-stop.py) |
 | `unbounded-wait.py` | `9d2a8f9c26693cc87d058284427d40554e5ff0c3f2eca3df46f4369669a43859` | [unbounded-wait.py](unbounded-wait.py) |
 | `ungated-record.py` | `35c65369b1609683e09b784681a23fab80a05e047c5f36abe5311f100b4f9394` | [ungated-record.py](ungated-record.py) |
 
@@ -510,11 +510,15 @@ section of its opening docstring. Read that section before relying on a hook; in
   deletion instead reads as a fresh count that can restart the refusals, and a deletion or pruning of
   the state file after the capped-allow mode began ends it early. A refusal that names a final message
   not yet in the transcript stores that message hash, at most eight, the oldest evicted when a ninth is
-  stored, so the late arrival is passed over once instead of refused again; a transient failed read of
-  that stored state on a stop whose transcript is readable keeps the stored hashes only through a
-  re-read, reconciled against the transcript (an entry whose message has arrived, or that a new user
-  message or a transcript reset invalidated, is dropped), and when the state is still unreadable at the
-  re-read the stored list is lost, so the one late-arriving message it excused is reported once more.
+  stored, so the late arrival is passed over once instead of refused again, whether it is read from the
+  transcript or supplied as the final message of a later stop; a transient failed read of that stored
+  state on a stop whose transcript is readable keeps the stored hashes only through a re-read,
+  reconciled against one rescan from the stored boundary (an entry whose message has arrived there is
+  consumed, a new user message there invalidates the list, and the boundary and the list are saved
+  together from that same rescan), while a rescan that is unreadable or truncated keeps the stored
+  boundary and list untouched (such a stop records no new hash of its own, so its refused final can be
+  reported once more at its late arrival), and when the state is still unreadable at the re-read the
+  stored entries are all lost, so every late-arriving message they excused is reported once more.
 - **`future-stamp-write.py`** checks only folders you declare, and only ISO-like timestamp literals. A
   time in a quote or code span in a record, a time built from parts, or one just after a scheduling word
   passes, and some table layouts give false positives or misses, which the file lists.

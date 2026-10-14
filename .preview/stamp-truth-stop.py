@@ -80,7 +80,9 @@ after OFFSET. The file is written when this hook blocks, and on a pass once a st
 unavailable. LATE-ARRIVAL EXCEPTION: at a block, when the blocked final message is NOT yet in the transcript,
 its SHA-256 is recorded as pending (at most MAX_PENDING, 8, the OLDEST hash evicted when a ninth is
 stored); a later record with that text is skipped ONCE (the pending entry is consumed) because it arrived
-after OFFSET only through transcript lag. Pending entries are dropped at any new genuine user message and
+after OFFSET only through transcript lag, and a supplied last_assistant_message matching that arrived
+record consumes the entry the same way (FIX-537-R9: every path that consumes a final message consumes
+its pending hash). Pending entries are dropped at any new genuine user message and
 when the transcript is reset (shorter than OFFSET, or the bytes before OFFSET changed), which also discards
 OFFSET and is RECORDED in the state (round 40, see BLOCK CAP). A blocked final message already in the transcript creates no exception. The boundary is never
 inferred from message text. State dir: $XDG_RUNTIME_DIR/clock-truth when XDG_RUNTIME_DIR is absolute, else
@@ -152,18 +154,25 @@ next Stop, and a clean Stop whose state READ failed persists it the same way, on
 (round 43: before, with the transcript unreadable and the field omitted or explicitly true, neither save
 predicate held, so the one Stop that observed the fault wrote nothing and a later genuine user turn
 restarted the count); on the READABLE transcript branch a Stop whose state read failed also re-reads the
-state under the still-held lock BEFORE the messages are checked and RECONCILES the stored pending hashes
-that read back against the readable transcript past the RECOVERED boundary: a reset or a genuine user
-message there invalidates them all, the hash of a message already present there is dropped as consumed,
-and only the remainder is kept, whatever the field, under the MAX_PENDING (8) eviction every save
-applies, the oldest hash evicted when a ninth is stored (round 43 follow-up: before, both readable-branch
-saves wrote the empty loaded pending list over the stored one, so one transient fault erased the
-late-arrival exception and its already-reported message could be re-reported once at its late arrival;
-FIX-537-R8: that first repair merged the recovered hashes back unconditionally, after the consumption
-scan had already run, so it resurrected entries the transcript had consumed or a new user turn had
-invalidated, and the same violating message repeated verbatim after the fault passed once unchecked); a
-state still unreadable at that re-read loses the pending list, so the late-arriving already-reported
-message is re-reported once, the disclosed readable-branch residual (see RESIDUAL COVERAGE). Round
+state under the still-held lock BEFORE the messages are checked, and the pending reconciliation is ONE
+invariant (FIX-537-R9): the (boundary, pending list) pair advances only together, computed from ONE
+transcript snapshot, a single rescan from the RECOVERED boundary that replaces the from-0 scan wholesale,
+so a stored hash is consumed only by a record that lies after the stored boundary within that same
+snapshot (a genuine user message there still invalidates them all), every path that consumes a final
+message consumes its pending hash the same way, the supplied last_assistant_message included (skipped
+once at its late arrival, the spent entry never excusing a later verbatim repeat), and an arrival
+appended between reads is either consumed AND covered by the saved boundary or neither (FIX-537-R8
+reconciled against a SECOND scan while the FIRST scan and its boundary were kept, so a record BEFORE the
+recovered boundary could consume a hash and a mid-fault arrival was consumed yet re-reported; the round
+43 follow-up before it merged the recovered hashes back after the consumption scan and resurrected
+consumed or invalidated entries), all under the MAX_PENDING (8) eviction every save applies, the oldest
+hash evicted when a ninth is stored. When the reconciliation cannot be performed the stored pair that
+read back is kept EXACTLY as it was, never saved as an empty list: an unreadable or RESET rescan keeps
+the stored (boundary, pending) pair untouched for the next readable Stop to resolve, at the disclosed
+cost that such a faulting Stop records no NEW late hash of its own (its blocked final can be re-reported
+once at its late arrival); a state still unreadable at that re-read keeps the empty loaded list, so
+EVERY stored pending entry can be lost and each late-arriving already-reported message those entries
+excused can be re-reported once, the disclosed readable-branch residual (see RESIDUAL COVERAGE). Round
 43: the marker FAILS CLOSED, exactly like the recorded reset: while either stands, no
 transcript-derived user message is a new turn, at ANY offset, and ONLY an explicit-false Stop clears them
 (round 42 cleared the marker at a genuinely new user message past a held NON-trivial boundary, reasoning
@@ -416,10 +425,12 @@ abbreviation or an invalid date is not checked anywhere, a line-leading status s
 fails open, so a fabricated `[2026-09-24 09:00 PDT]` header in an Eastern-zone process is a MISS). Genuine-user detection is heuristic on entry shape and a fixed list of
 notification prefixes. The recovery boundary lives in volatile per-user storage: it is lost on reboot (the
 state is then absent and the whole current turn is evaluated once more). READABLE-BRANCH RESIDUAL
-(FIX-537-R8): on a Stop whose transcript is readable but whose state read failed, the stored pending
-late-arrival hashes survive only through the re-read under the lock, reconciled against the transcript
-past the recovered boundary; a state STILL unreadable at that re-read loses the pending list, so the one
-already-reported message it excused is re-reported once at its late arrival. Two OVERLAPPING Stops for one
+(FIX-537-R9): on a Stop whose transcript is readable but whose state read failed, the stored pending
+late-arrival hashes survive only through the re-read under the lock, reconciled against ONE rescan from
+the recovered boundary (an unreadable or RESET rescan keeps the stored pair untouched instead, and such
+a Stop records no NEW late hash of its own, so its blocked final can be re-reported once at its late
+arrival); a state STILL unreadable at that re-read loses the pending ENTRIES, every one of them, so EACH
+already-reported message they excused is re-reported once at its late arrival. Two OVERLAPPING Stops for one
 transcript (round 28): the one that finds the lock held is allowed UNCHECKED with a warning (the fail-open
 direction), so a violation in it passes. The window is one whole evaluation, which grows with the transcript
 scanned: milliseconds on a short turn, but about 1.2 s on a 49 MiB turn and 1.6 s on a 63 MiB one, near the
@@ -1944,34 +1955,40 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None):
     if t.get("reset") or t.get("user"):
         pending = []  # a reset transcript or a new genuine user message invalidates the late-arrival exception
     remaining = list(pending)
-    # FIX-537-R8 (both legs MEDIUM): the round-43 follow-up merged the recovered pending hashes back
-    # UNCONDITIONALLY, right before the readable-branch saves, AFTER the consumption scans below had
-    # already run on the empty loaded list, so the merge resurrected entries the readable transcript
-    # had consumed (the reported message had arrived) or invalidated (a new genuine user message), and
-    # the same violating message, repeated verbatim after the fault, passed once unchecked. The
-    # recovered hashes are now reconciled against the readable transcript past the RECOVERED boundary,
-    # before anything is checked or saved: a reset or a genuine user message there invalidates them all
-    # (exactly the invalidation above), the hash of a message already present there is dropped as
-    # consumed, and only the remainder is merged HERE, ahead of the final-message check, so a late
-    # arrival on this very Stop is still skipped once and no later step can resurrect a consumed or
-    # invalidated entry; a state still unreadable at this re-read keeps the empty loaded list, the
-    # disclosed readable-branch residual (see RESIDUAL COVERAGE), and save_state still applies the
-    # MAX_PENDING eviction to whatever is kept
+    # FIX-537-R9 (codex MAJOR 1, MEDIUM 2, 3 and 4): the pending reconciliation is ONE invariant now:
+    # the (boundary, pending list) pair advances only TOGETHER, computed from ONE transcript snapshot,
+    # and a hash is consumed only by a record that lies after the stored boundary within that same
+    # snapshot. On a Stop whose state read failed but whose transcript is readable, the state is re-read
+    # under the still-held lock and ONE rescan from the recovered boundary replaces the from-0 scan
+    # wholesale (boundary, messages, flags), so the consumption below (both final-message paths and the
+    # per-message loop) sees exactly the records past the stored boundary, and the boundary saved later
+    # is that same snapshot. Before (FIX-537-R8), the recovered hashes were reconciled against a SECOND
+    # scan while the FIRST scan and its boundary were kept, so a record BEFORE the recovered boundary
+    # could consume a pending hash (codex 2), and an arrival appended between the two scans was consumed
+    # yet left past the saved boundary and re-reported at the next Stop (codex 3). When the
+    # reconciliation cannot be performed, the stored pair that read back is kept EXACTLY as it was,
+    # never saved as an empty list: an unreadable or RESET rescan holds the stored (boundary, pending)
+    # pair untouched for the next readable Stop to resolve (codex 4; held below), at the disclosed cost
+    # that such a Stop records no NEW late hash of its own; a state still unreadable at the re-read
+    # keeps the empty loaded list, the disclosed readable-branch residual (see RESIDUAL COVERAGE): every
+    # stored pending entry can then be lost, so each late-arriving already-reported message those
+    # entries excused can be re-reported once. save_state still applies the MAX_PENDING eviction to
+    # whatever is kept.
+    held = None  # a failed reconciliation keeps this stored (boundary, tail, pending) pair verbatim
     if tp and not state_ok and dfd is not None and t["size"] is not None:
         cur = {}
         off2, tl2, pend2, ok2 = load_state(None, tp, cur, dfd)
-        if ok2 and not cur.get("absent") and pend2:
+        if ok2 and not cur.get("absent"):
             t2 = turn_messages(tp, off2, tl2)
-            if t2["size"] is not None and not t2["reset"] and not t2["user"]:
-                m2 = list(t2["msgs"])
-                if m2 and (lam is None or m2[-1][0].strip() == lam.strip()):
-                    m2 = m2[:-1]  # the final candidate: the final-message machinery below consumes it
-                kept = [h for h in pend2 if h not in remaining]
-                for text, _ in m2:
-                    h2 = _sha(text.strip())
-                    if h2 in kept:
-                        kept.remove(h2)  # already present in the rescan: consumed, never resurrected
-                remaining.extend(kept)
+            if t2["size"] is not None and not t2["reset"]:
+                # the ONE snapshot: records past the stored boundary only, with that boundary adopted
+                t, msgs = t2, t2["msgs"]
+                offset, tail, pending = off2, tl2, pend2
+                if t2["user"]:
+                    pending = []  # a new genuine user message invalidates the exception, exactly as above
+                remaining = list(pending)
+            else:
+                held = (off2, tl2, pend2)  # unreadable or reset rescan: the stored pair is kept as-is
     lam_in_transcript = lam is not None and any(text.strip() == lam.strip() for text, _ in msgs)
     # the FINAL message: last_assistant_message, else the last collected transcript assistant entry
     final, final_ref = lam, now_us
@@ -1979,6 +1996,14 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None):
         if msgs[-1][1] is not None:
             final_ref = msgs[-1][1]
         msgs = msgs[:-1]  # checked below as the final message
+        h = _sha(final.strip())
+        if h in remaining:
+            # FIX-537-R9 (codex MAJOR 1): the supplied-final path consumes its pending hash exactly like
+            # the transcript-read path below: the already-reported final message arriving late is skipped
+            # ONCE and the spent entry never excuses a later verbatim repeat (before, the hash was saved
+            # back, so the next verbatim repeat passed with nothing reported)
+            remaining.remove(h)
+            final = None
     elif lam is None and msgs:
         (final, final_ref), msgs = msgs[-1], msgs[:-1]
         h = _sha(final.strip())
@@ -1996,13 +2021,15 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None):
     # Older messages are checked only when the recovery state could be READ: with it unavailable the boundary
     # is unknown, and re-checking already-reported messages would re-block every Stop and wedge the actor.
     n = len(msgs) if state_ok else 0
-    for i, (text, ref) in enumerate(msgs[:n], 1):
+    for i, (text, ref) in enumerate(msgs, 1):
         h = _sha(text.strip())
         if h in remaining:
-            remaining.remove(h)  # the already-reported final message arriving late: skipped once, consumed
+            # FIX-537-R9: consumption runs over every record of the ONE snapshot (after a recovery above,
+            # msgs lies entirely past the stored boundary); the state_ok gate bounds only the re-CHECK
+            remaining.remove(h)  # the already-reported message arriving late: skipped once, consumed
             continue
-        if ref is None:
-            continue  # no trustworthy written_at
+        if i > n or ref is None:
+            continue  # unchecked (the boundary is unknown), or no trustworthy written_at
         try:
             earlier_bad.extend(check_message(text, ref, start_us, f"earlier message {i} of {n} this turn",
                                              BEHIND_US))
@@ -2188,14 +2215,14 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None):
 
     saved = False  # whether this Stop's counter reached the recovery state
     if readable:
-        # FIX-537-R8: the recovered pending hashes are no longer merged here: merged at this point,
-        # unconditionally, AFTER the consumption scan, the round-43 follow-up resurrected entries the
-        # readable transcript had consumed or a new genuine user turn had invalidated; the reconciling
-        # merge now sits right after `remaining` is built, ahead of the final-message check (see the
-        # FIX-537-R8 block above)
+        # FIX-537-R9: the reconciliation above adopted the ONE rescan snapshot (the boundary and the
+        # hashes advance together), so these saves need no merge; when it could NOT be performed (held),
+        # the stored pair is written back EXACTLY as it was, never an empty list, and this Stop records
+        # no NEW late hash of its own (the pair may not advance alone), so a block here can see its
+        # final re-reported once at its late arrival, the disclosed cost of holding the pair
         if final_bad or earlier_bad:
             late = [_sha(lam.strip())] if lam is not None and not lam_in_transcript else []
-            saved = save(t["end"], t["tail"], remaining + late)
+            saved = save(*(held if held is not None else (t["end"], t["tail"], remaining + late)))
             if not saved:
                 earlier_bad = []  # the boundary cannot be PERSISTED: only the final message may block
         elif had_state or not state_ok or absent_unknown:
@@ -2203,7 +2230,7 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None):
             # discovered in an absent state under an explicit true; round 27: the counter is written too
             # (preserved under stop_hook_active, BLOCK_CAP when it was unknown), never reset to 0 inside
             # the corrective loop
-            save(t["end"], t["tail"], remaining)
+            save(*(held if held is not None else (t["end"], t["tail"], remaining)))
     # round 42: `new_turn` joins the final save condition: on a clean explicit-false Stop with BOTH the
     # state and the transcript unreadable, none of will_block, had_state (the failed read hid the
     # recorded reset) or cap == "open" held, so the one signal that clears the flags wrote nothing and a
@@ -6501,6 +6528,228 @@ def _self_test():
             self.assertTrue(st[3])
             self.assertEqual(st[2], [_sha(x) for x in lates[1:]])  # just past the limit: the oldest
             # hash is evicted, so that message, were it still to arrive, would be refused once more
+
+        def test_r44_supplied_final_matching_arrived_pending_consumed_once(self):
+            # FIX-537-R9 MAJOR (codex 1, pre-existing): a supplied last_assistant_message matching the
+            # arrived pending record took the matching-final branch, which never consumed the hash, so
+            # the spent exception was saved back and a later verbatim repeat of the same message passed
+            # with nothing reported. The supplied-final path now consumes its pending hash exactly like
+            # the transcript-read path: skipped once at its late arrival, never excused again, for the
+            # field omitted, explicitly true and explicitly false alike
+            bad = "[2026-09-23T20:00Z] still wrong"
+            missing = "[2026-09-23T21:00Z] reported but not yet in the transcript"
+            real_load = load_state
+            for i, field in enumerate(({}, {"stop_hook_active": True}, {"stop_hook_active": False})):
+                sdir = os.path.join(self.tmp, f"state44a{i}")
+                self.write([self.user("go"), self.asst(bad)])
+                self.assertEqual(self.r38_ev(sdir, missing)[0], "block", i)  # block 1, pending seeded
+                self.assertEqual(load_state(sdir, self.tr, {})[2], [_sha(missing)], i)
+                self.write([self.asst(missing)], "a")  # the reported message ARRIVES as the last record
+                fails = []
+
+                def transient_load(*a, **k):  # ONE unavailable read; the re-read under the lock recovers
+                    fails.append(1)
+                    globals()["load_state"] = real_load
+                    return 0, None, [], False
+                payload = {"transcript_path": self.tr, "last_assistant_message": missing}
+                payload.update(field)
+                globals()["load_state"] = transient_load
+                try:
+                    r = evaluate(dict(payload), self.now, self.start, sdir)
+                finally:
+                    globals()["load_state"] = real_load
+                self.assertIsNone(r, i)  # skipped ONCE at its late arrival, like a transcript-read final
+                self.assertTrue(fails, i)  # the state load was attempted and actually failed
+                self.assertEqual(load_state(sdir, self.tr, {})[2], [], i)  # consumed, never saved back
+                # the same message again, verbatim, behind a clean final: the exception is spent, so the
+                # repeat is refused (the explicit false restarted the count) or capped with the violation
+                # reported, never passed in silence
+                kind, _ = self.r38_ev(sdir, "Done.", append=[self.asst(missing), self.asst("Done.")])
+                self.assertEqual(kind, "block" if i == 2 else "cap", i)
+
+        def test_r44_pre_boundary_record_never_consumes_pending(self):
+            # FIX-537-R9 MEDIUM (codex 2): the R8 recovery reconciled against a SECOND scan from the
+            # recovered boundary while the final-message machinery still read the from-0 scan, so an
+            # identical historical record BEFORE the recovered boundary consumed the pending hash and
+            # the saved list went empty; the eventual actual arrival was then reported again. A hash is
+            # consumed only by a record past the stored boundary within the one adopted snapshot, for
+            # the field omitted, explicitly true and explicitly false alike
+            bad = "[2026-09-23T20:00Z] still wrong"
+            real_load = load_state
+            for i, field in enumerate(({}, {"stop_hook_active": True}, {"stop_hook_active": False})):
+                sdir = os.path.join(self.tmp, f"state44b{i}")
+                self.write([self.user("go"), self.asst(bad)])
+                self.assertEqual(self.r38_ev(sdir, bad)[0], "block", i)  # reported; boundary advances
+                self.assertEqual(load_state(sdir, self.tr, {})[2], [], i)  # in the transcript: no pending
+                # the same text again as the supplied final, NOT appended: seeds its pending hash
+                self.assertEqual(self.r38_ev(sdir, bad)[0], "block", i)
+                st1 = load_state(sdir, self.tr, {})
+                self.assertTrue(st1[3], i)
+                self.assertEqual(st1[2], [_sha(bad)], i)  # the pending hash at stake
+                fails = []
+
+                def transient_load(*a, **k):  # ONE unavailable read; the re-read under the lock recovers
+                    fails.append(1)
+                    globals()["load_state"] = real_load
+                    return 0, None, [], False
+                payload = {"transcript_path": self.tr}
+                payload.update(field)
+                globals()["load_state"] = transient_load
+                try:
+                    r = evaluate(dict(payload), self.now, self.start, sdir)
+                finally:
+                    globals()["load_state"] = real_load
+                self.assertIsNone(r, i)  # no record past the boundary: nothing to check
+                self.assertTrue(fails, i)  # the state load was attempted and actually failed
+                off, tl, pend, ok = load_state(sdir, self.tr, {})
+                self.assertTrue(ok, i)
+                # the identical record BEFORE the recovered boundary consumed nothing: the pair survives
+                self.assertEqual((off, tl, pend), (st1[0], st1[1], [_sha(bad)]), i)
+                # the actual late arrival is excused exactly once, like the no-fault path
+                kind, _ = self.r38_ev(sdir, "Done.", append=[self.asst(bad), self.asst("Done.")])
+                self.assertEqual(kind, "pass", i)
+                self.assertEqual(load_state(sdir, self.tr, {})[2], [], i)  # consumed exactly once
+
+        def test_r44_arrival_between_scans_consumed_and_covered_together(self):
+            # FIX-537-R9 MEDIUM (codex 3): the R8 recovery consumed hashes against its OWN second scan
+            # while the first scan boundary was saved, so an arrival appended between the two scans was
+            # consumed yet left PAST the saved boundary and re-reported at the next Stop. The pair now
+            # comes from ONE snapshot: an arrival is either consumed AND covered by the saved boundary,
+            # or neither, for the field omitted, explicitly true and explicitly false alike
+            bad = "[2026-09-23T20:00Z] still wrong"
+            missing = "[2026-09-23T21:00Z] reported but not yet in the transcript"
+            real_load, real_tm = load_state, turn_messages
+            for i, field in enumerate(({}, {"stop_hook_active": True}, {"stop_hook_active": False})):
+                sdir = os.path.join(self.tmp, f"state44c{i}")
+                self.write([self.user("go"), self.asst(bad)])
+                self.assertEqual(self.r38_ev(sdir, missing)[0], "block", i)  # block 1, pending seeded
+                self.write([self.asst("Done.")], "a")  # a clean final past the stored boundary
+                fails, scans = [], []
+
+                def transient_load(*a, **k):  # ONE unavailable read; the re-read under the lock recovers
+                    fails.append(1)
+                    globals()["load_state"] = real_load
+                    return 0, None, [], False
+
+                def appending_tm(*a, **k):  # the pending message lands between the scans
+                    scans.append(1)
+                    out = real_tm(*a, **k)
+                    if len(scans) == 1:
+                        self.write([self.asst(missing)], "a")
+                    return out
+                payload = {"transcript_path": self.tr, "last_assistant_message": "Done."}
+                payload.update(field)
+                globals()["load_state"] = transient_load
+                globals()["turn_messages"] = appending_tm
+                try:
+                    r = evaluate(dict(payload), self.now, self.start, sdir)
+                finally:
+                    globals()["load_state"] = real_load
+                    globals()["turn_messages"] = real_tm
+                self.assertIsNone(r, i)  # the final message is clean
+                self.assertTrue(fails, i)  # the state load was attempted and actually failed
+                self.assertGreaterEqual(len(scans), 2, i)  # the append really sat between the scans
+                off, tl, pend, ok = load_state(sdir, self.tr, {})
+                self.assertTrue(ok, i)
+                t = turn_messages(self.tr)
+                # consumed AND covered together: the saved boundary includes the arrival whose hash the
+                # reconciliation consumed
+                self.assertEqual((off, tl, pend), (t["end"], t["tail"], []), i)
+                kind, _ = self.r38_ev(sdir, "Done 2.", append=[self.asst("Done 2.")])
+                self.assertEqual(kind, "pass", i)  # never reported again
+
+        def test_r44_unreadable_rescan_keeps_the_stored_pair(self):
+            # FIX-537-R9 MEDIUM (codex 4): a recovery rescan that is UNREADABLE (the transcript vanished
+            # between the two reads) contributed nothing, and the readable first scan still saved the
+            # empty loaded list with its own boundary, silently destroying a recoverable pair. A
+            # reconciliation that cannot be performed now keeps the stored (boundary, pending) pair
+            # exactly as it was, never an empty list, for the field omitted, explicitly true and
+            # explicitly false alike
+            bad = "[2026-09-23T20:00Z] still wrong"
+            missing = "[2026-09-23T21:00Z] reported but not yet in the transcript"
+            real_load, real_tm = load_state, turn_messages
+            for i, field in enumerate(({}, {"stop_hook_active": True}, {"stop_hook_active": False})):
+                sdir = os.path.join(self.tmp, f"state44d{i}")
+                self.write([self.user("go"), self.asst(bad)])
+                self.assertEqual(self.r38_ev(sdir, missing)[0], "block", i)  # block 1, pending seeded
+                st0 = load_state(sdir, self.tr, {})
+                self.assertTrue(st0[3], i)
+                self.assertEqual(st0[2], [_sha(missing)], i)
+                self.write([self.asst("Done.")], "a")
+                fails, scans, hidden = [], [], self.tr + ".hidden"
+
+                def transient_load(*a, **k):  # ONE unavailable read; the re-read under the lock recovers
+                    fails.append(1)
+                    globals()["load_state"] = real_load
+                    return 0, None, [], False
+
+                def hiding_tm(*a, **k):  # the transcript is renamed around the SECOND read only
+                    scans.append(1)
+                    if len(scans) != 2:
+                        return real_tm(*a, **k)
+                    os.rename(self.tr, hidden)
+                    try:
+                        return real_tm(*a, **k)
+                    finally:
+                        os.rename(hidden, self.tr)
+                payload = {"transcript_path": self.tr, "last_assistant_message": "Done."}
+                payload.update(field)
+                globals()["load_state"] = transient_load
+                globals()["turn_messages"] = hiding_tm
+                try:
+                    r = evaluate(dict(payload), self.now, self.start, sdir)
+                finally:
+                    globals()["load_state"] = real_load
+                    globals()["turn_messages"] = real_tm
+                self.assertIsNone(r, i)  # the final message is clean
+                self.assertTrue(fails, i)  # the state load was attempted and actually failed
+                self.assertGreaterEqual(len(scans), 2, i)  # the rescan ran, and ran unreadable
+                off, tl, pend, ok = load_state(sdir, self.tr, {})
+                self.assertTrue(ok, i)
+                self.assertEqual((off, tl, pend), (st0[0], st0[1], st0[2]), i)  # kept EXACTLY as stored
+                self.write([self.asst(missing)], "a")  # the reported message finally arrives
+                self.assertEqual(self.r38_ev(sdir, "Done.")[0], "pass", i)  # excused once, not refused
+                self.assertEqual(load_state(sdir, self.tr, {})[2], [], i)  # consumed exactly once
+
+        def test_r44_residual_reread_still_unreadable_loses_every_entry(self):
+            # FIX-537-R9 MINOR (codex 5): the readable-branch residual is PLURAL: a state still
+            # unreadable at the re-read under the lock keeps the empty loaded list, so EVERY stored
+            # pending entry can be lost, and EACH late-arriving already-reported message those entries
+            # excused is reported once more; a RESIDUAL contract test (green at the pin by design, like
+            # the capacity test), pinning the disclosed loss at two entries, not the singular wording
+            miss1 = "[2026-09-23T21:00Z] reported but not yet in the transcript"
+            miss2 = "[2026-09-23T22:00Z] also reported and also not yet in the transcript"
+            real_load = load_state
+            sdir = os.path.join(self.tmp, "state44e")
+            self.write([self.user("go")])
+            self.assertEqual(self.r38_ev(sdir, miss1)[0], "block")  # block 1, first pending hash
+            self.assertEqual(self.r38_ev(sdir, miss2)[0], "block")  # block 2, second pending hash
+            self.assertEqual(load_state(sdir, self.tr, {})[2], [_sha(miss1), _sha(miss2)])
+            self.write([self.asst("Done.")], "a")
+            fails = []
+
+            def failing_load(*a, **k):  # EVERY state read of this Stop fails; restored only afterwards
+                fails.append(1)
+                return 0, None, [], False
+            globals()["load_state"] = failing_load
+            try:
+                r = evaluate({"transcript_path": self.tr, "last_assistant_message": "Done."},
+                             self.now, self.start, sdir)
+            finally:
+                globals()["load_state"] = real_load
+            self.assertIsNone(r)  # the final message is clean
+            self.assertGreaterEqual(len(fails), 2)  # the load AND the re-read under the lock failed
+            self.assertEqual(load_state(sdir, self.tr, {})[2], [])  # every stored entry is lost
+            # BOTH excused messages arrive late: each one is reported once more, the disclosed cost
+            self.write([self.asst(miss1), self.asst(miss2), self.asst("Done 2.")], "a")
+            notes, report = [], []
+            r = evaluate({"transcript_path": self.tr, "last_assistant_message": "Done 2."},
+                         self.now, self.start, sdir, notes, report=report)
+            self.assertIsNone(r)  # the faulting Stop left the counter capped: reported, allowed
+            self.assertTrue(notes and "block cap hit" in notes[0])
+            self.assertEqual(sum("2026-09-23T21:00Z" in v for v in report), 1)  # the first, once more
+            self.assertEqual(sum("2026-09-23T22:00Z" in v for v in report), 1)  # the second, once more
+
         def test_r43_open_stop_both_reads_failing_rereads_the_state(self):
             # FIX-537-R7 MINOR (claude 3): the round-43 re-read runs on EVERY Stop of the
             # both-unreadable branch whose state read failed, the fail-open VIOLATING Stop (cap
