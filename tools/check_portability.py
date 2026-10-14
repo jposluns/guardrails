@@ -336,7 +336,7 @@ def _mask_manifest_identity(text):
     # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
     # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
     # on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
-    except (tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise GateError("attribution source {} does not parse ({})".format(IDENTITY_MANIFEST, exc))
     plugin = data.get("plugin") if isinstance(data, dict) else None
     values = {}
@@ -522,7 +522,7 @@ def load_identity(root):
     # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
     # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
     # on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
-    except (tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise GateError("identity source {} does not parse ({})".format(IDENTITY_MANIFEST, exc))
     plugin = data.get("plugin")
     if not isinstance(plugin, dict):

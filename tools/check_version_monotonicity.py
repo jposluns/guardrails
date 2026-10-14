@@ -294,7 +294,7 @@ def _parse_base_releases(text):
         data = tomllib.loads(text)
     # RecursionError too: tomllib raises it (a RuntimeError, not a ValueError) on a deeply
     # nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
-    except (tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise GateError("baseline changelog.toml does not parse: {}".format(exc))
     return _releases_from_data(data, "base")
 
@@ -322,7 +322,7 @@ def _base_is_genesis(root, base_commit, base_releases):
             base_rel = tomllib.loads(_show_file(root, base_commit, RELEASES_REL))
         # RecursionError too: tomllib raises it (a RuntimeError, not a ValueError) on a deeply
         # nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
-        except (tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+        except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
             raise GateError("baseline {} does not parse: {}".format(RELEASES_REL, exc))
         unknown = set(base_rel) - {"format-version", "release"}
         if unknown:
@@ -463,7 +463,7 @@ def layer_c(root, base_commit, head_data):
         base_data = tomllib.loads(_show_file(root, base_commit, RELEASES_REL))
     # RecursionError too: tomllib raises it (a RuntimeError, not a ValueError) on a deeply
     # nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
-    except (tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise GateError("baseline {} does not parse: {}".format(RELEASES_REL, exc))
     base_rows = _rows_of(base_data, "release", "baseline " + RELEASES_REL)
     head_rows = _rows_of(head_data, "release", RELEASES_REL)
@@ -495,7 +495,7 @@ def layer_d(root, base_commit, head_data):
         base_data = tomllib.loads(_show_file(root, base_commit, IDHISTORY_REL))
     # RecursionError too: tomllib raises it (a RuntimeError, not a ValueError) on a deeply
     # nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
-    except (tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise GateError("baseline {} does not parse: {}".format(IDHISTORY_REL, exc))
     findings = []
     for section in REGISTER_SECTIONS:
