@@ -2531,9 +2531,11 @@ def next_id(high, ns, known_complete=False, imported_series=False):
     With `imported_series=True` (a genuine bool), `ns` may also be an imported counter key
     `imported:<NS>`, which allocates `imported:<NS>-<n>` from that key's own high-water and never reads the
     clean `<NS>` line (spec 8.2); the map may then hold both series. Without it, an imported key is refused
-    exactly as before. For an absent imported key, `known_complete=True` asserts the imported series'
-    proof instead: validate_counters(..., imported_namespaces=...) listing that namespace, since a
-    clean-only known_namespaces proof says nothing about the imported line. On this series-aware path the
+    exactly as before. An absent imported key is refused whatever `known_complete` says: spec 8.2
+    requires every imported counter row once the store declares 1.3.0 and lets only a genuinely first
+    adoption start at zero, written as an explicit zero row, and a clean-only known_namespaces proof says
+    nothing about the imported line, so reading an absent row as high-water 0 would zero-seed prior
+    ancestry and could reuse an imported id. On this series-aware path the
     map's values and the allocated number share parse_series_id's fixed ceiling (_MAX_ID_NUMBER): an
     allocation past it is refused, never emitted as an id the parser or check_ids_within_counters would
     reject, whatever sys.set_int_max_str_digits is."""
@@ -2559,6 +2561,16 @@ def next_id(high, ns, known_complete=False, imported_series=False):
                          "{}; a non-bool must not be read as True (spec 8.2)".format(
                              _safe_display(known_complete)))
     _validated_counter_map(high, "next_id", imported_series)
+    if imported_series and ns.startswith(IMPORTED_PREFIX) and ns not in high:
+        # The imported line accepts NO completeness proof for an absent key, known_complete=True included:
+        # spec 8.2 requires every imported counter row once the store declares 1.3.0 and lets only a
+        # genuinely first adoption start at zero, written as an explicit zero row, so reading an absent
+        # row as high-water 0 would zero-seed prior ancestry and could reuse an imported id. Fail closed;
+        # the remedy is recording the counter row, never a proof flag.
+        raise ValueError("cannot allocate an id for namespace {!r}: the imported series has no recorded "
+                         "high-water row for it, and an absent imported counter is refused whatever "
+                         "known_complete says; record the explicit counter row (zero only on a genuinely "
+                         "first adoption), so prior ancestry is never zero-seeded (spec 8.2)".format(ns))
     if ns not in high and not known_complete:
         raise ValueError("cannot allocate an id for namespace {!r}: it has no recorded high-water and the "
                          "counters map is not known complete; validate it with validate_counters(..., "
@@ -3767,8 +3779,13 @@ def self_test():
 
     both = {"BI": 3, "imported:BI": 5}
     check("imported-next-id-own-line", next_id(both, "imported:BI", imported_series=True) == ("imported:BI-6", 6))
-    check("imported-next-id-from-complete-empty",
-          next_id({"BI": 3}, "imported:BI", known_complete=True, imported_series=True) == ("imported:BI-1", 1))
+    check("next-id-imported-absent-refused-even-known-complete",
+          _alloc_refused(lambda: next_id({"BI": 3}, "imported:BI", known_complete=True, imported_series=True)))
+    check("next-id-imported-zero-row-allocates",
+          next_id({"imported:BI": 0}, "imported:BI", imported_series=True) == ("imported:BI-1", 1))
+    check("next-id-clean-absent-known-complete-unchanged",
+          next_id({}, "BI", known_complete=True) == ("BI-1", 1)
+          and next_id({"imported:BI": 5}, "BI", known_complete=True, imported_series=True) == ("BI-1", 1))
     check("imported-next-id-clean-line-unchanged", next_id(both, "BI", imported_series=True) == ("BI-4", 4))
     check("imported-next-id-default-refused", _alloc_refused(lambda: next_id(both, "imported:BI")))
     check("imported-next-id-default-mixed-map-refused", _alloc_refused(lambda: next_id(both, "BI")))
@@ -3819,9 +3836,11 @@ def self_test():
             dict(schema=1, counters={_ikey: 1}), imported_namespaces=[_ns])[1]))
         check("imported-next-id-namespace-refused-{}".format(_ns), _alloc_refused(
             lambda: next_id({_ikey: 1}, _ikey, imported_series=True)))
-    check("imported-next-id-proof-names-imported-control",
-          "imported_namespaces" in str(_alloc_error(
-              lambda: next_id(dict(BI=3), "imported:BI", imported_series=True))))
+    check("imported-next-id-absent-refusal-names-no-proof-escape",
+          "whatever known_complete" in str(_alloc_error(
+              lambda: next_id(dict(BI=3), "imported:BI", imported_series=True)))
+          and "whatever known_complete" in str(_alloc_error(
+              lambda: next_id(dict(BI=3), "imported:BI", known_complete=True, imported_series=True))))
 
     # ----- The imported-record validator (spec 8.3, the imported envelope). Valid imported PD and MD
     # records pass; each refused vector differs from its valid base by the one deviation its rule refuses,
