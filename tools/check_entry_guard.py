@@ -53,8 +53,9 @@ bound overtake each run, widened a timer read's bracket past TIMER_BRACKET, or m
 overrun its elapsed bound), a mutant's fixture run hung without earning credit, the hung-credit check's FIFO
 subject never showed the kernel's FIFO open wait while every case needing no such reading held (a failure among
 those cases fails, never cannot-evaluate), a refusal fixture's dumpability setup (PR_SET_DUMPABLE) or bindability
-probe could not be made, or the double-fork walk leg with no child subreaper or not exercised in its attempts;
-such a run is never read as a pass or as a failure. No run earns
+probe could not be made, the double-fork walk leg with no child subreaper, not exercised, or its timing
+precondition missed in its attempts, or the high-descriptor probe leg where the descriptor bound cannot reach
+past 1024; such a run is never read as a pass or as a failure. No run earns
 mutation credit by hanging alone. Under a mutant, a fixture gate run that GATE_TIMEOUT (3 s)
 overtakes is re-run once at the larger BLOCK_CONFIRM (10 s) bound, and a re-run that completes decides by its
 result. A re-run still running at BLOCK_CONFIRM is credited as a block only for a (mutant, vector) pair declared in
@@ -129,6 +130,7 @@ import itertools
 import json
 import operator
 import os
+import resource
 import select
 import signal
 import stat
@@ -948,50 +950,69 @@ PID_BOUND = 2 ** 31 - 1
 
 def _pid_token(text):
     """The pid the task or children entry text (str from a listing, bytes from a read) names, or None when it
-    is not one: ASCII digits only (no sign, so never a negative), and a value within 1..PID_BOUND."""
-    if not (text.isascii() and text.isdigit()) or len(text) > len(str(PID_BOUND)):
+    is not one: ASCII digits only (no sign, so never a negative), no longer than PID_BOUND is wide, no leading
+    zero (the kernel emits only the canonical decimal form, so b"007" is malformed, never 7), and a value
+    within 1..PID_BOUND (zero, and PID_BOUND + 1 even at the permitted width, are refused)."""
+    if (not (text.isascii() and text.isdigit()) or len(text) > len(str(PID_BOUND))
+            or text[:1] in ("0", b"0")):
         return None
     value = int(text)
     return value if 0 < value <= PID_BOUND else None
 
 
 def _token_preview(token):
-    """token bounded for a problem message: at most 40 characters, a longer one cut and marked."""
+    """token bounded for a problem message: at most 40 characters with the marker included, a longer one cut
+    to 37 and marked with three dots, so the bound is exact (a 40-character token passes whole)."""
     if len(token) <= 40:
         return token
-    return token[:40] + (b"..." if isinstance(token, bytes) else "...")
+    return token[:37] + (b"..." if isinstance(token, bytes) else "...")
 
 
 def _pidfd_dead(pidfd):
-    """Whether the process the pidfd names has exited (a zombie included): its pidfd then reads ready."""
-    return bool(select.select([pidfd], [], [], 0)[0])
+    """Whether the process the pidfd names has exited (a zombie included): its pidfd then reads ready. Probed
+    with select.poll, which unlike select.select has no FD_SETSIZE ceiling, so a pidfd numbered 1024 or higher
+    is probed the same way, never a ValueError. An OSError is the caller's to turn into its named problem."""
+    poller = select.poll()
+    poller.register(pidfd, select.POLLIN)
+    return bool(poller.poll(0))
 
 
 def _recorded_alive(found, opened):
     """One pidfd per pid of found that was still alive when this walk recorded it, for the exit test of
-    _descendants: a pidfd opened at the recording names that one process, never a pid reused since, and reads
-    ready once it has exited. Every pidfd opened is appended to the caller-owned opened, which the caller
-    closes once at the end of the whole walk (one close site), so none is closed twice or leaked. A pid
-    already gone (ProcessLookupError) or already dead when recorded (a zombie) held nothing and can fork
-    nothing, so its exit is no movement and it is excluded. Returns (alive pidfds, problem): any other
-    pidfd_open failure is the walk's named problem, never a silently skipped exit test."""
+    _descendants: (alive pidfds, problem). The pidfds are opened only after the whole walk returned its set,
+    never as each children entry is discovered, so each names the process that held the pid at this recording;
+    a pid that exited and was reused between its discovery in a children read and this recording binds the
+    reusing process (the discovery-to-binding interval, a residual _descendants states). Each descriptor
+    pidfd_open returns lands in the caller-owned opened in the same C-level step (map consumed by list.extend,
+    as _writer_bound owns its duplicate), so no signal handler or trace function runs between the kernel
+    installing it and the list owning it; the caller closes the list once at the end of the whole walk (one
+    close site), so none is closed twice or leaked. A pid already gone (ProcessLookupError) held nothing and
+    can fork nothing, so its exit is no movement and it is excluded, as is one already exited when recorded (a
+    zombie, its pidfd ready). Any other pidfd_open failure, and any liveness-probe failure, is the walk's
+    named problem, never a silently skipped exit test."""
     alive = []
     for pid in sorted(found):
         try:
-            pidfd = os.pidfd_open(pid)
+            opened.extend(map(os.pidfd_open, (pid,)))
         except ProcessLookupError:
             continue
         except OSError as exc:
             return [], "pidfd_open of recorded pid {} failed ({})".format(pid, exc)
-        opened.append(pidfd)
-        if not _pidfd_dead(pidfd):
+        pidfd = opened[-1]
+        try:
+            dead = _pidfd_dead(pidfd)
+        except OSError as exc:
+            return [], "liveness probe of recorded pid {} failed ({})".format(pid, exc)
+        if not dead:
             alive.append(pidfd)
     return alive, None
 
 
 def _walk_once(own):
-    """One top-down walk from the process own over /proc/<pid>/task/<tid>/children: (found, problem). found
-    holds every pid reachable from own's tasks through recorded children. problem names, as one reason, a read
+    """One top-down walk from the process own over /proc/<pid>/task/<tid>/children: (found, visited, problem).
+    found holds every pid reachable from own's tasks through recorded children; visited holds one (pid, tid)
+    pair per task whose children file this walk read, so two walks' visited sets agree only when no such task
+    disappeared between them (a task read as exited is in neither). problem names, as one reason, a read
     the walk could not complete: own's task directory unlistable, a discovered pid's task directory unlistable
     other than by having exited, a children file unreadable or missing while its task directory is still
     present (a kernel without the children interface included), a task-directory probe refused other than by
@@ -1001,23 +1022,25 @@ def _walk_once(own):
     then no candidate list and the caller treats it as cannot-evaluate, never as a silent skip. A discovered
     pid whose task directory is gone exited after it was recorded: a live child it had has been reparented (to
     this child-subreaper process, or to a subreaper below it, itself discovered), where a later walk can find
-    it (_descendants holds the rule that makes the walks' agreement trustworthy); the exited pid stays in
+    it (_descendants holds the acceptance rule and states what it does not prove); the exited pid stays in
     found and holds nothing. Residual: under hidepid=invisible a descendant of another uid has no visible
     /proc entry, reads here as exited, and its subtree is beyond the walk."""
-    found, queue = set(), collections.deque((own,))
+    found, visited, queue = set(), set(), collections.deque((own,))
     while queue:
         pid = queue.popleft()
         try:
             tasks = os.listdir("/proc/{}/task".format(pid))
         except (FileNotFoundError, ProcessLookupError) as exc:
             if pid == own:
-                return found, "/proc/{}/task of this process unlistable ({})".format(pid, exc)
+                return found, visited, "/proc/{}/task of this process unlistable ({})".format(pid, exc)
             continue
         except OSError as exc:
-            return found, "/proc/{}/task unlistable ({})".format(pid, exc)
+            return found, visited, "/proc/{}/task unlistable ({})".format(pid, exc)
         for tid in tasks:
-            if _pid_token(str(tid)) is None:
-                return found, "/proc/{}/task holds a non-pid entry {!r}".format(pid, _token_preview(str(tid)))
+            token = _pid_token(str(tid))
+            if token is None:
+                return found, visited, "/proc/{}/task holds a non-pid entry {!r}".format(
+                    pid, _token_preview(str(tid)))
             name = "/proc/{}/task/{}/children".format(pid, tid)
             try:
                 with open(name, "rb") as handle:
@@ -1030,52 +1053,68 @@ def _walk_once(own):
                 except (FileNotFoundError, ProcessLookupError):
                     continue
                 except OSError as probe:
-                    return found, "/proc/{}/task/{} unlistable ({})".format(pid, tid, probe)
-                return found, "{} missing with its task directory present ({})".format(name, exc)
+                    return found, visited, "/proc/{}/task/{} unlistable ({})".format(pid, tid, probe)
+                return found, visited, "{} missing with its task directory present ({})".format(name, exc)
             except OSError as exc:
-                return found, "{} unreadable ({})".format(name, exc)
+                return found, visited, "{} unreadable ({})".format(name, exc)
+            visited.add((pid, token))
             for part in data.split():
                 child = _pid_token(part)
                 if child is None:
-                    return found, "{} holds a non-pid entry {!r}".format(name, _token_preview(part))
+                    return found, visited, "{} holds a non-pid entry {!r}".format(name, _token_preview(part))
                 if child != own and child not in found:
                     found.add(child)
                     queue.append(child)
-    return found, None
+    return found, visited, None
 
 
 def _descendants():
     """The live descendants of this process, discovered top-down from this process alone (_walk_once), never
-    from a scan of other pids: (found, problem). A walk is accepted only when it returns the same set as the
-    walk before it and no pid either walk recorded alive has exited before the acceptance (each recorded pid
-    is held through a pidfd opened as it is recorded: _recorded_alive, _pidfd_dead), because the children
+    from a scan of other pids: (found, problem). A walk is accepted only when it returns the same pid set and
+    the same visited task set as the walk before it and no exit was observed by the probes (one pidfd per pid
+    a walk recorded alive, opened after that walk: _recorded_alive, _pidfd_dead), because the children
     interface is not synchronized and agreement alone proves nothing: a parent's exit mid-walk can move a live
     child, reparented to this child subreaper (or to a discovered subreaper below it), under a children file
     the walk has already read, and two walks then agree while that live child is missing from both (the
-    double-fork shape); the exit test reads the parent's exit from its pidfd, refuses the agreement, and the
-    walk repeats. A pidfd names one process for good, so a pid reused between walks reads as the exit it
-    hides. problem names, once, a walk that could not be completed (_walk_once), an exit test that could not
-    be made (_recorded_alive), or a walk still unsettled after SCAN_WALKS walks; found is then empty and the
-    caller treats the scan as cannot-evaluate, never as a candidate list. No pid outside this process and its
-    discovered descendants is read (the pidfds too are opened on discovered pids alone). Residual: acceptance
-    is still not completeness; a process never recorded alive by the earlier of the two agreeing walks can
-    fork a child and exit wholly between that walk's reads and this walk's, hiding the child from both while
-    no recorded exit refuses the agreement; a process reparented past this process before the walk, or given a
-    descriptor another way, is not a descendant and is beyond the walk; and under hidepid=invisible a
-    descendant of another uid is invisible (_walk_once). Witness cleanup therefore names a write end still
-    open with no writer identified, never ending silently (_witnessed)."""
-    own, previous, earlier, opened = os.getpid(), None, [], []
+    double-fork shape); the exit test reads the parent's exit from its pidfd and refuses the agreement, and
+    the walk repeats. The task agreement covers the move no pidfd can observe: children files are per task,
+    and a non-leader thread that exits hands its children to a live sibling thread of the same process, no pid
+    exiting, so the pid agreement and the exit test both hold while a child so moved is missing from both
+    walks; the exited thread's (pid, tid) is then absent from the later walk's visited tasks, the agreement is
+    refused, and the walk repeats over the re-read children files. problem names, once, a walk that could not
+    be completed (_walk_once), an exit test that could not be made or probed (_recorded_alive, and a liveness
+    probe failing at the acceptance), or a walk still unsettled after SCAN_WALKS walks; found is then empty
+    and the caller treats the scan as cannot-evaluate, never as a candidate list. No pid outside this process
+    and its discovered descendants is read, with one qualification: the pidfds too are opened on discovered
+    pids alone, so a pid reused before its recording binds the one process that then holds it (the
+    discovery-to-binding interval below). Acceptance is agreement plus no exit observed by the probes, never
+    completeness; the races that remain, each stated: a process never recorded alive by the earlier of the two
+    agreeing walks can fork a child and exit wholly between that walk's reads and this walk's, hiding the
+    child from both while no probe observes the exit; a recorded process can exit in the final-probe interval,
+    after the last probe read it alive and before the accepted set is returned; the pidfds are opened only
+    after each whole walk (_recorded_alive), so an exit hidden by pid reuse between a children read and that
+    recording is observed only where it changes a later walk's pid or task agreement; a process reparented
+    past this process before the walk, or given a descriptor another way, is not a descendant and is beyond
+    the walk; and under hidepid=invisible a descendant of another uid is invisible (_walk_once). Witness
+    cleanup therefore names a write end still open with no writer killed and nothing named, never ending
+    silently (_witnessed)."""
+    own, previous, preceding, earlier, opened = os.getpid(), None, None, [], []
     try:
         for _walk in range(SCAN_WALKS):
-            found, problem = _walk_once(own)
+            found, visited, problem = _walk_once(own)
             if problem is not None:
                 return set(), problem
             alive, problem = _recorded_alive(found, opened)
             if problem is not None:
                 return set(), problem
-            if found == previous and not any(_pidfd_dead(pidfd) for pidfd in earlier + alive):
-                return found, None
-            previous, earlier = found, alive
+            if found == previous and visited == preceding:
+                try:
+                    exited = any(_pidfd_dead(pidfd) for pidfd in earlier + alive)
+                except OSError as exc:
+                    return set(), "liveness probe at the walk acceptance failed ({})".format(exc)
+                if not exited:
+                    return found, None
+            previous, preceding, earlier = found, visited, alive
         return set(), "descendant walk unsettled after {} walks".format(SCAN_WALKS)
     finally:
         for pidfd in opened:
@@ -1087,14 +1126,14 @@ def _pipe_writers(dev, ino, extra=()):
     descriptor linking to the pipe (dev, ino): the candidates _kill_holder binds before it signals, found from
     the kernel's descriptor tables, never from what any process reported. Returns (holders, unlisted, problem):
     problem names, once, why the scan could not be made (/proc/self is not this pid, or the descendant walk
-    could not be completed or settled), and holders and unlisted are then empty, never one candidate per
-    unreadable pid. unlisted names, as (pid, reason), every candidate whose /proc/<pid>/fd could not be listed
-    (a non-dumpable descendant included) or one of whose descriptor links could not be read for any reason
-    other than the descriptor having closed: such a process may hold the pipe unseen, so the cleanup must
-    evaluate or name it, never clear it; one that exited between the walk and the read is skipped, as it holds
-    nothing. No pid outside the walked descendants and extra is read. Residual, stated: a holder that is not a
-    descendant of this process (reparented past it before the walk, or given a descriptor another way) is
-    beyond the walk and is found only when the caller names it in extra."""
+    could not be completed, probed or settled: _descendants), and holders and unlisted are then empty, never
+    one candidate per unreadable pid. unlisted names, as (pid, reason), every candidate whose /proc/<pid>/fd
+    could not be listed (a non-dumpable descendant included) or one of whose descriptor links could not be
+    read for any reason other than the descriptor having closed: such a process may hold the pipe unseen, so
+    the cleanup must evaluate or name it, never clear it; one that exited between the walk and the read is
+    skipped, as it holds nothing. No pid outside the walked descendants and extra is read. Residual, stated:
+    a holder that is not a descendant of this process (reparented past it before the walk, or given a
+    descriptor another way) is beyond the walk and is found only when the caller names it in extra."""
     target = "pipe:[{}]".format(ino)
     problem = _proc_is_own()
     if problem is not None:
@@ -1137,7 +1176,8 @@ def _kill_holder(pid, pipe):
     binds as a writer of the pipe), or NOT_EVALUATED, never signalled: /proc/self is not this pid (a numeric pid
     match), pidfd_open failed other than with ProcessLookupError, /proc/<pid>/fd or a descriptor link could not be
     read, a binding was refused (pidfd_getfd failed, or the machine is unverified) or its duplicate could not be
-    read, the pidfd send failed, or pid is this process and holds the write end."""
+    read, the liveness probe failed (_pidfd_dead), the pidfd send failed, or pid is this process and holds the
+    write end."""
     try:
         problem = _proc_is_own()
         if problem is not None:
@@ -1150,7 +1190,11 @@ def _kill_holder(pid, pipe):
         return NOT_EVALUATED, "pidfd_open or the witness unreadable ({})".format(exc)
     try:
         state, reason = _pipe_writer(pidfd, pid, witness.st_dev, witness.st_ino)
-        if select.select([pidfd], [], [], 0)[0]:
+        try:
+            dead = _pidfd_dead(pidfd)
+        except OSError as exc:
+            return NOT_EVALUATED, "liveness probe failed ({})".format(exc)
+        if dead:
             return ENDED, "exited"
         if state != WRITER:
             return state, reason
@@ -1267,9 +1311,9 @@ def _witnessed(launch, known=(), wait=None):
                     elif state == ENDED and reason.startswith("SIGKILL sent"):
                         killed.append(pid)
                 if not killed and not unevaluated and _write_end_open(read_end):
-                    unevaluated.append(("/proc scan", "the witness write end is still open after cleanup and "
-                                        "no writer was identified (unresolved discovery): a live holder the "
-                                        "walk could not see holds it unseen"))
+                    unevaluated.append(("/proc scan", "the witness write end is still open after cleanup with "
+                                        "no writer killed and nothing named (unresolved discovery): a live "
+                                        "holder the walk could not see holds it unseen"))
         finally:
             os.close(read_end)
     return returned, pids, ended, unevaluated
@@ -1817,12 +1861,17 @@ def _refused_named(adopted):
 
 _WALK_ABSENT = object()
 
+# The scripted walk legs' fake pids sit at and past this bound, past any host's pid ceiling (the kernel's
+# PID_MAX_LIMIT is 4194304), so a real call that reaches one (os.pidfd_open, a /proc path left unscripted) can
+# only read no such process, never a live pid.
+FAKE_PID_BASE = 5000000
+
 
 def _walk_stub(table, own):
     """os.listdir and open stand-ins for one scripted /proc subtree: table maps a walk ordinal (counted at each
     listing of the process own's task directory; later walks reuse the last entry) to {path: a list to return,
     bytes to read, or an exception to raise}; every other path reaches the real call. Returns (listing,
-    opened)."""
+    opened, state), state counting the walks seen in state["walk"]."""
     state = dict(walk=0)
     real_listdir, real_open = os.listdir, builtins.open
 
@@ -1846,27 +1895,35 @@ def _walk_stub(table, own):
         if isinstance(got, BaseException):
             raise got
         return io.BytesIO(got)
-    return listing, opened
+    return listing, opened, state
 
 
 def _walk_scripted(table):
-    """_descendants run over the scripted /proc subtree table (_walk_stub) for this process."""
-    listing, opened = _walk_stub(table, os.getpid())
-    with _patched(os, "listdir", listing), _patched(builtins, "open", opened):
-        return _descendants()
+    """_descendants run over the scripted /proc subtree table (_walk_stub) for this process: ((found, problem),
+    walks seen)."""
+    return _walk_patched(table, ())
 
 
-def _broken_walk_witnessed(probe_error):
-    """_witnessed over a real forked holder of the witness write end while the descendant walk is broken by a
-    scripted task-directory probe refusal (probe_error: the children file reads absent and the directory probe
-    raises), no known pid given: the cleanup must name the walk once, as exactly one ("/proc scan", reason)
-    naming the probe, derive no candidate from the incomplete walk and send no signal; the holder survives
-    until this leg reaps it: (ok, detail)."""
-    own = os.getpid()
-    table = {1: {"/proc/{}/task".format(own): [str(own)],
-                 "/proc/{0}/task/{0}/children".format(own): FileNotFoundError(errno.ENOENT, "absent"),
-                 "/proc/{0}/task/{0}".format(own): probe_error}}
-    listing, opened = _walk_stub(table, own)
+def _walk_patched(table, patches):
+    """_descendants over the scripted /proc subtree table (_walk_stub) with the extra (owner, name,
+    replacement) attribute patches installed: ((found, problem), walks seen)."""
+    listing, opened, state = _walk_stub(table, os.getpid())
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(_patched(os, "listdir", listing))
+        stack.enter_context(_patched(builtins, "open", opened))
+        for owner, name, replacement in patches:
+            stack.enter_context(_patched(owner, name, replacement))
+        result = _descendants()
+    return result, state["walk"]
+
+
+def _scan_broken_witnessed(table, patches, marks):
+    """_witnessed over a real forked holder of the witness write end while the descendant walk is broken by the
+    scripted /proc subtree table and the extra attribute patches, no known pid given: the cleanup must name the
+    broken scan once, as exactly one ("/proc scan", reason) entry bearing every mark in marks, derive no
+    candidate from the incomplete walk and send no signal; the holder survives until this leg reaps it:
+    (ok, detail)."""
+    listing, opened, _state = _walk_stub(table, os.getpid())
     sent, forked = [], []
 
     def send(pidfd, signum):
@@ -1888,19 +1945,33 @@ def _broken_walk_witnessed(probe_error):
         return forked[0]
     result = status = None
     try:
-        with (_patched(os, "listdir", listing), _patched(builtins, "open", opened),
-              _patched(signal, "pidfd_send_signal", send)):
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(_patched(os, "listdir", listing))
+            stack.enter_context(_patched(builtins, "open", opened))
+            stack.enter_context(_patched(signal, "pidfd_send_signal", send))
+            for owner, name, replacement in patches:
+                stack.enter_context(_patched(owner, name, replacement))
             result = _witnessed(launch, wait=WITNESS_TIMEOUT)
     finally:
         if forked:
             status = _reap_within(forked[0], WITNESS_WAIT)
     unevaluated = result[3] if result else None
-    mark = probe_error.strerror or str(probe_error)
     ok = (result is not None and result[2] is False and sent == [] and status is None
           and unevaluated is not None and len(unevaluated) == 1 and unevaluated[0][0] == "/proc scan"
-          and "unlistable" in unevaluated[0][1] and mark in unevaluated[0][1])
+          and all(mark in unevaluated[0][1] for mark in marks))
     return ok, dict(child=forked, reported=result and result[1], ended=result and result[2],
-                    unevaluated=unevaluated, sent=sent, status=status)
+                    unevaluated=unevaluated, sent=sent, status=status, marks=marks)
+
+
+def _broken_walk_witnessed(probe_error):
+    """The scripted task-directory probe refusal (probe_error: the children file reads absent and the directory
+    probe raises) driven end to end through a real witnessed cleanup (_scan_broken_witnessed), the one scan
+    entry naming the probe."""
+    own = os.getpid()
+    table = {1: {"/proc/{}/task".format(own): [str(own)],
+                 "/proc/{0}/task/{0}/children".format(own): FileNotFoundError(errno.ENOENT, "absent"),
+                 "/proc/{0}/task/{0}".format(own): probe_error}}
+    return _scan_broken_witnessed(table, (), ("unlistable", probe_error.strerror or str(probe_error)))
 
 
 def _double_fork_found():
@@ -1911,15 +1982,19 @@ def _double_fork_found():
     then agree while the live D is missing from both, and the exit test (B, recorded alive by walk 1, exited
     before the end of walk 2) must refuse the agreement and walk on until D is recorded. Every byte the walk
     reads is the kernel's own; the hooks only choose when B forks and when it exits. None (cannot evaluate,
-    retried by _attempted) when a bounded handshake or the reparenting wait timed out, so host scheduling
-    never fails this leg; a run whose hooks both fired and whose walk still misses D is False."""
+    retried by _attempted) when a bounded handshake or the reparenting wait timed out, or when the timing
+    precondition was missed: B already exited (a zombie or gone) when walk 2's hook fired, or D already
+    visible in the children bytes that read returned, so the intended race was not established and a walk that
+    found D early is no failure; host scheduling therefore never fails this leg. The four-walk requirement is
+    read only once the race is established, and a run whose hooks both fired on the established race and whose
+    walk still misses D is False."""
     own = os.getpid()
     cmd_r, cmd_w = os.pipe()
     rep_r, rep_w = os.pipe()
 
     def waited(fd):
         return os.read(fd, 32) if select.select([fd], [], [], WITNESS_WAIT)[0] else b""
-    state = dict(b=0, d=0, walk=0, exited=None)
+    state = dict(b=0, d=0, walk=0, exited=None, early=None, b_alive=None)
     a_pid = os.fork()
     if a_pid == 0:
         try:
@@ -1958,6 +2033,14 @@ def _double_fork_found():
                 time.sleep(0.005)
             return False
 
+        def still_alive(pid):
+            # a zombie (state Z) or a gone /proc entry reads as exited: the race window was already missed
+            try:
+                with real_open("/proc/{}/stat".format(pid), "rb") as handle:
+                    return handle.read().rsplit(b")", 1)[1].split()[0] != b"Z"
+            except OSError:
+                return False
+
         def listing(path="."):
             if str(path) == "/proc/{}/task".format(own):
                 state["walk"] += 1
@@ -1974,6 +2057,8 @@ def _double_fork_found():
                 reply = waited(rep_r)
                 state["d"] = int(reply) if reply else 0
             elif name == own_children and state["walk"] == 2 and state["d"] and state["exited"] is None:
+                state["early"] = str(state["d"]).encode("ascii") in data.split()
+                state["b_alive"] = still_alive(state["b"])
                 os.write(cmd_w, b"x")
                 state["exited"] = reparented(state["d"])
             return io.BytesIO(data)
@@ -1993,6 +2078,9 @@ def _double_fork_found():
     detail = dict(state, a=a_pid, found=sorted(found), problem=problem)
     if not (state["d"] and state["exited"] is True):
         return None, dict(detail, note="the double fork was not exercised")
+    if state["early"] or not state["b_alive"]:
+        return None, dict(detail, note="the timing precondition was missed (B already exited when walk 2's "
+                                       "hook fired, or D already visible to walk 2): not the intended race")
     return (problem is None and state["d"] in found and a_pid in found and state["walk"] >= 4), detail
 
 
@@ -2059,11 +2147,230 @@ def _unrelated_unread():
                     fd_lists=sorted(set(fd_lists)), scope=sorted(scope))
 
 
+def _scripted_probes(opens, probes):
+    """Patches scripting the exit test over fake pids (FAKE_PID_BASE and past): os.pidfd_open of a fake pid
+    consumes the next entry of opens (an exception instance to raise; an exhausted list opens the null device,
+    a real descriptor the walk owns and closes), and the liveness probe consumes the next entry of probes (an
+    exception instance to raise, else the reading; an exhausted list reads False), each consumed probe recorded
+    in used["probes"] (an exception by its type name): (patches for _walk_patched, used). A real pid reaches
+    the real os.pidfd_open."""
+    this, real_pidfd_open = sys.modules[__name__], os.pidfd_open
+    used = dict(opens=0, probes=[])
+
+    def opening(pid, *rest):
+        if pid < FAKE_PID_BASE:
+            return real_pidfd_open(pid, *rest)
+        used["opens"] += 1
+        step = opens[used["opens"] - 1] if used["opens"] <= len(opens) else None
+        if isinstance(step, BaseException):
+            raise step
+        return os.open(os.devnull, os.O_RDONLY | os.O_CLOEXEC)
+
+    def probing(pidfd):
+        step = probes[len(used["probes"])] if len(used["probes"]) < len(probes) else False
+        used["probes"].append(type(step).__name__ if isinstance(step, BaseException) else step)
+        if isinstance(step, BaseException):
+            raise step
+        return step
+    return ((os, "pidfd_open", opening), (this, "_pidfd_dead", probing)), used
+
+
+def _probe_table(own, fake):
+    """The one-fake-pid scripted subtree of the probe legs: own's children name fake, whose task directory
+    reads gone (exited after its recording, so fake stays in the walked set the exit test probes)."""
+    return {1: {"/proc/{}/task".format(own): [str(own)],
+                "/proc/{0}/task/{0}/children".format(own): str(fake).encode("ascii"),
+                "/proc/{}/task".format(fake): FileNotFoundError(errno.ENOENT, "scripted as exited")}}
+
+
+def _pidfd_open_refused():
+    """A pidfd_open refused (EACCES) on a walked live pid in range is the walk's named problem, never a
+    silently skipped exit test: a real forked child is discovered through a scripted children file and its
+    pidfd_open alone is refused: (ok, detail)."""
+    own, forked = os.getpid(), []
+    real_pidfd_open = os.pidfd_open
+
+    def refusing(pid, *rest):
+        if forked and pid == forked[0]:
+            raise PermissionError(errno.EACCES, "refused by the self-test")
+        return real_pidfd_open(pid, *rest)
+    forked.append(os.fork())
+    if forked == [0]:
+        try:
+            time.sleep(HANG_SECONDS)
+        finally:
+            os._exit(0)
+    table = {1: {"/proc/{}/task".format(own): [str(own)],
+                 "/proc/{0}/task/{0}/children".format(own): str(forked[0]).encode("ascii")}}
+    try:
+        (found, problem), walks = _walk_patched(table, ((os, "pidfd_open", refusing),))
+    finally:
+        os.kill(forked[0], signal.SIGKILL)
+        os.waitpid(forked[0], 0)
+    mark = "pidfd_open of recorded pid {} failed".format(forked[0])
+    ok = (found == set() and problem is not None and mark in problem
+          and "refused by the self-test" in problem and walks == 1)
+    return ok, dict(child=forked[0], found=found, problem=problem, walks=walks)
+
+
+def _alive_probe_refuses():
+    """The alive half of the exit test refuses an agreement on its own: a recorded pid skipped by the earlier
+    walk's recording (gone at it: ProcessLookupError) is alive at the later walk's recording and reads exited
+    at the acceptance, so only the later walk's recorded pidfd can observe the exit; the agreement at walk 2 is
+    refused and the walk settles at walk 3, with the scripted probe sequence consumed exactly (an acceptance
+    that probes only the earlier walk's pidfds settles at walk 2, one that probes only the later walk's leaves
+    a probe unconsumed; either reads red): (ok, detail)."""
+    own, fake = os.getpid(), FAKE_PID_BASE + 1
+    sequence = [False, True, False, False, False]
+    patches, used = _scripted_probes([ProcessLookupError(errno.ESRCH, "gone at the recording")], list(sequence))
+    result, walks = _walk_patched(_probe_table(own, fake), patches)
+    ok = result == ({fake}, None) and walks == 3 and used["probes"] == sequence
+    return ok, dict(result=result, walks=walks, used=used)
+
+
+def _probe_failure_named(probes, walks, mark):
+    """A liveness probe failing after probes - 1 clean readings is the walk's named problem at that call site
+    (the recording, or the acceptance), observed at the expected walk count, never an escaping exception:
+    (ok, detail)."""
+    own, fake = os.getpid(), FAKE_PID_BASE + 1
+    error = OSError(errno.EIO, "io error of the self-test")
+    patches, used = _scripted_probes([], [False] * (probes - 1) + [error])
+    (found, problem), seen = _walk_patched(_probe_table(own, fake), patches)
+    ok = (found == set() and problem is not None and mark in problem
+          and "io error of the self-test" in problem and seen == walks)
+    return ok, dict(found=found, problem=problem, walks=seen, used=used)
+
+
+def _high_descriptor_probes():
+    """The liveness probe holds at descriptor 1024 and above, where select.select raises ValueError
+    (FD_SETSIZE): a live process's pidfd duplicated to 1024 or higher reads not exited, and an exited child's
+    reads exited: (ok, detail); (None, reason) where the descriptor bound cannot reach past 1024
+    (RLIMIT_NOFILE, raised for the probe when the hard bound allows and restored after)."""
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    lifted = soft < 1100
+    if lifted:
+        if hard != resource.RLIM_INFINITY and hard < 1100:
+            return None, "RLIMIT_NOFILE {} (hard {}) cannot reach past descriptor 1024".format(soft, hard)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (1100, hard))
+    child, opened = 0, []
+    try:
+        child = os.fork()
+        if child == 0:
+            os._exit(0)
+        os.waitid(os.P_PID, child, os.WEXITED | os.WNOWAIT)
+        opened.append(os.pidfd_open(child))
+        opened.append(os.pidfd_open(os.getpid()))
+        opened.append(fcntl.fcntl(opened[0], fcntl.F_DUPFD_CLOEXEC, 1024))
+        opened.append(fcntl.fcntl(opened[1], fcntl.F_DUPFD_CLOEXEC, 1024))
+        high = opened[2:]
+        try:
+            readings = [_pidfd_dead(high[0]), _pidfd_dead(high[1])]
+        except (OSError, ValueError) as exc:
+            return False, "the probe at descriptors {} raised {!r}".format(high, exc)
+        return readings == [True, False] and min(high) >= 1024, dict(high=high, readings=readings)
+    finally:
+        for descriptor in opened:
+            os.close(descriptor)
+        if child:
+            os.waitpid(child, 0)
+        if lifted:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+
+
+def _liveness_broken_pipe_writers():
+    """The probe-broken walk reaches _pipe_writers as ([], [], problem) naming the liveness probe, never one
+    candidate per pid: (ok, detail)."""
+    own, fake = os.getpid(), FAKE_PID_BASE + 1
+    patches, _used = _scripted_probes([], [OSError(errno.EIO, "io error of the self-test")])
+    listing, opened, _state = _walk_stub(_probe_table(own, fake), own)
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(_patched(os, "listdir", listing))
+        stack.enter_context(_patched(builtins, "open", opened))
+        for owner, name, replacement in patches:
+            stack.enter_context(_patched(owner, name, replacement))
+        writers = _pipe_writers(0, 0)
+    ok = (writers[0] == [] and writers[1] == [] and writers[2] is not None
+          and "liveness probe of recorded pid" in writers[2] and "io error of the self-test" in writers[2])
+    return ok, writers
+
+
+def _probe_broken_witnessed():
+    """The liveness-probe failure driven end to end through a real witnessed cleanup (_scan_broken_witnessed):
+    exactly one ("/proc scan", reason) entry naming the probe, no candidate derived, nothing signalled."""
+    own, fake = os.getpid(), FAKE_PID_BASE + 1
+    patches, _used = _scripted_probes([], [OSError(errno.EIO, "io error of the self-test")])
+    return _scan_broken_witnessed(_probe_table(own, fake), patches,
+                                  ("liveness probe of recorded pid", "io error of the self-test"))
+
+
+def _recording_sweep():
+    """Run the scripted walk over a real forked child once per opcode of _recorded_alive, raising _Injected at
+    that opcode (as a caller's signal handler that raises would), from the first opcode until a run sees no
+    injection: dict(points, complete, count, findings). No run may leave a descriptor behind: each descriptor
+    pidfd_open returns lands in the caller-owned list in the same C-level step (_recorded_alive), so an
+    exception at any opcode either precedes the open or finds the descriptor owned, and _descendants closes
+    what the list owns. A NOT_TAKEN instruction is not a point (_injector states why). Run only in a child
+    (_in_child): it installs a trace function."""
+    child = os.fork()
+    if child == 0:
+        try:
+            time.sleep(HANG_SECONDS)
+        finally:
+            os._exit(0)
+    own, code, findings = os.getpid(), _recorded_alive.__code__, []
+    inert = set(instruction.offset for instruction in dis.get_instructions(code)
+                if instruction.opname == "NOT_TAKEN")
+    table = {1: {"/proc/{}/task".format(own): [str(own)],
+                 "/proc/{0}/task/{0}/children".format(own): str(child).encode("ascii")}}
+    try:
+        for ordinal in range(1, SWEEP_LIMIT + 1):
+            seen = [0]
+
+            def trace(frame, event, arg):
+                if frame.f_code is not code:
+                    return None
+                frame.f_trace_opcodes = True
+                if event == "opcode" and seen[0] >= 0 and frame.f_lasti not in inert:
+                    seen[0] += 1
+                    if seen[0] == ordinal:
+                        seen[0] = -1
+                        raise _Injected()
+                return trace
+            descriptors = set(os.listdir(DESCRIPTOR_DIR))
+            raised = result = None
+            try:
+                try:
+                    sys.settrace(trace)
+                    result = _walk_scripted(table)
+                finally:
+                    sys.settrace(None)
+            except BaseException as exc:
+                raised = type(exc).__name__
+            leaked = sorted(set(os.listdir(DESCRIPTOR_DIR)) - descriptors)
+            if leaked or raised not in (None, "_Injected"):
+                findings.append(dict(point=ordinal, raised=raised, result=repr(result), leaked=leaked))
+            if raised is None:
+                return dict(points=ordinal, complete=True, count=len(findings), findings=findings[:10])
+        return dict(points=SWEEP_LIMIT, complete=False, count=len(findings), findings=findings[:10])
+    finally:
+        os.kill(child, signal.SIGKILL)
+        os.waitpid(child, 0)
+
+
+def _recording_swept():
+    """The recording sweep, run in a child: (ok, detail): ok only when the sweep completed (a run no injection
+    reached) with no finding at any point."""
+    done, sweep = _in_child(_recording_sweep, CHILD_TIMEOUT)
+    ok = done and sweep["complete"] and not sweep["count"]
+    return ok, (done, sweep)
+
+
 def _walk_tables(own):
-    """The scripted /proc subtrees of the walk legs (_descendant_walk_held), keyed by leg: each value is
-    (table for _walk_scripted, expected (found, problem) or a problem mark). The fake pids sit past this
-    host's pid_max; every path of theirs is scripted, so none is ever opened."""
-    base = 5000000
+    """The scripted /proc subtrees of the walk legs (_descendant_walk_held), keyed by leg: each legs value is
+    (table for _walk_scripted, expected (found, problem), expected walks seen), each problems value (table, a
+    problem mark). The fake pids sit past this host's pid ceiling (FAKE_PID_BASE); every path of theirs is
+    scripted, so none is ever opened."""
+    base = FAKE_PID_BASE
     first, second, third = base + 1, base + 2, base + 3
     task = "/proc/{}/task".format
     directory = "/proc/{}/task/{}".format
@@ -2084,23 +2391,43 @@ def _walk_tables(own):
                          task(first): gone},
                      2: {task(own): [str(own)], children(own, own): str(second).encode("ascii"),
                          task(second): [str(second)], children(second, second): b""}},
-                    ({second}, None)),
+                    ({second}, None), 3),
         exited=({1: {task(own): [str(own)],
                      children(own, own): "{} {}".format(first, second).encode("ascii"),
                      task(first): [str(first)], children(first, first): gone,
                      directory(first, first): gone,
                      task(second): [str(second)], children(second, second): b""}},
-                ({first, second}, None)),
-        settled_early=(settle(2), ({third + 1}, None)),
-        settled_at_bound=(settle(SCAN_WALKS), ({third + SCAN_WALKS - 1}, None)))
+                ({first, second}, None), 2),
+        threadmoved=({1: {task(own): [str(own), str(first)], children(own, own): b"",
+                          children(own, first): b""},
+                      2: {task(own): [str(own), str(first)], children(own, own): b"",
+                          children(own, first): gone, directory(own, first): gone},
+                      3: {task(own): [str(own)], children(own, own): str(third).encode("ascii"),
+                          task(third): [str(third)], children(third, third): b""}},
+                     ({third}, None), 4),
+        bounded=({1: {task(own): [str(own)], children(own, own): str(PID_BOUND).encode("ascii"),
+                      task(PID_BOUND): gone}},
+                 ({PID_BOUND}, None), 2),
+        settled_early=(settle(2), ({third + 1}, None), 2),
+        settled_at_bound=(settle(SCAN_WALKS), ({third + SCAN_WALKS - 1}, None), SCAN_WALKS))
     problems = dict(
         refused=({1: {task(own): [str(own)], children(own, own): str(first).encode("ascii"),
                       task(first): [str(first)], children(first, first): refusal}}, "unreadable"),
         malformed=({1: {task(own): [str(own)], children(own, own): b"not-a-pid"}}, "non-pid"),
         zero=({1: {task(own): [str(own)], children(own, own): b"0"}}, "non-pid entry b'0'"),
+        leadzero=({1: {task(own): [str(own)], children(own, own): b"007"}}, "non-pid entry b'007'"),
         oversized=({1: {task(own): [str(own)], children(own, own): b"9" * 5000}}, "non-pid"),
+        width=({1: {task(own): [str(own)], children(own, own): b"9" * 11}}, "non-pid"),
+        pastbound=({1: {task(own): [str(own)], children(own, own): b"2147483648"}},
+                   "non-pid entry b'2147483648'"),
         taskname=({1: {task(own): [str(own)], children(own, own): str(first).encode("ascii"),
                        task(first): ["not-a-tid"]}}, "not-a-tid"),
+        taskzero=({1: {task(own): [str(own)], children(own, own): str(first).encode("ascii"),
+                       task(first): ["0"]}}, "non-pid entry '0'"),
+        taskwidth=({1: {task(own): [str(own)], children(own, own): str(first).encode("ascii"),
+                        task(first): ["9" * 11]}}, "non-pid"),
+        tasknonascii=({1: {task(own): [str(own)], children(own, own): str(first).encode("ascii"),
+                           task(first): ["\u0662\u0663"]}}, "non-pid"),
         probe=({1: {task(own): [str(own)],
                     children(own, own): FileNotFoundError(errno.ENOENT, "absent"),
                     directory(own, own): refusal}}, "unlistable"),
@@ -2118,29 +2445,52 @@ def _descendant_walk_held(adopted):
     _witnessed, and live legs rerun the cleanup over real processes: (verdict, {leg: (ok, ...)}). Leg
     reparented: an intermediate parent exits mid-walk; its child, reparented to this subreaper, is found by
     the repeated walk. Leg exited: a recorded child whose task directory is gone is skipped as exited and its
-    sibling is still found. Legs settled_early and settled_at_bound, with leg bound pinning SCAN_WALKS to its
-    literal value: a walk settles at walk 2, and at walk SCAN_WALKS exactly, while leg unsettled, whose first
-    agreement would come one walk past the bound, is a named problem, never a partial candidate list. Legs
-    refused, malformed, zero, oversized, taskname, missing and probe: a children read refused with the task
-    still present, a children entry that is not a pid (a malformed token, zero, and an oversized number that
-    must never raise), a non-pid task name, a children file absent with its task directory listable (a kernel
-    without the interface), and a task-directory probe refused other than by the task having exited are each
-    one named problem. Legs writers, witnessed-eacces and witnessed-eio: the probe-broken walk reaches
-    _pipe_writers as ([], [], problem) and reaches a real witnessed cleanup as exactly one ("/proc scan",
-    reason) entry naming the probe, with no candidate derived from the incomplete walk and nothing signalled
-    (_broken_walk_witnessed, EACCES and EIO driven). Leg double-fork: the live hook-timed double fork
-    (_double_fork_found), cannot-evaluate without a child subreaper. Leg unrelated: _unrelated_unread."""
+    sibling is still found. Leg threadmoved: a task of a live recorded process disappears between two walks
+    that agree on pids (the thread-exit move: an exiting thread's children move to a sibling task of the same
+    process, no pid exiting and no pidfd reading ready), so the task agreement alone must refuse the agreement
+    and walk on until the moved child is found at walk 4; on pid agreement alone the walk settles at walk 2
+    with that child missing. Leg bounded: the token at PID_BOUND exactly is a pid. Legs settled_early and
+    settled_at_bound, with leg bound pinning SCAN_WALKS to its literal value: a walk settles at walk 2, and at
+    walk SCAN_WALKS exactly, while leg unsettled, whose first agreement would come one walk past the bound, is
+    a named problem, never a partial candidate list. Every legs entry asserts its observed walk count, so an
+    acceptance that needs extra walks (a minimum-walk mutant included) reads red. Legs refused, malformed,
+    zero, leadzero, oversized, width, pastbound, taskname, taskzero, taskwidth, tasknonascii, missing and
+    probe: a children read refused with the task still present, children and task-name tokens that are not a
+    pid (malformed, zero, a leading zero, an oversized number that must never raise, a token one digit past
+    PID_BOUND's width, PID_BOUND + 1 at that width, and a non-ASCII digit name that int would accept), a
+    children file absent with its task directory listable (a kernel without the interface), and a
+    task-directory probe refused other than by the task having exited are each one named problem. Leg preview:
+    the token preview bound is exact at 39, 40 and 41 characters, bytes and str. Legs pidfd-refused and
+    alive-probe: a pidfd_open refused on a walked live pid is the walk's named problem, never a silently
+    skipped exit test (red under a skip), and an exit only the later walk's recorded pidfd can observe refuses
+    the agreement, the scripted probe sequence consumed exactly. Legs probe-recorded and probe-accept: a
+    liveness probe failing at the recording, and at the acceptance, is each the walk's named problem, never an
+    escaping exception. Leg probe-high: the probe holds at descriptor 1024 and above for a live and for an
+    exited process (_high_descriptor_probes, cannot-evaluate where the descriptor bound cannot reach there).
+    Legs probe-writers and witnessed-probe: the probe-broken walk reaches _pipe_writers as ([], [], problem)
+    and a real witnessed cleanup as exactly one ("/proc scan", reason) entry naming the probe. Leg
+    probe-interrupt: an injected exception at every opcode of _recorded_alive leaves no descriptor behind
+    (_recording_sweep, run in a child). Legs writers, witnessed-eacces and witnessed-eio: the probe-broken
+    walk reaches _pipe_writers as ([], [], problem) and reaches a real witnessed cleanup as exactly one
+    ("/proc scan", reason) entry naming the probe, with no candidate derived from the incomplete walk and
+    nothing signalled (_broken_walk_witnessed, EACCES and EIO driven). Leg double-fork: the live hook-timed
+    double fork (_double_fork_found), cannot-evaluate without a child subreaper or with its timing
+    precondition missed in every attempt. Leg unrelated: _unrelated_unread."""
     legs, problems = _walk_tables(os.getpid())
     outcomes = {}
-    for name, (table, want) in legs.items():
-        got = _walk_scripted(table)
-        outcomes[name] = (got == want, got, want)
+    for name, (table, want, walks) in legs.items():
+        got, seen = _walk_scripted(table)
+        outcomes[name] = (got == want and seen == walks, got, want, seen, walks)
     for name, (table, mark) in problems.items():
-        found, problem = _walk_scripted(table)
+        (found, problem), _seen = _walk_scripted(table)
         outcomes[name] = (found == set() and problem is not None and mark in problem, found, problem)
     outcomes["bound"] = (SCAN_WALKS == 8, SCAN_WALKS, 8)
+    outcomes["preview"] = (_token_preview(b"9" * 39) == b"9" * 39 and _token_preview(b"9" * 40) == b"9" * 40
+                           and _token_preview(b"9" * 41) == b"9" * 37 + b"..."
+                           and _token_preview("x" * 41) == "x" * 37 + "...",
+                           _token_preview(b"9" * 41))
     broken, _mark = problems["probe"]
-    listing, opened = _walk_stub(broken, os.getpid())
+    listing, opened, _state = _walk_stub(broken, os.getpid())
     with _patched(os, "listdir", listing), _patched(builtins, "open", opened):
         writers = _pipe_writers(0, 0)
     outcomes["writers"] = (writers[0] == [] and writers[1] == [] and writers[2] is not None
@@ -2148,6 +2498,14 @@ def _descendant_walk_held(adopted):
     outcomes["witnessed-eacces"] = _broken_walk_witnessed(PermissionError(errno.EACCES,
                                                                           "refused by the self-test"))
     outcomes["witnessed-eio"] = _broken_walk_witnessed(OSError(errno.EIO, "io error of the self-test"))
+    outcomes["pidfd-refused"] = _pidfd_open_refused()
+    outcomes["alive-probe"] = _alive_probe_refuses()
+    outcomes["probe-recorded"] = _probe_failure_named(1, 1, "liveness probe of recorded pid")
+    outcomes["probe-accept"] = _probe_failure_named(3, 2, "liveness probe at the walk acceptance")
+    outcomes["probe-high"] = _high_descriptor_probes()
+    outcomes["probe-writers"] = _liveness_broken_pipe_writers()
+    outcomes["witnessed-probe"] = _probe_broken_witnessed()
+    outcomes["probe-interrupt"] = _recording_swept()
     if adopted is True:
         outcomes["double-fork"] = _attempted(_double_fork_found)
     else:
@@ -3139,8 +3497,9 @@ def _self_test(restore_problems, report_path):
               "(each is named below with its detail: a witnessed or timer vector was not exercised in any of its "
               "{} runs, a mutant's fixture run hung without earning credit, the hung-credit check's FIFO "
               "subject never showed its wait, a refusal fixture's dumpability setup or bindability probe could "
-              "not be made, or the double-fork walk leg had no child subreaper or was not "
-              "exercised)".format(len(unevaluated), len(results), ATTEMPTS))
+              "not be made, the double-fork walk leg had no child subreaper, was not exercised or missed "
+              "its timing precondition, or the descriptor bound could not reach past 1024 for the "
+              "high-descriptor probe leg)".format(len(unevaluated), len(results), ATTEMPTS))
         for check_id, detail in failed:
             print("  {}: {!r}".format(check_id, detail))
         for check_id, detail in unevaluated:
@@ -3157,11 +3516,13 @@ def _self_test(restore_problems, report_path):
           "one that left its group, its descendants (an audit hook refusing the kills included) and an orphaned "
           "one are killed, and a run its bound overtook, or that overran its elapsed bound with its cleanup "
           "proven, is no failure, and a failure is never retried or masked; witness cleanup finds its candidates "
-          "top-down from this process's own task children alone, repeated until two walks agree with no "
-          "recorded pid's exit between them (the hook-timed double fork is re-walked, never dropped), reads no "
-          "unrelated pid, names a walk it cannot complete or settle once as a /proc-scan problem, never as "
-          "candidates, and names a witness write end still open with no writer identified as an unresolved "
-          "discovery, never ending silently; it never signals this process and signals only a live process "
+          "top-down from this process's own task children alone, repeated until two walks agree on pids and "
+          "visited tasks with no exit observed by the probes (the hook-timed double fork is re-walked, never "
+          "dropped, and a child moved by an exiting thread of a live process breaks the task agreement), reads "
+          "no unrelated pid, names a walk, an exit test or a liveness probe it cannot complete or settle once "
+          "as a /proc-scan problem, never as candidates, and names a witness write end still open with no "
+          "writer killed and nothing named as an unresolved discovery, never ending silently; it never "
+          "signals this process and signals only a live process "
           "that held the witness "
           "write end at the binding, observed through its pidfd (a write end dropped after the binding is a "
           "residual), and names every candidate it cannot evaluate (a known pid, or a walked descendant whose "
