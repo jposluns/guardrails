@@ -13,16 +13,24 @@ launcher words are removed. The recognized interpreter-only flags -I, -B, -E, -s
 -P, and -u, including glued forms such as -IB, do not affect identity. The value of a
 runtime-derived flag (--base, --protected, --head) is masked as <ref:expression>,
 preserving which expression supplied it, only in the CI workflow and only when it
-carries a shell expansion that is byte-for-byte one of the reviewed
-MASKED_REF_EXPRESSIONS (any other expansion there is cannot-evaluate, never masked),
-so a change among runtime spellings (including one making two refs identical, a
-self-comparison) diverges; a literal value stays in identity, so two different
-literals diverge. In the local runner every run_gate word is held to a character
-allowlist that admits no expansion at all, so a runtime-derived flag value there is
-refused, never masked. A ${{ }} GitHub expression inside a
-gate command is cannot-evaluate, not masked. Every other argument remains
-order-preserving and identity-relevant. Duplicates collapse because comparison is
-set-based.
+is byte-for-byte one of the reviewed MASKED_REF_EXPRESSIONS. A runtime-derived
+value is exactly one that carries $ or a backquote: any other such value is
+cannot-evaluate, never masked, a literal <ref:...> placeholder spelling included
+(the placeholder is the OUTPUT of this masking, accepted back only from the
+reviewed in-gate allowlist and its canonical identities, so a quoted <ref:...>
+literal in a workflow never collapses into a masked identity), and a change
+among the reviewed runtime spellings (including one making two refs identical,
+a self-comparison) diverges; a value carrying neither character stays in
+identity as a kept literal (a tilde, glob or brace word included), so two
+different literals diverge. In the local runner every run_gate word is held to
+a character allowlist that admits no expansion at all, so a runtime-derived
+flag value there is refused, never masked. A ${{ }} GitHub expression anywhere
+in a run: value is cannot-evaluate, not masked, read on the raw block line
+before shell-comment stripping (GitHub substitutes expressions into the script
+text before the shell runs, comments included, so a substituted value carrying
+a newline leaves the comment), so a whole-line or trailing shell comment
+carrying one is refused too. Every other argument remains order-preserving and
+identity-relevant. Duplicates collapse because comparison is set-based.
 
 REQUIRED STATUS (multi-job shape). The CI member set is the union over every job,
 so a gate moved from one job to another is still one member, and a gate dropped
@@ -704,25 +712,26 @@ def _is_runtime_value(value):
     return "$" in value or "`" in value
 
 
-def _mask_value(value):
-    """Canonicalize a runtime-value-flag value as a Result. A runtime-derived value is
-    masked to <ref:expression>, preserving which expression supplied it so a change
-    among runtime spellings (including a self-comparison) diverges; a literal stays in
-    identity. The expression must be byte-for-byte one of MASKED_REF_EXPRESSIONS: bash
-    can assign or abort inside an expansion, so an unreviewed expression is refused,
-    never masked. An already-masked placeholder whose expression is reviewed passes
-    through unchanged so the form is idempotent, which the allowlist canonical-identity
-    check relies on."""
-    if value.startswith("<ref:") and value.endswith(">"):
-        expression = value[len("<ref:"):-1]
-        if expression not in MASKED_REF_EXPRESSIONS:
-            return Result(
-                False,
-                None,
-                "masked-value",
-                "masked expression {!r} is outside the reviewed "
-                "MASKED_REF_EXPRESSIONS allowlist".format(expression),
-            )
+def _mask_value(value, masked_ok=False):
+    """Canonicalize a runtime-value-flag value as a Result. A runtime-derived value
+    (one carrying $ or a backquote) is masked to <ref:expression>, preserving which
+    expression supplied it so a change among runtime spellings (including a
+    self-comparison) diverges; a literal stays in identity. The expression must be
+    byte-for-byte one of MASKED_REF_EXPRESSIONS: bash can assign or abort inside an
+    expansion, so an unreviewed expression is refused, never masked. A <ref:...>
+    placeholder is the OUTPUT of this masking, accepted back only on the canonical
+    path (masked_ok=True: _validate_allowlist re-normalizing the reviewed in-gate
+    allowlist identities), where a placeholder of a reviewed expression passes
+    through unchanged so the form is idempotent there, which the allowlist
+    canonical-identity check relies on. A workflow value gets no placeholder
+    reading (FIX-551-R7): a <ref:...> spelling carrying $ or a backquote is
+    screened like any other value and refused, because no whole placeholder is in
+    MASKED_REF_EXPRESSIONS, so a quoted <ref:...> literal never collapses into the
+    masked identity of the expression it names; one carrying neither character
+    stays a kept literal, which no masked identity can equal (every reviewed
+    expression carries $)."""
+    if (masked_ok and value.startswith("<ref:") and value.endswith(">")
+            and value[len("<ref:"):-1] in MASKED_REF_EXPRESSIONS):
         return Result(True, value, "", "")
     if _is_runtime_value(value):
         if value not in MASKED_REF_EXPRESSIONS:
@@ -737,8 +746,10 @@ def _mask_value(value):
     return Result(True, value, "", "")
 
 
-def normalize(tokens):
-    """Return a canonical gate identity or a cannot-evaluate Result."""
+def normalize(tokens, masked_ok=False):
+    """Return a canonical gate identity or a cannot-evaluate Result. masked_ok=True
+    is the allowlist-identity path, the one place a <ref:...> placeholder of a
+    reviewed expression is accepted back (_mask_value)."""
     tokens = list(tokens)
     if not tokens:
         return Result(False, None, "empty-command", "gate command is empty")
@@ -812,7 +823,7 @@ def normalize(tokens):
                     "{} has no value".format(token),
                 )
             value = args[index + 1]
-            masked = _mask_value(value)
+            masked = _mask_value(value, masked_ok)
             if not masked.ok:
                 return masked
             canonical.extend((token, masked.value))
@@ -833,7 +844,7 @@ def normalize(tokens):
                     "{} has an empty value".format(matched_flag),
                 )
             value = token[len(matched_flag) + 1:]
-            masked = _mask_value(value)
+            masked = _mask_value(value, masked_ok)
             if not masked.ok:
                 return masked
             canonical.extend((matched_flag, masked.value))
@@ -2127,7 +2138,7 @@ def _edit_event_types(lines, source, diagnostics):
         # a verbatim-tag form, a multi-line explicit '?' key, and a BOM
         # before on); the strict top-level parser refuses each of them
         # (unknown-top-key, yaml-feature or text-format, exit 2), never
-        # reads them. The 34v vectors pin each end to end.
+        # reads them. The 35v vectors pin each end to end.
         candidate = key.strip()
         if candidate[:1] == "?" and candidate[1:2] in ("", " "):
             candidate = candidate[1:].strip()
@@ -2657,6 +2668,25 @@ def extract_ci(text, source=CI_SOURCE):
                             index += 1
                             continue
 
+                        if ("${{" in body_raw
+                                and len(body_raw)
+                                - len(body_raw.lstrip(" ")) > 8):
+                            # The RAW block line, before shell-comment
+                            # stripping (FIX-551-R7): GitHub substitutes
+                            # ${{ }} into the script text before the shell
+                            # runs, comments included, so a substituted
+                            # value carrying a newline leaves the comment.
+                            # A less-indented line ends the block instead.
+                            diagnostics.append(_diagnostic(
+                                source,
+                                body_number,
+                                "workflow-expression",
+                                "a GitHub expression inside run: is not "
+                                "statically evaluable",
+                            ))
+                            index += 1
+                            continue
+
                         body_code = _strip_comment(body_raw)
                         if not body_code.strip():
                             index += 1
@@ -2844,7 +2874,7 @@ def _validate_allowlist(rows):
                         where, exc),
                 ))
             else:
-                normalized = normalize(identity_tokens)
+                normalized = normalize(identity_tokens, masked_ok=True)
                 if (not normalized.ok
                         or normalized.value != identity):
                     diagnostics.append(_diagnostic(
@@ -6224,7 +6254,8 @@ def self_test():
               1, ("relocation",))
 
     # FIX-551-R6: the step-shell rule is pinned on msg-leaks.yml by its own
-    # vector. ci_fixture writes shell: bash into every step, so before this
+    # vector. ci_fixture writes shell: bash into every generated command
+    # step (not its checkout step or appended extra_steps), so before this
     # vector no case removed the line on the msg-leaks.yml side, and a
     # mutant applying _step_shell_findings to quality.yml alone passed every
     # vector. The findings must be exactly the one step-shell finding naming
@@ -6247,6 +6278,103 @@ def self_test():
         failures.append(
             "35w expected exactly one step-shell finding naming {}: "
             "{!r}".format(MSG_LEAKS_CI_SOURCE, shell_dropped.findings))
+
+    # FIX-551-R7 (PR 551 round-6 reviews, MAJOR): a ${{ }} GitHub expression
+    # anywhere in the RAW run: value is cannot-evaluate (workflow-expression),
+    # read before shell-comment stripping: GitHub substitutes expressions
+    # into the script text before the shell runs, comments included, so a
+    # substituted value carrying a newline leaves the comment. Before the
+    # change the three comment shapes below each passed with exit 0.
+    pr_title = "${{ github.event.pull_request.title }}"
+    for label, block_lines, on_quality in (
+            ("a whole-line comment in a run: block",
+             ("          # " + pr_title, "          echo ok"), True),
+            ("a trailing comment on a run: block line",
+             ("          echo ok # " + pr_title,), True),
+            ("a comment-only run: block on msg-leaks.yml",
+             ("          # " + pr_title,), False)):
+        expr_step = ("      - name: Expression carrier",
+                     "        " + STEP_SHELL_LINE,
+                     "        run: |") + block_lines
+        if on_quality:
+            expr_report = evaluate(
+                local_msg, with_on(ci_fixture(common, expr_step), defaults),
+                msg_waiver, msg_side)
+            expr_source = CI_SOURCE
+        else:
+            expr_report = evaluate(
+                local_msg, quality_side, msg_waiver,
+                ((MSG_LEAKS_CI_SOURCE, with_on(
+                    ci_fixture((msg_selftest, msg_scan), expr_step),
+                    edited)),))
+            expr_source = MSG_LEAKS_CI_SOURCE
+        case("35x a GitHub expression in a run: shell comment is "
+             "cannot-evaluate: " + label, expr_report, 2)
+        count += 1
+        if not any(item.source == expr_source
+                   and item.code == "workflow-expression"
+                   for item in expr_report.diagnostics):
+            failures.append(
+                "35x {}: no workflow-expression diagnostic from {}: "
+                "{!r}".format(label, expr_source, expr_report.diagnostics))
+    inline_expr = evaluate(
+        local_msg,
+        with_on(ci_fixture(common + ("echo " + pr_title,)), defaults),
+        msg_waiver, msg_side)
+    case("35x control: an inline run: expression stays refused", inline_expr,
+         2)
+    count += 1
+    if not any(item.code == "workflow-expression"
+               for item in inline_expr.diagnostics):
+        failures.append(
+            "35x control: no workflow-expression diagnostic: {!r}".format(
+                inline_expr.diagnostics))
+
+    # FIX-551-R7 (PR 551 round-6 reviews, MEDIUM): a <ref:...> placeholder is
+    # the OUTPUT of the masking; a workflow value is screened like any other,
+    # so a placeholder spelling carrying $ is cannot-evaluate (masked-value),
+    # never masked, and a quoted <ref:...> literal never collapses into the
+    # masked identity of the reviewed expression it names. Before the change
+    # both spellings below reconciled with exit 0 against the waiver,
+    # byte-identical to the identity the reviewed "$PUSH_BEFORE" masks to,
+    # while handing the gate a different byte string at runtime. The reviewed
+    # allowlist identities are the one place a placeholder is still accepted
+    # back (_validate_allowlist normalizes with masked_ok=True); the control
+    # pins that path together with the reviewed CI spelling.
+    leak_waiver = ({
+        "side": "ci-only",
+        "identity": "tools/check_leaks.py --base <ref:$PUSH_BEFORE>",
+        "reason": "fixture baseline: the scan reads the push base in CI",
+        "backlog": "T-34",
+    },)
+    for label, spelling in (
+            ("a double-quoted placeholder literal",
+             "--base \"<ref:$PUSH_BEFORE>\""),
+            ("a single-quoted placeholder literal",
+             "--base '<ref:$PUSH_BEFORE>'")):
+        spoofed = evaluate(
+            local_fixture(common),
+            ci_fixture(common + (
+                "python3 -I -B tools/check_leaks.py " + spelling,)),
+            leak_waiver)
+        case("35y a literal placeholder flag value is cannot-evaluate: "
+             + label, spoofed, 2)
+        count += 1
+        if not any(item.code == "masked-value"
+                   for item in spoofed.diagnostics):
+            failures.append(
+                "35y {}: no masked-value diagnostic: {!r}".format(
+                    label, spoofed.diagnostics))
+    case("35y control: the reviewed expression still masks and reconciles "
+         "with the placeholder waiver",
+         evaluate(
+             local_fixture(common),
+             ci_fixture(common + (
+                 "python3 -I -B tools/check_leaks.py "
+                 "--base \"$PUSH_BEFORE\"",)),
+             leak_waiver),
+         0, active={(
+             "ci-only", "tools/check_leaks.py --base <ref:$PUSH_BEFORE>")})
 
     if failures:
         print("SELF-TEST FAIL:")
