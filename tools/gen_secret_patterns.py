@@ -22,6 +22,19 @@ PREFIXES order is check_secrets.py's own list order, and each pattern and label 
 a stable canonical Python literal, so a second run makes no change.
 """
 import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    import os
+    try:
+        sys.stderr.write(
+            "error: gen_secret_patterns.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))

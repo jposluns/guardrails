@@ -80,10 +80,23 @@ Exit convention (matches the repo's gates):
   1  a real finding (a digest mismatch, a stale/absent evidence claim, or a forward-ratchet break)
   2  malformed input, a missing/unreadable artifact or evidence file, or a read error (fail-closed)
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    import os
+    try:
+        sys.stderr.write(
+            "error: check_artifact_checksums.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
 import hashlib
 import io
 import re
-import sys
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
@@ -262,10 +275,10 @@ def run(root):
 # --- self-test --------------------------------------------------------------------------------------
 # Deterministic temp-root fixtures in the house style (no wall clock; the temp-root path suffix is random but the verdict is not): the dormant path, the
 # D1 honesty catch, and each armed fail case (A1..A5, R1) run against a throwaway tree where a writable
-# tempdir exists, and are reported PARTIAL (never a false pass) where none does. The inertness companion
-# (a [release.artifacts] table is inert to gen_changelog and the monotonicity gate; check_versions reads
-# only the version, so it is inert by construction and not re-exercised here) is a pure in-memory check
-# that ALWAYS runs.
+# tempdir exists; where none does they are a NAMED NOT RUN failure (never a skip beside a PASS). The
+# inertness companion (a [release.artifacts] table is inert to gen_changelog and the monotonicity gate;
+# check_versions reads only the version, so it is inert by construction and not re-exercised here) is a
+# pure in-memory check that ALWAYS runs.
 
 _EVIDENCE_CLEAN = "<html><body><p>Checksum: pending</p></body></html>\n"
 
@@ -304,7 +317,43 @@ def _run_quiet(root):
         return run(root)
 
 
-def self_test_main():
+def _not_run(failures, case, cause):
+    """Record a self-test case that could not run as a NAMED failure (a counted cannot-evaluate that
+    fails the run), never a printed note beside a PASS: coverage that did not run is not coverage."""
+    failures.append("NOT RUN: {}: {}; coverage that did not run FAILS the self-test, never a silent "
+                    "PASS".format(case, cause))
+
+
+_TEMP_ROOT_CASES = ("the dormant and armed temp-root cases (dormant clean, D1, A1..A5, R1, empty table, "
+                    "invalid-UTF-8 evidence)")
+
+
+def _recorded(output, entry):
+    """True when entry heads a bullet on the SELF-TEST FAIL list in output: a recorded failure prints as
+    "  - <entry>" after that header, so a NOT RUN line that was only printed (never recorded) does not
+    count."""
+    _head, header, listed = output.partition("SELF-TEST FAIL:\n")
+    return bool(header) and "\n  - " + entry in "\n" + listed
+
+
+def _not_run_vector(failures):
+    """Red-on-revert vector for the temp-root skip that printed SELF-TEST PASS (PARTIAL) and exited 0:
+    a nested self-test run with an unavailable temp directory (mkdtemp raises OSError) must exit nonzero
+    AND carry the temp-root cases' NOT RUN bullet on its failure list (a bare printed line does not count)."""
+    def _unavailable(*_args, **_kwargs):
+        raise OSError("injected: no writable temp directory")
+
+    out = io.StringIO()
+    with redirect_stdout(out), redirect_stderr(io.StringIO()):
+        rc = self_test_main(_mkdtemp=_unavailable, _vectors=False)
+    want = "NOT RUN: {}: no writable temp directory".format(_TEMP_ROOT_CASES)
+    if rc == 0 or not _recorded(out.getvalue(), want):
+        failures.append("(NOT RUN vector) an unavailable temp directory must exit nonzero AND record {!r} on "
+                        "the failure list, never a PASS (PARTIAL) exit 0 or a bare printed line (got exit {})"
+                        .format(want, rc))
+
+
+def self_test_main(_mkdtemp=None, _vectors=True):
     failures = []
 
     # --- always-run inertness companion (pure, no filesystem) --------------------------------------
@@ -323,7 +372,7 @@ def self_test_main():
     if _releases_from_data(plain, "head") != _releases_from_data(with_artifacts, "head"):
         failures.append("inertness: the monotonicity gate extracts a different result with artifacts")
 
-    # --- temp-root cases (skipped with a note where no writable tempdir exists) --------------------
+    # --- temp-root cases (a NOT RUN failure where no writable tempdir exists) ------------------------
     import shutil
     import tempfile
 
@@ -335,16 +384,12 @@ def self_test_main():
         hx["aiqt-skill.zip"], hx["aiqt-instructions.txt"])
 
     try:
-        base_tmp = Path(tempfile.mkdtemp(prefix="aiqt-checksums-selftest-"))
-    except OSError:
+        base_tmp = Path((_mkdtemp or tempfile.mkdtemp)(prefix="aiqt-checksums-selftest-"))
+    except OSError as exc:
         base_tmp = None
+        _not_run(failures, _TEMP_ROOT_CASES, "no writable temp directory ({})".format(exc))
 
-    if base_tmp is None:
-        print("SELF-TEST NOTE: no writable temp directory; the dormant and armed temp-root cases were "
-              "SKIPPED (the inertness companion above still ran)", file=sys.stderr)
-        ran = False
-    else:
-        ran = True
+    if base_tmp is not None:
         try:
             # 1. dormant clean: no artifacts, evidence has no digest token -> exit 0.
             r = _build(base_tmp / "dormant-clean", [("1.0.0", None)], _EVIDENCE_CLEAN, content)
@@ -413,18 +458,18 @@ def self_test_main():
         finally:
             shutil.rmtree(base_tmp, ignore_errors=True)
 
+    if _vectors:
+        _not_run_vector(failures)
+
     if failures:
         print("SELF-TEST FAIL:")
         for f in failures:
             print("  - " + f)
         return 1
-    if ran:
-        print("SELF-TEST PASS: the inertness companion, the dormant clean path and D1 honesty catch, and "
-              "each armed fail case (A1 path, A2 malformed, A3 missing, A4 mismatch, A5 stale evidence, R1 "
-              "forward ratchet), and the invalid-UTF-8 evidence fail-closed all hold")
-    else:
-        print("SELF-TEST PASS (PARTIAL): the inertness companion holds; the dormant and armed temp-root "
-              "cases were SKIPPED (no writable temp directory), so those invariants are UNVERIFIED this run")
+    print("SELF-TEST PASS: the inertness companion, the dormant clean path and D1 honesty catch, and "
+          "each armed fail case (A1 path, A2 malformed, A3 missing, A4 mismatch, A5 stale evidence, R1 "
+          "forward ratchet), and the invalid-UTF-8 evidence fail-closed all hold; an unavailable temp "
+          "directory is a NOT RUN failure (nonzero exit), never a PASS (PARTIAL)")
     return 0
 
 

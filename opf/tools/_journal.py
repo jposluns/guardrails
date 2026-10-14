@@ -50,16 +50,21 @@ lifetime, is a tracked post-1.0.0 hardening.
 Exit convention of the CLIs built on this module: 0 clean/NA, 1 finding, 2 malformed or read error.
 
   _journal.py --self-test   the #378 close vectors and the descriptor-helper vectors (read-error
-                            conversion, quiet cleanup close)
+                            conversion, the stop_at_cap read bound, quiet cleanup close)
 """
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: _journal.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: _journal.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 import hashlib
 import json
@@ -239,12 +244,23 @@ def _open_parent(root_fd, relpath):
     return pfd, parts[-1]
 
 
-def _read_fd(fd, cap=None):
+def _read_fd(fd, cap=None, stop_at_cap=False):
     chunks = []
     total = 0
     while True:
+        if stop_at_cap and total == cap:
+            # stop_at_cap never reads a byte past the cap: at the cap the size of the opened file, not a
+            # further read, shows whether more remains, and a larger file is refused (a metered caller passes
+            # a byte allowance as the cap, so even one probing byte would exceed it).
+            try:
+                size = os.fstat(fd).st_size
+            except OSError as exc:
+                raise JournalError("cannot stat a contained file descriptor ({})".format(exc))
+            if size > cap:
+                raise JournalError("contained file exceeds the {}-byte read cap (fail-closed)".format(cap))
+            break
         try:
-            block = os.read(fd, _READ_CHUNK)
+            block = os.read(fd, min(_READ_CHUNK, cap - total) if stop_at_cap else _READ_CHUNK)
         except OSError as exc:
             # CLASS 1: a read error (EIO, EBADF, ...) mid-read is fail-closed, never a truncated or empty
             # result. Every contained reader (read_frames, read_lock_owner, _read_at, _read_contained)
@@ -327,11 +343,13 @@ def _read_at(pfd, name, relpath, cap=None):
         _close_fd_yielding(fd)
 
 
-def _read_contained(root_fd, relpath, require_single_link=False):
+def _read_contained(root_fd, relpath, require_single_link=False, cap=None):
     """Read a contained regular file's bytes through an O_NOFOLLOW fd, confirming on the opened fd that
     it is a regular file. JournalError on a symlink, a non-regular file, a missing path, or a read
-    error. When require_single_link is set the OPENED-fd stat must show exactly one hard link BEFORE any
-    byte is read: a store CONTROL file (a manifest or `.opf.toml`/`.opf.local.toml` pointer) hardlinked to
+    error. cap=None reads up to the product-file ceiling _MAX_PRODUCT_READ_BYTES; a given cap is a hard
+    limit the read never passes (_read_fd stop_at_cap), a larger file refused. When require_single_link
+    is set the OPENED-fd stat must show exactly one hard link BEFORE any byte is read: a store CONTROL
+    file (a manifest or `.opf.toml`/`.opf.local.toml` pointer) hardlinked to
     an out-of-tree victim passes O_NOFOLLOW and S_ISREG, and its resolved posture would then track the
     victim's inode, so it is refused here class-consistent with the journal's own frames.log nlink==1
     identity guard (SECI-symlink-resolution). The default is OFF, so a generic product read keeps an
@@ -361,6 +379,8 @@ def _read_contained(root_fd, relpath, require_single_link=False):
             raise JournalError("contained control file {!r} has {} hard links; refusing to read a "
                                "multiply-linked control file (a hardlink to an out-of-tree victim, never "
                                "our singly-linked control file)".format(relpath, st.st_nlink))
+        if cap is not None:
+            return _read_fd(fd, cap=cap, stop_at_cap=True), st
         return _read_fd(fd, cap=_MAX_PRODUCT_READ_BYTES), st
     finally:
         # Each close in its own try/finally (round-5 defect 3): a FILE close that reports an error must
@@ -416,14 +436,17 @@ def _fsync_contained_dir(pfd, name):
 
 def ensure_journal_dirs(root_fd, journal_rel):
     """J1 (journal-hierarchy crash durability): create every missing component of journal_rel beneath
-    root_fd, CONTAINED (an O_DIRECTORY|O_NOFOLLOW walk, mkdirat), fsyncing each newly-created directory's
-    PARENT fd immediately after creating it, so the COMPLETE journal hierarchy is durable BEFORE any INTENT
-    or apply begins. Without the per-parent fsync a power loss could make an applied tree mutation durable
-    (apply_ops fsyncs each touched file AND its parent) while the never-fsynced journal subtree is lost, so
-    a fresh recover would find no journal and falsely report 'nothing to recover' for a transaction whose
-    tree mutation had already begun. Idempotent: an already-present component is descended into, not
-    re-created (its durability was established when it was made). A symlinked or non-directory component
-    fails closed (JournalError), consistent with the engine's no-follow containment idiom."""
+    root_fd, CONTAINED (an O_DIRECTORY|O_NOFOLLOW walk, mkdirat), fsyncing each component's PARENT fd
+    on EVERY call, for a component that was already present as well as one this call creates, so the
+    COMPLETE journal hierarchy is durable BEFORE any INTENT or apply begins and a retry repairs an
+    earlier attempt interrupted between a mkdir and its parent fsync: that component exists, but its
+    entry was never made durable, so presence cannot stand in for durability. Without the per-parent
+    fsync a power loss could make an applied tree mutation durable (apply_ops fsyncs each touched file
+    AND its parent) while the never-fsynced journal subtree is lost, so a fresh recover would find no
+    journal and falsely report 'nothing to recover' for a transaction whose tree mutation had already
+    begun. Idempotent in effect: an already-present component is descended into, not re-created, and
+    its parent entry is flushed again. A symlinked or non-directory component fails closed
+    (JournalError), consistent with the engine's no-follow containment idiom."""
     parts = _check_rel(journal_rel)
     cur = root_fd
     opened = []
@@ -433,13 +456,13 @@ def ensure_journal_dirs(root_fd, journal_rel):
                 nfd = os.open(comp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=cur)
             except FileNotFoundError:
                 os.mkdir(comp, 0o777, dir_fd=cur)             # create the single missing component
-                os.fsync(cur)                                 # J1: its entry durable in the PARENT first
                 nfd = os.open(comp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=cur)
             except OSError as exc:
                 raise JournalError("cannot open/create journal component {!r} of {!r} ({})"
                                    .format(comp, journal_rel, exc))
             opened.append(nfd)
-            cur = nfd
+            os.fsync(cur)                                 # J1: the entry durable in the PARENT on EVERY
+            cur = nfd                                     # call: a retry repairs an interrupted attempt
     finally:
         for fd in opened:
             _close_fd_quietly(fd)                         # guarded: a raising close never aborts the rest
@@ -990,6 +1013,39 @@ def release_lock(journal_root):
     _fsync_path_dir(journal_root)
 
 
+def _listdir_fresh(held_fd, label):
+    """The entry names of the directory held open at `held_fd`, read through a FRESH descriptor opened
+    as "." beneath it for this listing alone (F-JOURNAL-HELD-FD-LISTING). os.listdir(fd) and
+    os.scandir(fd) read through a dup that SHARES the given descriptor's open file description -- its
+    directory read offset and, on btrfs, a readdir upper bound the kernel snapshots when the directory
+    is opened -- so a listing through a descriptor held from an earlier open or listing can miss every
+    entry created since that open (an entry created after the open reads as absent). The "." open
+    resolves RELATIVE to held_fd inside the kernel, so it reaches exactly the directory the held
+    descriptor identifies without re-resolving any path (the held descriptor's swap/race protection is
+    kept: a rename or decoy at the directory's path cannot divert it), and it carries a fresh open file
+    description whose view includes every entry up to THIS open. The fresh descriptor is closed on
+    every path, exactly once. An OSError opening or listing is wrapped in a contextual JournalError
+    (fail-closed). The enumeration itself stays os.scandir, so an injected scandir fault still
+    exercises the fail-closed wrap (F-R18-OSESC). Behaviour change, in the fail-closed direction: the
+    "." open checks the directory's permissions again at listing time, where a listing through the
+    held descriptor relied on the check made at its open, so a directory made unreadable after the held
+    open (mode 000, say) now raises JournalError here (doctor reports MALFORMED, pin blocks, store
+    discovery is CANNOT-EVALUATE) where the held listing would have returned its entries. A held
+    directory removed since its open lists as empty either way. Each caller's self-test drives this
+    helper under _StStaleListing, which serves the stale view on any filesystem."""
+    try:
+        lfd = os.open(".", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=held_fd)
+    except OSError as exc:
+        raise JournalError("cannot reopen {} for a fresh listing ({}); fail-closed".format(label, exc))
+    try:
+        with os.scandir(lfd) as it:
+            return [entry.name for entry in it]
+    except OSError as exc:
+        raise JournalError("cannot list {} ({}); fail-closed".format(label, exc))
+    finally:
+        _close_fd_quietly(lfd)
+
+
 def _journal_txn_dirs(jr_fd, journal_root, strict=False, hold=False):
     """The transaction subdirectories of a journal root, sorted (the reconcile order). Skips the lock and
     arbitration files and any stray non-directory entry. A symlinked entry is REFUSED (JournalError), not
@@ -1008,22 +1064,29 @@ def _journal_txn_dirs(jr_fd, journal_root, strict=False, hold=False):
     they are closed here).
 
     F-R18-JTOCTOU: enumerate and classify FD-RELATIVE to the TRUSTED, already-open journal-root descriptor
-    (os.scandir(jr_fd), os.lstat(name, dir_fd=jr_fd)), never by re-resolving the journal PATH. A path-based
+    (a fresh "." listing descriptor opened beneath jr_fd, os.lstat(name, dir_fd=jr_fd)), never by
+    re-resolving the journal PATH. A path-based
     Path(journal_root).iterdir() FOLLOWS the journal path at enumeration time, so a swapped journal ANCESTOR
     (a symlink to an empty decoy) planted between the open and the listing would report false-clean (an open
     txn is missed and the caller reads the journal as 'all terminal'). Binding the enumeration to jr_fd keeps
     it on the same directory identity every other journal op is bound to; `journal_root` is used only to build
     the returned entry paths whose basenames the contained per-txn opens resolve beneath jr_fd.
+    F-JOURNAL-HELD-FD-LISTING: the enumeration reads through a FRESH descriptor opened as "." beneath
+    jr_fd for each listing (_listdir_fresh), NEVER through the held jr_fd itself: a listing read through
+    a descriptor held from an earlier open or listing can miss a transaction directory created after
+    that open (on btrfs the kernel snapshots a readdir upper bound when the directory is opened). A
+    missed OPEN transaction here is not recovered by the stale-lock reconcile, which lists twice: when
+    its validation listing sees the transaction it refuses to break the stale lock (the observed parent
+    behaviour on btrfs: fail-closed, recovery unavailable), and only when both listings miss it does it
+    read the journal as 'all terminal' and break the lock with the transaction still open.
+    The "." open resolves relative to jr_fd inside the kernel, so the enumeration keeps jr_fd's
+    directory identity with no path re-resolution.
     F-R18-OSESC: a listing or entry-stat OSError (e.g. EIO) is wrapped in a contextual JournalError
     (fail-closed), never left to escape as a raw OSError (CLI exit 1 + traceback); the CLI maps it to exit 2,
     _all_terminal to False, and _latest_txn to its documented failure."""
     out = []
     try:
-        try:
-            with os.scandir(jr_fd) as it:
-                names = sorted(e.name for e in it)
-        except OSError as exc:
-            raise JournalError("cannot list journal dir contained ({}); fail-closed".format(exc))
+        names = sorted(_listdir_fresh(jr_fd, "journal dir contained"))
         for name in names:
             try:
                 est = os.lstat(name, dir_fd=jr_fd)
@@ -2264,17 +2327,71 @@ def _st_fcntl():
     return fcntl
 
 
+class _StCensusError(RuntimeError):
+    """The descriptor census could not read a descriptor: cannot-evaluate, never a closed descriptor."""
+
+
 def _st_fd_table():
     """The open descriptors below 1024 and the file each names, so a leak is found even when its number
-    is reused by a different file."""
+    is reused by a different file. Each is keyed on (st_dev, st_ino, anonymous-inode kind): anonymous-inode
+    descriptors of many kinds share one (st_dev, st_ino), so the kind, read from the descriptor's /proc/self/fd
+    link ("anon_inode:[eventpoll]", "anon_inode:[eventfd]"; None for any other file), is what tells an epoll
+    descriptor from an eventfd put at its number. Residual: two anonymous-inode descriptors of the same kind
+    share every field, so one replaced at its number by another of its own kind still reads as unchanged; and
+    where /proc/self/fd does not exist (not Linux, or Linux without /proc mounted) every link read is ENOENT,
+    so the kind is None throughout and the table is keyed on (st_dev, st_ino) alone. Only EBADF on the fstat
+    reads as closed, and only ENOENT on the link read (the number has no entry: closed since its fstat) reads
+    as no kind; any other read error raises _StCensusError naming the descriptor, never omitting it as closed
+    (a leak check fails closed on input it cannot read)."""
+    import errno
     table = {}
     for fd in range(1024):
         try:
             st = os.fstat(fd)
-        except OSError:
-            continue
-        table[fd] = (st.st_dev, st.st_ino)
+        except OSError as exc:
+            if exc.errno == errno.EBADF:
+                continue
+            raise _StCensusError("descriptor census cannot evaluate descriptor {}: {!r}".format(fd, exc))
+        try:
+            link = os.readlink("/proc/self/fd/{}".format(fd))
+        except OSError as exc:
+            if exc.errno != errno.ENOENT:
+                raise _StCensusError("descriptor census cannot evaluate descriptor {}: {!r}".format(fd, exc))
+            link = ""
+        table[fd] = (st.st_dev, st.st_ino, link if link.startswith("anon_inode:") else None)
     return table
+
+
+def _st_anon_reuse(table):
+    """(detected, shared) for an anonymous-inode replacement, or None where there is no epoll or eventfd (not
+    Linux): a held epoll descriptor is in the baseline, then an eventfd is put at its number (dup2).
+    `detected` is whether `table()` reads that as a change; `shared` is whether the two have one (st_dev,
+    st_ino), where a table of those alone reads the replacement as unchanged and only the anonymous-inode
+    kind tells them apart. Every descriptor it opens is closed once on every path: `held` is owned from the
+    dup on, under the finally that also covers the epoll's own close, so a raising close leaves nothing open."""
+    import select
+    if not hasattr(select, "epoll") or not hasattr(os, "eventfd"):
+        return None
+    poll = select.epoll()
+    held = None
+    try:
+        try:
+            held = os.dup(poll.fileno())
+        finally:
+            poll.close()
+        before = os.fstat(held)
+        baseline = table()
+        other = os.eventfd(0)
+        try:
+            os.dup2(other, held)
+        finally:
+            os.close(other)
+        after = os.fstat(held)
+        shared = (before.st_dev, before.st_ino) == (after.st_dev, after.st_ino)
+        return table() != baseline, shared
+    finally:
+        if held is not None:
+            os.close(held)
 
 
 def _st_close_run(call, masking, expect, watch=True):
@@ -2558,6 +2675,205 @@ def _st_watch_drop_check():
     return failures, runs
 
 
+# F-JOURNAL-HELD-FD-LISTING: the deterministic stale-listing seam. A listing read through a held directory
+# descriptor can miss every entry created since that descriptor was opened, but only on some filesystems
+# (btrfs does; tmpfs does not), so a vector that relies on the native behaviour discriminates only where its
+# fixture happens to sit. Under this seam the stale view is served on ANY filesystem, so each fresh-descriptor
+# listing site's vector fails if that site lists through the held descriptor or through a dup of it.
+
+class _StStaleScandir:
+    """The STALE view of a real os.scandir iterator: only the entries named at _StStaleListing.hold() (the
+    real DirEntry objects, filtered), with the iterator's context-manager and close behaviour."""
+
+    def __init__(self, it, names):
+        self._it, self._names = it, names
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        for entry in self._it:
+            if entry.name in self._names:
+                return entry
+        raise StopIteration
+
+    def close(self):
+        self._it.close()
+
+
+class _StStaleListing:
+    """A deterministic model of a STALE directory listing (F-JOURNAL-HELD-FD-LISTING), so a vector proves
+    that a listing reads through a FRESH descriptor whatever filesystem its fixture is on.
+
+    hold(fd) records a held directory descriptor and the entry names its directory had at that moment (a
+    vector calls it right after the open, before it creates the late entry). While the seam is entered (with
+    seam:), a listing (os.listdir or os.scandir given an int) of a held directory is served
+      STALE (only the entries named at hold(), less any since removed) through the held descriptor itself and
+      through ANY descriptor that shares its open file description (os.dup, os.dup2, fcntl F_DUPFD and
+      F_DUPFD_CLOEXEC). Sharing is decided by the kernel, not by bookkeeping: O_NONBLOCK, a status flag of
+      the open file description, is flipped on the listed descriptor and read back on the held one;
+      CURRENT (the real listing) only through a descriptor os.open returned for "." relative to the held one
+      (dir_fd=held) that shares no open file description with a held one;
+      STALE through any other descriptor of the held directory (a path-based reopen, say).
+    Listings of any other directory, and of a path, are the real ones. Each decision is appended to `views`
+    ("stale" or "current"), so a vector can also require that every listing of the held directory was fresh.
+    hold_on_open(match, after) holds the first descriptor os.open returns for which match(path, kwargs) is
+    true and then calls after(fd): the vector's late entry, created inside the code's own open-to-list
+    window. recording(opener) wraps an opener captured before the seam was entered (one that bypasses the
+    patched os.open) so its "." opens are recorded too. The seam's own vectors: _st_stale_listing_check.
+
+    Imported only by a self-test; nothing here runs on a production path."""
+
+    def __init__(self):
+        self.held = {}                            # fd -> ((st_dev, st_ino), the entry names at hold())
+        self.fresh = {}                           # fd -> (st_dev, st_ino) of the held directory it reopens
+        self.views = []
+        self._match = self._after = None
+        self._saved = None
+        self._real_open, self._real_close = os.open, os.close
+        self._real_listdir, self._real_scandir = os.listdir, os.scandir
+
+    def _ident(self, fd):
+        st = os.fstat(fd)
+        return (st.st_dev, st.st_ino)
+
+    def hold(self, fd):
+        lfd = self._real_open(".", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+        try:
+            names = frozenset(self._real_listdir(lfd))
+        finally:
+            self._real_close(lfd)
+        self.held[fd] = (self._ident(fd), names)
+
+    def hold_on_open(self, match, after):
+        self._match, self._after = match, after
+
+    def _note(self, fd, path, kwargs):
+        parent = kwargs.get("dir_fd")
+        if path == "." and parent in self.held:
+            self.fresh[fd] = self.held[parent][0]
+        elif self._match is not None and self._match(path, kwargs):
+            self._match = None
+            self.hold(fd)
+            self._after(fd)
+
+    def recording(self, opener):
+        def recorded(path, flags, *args, **kwargs):
+            fd = opener(path, flags, *args, **kwargs)
+            self._note(fd, path, kwargs)
+            return fd
+        return recorded
+
+    def _shares(self, fd, held):
+        before, mine = os.get_blocking(held), os.get_blocking(fd)
+        os.set_blocking(fd, not mine)
+        try:
+            return os.get_blocking(held) != before
+        finally:
+            os.set_blocking(fd, mine)
+
+    def _view(self, fd):
+        ident = self._ident(fd)
+        held = [h for h, (hid, _names) in self.held.items() if hid == ident]
+        if not held:
+            return None, None
+        for h in held:
+            if fd == h or self._shares(fd, h):
+                return "stale", self.held[h][1]
+        if self.fresh.get(fd) == ident:
+            return "current", None
+        return "stale", self.held[held[0]][1]
+
+    def _listing(self, real, args, kwargs, wrap):
+        target = args[0] if args else kwargs.get("path")
+        view, names = self._view(target) if isinstance(target, int) else (None, None)
+        if view is None:
+            return real(*args, **kwargs)
+        self.views.append(view)
+        listed = real(*args, **kwargs)
+        return listed if view == "current" else wrap(listed, names)
+
+    def _open(self, path, flags, *args, **kwargs):
+        return self.recording(self._real_open)(path, flags, *args, **kwargs)
+
+    def _close(self, fd):
+        self.held.pop(fd, None)
+        self.fresh.pop(fd, None)
+        self._real_close(fd)
+
+    def _listdir(self, *args, **kwargs):
+        return self._listing(self._real_listdir, args, kwargs,
+                             lambda listed, names: [name for name in listed if name in names])
+
+    def _scandir(self, *args, **kwargs):
+        return self._listing(self._real_scandir, args, kwargs, _StStaleScandir)
+
+    def __enter__(self):
+        self._saved = (os.open, os.close, os.listdir, os.scandir)
+        os.open, os.close, os.listdir, os.scandir = self._open, self._close, self._listdir, self._scandir
+        return self
+
+    def __exit__(self, *exc):
+        os.open, os.close, os.listdir, os.scandir = self._saved
+
+
+def _st_stale_listing_check(base):
+    """The stale-listing seam's own vectors, on whatever filesystem `base` (an existing directory) is on: with
+    `early` present at hold() and `late` created after it, the held descriptor, an os.dup, an os.dup2, a fcntl
+    F_DUPFD and F_DUPFD_CLOEXEC dup of it and a path-based reopen each list only `early` (os.listdir and
+    os.scandir), a "." reopen relative to the held descriptor lists both, and an unrelated directory lists
+    its real entries; leaving the seam restores the os functions. Returns (failures, checks)."""
+    import fcntl
+    root = os.path.join(base, "stale-listing-seam")
+    os.makedirs(os.path.join(root, "dir", "early"))
+    os.makedirs(os.path.join(root, "other", "entry"))
+    failures, checks, fds = [], 0, []
+    try:
+        held = os.open(os.path.join(root, "dir"), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        fds.append(held)
+        with _StStaleListing() as seam:
+            seam.hold(held)
+            os.mkdir("late", dir_fd=held)
+            spare = os.open(os.devnull, os.O_RDONLY)
+            fds.append(spare)
+            os.dup2(held, spare)
+            cases = [("held", held, ["early"]), ("os.dup2", spare, ["early"])]
+            for label, opener, want in (
+                    ("os.dup", lambda: os.dup(held), ["early"]),
+                    ("F_DUPFD", lambda: fcntl.fcntl(held, fcntl.F_DUPFD, 0), ["early"]),
+                    ("F_DUPFD_CLOEXEC", lambda: fcntl.fcntl(held, fcntl.F_DUPFD_CLOEXEC, 0), ["early"]),
+                    ("path reopen", lambda: os.open(os.path.join(root, "dir"), os.O_RDONLY | os.O_DIRECTORY),
+                     ["early"]),
+                    ("fresh '.' reopen", lambda: os.open(".", os.O_RDONLY | os.O_DIRECTORY, dir_fd=held),
+                     ["early", "late"]),
+                    ("unrelated", lambda: os.open(os.path.join(root, "other"), os.O_RDONLY | os.O_DIRECTORY),
+                     ["entry"])):
+                fds.append(opener())                  # recorded at once, so the finally closes it
+                cases.append((label, fds[-1], want))
+            for label, number, want in cases:
+                with os.scandir(number) as it:
+                    scanned = sorted(entry.name for entry in it)
+                for listing, got in (("os.listdir", sorted(os.listdir(number))), ("os.scandir", scanned)):
+                    checks += 1
+                    if got != want:
+                        failures.append("stale-listing seam: {} through the {} descriptor: expected {}, got "
+                                        "{}".format(listing, label, want, got))
+        checks += 1
+        if (os.open, os.close, os.listdir, os.scandir) != (seam._real_open, seam._real_close,
+                                                           seam._real_listdir, seam._real_scandir):
+            failures.append("stale-listing seam: leaving the seam did not restore the os functions")
+    finally:
+        for fd in fds:
+            os.close(fd)
+    return failures, checks
+
+
 def _st_site_vectors(base):
     """One representative finally site (_read_at), one except-handler site (_read_contained), and V3, the
     sibling closes of a contained-walk cleanup loop (_open_dir_contained)."""
@@ -2708,30 +3024,189 @@ def _st_n2d():
     return returned, closes == [-1]
 
 
+def _st_fd_table_eio(seam="fstat", code=None):
+    """F1, F3 and F4: the descriptor census fails closed. A held /dev/null descriptor is listed by
+    _st_fd_table; with its census read failing errno `code` (EIO by default; os.<seam>: its fstat, F1, or the
+    readlink of its /proc/self/fd link, F3) the table must raise _StCensusError naming it, never omit it as
+    closed. The one exception is ENOENT on the link read (F4: the number has no entry), where the table must
+    list the descriptor with no kind (None). An independent fstat must still see it open afterwards, else
+    the check proves nothing."""
+    import errno
+    code = errno.EIO if code is None else code
+    fd = os.open(os.devnull, os.O_RDONLY)
+    saved_fstat, saved_readlink = os.fstat, os.readlink
+    saved_seam = saved_readlink if seam == "readlink" else saved_fstat
+
+    def failing_seam(number, *args, **kwargs):
+        if number in (fd, "/proc/self/fd/{}".format(fd)):
+            raise OSError(code, "injected census read failure")
+        return saved_seam(number, *args, **kwargs)
+
+    try:
+        listed = fd in _st_fd_table()
+        if seam == "readlink":
+            os.readlink = failing_seam
+        else:
+            os.fstat = failing_seam
+        try:
+            table = _st_fd_table()
+            got = "omitted" if fd not in table else "no-kind" if table[fd][2] is None else "kind"
+        except _StCensusError as exc:
+            got = "raised" if "descriptor {}:".format(fd) in str(exc) else "unnamed"
+        finally:
+            os.fstat, os.readlink = saved_fstat, saved_readlink
+        try:
+            saved_fstat(fd)
+            still_open = True
+        except OSError:
+            still_open = False
+    finally:
+        os.close(fd)
+    want = "no-kind" if (seam, code) == ("readlink", errno.ENOENT) else "raised"
+    return listed and still_open and got == want
+
+
+def _st_anon_reuse_close_fault():
+    """F5: _st_anon_reuse leaves no descriptor open when its epoll's close raises. select.epoll is wrapped so
+    close() closes the real epoll and then raises OSError(EIO); the call must raise that error, and the
+    descriptor census must read as it did before the call. None where there is no epoll or eventfd (not
+    Linux)."""
+    import errno
+    import select
+    if not hasattr(select, "epoll") or not hasattr(os, "eventfd"):
+        return None
+    real_epoll = select.epoll
+
+    class RaisingEpoll:
+        def __init__(self):
+            self.real = real_epoll()
+
+        def fileno(self):
+            return self.real.fileno()
+
+        def close(self):
+            self.real.close()
+            raise OSError(errno.EIO, "injected epoll close failure")
+
+    before = _st_fd_table()
+    select.epoll = RaisingEpoll
+    try:
+        _st_anon_reuse(_st_fd_table)
+        raised = False
+    except OSError as exc:
+        raised = exc.errno == errno.EIO
+    finally:
+        select.epoll = real_epoll
+    return raised and _st_fd_table() == before
+
+
+def _st_stop_at_cap():
+    """R1-stop-at-cap: _read_fd with stop_at_cap set never asks os.read for a byte past the cap, so it
+    never reads one, and never asks for zero bytes (at the cap the opened file size, not a read, shows
+    whether more remains). Over regular files in a temporary directory: a file of exactly the cap returns
+    its bytes; a file one byte over the cap and a non-empty file under a zero cap are each a JournalError,
+    never a truncated result; an empty file under a zero cap returns empty with no read. Each leg opens its
+    own descriptor and closes it once, and the patched os.read is restored in a finally. Returns
+    (exact, over, zero_empty, zero_over)."""
+    import shutil
+    import tempfile
+    base = tempfile.mkdtemp(prefix="aiqt-journal-stop-at-cap-")
+    saved_read = os.read
+
+    def leg(data, cap):
+        path = os.path.join(base, "file")
+        with open(path, "wb") as handle:
+            handle.write(data)
+        asked, taken = [], [0]
+
+        def counted_read(fd, n):
+            asked.append(n)
+            block = saved_read(fd, n)
+            taken[0] += len(block)
+            return block
+
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            os.read = counted_read
+            try:
+                got = _read_fd(fd, cap=cap, stop_at_cap=True)
+            except JournalError:
+                got = None
+            finally:
+                os.read = saved_read
+        finally:
+            os.close(fd)
+        return got, taken[0], asked
+
+    try:
+        results = []
+        for data, cap, want in ((b"123456", 6, b"123456"), (b"1234567", 6, None), (b"", 0, b""),
+                                (b"x", 0, None)):
+            got, taken, asked = leg(data, cap)
+            results.append(got == want and taken <= cap and sum(asked) <= cap and 0 not in asked)
+        return tuple(results)
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
 def _st_descriptor_helper_checks():
     """Descriptor-helper vectors, ported from the retired import engine's self-test (their only former
     home), each driving the helper directly, with a patched os primitive where the contract needs one:
       C1-osread  _read_fd converts a read-time OSError to a JournalError, never a raw OSError or a
                  truncated result (with a positive control: a readable descriptor returns its bytes).
+      R1         _read_fd with stop_at_cap never asks for or reads a byte past the cap, nor asks for zero:
+                 an exact fit returns its bytes, one byte over and a non-empty file under a zero cap refuse,
+                 and an empty file under a zero cap returns empty with no read (_st_stop_at_cap).
       N2a        _close_fd_quietly swallows a close-time EBADF rather than propagating it.
       N2d        _close_fd_quietly never raises and closes exactly once (P1, #378): its one close fails while
                  stderr itself is broken, and the helper still returns without a second close.
-    No store, no journal and no subprocess; every patched primitive is restored in a finally, and each
-    leg's descriptors are its own, closed once. Returns (failures, checks)."""
+      F1         _st_fd_table fails closed: a census fstat of a held descriptor failing EIO, EACCES, EPERM
+                 or ENOENT (anything but EBADF) raises naming it.
+      F2         _st_fd_table reads an eventfd put at an epoll descriptor's number (dup2) as a change, by
+                 its anonymous-inode kind; the flip, a table of (st_dev, st_ino) alone, must read it as
+                 unchanged wherever the two share an inode. Run where epoll and eventfd exist (Linux).
+      F3         _st_fd_table fails closed: a read of a held descriptor's /proc/self/fd link failing EIO,
+                 EACCES, EPERM or EBADF (anything but ENOENT) raises naming it.
+      F4         _st_fd_table lists a held descriptor whose link read fails ENOENT with no kind (None).
+      F5         _st_anon_reuse leaves no descriptor open when its epoll's close raises. Run where epoll
+                 and eventfd exist (Linux).
+    No store, no journal and no subprocess (R1 alone writes temporary files, removed after it); every
+    patched primitive is restored in a finally, and each leg's descriptors are its own, closed once.
+    Returns (failures, checks)."""
+    import errno
     n2d_returned, n2d_single = _st_n2d()
+    cap_exact, cap_over, cap_zero_empty, cap_zero_over = _st_stop_at_cap()
     results = (("C1-osread-control-reads", _st_c1_control()),
                ("C1-osread-converts-to-journalerror", _st_c1_osread()),
+               ("R1-stop-at-cap-exact-fit-returns", cap_exact),
+               ("R1-stop-at-cap-over-refuses-at-cap", cap_over),
+               ("R1-stop-at-cap-zero-cap-empty-returns", cap_zero_empty),
+               ("R1-stop-at-cap-zero-cap-nonempty-refuses", cap_zero_over),
                ("N2a-close-quietly-swallows-oserror", _st_n2a()),
                ("N2d-close-quietly-nonthrow", n2d_returned),
-               ("N2d-close-quietly-single-close", n2d_single))
+               ("N2d-close-quietly-single-close", n2d_single),
+               ("F1-fd-table-eio-fails-closed", _st_fd_table_eio()),
+               ("F3-fd-table-readlink-eio-fails-closed", _st_fd_table_eio("readlink")))
+    results += tuple(("F1-fd-table-{}-fails-closed".format(errno.errorcode[code].lower()),
+                      _st_fd_table_eio("fstat", code)) for code in (errno.EACCES, errno.EPERM, errno.ENOENT))
+    results += tuple(("F3-fd-table-readlink-{}-fails-closed".format(errno.errorcode[code].lower()),
+                      _st_fd_table_eio("readlink", code)) for code in (errno.EACCES, errno.EPERM, errno.EBADF))
+    results += (("F4-fd-table-readlink-enoent-no-kind", _st_fd_table_eio("readlink", errno.ENOENT)),)
+    anon = _st_anon_reuse(_st_fd_table)
+    if anon is not None:
+        detected, shared = anon
+        stat_only = _st_anon_reuse(lambda: dict((fd, ident[:2]) for fd, ident in _st_fd_table().items()))
+        results += (("F2-fd-table-anon-reuse-detected", detected),
+                    ("F2-fd-table-anon-reuse-flip-red", not shared or not stat_only[0]),
+                    ("F5-anon-reuse-close-fault-no-leak", _st_anon_reuse_close_fault()))
     return [name for name, ok in results if ok is not True], len(results)
 
 
 def self_test():
     """The #378 close vectors for the three close helpers (V1, V2), three representative _journal sites,
     and the sibling closes of a cleanup loop (V3), each green and each red under its flip; then the
-    descriptor-helper vectors (_st_descriptor_helper_checks). Returns 0 clean, 1 a failure, 2
-    cannot-evaluate."""
+    descriptor-helper vectors (_st_descriptor_helper_checks) and the stale-listing seam's own vectors
+    (_st_stale_listing_check, counted with them). Returns 0 clean, 1 a failure, 2 cannot-evaluate."""
     import shutil
     import tempfile
     try:
@@ -2744,9 +3219,18 @@ def self_test():
         failures, runs = _st_close_check(globals(), vectors)
         drop_failures, drop_runs = _st_watch_drop_check()
         failures, runs = failures + drop_failures, runs + drop_runs
+        seam_failures, seam_checks = _st_stale_listing_check(base)   # F-JOURNAL-HELD-FD-LISTING
+    except _StCensusError as exc:
+        print("SELF-TEST ERROR: {}".format(exc), file=sys.stderr)
+        return 2
     finally:
         shutil.rmtree(base, ignore_errors=True)
-    helper_failures, checks = _st_descriptor_helper_checks()
+    try:
+        helper_failures, checks = _st_descriptor_helper_checks()
+    except _StCensusError as exc:                 # a census that cannot read a descriptor: cannot-evaluate
+        print("SELF-TEST ERROR: {}".format(exc), file=sys.stderr)
+        return 2
+    helper_failures, checks = helper_failures + seam_failures, checks + seam_checks
     if failures or helper_failures:
         print("JOURNAL SELF-TEST: FAIL ({} of {} close-vector runs and {} of {} descriptor-helper checks "
               "failed)".format(len(failures), runs, len(helper_failures), checks))

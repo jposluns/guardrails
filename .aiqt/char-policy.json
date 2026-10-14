@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "id": "no-dashes",
+  "chars": {"\u2013": "en dash", "\u2014": "em dash"},
+  "advice": "use hyphens, commas, colons, semicolons, or parentheses",
+  "scope": [
+    {"tree": ".", "suffixes": [".md", ".mdc"], "skip": [".git", "node_modules", "__pycache__"]},
+    {"tree": ".aiqt/standards", "suffixes": [".toml"]},
+    {"tree": "plugin", "suffixes": [".py", ".json", ".toml"], "skip": [".git", "node_modules", "__pycache__"]},
+    {"tree": ".aiqt/core/hooks", "suffixes": [".py", ".json", ".toml"], "skip": [".git", "node_modules", "__pycache__"]},
+    {"file": "NOTICE"},
+    {"file": ".aiqt/attribution.toml"}
+  ]
+}

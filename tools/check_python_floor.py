@@ -5,6 +5,9 @@ floor of the pack's executable tooling, and every other statement of that floor 
 Legs, in order:
   source         the single source parses, carries exactly its declared keys, and names the decided
                  floor (FLOOR below; a change to either is a reviewed change to both).
+  switch         the single source keeps documentation-check at its decided value (DOCUMENTATION_CHECK
+                 below, true since the declarations unit switched it on), so turning the documentation
+                 check off is a finding (exit 1) and a reviewed change to this gate, never a silent pass.
   pins           every `python-version:` interpreter pin in .github/workflows/*.yml, in PIN_FILES (the
                  shipped adopter CI template and its inline copy) and in every local action file (each
                  action.yml or action.yaml under the tree outside SKIPPED_DIR_NAMES, and the target of
@@ -82,19 +85,113 @@ Legs, in order:
                  refused as missing. The line is judged as written, script text included, a
                  disclosed over-rejection.
   guard          each guarded-surfaces entrypoint opens with the canonical refusal guard, AST-matched
-                 against GUARD_TEMPLATE with the file's own basename and the floor; only a module
-                 docstring and `from __future__` imports may precede its `import sys`.
+                 against GUARD_TEMPLATE with the file's own basename, the floor and its refusal exit (1
+                 for an entry also listed in nonblocking-surfaces, otherwise 2); only a module
+                 docstring and `from __future__` imports may precede its `import sys`. A HOOK_SURFACES
+                 entry (a hook whose events differ in the direction an error must fail) carries the
+                 hook form instead, HOOK_GUARD_TEMPLATE: a FLOOR_FAIL_OPEN_MODES tuple literal of
+                 sorted, unique mode names between `import sys` and the version test, and under the
+                 floor a mode in that literal warns (a systemMessage on stdout, exit 0) while any other
+                 argv (a PreToolUse handler, an unknown mode, no mode) refuses with the canonical
+                 refusal and exit 2, fixed: exit 1 does not block a PreToolUse call, so a HOOK_SURFACES
+                 entry listed in nonblocking-surfaces is cannot-evaluate at the source leg. The hook's
+                 own self-test holds the literal equal to its fail-open handlers. Both forms
+                 wrap each diagnostic write and its explicit flush (the stderr refusal, and the
+                 hook form's stdout warning) in try/except BaseException and exit through
+                 os._exit, which skips the interpreter-exit flush of the std streams, so the
+                 refusal exit depends on no stream's availability, write or flush; the two
+                 retired shapes (the bare write before `raise SystemExit`, and the wrapped write
+                 that still ended in `raise SystemExit`, whose exit a failing sys.stderr flush at
+                 interpreter exit replaced with CPython's own exit 120) do not match and are
+                 findings.
   dynamic        each guarded-surfaces entrypoint, run in a child (-I -B plus each of no flag, -O and
                  -OO) from a fresh empty working directory with sys.version_info patched to each of two
-                 versions below the floor, exits 2 with empty stdout and the exact refusal on stderr, and
+                 versions below the floor, exits with its refusal exit (as for the guard leg) with
+                 empty stdout and the exact refusal on stderr, and
                  leaves the working directory empty; the guard prefix alone, run at the floor's .0
-                 release and at the real interpreter version, continues.
-  completeness   OFF until the source sets completeness-check = true (the unit that guards the last
-                 shipped entrypoint switches it on): every shipped entrypoint, a .py file outside
-                 EXCLUDED_TREES with a module-level `if __name__ == "__main__":`, must be listed in
-                 guarded-surfaces.
-  documentation  OFF until the source sets documentation-check = true (the declarations unit switches
-                 it on): each DECLARATION_FILES entry must contain "Python <floor> or newer".
+                 release and at the real interpreter version, continues. A HOOK_SURFACES entry is also
+                 run (no flag, the first patched version) with each FLOOR_FAIL_OPEN_MODES mode, which
+                 must exit 0 with the exact warning on stdout and the refusal on stderr, and with
+                 DENY_PROBE_MODE, a mode outside the literal, which must refuse with exit 2.
+                 The refusal exit may not depend on the diagnostic write or its flush: each
+                 entrypoint is also run (no flag, the first patched version) under each
+                 STDERR_VECTORS condition (sys.stderr set to None, a sys.stderr whose write
+                 raises, a sys.stderr whose write succeeds but whose flush raises, and file
+                 descriptor 2 closed before the interpreter starts, which leaves sys.stderr
+                 None), and must still exit with its refusal exit with empty stdout and stderr;
+                 a HOOK_SURFACES entry must also still warn (exit 0, the exact warning on
+                 stdout) under each condition with its first FLOOR_FAIL_OPEN_MODES mode.
+  fallback       every .py file outside EXCLUDED_TREES (a directory in SKIPPED_DIR_NAMES is not
+                 walked): each handler of an import-time try or try/except* whose body holds an
+                 import (an import fallback, such as the shared tooling's tomllib fallback) is either
+                 the canonical refusal or a plain fallback. The canonical refusal is a grammar,
+                 matched statement by statement (is_canonical_fallback):
+                     if <exc>.name != "<module>":   optional; only in `except ModuleNotFoundError as
+                         raise                      <exc>` or `except ImportError as <exc>` (a named
+                                                    handler) of a plain try, not a try/except* (its
+                                                    handler receives an ExceptionGroup, which has no
+                                                    .name), and only when the try's body is exactly
+                                                    `import <module>` with <module> undotted (the
+                                                    module it guards)
+                     import os                      required: it binds the os that os._exit reads
+                     NAME = "<string literal>"      zero or more; NAME is not os, sys, BaseException
+                                                    or tuple
+                     try:
+                         sys.stderr.write(<message>)
+                         sys.stderr.flush()
+                     except BaseException:
+                         pass
+                     os._exit(<code>)               <code> the literal 2 or 1
+                 The diagnostic try may instead be the version split the shared tooling uses to
+                 choose its message: `if tuple(sys.version_info[:2]) < (<int literal>, ...):`, that
+                 one comparison (the guard's own), with an if branch and an else branch that are each
+                 exactly that try. <message> is a string literal, an f-string whose replacement
+                 fields are each a plain {NAME} with no format spec (a conversion such as !r is
+                 allowed), a NAME, or a + concatenation of those, each NAME bound by a binding
+                 above. The handler's own `as` name, when it has one, is not os, sys, BaseException
+                 or tuple, and the module binds sys by a module-level `import sys` statement that
+                 ends before the try begins (an aliased import, one inside a function, class, branch
+                 or try, and one after the try do not count). The grammar admits no other call,
+                 keyword argument, unpacking, operator or name, so while os, sys, tuple and
+                 BaseException name what they normally do (the residual below), evaluating the
+                 message and the version test calls no user code:
+                 neither can end the process, close a stream or raise an error of its own. A plain
+                 fallback holds, at import time, no call, raise, try, with, await, yield or assert,
+                 no decorated definition and no class with bases or keywords (`NAME = None`, `pass`,
+                 an alternative import, an undecorated def). Any other handler is a finding, so within
+                 the judged constructs and the residual below, a retired or altered refusal is a
+                 finding: `raise SystemExit`, sys.exit, exit or an aliased exit (a sys.stderr whose
+                 flush fails at CPython's interpreter-exit flush of the std streams replaces that
+                 exit with the interpreter's own exit 120), an unwrapped write or print (with the
+                 stream None the call raises out of the handler and the refusal exit is lost), a
+                 re-raise in the diagnostic's handler (exit 1), a missing flush or one before the
+                 write (os._exit skips the interpreter-exit flush, so the unflushed diagnostic is
+                 lost), a missing os._exit (the handler falls through), a message or version test
+                 outside the grammar (a call there can exec a clean exit, close sys.stderr or raise),
+                 a re-raise naming another module (the guarded module's own import error is
+                 re-raised, exit 1), a re-raise in an unnamed handler, after a from-import or under
+                 except* (it reads None.name, re-raises every import error, or reads the missing
+                 .name of an ExceptionGroup: exit 1), an `as` name that rebinds os, sys,
+                 BaseException or tuple, a sys with no module-level `import sys` before the try (a
+                 NameError: exit 1 in the version split, a diagnostic lost inside the wrapping try
+                 otherwise), a missing `import os` (a NameError, exit 1) and any extra statement.
+                 "Import time" follows _import_time_nodes: a class body runs when its class
+                 statement runs and is scanned, as are a def's decorators and a def's or lambda's
+                 default values; a function or lambda body (a method's included) runs only when
+                 called and is not scanned.
+  completeness   ON when the source sets completeness-check = true, as it does since the unit that
+                 guarded tools/check_entry_guard.py, the last shipped entrypoint, switched it on (off,
+                 an unlisted entrypoint is not a finding). The core-hook, preview-hook, adopter-tool
+                 and OPF enforcement deny-hook units and tools/check_entry_guard.py are listed. On,
+                 every shipped entrypoint, a .py file outside EXCLUDED_TREES with a module-level
+                 `if __name__ == "__main__":`, must be listed in guarded-surfaces.
+  documentation  ON (documentation-check = true, held by the switch leg): each DECLARATION_FILES entry
+                 must contain "Python <floor> or newer" as many times as DECLARATION_COPIES says
+                 (once by default), and each "Python <floor> or|and <word>" in it must be that phrase,
+                 so changing or removing one of two copies is a finding.
+  claims         ON with the documentation leg: no DECLARATION_FILES entry may name a Python version
+                 below the floor (OLDER_CLAIM_RE below), so an older claim beside the floor statement
+                 is a finding, naming file and line.
 
   check_python_floor.py              run every leg over this repository
   check_python_floor.py --self-test  fixture trees for every leg, plus red-on-revert: for each leg, a
@@ -137,10 +234,52 @@ run as a fork or copy under a name that does not name setup-python, which is not
 setup-python step; and a remote action, a remote reusable workflow
 (owner/repo/.github/workflows/x.yml@ref) and a docker:// image, whose content is not in the tree
 and is not read, so a setup-python step inside one is not seen. The leg scans only the files named
-above. The documentation leg matches the exact phrase, not its meaning.
+above. The documentation leg matches the exact phrase, not its meaning: a sentence that negates it
+("do not require Python 3.14 or newer") passes, and the phrase reflowed across a line break is a
+finding. A floor statement worded another way ("Python 3.14+", "at least 3.14") is caught only
+through the copy count, so it passes when it is added beside the declared copies. The claims leg
+reads only the forms OLDER_CLAIM_RE names: the word Python, CPython or Py (Py not after a dot, slash
+or hyphen; each optionally followed by "version" or "versions" and by an operator such as >=, the
+sign U+2265 or their HTML forms) or the interpreter name pythonM.N, followed by a version M.N, or
+followed by at least one space and a major version alone ("Python 3", read as 3.0); an operator
+followed by 3.N; and a bare 3.N followed by a plus sign, by "or" or "and" and then "newer", "later",
+"above", "higher", "greater" or "up", or by "onward" or "onwards". It does not read a version spelled
+in words, one separated from the word by markup other than whitespace and a no-break space, a bare
+3.N with none of those after it ("runs on 3.12"), the name python3 with no minor version, a bare
+version with a major other than 3, or the later end of a range ("Python 3.11 to 3.13" is a finding
+for 3.11 only). It judges every older version it reads, whatever the sentence
+says about it, so a sentence that names an older version only to say it is refused is also a finding,
+a disclosed over-rejection: state the floor without naming older versions. The fallback leg is a static
+AST match, a disclosed residual: it judges only a try whose own body holds an import statement, so a
+refusal in another import-time construct (a module-level if, a try around a call such as the MAP_KEYS
+binding in tools/gen_rules.py, whose refusal that tool's self-test pins by execution instead) is not
+judged. It does not resolve names beyond the bindings it names: an os, sys, tuple or BaseException
+rebound after the module-level `import sys` and before the handler runs, the try's own body included
+(the grammar refuses such a binding only in the handler's body and its `as` clause, and requires that
+an `import sys` precede the try, not that nothing rebinds sys after it), a sys.stderr replaced by an
+object whose write or flush runs its own code (the grammar fixes the calls, not the stream; the
+wrapping try catches what they raise, but one that ends the process is not seen), an implicit
+special-method call that runs user code in a plain fallback (an operator, attribute, subscript or
+iteration, f-string formatting through __format__ or a truth test through __bool__, among others), a
+metaclass hook of a class whose body holds the fallback, and code an imported module runs (the
+handler's `import os` included) are not seen.
 
 Run this gate isolated: python3 -I -B tools/check_python_floor.py
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    import os
+    try:
+        sys.stderr.write(
+            "error: check_python_floor.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
 import ast
 import importlib.util
 import json
@@ -148,7 +287,6 @@ import os
 import re
 import stat
 import subprocess
-import sys
 import tempfile
 import tomllib
 from pathlib import Path
@@ -160,8 +298,11 @@ SUITE_ID = "python-floor-selftest"
 # The decided floor. The source leg asserts the single source names it; every other leg reads the
 # floor from the single source.
 FLOOR = (3, 14)
-SOURCE_KEYS = {"format-version", "python-floor", "guarded-surfaces", "completeness-check",
-               "documentation-check"}
+# The decided value of the documentation-check switch. The switch leg asserts the single source keeps
+# it, so turning the documentation check off is a finding and a reviewed change to this gate too.
+DOCUMENTATION_CHECK = True
+SOURCE_KEYS = {"format-version", "python-floor", "guarded-surfaces", "nonblocking-surfaces",
+               "completeness-check", "documentation-check"}
 WORKFLOWS_REL = ".github/workflows"
 PIN_FILES = ("opf/enforcement/ci/github-actions.yml", "opf/tools/check_opf_doctor.py")
 PIN_KEY = "python-version"
@@ -236,28 +377,123 @@ SKIPPED_DIR_NAMES = {".git", "__pycache__", ".venv", "venv", "node_modules"}
 DECLARATION_FILES = ("README.md", "docs/development.md", "site/development.html", "site/install.html",
                      "opf/site/adopt.md", "opf/site/adopt.html", "opf/spec/OPF-QUICKSTART.md",
                      ".preview/README.md")
-SURFACE_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_][A-Za-z0-9_.-]*)*\.py")
+# How many times a declaration file states the floor phrase, where that is more than once: each copy is
+# counted, so changing or removing one of them is a finding.
+# .preview/README.md states it once and quotes it once in the hooks' refusal line.
+DECLARATION_COPIES = {".preview/README.md": 2, "opf/site/adopt.html": 2}
+# A separator the claims leg reads between words: whitespace, or a no-break space and its HTML forms.
+CLAIM_SEP = r"(?:\s|&nbsp;|&#160;)"
+# A version operator: >=, =>, ~=, ==, >, the sign U+2265, and their HTML forms.
+CLAIM_OP = r"(?:>=|=>|~=|==|>|\u2265|&gt;=|&gt;|&ge;|&#8805;|&#x2265;)"
+# The word before a version: Python or CPython, or Py when no dot, slash or hyphen precedes it (so a
+# file name such as x.py is not read), then optionally "version" or "versions" and an operator.
+CLAIM_WORD = (r"(?:(?<![A-Za-z0-9_])c?python|(?<![A-Za-z0-9_./-])py)(?:{0}*versions?)?{0}*(?:{1}{0}*)?v?"
+              .format(CLAIM_SEP, CLAIM_OP))
+# A Python version a declaration file names (the claims leg): the word, then a version M.N (the
+# interpreter name pythonM.N included); the word, at least one separator, then a major version alone
+# ("Python 3"); an operator then 3.N; or a bare 3.N followed by a plus sign, an "or newer" style
+# phrase or "onward".
+OLDER_CLAIM_RE = re.compile(
+    r"(?i)" + CLAIM_WORD + r"(?P<major>[0-9]+)\.(?P<minor>[0-9]+)"
+    r"|(?:(?<![A-Za-z0-9_])c?python|(?<![A-Za-z0-9_./-])py)(?:" + CLAIM_SEP + r"+versions?)?"
+    + CLAIM_SEP + r"+(?:" + CLAIM_OP + CLAIM_SEP + r"*)?v?(?P<only>[0-9]+)(?![0-9]|\.[0-9])"
+    r"|" + CLAIM_OP + CLAIM_SEP + r"*v?(?P<op>3)\.(?P<op_minor>[0-9]+)"
+    r"|(?<![0-9.])(?P<bare>3)\.(?P<bare_minor>[0-9]+)(?=\+|" + CLAIM_SEP + r"+(?:(?:or|and)" + CLAIM_SEP
+    + r"+(?:newer|later|above|higher|greater|up)|onwards?)\b)")
+# A repo-relative .py path. Each segment opens with at most one dot (a hidden directory such as .preview
+# or the .aiqt/ source tree) and then a letter, digit or underscore, so the pattern itself refuses an
+# empty, . or .. segment and a leading /. load_source also refuses a . or .. segment by splitting on /,
+# a second layer.
+SURFACE_RE = re.compile(r"\.?[A-Za-z0-9_][A-Za-z0-9_.-]*(?:/\.?[A-Za-z0-9_][A-Za-z0-9_.-]*)*\.py")
 FLOOR_RE = re.compile(r"([1-9][0-9]*)\.(0|[1-9][0-9]*)")
 FLAG_SETS = ((), ("-O",), ("-OO",))
 CHILD_TIMEOUT = 60
 CONTINUED = "CONTINUED"
-# The canonical guard. The CLI form: stdout stays empty and the process exits 2 (cannot evaluate).
+# The canonical guard. The CLI form: stdout stays empty and the process exits 2 (cannot evaluate). A
+# nonblocking-surfaces entry exits 1 instead: it is a hook whose event reads exit 2 as a block (a Stop
+# hook's exit 2 blocks the stop, and the guard runs before the hook's own block cap).
+REFUSAL_EXIT = 2
+NONBLOCKING_EXIT = 1
+# The refusal exit survives a failing diagnostic stream end to end. The stderr write and its
+# explicit flush are wrapped in try/except BaseException: sys.stderr can be None (Python leaves it
+# None when file descriptor 2 is invalid at interpreter startup), its write can raise, and its
+# flush can raise; an unwrapped write error escaping the guard once turned the refusal exit into
+# exit 1, which a PreToolUse hook event reads as non-blocking (fail open). The exit is os._exit,
+# no longer `raise SystemExit`: SystemExit unwinds into CPython's interpreter-exit flush of the std
+# streams, and a sys.stderr whose flush fails there replaced the refusal exit with the
+# interpreter's own exit 120, so wrapping the write alone still lost the code to a failing flush.
+# os._exit skips that exit-time flush, and it loses no buffered output the explicit flush did not
+# already hand over: the guard leg pins this guard to the top of the file (only a docstring and
+# `from __future__` imports may precede its `import sys`), so when it exits, nothing else has run
+# and nothing else has buffered output, and `import sys` and `import os` write nothing. The
+# observed exit code is the same under runpy (the dynamic leg's child) and in a plain subprocess
+# (how Claude Code runs a hook): neither intercepts os._exit, and neither caught the top-level
+# SystemExit either, so the change removes no interception point.
 GUARD_TEMPLATE = '''import sys
 
 if tuple(sys.version_info[:2]) < ({major}, {minor}):
-    sys.stderr.write(
+    import os
+    try:
+        sys.stderr.write(
+            "error: {name} requires Python {major}.{minor} or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit({code})
+'''
+# The hook form, for HOOK_SURFACES only: the hook's events differ in the direction an error must fail, so
+# a mode named in the FLOOR_FAIL_OPEN_MODES literal (a Stop-type, SessionStart, TeammateIdle,
+# UserPromptSubmit or PostToolUse handler) warns on exit 0, never blocking, and every other argv (a
+# PreToolUse handler, an unknown mode, no mode) fails closed with the canonical refusal and exit 2. That
+# exit is fixed, never {code}: Claude Code reads exit 1 as a non-blocking error and lets a PreToolUse call
+# proceed, so load_source refuses a HOOK_SURFACES entry listed in nonblocking-surfaces. Both the
+# stderr refusal and the stdout warning are best-effort writes, each flushed inside its own
+# try/except BaseException, and both paths exit through os._exit, which skips the interpreter-exit
+# flush of the std streams (see the GUARD_TEMPLATE comment; here too nothing runs before the
+# guard, so os._exit loses no other buffered output, and the stdout warning is already flushed):
+# the exits above hold even when a stream is closed, missing, failing on write or failing on
+# flush, and the warning reaches stdout whenever stdout accepts the write and the flush.
+HOOK_GUARD_TEMPLATE = '''import sys
+
+FLOOR_FAIL_OPEN_MODES = {modes}
+
+if tuple(sys.version_info[:2]) < ({major}, {minor}):
+    import os
+    _floor_refusal = (
         "error: {name} requires Python {major}.{minor} or newer; this is Python %d.%d.%d (%s). "
         "Nothing was run (cannot evaluate).\\n"
         % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    raise SystemExit(2)
+    try:
+        sys.stderr.write(_floor_refusal)
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    if len(sys.argv) > 1 and sys.argv[1] in FLOOR_FAIL_OPEN_MODES:
+        try:
+            import json
+            sys.stdout.write(json.dumps(dict(systemMessage=(
+                "AIQT guardrail: the %s check could not run (%s); surfacing a warning rather than blocking "
+                "(non-blocking by design on this event)." % (sys.argv[1], _floor_refusal.strip())))) + "\\n")
+            sys.stdout.flush()
+        except BaseException:
+            pass
+        os._exit(0)
+    os._exit(2)
 '''
+HOOK_SURFACES = (".aiqt/core/hooks/scripts/aiqt_hooks.py",
+                 "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py")
+MODES_NAME = "FLOOR_FAIL_OPEN_MODES"
+MODE_RE = re.compile(r"[a-z][a-z0-9_]*")
+DENY_PROBE_MODE = "floor_deny_probe"
 # Child programs. sys.version_info is replaced by a plain tuple before the entrypoint (or the guard
 # prefix) runs; the guard reads only sys.version_info, so the tuple stands in for an older interpreter.
 REFUSAL_CHILD = (
     "import runpy, sys\n"
     "path = sys.argv[1]\n"
     "version = tuple(int(part) for part in sys.argv[2].split('.'))\n"
-    "sys.argv = [path]\n"
+    "sys.argv = [path] + sys.argv[3:]\n"
     "sys.version_info = version + ('final', 0)\n"
     "runpy.run_path(path, run_name='__main__')\n")
 BOUNDARY_CHILD = (
@@ -267,6 +503,45 @@ BOUNDARY_CHILD = (
     "    sys.version_info = tuple(int(part) for part in version.split('.')) + ('final', 0)\n"
     "exec(compile(prefix, '<guard prefix>', 'exec'), {'__name__': '__main__'})\n"
     "print('" + CONTINUED + "')\n")
+# The stderr-unavailable vectors: the refusal exit may not depend on the diagnostic write or on
+# the stream's later flush. none runs the entrypoint with sys.stderr set to None (what Python
+# leaves when file descriptor 2 is invalid at interpreter startup); raises with a sys.stderr
+# whose write raises; flushraises with a sys.stderr whose write succeeds but whose flush raises,
+# the stream shape that turned `raise SystemExit` into the interpreter's own exit 120 when CPython
+# flushed the std streams at interpreter exit (the guard now flushes inside its try and exits
+# through os._exit, which skips that exit-time flush); and closed in a fresh interpreter started
+# with file descriptor 2 closed, so Python itself sets sys.stderr to None.
+STDERR_VECTORS = ("none", "raises", "flushraises", "closed")
+STDERR_VECTOR_LABELS = {"none": "sys.stderr set to None",
+                        "raises": "a sys.stderr whose write raises",
+                        "flushraises": "a sys.stderr whose write succeeds but whose flush raises",
+                        "closed": "file descriptor 2 closed at interpreter startup"}
+BROKEN_STDERR_CHILD = (
+    "import runpy, sys\n"
+    "path, vector = sys.argv[1], sys.argv[3]\n"
+    "version = tuple(int(part) for part in sys.argv[2].split('.'))\n"
+    "sys.argv = [path] + sys.argv[4:]\n"
+    "sys.version_info = version + ('final', 0)\n"
+    "class _BrokenStderr:\n"
+    "    def write(self, text):\n"
+    "        raise OSError('stderr unavailable')\n"
+    "    def flush(self):\n"
+    "        pass\n"
+    "class _FlushRaisesStderr:\n"
+    "    def write(self, text):\n"
+    "        return len(text)\n"
+    "    def flush(self):\n"
+    "        raise OSError('stderr flush failed')\n"
+    "sys.stderr = None if vector == 'none' else (\n"
+    "    _FlushRaisesStderr() if vector == 'flushraises' else _BrokenStderr())\n"
+    "runpy.run_path(path, run_name='__main__')\n")
+# Closes file descriptor 2, then replaces the process with a fresh interpreter running the -c
+# program in argv[1] (REFUSAL_CHILD) with the remaining arguments: that interpreter starts with
+# no usable file descriptor 2, so it initializes sys.stderr to None itself.
+CLOSED_FD2_CHILD = (
+    "import os, sys\n"
+    "os.close(2)\n"
+    "os.execv(sys.executable, [sys.executable, '-I', '-B', '-c'] + sys.argv[1:])\n")
 CHILD_ENV = {"PATH": "/usr/bin:/bin", "LC_ALL": "C.UTF-8"}
 
 
@@ -310,6 +585,17 @@ def load_source(root):
     surfaces = data["guarded-surfaces"]
     if not isinstance(surfaces, list) or not all(isinstance(item, str) for item in surfaces):
         raise CannotEvaluate("{}: guarded-surfaces must be a list of strings".format(SOURCE_REL))
+    nonblocking = data["nonblocking-surfaces"]
+    if not isinstance(nonblocking, list) or not all(isinstance(item, str) for item in nonblocking):
+        raise CannotEvaluate("{}: nonblocking-surfaces must be a list of strings".format(SOURCE_REL))
+    if nonblocking != sorted(set(nonblocking)) or not set(nonblocking) <= set(surfaces):
+        raise CannotEvaluate("{}: nonblocking-surfaces must be sorted, unique and each listed in "
+                             "guarded-surfaces".format(SOURCE_REL))
+    hooks = sorted(set(nonblocking) & set(HOOK_SURFACES))
+    if hooks:
+        raise CannotEvaluate("{}: nonblocking-surfaces lists the hook surface(s) {}, whose hook form "
+                             "refuses a PreToolUse, unknown or missing mode with exit 2, fixed (exit 1 "
+                             "does not block a PreToolUse call)".format(SOURCE_REL, ", ".join(hooks)))
     for item in surfaces:
         if not SURFACE_RE.fullmatch(item) or any(part in (".", "..") for part in item.split("/")):
             raise CannotEvaluate("{}: guarded-surfaces entry {!r} is not a repo-relative .py path"
@@ -319,13 +605,23 @@ def load_source(root):
     for item in surfaces:
         _read_text(root / item)
     return {"floor": (int(match.group(1)), int(match.group(2))), "surfaces": tuple(surfaces),
-            "completeness": data["completeness-check"], "documentation": data["documentation-check"]}
+            "nonblocking": frozenset(nonblocking), "completeness": data["completeness-check"],
+            "documentation": data["documentation-check"]}
 
 
 def source_findings(source):
     if source["floor"] != FLOOR:
         return ["{}: python-floor is {}.{}, but the decided floor is {}.{}".format(
             SOURCE_REL, *source["floor"], *FLOOR)]
+    return []
+
+
+def switch_findings(source):
+    if source["documentation"] != DOCUMENTATION_CHECK:
+        return ["{}: documentation-check is {}, but its decided value is {} (DOCUMENTATION_CHECK in "
+                "tools/check_python_floor.py); changing it is a reviewed change to this gate".format(
+                    SOURCE_REL, *("true" if value else "false"
+                                  for value in (source["documentation"], DOCUMENTATION_CHECK)))]
     return []
 
 
@@ -812,12 +1108,43 @@ def _dump(node):
     return ast.dump(node, include_attributes=False)
 
 
-def guard_text(name, floor):
-    return GUARD_TEMPLATE.format(name=name, major=floor[0], minor=floor[1])
+def guard_text(name, floor, modes=None, code=REFUSAL_EXIT):
+    """The canonical guard with code as its refusal exit, or with modes (a tuple of mode names) its hook
+    form, whose deny exit is fixed at 2 (code is ignored there)."""
+    if modes is None:
+        return GUARD_TEMPLATE.format(name=name, major=floor[0], minor=floor[1], code=code)
+    return HOOK_GUARD_TEMPLATE.format(name=name, major=floor[0], minor=floor[1],
+                                      modes=repr(tuple(modes)))
 
 
-def _canonical(name, floor):
-    return [_dump(node) for node in ast.parse(guard_text(name, floor)).body]
+def refusal_exit(rel, nonblocking):
+    """The exit the guard and dynamic legs require of rel's refusal: 2, or 1 for a nonblocking-surfaces
+    entry; a HOOK_SURFACES entry is always 2 (load_source refuses one listed as nonblocking)."""
+    if rel in HOOK_SURFACES:
+        return REFUSAL_EXIT
+    return NONBLOCKING_EXIT if rel in nonblocking else REFUSAL_EXIT
+
+
+def _canonical(name, floor, modes=None, code=REFUSAL_EXIT):
+    return [_dump(node) for node in ast.parse(guard_text(name, floor, modes, code)).body]
+
+
+def hook_modes(tree):
+    """The FLOOR_FAIL_OPEN_MODES literal of a hook-form guard: the tuple of mode names the second
+    statement after the preamble assigns, or None when that statement is not one plain assignment of a
+    non-empty, sorted, unique tuple of lower-case identifier strings to that name."""
+    start = _preamble_end(tree)
+    node = tree.body[start + 1] if len(tree.body) > start + 1 else None
+    if not (isinstance(node, ast.Assign) and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name) and node.targets[0].id == MODES_NAME
+            and isinstance(node.value, ast.Tuple) and node.value.elts):
+        return None
+    modes = []
+    for elt in node.value.elts:
+        if not (isinstance(elt, ast.Constant) and type(elt.value) is str and MODE_RE.fullmatch(elt.value)):
+            return None
+        modes.append(elt.value)
+    return tuple(modes) if modes == sorted(set(modes)) else None
 
 
 def _preamble_end(tree):
@@ -838,22 +1165,33 @@ def _too_complex(rel, exc):
     return CannotEvaluate("{}: too complex to evaluate: {}: {}".format(rel, type(exc).__name__, exc))
 
 
-def guard_findings(root, surfaces, floor):
+def guard_findings(root, surfaces, floor, nonblocking=()):
     findings = []
     for rel in surfaces:
         tree = _parse(root, rel)
-        want = _canonical(Path(rel).name, floor)
+        code = refusal_exit(rel, nonblocking)
         start = _preamble_end(tree)
         try:
-            opens = [_dump(node) for node in tree.body[start:start + len(want)]] == want
+            modes = hook_modes(tree) if rel in HOOK_SURFACES else None
+            want = None if rel in HOOK_SURFACES and modes is None \
+                else _canonical(Path(rel).name, floor, modes, code)
+            opens = want is not None \
+                and [_dump(node) for node in tree.body[start:start + len(want)]] == want
         except (MemoryError, RecursionError) as exc:
             raise _too_complex(rel, exc)
-        if not opens:
+        if not opens and rel in HOOK_SURFACES:
+            findings.append(
+                "{}: does not open with the canonical floor guard in its hook form (only a docstring "
+                "and `from __future__` imports may precede `import sys`, then a {} tuple of sorted, "
+                "unique mode names, then `if tuple(sys.version_info[:2]) < ({}, {}):` warning on exit 0 "
+                "for a listed mode and refusing as {} with exit {} otherwise; see HOOK_GUARD_TEMPLATE)"
+                .format(rel, MODES_NAME, floor[0], floor[1], Path(rel).name, code))
+        elif not opens:
             findings.append(
                 "{}: does not open with the canonical floor guard (only a docstring and `from "
                 "__future__` imports may precede `import sys` and `if tuple(sys.version_info[:2]) < "
-                "({}, {}):`, refusing as {} with exit 2; see GUARD_TEMPLATE)".format(
-                    rel, floor[0], floor[1], Path(rel).name))
+                "({}, {}):`, refusing as {} with exit {}; see GUARD_TEMPLATE)".format(
+                    rel, floor[0], floor[1], Path(rel).name, code))
     return findings
 
 
@@ -869,6 +1207,14 @@ def expected_refusal(name, floor, version, executable):
             % ((name,) + tuple(floor) + tuple(version) + (executable or "unknown interpreter",)))
 
 
+def expected_warning(name, floor, version, executable, mode):
+    """The hook form's stdout for a fail-open mode under the floor: one systemMessage JSON line."""
+    return json.dumps(dict(systemMessage=(
+        "AIQT guardrail: the %s check could not run (%s); surfacing a warning rather than blocking "
+        "(non-blocking by design on this event)."
+        % (mode, expected_refusal(name, floor, version, executable).strip())))) + "\n"
+
+
 def _child(code, args, flags, cwd):
     try:
         proc = subprocess.run([sys.executable, "-I", "-B", *flags, "-c", code, *args], cwd=cwd,
@@ -880,11 +1226,12 @@ def _child(code, args, flags, cwd):
             proc.stderr.decode("utf-8", "backslashreplace"))
 
 
-def refusal_observed(path, version, flags):
-    """Run one entrypoint at a patched version; return (exit, stdout, stderr, working-dir entries)."""
+def refusal_observed(path, version, flags, args=()):
+    """Run one entrypoint at a patched version with the argv args; return (exit, stdout, stderr,
+    working-dir entries)."""
     try:
         with tempfile.TemporaryDirectory(prefix="python-floor-cwd-") as cwd:
-            rc, out, err = _child(REFUSAL_CHILD, [str(path), "%d.%d.%d" % version], flags, cwd)
+            rc, out, err = _child(REFUSAL_CHILD, [str(path), "%d.%d.%d" % version, *args], flags, cwd)
             return rc, out, err, sorted(os.listdir(cwd))
     except OSError as exc:
         raise CannotEvaluate("temporary working directory: {}".format(exc))
@@ -900,33 +1247,93 @@ def boundary_observed(prefix, version, flags):
         raise CannotEvaluate("temporary working directory: {}".format(exc))
 
 
-def guard_prefix(tree, name, floor):
-    """Source of the top-level statements up to and including the canonical guard, or None."""
-    want = _canonical(name, floor)[-1]
+def stderr_vector_observed(path, version, vector, args=()):
+    """Run one entrypoint at a patched version with stderr unavailable (one of STDERR_VECTORS);
+    return (exit, stdout, stderr, working-dir entries). The guard may be unable to write its
+    refusal, so stderr must stay empty and the exit must still be the refusal exit."""
+    try:
+        with tempfile.TemporaryDirectory(prefix="python-floor-cwd-") as cwd:
+            if vector == "closed":
+                rc, out, err = _child(CLOSED_FD2_CHILD,
+                                      [REFUSAL_CHILD, str(path), "%d.%d.%d" % version, *args],
+                                      (), cwd)
+            else:
+                rc, out, err = _child(BROKEN_STDERR_CHILD,
+                                      [str(path), "%d.%d.%d" % version, vector, *args], (), cwd)
+            return rc, out, err, sorted(os.listdir(cwd))
+    except OSError as exc:
+        raise CannotEvaluate("temporary working directory: {}".format(exc))
+
+
+def guard_prefix(tree, name, floor, modes=None, code=REFUSAL_EXIT):
+    """Source of the top-level statements up to and including the canonical guard (with modes, its hook
+    form), or None."""
+    want = _canonical(name, floor, modes, code)[-1]
     for index, node in enumerate(tree.body):
         if _dump(node) == want:
             return ast.unparse(ast.Module(body=tree.body[:index + 1], type_ignores=[]))
     return None
 
 
-def dynamic_findings(root, surfaces, floor):
+def dynamic_findings(root, surfaces, floor, nonblocking=()):
     findings = []
     for rel in surfaces:
         name = Path(rel).name
+        code = refusal_exit(rel, nonblocking)
         for version in below_floor(floor):
-            want = (2, "", expected_refusal(name, floor, version, sys.executable), [])
+            want = (code, "", expected_refusal(name, floor, version, sys.executable), [])
             for flags in FLAG_SETS:
                 got = refusal_observed(root / rel, version, flags)
                 if got != want:
                     findings.append(
                         "{} at patched {}.{}.{} under {}: got exit {}, stdout {!r}, stderr "
-                        "{!r}, working-dir entries {!r}; want exit 2, empty stdout, the exact refusal "
+                        "{!r}, working-dir entries {!r}; want exit {}, empty stdout, the exact refusal "
                         "and an untouched working directory".format(
-                            rel, *version, " ".join(flags) or "no flag", *got))
+                            rel, *version, " ".join(flags) or "no flag", *got, code))
         try:
-            prefix = guard_prefix(_parse(root, rel), name, floor)
+            tree = _parse(root, rel)
+            modes = hook_modes(tree) if rel in HOOK_SURFACES else None
+            prefix = None if rel in HOOK_SURFACES and modes is None \
+                else guard_prefix(tree, name, floor, modes, code)
         except (MemoryError, RecursionError) as exc:
             raise _too_complex(rel, exc)
+        version = below_floor(floor)[0]
+        refusal = expected_refusal(name, floor, version, sys.executable)
+        for mode in modes or ():
+            got = refusal_observed(root / rel, version, (), [mode])
+            if got != (0, expected_warning(name, floor, version, sys.executable, mode), refusal, []):
+                findings.append(
+                    "{} at patched {}.{}.{} with the fail-open mode {}: got exit {}, stdout {!r}, stderr "
+                    "{!r}, working-dir entries {!r}; want exit 0, the exact warning, the refusal on "
+                    "stderr and an untouched working directory".format(rel, *version, mode, *got))
+        if modes is not None:
+            got = refusal_observed(root / rel, version, (), [DENY_PROBE_MODE])
+            if got != (REFUSAL_EXIT, "", refusal, []):
+                findings.append(
+                    "{} at patched {}.{}.{} with the mode {}, outside {}: got exit {}, stdout {!r}, "
+                    "stderr {!r}, working-dir entries {!r}; want exit {}, empty stdout, the exact refusal "
+                    "and an untouched working directory".format(
+                        rel, *version, DENY_PROBE_MODE, MODES_NAME, *got, REFUSAL_EXIT))
+        for vector in STDERR_VECTORS:
+            got = stderr_vector_observed(root / rel, version, vector)
+            if got != (code, "", "", []):
+                findings.append(
+                    "{} at patched {}.{}.{} with {}: got exit {}, stdout {!r}, stderr {!r}, "
+                    "working-dir entries {!r}; want exit {}, empty stdout and stderr and an "
+                    "untouched working directory (the refusal exit may not depend on the "
+                    "diagnostic write or its flush)".format(
+                        rel, *version, STDERR_VECTOR_LABELS[vector], *got, code))
+        for mode in modes[:1] if modes else ():
+            warning = expected_warning(name, floor, version, sys.executable, mode)
+            for vector in STDERR_VECTORS:
+                got = stderr_vector_observed(root / rel, version, vector, [mode])
+                if got != (0, warning, "", []):
+                    findings.append(
+                        "{} at patched {}.{}.{} with the fail-open mode {} and {}: got exit {}, "
+                        "stdout {!r}, stderr {!r}, working-dir entries {!r}; want exit 0, the "
+                        "exact warning on stdout, empty stderr and an untouched working "
+                        "directory".format(
+                            rel, *version, mode, STDERR_VECTOR_LABELS[vector], *got))
         if prefix is None:
             findings.append("{}: no canonical guard statement to run at the floor boundary".format(rel))
             continue
@@ -958,11 +1365,12 @@ def _has_main_block(tree):
     return False
 
 
-def shipped_entrypoints(root):
+def _python_files(root):
+    """Every repo-relative .py path outside EXCLUDED_TREES, directory by directory in sorted order
+    (a directory in SKIPPED_DIR_NAMES is not walked)."""
     def _fail(exc):
         raise CannotEvaluate("cannot walk the tree: {}".format(exc))
 
-    found = []
     for dirpath, dirnames, filenames in os.walk(root, onerror=_fail):
         rel_dir = Path(dirpath).relative_to(root).as_posix()
         prefix = "" if rel_dir == "." else rel_dir + "/"
@@ -970,9 +1378,12 @@ def shipped_entrypoints(root):
                              and not _excluded(prefix + name + "/"))
         for name in sorted(filenames):
             rel = prefix + name
-            if name.endswith(".py") and not _excluded(rel) and _has_main_block(_parse(root, rel)):
-                found.append(rel)
-    return found
+            if name.endswith(".py") and not _excluded(rel):
+                yield rel
+
+
+def shipped_entrypoints(root):
+    return [rel for rel in _python_files(root) if _has_main_block(_parse(root, rel))]
 
 
 def completeness_findings(root, surfaces):
@@ -981,10 +1392,323 @@ def completeness_findings(root, surfaces):
             for rel in shipped_entrypoints(root) if rel not in listed]
 
 
+# The fallback leg's refusal guidance, shared by its findings.
+FALLBACK_GUIDANCE = ("refuse only through the canonical grammar: `import os`, then any "
+                     "`NAME = \"<string literal>\"` bindings, then try: sys.stderr.write(<message>); "
+                     "sys.stderr.flush() except BaseException: pass with nothing else in it (or one "
+                     "`if tuple(sys.version_info[:2]) < (<int literals>):` whose if and else branches are "
+                     "each that try), then os._exit(2) or os._exit(1), as GUARD_TEMPLATE does; the "
+                     "message is a string literal, an f-string or a + concatenation whose parts are "
+                     "string literals and names bound to string literals in the handler; sys is "
+                     "bound by a module-level `import sys` before the try, and the handler's `as` "
+                     "name is not os, sys, BaseException or tuple")
+# The names the canonical grammar reads (the exit's os, the stream's sys, the diagnostic handler's
+# BaseException and the version test's tuple): a message binding may not rebind one of them.
+FALLBACK_SHAPE_NAMES = frozenset(("os", "sys", "BaseException", "tuple"))
+# The fixed parts of the canonical grammar, compared as AST dumps: the diagnostic's two callees and the
+# left side of the version split's one comparison (the guard's own).
+FALLBACK_WRITE = _dump(ast.parse("sys.stderr.write", mode="eval").body)
+FALLBACK_FLUSH = _dump(ast.parse("sys.stderr.flush", mode="eval").body)
+FALLBACK_VERSION_LEFT = _dump(ast.parse("tuple(sys.version_info[:2])", mode="eval").body)
+
+
+def _import_time_nodes(nodes):
+    """Every AST node under nodes that runs at import time. A class body runs when the class
+    statement runs, so the walk descends into it and into its decorators, bases and keywords. A
+    function or lambda body runs only when called, so the walk yields a def but does not descend
+    into its body (a method's included); it does walk a function's decorators and a function's or
+    lambda's default values, which run when the def or lambda is evaluated. Annotations are not
+    walked: Python 3.14 evaluates them lazily, on first access."""
+    stack = list(nodes)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            yield node
+            stack.extend(getattr(node, "decorator_list", ()))
+            stack.extend(node.args.defaults)
+            stack.extend(default for default in node.args.kw_defaults if default is not None)
+            continue
+        yield node
+        stack.extend(ast.iter_child_nodes(node))
+
+
+def _expr_call(stmt):
+    """The call when stmt is an expression statement holding a call, else None."""
+    return stmt.value if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call) else None
+
+
+def _guarded_module(try_node):
+    """The module an import fallback guards: X when the try's body is exactly `import X` (one
+    undotted name, an alias allowed), else None. A dotted import can fail on its parent package, whose
+    import error names the parent, so no re-raise can name the module it guards."""
+    body = try_node.body
+    if len(body) == 1 and isinstance(body[0], ast.Import) and len(body[0].names) == 1 \
+            and "." not in body[0].names[0].name:
+        return body[0].names[0].name
+    return None
+
+
+def _is_import_os(stmt):
+    """True when stmt is exactly `import os`, which binds the name the exit's os._exit reads."""
+    return isinstance(stmt, ast.Import) and [(alias.name, alias.asname)
+                                             for alias in stmt.names] == [("os", None)]
+
+
+def _is_import_sys(stmt):
+    """True when stmt is exactly `import sys`, which binds the name the diagnostic and the version
+    test read."""
+    return isinstance(stmt, ast.Import) and [(alias.name, alias.asname)
+                                             for alias in stmt.names] == [("sys", None)]
+
+
+def _sys_bound_before(tree, try_node):
+    """True when a module-level statement of tree that ends before try_node begins is exactly
+    `import sys` (_is_import_sys). Module-level statements run in order, and a try nested in one (a
+    class body's) runs while that statement runs, so such an import has bound sys by then. An import
+    in a function, a class, a branch or a try, an aliased one and one after the try do not count."""
+    return any(_is_import_sys(stmt) and stmt.end_lineno < try_node.lineno for stmt in tree.body)
+
+
+def _literal_binding(stmt):
+    """The bound name when stmt is exactly NAME = "<string literal>" with NAME none of
+    FALLBACK_SHAPE_NAMES, else None."""
+    if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name) \
+            and stmt.targets[0].id not in FALLBACK_SHAPE_NAMES and isinstance(stmt.value, ast.Constant) \
+            and type(stmt.value.value) is str:
+        return stmt.targets[0].id
+    return None
+
+
+def _is_message(node, bound):
+    """True when node is the canonical message: a string literal, an f-string whose every replacement
+    field is a plain {NAME} with no format spec, a NAME, or a + concatenation of those, each NAME one
+    of bound (bound to a string literal earlier in the handler). Evaluating it only joins and formats
+    str values: it calls no user code, so it cannot end the process or close a stream, and the write
+    receives a str."""
+    stack = [node]
+    while stack:
+        part = stack.pop()
+        if isinstance(part, ast.BinOp) and isinstance(part.op, ast.Add):
+            stack.extend((part.left, part.right))
+        elif isinstance(part, ast.JoinedStr):
+            stack.extend(part.values)
+        elif isinstance(part, ast.FormattedValue):
+            if part.format_spec is not None or not isinstance(part.value, ast.Name) \
+                    or part.value.id not in bound:
+                return False
+        elif isinstance(part, ast.Name):
+            if part.id not in bound:
+                return False
+        elif not (isinstance(part, ast.Constant) and type(part.value) is str):
+            return False
+    return True
+
+
+def _stderr_args(stmt, callee):
+    """The positional arguments when stmt is exactly a call of callee (FALLBACK_WRITE or
+    FALLBACK_FLUSH) with no keyword argument, else None."""
+    call = _expr_call(stmt)
+    return call.args if call is not None and _dump(call.func) == callee and not call.keywords else None
+
+
+def _is_wrapped_diagnostic(stmt, bound):
+    """The canonical diagnostic, with nothing else in any part of the try statement:
+        try:
+            sys.stderr.write(<message>)
+            sys.stderr.flush()
+        except BaseException:
+            pass
+    with <message> a canonical message (_is_message) over the names in bound."""
+    if not (isinstance(stmt, ast.Try) and len(stmt.body) == 2 and len(stmt.handlers) == 1
+            and not stmt.orelse and not stmt.finalbody):
+        return False
+    write = _stderr_args(stmt.body[0], FALLBACK_WRITE)
+    handler = stmt.handlers[0]
+    return write is not None and len(write) == 1 and _is_message(write[0], bound) \
+        and _stderr_args(stmt.body[1], FALLBACK_FLUSH) == [] \
+        and isinstance(handler.type, ast.Name) and handler.type.id == "BaseException" \
+        and handler.name is None and len(handler.body) == 1 and isinstance(handler.body[0], ast.Pass)
+
+
+def _is_version_test(node):
+    """True when node is exactly tuple(sys.version_info[:2]) < (<int literal>, ...), the guard's own
+    comparison: it reads the version, compares two tuples of ints and calls nothing else."""
+    return isinstance(node, ast.Compare) and _dump(node.left) == FALLBACK_VERSION_LEFT \
+        and len(node.ops) == 1 and isinstance(node.ops[0], ast.Lt) \
+        and isinstance(node.comparators[0], ast.Tuple) and all(
+            isinstance(elt, ast.Constant) and type(elt.value) is int for elt in node.comparators[0].elts)
+
+
+def _is_diagnostic(stmt, bound):
+    """The canonical diagnostic, or the version split the shared tooling uses to choose its message:
+    an if/else on the canonical version test (_is_version_test) whose two branches are each exactly
+    the canonical diagnostic."""
+    if isinstance(stmt, ast.If):
+        return _is_version_test(stmt.test) and len(stmt.body) == 1 and len(stmt.orelse) == 1 \
+            and _is_wrapped_diagnostic(stmt.body[0], bound) and _is_wrapped_diagnostic(stmt.orelse[0], bound)
+    return _is_wrapped_diagnostic(stmt, bound)
+
+
+def _is_os_exit(stmt):
+    """True when stmt is exactly os._exit(<the refusal or nonblocking exit, a literal>)."""
+    call = _expr_call(stmt)
+    return call is not None and isinstance(call.func, ast.Attribute) and call.func.attr == "_exit" \
+        and isinstance(call.func.value, ast.Name) and call.func.value.id == "os" and not call.keywords \
+        and len(call.args) == 1 and isinstance(call.args[0], ast.Constant) \
+        and type(call.args[0].value) is int and call.args[0].value in (REFUSAL_EXIT, NONBLOCKING_EXIT)
+
+
+def _is_other_module_reraise(stmt, handler, guarded):
+    """True when stmt is exactly `if <exc>.name != "<guarded>": raise` in an
+    `except ModuleNotFoundError as <exc>` or `except ImportError as <exc>` handler, with guarded the
+    module the fallback guards (_guarded_module): it hands an import error for any other module back
+    unchanged, so only the guarded module's absence refuses. An unnamed handler and a None guarded
+    (no single undotted import, or a try/except*, whose handler receives an ExceptionGroup with no
+    .name) never match: the comparison would read None.name, or compare <exc>.name with None."""
+    return guarded is not None and handler.name is not None \
+        and isinstance(handler.type, ast.Name) and handler.type.id in ("ModuleNotFoundError", "ImportError") \
+        and isinstance(stmt, ast.If) and _dump(stmt.test) == _dump(ast.parse(
+            "{}.name != {!r}".format(handler.name, guarded), mode="eval").body) \
+        and len(stmt.body) == 1 and isinstance(stmt.body[0], ast.Raise) and stmt.body[0].exc is None \
+        and not stmt.orelse
+
+
+def _canonical_departure(handler, guarded, sys_bound):
+    """None when an import-fallback handler's body is exactly the canonical refusal: an optional
+    re-raise naming the guarded module (_is_other_module_reraise), `import os`, any literal bindings
+    (_literal_binding), the canonical diagnostic over the names they bind (_is_diagnostic), then
+    os._exit. Otherwise the line of the first statement that departs from it (the handler's last line
+    when a required statement is missing), or the handler's own line when its `as` name is one of
+    FALLBACK_SHAPE_NAMES or sys_bound (_sys_bound_before) is false. Every statement is matched whole,
+    so a re-raise naming another module, a missing `import os`, a message or version test outside the
+    grammar, a re-raise in the diagnostic's handler, a flush before the write, a missing flush, a
+    write to another stream, an extra statement anywhere or a missing os._exit departs."""
+    if handler.name in FALLBACK_SHAPE_NAMES or not sys_bound:
+        return handler.lineno
+    body = list(handler.body)
+    if body and _is_other_module_reraise(body[0], handler, guarded):
+        body = body[1:]
+    bound = set()
+    index = 0
+    for matches in (_is_import_os, None, lambda stmt: _is_diagnostic(stmt, bound), _is_os_exit):
+        if matches is None:
+            while index < len(body) and _literal_binding(body[index]) is not None:
+                bound.add(_literal_binding(body[index]))
+                index += 1
+            continue
+        if index == len(body):
+            return handler.body[-1].end_lineno
+        if not matches(body[index]):
+            return body[index].lineno
+        index += 1
+    return body[index].lineno if index < len(body) else None
+
+
+def is_canonical_fallback(handler, guarded, sys_bound):
+    """True when an import-fallback handler's body is exactly the canonical refusal
+    (_canonical_departure); guarded is the module its plain try imports (_guarded_module, None for a
+    try/except*) and sys_bound whether a module-level `import sys` precedes the try
+    (_sys_bound_before)."""
+    return _canonical_departure(handler, guarded, sys_bound) is None
+
+
+def _fallback_action(handler):
+    """The first import-time construct in a non-canonical handler that can end the process, raise
+    or write (a call, a raise, a try, a with, an await or yield, an assert, a decorated definition
+    or a class with bases or keywords), as (line, description); None for a plain fallback such as
+    `NAME = None`, `pass`, an alternative import or an undecorated def."""
+    kinds = ((ast.Call, "a call"), (ast.Raise, "a raise"), ((ast.Try, ast.TryStar), "a try statement"),
+             ((ast.With, ast.AsyncWith), "a with statement"),
+             ((ast.Await, ast.Yield, ast.YieldFrom), "an await or yield"), (ast.Assert, "an assert"))
+    found = []
+    for node in _import_time_nodes(handler.body):
+        for kind, description in kinds:
+            if isinstance(node, kind):
+                found.append((node.lineno, node.col_offset, description))
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.decorator_list:
+            found.append((node.lineno, node.col_offset, "a decorated definition"))
+        if isinstance(node, ast.ClassDef) and (node.bases or node.keywords):
+            found.append((node.lineno, node.col_offset, "a class with bases or keywords"))
+    return min(found)[::2] if found else None
+
+
+def _fallback_handler_findings(rel, handler, guarded, sys_bound):
+    """A finding when one import-fallback handler is neither the canonical refusal
+    (is_canonical_fallback) nor a plain fallback that cannot end the process (_fallback_action)."""
+    departure = _canonical_departure(handler, guarded, sys_bound)
+    action = None if departure is None else _fallback_action(handler)
+    if action is None:
+        return []
+    return ["{}:{}: an import fallback departs here from the canonical write-flush-exit refusal, and "
+            "it is no plain fallback (it holds {} at line {}); a retired or altered shape can lose "
+            "the refusal exit or its diagnostic (`raise SystemExit` or sys.exit becomes exit 120 when "
+            "the sys.stderr flush at interpreter exit fails, an unwrapped write raises when "
+            "sys.stderr is None, a re-raise turns the refusal into exit 1, an unflushed or "
+            "late-flushed write is lost to os._exit, and a call in the message or version test can "
+            "end the process, close the stream or raise); {}".format(
+                rel, departure, action[1], action[0], FALLBACK_GUIDANCE)]
+
+
+def fallback_findings(root):
+    """The fallback leg: every module-level import fallback in the tree is the canonical refusal or a
+    plain fallback, never a retired or altered shape (see the module docstring)."""
+    findings = []
+    for rel in _python_files(root):
+        tree = _parse(root, rel)
+        try:
+            for node in _import_time_nodes(tree.body):
+                if isinstance(node, (ast.Try, ast.TryStar)) and any(
+                        isinstance(item, (ast.Import, ast.ImportFrom)) for item in node.body):
+                    guarded = _guarded_module(node) if isinstance(node, ast.Try) else None
+                    sys_bound = _sys_bound_before(tree, node)
+                    for handler in node.handlers:
+                        findings.extend(_fallback_handler_findings(rel, handler, guarded, sys_bound))
+        except (MemoryError, RecursionError) as exc:
+            raise _too_complex(rel, exc)
+    return findings
+
+
 def documentation_findings(root, floor):
+    """Each declaration file must state the floor phrase as many times as DECLARATION_COPIES says (once
+    by default), and every statement of the floor in the form "Python <floor> or|and <word>" must be
+    exactly the phrase."""
     phrase = "Python %d.%d or newer" % floor
-    return ["{}: does not state {!r}".format(rel, phrase) for rel in DECLARATION_FILES
-            if phrase not in _read_text(root / rel)]
+    variant_re = re.compile(r"(?i)(?<![A-Za-z0-9_])c?python{0}+{1}(?![0-9]|\.[0-9]){0}+(?:or|and){0}+"
+                            r"[A-Za-z]+".format(CLAIM_SEP, re.escape("%d.%d" % floor)))
+    found = []
+    for rel in DECLARATION_FILES:
+        text = _read_text(root / rel)
+        count, want = text.count(phrase), DECLARATION_COPIES.get(rel, 1)
+        if not count:
+            found.append("{}: does not state {!r}".format(rel, phrase))
+        elif count != want:
+            found.append("{}: states {!r} {} time(s), not the {} in DECLARATION_COPIES".format(
+                rel, phrase, count, want))
+        found.extend("{}:{}: states the floor as {!r}, not as {!r}".format(
+            rel, text.count("\n", 0, match.start()) + 1, match.group(0), phrase)
+            for match in variant_re.finditer(text) if match.group(0) != phrase)
+    return found
+
+
+def documentation_claim_findings(root, floor):
+    """Each Python version below the floor that a declaration file names, with its line."""
+    found = []
+    for rel in DECLARATION_FILES:
+        text = _read_text(root / rel)
+        for match in OLDER_CLAIM_RE.finditer(text):
+            parts = next(match.group(*pair) for pair in (("major", "minor"), ("only", "only"),
+                                                         ("op", "op_minor"), ("bare", "bare_minor"))
+                         if match.group(pair[0]) is not None)
+            try:
+                version = (int(parts[0]), 0 if match.group("only") is not None else int(parts[1]))
+            except ValueError as exc:
+                raise CannotEvaluate("{}: a version too long to read: {}".format(rel, exc))
+            if version < floor:
+                named = parts[0] if match.group("only") is not None else "{}.{}".format(*parts)
+                found.append("{}:{}: names Python {}, below the floor {}.{}; a declaration may "
+                             "not state an older version".format(
+                                 rel, text.count("\n", 0, match.start()) + 1, named, *floor))
+    return found
 
 
 def evaluate(root):
@@ -994,19 +1718,22 @@ def evaluate(root):
         floor = source["floor"]
         findings = []
         findings.extend(source_findings(source))
+        findings.extend(switch_findings(source))
         findings.extend(pin_findings(root, floor))
-        findings.extend(guard_findings(root, source["surfaces"], floor))
-        findings.extend(dynamic_findings(root, source["surfaces"], floor))
+        findings.extend(guard_findings(root, source["surfaces"], floor, source["nonblocking"]))
+        findings.extend(dynamic_findings(root, source["surfaces"], floor, source["nonblocking"]))
+        findings.extend(fallback_findings(root))
         if source["completeness"]:
             findings.extend(completeness_findings(root, source["surfaces"]))
         if source["documentation"]:
             findings.extend(documentation_findings(root, floor))
+            findings.extend(documentation_claim_findings(root, floor))
     except CannotEvaluate as exc:
         return 2, ["CANNOT EVALUATE: {}".format(exc)]
     if findings:
         return 1, ["FAIL: " + finding for finding in findings]
-    return 0, ["PASS: python floor {}.{} ({}): source, pins, guard and dynamic legs over {} "
-               "guarded surface(s); completeness check {}, documentation check {}".format(
+    return 0, ["PASS: python floor {}.{} ({}): source, pins, guard, dynamic and fallback legs over {} "
+               "guarded surface(s); completeness check {}, documentation and claims checks {}".format(
                    floor[0], floor[1], SOURCE_REL, len(source["surfaces"]),
                    "ON" if source["completeness"] else "OFF (completeness-check = false)",
                    "ON" if source["documentation"] else "OFF (documentation-check = false)")]
@@ -1022,11 +1749,14 @@ _EXECUTED_SET = set()
 # Red-on-revert: each leg's call in evaluate(), removed in a copy of this gate.
 REVERT_CALLS = (
     ("source", "source_findings(source)"),
+    ("switch", "switch_findings(source)"),
     ("pins", "pin_findings(root, floor)"),
-    ("guard", "guard_findings(root, source[\"surfaces\"], floor)"),
-    ("dynamic", "dynamic_findings(root, source[\"surfaces\"], floor)"),
+    ("guard", "guard_findings(root, source[\"surfaces\"], floor, source[\"nonblocking\"])"),
+    ("dynamic", "dynamic_findings(root, source[\"surfaces\"], floor, source[\"nonblocking\"])"),
+    ("fallback", "fallback_findings(root)"),
     ("completeness", "completeness_findings(root, source[\"surfaces\"])"),
     ("documentation", "documentation_findings(root, floor)"),
+    ("claims", "documentation_claim_findings(root, floor)"),
 )
 
 
@@ -1040,11 +1770,12 @@ def check(name, got, want):
         FAILURES.append("{}: got {!r}, want {!r}".format(name, got, want))
 
 
-def _source_text(floor="3.14", surfaces=(), completeness=False, documentation=False, extra=""):
-    return ("format-version = 1\npython-floor = {}\nguarded-surfaces = {}\ncompleteness-check = {}\n"
-            "documentation-check = {}\n{}".format(
-                json.dumps(floor), json.dumps(list(surfaces)), "true" if completeness else "false",
-                "true" if documentation else "false", extra))
+def _source_text(floor="3.14", surfaces=(), completeness=False, documentation=True, extra="",
+                 nonblocking=()):
+    return ("format-version = 1\npython-floor = {}\nguarded-surfaces = {}\nnonblocking-surfaces = {}\n"
+            "completeness-check = {}\ndocumentation-check = {}\n{}".format(
+                json.dumps(floor), json.dumps(list(surfaces)), json.dumps(list(nonblocking)),
+                "true" if completeness else "false", "true" if documentation else "false", extra))
 
 
 def _write(root, rel, text):
@@ -1053,10 +1784,20 @@ def _write(root, rel, text):
     path.write_text(text, encoding="utf-8")
 
 
-def _fixture(base, source=None, workflow_pin="3.14", template_pin="3.14", files=None, pin_quote="'"):
+def _declared(floor_text="3.14"):
+    """Every declaration file, stating the floor as many times as DECLARATION_COPIES says."""
+    return {rel: "Requires Python {} or newer.\n".format(floor_text) * DECLARATION_COPIES.get(rel, 1)
+            for rel in DECLARATION_FILES}
+
+
+def _fixture(base, source=None, workflow_pin="3.14", template_pin="3.14", files=None, pin_quote="'",
+             declarations=True):
     """A clean tree; workflow_pin is the version on quality.yml line 6, or with pin_quote="" the whole
-    text after that line's indentation."""
+    text after that line's indentation. Every declaration file states the floor unless declarations
+    is false; files are written after them."""
     root = Path(tempfile.mkdtemp(prefix="tree-", dir=base))
+    for rel, text in (_declared() if declarations else {}).items():
+        _write(root, rel, text)
     _write(root, SOURCE_REL, _source_text() if source is None else source)
     pin = "python-version: {0}{1}{0}".format(pin_quote, workflow_pin) if pin_quote else workflow_pin
     _write(root, WORKFLOWS_REL + "/quality.yml",
@@ -1077,6 +1818,49 @@ def _entry(guard, before="", after="open(\"RAN\", \"w\").close()\n"):
 
 def _has(lines, marker):
     return any(marker in line for line in lines)
+
+
+def _noflush_guard_text(name, floor, modes=None, code=REFUSAL_EXIT):
+    """The retired wrapped-write guard shape, rebuilt from the canonical text by dropping each
+    explicit flush and the `import os`, and ending with `raise SystemExit` instead of os._exit:
+    the wrapped write held the refusal exit against a failing write, but `raise SystemExit`
+    unwinds into CPython's interpreter-exit flush of the std streams, and a sys.stderr whose
+    flush fails there replaces the code with the interpreter's own exit 120. Kept only so the
+    self-test proves the gate refuses the shape and the flushraises vector catches its exit 120."""
+    out = []
+    for line in guard_text(name, floor, modes, code).split("\n"):
+        stripped = line.strip(" ")
+        if stripped in ("import os", "sys.stderr.flush()", "sys.stdout.flush()"):
+            continue
+        if stripped.startswith("os._exit("):
+            line = line.replace("os._exit(", "raise SystemExit(", 1)
+        out.append(line)
+    return "\n".join(out)
+
+
+def _old_guard_text(name, floor, modes=None, code=REFUSAL_EXIT):
+    """The retired pre-fix guard shape, rebuilt from the wrapped-write text by unwrapping each
+    try/except around a diagnostic write: there the write ran bare before `raise SystemExit`, so
+    with stderr unavailable the write raised out of the guard and the process exited 1, a
+    non-blocking error on PreToolUse (fail open). Kept only so the self-test proves the gate
+    refuses the shape and the stderr vectors catch its fail-open."""
+    out, dedent, in_handler = [], None, False
+    for line in _noflush_guard_text(name, floor, modes, code).split("\n"):
+        stripped = line.strip(" ")
+        indent = len(line) - len(line.lstrip(" "))
+        if stripped == "try:":
+            dedent, in_handler = indent, False
+            continue
+        if dedent is not None and stripped == "except BaseException:" and indent == dedent:
+            in_handler = True
+            continue
+        if in_handler and stripped == "pass" and indent == dedent + 4:
+            dedent, in_handler = None, False
+            continue
+        if dedent is not None and not in_handler and indent > dedent:
+            line = line[4:]
+        out.append(line)
+    return "\n".join(out)
 
 
 def _self_test_cases(base):
@@ -1104,6 +1888,19 @@ def _self_test_cases(base):
           2)
     check("source/escaping-surface-cannot-evaluate",
           evaluate(_fixture(base, source=_source_text(surfaces=["../demo.py"])))[0], 2)
+    check("source/hidden-dir-surface-passes", evaluate(_fixture(
+        base, source=_source_text(surfaces=[".preview/demo.py"]),
+        files={".preview/demo.py": demo["tools/demo.py"]}))[0], 0)
+    # One leading dot per segment, in the first segment and a later one: each tree holds the file, so a
+    # pattern that allowed two dots would pass it (exit 0) instead of refusing the entry (exit 2).
+    check("source/two-leading-dots-cannot-evaluate", [evaluate(_fixture(
+        base, source=_source_text(surfaces=[rel]), files={rel: demo["tools/demo.py"]}))[0]
+        for rel in ("..preview/demo.py", "tools/..hidden/demo.py")], [2, 2])
+    check("source/nonblocking-not-guarded-cannot-evaluate", evaluate(_fixture(
+        base, source=_source_text(nonblocking=["tools/demo.py"]), files=demo))[0], 2)
+    check("source/nonblocking-not-list-cannot-evaluate", evaluate(_fixture(
+        base, source=_source_text(surfaces=["tools/demo.py"]).replace(
+            "nonblocking-surfaces = []", "nonblocking-surfaces = \"tools/demo.py\""), files=demo))[0], 2)
     check("source/unsorted-surfaces-cannot-evaluate", evaluate(_fixture(
         base, source=_source_text(surfaces=["tools/demo.py", "tools/a.py"]),
         files={"tools/a.py": _entry(guard_text("a.py", floor)), **demo}))[0], 2)
@@ -1378,9 +2175,9 @@ def _self_test_cases(base):
            "as '3.10'".format(WORKFLOWS_REL)])
 
     check("guard/canonical-passes", evaluate(_fixture(base, source=listed, files=demo)), (0, [
-        "PASS: python floor 3.14 ({}): source, pins, guard and dynamic legs over 1 guarded "
-        "surface(s); completeness check OFF (completeness-check = false), documentation check OFF "
-        "(documentation-check = false)".format(SOURCE_REL)]))
+        "PASS: python floor 3.14 ({}): source, pins, guard, dynamic and fallback legs over 1 guarded "
+        "surface(s); completeness check OFF (completeness-check = false), documentation and claims "
+        "checks ON".format(SOURCE_REL)]))
     guard_marker = "canonical floor guard"
     for check_id, text in (
             ("guard/absent-finding", _entry("import sys\n")),
@@ -1392,21 +2189,116 @@ def _self_test_cases(base):
              _entry("import sys\n\nassert tuple(sys.version_info[:2]) >= (%d, %d)\n" % floor))):
         code, lines = evaluate(_fixture(base, source=listed, files={"tools/demo.py": text}))
         check(check_id, (code, _has(lines, guard_marker)), (1, True))
-    # 200000 unary minus signs overflow the parser's fixed stack at once (a MemoryError).
-    code, lines = evaluate(_fixture(base, source=listed, files={"tools/demo.py": "-" * 200000 + "1\n"}))
-    check("guard/parser-overflow-cannot-evaluate",
-          (code, _has(lines, "tools/demo.py: too complex to parse: MemoryError")), (2, True))
-    # A 10000-term sum parses, but ast.dump of it exceeds the recursion limit.
-    deep = {"tools/demo.py": "1+" * 10000 + "1\n"}
-    code, lines = evaluate(_fixture(base, source=listed, files=deep))
-    check("guard/deep-tree-cannot-evaluate",
-          (code, _has(lines, "tools/demo.py: too complex to evaluate: RecursionError")), (2, True))
+    # A nonblocking-surfaces entry refuses with exit 1 (guard and dynamic legs); exit 2 there, or exit 1
+    # on an entry not listed, is a guard finding.
+    nonblocking = _source_text(surfaces=["tools/demo.py"], nonblocking=["tools/demo.py"])
+    good_nonblocking = _entry(guard_text("demo.py", floor, code=NONBLOCKING_EXIT))
+    check("guard/nonblocking-exit-1-passes",
+          evaluate(_fixture(base, source=nonblocking, files={"tools/demo.py": good_nonblocking}))[0], 0)
+    for check_id, source, text in (
+            ("guard/nonblocking-exit-2-finding", nonblocking, _entry(good)),
+            ("guard/unlisted-exit-1-finding", listed, good_nonblocking)):
+        code, lines = evaluate(_fixture(base, source=source, files={"tools/demo.py": text}))
+        check(check_id, (code, _has(lines, guard_marker)), (1, True))
+    # A parser or traversal overflow is INJECTED (ast.parse raising, ast.dump raising on a marked node)
+    # rather than provoked by a deeply nested body: the depth at which CPython's parser, its AST
+    # construction or ast.dump overflows, and the class it raises, are interpreter implementation limits
+    # that move between patch releases, so a real nesting body can parse cleanly (or raise another class)
+    # on a newer interpreter and the case would flip. Injected, each case is identical on every
+    # interpreter and turns red if its MemoryError/RecursionError mapping is removed.
+    real_parse, real_dump = ast.parse, ast.dump
+    deep_marker = "injected_deep_tree_marker"
+
+    def parse_overflow(exc_class):
+        def parse(source, *args, **kwargs):
+            if kwargs.get("filename") == "tools/demo.py":
+                raise exc_class("injected parser overflow")
+            return real_parse(source, *args, **kwargs)
+        return parse
+
+    def dump_overflow(exc_class):
+        def dump(node, *args, **kwargs):
+            text = real_dump(node, *args, **kwargs)
+            if deep_marker in text:
+                raise exc_class("injected ast.dump overflow")
+            return text
+        return dump
+
+    shallow = {"tools/demo.py": "VALUE = 1\n"}
+    got = []
+    for exc_class in (MemoryError, RecursionError):
+        ast.parse = parse_overflow(exc_class)
+        try:
+            code, lines = evaluate(_fixture(base, source=listed, files=shallow))
+            got.append((code, _has(lines, "tools/demo.py: too complex to parse: " + exc_class.__name__)))
+        except (MemoryError, RecursionError) as exc:
+            got.append("raised " + type(exc).__name__)
+        finally:
+            ast.parse = real_parse
+    check("guard/parser-overflow-cannot-evaluate", got, [(2, True), (2, True)])
+    deep = {"tools/demo.py": deep_marker + " = 1\n"}
+    got = []
+    for exc_class in (MemoryError, RecursionError):
+        ast.dump = dump_overflow(exc_class)
+        try:
+            code, lines = evaluate(_fixture(base, source=listed, files=deep))
+            got.append((code, _has(lines, "tools/demo.py: too complex to evaluate: " + exc_class.__name__)))
+        except (MemoryError, RecursionError) as exc:
+            got.append("raised " + type(exc).__name__)
+        finally:
+            ast.dump = real_dump
+    check("guard/deep-tree-cannot-evaluate", got, [(2, True), (2, True)])
 
     path = _fixture(base, files=demo) / "tools" / "demo.py"
     version = below_floor(floor)[0]
     check("dynamic/refusal-exact-under-OO", refusal_observed(path, version, ("-OO",)),
           (2, "", expected_refusal("demo.py", floor, version, sys.executable), []))
     check("dynamic/below-floor-vectors", below_floor((3, 14)), ((3, 13, 9), (3, 12, 0)))
+    path = _fixture(base, files={"tools/demo.py": good_nonblocking}) / "tools" / "demo.py"
+    check("dynamic/nonblocking-refusal-exact", refusal_observed(path, version, ()),
+          (1, "", expected_refusal("demo.py", floor, version, sys.executable), []))
+    # The refusal exit may not depend on the diagnostic write or its flush: with sys.stderr None
+    # (as Python leaves it when file descriptor 2 is closed at interpreter startup), with a
+    # sys.stderr whose write raises, with one whose write succeeds but whose flush raises, and
+    # with file descriptor 2 closed in the child, the guard still exits with its refusal exit
+    # and nothing on stdout or stderr, and a nonblocking-surfaces entry still exits 1.
+    vector_path = _fixture(base, files=demo) / "tools" / "demo.py"
+    check("dynamic/stderr-none-refusal-exact",
+          stderr_vector_observed(vector_path, version, "none"), (2, "", "", []))
+    check("dynamic/stderr-raises-refusal-exact",
+          stderr_vector_observed(vector_path, version, "raises"), (2, "", "", []))
+    check("dynamic/stderr-flush-raises-refusal-exact",
+          stderr_vector_observed(vector_path, version, "flushraises"), (2, "", "", []))
+    check("dynamic/closed-fd2-refusal-exact",
+          stderr_vector_observed(vector_path, version, "closed"), (2, "", "", []))
+    vector_path = _fixture(base, files={"tools/demo.py": good_nonblocking}) / "tools" / "demo.py"
+    check("dynamic/nonblocking-stderr-vectors-exit-1",
+          [stderr_vector_observed(vector_path, version, vector) for vector in STDERR_VECTORS],
+          [(1, "", "", [])] * 4)
+    # Both retired shapes fail a vector and the guard leg refuses each. The oldest wrote the
+    # refusal bare before `raise SystemExit`: with stderr unavailable the write raised and the
+    # process exited 1, so a PreToolUse refusal failed open (and the flushraises vector turns its
+    # `raise SystemExit` into the interpreter's own exit 120). The wrapped-write shape held the
+    # exit against a failing write but still ended in `raise SystemExit`, so the flushraises
+    # vector alone turns its refusal exit into exit 120.
+    old_shape = {"tools/demo.py": _entry(_old_guard_text("demo.py", floor))}
+    check("dynamic/old-shape-stderr-fails-open",
+          [stderr_vector_observed(_fixture(base, files=old_shape) / "tools" / "demo.py",
+                                  version, vector)[0] for vector in STDERR_VECTORS], [1, 1, 120, 1])
+    code, lines = evaluate(_fixture(base, source=listed, files=old_shape))
+    check("guard/old-shape-unwrapped-write-finding",
+          (code, _has(lines, guard_marker),
+           _has(lines, "the refusal exit may not depend on the diagnostic write")),
+          (1, True, True))
+    noflush_shape = {"tools/demo.py": _entry(_noflush_guard_text("demo.py", floor))}
+    check("dynamic/noflush-shape-flush-raises-exit-120",
+          [stderr_vector_observed(_fixture(base, files=noflush_shape) / "tools" / "demo.py",
+                                  version, vector)[0] for vector in STDERR_VECTORS], [2, 2, 120, 2])
+    code, lines = evaluate(_fixture(base, source=listed, files=noflush_shape))
+    check("guard/noflush-shape-finding",
+          (code, _has(lines, guard_marker),
+           _has(lines, "the refusal exit may not depend on the diagnostic write")),
+          (1, True, True))
     code, lines = evaluate(_fixture(base, source=listed, files={
         "tools/demo.py": _entry(good, after="return\n")}))
     check("dynamic/compile-failure-finding",
@@ -1415,12 +2307,114 @@ def _self_test_cases(base):
     check("dynamic/boundary-continues-at-floor", boundary_observed(prefix, floor + (0,), ()),
           (0, CONTINUED + "\n", ""))
     check("dynamic/boundary-refuses-below-floor", boundary_observed(prefix, version, ())[:2], (2, ""))
-    try:
-        dynamic_findings(_fixture(base, files=deep), ["tools/demo.py"], floor)
-        got = "no exception"
-    except CannotEvaluate as exc:
-        got = "too complex to evaluate: RecursionError" in str(exc)
-    check("dynamic/deep-tree-cannot-evaluate", got, True)
+    got = []
+    for exc_class in (MemoryError, RecursionError):
+        ast.dump = dump_overflow(exc_class)
+        try:
+            dynamic_findings(_fixture(base, files=deep), ["tools/demo.py"], floor)
+            got.append("no exception")
+        except CannotEvaluate as exc:
+            got.append("too complex to evaluate: " + exc_class.__name__ in str(exc))
+        except (MemoryError, RecursionError) as exc:
+            got.append("raised " + type(exc).__name__)
+        finally:
+            ast.dump = real_dump
+    check("dynamic/deep-tree-cannot-evaluate", got, [True, True])
+
+    # The hook form (HOOK_SURFACES): a fixture hook at the core hook's path with two demo modes.
+    hook_rel, demo_modes = HOOK_SURFACES[0], ("mode_a", "mode_b")
+    hook_good = guard_text("aiqt_hooks.py", floor, demo_modes)
+    hook = dict([(hook_rel, _entry(hook_good, before='"""Fixture hook."""\n'))])
+    hook_listed = _source_text(surfaces=[hook_rel])
+    check("guard/hook-form-passes", evaluate(_fixture(base, source=hook_listed, files=hook))[0], 0)
+    for check_id, text in (
+            ("guard/hook-cli-form-finding", _entry(guard_text("aiqt_hooks.py", floor))),
+            ("guard/hook-unsorted-modes-finding",
+             _entry(guard_text("aiqt_hooks.py", floor, ("mode_b", "mode_a")))),
+            ("guard/hook-duplicate-modes-finding",
+             _entry(guard_text("aiqt_hooks.py", floor, ("mode_a", "mode_a")))),
+            ("guard/hook-computed-modes-finding", _entry(hook_good.replace(
+                "FLOOR_FAIL_OPEN_MODES = ('mode_a', 'mode_b')", "FLOOR_FAIL_OPEN_MODES = tuple(['mode_a'])"))),
+            ("guard/hook-blocking-fail-open-finding",
+             _entry(hook_good.replace("os._exit(0)", "os._exit(2)")))):
+        code, lines = evaluate(_fixture(base, source=hook_listed, files=dict([(hook_rel, text)])))
+        check(check_id, (code, _has(lines, "canonical floor guard in its hook form")), (1, True))
+    code, lines = evaluate(_fixture(base, source=listed, files=dict(
+        [("tools/demo.py", _entry(guard_text("demo.py", floor, demo_modes)))])))
+    check("guard/hook-form-on-cli-surface-finding", (code, _has(lines, guard_marker)), (1, True))
+    hook_path = _fixture(base, files=hook) / hook_rel
+    hook_refusal = expected_refusal("aiqt_hooks.py", floor, version, sys.executable)
+    check("dynamic/hook-fail-open-mode-warns", refusal_observed(hook_path, version, (), ["mode_b"]),
+          (0, expected_warning("aiqt_hooks.py", floor, version, sys.executable, "mode_b"), hook_refusal, []))
+    check("dynamic/hook-other-mode-refuses",
+          refusal_observed(hook_path, version, (), [DENY_PROBE_MODE]), (2, "", hook_refusal, []))
+    check("dynamic/hook-no-mode-refuses", refusal_observed(hook_path, version, ()),
+          (2, "", hook_refusal, []))
+    check("dynamic/hook-stderr-vectors-deny-exact",
+          [stderr_vector_observed(hook_path, version, vector) for vector in STDERR_VECTORS],
+          [(2, "", "", [])] * 4)
+    check("dynamic/hook-stderr-vectors-fail-open-warn",
+          [stderr_vector_observed(hook_path, version, vector, ["mode_b"])
+           for vector in STDERR_VECTORS],
+          [(0, expected_warning("aiqt_hooks.py", floor, version, sys.executable, "mode_b"),
+            "", [])] * 4)
+    old_hook = dict([(hook_rel, _entry(_old_guard_text("aiqt_hooks.py", floor, demo_modes),
+                                       before='"""Fixture hook."""\n'))])
+    check("dynamic/hook-old-shape-stderr-fails-open",
+          [stderr_vector_observed(_fixture(base, files=old_hook) / hook_rel, version, vector,
+                                  [mode])[0] for vector in STDERR_VECTORS
+           for mode in ("mode_b", DENY_PROBE_MODE)], [1, 1, 1, 1, 120, 120, 1, 1])
+    code, lines = evaluate(_fixture(base, source=hook_listed, files=old_hook))
+    check("guard/hook-old-shape-unwrapped-write-finding",
+          (code, _has(lines, "canonical floor guard in its hook form")), (1, True))
+    noflush_hook = dict([(hook_rel, _entry(_noflush_guard_text("aiqt_hooks.py", floor, demo_modes),
+                                           before='"""Fixture hook."""\n'))])
+    check("dynamic/hook-noflush-shape-flush-raises-exit-120",
+          [stderr_vector_observed(_fixture(base, files=noflush_hook) / hook_rel, version, vector,
+                                  [mode])[0] for vector in STDERR_VECTORS
+           for mode in ("mode_b", DENY_PROBE_MODE)], [0, 2, 0, 2, 120, 120, 0, 2])
+    code, lines = evaluate(_fixture(base, source=hook_listed, files=noflush_hook))
+    check("guard/hook-noflush-shape-finding",
+          (code, _has(lines, "canonical floor guard in its hook form")), (1, True))
+    blocking = dict([(hook_rel, _entry(hook_good.replace("os._exit(0)", "os._exit(2)")))])
+    blocked = dynamic_findings(_fixture(base, files=blocking), [hook_rel], floor)
+    check("dynamic/hook-blocking-fail-open-finding",
+          sorted(set(line.split(": got")[0] for line in blocked if "fail-open mode" in line)),
+          sorted(["{} at patched {}.{}.{} with the fail-open mode {}".format(
+                      hook_rel, *version, mode) for mode in demo_modes]
+                 + ["{} at patched {}.{}.{} with the fail-open mode {} and {}".format(
+                        hook_rel, *version, demo_modes[0], STDERR_VECTOR_LABELS[vector])
+                    for vector in STDERR_VECTORS]))
+    hook_prefix = guard_prefix(ast.parse(hook[hook_rel]), "aiqt_hooks.py", floor, demo_modes)
+    check("dynamic/hook-boundary-continues-at-floor", boundary_observed(hook_prefix, floor + (0,), ()),
+          (0, CONTINUED + "\n", ""))
+    # The hook form's deny path (a PreToolUse, unknown or missing mode) exits 2, fixed: exit 1 does not
+    # block a PreToolUse call. A hook surface listed in nonblocking-surfaces is cannot-evaluate, the guard
+    # carrying exit 1 there (the fail-open the listing would otherwise demand) included; called directly
+    # with such a listing, the guard and dynamic legs still require exit 2.
+    hook_exit_1 = _entry(hook_good.replace("    os._exit(2)\n", "    os._exit(1)\n"),
+                         before='"""Fixture hook."""\n')
+    check("guard/hook-form-deny-exit-fixed-at-2",
+          (guard_text("aiqt_hooks.py", floor, demo_modes, code=NONBLOCKING_EXIT) == hook_good,
+           hook_good.endswith("    os._exit(2)\n"), hook_exit_1 != hook[hook_rel]),
+          (True, True, True))
+    got = []
+    for rel, text in ((hook_rel, hook_exit_1), (hook_rel, hook[hook_rel]), (HOOK_SURFACES[1], hook_exit_1)):
+        code, lines = evaluate(_fixture(base, source=_source_text(surfaces=[rel], nonblocking=[rel]),
+                                        files=dict([(rel, text)])))
+        got.append((code, _has(lines, "nonblocking-surfaces lists the hook surface(s) " + rel)))
+    check("source/nonblocking-hook-surface-cannot-evaluate", got, [(2, True)] * 3)
+    code, lines = evaluate(_fixture(base, source=hook_listed, files=dict([(hook_rel, hook_exit_1)])))
+    direct = guard_findings(_fixture(base, files=dict([(hook_rel, hook_exit_1)])), [hook_rel], floor,
+                            frozenset([hook_rel]))
+    check("guard/hook-deny-exit-1-finding",
+          (code, _has(lines, "canonical floor guard in its hook form"),
+           _has(direct, "canonical floor guard in its hook form")), (1, True, True))
+    denied = dynamic_findings(_fixture(base, files=dict([(hook_rel, hook_exit_1)])), [hook_rel], floor,
+                              frozenset([hook_rel]))
+    check("dynamic/hook-deny-exit-1-finding",
+          [_has(denied, "with the mode {}, outside {}: got exit 1".format(DENY_PROBE_MODE, MODES_NAME)),
+           _has(denied, "under no flag: got exit 1"), _has(denied, "fail-open mode")], [True, True, False])
 
     unguarded = {"tools/demo.py": _entry("import sys\n")}
     check("completeness/off-ignores-unguarded", evaluate(_fixture(base, files=unguarded))[0], 0)
@@ -1436,19 +2430,329 @@ def _self_test_cases(base):
             ".venv/lib/tool.py": _entry("import sys\n"),
             "tools/helper.py": "VALUE = 1\n"}))[0], 0)
 
-    declared = dict.fromkeys(DECLARATION_FILES, "Requires Python 3.14 or newer.\n")
-    check("documentation/off-ignores-missing", evaluate(_fixture(base))[0], 0)
-    code, lines = evaluate(_fixture(base, source=_source_text(documentation=True), files=dict(
-        declared, **{DECLARATION_FILES[0]: "Requires Python.\n"})))
+    # The fallback leg: a module-level import fallback is the canonical write-flush-exit refusal or a
+    # plain fallback, nothing else; the fixture file is no entrypoint and is not listed, so only this
+    # leg judges it. Each case names the line its finding must cite.
+    fallback_head = "import sys\n\ntry:\n    import tomllib\nexcept ModuleNotFoundError:\n"
+    fallback_write = "        sys.stderr.write(\"error: no tomllib\\n\")\n"
+    fallback_flush = "        sys.stderr.flush()\n"
+    fallback_wrapped = ("    import os\n    try:\n" + fallback_write + fallback_flush
+                        + "    except BaseException:\n        pass\n")
+
+    def fallback_case(source, line=None, holds=None):
+        """(exit, whether a fallback finding cites tools/helper.py:<line>) for one helper source, plus
+        whether the finding names the construct holds when holds is given."""
+        code, lines = evaluate(_fixture(base, files=dict([("tools/helper.py", source)])))
+        cited = line is not None and _has(
+            lines, "tools/helper.py:{}: an import fallback departs here".format(line))
+        return (code, cited) if holds is None else (code, cited, _has(lines, "(it holds {})".format(holds)))
+
+    def fallback_refusal(write="sys.stderr.write(\"error: no tomllib\\n\")", flush="sys.stderr.flush()",
+                         handler="except BaseException:\n        pass", before="    import os\n",
+                         after="    os._exit(2)\n", head=fallback_head):
+        """The canonical refusal with one part replaced; with the default head and before, its
+        diagnostic try statement is on line 7 and its exit on line 12."""
+        return "{}{}    try:\n        {}\n        {}\n    {}\n{}".format(
+            head, before, write, flush, handler, after)
+
+    fallback_branch = ("        try:\n            sys.stderr.write(\"error: no tomllib\\n\")\n"
+                       "            sys.stderr.flush()\n        except BaseException:\n            pass\n")
+
+    def fallback_split(test="tuple(sys.version_info[:2]) < (3, 14)", body=fallback_branch,
+                       orelse="    else:\n" + fallback_branch, head=fallback_head):
+        """The canonical refusal whose diagnostic is the version split, its if statement on line 7
+        with the default head."""
+        return head + "    import os\n    if " + test + ":\n" + body + orelse + "    os._exit(2)\n"
+
+    def fallback_reraise(reraise="    if exc.name != \"tomllib\":\n        raise\n",
+                         handler="except ModuleNotFoundError as exc:", guarded="    import tomllib\n"):
+        """The canonical refusal opening with a re-raise (on line 6 when guarded is one line)."""
+        return fallback_refusal(head="import sys\n\ntry:\n" + guarded + handler + "\n",
+                                before=reraise + "    import os\n")
+
+    check("fallback/raise-systemexit-and-bare-write-finding", fallback_case(
+        fallback_head + "    sys.stderr.write(\"error: no tomllib\\n\")\n    raise SystemExit(2)\n", 6),
+        (1, True))
+    check("fallback/sys-exit-finding", fallback_case(
+        fallback_head + fallback_wrapped + "    sys.exit(2)\n", 12), (1, True))
+    check("fallback/wrapped-write-no-flush-finding", fallback_case(
+        fallback_head + "    import os\n    try:\n" + fallback_write
+        + "    except BaseException:\n        pass\n    os._exit(2)\n", 7), (1, True))
+    # Each of these passed the scanner that looked for retired shapes instead of matching the one
+    # canonical shape: the diagnostic's handler re-raises (exit 1 when the write raises), the flush
+    # runs before the write (the diagnostic stays buffered and os._exit drops it), an extra statement
+    # sits between the diagnostic and the exit, and the handler has no os._exit (it falls through).
+    check("fallback/reraise-in-diagnostic-handler-finding", fallback_case(
+        fallback_head + "    import os\n    try:\n" + fallback_write + fallback_flush
+        + "    except BaseException:\n        raise\n    os._exit(2)\n", 7), (1, True))
+    check("fallback/flush-before-write-finding", fallback_case(
+        fallback_head + "    import os\n    try:\n" + fallback_flush + fallback_write
+        + "    except BaseException:\n        pass\n    os._exit(2)\n", 7), (1, True))
+    check("fallback/extra-statement-finding", [fallback_case(source, line) for source, line in (
+        (fallback_head + fallback_wrapped + "    os.getpid()\n    os._exit(2)\n", 12),
+        (fallback_head + fallback_wrapped + "    os._exit(2)\n    os.getpid()\n", 13))], [(1, True)] * 2)
+    check("fallback/missing-os-exit-finding", fallback_case(
+        fallback_head + fallback_wrapped, 11), (1, True))
+    # Spelled refusals the retired-shape scanner did not name: print to stderr, the builtin exit, an
+    # aliased sys.exit and a qualified SystemExit.
+    check("fallback/spelled-refusals-findings", [fallback_case(source, line) for source, line in (
+        (fallback_head + "    import os\n    print(\"error\", file=sys.stderr)\n    os._exit(2)\n", 7),
+        (fallback_head + fallback_wrapped + "    exit(2)\n", 12),
+        (fallback_head + fallback_wrapped + "    import sys as _s\n    _s.exit(2)\n", 12),
+        (fallback_head + fallback_wrapped + "    import builtins\n    raise builtins.SystemExit(2)\n",
+         12))], [(1, True)] * 4)
+    # A class body runs at import: a retired refusal in one, inside a fallback handler or holding the
+    # import fallback itself, is judged; a method body still is not.
+    check("fallback/class-body-in-handler-finding", fallback_case(
+        fallback_head + "    class _Refuse:\n        try:\n    " + fallback_write
+        + "        except BaseException:\n            pass\n        raise SystemExit(2)\n", 6), (1, True))
+    check("fallback/class-body-import-fallback-finding", fallback_case(
+        "import sys\n\n\nclass Loader:\n    try:\n        import tomllib\n"
+        "    except ModuleNotFoundError:\n        sys.stderr.write(\"x\\n\")\n"
+        "        raise SystemExit(2)\n", 8), (1, True))
+    check("fallback/def-default-finding", fallback_case(
+        fallback_head + "    def load(code=sys.exit(2)):\n        return code\n", 6), (1, True))
+    # A decorator and a base class run code at import without a call node in the handler.
+    check("fallback/decorated-def-and-based-class-findings", [
+        fallback_case(source, line) for source, line in (
+            (fallback_head + "    @staticmethod\n    def load():\n        return 1\n", 7),
+            (fallback_head + "    class Fallback(dict):\n        pass\n", 6))], [(1, True)] * 2)
+    # The canonical grammar, rule by rule. Each case breaks one rule, so it passes when that rule alone
+    # is removed from the matcher. The round-3 QA forms first: a message that execs a clean exit 0 or
+    # closes the stream, and a version test that raises (exit 1).
+    check("fallback/message-call-findings", [fallback_case(fallback_refusal(write=write), 7) for write in (
+        "sys.stderr.write(os.execl(sys.executable, sys.executable, \"-I\", \"-B\", \"-c\", "
+        "\"raise SystemExit(0)\"))",
+        "sys.stderr.write(sys.stderr.close())",
+        "sys.stderr.write(\"error: \" + str(signal.raise_signal(signal.SIGTERM)))")], [(1, True)] * 3)
+    check("fallback/version-test-call-finding", fallback_case(fallback_split(test="int(\"bad\")"), 7),
+          (1, True))
+    check("fallback/message-grammar-findings", [fallback_case(source, line) for source, line in (
+        (fallback_refusal(write="sys.stderr.write(b\"error: no tomllib\\n\")"), 7),
+        (fallback_refusal(write="sys.stderr.write(MESSAGE)"), 7),
+        (fallback_refusal(write="sys.stderr.write(f\"error: {MESSAGE}\\n\")"), 7),
+        (fallback_refusal(write="sys.stderr.write(f\"error: {os._exit(0)}\\n\")"), 7),
+        (fallback_refusal(before="    import os\n    TOOL = \"helper.py\"\n",
+                          write="sys.stderr.write(f\"error: {TOOL:{os._exit(0)}}\\n\")"), 8),
+        (fallback_refusal(write="sys.stderr.write(\"error: no tomllib\\n\" % \"x\")"), 7))],
+        [(1, True)] * 6)
+    check("fallback/binding-findings", [fallback_case(fallback_refusal(
+        before="    import os\n    " + binding + "\n", write="sys.stderr.write(" + message + ")"), 7)
+        for binding, message in (
+            ("TOOL = str(1)", "TOOL"), ("TOOL = 1", "TOOL"), ("sys = \"error\\n\"", "sys"),
+            ("TOOL = sys.stderr = \"error\\n\"", "TOOL"), ("sys.stderr = \"error\\n\"", "\"error\\n\""),
+            ("TOOL: str = \"error\\n\"", "TOOL"))], [(1, True)] * 6)
+    # The round-3 QA MINOR 3: `import os` is required and must bind os (an unbound os is a NameError,
+    # exit 1).
+    check("fallback/import-os-findings", [fallback_case(fallback_refusal(before=before), 6) for before in (
+        "", "    import os as _os\n", "    import posix as os\n", "    import os, sys\n")], [(1, True)] * 4)
+    check("fallback/version-split-findings", [fallback_case(source, 7) for source in (
+        fallback_split(test="int(\"bad\") < (3, 14)"),
+        fallback_split(test="sys.version_info < (3, 14)"),
+        fallback_split(test="tuple(sys.version_info[:2]) < (3, int(\"bad\"))"),
+        fallback_split(test="tuple(sys.version_info[:2]) < (3, \"14\")"),
+        fallback_split(test="tuple(sys.version_info[:2]) >= (3, 14)"),
+        fallback_split(test="tuple(sys.version_info[:2]) < (3, 14) < (4, 0)"),
+        fallback_split(test="tuple(sys.version_info[:2]) < VERSION"),
+        fallback_split(body=fallback_branch + "        os._exit(0)\n"),
+        fallback_split(orelse="    else:\n" + fallback_branch + "        os._exit(0)\n"),
+        fallback_split(orelse=""),
+        fallback_split(body="        pass\n"),
+        fallback_split(orelse="    else:\n        pass\n"))], [(1, True)] * 12)
+    check("fallback/diagnostic-try-findings", [fallback_case(fallback_refusal(**parts), 7) for parts in (
+        dict(write="sys.stdout.write(\"error: no tomllib\\n\")"),
+        dict(flush="sys.stdout.flush()"),
+        dict(write="sys.stderr.write(\"error: no tomllib\\n\", end=os._exit(0))"),
+        dict(write="sys.stderr.write(\"error: no tomllib\\n\", os._exit(0))"),
+        dict(flush="sys.stderr.flush(os._exit(0))"),
+        dict(flush="sys.stderr.flush()\n        os._exit(0)"),
+        dict(handler="except BaseException:\n        pass\n    else:\n        os._exit(0)"),
+        dict(handler="except BaseException:\n        pass\n    finally:\n        os._exit(0)"),
+        dict(handler="except BaseException:\n        pass\n    except Exception:\n        os._exit(0)"),
+        dict(handler="except OSError:\n        pass"),
+        dict(handler="except (BaseException,):\n        pass"),
+        dict(handler="except BaseException as os:\n        pass"),
+        dict(handler="except BaseException:\n        pass\n        os._exit(0)"),
+        dict(handler="except* BaseException:\n        pass"))], [(1, True)] * 14)
+    check("fallback/os-exit-findings", [fallback_case(fallback_refusal(after=after), 12) for after in (
+        "    os._exit(0)\n", "    os._exit(2.0)\n", "    os._exit(True)\n", "    os._exit(CODE)\n",
+        "    os._exit(2, os._exit(0))\n", "    os._exit(2, flag=os._exit(0))\n", "    sys._exit(2)\n",
+        "    os.umask(2)\n", "    _exit(2)\n", "    os.path._exit(2)\n", "    CODE = os._exit(2)\n",
+        "    os._exit\n")], [(1, True)] * 12)
+    # The round-3 QA MINOR 2 first: a re-raise naming another module re-raises the guarded module's
+    # own import error (exit 1). A dotted or from-import can fail on a module the re-raise does not name.
+    check("fallback/reraise-findings", [fallback_case(source, line) for source, line in (
+        (fallback_reraise(reraise="    if exc.name != \"tomli\":\n        raise\n"), 6),
+        (fallback_reraise(reraise="    if True:\n        raise\n"), 6),
+        (fallback_reraise(reraise="    if exc.name == \"tomllib\":\n        raise\n"), 6),
+        (fallback_reraise(reraise="    while exc.name != \"tomllib\":\n        raise\n"), 6),
+        (fallback_reraise(reraise="    if exc.name != \"tomllib\":\n        raise SystemExit(0)\n"), 6),
+        (fallback_reraise(reraise="    if exc.name != \"tomllib\":\n        pass\n"), 6),
+        (fallback_reraise(reraise="    if exc.name != \"tomllib\":\n        raise\n        os._exit(0)\n"), 6),
+        (fallback_reraise(reraise="    if exc.name != \"tomllib\":\n        raise\n    else:\n"
+                                  "        os._exit(0)\n"), 6),
+        (fallback_reraise(handler="except Exception as exc:"), 6),
+        (fallback_reraise(handler="except (ModuleNotFoundError,) as exc:"), 6),
+        (fallback_reraise(guarded="    import xml.etree\n",
+                          reraise="    if exc.name != \"xml.etree\":\n        raise\n"), 6),
+        (fallback_reraise(guarded="    import tomllib, json\n"), 6),
+        (fallback_reraise(guarded="    from tomllib import loads\n",
+                          reraise="    if exc.name != \"loads\":\n        raise\n"), 6),
+        (fallback_reraise(guarded="    import tomllib\n    import json\n"), 7))], [(1, True)] * 14)
+    # The round-4 QA MEDIUM: a re-raise in an unnamed handler reads None.name, one after a from-import
+    # compares exc.name with None (every import error is re-raised), and one under except* reads the
+    # .name an ExceptionGroup lacks; each exits 1 without the diagnostic.
+    check("fallback/reraise-binding-findings", [fallback_case(source, 6) for source in (
+        fallback_reraise(handler="except ModuleNotFoundError:",
+                         reraise="    if None.name != \"tomllib\":\n        raise\n"),
+        fallback_reraise(guarded="    from tomllib import loads\n",
+                         reraise="    if exc.name != None:\n        raise\n"),
+        fallback_reraise(handler="except* ModuleNotFoundError as exc:"))], [(1, True)] * 3)
+
+    def fallback_named(name, prefix="import sys\n\n"):
+        """The head of a fallback whose handler binds name, the handler on line 5 with the default
+        prefix."""
+        return prefix + "try:\n    import tomllib\nexcept ModuleNotFoundError" + name + ":\n"
+
+    # The round-4 QA MINOR 2: the handler's `as` clause rebinds a name the grammar reads (as sys the
+    # diagnostic is never written, or the version split exits 1; as tuple the split exits 1; as
+    # BaseException the wrapping try catches nothing). An `as os` is refused with them, though the
+    # handler's `import os` rebinds os.
+    check("fallback/handler-name-findings", [fallback_case(source, 5) for source in (
+        fallback_refusal(head=fallback_named(" as sys")), fallback_split(head=fallback_named(" as sys")),
+        fallback_split(head=fallback_named(" as tuple")),
+        fallback_refusal(head=fallback_named(" as BaseException")),
+        fallback_refusal(head=fallback_named(" as os")))], [(1, True)] * 5)
+    # The round-4 QA MINOR 3: sys is bound by a module-level `import sys` before the try. With none,
+    # with one after the try, an aliased one or one in a function body, the plain diagnostic's
+    # NameError is swallowed (the diagnostic is lost) and the version split's exits 1.
+    check("fallback/sys-binding-findings", [fallback_case(source, 5) for source in (
+        fallback_refusal(head=fallback_named("", "import json\n\n")),
+        fallback_split(head=fallback_named("", "import json\n\n")),
+        fallback_split(head=fallback_named("", "import json\n\n")) + "\nimport sys\n",
+        fallback_refusal(head=fallback_named("", "import json\n\n")) + "\nimport sys\n",
+        fallback_refusal(head=fallback_named("", "import sys as _sys\n\n")),
+        fallback_refusal(head=fallback_named("", "def load():\n    import sys\n")))], [(1, True)] * 6)
+    # A plain fallback holds none of these at import time; each is a finding.
+    check("fallback/plain-fallback-action-findings", [
+        fallback_case(fallback_head + body, line) for body, line in (
+        ("    raise SystemExit\n", 6),
+        ("    try:\n        pass\n    finally:\n        pass\n", 6),
+        ("    try:\n        pass\n    except* ValueError:\n        pass\n", 6),
+        ("    with LOCK:\n        pass\n", 6),
+        ("    async with LOCK:\n        pass\n", 6),
+        ("    await LOCK\n", 6), ("    yield\n", 6), ("    yield from LOCK\n", 6),
+        ("    assert LOCK\n", 6),
+        ("    class Fallback(metaclass=LOCK):\n        pass\n", 6),
+        ("    @LOCK\n    async def load():\n        return 1\n", 7),
+        ("    @LOCK\n    class Fallback:\n        pass\n", 7))], [(1, True)] * 12)
+    check("fallback/import-time-walk-findings", [fallback_case(fallback_head + body, line, "a call at line 6")
+                                                 for body, line in (
+        ("    def load(*, code=sys.exit(2)):\n        return code\n", 6),
+        ("    load = lambda code=sys.exit(2): code\n", 6),
+        ("    @LOCK(sys.exit(2))\n    def load():\n        return 1\n", 7))], [(1, True, True)] * 3)
+    fallback_retired = "    sys.stderr.write(\"error: no tomllib\\n\")\n    raise SystemExit(2)\n"
+    check("fallback/scan-scope-findings", [fallback_case(source, line) for source, line in (
+        ("import sys\n\ntry:\n    import tomllib\nexcept* ModuleNotFoundError:\n" + fallback_retired, 6),
+        ("import sys\n\ntry:\n    from tomllib import loads\nexcept ModuleNotFoundError:\n"
+         + fallback_retired, 6),
+        ("import sys\n\ntry:\n    import tomllib\nexcept ModuleNotFoundError:\n    tomllib = None\n"
+         "except ImportError:\n" + fallback_retired, 8))], [(1, True)] * 3)
+    check("fallback/deferred-bodies-not-scanned-passes", [fallback_case(fallback_head + body) for body in (
+        "    load = lambda: sys.exit(2)\n", "    async def load():\n        sys.exit(2)\n")], [(0, False)] * 2)
+    check("fallback/current-template-passes", fallback_case(
+        fallback_head + fallback_wrapped + "    os._exit(2)\n"), (0, False))
+    check("fallback/canonical-variants-pass", [fallback_case(source) for source in (
+        fallback_reraise(),
+        fallback_reraise(handler="except ImportError as exc:", guarded="    import tomllib as toml\n"),
+        fallback_split(),
+        fallback_split(test="tuple(sys.version_info[:2]) < (3, 14, 0)"),
+        fallback_refusal(before="    import os\n    TOOL = \"helper.py\"\n    WHY = \"no tomllib\"\n",
+                         write="sys.stderr.write(\"error: \" + TOOL + f\": {WHY!r} ({TOOL})\" + \"\\n\")",
+                         after="    os._exit(1)\n"),
+        "import sys\n\ntry:\n    import fcntl\nexcept ImportError:\n    fcntl = None\n",
+        "import sys\n\ntry:\n    from x import root\nexcept Exception:\n    def root():\n"
+        "        return sys.exit(2)\n",
+        "import json\n\ntry:\n    import fcntl\nexcept ImportError as sys:\n    fcntl = None\n",
+        "import sys\n\n\nclass Loader:\n    try:\n        import tomllib\n    except ModuleNotFoundError:\n"
+        + "".join("    " + line + "\n" for line in (fallback_wrapped + "    os._exit(2)\n").splitlines()))],
+        [(0, False)] * 9)
+    check("fallback/function-body-not-scanned-passes", fallback_case(
+        "import sys\n\n\ndef load():\n    try:\n        import tomllib\n"
+        "    except ModuleNotFoundError:\n        sys.stderr.write(\"x\\n\")\n"
+        "        raise SystemExit(2)\n    return tomllib\n"), (0, False))
+    check("fallback/method-body-not-scanned-passes", fallback_case(
+        "import sys\n\n\nclass Loader:\n    def load(self):\n        try:\n            import tomllib\n"
+        "        except ModuleNotFoundError:\n            sys.stderr.write(\"x\\n\")\n"
+        "            raise SystemExit(2)\n        return tomllib\n"), (0, False))
+
+    code, lines = evaluate(_fixture(base, source=_source_text(documentation=False), declarations=False))
+    check("switch/off-finding", (code, [line for line in lines if "documentation-check is" in line]),
+          (1, ["FAIL: {}: documentation-check is false, but its decided value is true "
+               "(DOCUMENTATION_CHECK in tools/check_python_floor.py); changing it is a reviewed change "
+               "to this gate".format(SOURCE_REL)]))
+    code, lines = evaluate(_fixture(base, files={DECLARATION_FILES[0]: "Requires Python.\n"}))
     check("documentation/on-missing-phrase-finding",
           (code, [line for line in lines if "does not state" in line]),
           (1, ["FAIL: README.md: does not state 'Python 3.14 or newer'"]))
-    check("documentation/on-present-passes",
-          evaluate(_fixture(base, source=_source_text(documentation=True), files=declared))[0], 0)
+    check("documentation/on-present-passes", evaluate(_fixture(base, files=_declared()))[0], 0)
     check("documentation/on-absent-file-cannot-evaluate",
-          evaluate(_fixture(base, source=_source_text(documentation=True)))[0], 2)
+          evaluate(_fixture(base, declarations=False))[0], 2)
+    # An older claim beside the floor statement: the visible sentence names 3.11, a comment the floor.
+    code, lines = evaluate(_fixture(base, files={DECLARATION_FILES[3]: (
+        "<!-- Python 3.14 or newer -->\n<p>The hooks require Python 3.11 or newer.</p>\n")}))
+    check("claims/older-beside-phrase-finding",
+          (code, [line for line in lines if "names Python" in line]),
+          (1, ["FAIL: site/install.html:2: names Python 3.11, below the floor 3.14; a declaration may "
+               "not state an older version"]))
+    forms = ("Requires Python 3.14 or newer.\nCPython 3.13\npython3.12\nPython\n3.10\nPython&nbsp;3.9\n"
+             "Python versions 3.12\nruns on 3.11+\nor 3.13 or later\nPython 2.7\nPython\u00a03.8\n")
+    code, lines = evaluate(_fixture(base, files={DECLARATION_FILES[0]: forms}))
+    check("claims/older-forms-findings",
+          (code, [line.split(": names ")[0] + " " + line.split(" ")[4] for line in lines
+                  if "names Python" in line]),
+          (1, ["FAIL: README.md:2 3.13,", "FAIL: README.md:3 3.12,", "FAIL: README.md:4 3.10,",
+               "FAIL: README.md:6 3.9,", "FAIL: README.md:7 3.12,", "FAIL: README.md:8 3.11,",
+               "FAIL: README.md:9 3.13,", "FAIL: README.md:10 2.7,", "FAIL: README.md:11 3.8,"]))
+    check("claims/floor-newer-and-other-versions-pass", evaluate(_fixture(base, files={
+        DECLARATION_FILES[0]: "Requires Python 3.14 or newer.\nPython 3.14.4, Python 3.15, python3.14, "
+        "3.14+ and 3.20 or later.\nRun python3 tools/x.py; spec 1.2.0 or later; OPF 1.3.0 and up; "
+        "AIQT 2.7+; 13.1+.\n"}))[0], 0)
+    check("claims/oversized-version-cannot-evaluate", evaluate(_fixture(base, files={
+        DECLARATION_FILES[0]: "Requires Python 3.14 or newer.\nPython 3." + "1" * 5000 + "\n"}))[0], 2)
+    # A file holding two copies of the phrase: one copy changed, or removed, is a finding.
+    adopt = "opf/site/adopt.html"
+    code, lines = evaluate(_fixture(base, files={
+        adopt: "<p>Requires Python 3.14 or newer.</p>\n<p>Requires Python 3.14 or later.</p>\n"}))
+    check("documentation/copies-one-changed-finding", (code, lines),
+          (1, ["FAIL: {}: states 'Python 3.14 or newer' 1 time(s), not the 2 in DECLARATION_COPIES"
+               .format(adopt), "FAIL: {}:2: states the floor as 'Python 3.14 or later', not as "
+               "'Python 3.14 or newer'".format(adopt)]))
+    code, lines = evaluate(_fixture(base, files={adopt: "<p>Requires Python 3.14 or newer.</p>\n"}))
+    check("documentation/copies-one-removed-finding", (code, lines),
+          (1, ["FAIL: {}: states 'Python 3.14 or newer' 1 time(s), not the 2 in DECLARATION_COPIES"
+               .format(adopt)]))
+    code, lines = evaluate(_fixture(base, files={
+        DECLARATION_FILES[0]: "Requires Python 3.14 or newer.\nThe hooks need python 3.14 and later.\n"}))
+    check("documentation/variant-wording-finding", (code, lines),
+          (1, ["FAIL: README.md:2: states the floor as 'python 3.14 and later', not as "
+               "'Python 3.14 or newer'"]))
+    forms = ("Requires Python 3.14 or newer.\nSupports Python >= 3.10.\nNeeds Python \u2265 3.10.\n"
+             "Python &gt;= 3.9\nCPython &ge; 3.12\nRuns on 3.12 and above.\nRuns on 3.12 or greater.\n"
+             "Tested on Py 3.12.\nPython 3 or newer\nRequires >=3.11.\n3.11 onwards.\nPython 2\n")
+    code, lines = evaluate(_fixture(base, files={DECLARATION_FILES[0]: forms}))
+    check("claims/operator-major-and-phrase-findings",
+          (code, [line.split(": names ")[0] + " " + line.split(" ")[4] for line in lines
+                  if "names Python" in line]),
+          (1, ["FAIL: README.md:2 3.10,", "FAIL: README.md:3 3.10,", "FAIL: README.md:4 3.9,",
+               "FAIL: README.md:5 3.12,", "FAIL: README.md:6 3.12,", "FAIL: README.md:7 3.12,",
+               "FAIL: README.md:8 3.12,", "FAIL: README.md:9 3,", "FAIL: README.md:10 3.11,",
+               "FAIL: README.md:11 3.11,", "FAIL: README.md:12 2,"]))
+    check("claims/operator-major-near-misses-pass", evaluate(_fixture(base, files={
+        DECLARATION_FILES[0]: "Requires Python 3.14 or newer.\nPython 4 or newer; Python >= 3.14; "
+        "run check.py 3 times; py3 wheels; python3 tools/x.py 2; Python 3.14.4; spec >= 1.2.0.\n"}))[0], 0)
 
-    _red_on_revert(base, good, declared)
+    _red_on_revert(base, good)
     _rule_reverts(base)
 
 
@@ -1463,7 +2767,7 @@ def _gate_run(root, gate_source):
     return proc.returncode, proc.stdout.decode("utf-8", "backslashreplace").splitlines()
 
 
-def _red_on_revert(base, good, declared):
+def _red_on_revert(base, good):
     """Each leg red on its fixture with the intact gate, which names that leg's own finding, and green
     on the same fixture with that leg's check removed from a copy of this gate."""
     gate_source = _read_text(Path(__file__).resolve())
@@ -1477,19 +2781,27 @@ def _red_on_revert(base, good, declared):
     listed = _source_text(surfaces=["tools/demo.py"])
     # Each case: the leg, its fixture, and the text of that leg's own finding.
     cases = (
-        ("source", dict(source=_source_text(floor="3.13"), workflow_pin="3.13", template_pin="3.13"),
+        ("source", dict(source=_source_text(floor="3.13"), workflow_pin="3.13", template_pin="3.13",
+                        files=_declared("3.13")),
          "decided floor"),
+        ("switch", dict(source=_source_text(documentation=False)), "documentation-check is false"),
         ("pins", dict(workflow_pin="3.12"), "quality.yml:6: python-version '3.12' differs"),
         ("guard", dict(source=listed, files={"tools/demo.py": _entry(good, before="import os\n")}),
          "canonical floor guard"),
         ("dynamic", dict(source=listed, files={"tools/demo.py": _entry(good, after="return\n")}),
          "at patched"),
+        ("fallback", dict(files=dict([("tools/helper.py", (
+            "import sys\n\ntry:\n    import tomllib\nexcept ModuleNotFoundError:\n"
+            "    sys.stderr.write(\"error: no tomllib\\n\")\n    raise SystemExit(2)\n"))])),
+         "departs here from the canonical write-flush-exit refusal"),
         ("completeness", dict(source=_source_text(completeness=True),
                               files={"tools/demo.py": _entry("import sys\n")}),
          "tools/demo.py: a shipped entrypoint"),
-        ("documentation", dict(source=_source_text(documentation=True), files=dict(
-            declared, **{DECLARATION_FILES[-1]: "Requires Python.\n"})),
+        ("documentation", dict(files={DECLARATION_FILES[-1]: "Requires Python.\n"}),
          DECLARATION_FILES[-1] + ": does not state"),
+        ("claims", dict(files={DECLARATION_FILES[-1]: "Requires Python 3.14 or newer; 3.12+ works.\n" + (
+            "Requires Python 3.14 or newer.\n" * (DECLARATION_COPIES.get(DECLARATION_FILES[-1], 1) - 1))}),
+         DECLARATION_FILES[-1] + ":1: names Python 3.12"),
     )
     results = {}
     for leg, kwargs, marker in cases:
@@ -1497,11 +2809,14 @@ def _red_on_revert(base, good, declared):
         named = any(line.startswith("FAIL: ") and marker in line for line in intact_lines)
         results[leg] = (intact_rc, named, _gate_run(_fixture(base, **kwargs), mutants[leg])[0])
     check("revert/source-leg", results["source"], (1, True, 0))
+    check("revert/switch-leg", results["switch"], (1, True, 0))
     check("revert/pins-leg", results["pins"], (1, True, 0))
     check("revert/guard-leg", results["guard"], (1, True, 0))
     check("revert/dynamic-leg", results["dynamic"], (1, True, 0))
+    check("revert/fallback-leg", results["fallback"], (1, True, 0))
     check("revert/completeness-leg", results["completeness"], (1, True, 0))
     check("revert/documentation-leg", results["documentation"], (1, True, 0))
+    check("revert/claims-leg", results["claims"], (1, True, 0))
 
 
 def _rule_reverts(base):
@@ -1615,28 +2930,19 @@ def _expected_check_ids():
     return None
 
 
-def _write_report(report_path):
-    if report_path is None:
-        return True
-    try:
-        with open(report_path, "w", encoding="utf-8") as handle:
-            json.dump(dict(format_version=1, suite=SUITE_ID, check_ids=EXECUTED), handle)
-            handle.write("\n")
-    except OSError as exc:
-        print("SELF-TEST HARNESS ERROR: cannot write execution report {}: {}".format(
-            report_path, exc), file=sys.stderr)
-        return False
-    return True
-
-
 def self_test(report_path=None):
+    if report_path is not None:
+        # The execution report is finalized at interpreter exit, after this run's cleanup
+        # (tools/_selftest_exit_report.py); nothing writes it in band. Imported only here: the
+        # red-on-revert legs run a copy of this gate in a fixture root that does not carry it.
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import _selftest_exit_report
+        _selftest_exit_report.arm(report_path, SUITE_ID, EXECUTED)
     try:
         with tempfile.TemporaryDirectory(prefix="python-floor-selftest-") as raw:
             _self_test_cases(Path(raw))
     except (CannotEvaluate, OSError) as exc:
         print("SELF-TEST HARNESS ERROR: {}".format(exc), file=sys.stderr)
-        return 2
-    if not _write_report(report_path):
         return 2
     expected = _expected_check_ids()
     if expected is None:
@@ -1674,4 +2980,6 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    _code = main(sys.argv[1:])
+    _finalizer = sys.modules.get("_selftest_exit_report")
+    (sys.exit if _finalizer is None else _finalizer.exit_with)(_code)

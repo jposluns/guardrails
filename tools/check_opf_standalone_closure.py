@@ -23,10 +23,23 @@ Exit convention (matches the repo's gates):
   1  a real finding (a subset gate failed in isolation: closure is broken)
   2  malformed input or a harness error (fail-closed): opf/ absent/unreadable, copy failed, no interpreter
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    import os
+    try:
+        sys.stderr.write(
+            "error: check_opf_standalone_closure.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
 import os
 import shutil
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 
@@ -52,6 +65,7 @@ _SUBSET = [
     ("opf-adopt-hook-selftest", "_opf_adopt_hook.py", ["--self-test"]),
     ("opf-pack-manifest-selftest", "_opf_pack_manifest.py", ["--self-test"]),
     ("opf-adopt-observe-selftest", "_opf_adopt_observe.py", ["--self-test"]),
+    ("opf-adopt-discover-selftest", "_opf_adopt_discover.py", ["--self-test"]),
     ("opf-prompt-pack-selftest", "check_opf_prompt_pack.py", ["--self-test"]),
     ("opf-prompt-pack", "check_opf_prompt_pack.py", []),
     ("opf-oplock-selftest", "_opf_oplock.py", ["--self-test"]),
