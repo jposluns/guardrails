@@ -560,16 +560,29 @@ def _restore_env(saved):
             os.environ[k] = v
 
 
-def _cleanup_leaked_descendant(leaked, failures):
-    """Kill any descendant still carrying the leaked token; where the survivor scan was
-    UNOBSERVABLE (None) on a host WITH /proc, record a self-test failure (the leak cannot be
-    proven absent). On a host with no /proc at all there is no survivor check (the disclosed
-    platform limit), never a false leak (_load_bound._leak_cleanup_is_failure)."""
+# Tokens the leaked-descendant cleanup ran for, in call order: the self-test asserts the REAL
+# call site ran for the real leaked token, so deleting that call is loud, never silent.
+_CLEANUP_CALLS = []
+
+
+def _cleanup_leaked_descendant(leaked, failures, cannot_evaluate):
+    """Kill any descendant still carrying the leaked token, reporting the survivor scan's three
+    DISTINCT results (_load_bound._leak_cleanup_outcome): an OBSERVED scan (a pid list or [];
+    anything listed is killed below), a cleanup FAILURE (an UNOBSERVABLE scan, None, on a host
+    WITH /proc: the leak cannot be proven absent, recorded in failures), and an UNAVAILABLE
+    observation (no /proc at all: the disclosed platform limit, recorded in cannot_evaluate by
+    name and reported as exit 2 at suite level, never a silent pass and never a false leak)."""
+    _CLEANUP_CALLS.append(leaked)
     leaked_pids = _load_bound._alive_with(leaked)
-    if _load_bound._leak_cleanup_is_failure(leaked_pids, os.path.isdir("/proc")):
+    outcome = _load_bound._leak_cleanup_outcome(leaked_pids, os.path.isdir("/proc"))
+    if outcome == "failure":
         failures.append("leaked-descendant cleanup: the survivor check was unobservable "
                         "(/proc could not be read) on a host with /proc, so the leaked child "
                         "cannot be proven absent")
+    elif outcome == "cannot-evaluate":
+        cannot_evaluate.append("leaked-descendant cleanup: no /proc on this host, so the "
+                               "survivor scan is unavailable and leak absence was not "
+                               "evaluated (the disclosed platform limit)")
     for pid in (leaked_pids or ()):
         _load_bound._kill_pid(pid)
 
@@ -577,6 +590,7 @@ def _cleanup_leaked_descendant(leaked, failures):
 def self_test_main():
     global SELFTEST_TIMEOUT
     failures = []
+    cannot_evaluate = []  # named unavailable observations, reported as exit 2 (no silent pass)
     ok = {"clock-inject.py": _STUB_OK}
     ok_hex = _sha(_STUB_OK)
     link_ok = _link("clock-inject.py")
@@ -733,29 +747,50 @@ def self_test_main():
             case("a self-test that exits 1 beside a leaked descendant", 1, r_leaky, needle="exited 1 before")
         finally:
             SELFTEST_TIMEOUT, _load_factor = saved
-            # None is UNOBSERVABLE (/proc could not be read) on a host WITH /proc, surfaced as a
-            # self-test failure instead of silently reading as "no leaked child"; on a host with
-            # no /proc there is no survivor check (the disclosed platform limit), never a false
-            # leak (_cleanup_leaked_descendant).
-            _cleanup_leaked_descendant(leaked, failures)
-            # Caller-level coverage for the cleanup guard: an injected UNOBSERVABLE scan (None) on
-            # a host with /proc must record one failure, an observed empty scan none. Drives the
-            # caller itself, so removing the guard (here or in _leak_cleanup_is_failure) turns
-            # this leg red; the committed run above never exercises the None branch on its own.
-            if os.path.isdir("/proc"):
-                probe_none, probe_empty = [], []
+            # The survivor scan's three distinct results: None on a host WITH /proc is a
+            # self-test failure, a host with NO /proc is a named cannot-evaluate (exit 2),
+            # and an observed list is killed; never a silent pass, never a false leak
+            # (_cleanup_leaked_descendant).
+            _cleanup_leaked_descendant(leaked, failures, cannot_evaluate)
+            # Caller-level coverage: the cleanup's three distinct results are driven through
+            # the REAL caller with an injected survivor scan and an injected /proc presence
+            # (no host gate: these legs run on every platform). An UNOBSERVABLE scan (None)
+            # with /proc present records exactly one failure; an observed empty scan records
+            # nothing; an UNAVAILABLE observation (no /proc) records exactly one named
+            # cannot-evaluate entry (exit 2 below), never a silent pass. Removing the guard
+            # here or in _load_bound._leak_cleanup_outcome turns a leg red.
+            def _probe_cleanup(scan_result, proc_present):
+                recorded_failures, recorded_cannot = [], []
                 saved_alive_probe = _load_bound._alive_with
+                saved_isdir_probe = os.path.isdir
+                _load_bound._alive_with = lambda tok, opener=None: scan_result
+                os.path.isdir = (lambda path, saved_isdir_probe=saved_isdir_probe:
+                                 proc_present if path == "/proc" else saved_isdir_probe(path))
                 try:
-                    _load_bound._alive_with = lambda tok, opener=None: None
-                    _cleanup_leaked_descendant("hooks-cleanup-probe", probe_none)
-                    _load_bound._alive_with = lambda tok, opener=None: []
-                    _cleanup_leaked_descendant("hooks-cleanup-probe", probe_empty)
+                    _cleanup_leaked_descendant("hooks-cleanup-probe", recorded_failures,
+                                               recorded_cannot)
                 finally:
+                    os.path.isdir = saved_isdir_probe
                     _load_bound._alive_with = saved_alive_probe
-                if (len(probe_none), probe_empty) != (1, []):
-                    failures.append("leaked-cleanup guard: an unobservable (None) scan must "
-                                    "record one failure and an observed empty scan none; got {} "
-                                    "and {!r}".format(len(probe_none), probe_empty))
+                return recorded_failures, recorded_cannot
+            probe_none = _probe_cleanup(None, True)
+            probe_empty = _probe_cleanup([], True)
+            probe_unavailable = _probe_cleanup(None, False)
+            probe_shape = (len(probe_none[0]), probe_none[1], probe_empty[0], probe_empty[1],
+                           probe_unavailable[0], len(probe_unavailable[1]),
+                           all("no /proc" in entry for entry in probe_unavailable[1]))
+            if probe_shape != (1, [], [], [], [], 1, True):
+                failures.append("leaked-cleanup caller probes: expected one failure for an "
+                                "unobservable scan with /proc, nothing for an observed empty "
+                                "scan, and one named cannot-evaluate for a host with no "
+                                "/proc; got {!r}".format(probe_shape))
+
+        # The REAL cleanup call site above must have run for the real leaked token: deleting
+        # the _cleanup_leaked_descendant call in the finally would otherwise leave the
+        # injected probes green while the lane's own leak went unchecked.
+        if leaked not in _CLEANUP_CALLS:
+            failures.append("leaked-descendant cleanup: the lane never ran its cleanup call "
+                            "site for the leaked token {!r}".format(leaked))
 
         def _unreadable_leg(rows, findings):
             raise GateError("an input became unreadable (seeded by the self-test)")
@@ -836,6 +871,11 @@ def self_test_main():
         for f in failures:
             print("  - " + f)
         return 1
+    if cannot_evaluate:
+        print("SELF-TEST CANNOT-EVALUATE:", file=sys.stderr)
+        for entry in cannot_evaluate:
+            print("  - " + entry, file=sys.stderr)
+        return 2
     print("SELF-TEST PASS: {} case(s): the NOT APPLICABLE path, the zero-hook channel, a clean one-hook tree, "
           "and each leg's seeded fault (a: failing and timed-out self-tests, a self-test exiting 1 beside a leaked "
           "descendant, a finding beside a stop or an unreadable input (exit 1), no scratch directory, the "
@@ -843,7 +883,10 @@ def self_test_main():
           "alien and extra entries, path entries in SHA256SUMS, malformed inputs, a table row without a "
           "leading pipe, line separators the reader does not honour, a CRLF README; c: a link to another "
           "file, a mismatched text or target, an absolute URL, a path with a slash, a bare name, an "
-          "angle-bracketed link, and a missing link) all hold".format(len(ran), REQUIRE_SIBLINGS_VAR))
+          "angle-bracketed link, and a missing link) all hold; and the leaked-descendant cleanup "
+          "caller probes drive its three distinct results (an observed scan, an unobservable-scan "
+          "failure, and the no-/proc named cannot-evaluate, exit 2) through the real "
+          "caller".format(len(ran), REQUIRE_SIBLINGS_VAR))
     return 0
 
 

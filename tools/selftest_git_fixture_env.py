@@ -120,10 +120,12 @@ SUITE_ID = "git-fixture-env-selftest"
 # characters, which only failing, erroring or unexpectedly succeeding tests write (an unexpected
 # success makes wasSuccessful() false), including a progress run CUT SHORT by other text on the
 # same line (a worker log line printed over a progress run: "..Fworker retrying", ".FINFO
-# started", "..E_x"). The exact rule tells a cut progress run from an ordinary word that merely
-# opens with a progress-letter spelling: an F after a progress run (one or more of . E s x u) is
-# always a failure (F is only ever a failed test), so "..Fworker" is evidence; an E or u after a
-# progress run is evidence only where it does NOT open a lowercase word, so "..EWARNING" and
+# started", "..E_x", "FF[worker] retrying"). The exact rule tells a cut progress run from an
+# ordinary word that merely opens with a progress-letter spelling: an F ADJACENT to progress
+# characters (after a progress run of . F E s x u, or opening the line before one) is always a
+# failure (F is only ever a failed test), so "..Fworker", "FF[worker]", "Fs.[worker]" and "Fu x"
+# are evidence; an E or u after a progress run is evidence only where it does NOT open a
+# lowercase word, so "..EWARNING" and
 # "..E_x" are evidence but "...Elapsed" is not; and a bare F, E or u opening the line is evidence
 # only where the text that follows is a non-word character, so "F[worker]" and "u[worker]" are
 # evidence but "Finished" and "success" (whose only failing letter, the u of s-u-ccess, opens a
@@ -203,25 +205,28 @@ def _bound_stop(what, exc):
 # success" result ending, or verbosity-1 progress characters that include F, E or u (unittest
 # writes F and E only for failing or erroring tests and u only for an unexpected success, which
 # makes wasSuccessful() false), whether the progress line is pure or cut short by other text
-# written onto the same line: the progress prefix may be EMPTY (a failing F, E or u can open the
-# line), and the cut is recognized only while the run stays progress-shaped, the cut text NOT
-# opening a lowercase word, so an ordinary word that merely opens with a progress-letter spelling
-# (success, suite, subprocess, summary, or a dotted ...Elapsed, each continuing into lowercase) is
-# never read as a cut progress run, while a real progress run cut by log text ("..Fworker
-# retrying", ".FINFO started", "..E_x", "F[worker] retrying") is. The exact rule is stated above
-# the regex. unittest's PASSING progress (dots, "Ran N tests", "OK") lands on stderr in passing
-# runs too, so it is never failure evidence: without a marker the stop stays a BoundStop
-# (cannot-evaluate), exactly like a silent one (the _load_bound contract). The rule OVER-matches
-# prose that takes a progress shape ("E.g. the run" reads as E then a non-word): that files a
-# would-be cannot-evaluate (exit 2) as a failure (exit 1), the direction that never hides a
-# defect; the completed path judges the exit code, not this text.
+# written onto the same line. The cut rule: an F ADJACENT to progress characters (preceded by a
+# progress run, "..Fworker retrying", ".FINFO started", "FF[worker] retrying", or followed by
+# one, "Fs.[worker] retrying", "Fu x") is always evidence (F is only ever a failed test); an E
+# or u ending a progress run is evidence only where it does NOT open a lowercase word
+# ("..EWARNING: x" and "..E_x" are evidence, "...Elapsed" and "suite" are not); and a bare F, E
+# or u opening the line is evidence only before a non-word character ("F[worker] retrying" is,
+# "Finished" and "Exception" are not). Every form the round-8 rule matched and every round-9
+# addition stays matched (bound/failure-evidence-regex-table drives the exact table). unittest's
+# PASSING progress (dots, "Ran N tests", "OK") lands on stderr in passing runs too, so it is
+# never failure evidence: without a marker the stop stays a BoundStop (cannot-evaluate), exactly
+# like a silent one (the _load_bound contract). The rule OVER-matches prose that takes a
+# progress shape ("E.g. the run" reads as E then a non-word, and "Fun x" as F before a progress
+# letter): that files a would-be cannot-evaluate (exit 2) as a failure (exit 1), the direction
+# that never hides a defect; the completed path judges the exit code, not this text.
 _FAILURE_EVIDENCE_RE = re.compile(
     r"^(Traceback|FAIL|ERROR|SELF-TEST FAIL)"        # line-start failure markers
     r"|\.\.\. (FAIL|ERROR|unexpected success)$"      # verbose unittest result line endings
     r"|^[.Esxu]*[FEu][.FEsxu]*$"                     # a pure verbosity-1 progress run carrying F, E or u
     r"|^[FEu](?!\w)"                                 # a failing char opens the line, cut by non-word text
-    r"|^[.Esxu]+F"                                   # a progress run then F (F is only ever a failure)
-    r"|^[.Esxu]+[Eu](?![a-z])",                       # a progress run then E or u not opening a lowercase word
+    r"|^[.FEsxu]+F"                                  # F after a progress run (F included: FF is failing)
+    r"|^F(?=[.FEsxu])"                               # F opening the line before more progress (Fs., Fu)
+    r"|^[.FEsxu]+[Eu](?![a-z])",                     # E or u after a progress run, not opening a lowercase word
     re.MULTILINE)
 
 
@@ -2302,8 +2307,11 @@ _SCAN_ALLOWED_UNPINNED = (
     # Cannot-evaluate launches (argv or head outside the resolver's bounds), each audited:
     ("tools/_load_bound.py", "run", ("unresolved",),
      "cannot-evaluate argv and executable=: the shared load-tolerant runner spawns through"
-     " _acquiring_popen(owned)(...), an ownership subclass of subprocess.Popen (the child is"
-     " captured before the fork, so a fault before run() binds the handle still stops it)"
+     " _acquiring_popen(owned)(...), an ownership subclass of subprocess.Popen (the holder is"
+     " appended before the fork and the pid the fork returns is stored on it from inside the"
+     " spawn primitive, so a fault before run() binds the handle, the store of the pid onto"
+     " the Popen object included, still stops the child; the residual is the boundary between"
+     " the fork syscall returning and that held store, stated in the module docstring)"
      " that this scan resolves as a Popen launch (a call whose callee is a call returning a"
      " Popen subclass defined in the scanned file, _scan_popen_factories); it launches its"
      " caller argv, which this scan does not follow to the call site, and its executable= is"
@@ -3504,8 +3512,13 @@ def _scan_popen_factories(tree):
     descended, nested scopes excluded; source order is not ordered here, so a base bound
     anywhere in the scope counts, erring toward MORE resolved launches, never fewer). Bounded
     by design, like every resolution here, to the scanned file: a factory imported from
-    another module, or a locally defined subclass instantiated directly by its bare name, is
-    not resolved by this rule and stays on the scan's other rules and the audited allowlist."""
+    another module, a locally defined subclass instantiated directly by its bare name, a
+    callee that is an ATTRIBUTE access (holder.acquire(owned)(...)), a factory returning
+    subprocess.Popen ITSELF or a bare alias of it (only ClassDef-derived subclasses are
+    tracked, never a returned alias name), a factory result bound to a name first
+    (cls = factory(); cls(...)), and a class derived from an alias bound in an ENCLOSING
+    function scope (only the module scope feeds a function's aliases) are not resolved by
+    this rule and stay on the scan's other rules and the audited allowlist."""
     def popen_expr(node, aliases):
         if isinstance(node, ast.Attribute) and node.attr == "Popen" \
                 and isinstance(node.value, ast.Name) and node.value.id == "subprocess":
@@ -4885,8 +4898,12 @@ def _bound_stop_lane(base):
     ...Elapsed, on both streams through all three runners) stay BoundStops; the corpus and
     imported legs also assert the captured evidence text rides the
     returned failing value. bound/leaked-cleanup-observable: the post-lane survivor check
-    distinguishes an unobservable /proc read (None, judged a failure) from proven absence ([]),
-    never reading blindness as absence. bound/stop-keeps-failure-evidence: a stopped member whose hook, monitor or exposure log
+    yields three DISTINCT results (an observed scan, a list or []; an unobservable /proc read,
+    None while /proc exists, judged a failure; and None with no /proc at all, reported as a
+    NAMED cannot-evaluate, exit 2, never a silent pass), never reading blindness as absence.
+    bound/failure-evidence-regex-table: the exact failure-evidence table (every round-8 and
+    round-9 cut-progress form matched, the ordinary words not).
+    bound/stop-keeps-failure-evidence: a stopped member whose hook, monitor or exposure log
     recorded a marker is a failure in the registered lists and the OPF lifecycle roster, a wrong value in
     a tuple beside a stop is a failure, a member stopped beside captured failure evidence is a failure (a plain
     failing value, never a BoundStop), and a member that exited nonzero while a leaked descendant held
@@ -5150,24 +5167,35 @@ def _bound_stop_lane(base):
         (MEMBER_BUDGET_S, MEMBER_STALL_S, CORPUS_BUDGET_S, CORPUS_STALL_S, CORPUS_SELFTEST,
          CORPUS_TOOLS, _LOAD_FACTOR) = saved
         del BOUND_STOPS[kept:]
-        # None is UNOBSERVABLE (/proc could not be read), never absence: judged by its own check
-        # below instead of silently reading as "no leaked child". On a host WITH /proc that is a
-        # failure; on a host with no /proc at all there is no survivor check (the disclosed
-        # platform limit), never a false leak (_leak_cleanup_is_failure).
+        # The survivor scan's three distinct results, judged below: None on a host WITH /proc
+        # is a failure, a host with NO /proc is a NAMED cannot-evaluate (exit 2 at suite
+        # level), and an observed list is killed here; never a silent pass, never a false
+        # leak (_leak_cleanup_outcome).
         leaked_pids = _load_bound._alive_with(leaked)
         for pid in (leaked_pids or ()):
             _load_bound._kill_pid(pid)
     has_proc_here = os.path.isdir("/proc")
-    # The real post-lane result (no leak), plus the injected None/[] pairs: an unobservable scan
-    # (None) while /proc exists is a failure, an observed [] is not, and None with no /proc is the
-    # disclosed platform limit, not a failure. Removing the guard in _leak_cleanup_is_failure
-    # turns the None-while-/proc leg red.
+    lane_outcome = _load_bound._leak_cleanup_outcome(leaked_pids, has_proc_here)
+    if lane_outcome == "cannot-evaluate":
+        # No /proc: the post-lane survivor scan is unavailable, reported by name as
+        # cannot-evaluate (exit 2), never a silent pass.
+        CANNOT_EVALUATE.append("bound/leaked-cleanup-observable: no /proc on this host, so "
+                               "the post-lane survivor scan is unavailable and leak absence "
+                               "was not evaluated (the disclosed platform limit)")
+    # The real post-lane result (no observed failure), plus the injected legs: the scan's
+    # three results are DISTINCT ("observed" for a list or [], "failure" for None while /proc
+    # exists, "cannot-evaluate" for None with no /proc), and the boolean failure reading
+    # agrees. Removing the guard in _leak_cleanup_outcome turns a leg red.
     check("bound/leaked-cleanup-observable",
-          (_load_bound._leak_cleanup_is_failure(leaked_pids, has_proc_here),
+          (lane_outcome == "failure",
+           _load_bound._leak_cleanup_outcome(None, True),
+           _load_bound._leak_cleanup_outcome([], True),
+           _load_bound._leak_cleanup_outcome([7], True),
+           _load_bound._leak_cleanup_outcome(None, False),
            _load_bound._leak_cleanup_is_failure(None, True),
            _load_bound._leak_cleanup_is_failure([], True),
            _load_bound._leak_cleanup_is_failure(None, False)),
-          (False, True, False, False))
+          (False, "failure", "observed", "observed", "cannot-evaluate", True, False, False))
     check("bound/slowed-run-passes", (slowed_loaded, isinstance(slowed_idle, BoundStop)), (0, True))
     check("bound/hang-is-cannot-evaluate",
           (isinstance(member_stop, BoundStop),
@@ -5302,6 +5330,24 @@ def _bound_stop_lane(base):
           ((False, "fail", True, ""), (False, "fail", True, ""),
            (False, "fail", True), (False, "fail", True),
            (False, "fail", True), (False, "fail", True)))
+    # The exact regex table: every round-8 form (a failing-char run opening the line and cut by
+    # log text: "FF[worker] retrying", "Fs.[worker] retrying", "Fu x"), every round-9 addition
+    # ("..Fworker retrying", ".FINFO started", "..EWARNING: x", "..E_x"), the bare-char and pure
+    # forms, and NONE of the ordinary words that merely open with a progress-letter spelling.
+    # Red when any branch regresses (the round-8 rule dropped the dotted forms, the round-9 rule
+    # dropped the line-opening F runs). "E.g. the run" pins the disclosed over-match.
+    regex_table = (
+        ("FF[worker] retrying", True), ("Fs.[worker] retrying", True), ("Fu x", True),
+        ("..Fworker retrying", True), (".FINFO started", True), ("..EWARNING: x", True),
+        ("..E_x", True), ("F[worker] retrying", True), ("u[worker] retrying", True),
+        (".E[worker] retrying", True), (".F", True), (".E", True), ("u", True),
+        ("..F..", True), ("E.g. the run", True),
+        ("success", False), ("suite", False), ("subprocess", False), ("summary", False),
+        ("...Elapsed", False), ("Finished", False), ("Exception", False),
+        ("Ran 5 tests", False), ("OK", False), ("....", False), ("sss", False))
+    check("bound/failure-evidence-regex-table",
+          [(line, _FAILURE_EVIDENCE_RE.search(line) is not None) for line, want in regex_table],
+          [(line, want) for line, want in regex_table])
 
 
 def main(report_path=None):
