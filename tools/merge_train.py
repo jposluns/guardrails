@@ -345,12 +345,19 @@ def _clean_env(extra=None):
     even with LANGUAGE set (gettext consults LANGUAGE only once the locale enables translation
     at all), but LANGUAGE is the highest-priority message-language selector when translation IS
     enabled, so the pin removes it instead of relying on that observation (FIX-541 round 8,
-    decided 4)."""
+    decided 4). The PATH both funnels resolve their program through is rebuilt LAST, after the
+    explicit additions, from the caller value (os.defpath when PATH is unset) with every empty,
+    dot or other relative entry removed: a cwd-resolving entry would resolve a bare configured
+    head in the child working directory, which for the regenerate and check commands is the
+    merged scratch checkout, content the PR itself supplies (FIX-541 round 10, decided 1)."""
     env = dict((k, v) for k, v in os.environ.items() if not k.startswith("GIT_"))
     env["GIT_TERMINAL_PROMPT"] = "0"
     env.update(extra or dict())
     env.pop("LANGUAGE", None)
     env["LC_ALL"] = "C"
+    env["PATH"] = os.pathsep.join(
+        entry for entry in env.get("PATH", os.defpath).split(os.pathsep)
+        if os.path.isabs(entry))
     return env
 
 
@@ -707,14 +714,45 @@ def _python_module_spelling(word):
     return False
 
 
-def guard_config_fail_closed(data, tree=None):
+def _python_scan_step(word):
+    # How the module-diagnostic scan advances past ONE leading python option word that did not
+    # spell -m (FIX-541 round 10, decided 5 and 6): None STOPS the scan (-c and a cluster
+    # carrying c take the rest of the command as program text, -- ends option parsing and a
+    # bare - runs stdin, so nothing later is an option word), 2 consumes the word AND the
+    # separate operand of its trailing valued option (--check-hash-based-pycs, and a short
+    # option or bundled cluster ENDING in the valued letter W or X with no attached operand:
+    # -W, -X, -IW), else 1.
+    if word in ("--", "-", "-c"):
+        return None
+    if word == "--check-hash-based-pycs":
+        return 2
+    if word.startswith("--"):
+        return 1
+    body = word[1:]
+    for pos, ch in enumerate(body):
+        if ch == "c":
+            return None
+        if ch in "WX":
+            return 2 if pos == len(body) - 1 else 1
+        if not ch.isalpha():
+            return 1
+    return 1
+
+
+def guard_config_fail_closed(data, tree=None, head_tree=None):
     """Raise FailClosed unless data is a well-formed version-1 merge-train config. tree, when
     given, is the set of REGULAR-FILE paths of the base tip tree the config text came from (see
     _base_tree): it resolves the script path of a configured command whose head is a recognized
     python-family interpreter spelling (FIX-541 round 8, decided 1), and with tree None every
-    such command is refused, fail closed. A command HEAD must be a bare program name: a path
-    head is refused outright, and a bare head naming a tree file is refused whenever tree is
-    given (FIX-541 round 9, decided 1)."""
+    such command is refused, fail closed. head_tree, when given, is every tree entry a command
+    HEAD could name, the regular files PLUS the symlinks, kept apart from tree (FIX-541 round
+    10, decided 1); with head_tree None the head refusal falls back to tree. A command HEAD
+    must be a bare program name: a path head is refused outright, and a bare head naming a
+    base tip tree entry is refused, case-insensitively, whenever the tree is given (FIX-541
+    round 9, decided 1, and round 10, decided 1 and 4; with BOTH sets None the run has no tree
+    to refuse against, so that guarantee needs the tree, which load_config always supplies)."""
+    heads = head_tree if head_tree is not None else tree
+    folded_heads = None if heads is None else frozenset(path.casefold() for path in heads)
     def bad(msg):
         raise FailClosed("malformed %s: %s" % (CONFIG_PATH, msg))
 
@@ -750,9 +788,15 @@ def guard_config_fail_closed(data, tree=None):
             # python-family spelling. Another Python launcher resolved on PATH (ipython, uv,
             # coverage, py, a renamed or symlinked interpreter) and the imports a selected
             # script makes from the checkout are TRUSTED CONFIGURATION, not proven by this
-            # guard; what the guard adds over that trust is that a head is never a path and
-            # never a base tip tree file, so checkout content (tools/gen.py, ./python3,
-            # tools/python3, a committed python3) never runs as a configured program head.
+            # guard; what the guard adds over that trust is that a head is never a path, that
+            # with the base tip tree given (load_config always gives it; the guarantee needs
+            # the tree) a head never names a base tip tree ENTRY, regular file or symlink,
+            # compared case-insensitively, and that _clean_env rebuilds the PATH every
+            # configured command resolves through with every cwd-relative entry removed
+            # (FIX-541 round 10, decided 1 and 4), so checkout content (tools/gen.py,
+            # ./python3, tools/python3, a committed python3 or a committed symlink, and
+            # content a PR adds that a dot or empty PATH entry would resolve in the scratch
+            # checkout) never runs as a configured program head.
             head = command[0]
             if "/" in head or "\\" in head:
                 # FIX-541 round 9 (decided 1): a PATH-form head (absolute, ./-prefixed or
@@ -762,14 +806,22 @@ def guard_config_fail_closed(data, tree=None):
                 bad("%s command %r head is a path, not a bare program name: a path head can "
                     "run checkout content or a shadowed interpreter, so it is refused; "
                     "configure a bare program name resolved on PATH" % (where, command[0]))
-            if tree is not None and head in tree:
-                bad("%s command %r head names a base tip tree file: checkout content is never "
-                    "a configured program, so the head is refused (FIX-541 round 9, decided 1)"
-                    % (where, command[0]))
-            if head == "git":
+            if folded_heads is not None and head.casefold() in folded_heads:
+                bad("%s command %r head names a base tip tree entry (a regular file or a "
+                    "symlink, compared case-insensitively): checkout content is never a "
+                    "configured program, so the head is refused (FIX-541 round 9, decided 1, "
+                    "and round 10, decided 1 and 4)" % (where, command[0]))
+            # FIX-541 round 10 (decided 4): git and the launcher heads are matched like the
+            # recognized interpreters, case-insensitively and with an optional .exe tail, so
+            # neither rule is dodged by a spelling a case-insensitive filesystem resolves to
+            # the same program.
+            program = head.casefold()
+            if program.endswith(".exe"):
+                program = program[:-len(".exe")]
+            if program == "git":
                 bad("%s command %r must not launch git: the merge train runs git only through "
                     "its own pinned funnel" % (where, command[0]))
-            if head in CONFIG_LAUNCHERS:
+            if program in CONFIG_LAUNCHERS:
                 bad("%s command %r must not run through launcher %r: a launcher can hand git an "
                     "unpinned argv around the funnel" % (where, command[0], head))
             interp = CONFIG_INTERPRETERS.match(head)
@@ -783,10 +835,15 @@ def guard_config_fail_closed(data, tree=None):
                 # file>, with every later word belonging to that script. python -m draws the
                 # module-naming diagnostic in every spelling THIS SCAN RECOGNIZES: separated
                 # (-m mod), attached (-mmod), bundled in a short cluster (-Im, -IBm) and behind
-                # the separate operand of a valued option (-W ignore -m); the scan steps over
-                # -W, -X and --check-hash-based-pycs operands so that last form is reached
-                # (FIX-541 round 9, decided 4: bundled and valued-option-preceded spellings
-                # used to fall to the generic shape refusal below). Rounds 5 to 7 tried to
+                # the separate operand of a valued option (-W ignore -m, -X dev -m,
+                # --check-hash-based-pycs always -m) or of a bundled cluster ending in the
+                # valued letter (-IW ignore -m); the scan advances per _python_scan_step and
+                # STOPS at -c, -- and a bare -, behind which every word is program text or a
+                # script argument, so a -m there draws the generic shape refusal below, never
+                # the module diagnostic (FIX-541 round 9, decided 4, and round 10, decided 5
+                # and 6: bundled and valued-option-preceded spellings used to fall to the
+                # generic refusal, and a -m behind -c, -- or - used to draw the module
+                # diagnostic). Rounds 5 to 7 tried to
                 # prove what -m NAME imports from tree membership and could not (under -I or
                 # -P a standard-library name wins over a checkout file, and a package needs
                 # more than __init__.py), so the capability is removed instead of modelled;
@@ -803,7 +860,10 @@ def guard_config_fail_closed(data, tree=None):
                             "refused because tree membership cannot prove what -m would "
                             "import; name a checkout script instead, as "
                             "<interpreter> -I -B <path.py>" % (where, command[0]))
-                    i += 2 if word in ("-W", "-X", "--check-hash-based-pycs") else 1
+                    step = _python_scan_step(word)
+                    if step is None:
+                        break
+                    i += step
                 leading = 0
                 for word in words:
                     if not word.startswith("-"):
@@ -1470,20 +1530,28 @@ def _push_and_observe(ctx, scratch, old, new):
 
 
 def _base_tree(repo, base_sha):
-    """Every REGULAR-FILE path (blob mode 100644 or 100755) of the base tip tree, read from the
-    private base repository: the set guard_config_fail_closed resolves a configured python
-    script path against (FIX-541 round 8, decided 1). A symlink (120000), a gitlink (160000)
-    and a tree are excluded: an entry that is not a regular file can point outside the checkout
-    or name no runnable script, so it never satisfies the resolution."""
+    """(files, heads) of the base tip tree, read from the private base repository. files is
+    every REGULAR-FILE path (blob mode 100644 or 100755): the set guard_config_fail_closed
+    resolves a configured python script path against (FIX-541 round 8, decided 1; a symlink
+    (120000), a gitlink (160000) and a tree are excluded, because such an entry can point
+    outside the checkout or name no runnable script, so it never satisfies the resolution).
+    heads is files PLUS every symlink path: the set the configured-command HEAD refusal
+    matches, kept apart from files (FIX-541 round 10, decided 1: a committed symlink resolves
+    to runnable checkout content, so it is refused as a head even though the script admission
+    never accepts it)."""
     out = _git(repo, "ls-tree", "-r", "-z", base_sha)[1]
-    paths = []
+    files, links = [], []
     for entry in out.split(b"\0"):
         if not entry:
             continue
         meta, _tab, path = entry.partition(b"\t")
-        if meta.split(b" ", 1)[0] in (b"100644", b"100755"):
-            paths.append(path.decode("utf-8", "surrogateescape"))
-    return frozenset(paths)
+        mode = meta.split(b" ", 1)[0]
+        if mode in (b"100644", b"100755"):
+            files.append(path.decode("utf-8", "surrogateescape"))
+        elif mode == b"120000":
+            links.append(path.decode("utf-8", "surrogateescape"))
+    files = frozenset(files)
+    return files, files | frozenset(links)
 
 
 def load_config(root, base_sha):
@@ -1495,7 +1563,8 @@ def load_config(root, base_sha):
         data = tomllib.loads(text)
     except (tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
         raise FailClosed("malformed %s: %s" % (CONFIG_PATH, exc))
-    _guard("config-fail-closed")(data, tree=_base_tree(root, base_sha))
+    files, heads = _base_tree(root, base_sha)
+    _guard("config-fail-closed")(data, tree=files, head_tree=heads)
     return data
 
 
@@ -2454,10 +2523,12 @@ def case_config(_tmp):
             return ("refused", str(exc))
         return ("accepted", "")
 
-    # FIX-541 round 8 (decided 1) and round 9 (decided 4): python -m draws the diagnostic
-    # NAMING the module form in every spelling the module scan recognizes: separated, attached,
-    # trailing, bundled in a short cluster (-Im, -IBm) and behind the separate operand of a
-    # valued option (-W ignore -m), checkout module or not (rounds 5 to 7 tried to prove what
+    # FIX-541 round 8 (decided 1), round 9 (decided 4) and round 10 (decided 5 and 6): python
+    # -m draws the diagnostic NAMING the module form in every spelling the module scan
+    # recognizes: separated, attached, trailing, bundled in a short cluster (-Im, -IBm) and
+    # behind the separate operand of a valued option or of a bundled cluster ending in its
+    # letter (-W ignore -m, -X dev -m, --check-hash-based-pycs always -m, -IW ignore -m),
+    # checkout module or not (rounds 5 to 7 tried to prove what
     # -m NAME imports from tree membership and could not, so the capability is removed
     # instead of modelled; the named diagnostic is
     # asserted so the dedicated -m scan cannot silently decay into the generic shape refusal
@@ -2472,16 +2543,35 @@ def case_config(_tmp):
             ("config/python-module-bundled-refused", ["python3", "-Im", "timeit"]),
             ("config/python-module-bundled-double-refused", ["python3", "-IBm", "timeit"]),
             ("config/python-module-after-valued-option-refused",
-             ["python3", "-W", "ignore", "-m", "timeit"])):
+             ["python3", "-W", "ignore", "-m", "timeit"]),
+            ("config/python-module-after-valued-x-refused",
+             ["python3", "-X", "dev", "-m", "mod"]),
+            ("config/python-module-after-check-hash-pycs-refused",
+             ["python3", "--check-hash-based-pycs", "always", "-m", "timeit"]),
+            ("config/python-module-after-bundled-valued-refused",
+             ["python3", "-IW", "ignore", "-m", "timeit"])):
         got = refusal(lambda d, a=argv: d["generated"].update(check=[list(a)]),
                       tree=tree_with_gen)
         check(check_id, (got[0], "must not launch a python module" in got[1]),
               ("refused", True))
-    # FIX-541 round 9 (decided 1): a command HEAD that is a path never runs, whatever it names
-    # (a checkout script, a ./-prefixed or repo-relative interpreter), and a bare head naming a
-    # base tip tree file never runs either; each refusal is asserted WITH its own named
-    # diagnostic, so neither head rule can silently decay into another refusal. The tree for
-    # these vectors carries the bare heads themselves.
+    # FIX-541 round 10 (decided 6): the module scan STOPS at -c, -- and a bare - (everything
+    # behind each is program text or a script argument, never an option word), so a -m there
+    # draws the generic one-shape refusal, never the module diagnostic; each form stays
+    # refused either way.
+    for check_id, argv in (
+            ("config/python-inline-code-then-m-generic-refused", ["python3", "-c", "-m"]),
+            ("config/python-double-dash-then-m-generic-refused", ["python3", "--", "-m"]),
+            ("config/python-stdin-then-m-generic-refused", ["python3", "-", "-m"])):
+        got = refusal(lambda d, a=argv: d["generated"].update(check=[list(a)]),
+                      tree=tree_with_gen)
+        check(check_id, (got[0], "must not launch a python module" in got[1],
+                         "may run python only as" in got[1]), ("refused", False, True))
+    # FIX-541 round 9 (decided 1) and round 10 (decided 1, 4 and 5): a command HEAD that is a
+    # path never runs, whatever it names and whichever separator it carries (the backslash
+    # half of the path rule gets its own vector), and a bare head naming a base tip tree entry
+    # never runs either, compared case-insensitively; each refusal is asserted WITH its own
+    # named diagnostic, so neither head rule can silently decay into another refusal. The tree
+    # for these vectors carries the bare heads themselves.
     tree_with_heads = frozenset(("tools/gen.py", "gen.py", "python3"))
     for check_id, argv, named in (
             ("config/path-head-script-refused", ["tools/gen.py", "--check"],
@@ -2490,10 +2580,14 @@ def case_config(_tmp):
              ["./python3", "-I", "-B", "tools/gen.py"], "head is a path"),
             ("config/path-head-checkout-interpreter-refused",
              ["tools/python3", "-I", "-B", "tools/gen.py"], "head is a path"),
+            ("config/backslash-path-head-refused", ["tools\\gen.py", "--check"],
+             "head is a path"),
             ("config/tree-file-head-refused", ["gen.py", "--check"],
-             "names a base tip tree file"),
+             "names a base tip tree entry"),
+            ("config/tree-entry-head-case-insensitive-refused", ["GEN.PY", "--check"],
+             "names a base tip tree entry"),
             ("config/tree-file-interpreter-head-refused",
-             ["python3", "-I", "-B", "tools/gen.py"], "names a base tip tree file")):
+             ["python3", "-I", "-B", "tools/gen.py"], "names a base tip tree entry")):
         got = refusal(lambda d, a=argv: d["generated"].update(check=[list(a)]),
                       tree=tree_with_heads)
         check(check_id, (got[0], named in got[1]), ("refused", True))
@@ -2512,6 +2606,26 @@ def case_config(_tmp):
           verdict(lambda d: d["generated"].update(
               check=[["PYTHON3.EXE", "-I", "-B", "tools/gen.py"]]), tree=tree_with_gen),
           "accepted")
+    # FIX-541 round 10 (decided 4): git and every launcher head take their rule in any case
+    # spelling and with an optional .exe tail, like the interpreters, so neither rule is
+    # dodged by a spelling a case-insensitive filesystem resolves to the same program.
+    for check_id, argv, named in (
+            ("config/git-uppercase-command-refused", ["Git", "push", "origin"],
+             "must not launch git"),
+            ("config/git-allcaps-command-refused", ["GIT", "status"],
+             "must not launch git"),
+            ("config/git-exe-command-refused", ["git.exe", "push"],
+             "must not launch git"),
+            ("config/launcher-uppercase-command-refused", ["Bash", "-c", "git push -f"],
+             "must not run through launcher"),
+            ("config/launcher-uppercase-exe-command-refused", ["SH.EXE", "-c", "git status"],
+             "must not run through launcher"),
+            ("config/launcher-env-uppercase-command-refused", ["Env", "git", "push"],
+             "must not run through launcher"),
+            ("config/launcher-exe-command-refused", ["bash.exe", "-c", "git status"],
+             "must not run through launcher")):
+        got = refusal(lambda d, a=argv: d["generated"].update(check=[list(a)]))
+        check(check_id, (got[0], named in got[1]), ("refused", True))
     # FIX-541 round 8 (decided 1): the ONE accepted python shape is
     # <interpreter> -I -B <repo-relative .py path in the tree as a regular file>; a missing
     # script, a suffixless path and a shape without the isolation options are each refused even
@@ -2638,18 +2752,40 @@ def case_frombase(tmp):
     tip_sha = fx.commit(fx.main, "tip-only script")
     check("config/base-tree-wiring-same-commit-accepted",
           (load_verdict(fx.main, tip_sha),
-           "tools/tip_only.py" in _base_tree(fx.main, tip_sha),
-           "tools/tip_only.py" in _base_tree(fx.main, tip_sha + "~1")),
+           "tools/tip_only.py" in _base_tree(fx.main, tip_sha)[0],
+           "tools/tip_only.py" in _base_tree(fx.main, tip_sha + "~1")[0]),
           (("accepted", "tools/tip_only.py"), True, False))
-    # A SYMLINK at the named .py path is not a regular file: _base_tree excludes it, so the
-    # resolution refuses even though ls-tree lists the path (FIX-541 round 8, decided 1).
+    # A SYMLINK at the named .py path is not a regular file: the SCRIPT set of _base_tree
+    # excludes it, so the resolution refuses even though ls-tree lists the path (FIX-541 round
+    # 8, decided 1) and even though the HEAD set carries it (FIX-541 round 10, decided 1: the
+    # two sets are kept apart).
     fx.write(fx.main, CONFIG_PATH, cfg_text.replace("tools/gen.py", "tools/alias_gen.py"))
     os.symlink("gen.py", os.path.join(str(fx.main), "tools", "alias_gen.py"))
     link_sha = fx.commit(fx.main, "symlink script")
-    link_tree = _base_tree(fx.main, link_sha)
+    link_files, link_heads = _base_tree(fx.main, link_sha)
     check("config/base-tree-symlink-script-refused",
-          (load_verdict(fx.main, link_sha)[0], "tools/alias_gen.py" in link_tree,
-           "tools/gen.py" in link_tree), ("refused", False, True))
+          (load_verdict(fx.main, link_sha)[0], "tools/alias_gen.py" in link_files,
+           "tools/alias_gen.py" in link_heads, "tools/gen.py" in link_files),
+          ("refused", False, True, True))
+    # FIX-541 round 10 (decided 1): a committed SYMLINK configured as a bare HEAD is refused
+    # with the tree given, end to end through load_config over a real base tip: the
+    # head-refusal set reads every tree entry a head could name, symlinks included.
+    fx.write(fx.main, "tools/head.sh", "#!/bin/sh\nexit 0\n")
+    fx.write(fx.main, CONFIG_PATH, cfg_text.replace(
+        'check = [["python3", "-I", "-B", "tools/gen.py", "--check"]]',
+        'check = [["train-head"]]'))
+    os.symlink("tools/head.sh", os.path.join(str(fx.main), "train-head"))
+    head_sha = fx.commit(fx.main, "symlink head")
+    head_files, head_heads = _base_tree(fx.main, head_sha)
+    try:
+        load_config(fx.main, head_sha)
+        head_got = ("accepted", "")
+    except FailClosed as exc:
+        head_got = ("refused", str(exc))
+    check("config/base-tree-symlink-head-refused",
+          (head_got[0], "names a base tip tree entry" in head_got[1],
+           "train-head" in head_files, "train-head" in head_heads),
+          ("refused", True, False, True))
     # A script ABSENT from the base tip refuses END TO END: the run exits 2 before touching
     # anything, naming the script (FIX-541 round 8, decided 1).
     fx2 = _fixture(tmp, "frombase-missing-script")
@@ -2661,6 +2797,58 @@ def case_frombase(tmp):
     check("config/base-tree-missing-script-refused",
           (rc2, reports2, "tools/absent.py" in (fatal2 or "")), (2, [], True))
     check("config/read-from-base-invariants", _invariants(fx, fx2), [])
+
+
+def _impostor_pr(tmp, name, sentinel):
+    # A fixture whose PR branch COMMITS an executable python3 impostor at the checkout root
+    # (the base tip tree, which the head refusal reads, never carries it) and whose fixture
+    # bin/python3 symlink is removed, so the configured bare python3 head resolves on the
+    # remaining PATH alone; the impostor records into sentinel that it ran (FIX-541 round 10,
+    # decided 1).
+    fx = _fixture(tmp, name)
+    wt = fx.add_pr(1, "feat/x", dict([("src/b.txt", "bravo\n")]))
+    impostor = Path(wt) / "python3"
+    impostor.write_text("#!/bin/sh\n: > '%s'\nexit 7\n" % sentinel, encoding="utf-8")
+    impostor.chmod(0o755)
+    head = fx.commit(wt, "impostor interpreter")
+    _git(wt, "push", "-q", "origin", "%s:refs/heads/feat/x" % head)
+    fx.prs[0]["headRefOid"] = head
+    fx.set_gh()
+    fx.advance_main(dict([("src/c.txt", "charlie\n")]))
+    os.remove(fx.bin / "python3")
+    return fx
+
+
+def case_pathenv(tmp):
+    # FIX-541 round 10 (decided 1): _clean_env rebuilds the PATH every child resolves its
+    # program through with every empty, dot or other relative entry removed: a cwd-resolving
+    # entry would resolve a bare configured head in the child working directory, which for the
+    # regenerate and check commands is the merged scratch checkout, content the PR itself
+    # supplies. The boundary is absoluteness: absolute entries stay, in order; every other
+    # entry (empty, dot, relative) is dropped.
+    saved = _put_env(dict(PATH=os.pathsep.join(["/usr/bin", ".", "", "rel/bin", "/bin"])))
+    try:
+        got_path = _clean_env().get("PATH")
+    finally:
+        _restore_env(saved)
+    check("config/clean-env-strips-relative-path-entries", got_path,
+          os.pathsep.join(["/usr/bin", "/bin"]))
+    # End to end, dry run over a PR that commits an executable ./python3 at the checkout root:
+    # with a dot (and then an empty) PATH entry prepended, the checkout impostor never runs
+    # (the sentinel it would write stays absent) and the run completes to would-merge through
+    # the real interpreter resolved on the sanitized PATH.
+    fixtures = []
+    for check_id, name, entry in (
+            ("config/dot-path-entry-impostor-never-runs", "dot-path-impostor", "."),
+            ("config/empty-path-entry-impostor-never-runs", "empty-path-impostor", "")):
+        sentinel = Path(tmp) / (name + "-ran")
+        fx = _impostor_pr(tmp, name, str(sentinel))
+        fixtures.append(fx)
+        fx.path = entry + os.pathsep + fx.path
+        rc, reports, _fatal = fx.run()
+        check(check_id, (rc, _result(reports, 1), sentinel.exists()),
+              (0, "would-merge", False))
+    check("config/path-entries-invariants", _invariants(*fixtures), [])
 
 
 def case_dry(tmp):
@@ -3188,7 +3376,8 @@ def _merge_env_wrapper(fx, tmp):
     return observed
 
 
-def _mergefault_run(tmp, name, fault, apply, clean=False, env=None, leak=None):
+def _mergefault_run(tmp, name, fault, apply, clean=False, env=None, leak=None,
+                    leak_inside=False):
     """One tool run over a FRESH fixture with the given merge fault injected at the funnel
     return boundary (the real merge runs first, so MERGE_HEAD and the merge state exist exactly
     as git leaves them; only the REPORTED code and stderr are replaced), the observations
@@ -3197,8 +3386,10 @@ def _mergefault_run(tmp, name, fault, apply, clean=False, env=None, leak=None):
     inject a non-C locale). leak, when given, is merged into the environment of the MERGE child
     alone at the _run_child boundary, AFTER _clean_env pinned it: the deliberate merge-only
     locale route-around of FIX-541 round 8, decided 2, which the translated stand-in must turn
-    red. The wrapped funnel records the REAL exit code of each merge it faults and every
-    conflict-resolution operation (a checkout --theirs, a resolution add); the LC_ALL/LANGUAGE
+    red. With leak_inside True the same leak lands INSIDE production _run_child instead, at
+    its subprocess.Popen call, below any parent-side capture of the env argument (FIX-541
+    round 10, decided 3). The wrapped funnel records the REAL exit code of each merge it
+    faults and every conflict-resolution operation (a checkout --theirs, a resolution add); the LC_ALL/LANGUAGE
     values the merge child OBSERVES are recorded in the child itself by the _merge_env_wrapper
     recording wrapper (_MERGE_CHILD_ENV; FIX-541 round 9, decided 3: round 8 recorded the env
     argument at the _run_child boundary, which a leak below that point dodged). Returns ((exit
@@ -3220,16 +3411,31 @@ def _mergefault_run(tmp, name, fault, apply, clean=False, env=None, leak=None):
     real_child = _run_child
     reached, resolutions, in_merge = [], [], []
     del _MERGE_CHILD_ENV[:]
+    del _NATIVE_FAULT[:]
+    del _FAULT_STDERR[:]
     observed = _merge_env_wrapper(fx, tmp)
 
     def leaking_child(argv, cwd=None, env=None, timeout=None, push=False):
         # leak lands at the _run_child boundary, AFTER _clean_env pinned env; the OBSERVATION
         # happens later still, in the exec-ed child itself (the recording wrapper), so even a
         # leak below this point would be observed (FIX-541 round 9, decided 3).
-        if in_merge and leak:
+        if in_merge and leak and not leak_inside:
             env = dict(env or dict())
             env.update(leak)
         return real_child(argv, cwd=cwd, env=env, timeout=timeout, push=push)
+
+    real_popen = subprocess.Popen
+
+    def leaking_popen(argv, *p_args, **p_kwargs):
+        # The merge-only leak landed INSIDE production _run_child, at its Popen call BELOW any
+        # parent-side capture of the env argument (FIX-541 round 10, decided 3): only the
+        # child-side observation sees it, so a capture reverted to the round-8 _run_child
+        # boundary turns the inside-child vector red.
+        if in_merge and p_kwargs.get("env") is not None:
+            p_env = dict(p_kwargs["env"])
+            p_env.update(leak)
+            p_kwargs["env"] = p_env
+        return real_popen(argv, *p_args, **p_kwargs)
 
     def fault_git(cwd, *args, **kwargs):
         if args[:2] in (("checkout", "--theirs"), ("add", "--")):
@@ -3243,16 +3449,24 @@ def _mergefault_run(tmp, name, fault, apply, clean=False, env=None, leak=None):
             in_merge.pop()
         observed()
         reached.append(rc)
-        return fault(rc, out, err)
+        faulted = fault(rc, out, err)
+        # The stderr handed back INTO the funnel, exactly what the merge diagnostic scan
+        # reads: the native validation asserts its diagnostic REACHED it (FIX-541 round 10,
+        # decided 2).
+        _FAULT_STDERR.append(faulted[2])
+        return faulted
 
     saved_env = _put_env(env or dict())
     _git = fault_git
     _run_child = leaking_child
+    if leak and leak_inside:
+        subprocess.Popen = leaking_popen
     try:
         rc, reports, _fatal = fx.run(apply=apply)
     finally:
         _git = real_git
         _run_child = real_child
+        subprocess.Popen = real_popen
         _restore_env(saved_env)
     reason = reports[0]["reason"] if reports else ""
     return ((rc, _result(reports, 1), _snapshot_diff(before, _snapshot(wt)),
@@ -3310,19 +3524,57 @@ def _locale_probe_env(locale):
     return env
 
 
-def _translates(locale):
-    """Whether real git translates its fatal: prefix under the given locale on THIS host: the
-    probe forces a one-line fatal diagnostic (rev-parse --verify of an absent name in an empty
-    non-repository directory, read-only) and reports True only for non-empty stderr carrying
-    NEITHER English prefix. Availability is checked before the native leak vector runs, and a
-    host with no translating locale reports that vector NOT RUN (cannot-evaluate), never a pass
-    (FIX-541 round 9, decided 3)."""
+def _native_probe(locale):
+    """(exit status, stderr text) of ONE forced git fatal diagnostic (rev-parse --verify of an
+    absent name in an empty non-repository directory, read-only) under EXACTLY the given
+    LC_ALL/LANGUAGE entries: the shape both the availability rule and the native-fault
+    validation read, exit status included (FIX-541 round 10, decided 2)."""
     with tempfile.TemporaryDirectory(prefix="merge-train-locale-probe-") as probe_dir:
         proc = subprocess.run(["git", "rev-parse", "--verify", "merge-train-locale-probe"],
                               cwd=probe_dir, env=_locale_probe_env(locale),
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
-    err = proc.stderr.decode("utf-8", "replace")
-    return bool(err.strip()) and not err.startswith(("fatal:", "error:"))
+    return proc.returncode, proc.stderr.decode("utf-8", "replace")
+
+
+def _translates(locale):
+    """Whether real git translates its fatal: prefix under the given locale on THIS host,
+    judged against a C-locale CONTROL of the same probe (FIX-541 round 10, decided 2: the
+    round-9 rule read ANY non-empty stderr without the English prefixes as translation, so an
+    unrelated diagnostic could count): True only when the control fails with the English
+    fatal: prefix, the probe under locale fails with the SAME exit status, and its stderr is a
+    non-empty diagnostic carrying NEITHER English prefix, the translated form of that same
+    fatal diagnostic; the C locale itself therefore never counts as translated. Availability
+    is checked before the native leak vector runs, and a host with no translating locale
+    reports that vector NOT RUN (cannot-evaluate), never a pass (FIX-541 round 9, decided
+    3)."""
+    control_rc, control_err = _native_probe(dict(LC_ALL="C"))
+    if control_rc == 0 or not control_err.startswith("fatal:"):
+        return False
+    rc, err = _native_probe(locale)
+    return (rc == control_rc and bool(err.strip())
+            and not err.startswith(("fatal:", "error:")))
+
+
+# One record per native-fault injection, cleared per _mergefault_run (FIX-541 round 10,
+# decided 2): observed says a merge-child locale observation existed at all (with none, nothing
+# is probed and nothing appended, NEVER a fallback to the host LANG), diag is the probe stderr
+# appended to the merge stderr, and valid says that diagnostic was VALIDATED as the translated
+# form of a fatal diagnostic (the C-locale control of the same probe fails with the English
+# fatal: prefix, the observed-locale probe fails with the SAME exit status, and its stderr is
+# non-empty with neither English prefix).
+_NATIVE_FAULT = []
+# The stderr each injected fault handed back into the funnel, exactly what the merge
+# diagnostic scan reads, cleared per _mergefault_run: the native validation asserts its
+# diagnostic REACHED it (FIX-541 round 10, decided 2).
+_FAULT_STDERR = []
+
+
+def _fault_probe(observed):
+    """The diagnostic subprocess of the native fault, an entry point kept apart from the
+    availability rule on purpose (FIX-541 round 10, decided 2): a degradation of THIS probe
+    (empty output, an unrelated exit-0 warning) must turn the validation check red while the
+    availability rule still reports a translating locale."""
+    return _native_probe(observed)
 
 
 def _fault_native_stderr(rc, out, err):
@@ -3331,12 +3583,21 @@ def _fault_native_stderr(rc, out, err):
     # diagnostic arrives as English "fatal: ...", which the scan refuses; under the deliberate
     # merge-only leak of a host-translating locale it arrives translated, which the
     # English-only scan misses, with no stand-in text involved (FIX-541 round 9, decided 3).
-    observed = _MERGE_CHILD_ENV[-1] if _MERGE_CHILD_ENV else dict()
-    with tempfile.TemporaryDirectory(prefix="merge-train-native-fault-") as probe_dir:
-        proc = subprocess.run(["git", "rev-parse", "--verify", "merge-train-locale-probe"],
-                              cwd=probe_dir, env=_locale_probe_env(observed),
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
-    return rc, out, err + proc.stderr.decode("utf-8", "replace")
+    # FIX-541 round 10 (decided 2): the probe outcome is VALIDATED against a C-locale control
+    # and recorded in _NATIVE_FAULT for meta/native-fault-diagnostic-validated; with NO
+    # observed merge-child locale nothing is probed and nothing is appended, never a fallback
+    # to the host LANG.
+    if not _MERGE_CHILD_ENV:
+        _NATIVE_FAULT.append(dict(observed=False, valid=False, diag=""))
+        return rc, out, err
+    probe_rc, diag = _fault_probe(_MERGE_CHILD_ENV[-1])
+    control_rc, control_err = _native_probe(dict(LC_ALL="C"))
+    _NATIVE_FAULT.append(dict(
+        observed=True, diag=diag,
+        valid=(control_rc != 0 and control_err.startswith("fatal:")
+               and probe_rc == control_rc and bool(diag.strip())
+               and not diag.startswith(("fatal:", "error:")))))
+    return rc, out, err + diag
 
 
 # The non-C locale the translated-diagnostic vectors inject around the run (FIX-541 round 7,
@@ -3458,6 +3719,21 @@ def case_mergefault(tmp):
           (got_leak, reason_leak.startswith("dry run: would merge")),
           ((0, "would-merge", [], True, [], False, [1],
             [["checkout", "--theirs"], ["add", "--"]]), True))
+    # FIX-541 round 10 (decided 3): the SAME merge-only leak, injected INSIDE production
+    # _run_child at its subprocess.Popen call, BELOW any parent-side capture of the env
+    # argument: the child-side observation still records it, the stand-in still arrives
+    # translated and the run still completes to the same pinned unsafe would-merge. An
+    # observation reverted to the round-8 _run_child boundary capture records the pinned C
+    # environment instead, the stand-in keeps the English prefix, the scan refuses, and THIS
+    # registered check goes red (round 9 showed that sensitivity only out of band).
+    got_inside, reason_inside, fx_inside = _mergefault_run(
+        tmp, "translated-locale-leak-inside-child", _fault_translated_stderr, False,
+        env=_NON_C_LOCALE, leak=dict(_NON_C_LOCALE), leak_inside=True)
+    fixtures.append(fx_inside)
+    check("meta/translated-vector-red-under-inside-child-locale-leak",
+          (got_inside, reason_inside.startswith("dry run: would merge")),
+          ((0, "would-merge", [], True, [], False, [1],
+            [["checkout", "--theirs"], ["add", "--"]]), True))
     # FIX-541 round 9 (decided 3): the same merge-only leak shown with REAL git output, under
     # a locale THIS host translates: the availability probe keeps the first candidate whose
     # fatal: prefix arrives translated from real git; with none available the vector is
@@ -3473,11 +3749,16 @@ def case_mergefault(tmp):
         if _translates(candidate):
             native = candidate
             break
+    # FIX-541 round 10 (decided 2): the C locale is the control of the availability rule and
+    # must NEVER read as translated (its probe diagnostic is the English fatal: prefix); an
+    # availability rule that counts any non-empty non-English-prefixed stderr turns this red.
+    check("meta/native-c-locale-not-translated", _translates(dict(LC_ALL="C")), False)
     if native is None:
-        skip("meta/native-translated-vector-red-under-merge-locale-leak",
-             "no locale translating the git fatal: prefix is available on this host "
-             "(candidates: de_DE.UTF-8+de, en_US.UTF-8+de, fr_FR.UTF-8+fr), so the native "
-             "leak vector cannot be evaluated")
+        why = ("no locale translating the git fatal: prefix is available on this host "
+               "(candidates: de_DE.UTF-8+de, en_US.UTF-8+de, fr_FR.UTF-8+fr), so the native "
+               "leak vector cannot be evaluated")
+        skip("meta/native-translated-vector-red-under-merge-locale-leak", why)
+        skip("meta/native-fault-diagnostic-validated", why)
     else:
         got_native, reason_native, fx_native = _mergefault_run(
             tmp, "native-translated-locale-leak", _fault_native_stderr, False,
@@ -3487,6 +3768,22 @@ def case_mergefault(tmp):
               (got_native, reason_native.startswith("dry run: would merge")),
               ((0, "would-merge", [], True, [], False, [1],
                 [["checkout", "--theirs"], ["add", "--"]]), True))
+        # FIX-541 round 10 (decided 2): the vector above pins the same unsafe outcome a plain
+        # conflict resolution reaches, so by ITSELF it stays green when the fault produces no
+        # diagnostic at all; this check requires the fault to have run exactly once over an
+        # OBSERVED merge-child locale, its diagnostic VALIDATED as the translated form of a
+        # fatal diagnostic (same failure exit as the C-locale control, non-empty, neither
+        # English prefix), and that diagnostic to have REACHED the stderr handed back into
+        # the funnel, the exact text the merge diagnostic scan read and missed. It goes red
+        # when _fault_native_stderr is replaced by an identity function, when its probe
+        # returns empty output, and when the probe returns an unrelated exit-0 warning.
+        record = _NATIVE_FAULT[0] if _NATIVE_FAULT else dict()
+        diag = record.get("diag", "")
+        check("meta/native-fault-diagnostic-validated",
+              (len(_NATIVE_FAULT), record.get("observed"), record.get("valid"),
+               bool(diag.strip()), diag.startswith(("fatal:", "error:")),
+               len(_FAULT_STDERR) == 1 and _FAULT_STDERR[0].endswith(diag)),
+              (1, True, True, True, False, True))
     check("refuse/mergefault-invariants", _invariants(*fixtures), [])
 
 
@@ -5576,6 +5873,7 @@ def case_harness(tmp):
 
 CASES = dict([
     ("config", case_config), ("absent", case_absent), ("frombase", case_frombase),
+    ("pathenv", case_pathenv),
     ("dry", case_dry), ("happy", case_happy), ("carry", case_carry), ("discover", case_discover),
     ("ambiguous", case_ambiguous_worktree), ("branch", case_branch), ("badname", case_badname),
     ("audit", case_audit), ("conflict", case_conflict), ("mergefault", case_mergefault),
