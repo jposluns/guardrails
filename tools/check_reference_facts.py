@@ -22,7 +22,7 @@ generator alone cannot assert:
     backtick fence whose info string holds a backtick is not an opener), a fence CLOSED only by a line
     holding nothing after the fence run but U+0020 or tab (never str.strip's Unicode whitespace), and
     an unterminated fence failing closed (exit 2, naming the file and the fence's opening line).
-    STRUCTURE IS VALIDATED BEFORE A BOUNDARY MAY EXCLUDE TEXT, in two layers. FIRST, the whole text
+    STRUCTURE IS VALIDATED BEFORE A BOUNDARY MAY EXCLUDE TEXT, in three layers. FIRST, the whole text
     from its top to the section's end boundary is REFUSED outright (exit 2, naming the file and line)
     when any line outside a recognized line-start fence holds an arrangement this line reader cannot
     prove it reads: a run of three or more fence characters anywhere but a line-start fence, a list
@@ -31,14 +31,22 @@ generator alone cannot assert:
     same line), or a line opening with '#' that is not a heading in the accepted grammar. SECOND, the
     deferred span itself (from the phrase's line to the section's end boundary) is read ONLY through
     a POSITIVE grammar on the raw lines: blank lines, plain column-0 paragraph lines, flat column-0
-    list items whose text starts with neither '<' nor '>' nor a fence character nor another list
-    marker, column-0 ATX headings, and indented continuations that are plain text by the same test;
-    ANY other line there (any blockquote, any fence, any HTML-led or nested container, any indented
-    continuation that is not plain text) is cannot-evaluate (exit 2, naming the file and line), so
-    the reader accepts only what the grammar proves it reads instead of enumerating the containers
-    it cannot; no CommonMark container model is attempted. DECIDED BOUNDARY (disclosed): blockquote
-    markers are stripped per line before headings are read, so a blockquoted ATX heading still ends
-    a section like a bare one; text after it is outside the checked region. Each manifest name is
+    list items at most four spaces after their marker whose text starts with none of '<', '>', '#',
+    a fence character or another list marker, column-0 ATX headings, and indented continuations
+    that directly continue a non-blank, non-heading line and are plain text by the same test; ANY
+    other line there (any blockquote, any fence, any HTML-led or nested container, indented code or
+    an indented line after a blank line or a heading, a list-held heading or code, or a line of
+    only '-', '=', '_' or '*' runs, which CommonMark reads as a setext underline or a thematic
+    break, never plain text) is cannot-evaluate (exit 2, naming the file and line), so the reader
+    accepts only what the grammar proves it reads instead of enumerating the containers it cannot;
+    no CommonMark container model is attempted. THIRD, ATX headings are computed TWICE over the
+    whole text, from the blockquote-stripped lines (which bound the section) and from the raw
+    lines, each with its own fence state, and ANY disagreement between the two readings from the
+    top of the text to the section's end boundary (the boundary line included) is cannot-evaluate
+    (exit 2, naming the first disagreeing line), so a blockquoted heading, a decoy heading
+    manufactured by stripping, or a blockquoted fence inverting one reading's fence state is
+    refused, never a silent boundary (the earlier revision's decided boundary, a blockquoted
+    heading ending a section like a bare one, is refused now). Each manifest name is
     matched case-insensitively with whitespace runs collapsed, anywhere in that region; a table with
     pipe-free rows and an emphasis-split phrase sit inside the region by construction, at the
     disclosed cost of OVER-REFUSAL (a vendored name mentioned anywhere else in the same section is a
@@ -122,11 +130,15 @@ BLOCKQUOTE = re.compile(r"^ {0,3}> ?")
 N_OF_M = re.compile(r"\b\d+ of \d+\b")
 # The POSITIVE deferred-section grammar (applied by _require_section_grammar to the RAW lines from
 # the deferred phrase to the section's end boundary): a column-0 ATX heading, a flat column-0 list
-# item (its text must then not open another container), and the list-marker lead that text may not
-# carry.
+# item (its text must then not open another container or a '#' lead, and sit at most four spaces
+# after the marker: five or more, or a tab, is indented code in CommonMark), the list-marker lead
+# that text may not carry, and the setext-underline / thematic-break shape (a line of only '-',
+# '=', '_' or '*' runs and blanks) that no span line may take, because CommonMark reads it as a
+# heading underline or a thematic break, never as the plain paragraph text this reader would read.
 COL0_HEADING = re.compile(r"^#{1,6}(?: |$)")
-FLAT_LIST_ITEM = re.compile(r"^(?:[-*+]|\d{1,9}[.)])[ \t]+(?=\S)")
+FLAT_LIST_ITEM = re.compile(r"^(?:[-*+]|\d{1,9}[.)])(?P<gap>[ \t]+)(?=\S)")
 LIST_MARKER_LEAD = re.compile(r"^(?:[-*+]|\d{1,9}[.)])(?:[ \t]|$)")
+SETEXT_OR_BREAK = re.compile(r"^[ \t]*[-=_*][-=_* \t]*$")
 
 
 def _fence_open(line):
@@ -330,38 +342,57 @@ def _require_section_grammar(raw_lines, start, end, where):
     """The POSITIVE grammar for the deferred span itself, applied to the RAW lines (blockquote
     markers NOT stripped) from the deferred phrase's line to the section's end boundary. A line is
     accepted ONLY as one of: a blank line (empty, or spaces and tabs only); a column-0 ATX heading
-    (one to six '#', then exactly U+0020 or the line end); a flat column-0 list item whose text
-    starts with neither '<' nor '>' nor a backtick or a tilde nor another list marker; a plain
-    column-0 paragraph line (first character none of '<', '>', '#', a backtick, a tilde, and not a
-    list marker); or an indented continuation whose first non-blank character passes the same
-    plain-text test. EVERY other line -- any blockquote, any fence, any HTML-led line, any nested or
-    indented container, any indented continuation that is not plain text -- is REFUSED (OSError ->
-    exit 2, naming the file and line): between the phrase and the boundary the reader accepts only
-    what this grammar proves it reads as flat text, instead of enumerating the containers it
-    cannot."""
+    (one to six '#', then exactly U+0020 or the line end); a flat column-0 list item at most four
+    spaces after its marker (five or more, or a tab, is indented code in CommonMark) whose text
+    starts with none of '<', '>', '#', a backtick or a tilde and is not another list marker; a
+    plain column-0 paragraph line (first character none of '<', '>', '#', a backtick, a tilde, and
+    not a list marker); or an indented continuation that DIRECTLY CONTINUES a non-blank,
+    non-heading line and whose first non-blank character passes the same plain-text test (an
+    indented line after a blank line or a heading is indented code or a new container in
+    CommonMark, not a continuation). A line of only '-', '=', '_' or '*' runs and blanks is
+    refused at any position: CommonMark reads it as a setext heading underline or a thematic
+    break, so the phrase's own paragraph could become a heading whose section this reader does not
+    model. EVERY other line -- any blockquote, any fence, any HTML-led line, any nested or
+    indented container, any list-held heading or code, any indented continuation that is not plain
+    text -- is REFUSED (OSError -> exit 2, naming the file and line): between the phrase and the
+    boundary the reader accepts only what this grammar proves it reads as flat text, instead of
+    enumerating the containers it cannot."""
     for k in range(start, end):
         line = raw_lines[k]
         if not line.strip(" \t"):
             continue
+        if SETEXT_OR_BREAK.match(line):
+            raise OSError("{}:{}: a line of only '-', '=', '_' or '*' runs (a setext heading "
+                          "underline or a thematic break in CommonMark, never plain text); the "
+                          "section reader cannot prove it reads this line "
+                          "(fail-closed)".format(where, k + 1))
         if line[:1] not in (" ", "\t"):
             if COL0_HEADING.match(line):
                 continue
             lm = FLAT_LIST_ITEM.match(line)
             if lm:
+                gap = lm.group("gap")
                 text = line[lm.end():]
-                if text[:1] not in ("<", ">", "`", "~") and not LIST_MARKER_LEAD.match(text):
+                if ("\t" not in gap and len(gap) <= 4
+                        and text[:1] not in ("<", ">", "#", "`", "~")
+                        and not LIST_MARKER_LEAD.match(text)):
                     continue
             elif line[:1] not in ("<", ">", "#", "`", "~") and not LIST_MARKER_LEAD.match(line):
                 continue
         else:
+            prev = raw_lines[k - 1] if k > 0 else ""
             text = line.lstrip(" \t")
-            if text[:1] not in ("<", ">", "#", "`", "~") and not LIST_MARKER_LEAD.match(text):
+            if (prev.strip(" \t") and not COL0_HEADING.match(prev)
+                    and text[:1] not in ("<", ">", "#", "`", "~")
+                    and not LIST_MARKER_LEAD.match(text)):
                 continue
         raise OSError("{}:{}: a line outside the deferred-section grammar (between the phrase and "
                       "the section end only blank lines, plain paragraph or continuation text, flat "
                       "plain list items, and column-0 ATX headings are read; a blockquote, a fence, "
-                      "an HTML-led line or a nested container is not); the section reader cannot "
-                      "prove it reads this line (fail-closed)".format(where, k + 1))
+                      "an HTML-led line, a nested or indented container, indented code, a list-held "
+                      "heading, or an indented line that does not directly continue a text line is "
+                      "not); the section reader cannot prove it reads this line "
+                      "(fail-closed)".format(where, k + 1))
 
 
 def deferred_sections(text, where):
@@ -377,18 +408,28 @@ def deferred_sections(text, where):
     that is not a heading in the accepted grammar) is REFUSED (OSError -> exit 2, naming the file and
     line) wherever it sits in that span. SECOND, the deferred span itself (from the phrase's line to
     the end boundary) must pass the POSITIVE grammar of _require_section_grammar on the RAW lines:
-    only blank lines, plain paragraph or continuation text, flat plain list items and column-0 ATX
-    headings are read there, and any blockquote, fence, HTML-led or nested container is refused
-    rather than read. DECIDED BOUNDARY (disclosed residual): blockquote markers are stripped per line
-    before headings are read, so a blockquoted ATX heading ('> # Aside') still ENDS a section exactly
-    like a bare one (markdown-it renders the heading inside the quote); a vendored name after such a
-    quoted heading is outside the checked region. The other DISCLOSED COST stays over-refusal: a
+    only blank lines, plain paragraph or continuation text (a continuation only directly under a
+    non-blank, non-heading line), flat plain list items (at most four spaces after the marker, no
+    '#' lead) and column-0 ATX headings are read there, and any blockquote, fence, HTML-led or
+    nested container, indented code, list-held heading or code, setext underline or thematic break
+    is refused rather than read. THIRD, ATX headings are computed TWICE over the whole text, from
+    the blockquote-stripped lines (which bound the section) and from the RAW lines, each with its
+    own fence state by the same _fence_open/_fence_close rules, and ANY disagreement between the
+    two readings from the top of the text to the section's end boundary (the boundary line
+    included) is REFUSED (OSError -> exit 2, naming the first disagreeing line): a blockquoted ATX
+    heading ('> # Aside'), a decoy heading a stripped quote marker manufactures, and a blockquoted
+    fence that inverts one reading's fence state each read as a heading in exactly one of the two
+    readings, so the earlier revision's DECIDED boundary (a blockquoted heading silently ending a
+    section like a bare one) is now cannot-evaluate instead of read; agreement of the two readings
+    is a necessary condition, not a proof of CommonMark equivalence (a divergence affecting only
+    lines beyond the section end is not examined). The DISCLOSED COST stays over-refusal: a
     vendored name mentioned anywhere else in the same section is read too, a refused arrangement
     above the section exits 2 even when it could not have affected it, and a blockquoted or
     nested-list spelling of the phrase or a name, which earlier revisions read, is refused."""
     lines = _unquoted_lines(text)
     raw_lines = text.split("\n")
     headings = _heading_levels(lines, where)
+    headings_raw = _heading_levels(raw_lines, where)
     joined = "\n".join(lines)
     starts, pos = [], 0
     for line in lines:
@@ -406,6 +447,14 @@ def deferred_sections(text, where):
             end = min((k for k in headings if k > i), default=len(lines))
         _refuse_unbounded(lines, end, where)
         _require_section_grammar(raw_lines, i, end, where)
+        for k in range(min(end + 1, len(lines))):
+            if headings.get(k) != headings_raw.get(k):
+                raise OSError("{}:{}: the raw and blockquote-stripped heading readings disagree (a "
+                              "heading in one reading is absent or at another level in the other: "
+                              "a blockquoted heading, a decoy heading a stripped quote marker "
+                              "manufactures, or a blockquoted fence inverting one reading's fence "
+                              "state); the section reader cannot bound the section "
+                              "(fail-closed)".format(where, k + 1))
         yield i + 1, "\n".join(lines[first:end])
 
 
@@ -573,10 +622,20 @@ def main():
 #      real close, the section below is read, and the name in it is a finding -> exit 1 (dropping
 #      the nothing-else rule closes the fence at the pseudo-closing line and reopens an
 #      unterminated fence at the bare line, exit 2);
-#  6zt. the DECIDED boundary: a blockquoted ATX heading after the phrase ends the section exactly
-#      like a bare heading (markers are stripped before headings are read), so a name after it is
-#      outside the checked region and the fixture passes clean (exit 0, the disclosed residual
-#      stated in the deferred_sections docstring),
+#  6zt. the FORMER decided boundary, now refused: a blockquoted ATX heading after the phrase is a
+#      heading in the blockquote-stripped reading only, so the raw-versus-stripped heading
+#      agreement rule refuses the section (exit 2, naming the boundary line); the reader this
+#      replaces read it as the section end and passed the name after it clean,
+#  6zw-6zx. decoy headings above the phrase manufactured by blockquote stripping (a list-quoted
+#      '###### fake'; a blockquoted backtick fence inverting the stripped reading's fence state):
+#      each is a heading in exactly one of the two readings, so the agreement rule refuses
+#      (exit 2, naming the first disagreeing line), where the reader this replaces passed the
+#      planted name clean through a shrunken section,
+#  6zy-6zz, 6zza-6zze. span lines CommonMark reads as non-text blocks, refused by the tightened
+#      positive grammar (exit 2, naming the line): a setext underline under the phrase (clean on
+#      the reader this replaces, the renderer's section continuing past the reader's boundary), a
+#      thematic break, indented code after a blank line or directly under a heading, list-held
+#      code (five spaces or a tab after the marker), and a list-held heading,
 #  6g. a vendored name in a section without the phrase, and 6q. one after the next same-level
 #      heading, stay clean (the read is scoped to the section),
 #  6zc-6zg. arrangements the section reader cannot prove it bounds are REFUSED (exit 2, naming the
@@ -966,16 +1025,77 @@ def self_test_main():
                 failures.append("a line outside the deferred-section grammar ({}) expected exit 2 "
                                 "with {!r} (got {}: {!r})".format(label, marker, rc, out))
 
-        # 6zt. the DECIDED boundary (disclosed in the deferred_sections docstring): a blockquoted
-        #     ATX heading after the phrase still ENDS the section (blockquote markers are stripped
-        #     before headings are read; markdown-it keeps the heading inside the quote), so a name
-        #     after it is outside the checked region and the fixture passes clean.
+        # 6zt. the FORMER decided boundary, now REFUSED: a blockquoted ATX heading after the
+        #     phrase is a heading only in the blockquote-stripped reading (markdown-it keeps it
+        #     inside the quote), so the raw and stripped heading readings disagree at the boundary
+        #     line and the section cannot be bounded (exit 2, naming that line); the reader this
+        #     replaces read the stripped heading as the section end and passed the name after it
+        #     CLEAN (exit 0).
         quoted_heading = tmp / "deferred-6zt"
         _write_fixture(quoted_heading, readme=_README.replace(prose, (
             "Not yet vendored:\n\n> # Aside\n\n- Fixture Full Framework\n")))
-        if run_quiet(quoted_heading) != 0:
-            failures.append("a blockquoted heading ending the section (the decided boundary) "
-                            "expected exit 0")
+        rc, out = run_capture(quoted_heading)
+        if rc != 2 or "standards README:13:" not in out or "disagree" not in out:
+            failures.append("a blockquoted heading after the phrase expected exit 2 naming "
+                            "standards README:13 with the heading-disagreement diagnostic "
+                            "(got {}: {!r})".format(rc, out))
+
+        # 6zw-6zx. decoy headings ABOVE the phrase, manufactured by blockquote stripping: a
+        #     list-quote HTML line whose quoted '###### fake' is a heading only in the stripped
+        #     reading (6zw), and a blockquoted backtick fence that inverts the stripped reading's
+        #     fence state so a bare '###### fake' is a heading in exactly one reading (6zx). Each
+        #     shrank the section in the stripped reading alone and passed the planted name CLEAN
+        #     (exit 0) on the reader this replaces; the heading-agreement rule refuses both
+        #     (exit 2, naming the first disagreeing line).
+        for label, lineno, readme in (
+                ("6zw list-quoted decoy heading above the phrase", 14, _README.replace(prose, (
+                    "## Deferred\n\n- > <pre>\n  > ###### fake\n\n"
+                    "Not yet vendored: Google SAIF.\n\n### Detail\n\n"
+                    "- Fixture Full Framework\n"))),
+                ("6zx blockquoted fences inverting the stripped fence state", 15,
+                 _README.replace(prose, (
+                    "## Deferred\n\n> ```\n```\n###### fake\n```\n> ```\n\n"
+                    "Not yet vendored: Google SAIF.\n\n### Detail\n\n"
+                    "- Fixture Full Framework\n")))):
+            case = tmp / ("deferred-" + label.split()[0])
+            _write_fixture(case, readme=readme)
+            rc, out = run_capture(case)
+            if rc != 2 or "standards README:{}:".format(lineno) not in out or "disagree" not in out:
+                failures.append("a stripped-versus-raw heading disagreement ({}) expected exit 2 "
+                                "naming standards README:{} (got {}: {!r})".format(
+                                    label, lineno, rc, out))
+
+        # 6zy-6zz, 6zza-6zze. lines INSIDE the deferred span that CommonMark reads as a non-text
+        #     block but the earlier grammar accepted as plain text, each now refused (exit 2,
+        #     naming the line). On the reader this replaces, 6zy passed CLEAN (the renderer's
+        #     setext section continues past the ATX heading the reader stops at, so the name was
+        #     unread) and the others were findings read through text the renderer shows as code, a
+        #     break or a heading.
+        for label, lineno, readme in (
+                ("6zy setext underline under the phrase", 12, _README.replace(prose, (
+                    "Not yet vendored: Google SAIF.\n===\n\n## Later\n\n"
+                    "- Fixture Full Framework\n"))),
+                ("6zz thematic break inside the span", 13, _README.replace(prose, (
+                    "Not yet vendored:\n\n---\n\n- Fixture Full Framework\n"))),
+                ("6zza indented code after a blank line", 13, _README.replace(prose, (
+                    "Not yet vendored:\n\n    indented code\n\n- Fixture Full Framework\n"))),
+                ("6zzb indented text directly under a heading", 12, _README.replace(prose, (
+                    "### Not yet vendored\n    indented code\n\n- Fixture Full Framework\n"))),
+                ("6zzc list-held code (five spaces after the marker)", 13, _README.replace(prose, (
+                    "Not yet vendored:\n\n-     code in a list\n\n"
+                    "- Fixture Full Framework\n"))),
+                ("6zzd a tab between the list marker and the text", 13, _README.replace(prose, (
+                    "Not yet vendored:\n\n-\tFixture note\n\n- Fixture Full Framework\n"))),
+                ("6zze list-held heading", 13, _README.replace(prose, (
+                    "Not yet vendored:\n\n- # Nested heading\n\n"
+                    "- Fixture Full Framework\n")))):
+            case = tmp / ("deferred-" + label.split()[0])
+            _write_fixture(case, readme=readme)
+            rc, out = run_capture(case)
+            if rc != 2 or "standards README:{}:".format(lineno) not in out:
+                failures.append("a span line outside the tightened grammar ({}) expected exit 2 "
+                                "naming standards README:{} (got {}: {!r})".format(
+                                    label, lineno, rc, out))
 
         # 6zu. the backtick-info opener rule ABOVE the section: a ```x`y line is NOT a fence
         #     opener (CommonMark forbids a backtick in a backtick fence's info string), so it is a
@@ -1185,8 +1305,13 @@ def self_test_main():
           "boundary may exclude text, a mis-started section included), a dangling-symlink manifest "
           "failing inside the real loader naming the manifest, a missing/invalid catalogue, and an "
           "unaliased publisher all fail closed (exit 2); a single-line HTML comment above the section "
-          "is not over-refused and its section is proven read (the planted name is the finding); a "
-          "blockquoted heading still ends the section (the decided boundary), and a pseudo-closing "
+          "is not over-refused and its section is proven read (the planted name is the finding); the raw "
+          "and blockquote-stripped heading readings must agree up to the section end (a "
+          "blockquoted heading, a stripping-manufactured decoy heading, and a blockquoted fence "
+          "inverting one reading's fence state are each cannot-evaluate, exit 2, naming the first "
+          "disagreeing line); a setext underline or thematic-break line, indented code after a "
+          "blank line or a heading, list-held code (a five-space or tab gap) and a list-held "
+          "heading in the deferred span are cannot-evaluate (exit 2); and a pseudo-closing "
           "fence above the section (trailing words or U+00A0) does not close, the section below "
           "staying read")
     return 0
