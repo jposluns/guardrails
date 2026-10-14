@@ -1603,12 +1603,21 @@ TRACEBACK_MARK = "Traceback (most recent call last"
 INJECTED_EXHAUSTION_MARK = "injected-memory-exhaustion"
 
 
+def _tomllib_parsers():
+    """(tomllib.loads, tomllib.load) as bound when called: the injection seam saves this pair, and the
+    restoration checks compare it with the pair bound at import."""
+    return tomllib.loads, tomllib.load
+
+
+TOMLLIB_PARSERS = _tomllib_parsers()
+
+
 @contextlib.contextmanager
 def _injected_memory_exhaustion():
     """tomllib.loads and tomllib.load raise MemoryError on a marked, otherwise valid input for the
     duration of the block, restored in a finally: real memory exhaustion cannot be provoked safely, so
     each MemoryError vector injects it at the parse call it exercises."""
-    real_loads, real_load = tomllib.loads, tomllib.load
+    real_loads, real_load = _tomllib_parsers()
 
     def exhausted_loads(text, **kwargs):
         if INJECTED_EXHAUSTION_MARK in text:
@@ -1624,18 +1633,28 @@ def _injected_memory_exhaustion():
 
 
 def _boundary(argv, refusal):
-    """(exit, refusal seen, traceback seen) of main(argv), judged on the complete stdout and stderr."""
+    """(exit, refusal seen, traceback seen) of main(argv) alone. What is judged: the text main writes
+    through sys.stdout and sys.stderr, captured together in process, must contain the refusal and must
+    not contain the traceback marker; other text in it is not judged, and a write that bypasses
+    sys.stdout and sys.stderr (sys.__stderr__, file descriptors 1 and 2, a child process) is not
+    captured. A SystemExit out of main (check() refusing a duplicate id when the suite is re-entered)
+    is returned with the captured diagnostic in place of the tuple, so it fails the compared value by
+    name instead of ending the run with no output."""
     printed = io.StringIO()
-    with contextlib.redirect_stdout(printed), contextlib.redirect_stderr(printed):
-        code_seen = main(argv)
+    try:
+        with contextlib.redirect_stdout(printed), contextlib.redirect_stderr(printed):
+            code_seen = main(argv)
+    except SystemExit as exc:
+        return "SystemExit({!r}) out of main: {}".format(exc.code, printed.getvalue().strip())
     transcript = printed.getvalue()
     return code_seen, refusal in transcript, TRACEBACK_MARK in transcript
 
 
 def _table_refusal(body):
-    """Both production boundaries on a table whose parse fails, each as (exit, refusal seen, traceback
-    seen) over the complete stdout and stderr: check_table through a bare main() and run through
-    --table; or the class of a parse failure that escaped the handler."""
+    """Both production boundaries on a table whose parse fails, each judged by _boundary: check_table
+    through a bare main() and run through --table; or the class of a parse failure that escaped the
+    handler. A CannotEvaluate out of main is not converted: it propagates and ends the suite with a
+    traceback."""
     tmp = Path(tempfile.mkdtemp(prefix="aiqt-brief-capability-table-"))
     try:
         os.makedirs(tmp / ".aiqt" / "core")
@@ -1655,19 +1674,31 @@ def _table_refusal(body):
 
 
 def _manifest_refusal(path):
-    """(result, exit, refusal seen, traceback seen) of _expected_check_ids and then main(--self-test)
-    reading the checks manifest at path, judged on the complete stdout and stderr; or the class of a
-    parse failure that escaped the handler."""
+    """(reader, command) on the checks manifest at path, each judged on its own transcript: reader is
+    (result, refusal seen, traceback seen) of a direct _expected_check_ids call, and command is
+    _boundary of main(--self-test) alone, so a refusal the reader prints cannot stand in for one the
+    command omits; or the class of a parse failure that escaped the handler."""
     printed = io.StringIO()
     try:
-        with contextlib.redirect_stdout(printed), contextlib.redirect_stderr(printed):
-            with _patched(CHECKS_MANIFEST=path):
+        with _patched(CHECKS_MANIFEST=path):
+            with contextlib.redirect_stdout(printed), contextlib.redirect_stderr(printed):
                 got = _expected_check_ids()
-                code_seen = main(["--self-test"])
+            command = _boundary(["--self-test"], MANIFEST_PARSE_REFUSAL)
     except (ValueError, RecursionError, MemoryError) as exc:
         return "escaped " + type(exc).__name__
     transcript = printed.getvalue()
-    return got, code_seen, MANIFEST_PARSE_REFUSAL in transcript, TRACEBACK_MARK in transcript
+    return (got, MANIFEST_PARSE_REFUSAL in transcript, TRACEBACK_MARK in transcript), command
+
+
+def _silenced_manifest_self_test(report_path=None):
+    """The silenced-command mutant of the opening of self_test, its expected-set read with stderr
+    discarded, as far as the manifest vectors reach it: their manifest is unreadable, so self_test
+    returns 2 there. A readable manifest returns a value no vector expects instead of running the suite."""
+    with contextlib.redirect_stderr(io.StringIO()):
+        expected = _expected_check_ids()
+    if expected is None:
+        return 2
+    return "readable manifest: the mutant reproduces only the opening"
 
 
 RUN_ITEM = "3. Run `t.py --self-test` on a snapshot of the change.\n"
@@ -2277,7 +2308,9 @@ def self_test(report_path=None):
         _selftest_exit_report.arm(report_path, SUITE_ID, EXECUTED)
     # The expected execution set is read first: an unreadable checks manifest is a harness error
     # (exit 2) before any check runs, so a manifest vector can exercise this boundary through
-    # main(--self-test) without re-entering the suite.
+    # main(--self-test) without re-entering the suite. Read later, that call would re-enter the suite,
+    # whose first check() refuses its id as a duplicate and exits 2; _boundary reports that SystemExit
+    # with its diagnostic as the command element, so the manifest vectors fail by name.
     expected = _expected_check_ids()
     if expected is None:
         return 2
@@ -2317,6 +2350,19 @@ def self_test(report_path=None):
         check("table/injected-memory-exhaustion-2",
               _table_refusal("x = 1  # " + INJECTED_EXHAUSTION_MARK + "\n"),
               ((2, True, False), (2, True, False)))
+    # the injection seam restores both parsers on leaving its block, also when the block raises: the
+    # SystemExit that check() raises on a duplicate id (raised here directly, since the execution gate
+    # refuses a duplicate or indirect check() call site) and a MemoryError that escapes a parse
+    check("table/injection-restored", _tomllib_parsers(), TOMLLIB_PARSERS)
+    after_raise = []
+    for raising in (SystemExit(2), MemoryError("injected memory exhaustion")):
+        try:
+            with _injected_memory_exhaustion():
+                raise raising
+        except (SystemExit, MemoryError) as exc:
+            after_raise.append((type(exc).__name__, _tomllib_parsers()))
+    check("table/injection-restored-after-raise", after_raise,
+          [("SystemExit", TOMLLIB_PARSERS), ("MemoryError", TOMLLIB_PARSERS)])
     # ---------- structure ----------
     check("structure/dash-list-refused", _outcome(DASH_LIST),
           (1, [("R1", "ADVISORY"), ("R5", "ADVISORY"), ("S3", "HARD")]))
@@ -2629,20 +2675,32 @@ def self_test(report_path=None):
         with _patched(ROOT=tmp):
             check("main/bare-malformed-table-2", _quiet(main, []), 2)
         # the checks manifest parse maps the same failures (memory exhaustion injected at the parse
-        # call) to the harness refusal, None from the helper and exit 2 from the self-test boundary,
-        # never a traceback
+        # call) to the harness refusal and None from the reader and to the refusal and exit 2 from the
+        # self-test boundary, each judged on its own transcript, never a traceback
         for name, body in (("deep.toml", "x = " + "[" * 8000 + "]" * 8000),
                            ("longint.toml", "x = " + "1" * 5000),
                            ("exhausted.toml", "x = 1  # " + INJECTED_EXHAUSTION_MARK + "\n")):
             with open(tmp / name, "w", encoding="utf-8") as handle:
                 handle.write(body)
+        manifest_refused = ((None, True, False), (2, True, False))
         check("main/manifest-deep-nesting-harness-error", _manifest_refusal(tmp / "deep.toml"),
-              (None, 2, True, False))
+              manifest_refused)
         check("main/manifest-overlong-integer-harness-error", _manifest_refusal(tmp / "longint.toml"),
-              (None, 2, True, False))
+              manifest_refused)
         with _injected_memory_exhaustion():
             check("main/manifest-injected-memory-exhaustion-harness-error",
-                  _manifest_refusal(tmp / "exhausted.toml"), (None, 2, True, False))
+                  _manifest_refusal(tmp / "exhausted.toml"), manifest_refused)
+        check("main/manifest-injection-restored", _tomllib_parsers(), TOMLLIB_PARSERS)
+        # the silenced-command mutant (the opening manifest read of self_test with its stderr discarded):
+        # the reader still prints its refusal, so each vector must go red on the command element alone
+        silenced = []
+        with _patched(self_test=_silenced_manifest_self_test):
+            silenced.append(_manifest_refusal(tmp / "deep.toml"))
+            silenced.append(_manifest_refusal(tmp / "longint.toml"))
+            with _injected_memory_exhaustion():
+                silenced.append(_manifest_refusal(tmp / "exhausted.toml"))
+        check("main/manifest-silenced-command-red", silenced, [((None, True, False), (2, False, False))] * 3)
+        check("main/manifest-silenced-injection-restored", _tomllib_parsers(), TOMLLIB_PARSERS)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     # ---------- red on revert: each blocking rule, form and exemption patched out flips its fixture ----------
@@ -2825,8 +2883,11 @@ def self_test(report_path=None):
             print("  - " + failure)
         return 1
     print("PASS: check_brief_capability self-test: {} unique checks executed (the shipped table loads and a "
-          "malformed table (a parser recursion, an over-long integer and an injected memory "
-          "exhaustion included) exits 2 at the production boundaries with no traceback; S1, S2 and S3 "
+          "malformed table exits 2 through main; a table that fails to parse (a parser recursion, an over-long "
+          "integer, an injected memory exhaustion) exits 2 at check_table and at run, each printing the "
+          "refusal and no traceback marker, and a checks manifest that fails the same ways gets the harness "
+          "refusal and None from its reader and the refusal and exit 2 from --self-test, each on its own "
+          "transcript, with both tomllib parsers restored after every injected block; S1, S2 and S3 "
           "refuse executable fences and command lines in numbered "
           "items and outside them, a command line is INFO only as a whole-sentence prohibition or past report "
           "that no other sentence of its void group (lazy lines, nested items, indented headings and fence contents "

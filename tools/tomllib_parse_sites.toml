@@ -800,11 +800,12 @@ count = 1
 class = "EXEMPT"
 reason = "valueerror-passthrough"
 
-# the self-test seam that saves and restores tomllib.loads and tomllib.load around an injected
-# MemoryError at the parse call (real memory exhaustion cannot be provoked safely)
+# the self-test seam that reads tomllib.loads and tomllib.load as bound: the injection saves and restores
+# them around an injected MemoryError at the parse call (real memory exhaustion cannot be provoked
+# safely), and the restoration checks compare them with the pair bound at import
 [[site]]
 path = "tools/check_brief_capability.py"
-function = "_injected_memory_exhaustion"
+function = "_tomllib_parsers"
 form = "alias"
 count = 2
 class = "EXEMPT"

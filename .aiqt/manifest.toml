@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "d0515fb4bfbb5b4015837a1c34517ced4b181853e43c929b2830335e2bcee613"
+tree-sha256 = "19e9ba65d0c303ccc2cfe47a9fe6215c3ea8102cbd7596a8878c936e8f951e62"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3291,8 +3291,8 @@ sha256 = "60b8867da42aaf045b5e0f16bdba7fbedc694f5b6174dc442f2e605006f97817"
 
 [[sources]]
 path = "tools/check_brief_capability.py"
-bytes = 176786
-sha256 = "1204c7cb52d213c40b17ed7b2fdb7025d9de9d2581bd3bbeff73a1c17356702b"
+bytes = 180869
+sha256 = "b6330787ab0e285f7addad4fb1410307b386913fd070b564177718f850900eed"
 
 [[sources]]
 path = "tools/check_byte_canon.py"
@@ -3721,8 +3721,8 @@ sha256 = "1e2359aa0c0c6dd2a398c70a9eece680953443191d148664bc61d8e3ff245300"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 74412
-sha256 = "6d63eee0b7bb4e2e52a5cdf8a3eaa0b22c50f4a8bf2b799b74d6088a087556bc"
+bytes = 74609
+sha256 = "6c816534ef294083ac4e91e56d358a4b8b2d8da873b270e2bfcdc6ff419882a5"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
@@ -3751,8 +3751,8 @@ sha256 = "9159f0c51f6269626c2c446b4db76977b6d5fe84bc9cfe4cd9df50bafc6944f0"
 
 [[sources]]
 path = "tools/tomllib_parse_sites.toml"
-bytes = 22217
-sha256 = "b531e209365f9e8624035b29d9f0886b618904b8f2d85ed2ad08b1d064d899ac"
+bytes = 22314
+sha256 = "7d6120afe09043d2099de68fa2bc036c25ced3a56eff9d7ab58c9925e4dc94c5"
 
 [[artifacts]]
 artifact-id = "claude:.claude/RULES-INDEX.md"

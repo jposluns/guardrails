@@ -1600,6 +1600,8 @@ expected-check-ids = [
   "table/deep-nesting-2",
   "table/overlong-integer-2",
   "table/injected-memory-exhaustion-2",
+  "table/injection-restored",
+  "table/injection-restored-after-raise",
   # ---------- structure ----------
   "structure/dash-list-refused",
   "structure/nested-list-refused",
@@ -1815,6 +1817,9 @@ expected-check-ids = [
   "main/manifest-deep-nesting-harness-error",
   "main/manifest-overlong-integer-harness-error",
   "main/manifest-injected-memory-exhaustion-harness-error",
+  "main/manifest-injection-restored",
+  "main/manifest-silenced-command-red",
+  "main/manifest-silenced-injection-restored",
   # ---------- red on revert: each blocking rule, form and exemption patched out flips its fixture ----------
   "revert/s1-red",
   "revert/s1-exec-tags-red",
