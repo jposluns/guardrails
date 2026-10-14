@@ -1137,7 +1137,7 @@ _LIC_CC0_OPENING_ONLY = ("Creative Commons Legal Code\n\nCC0 1.0 Universal\n\n"
 _LIC_CC0_THEN_PROPRIETARY = ("CC0 1.0 Universal\n\nACME PROPRIETARY LICENCE. All rights reserved. No use"
                              " without a signed agreement.\n")
 _LIC_CC0_PLUS_ADDENDUM = _LIC_CC0 + "\nACME ADDENDUM: all rights reserved; no use without a licence.\n"
-_LIC_CC0_ONE_TOKEN = _LIC_CC0.replace("unconditionally waives,", "unconditionally reserves,")
+_LIC_CC0_ONE_WORD = _LIC_CC0.replace("unconditionally waives,", "unconditionally reserves,")
 _LIC_UNLICENSE_THEN_PROPRIETARY = ("This is free and unencumbered software released into the public"
                                    " domain.\n\nExcept that ACME reserves all rights in it.\n")
 # Openings wrapped in markdown markers are still found anywhere, so they refuse the file.
@@ -1201,7 +1201,7 @@ LICENCE_IDENTITY_CASES = [
     ("CC0-1.0", _LIC_CC0_OPENING_ONLY, "not the whole canonical text"),
     ("CC0-1.0", _LIC_CC0_THEN_PROPRIETARY, "not the whole canonical text"),
     ("CC0-1.0", _LIC_CC0_PLUS_ADDENDUM, "not the whole canonical text"),
-    ("CC0-1.0", _LIC_CC0_ONE_TOKEN, "not the whole canonical text"),
+    ("CC0-1.0", _LIC_CC0_ONE_WORD, "not the whole canonical text"),
     ("Unlicense", _LIC_UNLICENSE_THEN_PROPRIETARY, "not the whole canonical text"),
     # a leading byte-order mark is dropped before the leading text is read.
     (None, "\ufeff" + _LIC_APACHE, ("Apache-2.0", True)),
