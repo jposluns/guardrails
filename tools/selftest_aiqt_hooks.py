@@ -129,7 +129,7 @@ DIRECTORY, tracked clean content (positive ls-files evidence required), a modell
 of an allowed command, a known non-runner naming a destructive word as data (echo, git rm, sudo docker rm) and
 the exact $(cat <<'EOF' ...) prose idiom ALLOW (some with a note), and untracked content in a repository is
 SNAPSHOT-THEN-ALLOWED. Every reproduced slip is asserted denied. No in-band override exists: a command carrying
-a leading GUARDRAIL_ALLOW_DESTRUCTIVE assignment (the removed opt-out) gets the decision, and the snapshot, of the
+a leading GUARDRAIL_ALLOW_DESTRUCTIVE assignment of a plain value gets the decision, and the snapshot, of the
 same command without it, and no reason, note or hook string spells that assignment. A mutant sweep removes each
 named rule from _DESTRUCT_RULES and requires every vector that names it to change outcome; functional mutants
 cover the probe tracked evidence and a fake clock that crosses the classification deadline mid-work.
@@ -13768,7 +13768,7 @@ def _main_isolated(monitor):
           "SNAPSHOT-THEN-ALLOWS untracked repository content, and ALLOWS tracked clean content (positive "
           "ls-files evidence, a note on a recursive delete), a literal scratch path, and a regenerable build "
           "directory (the directory type required); no in-band override exists, so a command carrying the "
-          "removed GUARDRAIL_ALLOW_DESTRUCTIVE prefix gets the decision of the same command without it. A "
+          "removed GUARDRAIL_ALLOW_DESTRUCTIVE prefix with a plain value gets the decision of the same command without it. A "
           "mis-wired PreToolUse event hard-blocks (exit 2). Historical note: several guards were "
           "originally ASK-based; this suite now asserts the no-ask outcomes above and the global "
           "invariant guarantees none reverts to an ask.")
