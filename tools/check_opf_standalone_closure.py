@@ -73,6 +73,7 @@ _SUBSET = [
     ("opf-adopt-state-selftest", "_opf_adopt_state.py", ["--self-test"]),
     ("opf-adopt-hook-selftest", "_opf_adopt_hook.py", ["--self-test"]),
     ("opf-adopt-complete-selftest", "_opf_adopt_complete.py", ["--self-test"]),
+    ("opf-import-complete-selftest", "_opf_import_complete.py", ["--self-test"]),
     ("opf-pack-manifest-selftest", "_opf_pack_manifest.py", ["--self-test"]),
     ("opf-adopt-observe-selftest", "_opf_adopt_observe.py", ["--self-test"]),
     ("opf-adopt-discover-selftest", "_opf_adopt_discover.py", ["--self-test"]),
@@ -124,6 +125,7 @@ _LEG_CEILING_S = {
     "opf-adopt-state-selftest": 600,  # not measured 2026-10-11; under the former 600 s bound (inferred)
     "opf-adopt-hook-selftest": 2,  # measured 2026-10-11: 1.3 s
     "opf-adopt-complete-selftest": 600,  # not measured 2026-10-11; under the former 600 s bound (inferred)
+    "opf-import-complete-selftest": 15,  # measured 2026-10-14: 1.9 s (one run); 1.9 * 20 / 3, rounded up to 15 s
     "opf-pack-manifest-selftest": 18,  # measured 2026-10-11: 17.3 s
     "opf-adopt-observe-selftest": 600,  # not measured 2026-10-11; under the former 600 s bound (inferred)
     "opf-prompt-pack-selftest": 1,  # measured 2026-10-11: 0.7 s
@@ -313,6 +315,36 @@ def _adopt_observe_registration_self_test():
     print("RED closure-registration -> closure/adopt-observe-registration")
 
 
+def _check_import_complete_registration(subset):
+    """Independent requirement, not inferred from the release manifest.
+
+    Covers this exact closure-roster tuple, not arbitrary dispatcher changes
+    or the registrations of other gates.
+    """
+    expected = ("opf-import-complete-selftest", "_opf_import_complete.py", ["--self-test"])
+    matches = [row for row in subset
+               if row[0] == expected[0] or row[1] == expected[1]]
+    if matches != [expected]:
+        raise AssertionError("closure/import-complete-registration")
+
+
+def _import_complete_registration_self_test():
+    _check_import_complete_registration(_SUBSET)
+    print("PASS closure/import-complete-registration")
+    # Mutate the real roster, independently of the shell-runner deletion.
+    # No digest or generated-manifest check participates in the verdict.
+    changed = list(_SUBSET)
+    changed.remove(("opf-import-complete-selftest", "_opf_import_complete.py", ["--self-test"]))
+    try:
+        _check_import_complete_registration(changed)
+    except AssertionError as exc:
+        if str(exc) != "closure/import-complete-registration":
+            raise
+    else:
+        raise AssertionError("closure/import-complete-registration-not-red")
+    print("RED closure-registration -> closure/import-complete-registration")
+
+
 def _isolated_env():
     """A minimal environment for the isolated subset. PYTHONPATH and PYTHONHOME are dropped so nothing off
     the copied tree can be imported (belt-and-suspenders atop `python3 -I`, which already ignores them), and
@@ -362,6 +394,7 @@ def _run_subset(opf_root, run_dir, bounds):
     """Run every subset member under its own bound. Returns a list of (name, rc, tail, elapsed_s, bound_s)."""
     _check_pack_manifest_registration(_SUBSET)
     _check_adopt_observe_registration(_SUBSET)
+    _check_import_complete_registration(_SUBSET)
     env = _isolated_env()
     results = []
     for name, script, args in _SUBSET:
@@ -573,6 +606,7 @@ def self_test_main():
     try:
         _pack_manifest_registration_self_test()
         _adopt_observe_registration_self_test()
+        _import_complete_registration_self_test()
         required = _bounds_self_test(root)
         _timeout_vectors_self_test(required)
     except (AssertionError, _BoundError, OSError) as exc:

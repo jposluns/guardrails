@@ -3671,6 +3671,7 @@ OPF_LIFECYCLE_EXEMPTIONS = {
                                        "(_opf_adopt_apply._selftest_git_commit and the S16 add, "
                                        "write-tree, commit-tree, update-ref helper), never a hook."),
     "opf/tools/_opf_adopt_complete.py": "Completion-check vectors over temporary post-apply filesystem fixtures.",
+    "opf/tools/_opf_import_complete.py": "Import-completion vectors over temporary post-import filesystem fixtures.",
     "opf/tools/_opf_init.py": "Canonical model bytes, defaults and validator vectors.",
     "opf/tools/_opf_init_contract.py": "KEEP contract validation over synthetic models.",
     "opf/tools/_opf_pack_manifest.py": "Pack parsing and digest vectors over filesystem fixtures.",
