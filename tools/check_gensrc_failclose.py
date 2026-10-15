@@ -845,16 +845,20 @@ def main() -> int:
 #       fixture base or any component below it, and accepts only regular files and directories), while a
 #       tree holding a real nested subdirectory of regular files is confirmed as produced,
 #   (u) the vector census reconciles the vectors that ran against the fixed list _SELF_TEST_VECTORS: a
-#       listed vector that did not run, or ran fewer times than listed, and an unlisted one that ran are
-#       each an assertion failure.
+#       listed vector that never ran, or ran fewer times than listed, and an unlisted one that ran are
+#       each an assertion failure, and the verdict and the PASS line both take the census result, so a
+#       self-test whose final census call is deleted cannot print PASS.
 # Every fixture vector runs through _run_vector: its setup is built with each setup subprocess checked and
 # each declared target confirmed present (a regular file or directory inside the fixture, following no
 # symlink); a vector whose setup raises or returns None, or whose evaluation raises, is a named
 # cannot-evaluate (the self-test exits 2, even beside an assertion failure), never a traceback or a pass. An
 # Exception outside a vector's setup and evaluation (for example from the fixture git lifecycle around the
 # self-test, or a cleanup error that is not an OSError) is not caught there and still ends the self-test
-# with a traceback. _run_vector records every vector it runs for the census, so a vector dropped from the
-# self-test fails it; a check written outside _run_vector is not counted.
+# with a traceback. _run_vector records every vector it runs for the census, so removing a vector's run
+# while its name stays in _SELF_TEST_VECTORS fails the self-test; removing the run and its name together
+# passes by design. Only runs through _run_vector are counted: a check run only inside _VectorEvaluation
+# (the verdict precedence check, the assertions the injected setup and evaluation vector wrappers make
+# around their inner runs, and the census meta-check (u) itself) is not, so removing one passes the census.
 # Every fixture is synthetic; any invalid-UTF-8 corruption bytes are assembled from non-secret parts so
 # this file never trips the repo secret scan.
 
@@ -1435,8 +1439,9 @@ class _VectorEvaluation:
 # Every vector the self-test must run through _run_vector, by name, listed as many times as it runs (the
 # no-maintenance vector runs twice: its own run, then the injected evaluation error that reuses its run
 # path). The self-test fails when a listed vector did not run, or ran fewer times than listed, or when an
-# unlisted vector ran, so a vector removed from the self-test, together with the rule only it guards,
-# cannot disappear unnoticed: removing one means removing its name here too.
+# unlisted vector ran, so removing a vector's run while its name stays here fails the self-test. This list
+# is edited with the self-test, not kept apart from it: removing a vector's run and its name here together
+# passes by design, and only a review of this list shows that removal.
 _SELF_TEST_VECTORS = (
     "conformant repo",
     "bypass generator",
@@ -1483,10 +1488,11 @@ _VECTORS_RUN = []
 
 def _vector_census(ran, listed):
     """Reconcile the vectors that ran (`ran`, the names _run_vector recorded) against the vectors the
-    self-test must run (`listed`), each name counted as often as it occurs and order ignored. Returns one
-    line per name whose counts differ: a listed vector that ran fewer times than listed (including one that
-    never ran), and a vector that ran more often than listed (including an unlisted one). Empty when the
-    two agree."""
+    self-test must run (`listed`), each name counted as often as it occurs and order ignored. Returns
+    (lines, matched). lines has one line per name whose counts differ: a listed vector that ran fewer times
+    than listed (including one that never ran), and a vector that ran more often than listed (including an
+    unlisted one); it is empty when the two agree. matched is the number of listed runs that ran, which
+    equals len(listed) when the two agree and is the figure the PASS line reports."""
     ran_counts, listed_counts = Counter(ran), Counter(listed)
     lines = []
     for name in sorted(set(ran_counts) | set(listed_counts)):
@@ -1497,7 +1503,7 @@ def _vector_census(ran, listed):
         elif ran_n > listed_n:
             lines.append("vector census: {!r} ran {} time(s) but is listed {}; list every vector the "
                          "self-test runs in _SELF_TEST_VECTORS".format(name, ran_n, listed_n))
-    return lines
+    return lines, sum((ran_counts & listed_counts).values())
 
 
 def _run_vector(cannot, failures, name, build, evaluate):
@@ -2236,18 +2242,27 @@ def _self_test_main_isolated():
         _run_vector(cannot, failures, "close vectors", lambda: _close_vectors(tmp / "close"), _evaluate_close)
 
         # (u) The vector census reconciliation, checked on injected lists: it is silent when the vectors
-        #     that ran match the listed ones in any order, and names a listed vector that ran fewer times
-        #     than listed, an unlisted vector that ran, and a vector that ran more often than listed.
+        #     that ran match the listed ones in any order, and names a listed vector that never ran (alone
+        #     and with every listed vector unrun), a listed vector that ran fewer times than listed, an
+        #     unlisted vector that ran, and a vector that ran more often than listed. Each case also checks
+        #     the number of listed runs that ran. A census that looked only at the names that ran would
+        #     miss a listed vector that never ran, the case a dropped vector produces.
         with _VectorEvaluation(cannot, failures, "vector census"):
             listed = ("a", "b", "b")
-            for ran, want in ((("b", "a", "b"), []),
-                              (("a", "b"), ["'b' is listed to run 2 time(s) but ran 1"]),
-                              (("a", "b", "b", "c"), ["'c' ran 1 time(s) but is listed 0"]),
-                              (("a", "b", "b", "b"), ["'b' ran 3 time(s) but is listed 2"])):
-                got = _vector_census(ran, listed)
-                if len(got) != len(want) or not all(w in line for w, line in zip(want, got)):
-                    failures.append("vector census: {!r} against {!r} expected lines naming {!r}, got {!r}"
-                                    .format(ran, listed, want, got))
+            for ran, want, want_matched in (
+                    (("b", "a", "b"), [], 3),
+                    (("a",), ["'b' is listed to run 2 time(s) but ran 0"], 1),
+                    ((), ["'a' is listed to run 1 time(s) but ran 0",
+                          "'b' is listed to run 2 time(s) but ran 0"], 0),
+                    (("a", "b"), ["'b' is listed to run 2 time(s) but ran 1"], 2),
+                    (("a", "b", "b", "c"), ["'c' ran 1 time(s) but is listed 0"], 3),
+                    (("a", "b", "b", "b"), ["'b' ran 3 time(s) but is listed 2"], 3)):
+                got, matched = _vector_census(ran, listed)
+                if (len(got) != len(want) or not all(w in line for w, line in zip(want, got))
+                        or matched != want_matched):
+                    failures.append("vector census: {!r} against {!r} expected lines naming {!r} and {} "
+                                    "matched run(s), got {!r} and {!r}"
+                                    .format(ran, listed, want, want_matched, got, matched))
     finally:
         _run_check = saved_run_check
         _now = saved_now
@@ -2259,9 +2274,15 @@ def _self_test_main_isolated():
         except OSError as exc:
             cleanup_error = exc
 
-    # Every listed vector ran as often as listed, and no unlisted vector ran.
-    failures.extend(_vector_census(_VECTORS_RUN, _SELF_TEST_VECTORS))
-    rc = _self_test_verdict(failures, cannot, cleanup_error, census_error)
+    # Every listed vector ran as often as listed, and no unlisted vector ran. The verdict and the PASS line
+    # both take this census result, so deleting this call ends the self-test with a NameError before any
+    # PASS line. The matched count is checked apart from the census lines, so a verdict that left those
+    # lines out still fails when fewer listed runs ran than the list holds.
+    census_lines, census_matched = _vector_census(_VECTORS_RUN, _SELF_TEST_VECTORS)
+    if census_matched != len(_SELF_TEST_VECTORS):
+        failures.append("vector census: {} of the {} listed vector runs ran"
+                        .format(census_matched, len(_SELF_TEST_VECTORS)))
+    rc = _self_test_verdict(failures + census_lines, cannot, cleanup_error, census_error)
     if rc != 0:
         return rc
     print("SELF-TEST PASS: a conformant repo (content-guarding file and tree generators) passes; a bypass "
@@ -2278,8 +2299,8 @@ def _self_test_main_isolated():
           "named as a gate defect; a declared target reached through a symlink at the fixture base or any "
           "component below it, or a tree with a symlinked member (a nested symlinked directory included) or "
           "a FIFO member, is not confirmed as produced, while a tree holding a real nested subdirectory of "
-          "regular files is; the vector census matches the {} vector runs against the listed vectors, and "
-          "a listed vector that did not run or an unlisted one that ran fails the self-test; the synthetic "
+          "regular files is; the vector census matches all {} listed vector runs, and a listed vector "
+          "that did not run or an unlisted one that ran fails the self-test; the synthetic "
           "real tree is byte-and-mode "
           "identical after a normal run and after a run "
           "whose corrupted probe raises (itself exit 2); a generator changing a real-tree file's mode is "
@@ -2287,14 +2308,14 @@ def _self_test_main_isolated():
           "valid-but-different / same-length content probe; a total-runtime deadline overrun returns exit "
           "2; a sandbox-setup mkdtemp failure returns exit 2; a block-kind generator that fail-closes "
           "on invalid UTF-8 passes (exit 0), exercising the invalid-UTF-8-only block probe path; a "
-          "git-reading generator passes (exit 0) because the D6 template materializes a real git "
+          "git-reading generator passes (exit 0) because the sandbox template materializes a real git "
           "repository so its baseline git ls-files succeeds; a repo-local core.fsmonitor hook is NEVER "
           "executed by the probe (no outside write) thanks to -c core.fsmonitor=false; and a forced probe "
           "failure and a tracked-set mismatch each fail closed (exit 2) with no git add -A fallback; and "
-          "every template git command carries the F-367 no-maintenance flags (gc.auto=0, gc.autoDetach="
+          "every template git command carries the no-maintenance flags (gc.auto=0, gc.autoDetach="
           "false, maintenance.auto=false) so no detached auto-gc / auto-maintenance can race the per-call "
           "copytree of the template; and the {} #378 close-vector runs pass, each flip leg red by its own "
-          "assertion".format(len(_VECTORS_RUN), close_runs))
+          "assertion".format(census_matched, close_runs))
     return 0
 
 
