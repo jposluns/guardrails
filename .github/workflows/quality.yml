@@ -70,6 +70,7 @@ jobs:
           ./gitleaks dir . --no-banner --redact --exit-code 1
 
       - name: Leak denylist self-test
+        shell: bash
         run: python3 -I -B tools/check_leaks.py --self-test
       - name: Leak denylist
         shell: bash
