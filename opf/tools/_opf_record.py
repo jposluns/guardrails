@@ -118,9 +118,13 @@ run (re-run), never a duplicate. The homes-2 publication boundary itself (_publi
 open a transaction unless the canonical reservation of the run id it publishes under stands with this
 plan's claims. An unreadable, malformed or conflicting reservation refuses (exit 2),
 never a silent fallback to the homes-1 counters path; a run killed after reserving and before
-publishing leaves its reservation standing, its numbers conservatively still reserved: the final doctor
-treats a reserved number as issued (spec 8.2), so the orphaned numbers never grade as missing records
-and the next run records above them. A legacy
+publishing leaves its reservation standing, its numbers conservatively still reserved, and the next run
+derives above them. The final doctor reads the reservations (a read that awaits the homes-2 revision of
+spec 4.2) and does not report a reserved number missing where the prior commit held no record with that
+id, so a reservation's [claims] number grades as issued and that next run records. A reservation keeps
+only its run's new high-water per key, so where an orphaned run claimed several numbers under one key,
+its lower numbers are still reported missing and the next run is held at the post-publication gate
+(conservative). A legacy
 .aiqt/record/journal found on a homes-2 store is refused and never recovered: homes 2 has no homes
 migration to carry it (spec 4.2).
 

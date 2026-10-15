@@ -15,7 +15,10 @@ human-readable strings explaining every omission. It NEVER forges a value: when 
 is OMITTED and a note is added, and the engine then routes the affected check to a named cannot-evaluate,
 which is the honest outcome. A partial `prior` is never forged either: any parse failure, absent object, or
 read failure while reconstructing the prior snapshot omits `prior` ENTIRELY (a partial prior would falsely
-accuse the store), keeping only the honest empty prior for the unborn-HEAD (no-commits) case.
+accuse the store), keeping only the honest empty prior for the unborn-HEAD (no-commits) case. The one
+exception is the prior's `held` table (every id the prior commit held, worklog and archive included): it can
+only withhold the reserved-number exemption, never accuse, so when it cannot be read it alone is omitted
+with a note and that exemption becomes a cannot-evaluate.
 
 Trust-boundary hardening of the git subprocess surface (this is a new external boundary,
 SECI-threat-model-boundaries; the git call is untrusted-context input, SECI-untrusted-content /
@@ -79,7 +82,12 @@ _GIT_TIMEOUT_S = 30
 # The honest empty prior for an unborn HEAD (a repository with no commits): nothing was ever committed, so
 # every across-time baseline is genuinely empty. Shaped exactly as _opf_check._normalize_prior accepts.
 def _empty_prior():
-    return {"releases": [], "counters_high": {}, "records": {}, "digests": {}}
+    return {"releases": [], "counters_high": {}, "records": {}, "digests": {}, "held": {}}
+
+
+# The note suffix when only the ids the prior commit held cannot be enumerated: the rest of the prior stands.
+_HELD_OMITTED = ("the ids the prior commit held are omitted (the reserved-number exemption is then "
+                 "cannot-evaluate)")
 
 
 _GitOutcome = namedtuple("_GitOutcome", "completed rc out err")
@@ -809,44 +817,184 @@ def _observe_remote(git, store_root, notes):
     return url.out.decode("utf-8", "replace").strip()
 
 
-def _show_toml(git, store_root, prefix, relpath, disp, notes):
+def _show_toml(git, store_root, prefix, relpath, disp, notes, omitted="the prior committed snapshot is omitted"):
     """Read and parse one committed TOML file from HEAD via `git show HEAD:<prefix><relpath>`. `prefix` is
     the store root's path from the repository toplevel (from `git rev-parse --show-prefix`), so the object
     path is unambiguous whether or not the store sits at the toplevel. Returns the parsed dict, or None (omit
     prior + note) on any git error, absent object, or parse failure. A bare ValueError from tomllib (an
     oversized base-10 integer literal, which is not a TOMLDecodeError) is caught too, so a hostile committed
-    file fails SAFE rather than escaping (guard-input-soundness)."""
+    file fails SAFE rather than escaping (guard-input-soundness). `omitted` names what the caller omits."""
     out = _run_git(git, store_root, ["show", "HEAD:{}{}".format(prefix, relpath)])
     if not out.completed:
-        notes.append("prior: could not read {} at HEAD ({}); the prior committed snapshot is omitted".format(
-            disp, out.err.strip()))
+        notes.append("prior: could not read {} at HEAD ({}); {}".format(disp, out.err.strip(), omitted))
         return None
     if out.rc != 0:
-        notes.append("prior: {} is absent or unreadable at HEAD (git show rc {}); the prior committed "
-                     "snapshot is omitted".format(disp, out.rc))
+        notes.append("prior: {} is absent or unreadable at HEAD (git show rc {}); {}".format(disp, out.rc, omitted))
         return None
     try:
         data = tomllib.loads(out.out.decode("utf-8"))
     # RecursionError too: tomllib raises it (a RuntimeError, not a ValueError) on a deeply nested
     # array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
     except (tomllib.TOMLDecodeError, ValueError, UnicodeDecodeError, RecursionError, MemoryError) as exc:
-        notes.append("prior: {} at HEAD is not valid TOML ({}); the prior committed snapshot is "
-                     "omitted".format(disp, exc))
+        notes.append("prior: {} at HEAD is not valid TOML ({}); {}".format(disp, exc, omitted))
         return None
     if not isinstance(data, dict):
-        notes.append("prior: {} at HEAD is not a table; the prior committed snapshot is omitted".format(disp))
+        notes.append("prior: {} at HEAD is not a table; {}".format(disp, omitted))
         return None
     return data
 
 
+def _ls_tree(git, store_root, treeish, notes, recursive=False):
+    """The entries of one committed tree, `git ls-tree -z [-r] <treeish>`, as (object type, name) pairs; a
+    recursive listing names each blob by its path within the tree. Returns None (+ note) on any git error or
+    an entry that does not parse. `-z` names each entry unquoted, NUL-terminated."""
+    out = _run_git(git, store_root, ["ls-tree", "-z"] + (["-r"] if recursive else []) + [treeish])
+    if not out.completed or out.rc != 0:
+        notes.append("prior: could not list {} ({}); {}".format(
+            treeish, out.err.strip() if not out.completed else "git ls-tree rc {}".format(out.rc), _HELD_OMITTED))
+        return None
+    entries = []
+    for row in out.out.split(b"\0"):
+        if not row:
+            continue
+        meta, tab, name = row.partition(b"\t")
+        fields = meta.split(b" ")
+        try:
+            name = name.decode("utf-8")
+            otype = fields[1].decode("ascii") if len(fields) == 3 else ""
+        except UnicodeDecodeError:
+            name = otype = ""
+        if not tab or not otype or not name:
+            notes.append("prior: an entry of {} does not parse; {}".format(treeish, _HELD_OMITTED))
+            return None
+        entries.append((otype, name))
+    return entries
+
+
+def _held_ids(git, store_root, machine_rel, prefix, manifest, records, notes):
+    """`held`: every clean-series id the prior commit held, active or archived, worklog included, as
+    {namespace: [[lo, hi], ...]} sorted, merged inclusive intervals, for the reserved-number exemption (a
+    reserved number is skipped as an orphaned reservation's only where the prior commit held no record with
+    that id). The active type-index ids come from `records`; the active worklog is read in the shape the
+    HEAD manifest selects (worklog.toml, or the worklog/ entry names); the archive is every file of every
+    archive/<bucket>/ at HEAD: the archive.toml moved ids and worklog_moved spans, the bucket worklog
+    entries and the type-index rows. An id outside the clean grammar, the roster namespaces or TOML's
+    integer range is no clean number a reservation can hold, so it is left out. Returns the table, or None
+    (+ note) when any of these cannot be read or an archive entry is not a bucket file; only `held` is then
+    omitted, so the exemption is cannot-evaluate and the rest of the prior stands. A span is kept as an
+    interval, never expanded (F15)."""
+    import _opf_worklog
+    ceiling = (1 << 63) - 1
+    spans = []
+
+    def add(ns, lo, hi):
+        if ns in _opf_check._ROSTER_NS_SET and lo <= ceiling:
+            spans.append((ns, lo, min(hi, ceiling)))
+
+    def add_id(value):
+        shape = _opf_check._valid_id_shape(value)
+        if shape is not None:
+            add(shape[0], shape[1], shape[1])
+
+    def add_wl(value):
+        ref = _opf_worklog._valid_wl_ref(value)
+        if ref is not None:
+            add("WL", ref[0], ref[0])
+
+    def rows(data, key, disp):
+        value = data.get(key, [])
+        if not isinstance(value, list):
+            notes.append("prior: HEAD {} [[{}]] is not an array; {}".format(disp, key, _HELD_OMITTED))
+            return None
+        return [row for row in value if isinstance(row, dict)]
+
+    for rid in records:
+        add_id(rid)
+    base = "HEAD:{}{}".format(prefix, machine_rel)
+    top = _ls_tree(git, store_root, base, notes)
+    if top is None:
+        return None
+    try:
+        generation = _opf_worklog.generation(manifest)
+    except _opf_worklog.WorklogError as exc:
+        notes.append("prior: the HEAD manifest's worklog generation is unreadable ({}); {}".format(
+            exc, _HELD_OMITTED))
+        return None
+    if generation == 2:
+        if ("tree", _opf_worklog.DIRECTORY_NAME) in top:
+            listing = _ls_tree(git, store_root, base + "/" + _opf_worklog.DIRECTORY_NAME, notes)
+            if listing is None:
+                return None
+            for otype, name in listing:
+                ref = _opf_worklog.parse_worklog_filename(name)
+                if otype != "blob" or ref is None:
+                    notes.append("prior: HEAD worklog/ holds {!r}, not a worklog entry; {}".format(
+                        name, _HELD_OMITTED))
+                    return None
+                add("WL", ref[0], ref[0])
+    elif ("blob", _WORKLOG_NAME) in top:
+        data = _show_toml(git, store_root, prefix, "{}/{}".format(machine_rel, _WORKLOG_NAME), _WORKLOG_NAME,
+                          notes, _HELD_OMITTED)
+        entries = None if data is None else rows(data, "entry", _WORKLOG_NAME)
+        if entries is None:
+            return None
+        for entry in entries:
+            add_wl(entry.get("id"))
+    if ("tree", _opf_check.ARCHIVE_DIRNAME) in top:
+        listing = _ls_tree(git, store_root, base + "/" + _opf_check.ARCHIVE_DIRNAME, notes, recursive=True)
+        if listing is None:
+            return None
+        bucket_files = (_opf_check.ARCHIVE_MANIFEST_NAME, _WORKLOG_NAME)
+        for otype, path in listing:
+            parts = path.split("/")
+            disp = "{}/{}".format(_opf_check.ARCHIVE_DIRNAME, path)
+            if otype != "blob" or len(parts) != 2 or not (
+                    parts[1] in bucket_files or parts[1].endswith(_INDEX_SUFFIX)):
+                notes.append("prior: HEAD {} is not an archive bucket file; {}".format(disp, _HELD_OMITTED))
+                return None
+            data = _show_toml(git, store_root, prefix, "{}/{}".format(machine_rel, disp), disp, notes, _HELD_OMITTED)
+            if data is None:
+                return None
+            if parts[1] == _opf_check.ARCHIVE_MANIFEST_NAME:
+                moved, wl_moved = rows(data, "moved", disp), rows(data, "worklog_moved", disp)
+                if moved is None or wl_moved is None:
+                    return None
+                for row in moved:
+                    add_id(row.get("id"))
+                for row in wl_moved:
+                    span = row.get("span")
+                    ends = [_opf_worklog._valid_wl_ref(v) for v in span] if isinstance(span, list) else []
+                    if len(ends) == 2 and None not in ends and ends[0][0] <= ends[1][0]:
+                        add("WL", ends[0][0], ends[1][0])
+            elif parts[1] == _WORKLOG_NAME:
+                entries = rows(data, "entry", disp)
+                if entries is None:
+                    return None
+                for entry in entries:
+                    add_wl(entry.get("id"))
+            else:
+                recs = rows(data, "record", disp)
+                if recs is None:
+                    return None
+                for row in recs:
+                    add_id(row.get("id"))
+    held = {}
+    for ns, lo, hi in spans:
+        held.setdefault(ns, []).append((lo, hi))
+    return {ns: [[lo, hi] for lo, hi in _opf_check._merge_spans(rows_)] for ns, rows_ in sorted(held.items())}
+
+
 def _reconstruct_prior(git, store_root, machine_rel, prefix, notes):
     """Reconstruct the prior committed snapshot from HEAD, shaped exactly as _opf_check._normalize_prior
-    accepts: {releases, counters_high, records, digests}. Reads the HEAD manifest to learn the layout and the
-    declared types, then the version and counters ledgers and each declared non-worklog type index. Records
+    accepts: {releases, counters_high, records, digests, held}. Reads the HEAD manifest to learn the layout and
+    the declared types, then the version and counters ledgers and each declared non-worklog type index. Records
     and digests are built per layout: an INLINE index row IS the record body, so its status is the body's and
     its digest is _opf_check._record_digest(body); a PER-RECORD index row already carries {id, state, digest},
     so the row supplies both directly. ANY absent object or malformed shape omits the WHOLE prior (a partial
-    prior would falsely accuse the store); the note names what could not be read. Returns the dict or None."""
+    prior would falsely accuse the store); the note names what could not be read. `held` (_held_ids) is the
+    one exception: it only narrows the reserved-number exemption, so when it cannot be read it alone is
+    omitted (+ note), which makes that exemption cannot-evaluate and leaves the rest of the prior whole.
+    Returns the dict or None."""
     manifest = _show_toml(git, store_root, prefix, "{}/{}".format(machine_rel, _MANIFEST_NAME),
                          _MANIFEST_NAME, notes)
     if manifest is None:
@@ -932,7 +1080,11 @@ def _reconstruct_prior(git, store_root, machine_rel, prefix, notes):
                     return None
                 records[rid] = (tname, state)
                 digests[rid] = digest
-    return {"releases": releases, "counters_high": counters_high, "records": records, "digests": digests}
+    prior = {"releases": releases, "counters_high": counters_high, "records": records, "digests": digests}
+    held = _held_ids(git, store_root, machine_rel, prefix, {"opf": base}, records, notes)
+    if held is not None:
+        prior["held"] = held
+    return prior
 
 
 def _observe_prior(git, store_root, machine_rel, notes):
@@ -1026,9 +1178,11 @@ def self_test_isolated():
     """Exercise gather over synthetic git repositories built in a tempdir (removed in a finally, for
     test-hermeticity). Covered: tracked vs untracked manifest; zero / one / multiple remotes; a prior
     extracted from a committed HEAD (records and the immutable-body digest matching the engine's own
-    _record_digest over the same committed content); an unborn HEAD -> the honest empty prior; and a
+    _record_digest over the same committed content); an unborn HEAD -> the honest empty prior; a
     non-repository directory -> the remote and prior fields OMITTED with a note while tracked reads
-    "untracked". Judged ONLY on gather's RETURNED structure (never by grepping git's stdout for verdicts).
+    "untracked"; and the prior's `held` ids, the active worklog (both generations) and every archive bucket
+    file included, omitted alone with a note when an archive entry is not a bucket file. Judged ONLY on
+    gather's RETURNED structure (never by grepping git's stdout for verdicts).
     Returns 0 clean, 1 on a failed check, 2 on a harness error. When git is not on PATH at all it SKIPs
     clean, like the POSIX-signal watchdogs, since every path depends on git."""
     import shutil as _shutil
@@ -1237,6 +1391,59 @@ def self_test_isolated():
         check("non-repo-remote-omitted", "actual_remote" not in obs)
         check("non-repo-prior-omitted", "prior" not in obs)
         check("non-repo-notes", any("omitted" in n for n in notes))
+
+        # 7. `held`: every id HEAD held, as merged intervals: the type-index ids, the active worklog, and
+        # each archive bucket's archive.toml moved ids and worklog spans, worklog entries and index rows.
+        held_repo = base / "held"
+        held_repo.mkdir()
+        _git_setup(held_repo, home, "init")
+        _write_store(held_repo)
+        _write(held_repo, machine_rel + "/" + _WORKLOG_NAME,
+               'schema = 1\n\n[[entry]]\nid = "WL-3"\n\n[[entry]]\nid = "WL-4"\n')
+        _write(held_repo, machine_rel + "/archive/2026/archive.toml",
+               'schema = 1\n\n[[moved]]\nid = "BI-7"\ntype = "backlog_item"\n'
+               'destination = "archive/2026/backlog_item.index.toml"\n\n'
+               '[[worklog_moved]]\nspan = ["WL-1", "WL-2"]\ndestination = "archive/2026/worklog.toml"\n')
+        _write(held_repo, machine_rel + "/archive/2026/backlog_item.index.toml",
+               'schema = 1\n\n[[record]]\nid = "BI-9"\n')
+        _write(held_repo, machine_rel + "/archive/2026/worklog.toml", 'schema = 1\n\n[[entry]]\nid = "WL-6"\n')
+        _git_setup(held_repo, home, "add", "-A")
+        _git_setup(held_repo, home, "commit", "-m", "store with an archive")
+        obs, notes = gather(_Res(held_repo, machine_rel))
+        prior = obs.get("prior") or {}
+        check("prior-held", prior.get("held") == {"BI": [[1, 1], [7, 7], [9, 9]], "DN": [[1, 1]],
+                                                  "WL": [[1, 4], [6, 6]]})
+        check("prior-held-normalizes", (_opf_check._normalize_prior(prior) or {}).get("held") == {
+            "BI": [(1, 1), (7, 7), (9, 9)], "DN": [(1, 1)], "WL": [(1, 4), (6, 6)]})
+
+        # 8. An archive entry that is not a bucket file omits `held` alone, with a note; the prior stands.
+        _write(held_repo, machine_rel + "/archive/stray.txt", "x\n")
+        _git_setup(held_repo, home, "add", "-A")
+        _git_setup(held_repo, home, "commit", "-m", "a stray archive file")
+        obs, notes = gather(_Res(held_repo, machine_rel))
+        prior = obs.get("prior")
+        check("prior-held-omitted-alone", isinstance(prior, dict) and "held" not in prior
+              and prior.get("records", {}).get("BI-1") == ("backlog_item", "open")
+              and any("archive/stray.txt" in n and _HELD_OMITTED in n for n in notes))
+
+        # 9. A generation-2 worklog at HEAD is read from its worklog/ entry names (the generation enabled
+        # for this case only).
+        gen2_repo = base / "held-gen2"
+        gen2_repo.mkdir()
+        _git_setup(gen2_repo, home, "init")
+        _write_store(gen2_repo)
+        manifest_path = gen2_repo / machine_rel / _MANIFEST_NAME
+        manifest_path.write_text(manifest_path.read_text(encoding="utf-8").replace(
+            'layout = "inline"\n', 'layout = "inline"\nworklog = 2\n'), encoding="utf-8")
+        (gen2_repo / machine_rel / _WORKLOG_NAME).unlink()
+        _write(gen2_repo, machine_rel + "/worklog/WL-1.toml", 'id = "WL-1"\n')
+        _write(gen2_repo, machine_rel + "/worklog/WL-2.abcd.toml", 'id = "WL-2.abcd"\n')
+        _git_setup(gen2_repo, home, "add", "-A")
+        _git_setup(gen2_repo, home, "commit", "-m", "a generation-2 worklog")
+        from unittest.mock import patch
+        with patch.object(_opf_store, "SUPPORTED_WORKLOG", 2):
+            obs, notes = gather(_Res(gen2_repo, machine_rel))
+        check("prior-held-worklog-generation-2", (obs.get("prior") or {}).get("held", {}).get("WL") == [[1, 2]])
     except OSError as exc:
         print("opf observe self-test: harness error: could not build a git fixture ({}); fail-closed".format(
             exc), file=sys.stderr)
@@ -1250,7 +1457,8 @@ def self_test_isolated():
         return 1
     print("opf observe self-test: PASS (tracked/untracked; 0/1/multiple remotes; prior from a committed "
           "HEAD with an engine-matching immutable-body digest; unborn HEAD -> empty prior; a non-repo dir "
-          "omits remote and prior with a note)")
+          "omits remote and prior with a note; the ids HEAD held, worklog and archive included, and an "
+          "unreadable archive omitting them alone)")
     return 0
 
 

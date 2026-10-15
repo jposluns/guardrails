@@ -4203,7 +4203,7 @@ def t52_publication_refused_before_intent(fx):
         assert "was reconciled" not in err and "were reclaimed" not in err, \
             ("T52 the next run reconciles nothing", err[-800:])
         # The refused publication's reservation stands (T79's orphan shape): the next run derives above
-        # it and records, the final doctor treating the reserved numbers as issued.
+        # it and records, the final doctor treating the reserved numbers as issued (no commit held them).
         assert RECORDED_EVENT in out and rc == 0, \
             ("T52 the next run records above the standing reservation", rc, err[-1600:])
         rows = [r["id"] for r in model(root, BI_INDEX)["record"]]
@@ -6049,8 +6049,9 @@ def t79_kill_after_reserve(fx):
     """A homes-2 run killed after reserving and before publishing leaves its reservation standing
     and every operand at the prestate, and the reserved numbers are never issued again: after the
     confirmed-dead reclaim refusal, the next create derives ABOVE the orphan (its own reservation
-    claims the next numbers), publishes them and records, exit 0: the final doctor treats the
-    orphaned numbers as issued (spec 8.2), so the store carrying the orphan is VALID."""
+    claims the next numbers), publishes them and records, exit 0: the prior commit (HEAD) held no
+    record with an orphaned number, so the final doctor treats those numbers as issued and the store
+    carrying the orphan is VALID."""
     env = fx.env
     base = fx.case("t79-homes2-base")
     with _self_test_homes2_active(base):
