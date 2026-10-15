@@ -17,37 +17,51 @@ evaluate_source(product_root, run_id, source, doctor=...) grades ONE migrate-dis
 adoption run `run_id`, in four legs, each reporting under one SourceResult:
   receipt: the adoption receipt core this import runs under (spec 8.8: import refuses without one) is
     present, validates and binds this run and the approved plan (the apply shell's own
-    receipt_binding_refusals), and its outcome-event chain (event-0001.toml, the genesis, then
-    event-0002.toml and on, read in order up to the first absent name and at most MAX_EVENTS) validates
-    through the shipped chain validator, rooted at the receipt core's digest;
+    receipt_binding_refusals), and its outcome-event chain validates through the shipped chain validator,
+    rooted at the receipt core's digest. The chain is every event-<NNNN>.toml the run's bundle inventories
+    list (event-0001.toml, the genesis, and on, at most MAX_EVENTS), each read and chained in order; an
+    event file present in the bundle but unlisted, listed but absent, spelled other than its
+    event-<NNNN>.toml name, or past a gap in the numbering is CANNOT-EVALUATE naming it;
   preserved: the run's adoption bundle verifies from disk (_opf_adopt_apply.verify_bundle: every inventory
-    and every payload it lists); the source's preserved copy under .working/archive/adoption/<run-id>/
-    holds its plan digest and is claimed by the bundle inventory; and a non-occupying source's frozen live
-    file still holds its plan digest (an occupying source left the live tree at apply);
+    and every payload it lists), once per evaluation, and the inventories the claim below and the event
+    listing above read are the bytes that verification read, never a second read; the source's preserved
+    copy under .working/archive/adoption/<run-id>/ holds its plan digest and is claimed by the bundle
+    inventory; and a non-occupying source's frozen live file still holds its plan digest (an occupying
+    source left the live tree at apply);
   imports: the imported records referencing the source are those, in the imported managed leaves
     (<type>.imported.index.toml per type except legacy_fragment, and worklog.imported.toml, inline in the
     machine store), whose import.source is exactly the source's preserved original
     .working/imported/import/<import-run>/originals/<source-path> of their own import.run. Every import run
     holding such a record re-reads its bundle inventory (the doctor's own row validator, kind import) and
     every payload it lists, claims the original, the original holds the plan digest, and each referencing
-    record's source_sha256 is the original's. The run completion evaluates is the one run no other of those
-    runs corrects (a record of the correcting run links supersedes or corrects to a record of the corrected
-    one); none or more than one is ambiguous, CANNOT-EVALUATE. The source completes on at least one record
-    of that run, or, with no record, on a recorded skip under the plan's skip policy attributed-skip: an
-    outcome event of kind SKIP_EVENT_KIND naming the source (SKIP_EVENT_SOURCE) and its actor
-    (SKIP_EVENT_ACTOR). A skip recorded under any other policy is a finding;
-  doctor: the caller's doctor run over the live tree is VALID, with no finding and no cannot-evaluate, and
-    grades each of the four section 8.3 imported-series checks (IMPORTED_SERIES_CHECKS) PASS. An INVALID
-    doctor keeps its own findings; a VALID one whose roster lacks an imported-series check, as every doctor
-    of this release does, is CANNOT-EVALUATE naming the missing checks, so no source is green until the
-    imported-series doctor checks ship.
+    record's source_sha256 is the original's. The runs must form one acyclic correction chain (a record of
+    the correcting run links supersedes or corrects to a record of the corrected one): each run corrects at
+    most one other, and the chain from the one run no other corrects reaches every referencing run.
+    Completion evaluates that head; no head or more than one, a fork, a cycle, or a run outside the chain
+    is CANNOT-EVALUATE. Every recorded skip of the source is graded, records or not: a skip under a policy
+    other than attributed-skip, or one naming no actor, is a finding. The source completes on at least one
+    record of the head run, or, with no record, on a recorded skip under the plan's skip policy
+    attributed-skip: an outcome event of kind SKIP_EVENT_KIND naming the source (SKIP_EVENT_SOURCE) and its
+    actor (SKIP_EVENT_ACTOR);
+  doctor: the caller's doctor run over the live tree returns the whole-store validator's own result type
+    (_opf_check.StoreValidation, checked by exact type), VALID with no finding and no cannot-evaluate, whose
+    per-check map covers the doctor's full required roster (_opf_check.REQUIRED_CHECKS) and the four
+    section 8.3 imported-series checks (IMPORTED_SERIES_CHECKS), every entry PASS. An INVALID doctor keeps
+    its own findings; another result type, an absent roster check, or an entry other than PASS is
+    CANNOT-EVALUATE naming it. Green needs a doctor result that grades the imported-series checks, which no
+    shipped doctor does (REQUIRED_CHECKS holds none). The evaluator trusts the caller-supplied doctor run it
+    is given: the exact type and the roster are a shape bar on that run's result, not an authentication of
+    the run.
 
-Read-only: every live read is contained and no-follow through the apply shell's own reader
-(_opf_adopt_apply._read_live, single-linked regular files only, capped), every TOML input is admitted only in
-its canonical emitted form (_opf_adopt_apply._canonical_toml), nothing is written and no process is spawned
-by this module. The doctor's git observations are a process-spawning gather, so the caller supplies the
-doctor run (store_doctor builds one from caller-supplied inert observations); with no doctor the doctor leg
-is CANNOT-EVALUATE, never a pass.
+Read-only: the evaluator's own operations only read. Every live read is contained and no-follow through the
+apply shell's own reader (_opf_adopt_apply._read_live, single-linked regular files only, capped), the
+evidence home is listed no-follow through the doctor's own lister (_opf_check._list_contained), every TOML
+input is admitted only in its canonical emitted form (_opf_adopt_apply._canonical_toml), and the evaluator
+itself writes nothing and starts no process. It calls the caller-supplied doctor, whose own behaviour it
+does not control: the doctor's git observations are a process-spawning gather, so the caller supplies the
+doctor run (store_doctor, the sanctioned way to build one, runs the whole-store validator over
+caller-supplied inert observations); with no doctor the doctor leg is CANNOT-EVALUATE, never a pass. The
+self-test writes its fixtures under temporary directories.
 
 Outcome model (single-sourced from _opf_store): VALID (green: every term holds), INVALID (incomplete, with
 findings) or CANNOT-EVALUATE (an input that cannot be read, parsed or disambiguated, never a pass), which
@@ -61,15 +75,22 @@ key, so the shipped chain validator refuses a chain holding a skip event (an out
 CANNOT-EVALUATE) and no source can complete through a recorded skip until a later release registers
 SKIP_EVENT_KIND and its keys in that schema; the skip shape here (a dedicated kind naming the source and
 its actor, honoured only under attributed-skip) is the import plan's proposal and is pending that
-schema's decision. Event files after the genesis are taken to follow its event-<NNNN>.toml naming, read
-until the first absent number, so a file past a gap is not read, and event and bundle membership (an
-unlisted file in a bundle) is not reconciled here. The referencing records are matched on their import
-table alone; their envelope, ids, links and segregation are the doctor's imported-series checks, which the
-doctor leg requires. A non-canonical spelling of a TOML input is CANNOT-EVALUATE, as in the adoption
-completion evaluator. Correction is read from the referencing records' supersedes and corrects links
-only; a batch's own declaration of the run it corrects is the writer's and is not read. The doctor verdict
-is only as complete as the caller's observations. Green proves source accounting and preservation, never
-byte-level mapping coverage or semantic fidelity (spec 14.1).
+schema's decision. Event files are reconciled against the bundle inventories; the rest of the bundle's
+membership (an unlisted file whose name is not event-shaped) is not reconciled here. Only the inventory
+bytes are shared with the bundle verification: the receipt core, the events, the preserved copy and the
+live source are graded on the evaluator's own later reads, not on the payload bytes that verification
+hashed. This release records no retirement of a migrate source that the evaluator can read (a recorded
+retirement ends the bounded state of retire and move rows only, _opf_adopt_state.RETIRED_BY_RETIREMENT; a
+migrate source retires through its import, which a later unit records), so a non-occupying source whose
+frozen live file is absent is a finding here, even where spec 8.8 says that after the source's recorded
+retirement the source-bytes check does not apply to the retired path. The referencing records are matched
+on their import table alone; their envelope, ids, links and segregation are the doctor's imported-series
+checks, which the doctor leg requires. A non-canonical spelling of a TOML input is CANNOT-EVALUATE, as in
+the adoption completion evaluator. Correction is read from the referencing records' supersedes and corrects
+links only; a batch's own declaration of the run it corrects is the writer's and is not read. The doctor
+verdict is only as complete as the caller's doctor run and its observations, which the evaluator trusts.
+Green proves source accounting and preservation, never byte-level mapping coverage or semantic fidelity
+(spec 14.1).
 
 Offline, stdlib only, fail-closed. It lives under `opf/tools/` and imports ONLY sibling `opf/tools/`
 modules, so the standalone-closure property holds.
@@ -92,6 +113,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 
 import hashlib
 import os
+import re
 import tempfile
 from pathlib import Path
 
@@ -125,8 +147,10 @@ SKIP_EVENT_SOURCE = "source"
 SKIP_EVENT_ACTOR = "actor"
 SKIP_POLICY = "attributed-skip"
 # The outcome events beside the receipt: the genesis event-0001.toml (_opf_adopt_apply.GENESIS_EVENT_NAME),
-# then one numbered file per later event, read in order up to the first absent number.
+# then one numbered file per later event, each a bundle member a bundle inventory lists. EVENT_SHAPE is any
+# event-shaped name, which must then be spelled exactly EVENT_NAME of its number.
 EVENT_NAME = "event-{:04d}.toml"
+EVENT_SHAPE = re.compile(r"event-([0-9]+)\.toml")
 MAX_EVENTS = 9999
 
 
@@ -156,7 +180,7 @@ class _Report:
 
 class _Evaluation:
     __slots__ = ("product_root", "root_fd", "run_id", "source", "plan", "row", "doctor", "events",
-                 "import_run", "records", "skipped")
+                 "import_run", "records", "skipped", "bundle")
 
 
 def _digest(data):
@@ -211,14 +235,101 @@ def _bind(ev):
     ev.row = rows[0]
 
 
+# --- the adoption bundle, verified once -----------------------------------------------------------------
+
+def _bundle(ev):
+    """(verification, {inventory path: parsed inventory or None}) of the run's adoption bundle, verified ONCE
+    per evaluation by _opf_adopt_apply.verify_bundle (spec 14.1's homes-1 re-read: every inventory and every
+    payload it lists). Each bundle-root inventory is parsed from the exact bytes that verification read,
+    never a second read, admitted canonical and held to the apply shell's own inventory validator; one it
+    grades INVALID (the legacy ingest format) maps to None and claims nothing. A verification or an
+    inventory that cannot evaluate raises Unevaluable to every leg that asks."""
+    if ev.bundle is None:
+        try:
+            read = {}
+            try:
+                verified = apply.verify_bundle(ev.product_root, ev.run_id, inventory_bytes=read)
+            except apply.AdoptApplyError as exc:
+                raise Unevaluable(str(exc))
+            if verified.status == CANNOT_EVALUATE:
+                raise Unevaluable("adoption evidence bundle: " + "; ".join(verified.findings))
+            docs = {}
+            for rel in sorted(read):
+                doc = _canonical(read[rel], "the adoption bundle inventory " + rel)
+                checked = apply.validate_inventory(doc, ev.run_id)
+                if checked.status == CANNOT_EVALUATE:
+                    raise Unevaluable("the adoption bundle inventory {}: {}".format(
+                        rel, "; ".join(checked.findings)))
+                docs[rel] = doc if checked.status == VALID else None
+            ev.bundle = (verified, docs)
+        except Unevaluable as exc:
+            ev.bundle = exc
+    if isinstance(ev.bundle, Unevaluable):
+        raise Unevaluable(str(ev.bundle))
+    return ev.bundle
+
+
 # --- the receipt and its outcome-event chain ----------------------------------------------------------
+
+def _event_names(names, where):
+    """{number: name} of the event-shaped names among `names` (EVENT_SHAPE); a name spelled other than
+    EVENT_NAME of its own number raises Unevaluable."""
+    out = {}
+    for name in names:
+        shaped = EVENT_SHAPE.fullmatch(name)
+        if shaped is None:
+            continue
+        number = int(shaped.group(1))
+        if name != EVENT_NAME.format(number):
+            raise Unevaluable("{} {!r}, which is not spelled as the outcome-event name {!r}".format(
+                where, name, EVENT_NAME.format(number)))
+        out[number] = name
+    return out
+
+
+def _event_files(ev, home):
+    """The run's outcome-event files in chain order, reconciled against the bundle (spec 14.2: append-only
+    outcome events are members of the run's evidence bundle). Every event-shaped name a bundle inventory
+    lists directly under the evidence home must be there, every one there must be listed, and the numbers
+    must run contiguously from event-0001.toml to at most MAX_EVENTS, so no event is skipped, set aside or
+    read past a gap. Any disagreement is CANNOT-EVALUATE naming the file."""
+    import _opf_check
+    try:
+        _verified, docs = _bundle(ev)
+    except Unevaluable as exc:
+        raise Unevaluable("the outcome events cannot be reconciled with the bundle: {}".format(exc))
+    prefix = home + "/"
+    listed = _event_names([row["path"][len(prefix):] for doc in docs.values() if doc is not None
+                           for row in doc["file"] if row["path"].startswith(prefix)
+                           and "/" not in row["path"][len(prefix):]], "the bundle inventory lists")
+    try:
+        subdirs, files = _opf_check._list_contained(ev.root_fd, home)
+    except store.StoreError as exc:
+        raise Unevaluable("cannot list the run's evidence bundle {} ({})".format(home, exc))
+    present = _event_names((subdirs or []) + (files or []), "the run's evidence bundle holds")
+    disagree = (["{}{} is in the bundle but no bundle inventory lists it".format(prefix, present[n])
+                 for n in sorted(set(present) - set(listed))]
+                + ["{}{} is listed by a bundle inventory but absent".format(prefix, listed[n])
+                   for n in sorted(set(listed) - set(present))])
+    if disagree:
+        raise Unevaluable("outcome events: " + "; ".join(disagree))
+    numbers = sorted(listed)
+    if numbers and numbers[-1] > MAX_EVENTS:
+        raise Unevaluable("the outcome-event chain runs past its bound of {} events; a longer chain is "
+                          "never read in part".format(MAX_EVENTS))
+    if numbers != list(range(1, len(numbers) + 1)):
+        raise Unevaluable("the outcome events {} are not numbered contiguously from {}: an event past a gap "
+                          "is never read or set aside".format(", ".join(prefix + listed[n] for n in numbers),
+                                                              EVENT_NAME.format(1)))
+    return [prefix + listed[n] for n in numbers]
+
 
 def _check_receipt(ev, rep):
     """The adoption receipt this import runs under (spec 8.8: import refuses without one) and its
     outcome-event chain, where spec 14.1 records each source's result and a skip is recorded. The receipt
-    core validates and binds this run and the approved plan by the apply shell's own rule; the chain
-    validates through the shipped validator, rooted at the core's digest. An INVALID chain is reported and
-    none of its events is read as a skip."""
+    core validates and binds this run and the approved plan by the apply shell's own rule; the chain, every
+    event file reconciled against the bundle (_event_files), validates through the shipped validator, rooted
+    at the core's digest. An INVALID chain is reported and none of its events is read as a skip."""
     rel = apply.receipt_rel(ev.run_id)
     core = _read(ev, rel)
     if core is None:
@@ -236,15 +347,10 @@ def _check_receipt(ev, rep):
         for refusal in apply.receipt_binding_refusals(ev.run_id, ev.plan, receipt):
             rep.finding("receipt: " + refusal)
     events = []
-    home = apply.evidence_home_rel(ev.run_id)
-    for number in range(1, MAX_EVENTS + 2):
-        name = home + "/" + EVENT_NAME.format(number)
+    for name in _event_files(ev, apply.evidence_home_rel(ev.run_id)):
         data = _read(ev, name)
         if data is None:
-            break
-        if number > MAX_EVENTS:
-            raise Unevaluable("the outcome-event chain runs past its bound of {} events; a longer chain is "
-                              "never read in part".format(MAX_EVENTS))
+            raise Unevaluable("outcome event {} vanished after the bundle listing".format(name))
         events.append(_canonical(data, "outcome event " + name))
     chain = schema.validate_event_chain(events, _digest(core))
     if chain.status == CANNOT_EVALUATE:
@@ -261,24 +367,13 @@ def _check_preserved(ev, rep):
     occupied a managed destination, the frozen live file and its apply-archived retirement preimage
     otherwise)'. The run's evidence bundle verifies from disk first, every inventory and every payload it
     lists (the homes-1 re-read of spec 14.1, kept on homes 2), and the preserved copy must be one the
-    bundle inventory claims."""
+    bundle inventory claims, read from the bytes that verification read (_bundle)."""
     row = ev.row
-    try:
-        bundle = apply.verify_bundle(ev.product_root, ev.run_id)
-    except apply.AdoptApplyError as exc:
-        raise Unevaluable(str(exc))
-    if bundle.status == CANNOT_EVALUATE:
-        raise Unevaluable("adoption evidence bundle: " + "; ".join(bundle.findings))
-    for f in bundle.findings:
+    verified, docs = _bundle(ev)
+    for f in verified.findings:
         rep.finding("adoption evidence bundle: " + f)
-    listed = set()
-    inventory = _read(ev, apply.inventory_rel(ev.run_id))
-    if inventory is not None:
-        doc = _canonical(inventory, "the adoption bundle inventory")
-        checked = apply.validate_inventory(doc, ev.run_id)
-        if checked.status == CANNOT_EVALUATE:
-            raise Unevaluable("the adoption bundle inventory: " + "; ".join(checked.findings))
-        listed = {r["path"] for r in doc["file"]} if checked.status == VALID else set()
+    base = docs.get(apply.inventory_rel(ev.run_id))
+    listed = {r["path"] for r in base["file"]} if base is not None else set()
     preserved = apply.archive_rel(ev.run_id, row["path"])
     if row.get("preservation") != preserved:
         rep.finding("{!r} is preserved at {!r}, not under this run's adoption archive".format(
@@ -294,8 +389,11 @@ def _check_preserved(ev, rep):
     if not row["occupying"]:
         live = _read(ev, row["path"])
         if live is None:
-            rep.finding("the frozen live source {!r} is absent from the live tree before its recorded "
-                        "retirement".format(row["path"]))
+            # This release records no retirement of a migrate source the evaluator can read (module
+            # docstring, residuals), so an absent frozen source is never read as retired.
+            rep.finding("the frozen live source {!r} is absent from the live tree, and this evaluator reads "
+                        "no recorded retirement of a migrate source, so its absence is a finding".format(
+                            row["path"]))
         elif _digest(live) != row["digest"]:
             rep.finding("the frozen live source {!r} no longer matches its plan digest: a drifted source is "
                         "never complete (spec 14.1)".format(row["path"]))
@@ -347,12 +445,15 @@ def _ids(entries):
 def correcting_run(runs):
     """Spec 8.8: 'Such a corrected import is a fresh run; its records MUST link `supersedes` or `corrects`
     to the imported records they replace ... and source completion (section 14.1) evaluates the correcting
-    run.' Run B corrects run A when a record of B links one of CORRECTING_RELS to a record of A. Returns the
-    one run no other run corrects, None when `runs` is empty; none (a correction cycle) or more than one
-    (two uncorrected batches for one source, which the writer refuses) raises Unevaluable."""
+    run.' Run B corrects run A when a record of B links one of CORRECTING_RELS to a record of A. The runs
+    must form ONE acyclic correction chain: exactly one run no other corrects (the head), each run on the
+    chain correcting at most one other, and the chain followed from the head reaching every run without
+    returning to one. Returns the head, None when `runs` is empty; no head or more than one (two uncorrected
+    batches for one source, which the writer refuses), a run correcting two (a fork), a cycle, or a run
+    outside the head's chain raises Unevaluable."""
     if not runs:
         return None
-    corrected = set()
+    corrects = {}
     for run, entries in runs.items():
         targets = set()
         for _rel, _tname, record in entries:
@@ -361,12 +462,26 @@ def correcting_run(runs):
                 if (isinstance(link, dict) and link.get("rel") in CORRECTING_RELS
                         and type(link.get("id")) is str):
                     targets.add(link["id"])
-        corrected.update(other for other in runs if other != run and targets & _ids(runs[other]))
-    heads = sorted(set(runs) - corrected)
+        corrects[run] = sorted(other for other in runs if other != run and targets & _ids(runs[other]))
+    heads = sorted(set(runs) - {other for targets in corrects.values() for other in targets})
     if len(heads) != 1:
         raise Unevaluable("the import runs {} referencing the source leave {} uncorrected, so which run "
                           "completion evaluates is ambiguous (spec 8.8 admits one completed batch per "
                           "correction chain)".format(sorted(runs), heads or "none"))
+    chain = [heads[0]]
+    while corrects[chain[-1]]:
+        if len(corrects[chain[-1]]) != 1:
+            raise Unevaluable("import run {} corrects the runs {}, so the correction chain forks (spec 8.8 "
+                              "admits one completed batch per correction chain)".format(
+                                  chain[-1], corrects[chain[-1]]))
+        if corrects[chain[-1]][0] in chain:
+            raise Unevaluable("the correction chain {} returns to import run {}: a correction cycle is never "
+                              "one chain (spec 8.8)".format(" -> ".join(chain), corrects[chain[-1]][0]))
+        chain.append(corrects[chain[-1]][0])
+    outside = sorted(set(runs) - set(chain))
+    if outside:
+        raise Unevaluable("the import runs {} referencing the source lie outside the correction chain {}, so "
+                          "they are not one correction chain (spec 8.8)".format(outside, " -> ".join(chain)))
     return heads[0]
 
 
@@ -420,9 +535,9 @@ def _check_imports(ev, rep):
     """Spec 14.1: 'at least one imported record referencing that source or a recorded skip under the
     approved policy'. Every import run referencing the source has its evidence re-read (_check_import_run),
     a corrected run's included (spec 8.8 keeps it immutable); completion evaluates the correcting run
-    (correcting_run). With no referencing record, a recorded skip completes the source only under the
-    plan's skip policy attributed-skip and only when it names its actor; a skip recorded under any other
-    policy is a finding whether or not records exist."""
+    (correcting_run). Every recorded skip of the source is graded first, whether or not records exist: one
+    under a policy other than attributed-skip, or one naming no actor, is a finding. With no referencing
+    record, a recorded skip completes the source only when no such finding stands."""
     runs = _referencing_runs(ev)
     head = correcting_run(runs)
     for run in sorted(runs):
@@ -433,6 +548,9 @@ def _check_imports(ev, rep):
     if skips and policy != SKIP_POLICY:
         rep.finding("a skip of {!r} is recorded, but the approved skip policy is {!r}: only {!r} lets a "
                     "recorded skip complete a source (spec 14.1)".format(ev.source, policy, SKIP_POLICY))
+    if not all(schema._is_token(e.get(SKIP_EVENT_ACTOR)) for e in skips):
+        rep.finding("a recorded skip of {!r} names no actor: an attributed skip names who skipped "
+                    "it".format(ev.source))
     if head is not None:
         ev.import_run, ev.records = head, sorted(_ids(runs[head]))
         return
@@ -441,19 +559,17 @@ def _check_imports(ev, rep):
                     ".working/imported/import/<run>/originals/{}) and no skip of it is recorded: the source is "
                     "not complete (spec 14.1)".format(ev.source, ev.source))
     else:
-        # Under another policy the finding above already leaves the source incomplete.
-        if all(schema._is_token(e.get(SKIP_EVENT_ACTOR)) for e in skips):
-            ev.skipped = True
-        else:
-            rep.finding("a recorded skip of {!r} names no actor: an attributed skip names who skipped "
-                        "it".format(ev.source))
+        # A skip under another policy or naming no actor is already a finding above, so the result is
+        # incomplete and does not report the skip.
+        ev.skipped = True
 
 
 # --- doctor validity on the live tree ---------------------------------------------------------------
 
 def store_doctor(observations=None):
-    """A doctor callable: resolve the store and run the whole-store validator over the caller's inert
-    git-derived observations (gathering them spawns git, which this module never does)."""
+    """A doctor callable, the sanctioned way to build one: resolve the store and run the whole-store
+    validator over the caller's inert git-derived observations (gathering them spawns git, which this
+    module never does). It returns that validator's own result, the type _check_doctor requires."""
     def run(product_root):
         import _opf_check
         return _opf_check.validate_store(store.resolve_store(Path(product_root)), observations=observations)
@@ -462,15 +578,22 @@ def store_doctor(observations=None):
 
 def _check_doctor(ev, rep):
     """Spec 14.1: 'doctor VALID over both the strict store and the imported series, evaluated on the live
-    tree'. Missing or non-list doctor evidence is never read as empty. An INVALID doctor reports every
-    finding, none set aside; a VALID one must grade each IMPORTED_SERIES_CHECKS entry PASS, or the imported
-    series was not evaluated and the leg is CANNOT-EVALUATE naming the checks missing."""
+    tree'. The doctor run must return the whole-store validator's own result type
+    (_opf_check.StoreValidation, by exact type, what validate_store and so store_doctor return), so a
+    callable's self-reported verdict of another shape is never read. Missing or non-list doctor evidence is
+    never read as empty. An INVALID doctor reports every finding, none set aside; a VALID one's per-check
+    map must cover the full roster, _opf_check.REQUIRED_CHECKS and IMPORTED_SERIES_CHECKS, with every entry
+    PASS, or the leg is CANNOT-EVALUATE naming the checks absent or not passing. The run itself is the
+    caller's and is trusted: this is a bar on its result's shape, not an authentication of the run."""
+    import _opf_check
     if ev.doctor is None:
         raise Unevaluable("no doctor run was supplied; doctor validity is never assumed")
     result = ev.doctor(ev.product_root)
-    status = getattr(result, "status", None)
-    cannot = getattr(result, "cannot_evaluate", None)
-    findings = getattr(result, "findings", None)
+    if type(result) is not _opf_check.StoreValidation:
+        raise Unevaluable("the doctor run returned a {}, not the whole-store validator's own result "
+                          "(_opf_check.StoreValidation): a verdict of another type is never read".format(
+                              type(result).__name__))
+    status, cannot, findings = result.status, result.cannot_evaluate, result.findings
     if not isinstance(cannot, list) or not isinstance(findings, list):
         raise Unevaluable("doctor evidence is not list-shaped (cannot_evaluate {}, findings {})".format(
             type(cannot).__name__, type(findings).__name__))
@@ -482,15 +605,16 @@ def _check_doctor(ev, rep):
         rep.finding("doctor: {}".format(f))
     if status == INVALID:
         return
-    checks = getattr(result, "checks", None)
+    checks = result.checks
     if not isinstance(checks, dict):
-        raise Unevaluable("doctor evidence carries no per-check verdict map, so the imported series is not "
-                          "shown graded")
-    missing = [cid for cid in IMPORTED_SERIES_CHECKS if cid not in checks]
+        raise Unevaluable("doctor evidence carries no per-check verdict map, so its roster is not shown "
+                          "graded")
+    missing = [cid for cid in tuple(_opf_check.REQUIRED_CHECKS) + IMPORTED_SERIES_CHECKS if cid not in checks]
     if missing:
-        raise Unevaluable("the doctor did not grade the imported series: {} absent from its roster (spec 8.3 "
-                          "and 4.2 add them when the imported series activates)".format(", ".join(missing)))
-    ungraded = ["{} {}".format(cid, checks[cid]) for cid in IMPORTED_SERIES_CHECKS if checks[cid] != "PASS"]
+        raise Unevaluable("the doctor did not grade its full roster: {} absent from its roster (the strict "
+                          "store's required checks, and the imported-series checks spec 8.3 and 4.2 add when "
+                          "the imported series activates)".format(", ".join(missing)))
+    ungraded = ["{} {}".format(cid, verdict) for cid, verdict in checks.items() if verdict != "PASS"]
     if ungraded:
         raise Unevaluable("doctor reports VALID while grading {}".format(", ".join(ungraded)))
 
@@ -504,7 +628,7 @@ def evaluate_source(product_root, run_id, source, *, doctor=None):
     only itself. Read-only over the live tree; every unreadable input is CANNOT-EVALUATE."""
     ev = _Evaluation()
     ev.product_root, ev.run_id, ev.source, ev.doctor = str(product_root), run_id, source, doctor
-    ev.plan, ev.row, ev.root_fd, ev.events = None, None, None, None
+    ev.plan, ev.row, ev.root_fd, ev.events, ev.bundle = None, None, None, None, None
     ev.import_run, ev.records, ev.skipped = None, [], False
     rep = _Report()
     try:
@@ -536,6 +660,7 @@ def evaluate_source(product_root, run_id, source, *, doctor=None):
 _RUN = "adopt-20260917T120000Z-0123456789abcdef"
 _IMP = "imp-20260918T090000Z-0123456789abcdef"
 _IMP2 = "imp-20260919T090000Z-fedcba9876543210"
+_IMP3 = "imp-20260920T090000Z-00112233aabbccdd"
 _SOURCE = "notes/old.md"          # a non-occupying migrate source, frozen live with its retirement preimage
 _OCCUPYING = ".working/TODO.md"   # an occupying migrate source, archived at apply; its view is rendered there
 _RETIRED = "legacy/RULES.md"      # a retire source, frozen live with its retirement preimage: never imported
@@ -700,16 +825,18 @@ def _roster():
 
 
 class _Doctor:
-    """A doctor stub returning one fixed StoreValidation-shaped verdict; by default VALID with every strict
-    and imported-series check graded PASS."""
+    """A doctor stub returning one fixed result built by the test as the whole-store validator's own type
+    (_opf_check.StoreValidation), not a doctor run; by default VALID with every strict and imported-series
+    check graded PASS. `result` is that object, so a vector can edit it after it is built."""
 
     def __init__(self, status=VALID, findings=(), cannot=(), checks=None):
-        self.status, self.findings, self.cannot_evaluate = status, list(findings), list(cannot)
-        self.checks = (dict((cid, "PASS") for cid in _roster() + IMPORTED_SERIES_CHECKS)
-                       if checks is None else checks)
+        import _opf_check
+        full = dict((cid, "PASS") for cid in _roster() + IMPORTED_SERIES_CHECKS)
+        self.result = _opf_check.StoreValidation(status, list(findings), list(cannot),
+                                                 checks=full if checks is None else checks)
 
     def __call__(self, product_root):
-        return self
+        return self.result
 
 
 def _case(mutate=None, source=_SOURCE, **fixture):
@@ -756,8 +883,10 @@ def _skip(source=_SOURCE, actor="maintainer"):
 
 def self_test():
     """Synthetic post-apply, post-import fixtures under TemporaryDirectory, judged on the returned status and
-    a named finding. No network and no process: the doctor is a stub. Exit 0 all pass, 1 a failed check, 2 a
-    harness error."""
+    a named finding. No network and no process: the doctor result is built by the test (_Doctor, the
+    validator's own type), except in doctor-real-store-doctor-cannot, which runs store_doctor() without
+    observations, and the duck-typed and subclass vectors. Exit 0 all pass, 1 a failed check, 2 a harness
+    error."""
     from unittest import mock
     here = sys.modules[__name__]
     results = []
@@ -773,11 +902,15 @@ def self_test():
         return mutate
 
     try:
-        check("fixture-record-is-valid-imported", records.validate_imported_record(
+        # Fixture and constant sanity checks: they pin the fixture's and the module constants' agreement with
+        # the shipped modules, and exercise no evaluator guard.
+        check("sanity-fixture-record-is-valid-imported", records.validate_imported_record(
             _record(1, _IMP), expected_type="backlog_item").status == VALID)
-        check("event-name-is-the-genesis-name", EVENT_NAME.format(1) == apply.GENESIS_EVENT_NAME)
-        check("imported-types-exclude-legacy-fragment", "legacy_fragment" not in IMPORTED_TYPES
+        check("sanity-event-name-is-the-genesis-name", EVENT_NAME.format(1) == apply.GENESIS_EVENT_NAME)
+        check("sanity-imported-types-exclude-legacy-fragment", "legacy_fragment" not in IMPORTED_TYPES
               and "backlog_item" in IMPORTED_TYPES and "worklog" in IMPORTED_TYPES)
+        check("sanity-shipped-roster-has-no-imported-check", not any(
+            cid.startswith("C-IMPORTED-") for cid in _roster()))
 
         # Green: one record of the source in one import run, every leg holding.
         base = _case()
@@ -813,9 +946,10 @@ def self_test():
             skipped = _case(imports=[], skip_policy=SKIP_POLICY, events=[_skip()])
             check("skip-attributed-green", skipped.status == VALID and skipped.skipped
                   and skipped.import_run is None and skipped.records == [])
+            # An INVALID result never reports a skip, so each incomplete vector pins its findings exactly.
             noskip = _case(imports=[], events=[_skip()])
-            check("skip-under-no-skip-incomplete", noskip.status == INVALID
-                  and _says(noskip, "the approved skip policy is 'no-skip'") and not noskip.skipped)
+            check("skip-under-no-skip-incomplete", noskip.status == INVALID and len(noskip.findings) == 1
+                  and _says(noskip, "the approved skip policy is 'no-skip'"))
             both = _case(events=[_skip()])
             check("skip-under-no-skip-with-records-still-a-finding", both.status == INVALID
                   and _says(both, "the approved skip policy is 'no-skip'"))
@@ -825,13 +959,17 @@ def self_test():
             for label, actor in (("empty", ""), ("absent", None)):
                 anonymous = _case(imports=[], skip_policy=SKIP_POLICY, events=[_skip(actor=actor)])
                 check("skip-without-actor-" + label + "-incomplete", anonymous.status == INVALID
-                      and _says(anonymous, "names no actor") and not anonymous.skipped)
+                      and len(anonymous.findings) == 1 and _says(anonymous, "names no actor"))
+            beside = _case(skip_policy=SKIP_POLICY, events=[_skip(actor=None)])
+            check("skip-without-actor-beside-records-finding", beside.status == INVALID
+                  and beside.findings == ["a recorded skip of 'notes/old.md' names no actor: an attributed skip "
+                                          "names who skipped it"])
             records_and_skip = _case(skip_policy=SKIP_POLICY, events=[_skip()])
             check("skip-beside-records-records-govern", records_and_skip.status == VALID
                   and not records_and_skip.skipped and records_and_skip.records == ["imported:BI-1"])
             signed = _case(imports=[], skip_policy=SKIP_POLICY, events=[("signed-off", _skip()[1])])
-            check("event-of-another-kind-not-a-skip", signed.status == INVALID
-                  and _says(signed, "no imported record references") and not signed.skipped)
+            check("event-of-another-kind-not-a-skip", signed.status == INVALID and len(signed.findings) == 1
+                  and _says(signed, "no imported record references"))
 
             def broken_link(root):
                 event = _event(dict(revision="0123456789abcdef0123456789abcdef01234567",
@@ -840,9 +978,9 @@ def self_test():
                 _put(root, apply.evidence_home_rel(_RUN) + "/" + EVENT_NAME.format(2), _emit(event))
                 _reinventory(root)
             unchained = _case(broken_link, imports=[], skip_policy=SKIP_POLICY)
-            check("skip-in-broken-chain-not-read", unchained.status == INVALID
+            check("skip-in-broken-chain-not-read", unchained.status == INVALID and len(unchained.findings) == 2
                   and _says(unchained, "outcome-event chain: event[1] previous_event_digest")
-                  and _says(unchained, "no imported record references") and not unchained.skipped)
+                  and _says(unchained, "no imported record references"))
 
         # The preserved original: each digest mismatch names the path.
         preimage = apply.archive_rel(_RUN, _SOURCE)
@@ -863,8 +1001,9 @@ def self_test():
         check("live-source-drift-names-path", drifted.status == INVALID
               and _says(drifted, "the frozen live source 'notes/old.md' no longer matches its plan digest"))
         absent = _case(lambda root: _remove(root, _SOURCE))
-        check("live-source-absent-finding", absent.status == INVALID
-              and _says(absent, "the frozen live source 'notes/old.md' is absent"))
+        check("live-source-absent-finding", absent.status == INVALID and _says(
+            absent, "the frozen live source 'notes/old.md' is absent from the live tree, and this evaluator "
+            "reads no recorded retirement of a migrate source"))
         archived = apply.archive_rel(_RUN, _OCCUPYING)
         occupied = _case(edit(archived, b"edited todo\n"), source=_OCCUPYING,
                          imports=[(_IMP, _OCCUPYING, [_record(1, _IMP, _OCCUPYING)])])
@@ -886,7 +1025,7 @@ def self_test():
         with tempfile.TemporaryDirectory(prefix="opf-import-complete-") as root:
             _fixture(root)
             ev = _Evaluation()
-            ev.product_root, ev.run_id, ev.source, ev.root_fd = root, _RUN, _SOURCE, None
+            ev.product_root, ev.run_id, ev.source, ev.root_fd, ev.bundle = root, _RUN, _SOURCE, None, None
             direct = _Report()
             try:
                 ev.root_fd = apply._open_product_root(root)
@@ -900,16 +1039,32 @@ def self_test():
                 "'notes/old.md' is preserved at '.working/archive/moved/notes/old.md', not under this run's "
                 "adoption archive"])
 
-        # The bundle inventory this leg re-reads after verify_bundle is held to the apply shell's own
-        # inventory validator too (verify_bundle is stubbed VALID here, so only that validator grades it).
-        def foreign_row(root):
-            doc = apply._canonical_toml(_bytes(root, apply.inventory_rel(_RUN)), "the fixture inventory")
+        # The inventory bytes the bundle verification hands back are held to the apply shell's own inventory
+        # validator too (verify_bundle is stubbed VALID here, handing back bytes the real one would refuse).
+        genuine_verify = apply.verify_bundle
+        base_inventory = apply.inventory_rel(_RUN)
+
+        def lenient(product_root, run_id, *, inventory_bytes=None):
+            genuine_verify(product_root, run_id, inventory_bytes=inventory_bytes)
+            doc = apply._canonical_toml(inventory_bytes[base_inventory], "the fixture inventory")
             doc["file"].append(apply.inventory_row("../escape.md", b"x"))
-            _put(root, apply.inventory_rel(_RUN), _emit(doc))
-        with mock.patch.object(apply, "verify_bundle", lambda *a: schema._ok()):
-            revalidated = _case(foreign_row)
+            inventory_bytes[base_inventory] = _emit(doc)
+            return schema._ok()
+        with mock.patch.object(apply, "verify_bundle", lenient):
+            revalidated = _case()
         check("bundle-inventory-revalidated-cannot", revalidated.status == CANNOT_EVALUATE
-              and _says(revalidated, "the adoption bundle inventory: "))
+              and _says(revalidated, "the adoption bundle inventory {}: ".format(base_inventory)))
+
+        # The claim reads the inventory bytes the verification read: an inventory that does not claim the
+        # preimage, swapped on disk for one that does once the verification has read it, still claims nothing.
+        def swapped(product_root, run_id, *, inventory_bytes=None):
+            checked = genuine_verify(product_root, run_id, inventory_bytes=inventory_bytes)
+            _reinventory(product_root)
+            return checked
+        with mock.patch.object(apply, "verify_bundle", swapped):
+            late = _case(lambda root: _reinventory(root, drop=(preimage,)))
+        check("bundle-claim-reads-verified-inventory-bytes", late.status == INVALID and late.findings == [
+            "the preserved copy {!r} is not claimed by the run's bundle inventory".format(preimage)])
 
         def symlinked(root):
             _remove(root, _SOURCE)
@@ -964,6 +1119,45 @@ def self_test():
                 bounded = _case(events=[("signed-off", {})] * (count - 1))
                 check("event-bound-" + label, bounded.status == want and (
                     want == VALID or _says(bounded, "runs past its bound of 2 events")))
+        # Every event file is reconciled against the bundle inventory before the chain is read.
+        home = apply.evidence_home_rel(_RUN)
+
+        def second_event(name, listed=True, present=True):
+            def mutate(root):
+                genesis = apply._canonical_toml(_bytes(root, apply.genesis_event_rel(_RUN)), "the genesis")
+                _put(root, home + "/" + name, _emit(_event(genesis, "signed-off")))
+                if listed:
+                    _reinventory(root)
+                if not present:
+                    _remove(root, home + "/" + name)
+            return mutate
+
+        def past_gap(root):
+            # A malformed event-0003.toml with no event-0002.toml, the bundle inventory resealed over it.
+            _put(root, home + "/" + EVENT_NAME.format(3), b"x = [\n")
+            _reinventory(root)
+        gapped = _case(past_gap)
+        check("event-past-a-gap-cannot", gapped.status == CANNOT_EVALUATE
+              and _says(gapped, "{}/{} are not numbered contiguously from {}".format(
+                  home, EVENT_NAME.format(3), EVENT_NAME.format(1))))
+        second = home + "/" + EVENT_NAME.format(2)
+        unlisted_event = _case(second_event(EVENT_NAME.format(2), listed=False))
+        check("event-unlisted-cannot", unlisted_event.status == CANNOT_EVALUATE
+              and _says(unlisted_event, second + " is in the bundle but no bundle inventory lists it"))
+        listed_absent = _case(second_event(EVENT_NAME.format(2), present=False))
+        check("event-listed-absent-cannot", listed_absent.status == CANNOT_EVALUATE
+              and _says(listed_absent, second + " is listed by a bundle inventory but absent"))
+        misspelled = _case(second_event("event-2.toml"))
+        check("event-misspelled-name-cannot", misspelled.status == CANNOT_EVALUATE and _says(
+            misspelled, "'event-2.toml', which is not spelled as the outcome-event name 'event-0002.toml'"))
+        check("event-second-listed-green", _case(second_event(EVENT_NAME.format(2))).status == VALID)
+        # An event that vanishes between the listing and its read (a concurrent removal, simulated by the
+        # reader) is CANNOT-EVALUATE naming it, never read as an empty or shorter chain.
+        genuine_read = _read
+        with mock.patch.object(here, "_read", lambda ev, rel: None if rel == second else genuine_read(ev, rel)):
+            raced = _case(second_event(EVENT_NAME.format(2)))
+        check("event-vanished-after-listing-cannot", raced.status == CANNOT_EVALUATE
+              and _says(raced, "outcome event {} vanished after the bundle listing".format(second)))
 
         # Import runs and the correction chain.
         corrected = [(_IMP, _SOURCE, [_record(1, _IMP)]),
@@ -981,6 +1175,39 @@ def self_test():
         cycle = _case(imports=[(_IMP, _SOURCE, [_record(1, _IMP, links=[("supersedes", "imported:BI-2")])]),
                                corrected[1]])
         check("correction-cycle-cannot", cycle.status == CANNOT_EVALUATE and _says(cycle, "leave none uncorrected"))
+        # One acyclic chain over every referencing run: two runs superseding each other beside an unlinked
+        # third, a cycle reached from the head, and a fork each way are CANNOT-EVALUATE.
+        loop_beside = _case(imports=[
+            (_IMP, _SOURCE, [_record(1, _IMP, links=[("supersedes", "imported:BI-2")])]),
+            (_IMP2, _SOURCE, [_record(2, _IMP2, links=[("supersedes", "imported:BI-1")])]),
+            (_IMP3, _SOURCE, [_record(3, _IMP3)])])
+        check("correction-cycle-beside-a-head-cannot", loop_beside.status == CANNOT_EVALUATE
+              and _says(loop_beside, "{} referencing the source lie outside the correction chain {}".format(
+                  [_IMP, _IMP2], _IMP3)))
+        spiral = _case(imports=[
+            (_IMP, _SOURCE, [_record(1, _IMP, links=[("supersedes", "imported:BI-2")])]),
+            (_IMP2, _SOURCE, [_record(2, _IMP2, links=[("supersedes", "imported:BI-1")])]),
+            (_IMP3, _SOURCE, [_record(3, _IMP3, links=[("supersedes", "imported:BI-1")])])])
+        check("correction-cycle-from-the-head-cannot", spiral.status == CANNOT_EVALUATE
+              and _says(spiral, "the correction chain {} -> {} -> {} returns to import run {}".format(
+                  _IMP3, _IMP, _IMP2, _IMP)))
+        fork = _case(imports=[
+            (_IMP, _SOURCE, [_record(1, _IMP)]), (_IMP2, _SOURCE, [_record(2, _IMP2)]),
+            (_IMP3, _SOURCE, [_record(3, _IMP3, links=[("supersedes", "imported:BI-1"),
+                                                       ("supersedes", "imported:BI-2")])])])
+        check("correction-fork-one-run-corrects-two-cannot", fork.status == CANNOT_EVALUATE
+              and _says(fork, "import run {} corrects the runs {}, so the correction chain forks".format(
+                  _IMP3, [_IMP, _IMP2])))
+        split = _case(imports=[
+            (_IMP, _SOURCE, [_record(1, _IMP)]),
+            (_IMP2, _SOURCE, [_record(2, _IMP2, links=[("supersedes", "imported:BI-1")])]),
+            (_IMP3, _SOURCE, [_record(3, _IMP3, links=[("corrects", "imported:BI-1")])])])
+        check("correction-fork-two-runs-correct-one-cannot", split.status == CANNOT_EVALUATE
+              and _says(split, "leave {} uncorrected".format([_IMP2, _IMP3])))
+        three = _case(imports=[corrected[0], corrected[1],
+                               (_IMP3, _SOURCE, [_record(3, _IMP3, links=[("corrects", "imported:BI-2")])])])
+        check("correction-chain-of-three-evaluates-its-head", three.status == VALID and three.import_run == _IMP3
+              and three.records == ["imported:BI-3"])
         head_original = original_rel(_IMP2, _SOURCE)
 
         def head_drift(root):
@@ -1032,6 +1259,13 @@ def self_test():
             lambda root: _put(root, _LEAF, _emit(dict(record=[_record(1, _IMP)])))).status == CANNOT_EVALUATE)
         check("imported-leaf-garbage-cannot", _case(
             lambda root: _put(root, _LEAF, b"record = [\n")).status == CANNOT_EVALUATE)
+        # The leaf schema each side of the supported value, and a bool equal to it (True == 1).
+        for label, value in (("below", records.SUPPORTED_SCHEMA - 1), ("above", records.SUPPORTED_SCHEMA + 1),
+                             ("bool", True)):
+            leafed = _case(lambda root, value=value: _put(
+                root, _LEAF, _emit(dict(schema=value, record=[_record(1, _IMP)]))))
+            check("imported-leaf-schema-" + label + "-cannot", leafed.status == CANNOT_EVALUATE and _says(
+                leafed, "does not hold exactly schema = {}".format(records.SUPPORTED_SCHEMA)))
 
         # Doctor validity on the live tree.
         sick = _case(lambda root: dict(doctor=_Doctor(INVALID, ["C-LINKS: a dangling link"])))
@@ -1059,7 +1293,7 @@ def self_test():
         check("doctor-invalid-without-finding-cannot", _case(
             lambda root: dict(doctor=_Doctor(INVALID))).status == CANNOT_EVALUATE)
         lopsided = _Doctor()
-        lopsided.findings = None
+        lopsided.result.findings = None
         unshaped = _case(lambda root: dict(doctor=lopsided))
         check("doctor-findings-not-a-list-cannot", unshaped.status == CANNOT_EVALUATE
               and _says(unshaped, "doctor evidence is not list-shaped"))
@@ -1067,6 +1301,38 @@ def self_test():
         def raising(product_root):
             raise RuntimeError("doctor exploded")
         check("doctor-raising-cannot", _says(_case(lambda root: dict(doctor=raising)), "doctor exploded"))
+        # Only the whole-store validator's own result type is read: a duck-typed stub carrying every one of
+        # its attributes, green, and a subclass of it are CANNOT-EVALUATE.
+        import types
+        import _opf_check
+        green = _Doctor().result
+        duck = types.SimpleNamespace(**dict((slot, getattr(green, slot))
+                                            for slot in _opf_check.StoreValidation.__slots__))
+        ducked = _case(lambda root: dict(doctor=lambda product_root: duck))
+        check("doctor-duck-typed-result-cannot", ducked.status == CANNOT_EVALUATE and _says(
+            ducked, "the doctor run returned a SimpleNamespace, not the whole-store validator's own result"))
+
+        class _Derived(_opf_check.StoreValidation):
+            __slots__ = ()
+        derived = _Derived(VALID, checks=dict(green.checks))
+        subclassed = _case(lambda root: dict(doctor=lambda product_root: derived))
+        check("doctor-result-subclass-cannot", subclassed.status == CANNOT_EVALUATE
+              and _says(subclassed, "the doctor run returned a _Derived, not"))
+        # The full roster: a strict-store check absent, or graded other than PASS, under a VALID status.
+        first = _roster()[0]
+        lacking = dict((cid, verdict) for cid, verdict in green.checks.items() if cid != first)
+        strict_gap = _case(lambda root: dict(doctor=_Doctor(checks=lacking)))
+        check("doctor-strict-check-absent-cannot", strict_gap.status == CANNOT_EVALUATE
+              and _says(strict_gap, "the doctor did not grade its full roster: {} absent".format(first)))
+        failing = dict(green.checks, **dict([(first, "FINDING")]))
+        strict_red = _case(lambda root: dict(doctor=_Doctor(checks=failing)))
+        check("doctor-strict-check-not-pass-cannot", strict_red.status == CANNOT_EVALUATE
+              and _says(strict_red, "doctor reports VALID while grading {} FINDING".format(first)))
+        # This release's real doctor over the fixture: store_doctor() with no observations. The fixture holds
+        # no resolvable store, so the whole-store validator returns CANNOT-EVALUATE before any check runs.
+        real = _case(lambda root: dict(doctor=store_doctor()))
+        check("doctor-real-store-doctor-cannot", real.status == CANNOT_EVALUATE
+              and _says(real, "doctor: CANNOT-EVALUATE store is not resolved"))
 
         # Binding: only a migrate source the plan scopes is evaluated, under a readable plan of this run.
         check("source-not-in-plan-cannot", _case(source="legacy/other.md").status == CANNOT_EVALUATE)

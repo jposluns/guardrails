@@ -125,7 +125,9 @@ _LEG_CEILING_S = {
     "opf-adopt-state-selftest": 600,  # not measured 2026-10-11; under the former 600 s bound (inferred)
     "opf-adopt-hook-selftest": 2,  # measured 2026-10-11: 1.3 s
     "opf-adopt-complete-selftest": 600,  # not measured 2026-10-11; under the former 600 s bound (inferred)
-    "opf-import-complete-selftest": 15,  # measured 2026-10-14: 1.9 s (one run); 1.9 * 20 / 3, rounded up to 15 s
+    # opf-import-complete-selftest: the slowest run times 20 / 3 for load, 2.4 * 20 / 3 = 16.0, rounded up to
+    # a multiple of 5, 20 s.
+    "opf-import-complete-selftest": 20,  # measured 2026-10-14: 2.3 to 2.4 s (three runs)
     "opf-pack-manifest-selftest": 18,  # measured 2026-10-11: 17.3 s
     "opf-adopt-observe-selftest": 600,  # not measured 2026-10-11; under the former 600 s bound (inferred)
     "opf-prompt-pack-selftest": 1,  # measured 2026-10-11: 0.7 s

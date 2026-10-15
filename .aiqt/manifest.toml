@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "5ab7a4eabc0bad1cec0c5e1b7bae0f53b505b964ee2148530c0e96626359d0f1"
+tree-sha256 = "d02bebd2c9b568b84a319eaf07f95bf6903a1ef152629dfc6e49d7cb3ba2e348"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -61,8 +61,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 371093
-sha256 = "3ad979ae3ef3e4e4ffc202def257d17f2927fb10626b48fefc6cf493ac3df602"
+bytes = 374053
+sha256 = "d68d9cff1586d6c0a8934248e96cd5f81a8aa8f227323c71a997ca803fe63f46"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -2666,8 +2666,8 @@ sha256 = "65ee9364396ac733e6717e905aaa50665ab68a091e97b6a82b47b56d3a5129ea"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_apply.py"
-bytes = 982053
-sha256 = "a7822f9f42bb97a4885f31e6ec743e35531545af97a9cb6bf624da8bd1b65bd9"
+bytes = 982467
+sha256 = "d0724b01ca706d3003ecd486725dab9a09329e53371d11bbf53cd5249b6316b5"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_complete.py"
@@ -2721,8 +2721,8 @@ sha256 = "225d9d5f7c15f5794a3772cd1333665829c1d34849a9708d994915fdeadc4349"
 
 [[sources]]
 path = "opf/tools/_opf_import_complete.py"
-bytes = 65621
-sha256 = "cfea40e0d67900e03058c1d058ff52ac55459e6c784ca51d2cc4f72dbfaf72d1"
+bytes = 85178
+sha256 = "4fb19902ce0ca01ff0a65aea8b250dcec5419bb8a73417f225a93c34a2b49b8d"
 
 [[sources]]
 path = "opf/tools/_opf_init.py"
@@ -3436,8 +3436,8 @@ sha256 = "81aa8f6297d4d5c1c1fd7a30ce325635f2a577d0065706c8f5393c65fa4cbb7f"
 
 [[sources]]
 path = "tools/check_opf_standalone_closure.py"
-bytes = 35715
-sha256 = "d14441b4ec12ae14ab49af4e4de77152f9d5bff8253852f88577e14280275c7e"
+bytes = 35830
+sha256 = "0e395bd67e1833d6cc32e7a78b7213538c0084843850f14d1b0173bb90729d9c"
 
 [[sources]]
 path = "tools/check_overclaim.py"
