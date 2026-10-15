@@ -210,7 +210,7 @@ Each case runs on its own copy of that template; the root is removed in a finall
       promise no reconciliation of work never left: the rule scopes the leftovers to what a run left,
       the refusal says any journal work left is for the next trigger, none when it failed before its
       transaction opened, and the next run reconciles nothing (flips: the reviewed head's refusal
-      text; the reviewed head's rule)
+      text; the reviewed head's rule; a doctor that reads no reservation, under which the next run is held)
   T53 a projection path holding an entry that is not the projection reads as existence only: the
       reclaimed outcome and the guard introduction never say the terminal transaction carries its
       projection (flips: the reviewed head's outcome; its introduction)
@@ -381,21 +381,23 @@ Each case runs on its own copy of that template; the root is removed in a finall
   T79 a homes-2 run killed after its reservation and before its publication leaves the reservation
       standing and the operands at the prestate; after the confirmed-dead reclaim, the next create
       derives ABOVE the orphaned reservation (the reserved numbers are never issued again), its own
-      reservation says so, and the run is then held at the post-publication gate, exit 2 with the
-      change left for review, because the doctor does not yet read reservations and grades the
-      orphaned numbers as missing records (flip: a derivation that ignores the reservation scan,
-      under which the reserved ids are issued again)
+      reservation says so, and the run records, exit 0: the final doctor treats the orphaned numbers
+      as issued, never as missing records (flips: a derivation that ignores the reservation scan,
+      under which the reserved ids are issued again; a doctor that reads no reservation, under which
+      the run is held at the post-publication gate)
   T80 two runs claiming the same kind never receive the same id: two runs planned before either
       reserves derive the same numbers; the first reserves through the production claim-and-reserve
       path, and the second is refused at the held revalidation with no reservation of its own, no
       transaction and no operand published; re-planned, it derives the next numbers, both
-      reservations standing disjoint (flips: as T79; a reservation step with no fresh scan and no
-      stale-plan comparison)
+      reservations standing disjoint (flips: the derivation flip of T79; a reservation step with no
+      fresh scan and no stale-plan comparison)
   T81 the homes-2 high-water reads every journal kind's reservations, the homes enumerated from
       JOURNAL_KINDS: an import-kind reservation of BI-1 and WL-1 moves the next create to BI-2 and
-      WL-2, and a malformed reservation in each other kind's home, plus an unreadable, a conflicting
+      WL-2, which records, exit 0, the final doctor reading that reservation too, and a malformed
+      reservation in each other kind's home, plus an unreadable, a conflicting
       (another kind's payload) and a misnamed entry in the import home, refuse exit 2 with every byte
-      untouched (flip: the reviewed head's single record home)
+      untouched (flips: the single record home of the reviewed head; a doctor that reads only the record
+      kind reservation home, under which the run is held at the post-publication gate)
   T82 the homes-2 publication boundary requires the reservation of the run id it publishes under: a
       direct _publish naming no run id, one with no reservation, and one whose reservation claims other
       numbers each refuse before any transaction opens (flip: the reviewed head's minted run id with
@@ -4148,7 +4150,7 @@ def t52_publication_refused_before_intent(fx):
     lowered to one byte) leaves no transaction and releases its own capability: its refusal says any
     journal work left is for the next trigger, none when it failed before its transaction opened, and
     the next run reconciles nothing (the publication's id reservation, published first as the boundary
-    requires, stands, so that run derives above it and is held at the post-publication gate, as T79).
+    requires, stands, so that run derives above it and records, exit 0, as T79).
     The reviewed head promised the next run reconciles the typed journal."""
     module, guard = residual_texts()
     for text, where in ((module, "module"), (guard, "guard")):
@@ -4201,9 +4203,9 @@ def t52_publication_refused_before_intent(fx):
         assert "was reconciled" not in err and "were reclaimed" not in err, \
             ("T52 the next run reconciles nothing", err[-800:])
         # The refused publication's reservation stands (T79's orphan shape): the next run derives above
-        # it and is held at the post-publication gate, which does not yet read reservations.
-        assert RECORDED_EVENT not in out and rc == 2 and "the uncommitted change is left for review" in err, \
-            ("T52 the next run publishes above the standing reservation and is held", rc, err[-1600:])
+        # it and records, the final doctor treating the reserved numbers as issued.
+        assert RECORDED_EVENT in out and rc == 0, \
+            ("T52 the next run records above the standing reservation", rc, err[-1600:])
         rows = [r["id"] for r in model(root, BI_INDEX)["record"]]
         assert "BI-{}".format(reserved_bi + 1) in rows and "BI-{}".format(reserved_bi) not in rows, \
             ("T52 the reserved id is never issued", rows)
@@ -6047,10 +6049,8 @@ def t79_kill_after_reserve(fx):
     """A homes-2 run killed after reserving and before publishing leaves its reservation standing
     and every operand at the prestate, and the reserved numbers are never issued again: after the
     confirmed-dead reclaim refusal, the next create derives ABOVE the orphan (its own reservation
-    claims the next numbers), publishes them, and is then held at the post-publication gate, exit 2
-    with the change left for review, because the doctor does not yet read reservations and grades
-    the orphaned numbers as missing records (the disclosed residual of this build; the reserved ids
-    are still never reissued)."""
+    claims the next numbers), publishes them and records, exit 0: the final doctor treats the
+    orphaned numbers as issued (spec 8.2), so the store carrying the orphan is VALID."""
     env = fx.env
     base = fx.case("t79-homes2-base")
     with _self_test_homes2_active(base):
@@ -6073,8 +6073,8 @@ def t79_kill_after_reserve(fx):
         refused(record_cli(env, root, CREATE), "were reclaimed before this operation")
         assert (alloc_dir / names[0]).read_bytes() == first, "T79 the reclaim never touches the reservation"
         rc, out, err = record_cli(env, root, CREATE)
-        assert RECORDED_EVENT not in out, "T79 the held publication reports no success"
-        assert rc == 2 and "the uncommitted change is left for review" in err, (rc, err[-1600:])
+        assert rc == 0 and RECORDED_EVENT in out, ("T79 the run above the orphan records, doctor VALID", rc,
+                                                   err[-1600:])
         names2 = sorted(os.listdir(alloc_dir))
         assert len(names2) == 2 and names[0] in names2, ("T79 both reservations standing", names2)
         (second_name,) = [n for n in names2 if n != names[0]]
@@ -6096,6 +6096,12 @@ def flip_t79():
     """A derivation that ignores the reservation scan: an orphaned reservation gets its numbers
     issued again."""
     return patch.object(record, "_reservation_high", lambda ctx: {})
+
+
+def flip_t79_doctor():
+    """A doctor that reads no reservation: the orphaned numbers grade as missing records, so the run
+    above them is held at the post-publication gate, exit 2."""
+    return patch.object(opf_check, "_reserved_numbers", lambda root_fd, rep: ({}, True))
 
 
 def t80_two_runs_never_same_id(fx):
@@ -6178,8 +6184,8 @@ def t81_cross_kind_reservations(fx):
     """The homes-2 high-water reads EVERY journal kind's reservations (spec 8.2: every reservation's
     [claims] value for the counter key), the homes enumerated from the JOURNAL_KINDS registry: an
     import-kind reservation of {BI: 1, WL: 1} moves the next create to BI-2 and WL-2 (its own
-    reservation says so, the import one is never touched), and that run is held at the
-    post-publication gate as T79's is. Fail-closed in every other kind's home: a malformed
+    reservation says so, the import one is never touched), and that run records, exit 0,
+    as in T79. Fail-closed in every other kind's home: a malformed
     reservation in each non-record kind's home, and in the import home an unreadable (non-regular)
     entry, an ingest payload under an import name, and a record-grammar name, each refuse exit 2
     with every byte untouched."""
@@ -6204,8 +6210,8 @@ def t81_cross_kind_reservations(fx):
                                .decode("utf-8"))["claims"]
         assert claims == {"BI": 2, "WL": 2}, ("T81 the record reservation claims above the import one", claims)
         assert imported.read_bytes() == planted, "T81 the import reservation is never touched"
-        assert RECORDED_EVENT not in out and rc == 2 and "the uncommitted change is left for review" in err, \
-            ("T81 held at the post-publication gate, as T79", rc, err[-1600:])
+        assert RECORDED_EVENT in out and rc == 0, ("T81 the run above the import reservation records, as T79",
+                                                  rc, err[-1600:])
         stamp = "-20260927T000009Z-" + "9" * 16
         for kind in record._opf_store.JOURNAL_KINDS:
             if kind == "record":
@@ -6236,6 +6242,17 @@ def flip_t81():
     """The reviewed head's single hard-coded home: only the record kind's reservations are read."""
     return patch.object(record, "_reservation_high",
                         lambda ctx: record._kind_reservation_high(ctx, "record", record._ALLOCATIONS_REL))
+
+
+def flip_t81_doctor():
+    """A doctor that reads only the record kind reservation home: the import-kind reservation is
+    unread, so its numbers grade as missing records and the run above them is held."""
+    real = opf_check._reserved_numbers
+
+    def record_only(root_fd, rep):
+        with patch.object(opf_check._opf_store, "JOURNAL_KINDS", ("record",)):
+            return real(root_fd, rep)
+    return patch.object(opf_check, "_reserved_numbers", record_only)
 
 
 def t82_publication_requires_reservation(fx):
@@ -6421,7 +6438,7 @@ TESTS = (
     ("T50-leftover-lock-complete-scoped", t50_leftover_lock_complete_scoped, flip_t50),
     ("T51-lock-refusals-name-created", t51_lock_refusals_name_created, flip_t51),
     ("T52-publication-refused-before-intent", t52_publication_refused_before_intent,
-     (flip_t52_message, flip_t52_rule)),
+     (flip_t52_message, flip_t52_rule, flip_t79_doctor)),
     ("T53-projection-existence-only", t53_projection_existence_only, (flip_t53_outcome, flip_t53_guard)),
     ("T54-header-exact", t54_header_exact, flip_t54),
     ("T55-lock-release-after-unlink", t55_lock_release_after_unlink, flip_t55),
@@ -6475,9 +6492,9 @@ TESTS = (
     ("T76-examination-lock-failure-diagnosed", t76_lock_failure_diagnosed, flip_t76),
     ("T77-release-report-every-failure", t77_report_every_failure, flip_t77),
     ("T78-homes2-declaration-pair-required", t78_homes2_needs_the_pair, (flip_t78, flip_t30)),
-    ("T79-kill-after-reserve", t79_kill_after_reserve, flip_t79),
+    ("T79-kill-after-reserve", t79_kill_after_reserve, (flip_t79, flip_t79_doctor)),
     ("T80-two-runs-distinct-ids", t80_two_runs_never_same_id, (flip_t79, flip_t80_no_recheck)),
-    ("T81-homes2-cross-kind-high-water", t81_cross_kind_reservations, flip_t81),
+    ("T81-homes2-cross-kind-high-water", t81_cross_kind_reservations, (flip_t81, flip_t81_doctor)),
     ("T82-homes2-publication-requires-reservation", t82_publication_requires_reservation, flip_t82),
     ("T83-journal-states-confirmed-absence", t83_journal_states_confirmed_absence, flip_t83),
     ("T84-recovery-recursion-lease-refused-as-held", t84_recursion_lease_refused_as_held, flip_t84),

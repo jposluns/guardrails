@@ -651,7 +651,9 @@ missing recovery state, and anchored preview exclusions. These fixtures mock fil
 observations; they do not certify filesystem races, crash recovery, power-loss durability, live
 adopter state, or the whole input space. Evidence membership relies on immutable per-bundle
 inventories; deleting a whole bundle, inventory and payload together, requires independent
-history to detect. Journals are deliberately outside doctor coverage. Writer activation and
+history to detect. Journals are deliberately outside doctor coverage, except that on homes 2 doctor
+lists only the id reservation home of each kind there, for the reserved numbers alone (a legacy store
+lists none). Writer activation and
 inventory publication remain inactive; homes 2 has no homes migration and no legacy journal
 transport (spec 4.2). The existing runtime suites must still validate integration before activation.
 """

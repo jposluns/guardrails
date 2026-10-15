@@ -118,9 +118,9 @@ run (re-run), never a duplicate. The homes-2 publication boundary itself (_publi
 open a transaction unless the canonical reservation of the run id it publishes under stands with this
 plan's claims. An unreadable, malformed or conflicting reservation refuses (exit 2),
 never a silent fallback to the homes-1 counters path; a run killed after reserving and before
-publishing leaves its reservation standing, its numbers conservatively still reserved (the final doctor
-does not yet read reservations, so a store carrying such an orphan grades the orphan's numbers as
-missing records until that later change). A legacy
+publishing leaves its reservation standing, its numbers conservatively still reserved: the final doctor
+treats a reserved number as issued (spec 8.2), so the orphaned numbers never grade as missing records
+and the next run records above them. A legacy
 .aiqt/record/journal found on a homes-2 store is refused and never recovered: homes 2 has no homes
 migration to carry it (spec 4.2).
 
