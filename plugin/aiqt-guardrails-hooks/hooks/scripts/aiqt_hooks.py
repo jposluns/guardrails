@@ -150,7 +150,7 @@ persistent shell/config state; the deferred recovery/snapshot layer is the backs
 read-only and offline; it never mutates the repo.
 
 Stop layer is a DELIBERATE exception, non-blocking by design (GD-24 tri-family QA, 2026-08-17,
-flagged for Architect review): it SURFACES a diff wall with a strong systemMessage and exits 0 (WARN),
+flagged for maintainer review): it SURFACES a diff wall with a strong systemMessage and exits 0 (WARN),
 it does NOT hard-block. The wall has already rendered by Stop time, so blocking cannot unsend it; and
 because this layer keeps no loop bound of its own and does not read the stop_hook_active field of the
 Stop input, a hard exit-2 Stop block could re-fire on the forced continuation and wedge the session. The
@@ -1710,7 +1710,7 @@ def _diff_proof_summary(command):
 
 
 def _diff_proof_log_listing(command):
-    """Proof E (Architect-directed refinement): a benign 'git log' COMMIT LISTING that provably emits no diff
+    """Proof E (maintainer-directed refinement): a benign 'git log' COMMIT LISTING that provably emits no diff
     to the console. Requires a metacharacter-free single simple command (the conservative charset, no shell
     reserved word, so no redirect and no pipe), the first resolved words literally 'git' and 'log', and every
     option-like word before a '--'/'--end-of-options' boundary drawn from the exact _BENIGN_LOG_OPTS
