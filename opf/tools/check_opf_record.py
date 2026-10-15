@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OPF record-authoring gate (spec 8.8): `opf record` behaviour, and red-on-revert discriminators.
 
-  check_opf_record.py --self-test                    the fixture suite (T1-T78)
+  check_opf_record.py --self-test                    the fixture suite (T1-T79)
   check_opf_record.py --self-test --red-on-revert    the same, plus each test's flip must turn it red
 
 There is no live-adopter leg (this repository is not an OPFiles adopter), so the whole assurance rides the
@@ -376,6 +376,10 @@ Each case runs on its own copy of that template; the root is removed in a finall
       retired HOMES2_SPEC_VERSION patch, under which the verb reads that store as generation 2 and
       chooses the typed journal home; the generation-only probe of T30, under which the run publishes
       into the legacy journal on the fresh store and reconciles the leftover in place)
+  T79 a leftover lease whose payload tomllib refuses with RecursionError (a deeply nested value, and a
+      1001-part key under the emulated 3.14.8 key-part cap) is malformed: recovery refuses it with the
+      held-lease refusal, every byte untouched (flip: the pre-fix lease parse, under which the
+      RecursionError escapes to the record verb's unexpected-error backstop)
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
 or unusable, temporary storage unusable, or any unexpected harness fault), never a clean skip.
@@ -2307,7 +2311,7 @@ class _Homes2SpecGate:
         return getattr(_opf_store, name)
 
 
-def _self_test_homes2_active(root, env):
+def _self_test_homes2_active(root):
     """Activate homes 2 over a fixture store: the manifest on disk declares the real homes-2 pair,
     spec_version HOMES2_SPEC_VERSION (2.0.0) and homes = 2, which the shipped validate_manifest accepts
     as it stands. Only what this build still needs to exercise homes 2 is patched: SUPPORTED_HOMES = 2
@@ -2324,27 +2328,11 @@ def _self_test_homes2_active(root, env):
     model = tomllib.loads(original.decode("utf-8"))
     model["opf"]["homes"] = 2
     model["opf"]["spec_version"] = _opf_store.HOMES2_SPEC_VERSION
-    # A 2.0.0 store carries the imported series, so the doctor requires one zero "imported:<NS>" row per
-    # enabled type except legacy_fragment (spec 8.2). counters.toml is a record operand, which the verb
-    # refuses to rewrite while it is dirty, so the rows are written AND committed on entry. They stay on
-    # exit: an exit rewrite would move an operand a vector compares across the window (T43), and no vector
-    # grades the store after its window.
-    counters_path = path.parent / opf_check.COUNTERS_NAME
-    imported_rows = {"imported:" + ns: 0 for ns in opf_check._imported_counter_namespaces(
-        opf_check._authoritative_types(opf_check._enabled_modules(model), model.get("types")))}
-
-    def commit_imported_rows():
-        doc = tomllib.loads(counters_path.read_text(encoding="utf-8"))
-        doc["counters"] = dict(doc["counters"], **imported_rows)
-        counters_path.write_text(emit.emit_checked(doc), encoding="utf-8")
-        env.git(root, "add", "--", str(counters_path))
-        env.git(root, "commit", "-q", "-m", "activate homes 2: the zero imported counter rows")
 
     @contextlib.contextmanager
     def active():
         path.write_text(emit.emit_checked(model), encoding="utf-8")
         try:
-            commit_imported_rows()
             with patch.object(_opf_store, "SUPPORTED_HOMES", 2), \
                     patch.object(record, "_opf_store", _Homes2SpecGate()):
                 yield
@@ -2364,11 +2352,10 @@ record._record_run_id = lambda lock_id: "record-create." + str(os.getpid()) + ".
 """
 
 # Inside a killed child: activate homes 2 exactly as _self_test_homes2_active does (the manifest on
-# disk already declares the real pair, spec_version 2.0.0 and homes = 2, and counters.toml carries the
-# committed zero imported rows; these are the two remaining module patches, SUPPORTED_HOMES and the
-# record spec_version gate of _Homes2SpecGate), and route the claim seam through the homes-1 counters
-# path over the clean rows, emulating the later id-reservation change, so the run reaches the homes-2
-# publication.
+# disk already declares the real pair, spec_version 2.0.0 and homes = 2; these are the two remaining
+# module patches, SUPPORTED_HOMES and the record spec_version gate of _Homes2SpecGate), and route the
+# claim seam through the homes-1 counters path, emulating the later id-reservation change, so the run
+# reaches the homes-2 publication.
 HOMES2_CHILD_FLIP = """
 import _opf_store
 _opf_store.SUPPORTED_HOMES = 2
@@ -2379,16 +2366,8 @@ class _Homes2SpecGate:
         return getattr(_opf_store, name)
 record._opf_store = _Homes2SpecGate()
 _claim_seam = record.claim_ids
-record.claim_ids = lambda homes, high, demand, known_complete: _claim_seam(
-    1, dict((k, v) for k, v in high.items() if not k.startswith("imported:")), demand, known_complete)
+record.claim_ids = lambda homes, high, demand, known_complete: _claim_seam(1, high, demand, known_complete)
 """
-
-
-def _clean_high(high):
-    """The clean number lines of a homes-2 counters map: the homes-1 seam the fixtures route a homes-2
-    claim through allocates clean ids only and never reads an imported row (spec 8.2), which the
-    planner then carries over unchanged."""
-    return dict((k, v) for k, v in high.items() if not k.startswith("imported:"))
 
 
 def subtree(root, prefix):
@@ -2454,7 +2433,7 @@ def t20_homes2_legacy_refused(fx):
     proc = child(env, root, CREATE, flip=FAILING_LOCK_RELEASE)
     assert proc.returncode == 0 and RECORDED_EVENT in proc.stdout, (proc.returncode, proc.stderr[-800:])
     assert (Path(root) / record.JOURNAL_REL / "lock").exists(), "T20 the legacy journal holds a leftover lock"
-    with _self_test_homes2_active(root, fx.env):
+    with _self_test_homes2_active(root):
         aiqt_before = subtree(root, ".aiqt")
         result = record_cli(env, root, CREATE)
         refused(result, "legacy record journal")
@@ -2477,7 +2456,7 @@ def t21_homes2_publish(fx):
     its terminal projection, rewrites exactly the planned operands, and touches nothing under .aiqt."""
     env = fx.env
     root = fx.case("t21-homes2-publish")
-    with _self_test_homes2_active(root, fx.env):
+    with _self_test_homes2_active(root):
         req = record.parse_request(CREATE + ["--root", str(root)])
         res = record._opf_store.resolve_store(Path(os.path.abspath(str(root))))
         assert res.status == record._opf_store.RESOLVED, res
@@ -2494,7 +2473,7 @@ def t21_homes2_publish(fx):
             operand = record._read_operand(root_fd, record._operand_rel(req, ctx))
             seam = record.claim_ids
             with patch.object(record, "claim_ids", lambda homes, high, demand, known_complete:
-                              seam(1, _clean_high(high), demand, known_complete)):
+                              seam(1, high, demand, known_complete)):
                 plan = record._PLANNERS["create"](req, ctx, operand, record._clock_now())
             for op in plan.operands:
                 op.new_raw = record._emit_bytes(op.new_model)
@@ -2523,7 +2502,7 @@ def t22_homes2_claim_refused(fx):
     created."""
     env = fx.env
     root = fx.case("t22-homes2-claim")
-    with _self_test_homes2_active(root, fx.env):
+    with _self_test_homes2_active(root):
         refused_untouched(env, root, CREATE, "is not active in this build")
         assert not (Path(root) / record.JOURNAL_REL).exists(), "T22 no legacy journal is created"
         assert not (Path(root) / ".working/journals").exists(), "T22 no typed journal home is created"
@@ -2560,7 +2539,7 @@ def t23_homes2_crash(fx):
     COMPLETE, and .aiqt is never touched."""
     env = fx.env
     base = fx.case("t23-homes2-base")
-    with _self_test_homes2_active(base, fx.env):
+    with _self_test_homes2_active(base):
         reference = fx.case("t23-homes2-reference", base)
         proc = child(env, reference, CREATE, flip=HOMES2_CHILD_FLIP)
         assert proc.returncode == 0 and RECORDED_EVENT in proc.stdout, (proc.returncode, proc.stderr[-1600:])
@@ -2634,7 +2613,7 @@ def t24_broken_manifest(fx):
             raise record.RecordError("synthetic manifest read failure")
         return original_read(root_fd, rel)
 
-    with _self_test_homes2_active(root, fx.env):
+    with _self_test_homes2_active(root):
         before = snapshot(root)
         with patch.object(record, "_read_operand", failing_manifest_read):
             result = record_cli(env, root, CREATE)
@@ -2672,7 +2651,7 @@ def t25_plan_under_capability(fx):
     head instead rolled it back and erased it."""
     env = fx.env
     base = fx.case("t25-homes2-base")
-    with _self_test_homes2_active(base, fx.env):
+    with _self_test_homes2_active(base):
         root = fx.case("t25-homes2-race", base)
         proc = child(env, root, CREATE, kill="after-apply-0", flip=HOMES2_CHILD_FLIP)
         assert proc.returncode == 137, ("T25 the child is killed", proc.returncode, proc.stderr[-800:])
@@ -2735,7 +2714,7 @@ def t26_complete_before_projection(fx):
     of leaving a state every later acquisition refuses."""
     env = fx.env
     base = fx.case("t26-homes2-base")
-    with _self_test_homes2_active(base, fx.env):
+    with _self_test_homes2_active(base):
         reference = fx.case("t26-homes2-reference", base)
         proc = child(env, reference, CREATE, flip=HOMES2_CHILD_FLIP)
         assert proc.returncode == 0 and RECORDED_EVENT in proc.stdout, (proc.returncode,
@@ -2951,7 +2930,7 @@ def t31_dead_capability(fx):
     records. A LIVE holder's capability is refused, never seized, and it releases cleanly."""
     env = fx.env
     base = fx.case("t31-homes2-base")
-    with _self_test_homes2_active(base, fx.env):
+    with _self_test_homes2_active(base):
         reference = fx.case("t31-homes2-reference", base)
         proc = child(env, reference, CREATE, flip=HOMES2_CHILD_FLIP)
         assert proc.returncode == 0 and RECORDED_EVENT in proc.stdout, (proc.returncode, proc.stderr[-1600:])
@@ -3035,7 +3014,7 @@ def t32_lone_active(fx):
     later acquisition refused the stale active record with no recovery."""
     env = fx.env
     base = fx.case("t32-homes2-base")
-    with _self_test_homes2_active(base, fx.env):
+    with _self_test_homes2_active(base):
         reference = fx.case("t32-homes2-reference", base)
         proc = child(env, reference, CREATE, flip=HOMES2_CHILD_FLIP)
         assert proc.returncode == 0 and RECORDED_EVENT in proc.stdout, (proc.returncode, proc.stderr[-1600:])
@@ -3081,7 +3060,7 @@ def t33_journal_rederived_under_capability(fx):
     head planned from the stale absence, reported nothing open, and left the transaction open."""
     env = fx.env
     base = fx.case("t33-homes2-base")
-    with _self_test_homes2_active(base, fx.env):
+    with _self_test_homes2_active(base):
         root = fx.case("t33-homes2-race", base)
         pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
         held = [record._opf_oplock.acquire_operation(str(root), record.VERB)]
@@ -3193,7 +3172,7 @@ def t35_released_holder_not_reconciled(fx):
     interrupted run was reconciled."""
     env = fx.env
     base = fx.case("t35-homes2-base")
-    with _self_test_homes2_active(base, fx.env):
+    with _self_test_homes2_active(base):
         root = fx.case("t35-homes2-released", base)
         pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
         held = [record._opf_oplock.acquire_operation(str(root), record.VERB)]
@@ -3242,7 +3221,7 @@ def t36_journal_home_reopened(fx):
     through the stale descriptor, reported no transaction open, and left the transaction open."""
     env = fx.env
     base = fx.case("t36-homes2-base")
-    with _self_test_homes2_active(base, fx.env):
+    with _self_test_homes2_active(base):
         root = fx.case("t36-homes2-replaced", base)
         (Path(root) / TYPED_JOURNAL).mkdir(parents=True)
         pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
@@ -3327,7 +3306,7 @@ def t37_reclaim_names_operation(fx):
     was reconciled"."""
     env = fx.env
     base = fx.case("t37-homes2-base")
-    with _self_test_homes2_active(base, fx.env):
+    with _self_test_homes2_active(base):
         root = fx.case("t37-homes2-ingest", base)
         assert die_holding(env, root, "ingest") == 137, "T37 the ingest holder is killed holding it"
         assert capability_records(root) == (True, True), "T37 its lease and active record are left"
@@ -3361,7 +3340,7 @@ def t38_staging_removal_disclosed(fx):
     so. The reviewed head said "Nothing was written" after deleting the staging file."""
     env = fx.env
     base = fx.case("t38-homes2-base")
-    with _self_test_homes2_active(base, fx.env):
+    with _self_test_homes2_active(base):
         root = fx.case("t38-homes2-lone-lease", base)
         cap = record._opf_oplock.acquire_operation(str(root), record.VERB)
         lease_bytes = (Path(root) / LEASE).read_bytes()
@@ -3410,7 +3389,7 @@ def t39_deletes_then_failure_disclosed(fx):
     never claiming nothing was written. The reviewed head said "Nothing was written" with both gone."""
     env = fx.env
     base = fx.case("t39-homes2-base")
-    with _self_test_homes2_active(base, fx.env):
+    with _self_test_homes2_active(base):
         root = fx.case("t39-homes2-dead", base)
         proc = child(env, root, CREATE, flip=HOMES2_CHILD_FLIP + DIE_BEFORE_PUBLISH)
         assert proc.returncode == 137, ("T39 the holder is killed", proc.returncode, proc.stderr[-800:])
@@ -3436,7 +3415,7 @@ def t40_held_refusal_discloses(fx):
     and the edit is kept. The reviewed head said "Nothing was written" with both records gone."""
     env = fx.env
     base = fx.case("t40-homes2-base")
-    with _self_test_homes2_active(base, fx.env):
+    with _self_test_homes2_active(base):
         root = fx.case("t40-homes2-edit", base)
         proc = child(env, root, CREATE, kill="after-apply-0", flip=HOMES2_CHILD_FLIP)
         assert proc.returncode == 137, ("T40 the holder is killed mid-apply", proc.returncode,
@@ -3502,7 +3481,7 @@ def t41_residuals_exact(fx):
     refused(result, "holds the single-writer lease")
     assert capability_records(root) == (True, True), "T41 a homes-1 record run never reclaims the records"
     base = fx.case("t41-homes2-base")
-    with _self_test_homes2_active(base, fx.env):
+    with _self_test_homes2_active(base):
         root = fx.case("t41-homes2-live", base)
         held = record._opf_oplock.acquire_operation(str(root), record.VERB)
         try:
@@ -3549,7 +3528,7 @@ def t42_own_unlinks_disclosed(fx):
     head said "the acquisition removed nothing" after both unlinks."""
     env = fx.env
     base = fx.case("t42-homes2-base")
-    with _self_test_homes2_active(base, fx.env):
+    with _self_test_homes2_active(base):
         root = fx.case("t42-homes2-unwind", base)
         held = [record._opf_oplock.acquire_operation(str(root), record.VERB)]
         original_acquire = record._opf_oplock.acquire_operation
@@ -3602,7 +3581,7 @@ def t43_publish_names_removals(fx):
     lease is kept, the staging leftover is gone, and no journal home or operand is written. The reviewed
     head said "nothing written" after deleting the staging file."""
     root = fx.case("t43-homes2-publish")
-    with _self_test_homes2_active(root, fx.env):
+    with _self_test_homes2_active(root):
         req = record.parse_request(CREATE + ["--root", str(root)])
         res = record._opf_store.resolve_store(Path(os.path.abspath(str(root))))
         assert res.status == record._opf_store.RESOLVED, res
@@ -3618,7 +3597,7 @@ def t43_publish_names_removals(fx):
             operand = record._read_operand(root_fd, record._operand_rel(req, ctx))
             seam = record.claim_ids
             with patch.object(record, "claim_ids", lambda homes, high, demand, known_complete:
-                              seam(1, _clean_high(high), demand, known_complete)):
+                              seam(1, high, demand, known_complete)):
                 plan = record._PLANNERS["create"](req, ctx, operand, record._clock_now())
             for op in plan.operands:
                 op.new_raw = record._emit_bytes(op.new_model)
@@ -3661,7 +3640,7 @@ def t44_continuation_refusal_discloses(fx):
     takes it there. The reviewed head's refusal carried no report."""
     env = fx.env
     base = fx.case("t44-homes2-base")
-    with _self_test_homes2_active(base, fx.env):
+    with _self_test_homes2_active(base):
         root = fx.case("t44-homes2-continuation", base)
         assert die_holding(env, root, record.VERB) == 137, "T44 the capability holder is killed holding it"
         assert capability_records(root) == (True, True), "T44 its lease and active record are left"
@@ -3697,7 +3676,7 @@ def t45_unreported_removals_unknown(fx):
     nothing removed."""
     env = fx.env
     base = fx.case("t45-homes2-base")
-    with _self_test_homes2_active(base, fx.env):
+    with _self_test_homes2_active(base):
         root = fx.case("t45-homes2-unreported", base)
         assert die_holding(env, root, record.VERB) == 137, "T45 the capability holder is killed holding it"
         original = record._opf_oplock.acquire_operation
@@ -3811,7 +3790,7 @@ def t46_disclosures_exact(fx):
             ("T46 the overstated wording is gone", retired)
     env = fx.env
     base = fx.case("t46-homes2-base")
-    with _self_test_homes2_active(base, fx.env):
+    with _self_test_homes2_active(base):
         root = fx.case("t46-homes2-linked-staging", base)
         try:
             _opf_oplock.acquire_operation(str(root), record.VERB, recover="yes")
@@ -3872,7 +3851,7 @@ def t47_reclaimed_outcome_scoped(fx):
     had not read."""
     env = fx.env
     base = fx.case("t47-homes2-base")
-    with _self_test_homes2_active(base, fx.env):
+    with _self_test_homes2_active(base):
         root = fx.case("t47-homes2-complete", base)
         proc = child(env, root, CREATE, flip=HOMES2_CHILD_FLIP + DIE_AT_RENDER)
         assert proc.returncode == 137, ("T47 the child is killed at the render", proc.returncode,
@@ -4087,7 +4066,7 @@ def t52_publication_refused_before_intent(fx):
         assert RULE_FIX8 not in text, ("T52 the unscoped rule is gone", where)
     env = fx.env
     root = fx.case("t52-homes2-pre-intent")
-    with _self_test_homes2_active(root, fx.env):
+    with _self_test_homes2_active(root):
         req = record.parse_request(CREATE + ["--root", str(root)])
         res = record._opf_store.resolve_store(Path(os.path.abspath(str(root))))
         assert res.status == record._opf_store.RESOLVED, res
@@ -4103,7 +4082,7 @@ def t52_publication_refused_before_intent(fx):
             operand = record._read_operand(root_fd, record._operand_rel(req, ctx))
             seam = record.claim_ids
             with patch.object(record, "claim_ids", lambda homes, high, demand, known_complete:
-                              seam(1, _clean_high(high), demand, known_complete)):
+                              seam(1, high, demand, known_complete)):
                 plan = record._PLANNERS["create"](req, ctx, operand, record._clock_now())
             for op in plan.operands:
                 op.new_raw = record._emit_bytes(op.new_model)
@@ -4168,7 +4147,7 @@ def t53_projection_existence_only(fx):
     assert T53_GUARD_FIX8 not in guard, "T53 the carries-its-projection introduction is gone"
     env = fx.env
     base = fx.case("t53-homes2-base")
-    with _self_test_homes2_active(base, fx.env):
+    with _self_test_homes2_active(base):
         root = fx.case("t53-homes2-not-a-projection", base)
         proc = child(env, root, CREATE, flip=HOMES2_CHILD_FLIP + DIE_AT_RENDER)
         assert proc.returncode == 137, ("T53 the child is killed at the render", proc.returncode,
@@ -4394,7 +4373,7 @@ def t58_released_holder_staging_reported(fx):
     assert T58_RETIRED not in recover, "T58 the cleared-nothing wording is gone"
     env = fx.env
     base = fx.case("t58-homes2-base")
-    with _self_test_homes2_active(base, fx.env):
+    with _self_test_homes2_active(base):
         root = fx.case("t58-homes2-released-staging", base)
         held = [record._opf_oplock.acquire_operation(str(root), record.VERB)]
         staging = active_record(root).parent / _opf_oplock._staging_name(_opf_oplock.ACTIVE_NAME)
@@ -5295,7 +5274,7 @@ def t70_tag_after_unwind(fx):
             fired.append(True)
             raise MemoryError("synthetic removal-report allocation failure")
         return tuple(*args)
-    with _self_test_homes2_active(root, fx.env):
+    with _self_test_homes2_active(root):
         with patch.object(_opf_oplock, "_create_control_file", lease_publication_fails):
             try:
                 _opf_oplock.acquire_operation(str(root), record.VERB)
@@ -5863,6 +5842,32 @@ def flip_t77():
     return patch.object(guard, "_claim_after_release", narrow)
 
 
+# --- T79: a leftover lease tomllib refuses with RecursionError is malformed, refused as held (spec 5.7) ------
+
+def t79_recursion_lease_refused_as_held(fx):
+    """A leftover lease whose payload tomllib refuses with RecursionError (a deeply nested value, and a
+    1001-part key under the emulated 3.14.8 key-part cap) is a malformed lease like any other: recovery
+    refuses it with the held-lease refusal and its remedy, every byte untouched, never the verb backstop's
+    unexpected error."""
+    _t74_refused_leg(fx, "t79-deep-lease", _opf_store._ST_DEEP_TOML.encode("utf-8"))
+    with _opf_store._StKeyPartCap():
+        _t74_refused_leg(fx, "t79-long-key-lease", _opf_store._ST_LONG_KEY_TOML.encode("utf-8"))
+
+
+def flip_t79():
+    """The pre-fix lease parse, catching UnicodeDecodeError and ValueError only: a RecursionError escapes
+    _closed_lease_model to the record verb's backstop."""
+    original = guard._closed_lease_model
+
+    def narrow(raw):
+        try:
+            tomllib.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            pass
+        return original(raw)
+    return patch.object(guard, "_closed_lease_model", narrow)
+
+
 # --- T78: homes 2 is the declaration pair, never homes = 2 alone (spec 4.2) ---------------------------------
 
 def t78_homes2_needs_the_pair(fx):
@@ -6041,6 +6046,7 @@ TESTS = (
     ("T76-examination-lock-failure-diagnosed", t76_lock_failure_diagnosed, flip_t76),
     ("T77-release-report-every-failure", t77_report_every_failure, flip_t77),
     ("T78-homes2-declaration-pair-required", t78_homes2_needs_the_pair, (flip_t78, flip_t30)),
+    ("T79-recovery-recursion-lease-refused-as-held", t79_recursion_lease_refused_as_held, flip_t79),
 )
 
 

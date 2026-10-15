@@ -489,7 +489,9 @@ def _read_operand(root_fd, rel):
         raise RecordError("{} is not a regular file; fail-closed".format(rel))
     try:
         model = tomllib.loads(data.decode("utf-8"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError, RecursionError) as exc:
+    except (UnicodeDecodeError, ValueError, RecursionError, MemoryError) as exc:
+        # ValueError: tomllib.TOMLDecodeError and an over-long integer literal; RecursionError and MemoryError:
+        # deep nesting and a many-part key.
         raise RecordError("{} does not parse as TOML ({}); fail-closed".format(rel, exc))
     return Operand(rel, data, stat.S_IMODE(st.st_mode), model)
 
@@ -562,14 +564,15 @@ def _counter_state(ctx, counters_model):
     """(high, findings): the counters map validated with the COMPLETENESS control (every enabled type's
     namespace must carry a high-water, the C-COUNTERS rule). Empty findings is the proof that licenses
     next_id(..., known_complete=True): an absent counter can then never read as high-water 0 and reuse an
-    existing id (spec 8.2). The imported series activates with the 2.0.0 / homes = 2 declaration, so on a
-    homes-2 store the proof is the C-COUNTERS rule there too: one "imported:<NS>" row per enabled type
-    except legacy_fragment is required and preserved, and this verb never claims or rewrites one."""
+    existing id (spec 8.2). Where the manifest activates the imported series (_opf_check.imported_series_active,
+    the flag the doctor's C-COUNTERS reads), the proof is that C-COUNTERS rule too: one "imported:<NS>" row
+    per enabled type except legacy_fragment is required and preserved, and this verb never claims or
+    rewrites one."""
     return _opf_schema.validate_counters(
         counters_model, known_namespaces=frozenset(ctx.types.values()),
         optional_namespaces=frozenset(_opf_store.IMPORTER_TYPES.values()),
         imported_namespaces=(_opf_check._imported_counter_namespaces(ctx.types)
-                             if isinstance(ctx.homes, int) and ctx.homes >= 2 else None))
+                             if _opf_check.imported_series_active(ctx.manifest) else None))
 
 
 def claim_ids(homes, high, demand, known_complete):
@@ -1301,7 +1304,7 @@ def _reparse(raw, rel):
     """A fresh model parsed from bytes: it shares no object with any model the planner built."""
     try:
         return tomllib.loads(raw.decode("utf-8"))
-    except (AttributeError, UnicodeDecodeError, tomllib.TOMLDecodeError, RecursionError) as exc:
+    except (AttributeError, UnicodeDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise _postcondition_failed("{} cannot be reparsed ({})".format(rel, exc))
 
 
@@ -3059,17 +3062,30 @@ def _self_test_contexts(check, root_fd, now):
     del partial["BI"]
     ctx = ctx_of(partial)
     check("a missing enabled namespace breaks the proof", _counter_state(ctx, ctx.counters.model)[1] != [])
-    # On a homes-2 store the proof is the C-COUNTERS rule of the active imported series (spec 8.2): the
-    # zero imported rows are accepted and each is required; on homes 1 an imported row still breaks it.
+    # Where the imported series is active (the 2.0.0 / homes = 2 manifest with both tooling gates raised)
+    # the proof is the C-COUNTERS rule of that series (spec 8.2): the zero imported rows are accepted and
+    # each is required. Inactive, an imported row still breaks it: on homes 1, and on the same 2.0.0
+    # manifest with homes 2 supported but not the imported series.
     imported_full = dict(full, **{"imported:" + ns: 0 for ns in full})
-    ctx = ctx_of(imported_full)
-    ctx.homes = 2
-    check("the homes-2 proof holds with every imported row", _counter_state(ctx, ctx.counters.model)[1] == [])
-    imported_partial = dict(imported_full)
-    del imported_partial["imported:BI"]
-    ctx = ctx_of(imported_partial)
-    ctx.homes = 2
-    check("a missing imported row breaks the homes-2 proof", _counter_state(ctx, ctx.counters.model)[1] != [])
+    pair = {"opf": {"spec_version": _opf_store.HOMES2_SPEC_VERSION, "homes": 2}}
+    prev_gates = (_opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION)
+    try:
+        _opf_store.SUPPORTED_HOMES = 2
+        ctx = ctx_of(imported_full)
+        ctx.manifest = pair
+        check("an imported row breaks the proof without imported-series support",
+              _counter_state(ctx, ctx.counters.model)[1] != [])
+        _opf_store.SUPPORTED_SPEC_VERSION = _opf_store.IMPORTED_SPEC_VERSION
+        check("the active-series proof holds with every imported row",
+              _counter_state(ctx, ctx.counters.model)[1] == [])
+        imported_partial = dict(imported_full)
+        del imported_partial["imported:BI"]
+        ctx = ctx_of(imported_partial)
+        ctx.manifest = pair
+        check("a missing imported row breaks the active-series proof",
+              _counter_state(ctx, ctx.counters.model)[1] != [])
+    finally:
+        _opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION = prev_gates
     ctx = ctx_of(imported_full)
     check("an imported row breaks the homes-1 proof", _counter_state(ctx, ctx.counters.model)[1] != [])
     # Schema markers are exact integers everywhere this verb reads one (codex QA3 F1's sibling checks):

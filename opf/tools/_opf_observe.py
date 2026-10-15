@@ -829,7 +829,7 @@ def _show_toml(git, store_root, prefix, relpath, disp, notes):
         data = tomllib.loads(out.out.decode("utf-8"))
     # RecursionError too: tomllib raises it (a RuntimeError, not a ValueError) on a deeply nested
     # array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
-    except (tomllib.TOMLDecodeError, ValueError, UnicodeDecodeError, RecursionError) as exc:
+    except (tomllib.TOMLDecodeError, ValueError, UnicodeDecodeError, RecursionError, MemoryError) as exc:
         notes.append("prior: {} at HEAD is not valid TOML ({}); the prior committed snapshot is "
                      "omitted".format(disp, exc))
         return None
@@ -941,12 +941,13 @@ def _reconstruct_prior(git, store_root, machine_rel, prefix, notes):
 
 def _reconstruct_imported(git, store_root, machine_rel, prefix, manifest, types_tbl, notes):
     """The prior imported baseline {imported id: canonical body digest} for the across-time immutability of
-    the imported leaves (spec 8.3). The imported series activates with the homes-2 declaration, so it lives
-    only in a store this tooling grades as homes 2 (the 2.0.0 / homes = 2 declaration), and any other HEAD
-    manifest yields the honest empty baseline. A leaf absent from the HEAD machine-store tree contributes no
+    the imported leaves (spec 8.3). It is read only where the HEAD manifest activates the imported series
+    (_opf_check.imported_series_active, the flag the doctor's imported grading reads: the graded 2.0.0 /
+    homes = 2 declaration and this tooling's imported-series support), and any other HEAD manifest yields
+    the honest empty baseline. A leaf absent from the HEAD machine-store tree contributes no
     rows; a listed leaf that cannot be read or parsed, a non-array row list, or a row with no string id omits
     the WHOLE prior, as for the clean files. Returns the dict, or None (omit + note)."""
-    if _opf_store.homes_generation(manifest) < 2:
+    if not _opf_check.imported_series_active(manifest):
         return {}
     listing = _run_git(git, store_root, ["ls-tree", "--name-only", "HEAD:{}{}".format(prefix, machine_rel)])
     if not listing.completed or listing.rc != 0:
@@ -1075,8 +1076,8 @@ def self_test_isolated():
     extracted from a committed HEAD (records and the immutable-body digest matching the engine's own
     _record_digest over the same committed content); an unborn HEAD -> the honest empty prior; a
     non-repository directory -> the remote and prior fields OMITTED with a note while tracked reads
-    "untracked"; and the imported baseline of a homes-2 HEAD (empty unless homes 2 is supported, the
-    committed leaf rows under the engine's digest once it is, the whole prior omitted on a row with no
+    "untracked"; and the imported baseline of a homes-2 HEAD (empty unless the imported series is active,
+    the committed leaf rows under the engine's digest once it is, the whole prior omitted on a row with no
     id). Judged ONLY on gather's RETURNED structure (never by grepping git's stdout for verdicts).
     Returns 0 clean, 1 on a failed check, 2 on a harness error. When git is not on PATH at all it SKIPs
     clean, like the POSIX-signal watchdogs, since every path depends on git."""
@@ -1290,13 +1291,14 @@ def self_test_isolated():
         check("non-repo-notes", any("omitted" in n for n in notes))
 
         # 7. The imported baseline of a homes-2 HEAD (spec 8.3): a committed 2.0.0 / homes = 2 store whose
-        # only imported leaf is backlog_item's. At the shipped SUPPORTED_HOMES the HEAD grades generation 1,
-        # so the baseline is the honest empty one even with the leaf committed (red when the branch reads
-        # the declaration without tooling support). With homes 2 supported, the baseline holds exactly the
-        # leaf's row under the engine's own _record_digest, and the leaves absent from HEAD (done, worklog)
-        # contribute nothing (red when the branch is dropped, or an absent leaf is read). A committed leaf
-        # row with no string id omits the WHOLE prior with a note, as for the clean files (red when that
-        # refusal is removed).
+        # only imported leaf is backlog_item's. At the shipped constants the imported series is inactive, so
+        # the baseline is the honest empty one even with the leaf committed (red when the branch reads the
+        # declaration without tooling support); with homes 2 supported but not the imported series it stays
+        # empty (red when the branch reads the homes-2 generation alone). With both gates raised, the
+        # baseline holds exactly the leaf's row under the engine's own _record_digest, and the leaves absent
+        # from HEAD (done, worklog) contribute nothing (red when the branch is dropped, or an absent leaf is
+        # read). A committed leaf row with no string id omits the WHOLE prior with a note, as for the clean
+        # files (red when that refusal is removed).
         homes2_repo = base / "homes2"
         homes2_repo.mkdir()
         _git_setup(homes2_repo, home, "init")
@@ -1318,11 +1320,16 @@ def self_test_isolated():
         with open(str(homes2_repo / leaf_rel), "rb") as fh:
             leaf_digest = _opf_check._record_digest(tomllib.loads(fh.read().decode("utf-8"))["record"][0])
         prev_homes = _opf_store.SUPPORTED_HOMES
+        prev_ssv = _opf_store.SUPPORTED_SPEC_VERSION
         try:
             obs, notes = gather(_Res(homes2_repo, machine_rel))
             check("homes2-prior-imported-inert-at-shipped-support",
                   isinstance(obs.get("prior"), dict) and obs["prior"].get("imported") == {})
             _opf_store.SUPPORTED_HOMES = 2
+            obs, notes = gather(_Res(homes2_repo, machine_rel))
+            check("homes2-prior-imported-inert-without-imported-support",
+                  isinstance(obs.get("prior"), dict) and obs["prior"].get("imported") == {})
+            _opf_store.SUPPORTED_SPEC_VERSION = _opf_store.IMPORTED_SPEC_VERSION
             obs, notes = gather(_Res(homes2_repo, machine_rel))
             check("homes2-prior-imported-baseline",
                   isinstance(obs.get("prior"), dict)
@@ -1334,6 +1341,7 @@ def self_test_isolated():
                   "prior" not in obs and any("carries a row with no string id" in n for n in notes))
         finally:
             _opf_store.SUPPORTED_HOMES = prev_homes
+            _opf_store.SUPPORTED_SPEC_VERSION = prev_ssv
     except OSError as exc:
         print("opf observe self-test: harness error: could not build a git fixture ({}); fail-closed".format(
             exc), file=sys.stderr)
