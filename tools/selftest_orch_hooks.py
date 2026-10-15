@@ -7821,6 +7821,348 @@ def _leasehb_write_integrity_cases(tmp):
                     snap(fs.lease) == fs_before), ("warn", True, True))
 
 
+# The child of the binding exit-status vectors: it loads the hook script from the directory in
+# argv[1], makes the core's lease read raise SystemExit(int(argv[3])) after a marker proving the
+# injection fired, and runs the REAL dispatcher entry for the binding named in argv[2], so the
+# returncode is the status the hook PROCESS really ends with.
+_LEASEHB_EXIT_CHILD = (
+    "import os, sys\n"
+    "sys.path.insert(0, sys.argv[1])\n"
+    "import aiqt_hooks\n"
+    "def stop(*_a, **_k):\n"
+    "    sys.stderr.write('injected core stop fired\\n')\n"
+    "    sys.stderr.flush()\n"
+    "    raise SystemExit(int(sys.argv[3]))\n"
+    "aiqt_hooks._orch_lease_hb_load = stop\n"
+    "os._exit(aiqt_hooks.main([sys.argv[2]]))\n")
+
+
+def _leasehb_status_and_parse_cases(tmp):
+    """Component: the lease-heartbeat binding status, surfacing, group and parse vectors. (1)
+    Neither binding ever exits 2: a SystemExit raised inside the core whose status would be 2
+    (code 2, or 258, whose low byte is 2) ends the hook PROCESS with status 1, while another
+    stop keeps its own status, run through the real dispatcher in a child process. (2) A
+    written-not-durable refresh on PostToolUse is surfaced as the result's error text, never as
+    plain success, with an attempted guard-events row; when that row's append fails too, the
+    withheld-bookkeeping report rides the same text and no row lands. (3) A field write gives its
+    temporary the lease's group before the first byte (a real other group where this process can
+    set one, else the call itself is observed), and a failure to set it refuses the write with
+    nothing published. (4) The special-bit refusal is the field write's alone: the mtime touch
+    refreshes a setgid lease and keeps its mode. (5) A json field write keeps nested members
+    (one of them named like the declared field), escaped key spellings and whitespace variants
+    byte-identical, and an escaped spelling of a declared key is a duplicate, a cannot-evaluate.
+    (6) The lines reader splits on line feeds only for the remaining separators str.splitlines
+    breaks on (U+2029, a vertical tab, U+001C to U+001E, a lone carriage return), a lease whose
+    lines end with a lone carriage return is a cannot-evaluate, and a CRLF lease is still
+    refreshed with its line endings kept."""
+    base = tmp / "leasehbsp"
+    base.mkdir()
+    errno_sp = __import__("errno")
+
+    def hb(**overrides):
+        block = {"mode": "refresh", "format": "lines", "holder_field": "holder",
+                 "refresh_after_minutes": 10, "warn_after_minutes": 30}
+        block.update(overrides)
+        return block
+
+    def stop(f, sid="s1"):
+        payload = f.payload("Stop")
+        payload["session_id"] = sid
+        return aiqt_hooks.orch_lease_heartbeat_stop(payload)
+
+    def post(f, sid="s1"):
+        payload = f.payload("PostToolUse", "Bash", {"command": "true"})
+        payload["session_id"] = sid
+        return aiqt_hooks.orch_lease_heartbeat_post(payload)
+
+    def text_of(result):
+        obj = result[1]
+        return obj.get("systemMessage", "") if isinstance(obj, dict) else ""
+
+    def snap(path):
+        st = os.lstat(path)
+        return (path.read_bytes(), st.st_mtime_ns)
+
+    def fixture(name, lease_text, block, age_secs=7200, primed=True):
+        f = Fixture(base, name)
+        f.lease.write_bytes(lease_text.encode("utf-8"))
+        aged = datetime.datetime.now(datetime.timezone.utc).timestamp() - age_secs
+        os.utime(f.lease, times=(aged, aged))
+        reg_path = f.root / ".aiqt" / "orchestration.local.json"
+        reg = json.loads(reg_path.read_text(encoding="utf-8"))
+        reg["lease"] = {"path": str(f.lease), "max_age_hours": 24,
+                        "holder_is_session_id": True, "heartbeat": block}
+        reg_path.write_text(json.dumps(reg), encoding="utf-8")
+        if primed:
+            # the past-holder memory already names s1, so no holder-change save runs
+            sd = Path(aiqt_hooks._orch_state_dir_for_root(str(f.root)))
+            sd.mkdir(parents=True, exist_ok=True)
+            (sd / "lease-heartbeat.json").write_text(
+                json.dumps({"version": 1, "session_id": "s1", "ts": now_iso(1)}),
+                encoding="utf-8")
+        return f
+
+    def rows(f):
+        path = Path(aiqt_hooks._orch_state_dir_for_root(str(f.root))) / "guard-events.jsonl"
+        if not path.exists():
+            return []
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+                if line.strip()]
+
+    def decisions(f):
+        return [r.get("decision") for r in rows(f) if r.get("kind") == "lease-heartbeat"]
+
+    def patched(patches, fn):
+        # patches: (owner, attribute, replacement) triples, each restored afterwards
+        saved = [(owner, attr, getattr(owner, attr)) for owner, attr, _r in patches]
+        try:
+            for owner, attr, repl in patches:
+                setattr(owner, attr, repl)
+            return fn()
+        finally:
+            for owner, attr, orig in reversed(saved):
+                setattr(owner, attr, orig)
+
+    def is_entry(fd, path):
+        try:
+            a, b = os.fstat(fd), os.lstat(str(path))
+        except OSError:
+            return False
+        return (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)
+
+    def is_dir_of(fd, ident):
+        st_fd = os.fstat(fd)
+        return stat.S_ISDIR(st_fd.st_mode) and (st_fd.st_dev, st_fd.st_ino) == ident
+
+    def tmp_names(directory):
+        return sorted(n for n in os.listdir(str(directory)) if n.endswith(".hb.tmp"))
+
+    real_fsync = os.fsync
+    real_fchown = os.fchown
+    real_write = os.write
+
+    # --- (1) neither binding ever exits 2: a core stop whose status would be 2 ends the hook
+    # process with status 1, and any other stop keeps its own status (red where a binding
+    # catches only Exception: SystemExit(2) and SystemExit(258) both end the process with 2) ---
+    hooks_dir = os.path.dirname(os.path.abspath(aiqt_hooks.__file__))
+    ex = fixture("exitstatus", "holder: s1\nheartbeat_utc: " + now_iso(2) + "\n",
+                 hb(field="heartbeat_utc"))
+
+    def exit_status(handler, event, code):
+        payload = ex.payload(event, "Bash", {"command": "true"}) if event == "PostToolUse" \
+            else ex.payload(event)
+        try:
+            p = subprocess.run([sys.executable, "-I", "-B", "-c", _LEASEHB_EXIT_CHILD, hooks_dir,
+                                handler, str(code)], input=json.dumps(payload), cwd=str(ex.root),
+                               capture_output=True, text=True, timeout=60)
+        except subprocess.TimeoutExpired:
+            return ("child timed out", False)
+        return (p.returncode, "injected core stop fired" in p.stderr)
+    for cid, handler, event in (
+            ("leasehb/post-binding-never-exits-2", "orch_lease_heartbeat_post", "PostToolUse"),
+            ("leasehb/stop-binding-never-exits-2", "orch_lease_heartbeat_stop", "Stop")):
+        check(cid, [exit_status(handler, event, code) for code in (2, 258, 3)],
+              [(1, True), (1, True), (3, True)])
+
+    # --- (2) a written-not-durable refresh on PostToolUse is the result's error text, never
+    # plain success (red where that event returns a clean allow), with an attempted row; a
+    # failed row append is reported through the withheld-bookkeeping text and lands no row ---
+    def dir_fault(f):
+        dst = os.stat(str(f.root))
+
+        def fsync(fd):
+            if is_dir_of(fd, (dst.st_dev, dst.st_ino)):
+                raise OSError(errno_sp.EIO, "injected directory fsync fault")
+            return real_fsync(fd)
+        return fsync
+    pd = fixture("postnotdurable", "holder: s1\nheartbeat_utc: " + now_iso(0.25) + "\n",
+                 hb(field="heartbeat_utc"), age_secs=900)
+    pd_before = pd.lease.read_bytes()
+    result = patched([(os, "fsync", dir_fault(pd))], lambda: post(pd))
+    err = result[2] if isinstance(result[2], str) else ""
+    check("leasehb/post-dir-fsync-not-durable-error-text",
+          (result[0], result[1], "WAS replaced and verified, but it is not durable" in err,
+           "injected directory fsync fault" in err, pd.lease.read_bytes() != pd_before,
+           decisions(pd)),
+          (0, None, True, True, True, ["written-not-durable"]))
+    pr = fixture("postnotdurablerow", "holder: s1\nheartbeat_utc: " + now_iso(0.25) + "\n",
+                 hb(field="heartbeat_utc"), age_secs=900)
+    pr_before = pr.lease.read_bytes()
+
+    def row_fault(fd, view):
+        raise OSError(errno_sp.EIO, "injected row write fault")
+    result = patched([(os, "fsync", dir_fault(pr)),
+                      (aiqt_hooks, "_orch_lease_hb_row_write", row_fault)], lambda: post(pr))
+    err = result[2] if isinstance(result[2], str) else ""
+    check("leasehb/post-dir-fsync-not-durable-row-fault-withheld",
+          (result[0], result[1], "WAS replaced and verified, but it is not durable" in err,
+           "bookkeeping withheld (the bookkeeping append failed ([Errno {}] injected row write "
+           "fault))".format(errno_sp.EIO) in err, pr.lease.read_bytes() != pr_before, rows(pr)),
+          (0, None, True, True, True, []))
+
+    # --- (3) the temporary takes the lease's group before its first byte (red where the
+    # temporary keeps the directory's default group: no group change is made), and a failure
+    # to set it is the named no-write refusal with nothing published ---
+    gp = fixture("tmpgroup", "holder: s1\nheartbeat_utc: " + now_iso(0.25) + "\n",
+                 hb(field="heartbeat_utc"), age_secs=900)
+    gp_probe = gp.root / "group-probe.txt"
+    gp_probe.write_bytes(b"")
+    default_gid = os.stat(str(gp_probe)).st_gid
+    gp_probe.unlink()
+    for other in sorted(set(os.getgroups()) | {os.getegid()}):
+        if other != default_gid:
+            # a group this process can set: the lease then really differs from the default
+            try:
+                os.chown(str(gp.lease), -1, other)
+                break
+            except OSError:
+                continue
+    lease_gid = os.stat(str(gp.lease)).st_gid
+    gp_tmp = gp.root / ".forced.tmpgroup.hb.tmp"
+    gp_events = []
+
+    def gp_fchown(fd, uid, gid):
+        if is_entry(fd, gp_tmp):
+            gp_events.append(("fchown", uid, gid))
+        return real_fchown(fd, uid, gid)
+
+    def gp_write(fd, data):
+        if is_entry(fd, gp_tmp):
+            gp_events.append(("write",))
+        return real_write(fd, data)
+    gp_before = gp.lease.read_bytes()
+    result = patched([(aiqt_hooks, "_orch_lease_hb_tmp_name", lambda name_arg: gp_tmp.name),
+                      (os, "fchown", gp_fchown), (os, "write", gp_write)], lambda: stop(gp))
+    check("leasehb/field-tmp-takes-lease-group",
+          (gp_events[:2], _verdict(result), gp.lease.read_bytes() != gp_before,
+           os.stat(str(gp.lease)).st_gid == lease_gid, tmp_names(gp.root)),
+          ([("fchown", -1, lease_gid), ("write",)], "allow", True, True, []))
+    gf = fixture("tmpgroupfault", "holder: s1\nheartbeat_utc: " + now_iso(0.25) + "\n",
+                 hb(field="heartbeat_utc"), age_secs=900)
+    gf_tmp = gf.root / ".forced.tmpgroupfault.hb.tmp"
+    gf_fired = []
+
+    def gf_fchown(fd, uid, gid):
+        if is_entry(fd, gf_tmp):
+            gf_fired.append(gid)
+            raise PermissionError(errno_sp.EPERM, "injected group change fault")
+        return real_fchown(fd, uid, gid)
+    gf_before = snap(gf.lease)
+    result = patched([(aiqt_hooks, "_orch_lease_hb_tmp_name", lambda name_arg: gf_tmp.name),
+                      (os, "fchown", gf_fchown)], lambda: stop(gf))
+    check("leasehb/field-tmp-group-fault-refused",
+          (len(gf_fired), _verdict(result),
+           "the temporary file cannot be given the lease's group ([Errno {}] injected group "
+           "change fault)".format(errno_sp.EPERM) in text_of(result),
+           "the lease is unchanged" in text_of(result), snap(gf.lease) == gf_before,
+           tmp_names(gf.root), decisions(gf)),
+          (1, "warn", True, True, True, [], ["no-write"]))
+
+    # --- (4) the special-bit refusal is the field write's alone: the mtime touch refreshes a
+    # setgid lease and leaves its mode as it was ---
+    sm = fixture("setgidmtime", "holder: s1\n", hb(), age_secs=900)
+    os.chmod(str(sm.lease), 0o2640)
+    sm_mode = stat.S_IMODE(os.lstat(str(sm.lease)).st_mode)
+    sm_before = snap(sm.lease)
+    result = stop(sm)
+    check("leasehb/mtime-setgid-lease-touched-mode-kept",
+          (sm_mode, _verdict(result), sm.lease.read_bytes() == sm_before[0],
+           os.lstat(str(sm.lease)).st_mtime_ns > sm_before[1],
+           stat.S_IMODE(os.lstat(str(sm.lease)).st_mode)),
+          (0o2640, "allow", True, True, 0o2640))
+
+    # --- (5) a json field write keeps nested members, escaped key spellings and whitespace
+    # variants byte-identical (red on a re-serializing writer, and on a textual writer that
+    # rewrites the first member named like the field, a nested one included) ---
+    def json_case(name, template):
+        old_hb = now_iso(2)
+        text = template.replace("OLD", old_hb)
+        fj = fixture(name, text, hb(format="json", field="heartbeat_utc"))
+        result_j = stop(fj)
+        new_text = fj.lease.read_bytes().decode("utf-8")
+        try:
+            new_hb = json.loads(new_text)["heartbeat_utc"]
+        except (ValueError, KeyError, TypeError):
+            return ("unparsed", text_of(result_j))
+        return (new_hb != old_hb, new_text == text.replace(old_hb, new_hb))
+    check("leasehb/json-nested-same-name-member-kept",
+          json_case("jsonnested",
+                    '{"meta": {"heartbeat_utc": "2020-01-01T00:00:00Z", '
+                    '"list": [1,{"heartbeat_utc":"x"}]},  "holder": "s1", '
+                    '"heartbeat_utc": "OLD"}\n'),
+          (True, True))
+    check("leasehb/json-escaped-keys-kept",
+          json_case("jsonescaped",
+                    '{"hold\\u0065r": "s1", "heartbeat\\u005futc": "OLD", '
+                    '"n\\u00e4me": "caf\\u00e9", "a\\"b": 1}\n'),
+          (True, True))
+    dup_text = ('{"holder": "s1", "heartbeat_utc": "' + now_iso(2) + '", '
+                '"heartbeat\\u005futc": "' + now_iso(2) + '"}\n')
+    fd_dup = fixture("jsonescapeddup", dup_text, hb(format="json", field="heartbeat_utc"))
+    dup_before = snap(fd_dup.lease)
+    result = stop(fd_dup)
+    check("leasehb/json-escaped-duplicate-key-cannot-evaluate",
+          (_verdict(result), "cannot be evaluated (the lease does not parse as json" in
+           text_of(result), snap(fd_dup.lease) == dup_before),
+          ("warn", True, True))
+    check("leasehb/json-whitespace-variants-kept",
+          (json_case("jsoncompact", '{"holder":"s1","heartbeat_utc":"OLD","n":[1,2,{"k":null}]}'),
+           json_case("jsontabscrlf",
+                     '{\r\n\t"holder"\t:\t"s1" ,\r\n\t"heartbeat_utc" :  "OLD"\r\n}\r\n'),
+           json_case("jsonouterws", '\n \t{ "holder" : "s1" , "heartbeat_utc" : "OLD" }\n\n')),
+          ((True, True), (True, True), (True, True)))
+
+    # --- (6) the remaining separators str.splitlines breaks on stay inside their line (red on a
+    # splitlines reader: the phantom holder line proved the holder and the lease was touched) ---
+    for cid, name, sep in (("leasehb/lines-u2029-no-phantom-holder", "sepu2029", "\u2029"),
+                           ("leasehb/lines-vt-no-phantom-holder", "sepvt", "\x0b"),
+                           ("leasehb/lines-fs-no-phantom-holder", "sepfs", "\x1c"),
+                           ("leasehb/lines-gs-no-phantom-holder", "sepgs", "\x1d"),
+                           ("leasehb/lines-rs-no-phantom-holder", "seprs", "\x1e"),
+                           ("leasehb/lines-lone-cr-no-phantom-holder", "sepcr", "\r")):
+        fs = fixture(name, "note: x" + sep + "holder: s1\n", hb(), primed=False)
+        fs_before = snap(fs.lease)
+        result = stop(fs)
+        check(cid, (_verdict(result), "appears 0 times" in text_of(result),
+                    snap(fs.lease) == fs_before), ("warn", True, True))
+
+    # a lease whose lines end with a lone carriage return is ONE physical line: a cannot-evaluate
+    # on Stop and nothing written on either event, wherever the holder line sits (red where a
+    # holder line that comes first reads as a foreign holder, in silence)
+    lone = {}
+    for tag, lone_text, lone_block in (
+            ("first", "holder: s1\rheartbeat_utc: " + now_iso(2) + "\r",
+             hb(field="heartbeat_utc")),
+            ("single", "holder: s1\r", hb()),
+            ("later", "heartbeat_utc: " + now_iso(2) + "\rholder: s1\r",
+             hb(field="heartbeat_utc"))):
+        fc = fixture("lonecr" + tag, lone_text, lone_block)
+        fc_before = snap(fc.lease)
+        stop_text = text_of(stop(fc))
+        post_result = post(fc)
+        lone[tag] = ("the declared lease cannot be evaluated" in stop_text,
+                     "the declared holder field's value carries a carriage return" in stop_text,
+                     "the declared holder field appears 0 times" in stop_text,
+                     _verdict(post_result), snap(fc.lease) == fc_before)
+    check("leasehb/lines-lone-cr-lease-cannot-evaluate", lone,
+          {"first": (True, True, False, "allow", True),
+           "single": (True, True, False, "allow", True),
+           "later": (True, False, True, "allow", True)})
+
+    # a CRLF lease is still refreshed, its line endings and other lines byte-identical (red on
+    # a carriage-return rule that refuses a carriage return anywhere in a lines lease)
+    crlf_old = now_iso(0.25)
+    crlf_text = "holder: s1\r\nheartbeat_utc: " + crlf_old + "\r\nnote: kept\r\n"
+    fl = fixture("crlflease", crlf_text, hb(field="heartbeat_utc"), age_secs=900)
+    result = stop(fl)
+    crlf_new = fl.lease.read_bytes().decode("utf-8")
+    crlf_lines = crlf_new.split("\r\n")
+    crlf_hb = crlf_lines[1][len("heartbeat_utc: "):] if len(crlf_lines) > 1 else ""
+    check("leasehb/lines-crlf-lease-refreshed-endings-kept",
+          (_verdict(result), crlf_hb != crlf_old, crlf_new == crlf_text.replace(crlf_old, crlf_hb)),
+          ("allow", True, True))
+
+
 def main(report_path=None):
     if report_path is not None:
         # The execution report is finalized at interpreter exit, after this run's cleanup
@@ -12385,6 +12727,7 @@ def _main_isolated(report_path=None):
         _leasehb_cases(tmp)
         _leasehb_fix2_cases(tmp)
         _leasehb_write_integrity_cases(tmp)
+        _leasehb_status_and_parse_cases(tmp)
         _rdp_cases(tmp)
     finally:
         aiqt_hooks._orch_dirfd_has_registry = saved_probe

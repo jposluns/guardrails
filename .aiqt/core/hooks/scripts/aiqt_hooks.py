@@ -16043,8 +16043,9 @@ def orch_resume_barrier(data):
 # absent, unreadable, symlinked anywhere on its path, not a regular file, multi-link, foreign-owned,
 # oversized, not strict UTF-8, unparsable, duplicate-keyed, missing a declared field,
 # state-inactive, future-dated, stale, or too close to staleness is NEVER created, seized, revived,
-# renewed or rewritten; it is surfaced as a named warning on Stop (exit 0, never a block) and a
-# guard-events row. No bookkeeping write may land in the lease either: the past-holder memory and
+# renewed or rewritten; it is surfaced as a named warning on Stop (exit 0, never a block) and an
+# attempted (best-effort) guard-events row. No bookkeeping write may land in the lease either: the
+# past-holder memory and
 # the guard-events destinations are proven DISTINCT from the declared lease (by resolved path, by
 # inode and by parent identity) and carried, with that proof, as ONE per-event holder EVERY
 # bookkeeping writer consumes (the row append, the event append, the memory save, the tracking
@@ -16747,7 +16748,10 @@ def _orch_lease_hb_parse(text, cfg, keys=None):
     holder, and where declared state and hb (the raw heartbeat value; for the lines format also
     hb_line, the byte-exact pieces of its one line, so a refresh changes only the value). A
     declared field that is absent or appears more than once is a cannot-evaluate (ambiguity never
-    authorizes a write), and in json the top level must be an object with no duplicate key (the
+    authorizes a write), and so is a lines-format declared value carrying a carriage return (a
+    lease whose lines end with a lone carriage return is one physical line, _orch_lease_hb_split,
+    so its declared value runs on into the rest of the lease), and in json the top level must be
+    an object with no duplicate key (the
     strict duplicate-rejecting hook) and string declared fields. Prose and other lines are allowed
     around a lines-format lease, so it may share a file with the operating-mode record; the
     declaration validation already refuses Operating-mode as a field."""
@@ -16762,6 +16766,13 @@ def _orch_lease_hb_parse(text, cfg, keys=None):
             if len(found) != 1:
                 return ("cannot", "the declared {} field appears {} times (exactly once required)"
                         .format(name, len(found)))
+            if "\r" in found[0][2]:
+                # a carriage return ends no line unless a line feed follows it, so a lease whose
+                # lines end with a lone carriage return is ONE physical line and a declared value
+                # runs on into the rest of it: a cannot-evaluate, never a holder that silently
+                # reads as foreign
+                return ("cannot", "the declared {} field's value carries a carriage return (a "
+                        "lone carriage return does not end a line)".format(name))
             info[name] = found[0][2]
             if name == "hb":
                 info["hb_line"] = found[0]
@@ -18051,13 +18062,16 @@ def _orch_lease_hb_write_field(root, cfg, session_id, now, path, parent, name, s
                                suffix, memory, holder=None):
     """The heartbeat FIELD write (refresh mode with a declared field): refuse a lease carrying a
     setuid, setgid or sticky bit (a replace cannot carry those over faithfully: the kernel may
-    clear a setgid bit on the mode change, and the temporary's group is the one a new file gets
-    in that directory, not necessarily the lease's), build the new bytes with the event's own
-    clock read, changing ONLY the declared
+    clear a setgid bit on the mode change; this refusal is the field write's alone, the mtime
+    form touches such a lease and changes no permission bit), build the new bytes with the
+    event's own clock read, changing ONLY the declared
     field's value (_orch_lease_hb_render, whose cannot-evaluate is the named no-write refusal),
     create an exclusive temporary file beside the lease (a random name with
     O_EXCL|O_NOFOLLOW, so nothing planted at a temporary-like name is ever opened or replaced),
-    learn its identity on the descriptor (_orch_lease_hb_field_tmp_fstat), carry over the
+    learn its identity on the descriptor (_orch_lease_hb_field_tmp_fstat), give it the lease's
+    group (os.fchown on the descriptor: a new file gets the directory's default group, which
+    need not be the lease's, and a failure is the named no-write refusal with nothing
+    published), carry over the
     original permission bits in full, write and fsync it, re-check the lease's identity
     against the proof fstat (dev, ino, mtime_ns, size), replace through the held directory
     descriptor, fsync that directory, and verify. Returns None, ('no-write', detail) with the
@@ -18131,6 +18145,7 @@ def _orch_lease_hb_write_field(root, cfg, session_id, now, path, parent, name, s
         return ("no-write", "the temporary file cannot be created ({})".format(exc))
     failure = None
     tmp_id = None
+    step = "checked"
     published = False
     interrupted = False
     first_stop = False
@@ -18141,14 +18156,20 @@ def _orch_lease_hb_write_field(root, cfg, session_id, now, path, parent, name, s
             # unlink after it keeps the window _orch_lease_hb_save_cleanup states)
             tst = _orch_lease_hb_field_tmp_fstat(tmp_fd)
             tmp_id = (tst.st_dev, tst.st_ino)
+            step = "given the lease's group"
+            # the temporary got the group a new file gets in this directory, which need not be
+            # the lease's: it takes the lease's group BEFORE the mode change and the first byte,
+            # so the carried-over group bits never grant another group access, and a failure
+            # refuses the write with nothing published
+            os.fchown(tmp_fd, -1, st.st_gid)
+            step = "written"
             os.fchmod(tmp_fd, mode)  # in full: a special bit was refused above
             view = memoryview(blob)
             while view:
                 view = view[os.write(tmp_fd, view):]
             os.fsync(tmp_fd)
         except OSError as exc:
-            failure = "the temporary file cannot be {} ({})".format(
-                "written" if tmp_id is not None else "checked", exc)
+            failure = "the temporary file cannot be {} ({})".format(step, exc)
         finally:
             try:
                 os.close(tmp_fd)  # once: after a failed close the number may already be reused
@@ -18302,8 +18323,10 @@ def _orch_lease_hb_refresh(root, cfg, session_id, now, path, parent, name, leaf,
 
 def _orch_lease_hb_judge(root, cfg, lease, session_id, event, now, path, parent, leaf, name,
                          memory, holder):
-    """The decision table over an OPEN lease (every row's fault direction is no-write; only the
-    Stop binding surfaces the returned text, and a refusal that persists unchanged is recorded
+    """The decision table over an OPEN lease (every row's fault direction is no-write; the
+    returned text is the Stop banner, and on PostToolUse only a written-not-durable refresh
+    returns text, which that binding carries as the result's error text; a refusal that
+    persists unchanged is recorded
     once per state change, never per call: _orch_lease_hb_row_once). Age is the OLDER of the
     mtime age and the declared heartbeat field's age, so a rewrite that bumps only the mtime
     cannot hide a stale recorded liveness value (the incident class). In refresh mode any declared
@@ -18571,14 +18594,16 @@ def _orch_lease_hb_judge(root, cfg, lease, session_id, event, now, path, parent,
                             "the lease by hand.".format(detail))
                 return None
             if kind == "written-not-durable":
-                # a verified write HAPPENED but may not survive a crash: recorded per
-                # occurrence and surfaced on Stop as a warning, never as plain success
+                # a verified write HAPPENED but may not survive a crash: a guard-events row is
+                # ATTEMPTED per occurrence (best-effort: a failed append is reported through
+                # the withheld-bookkeeping warning, so no row may land) and the warning is
+                # returned on BOTH events, never plain success: the Stop banner, or on
+                # PostToolUse the result's error text (the next Stop sees a fresh lease and
+                # would otherwise say nothing about this write)
                 _orch_lease_hb_event(holder, kind, detail)
-                if event == "Stop":
-                    return ("AIQT guardrail (lease heartbeat): the heartbeat WAS replaced and "
-                            "verified, but it is not durable ({}). A write happened; check the "
-                            "filesystem holding the lease.".format(detail))
-                return None
+                return ("AIQT guardrail (lease heartbeat): the heartbeat WAS replaced and "
+                        "verified, but it is not durable ({}). A write happened; check the "
+                        "filesystem holding the lease.".format(detail))
             _orch_lease_hb_row_once(holder, memory, now, kind, detail, detail, lease_key)
             if event == "Stop":
                 return ("AIQT guardrail (lease heartbeat): the heartbeat refresh was refused "
@@ -18663,7 +18688,9 @@ def _orch_lease_hb_event_cleanup(holder, *fds):
 
 def _orch_lease_heartbeat(data, event, holder=None):
     """The ONE lease-heartbeat core behind orch_lease_heartbeat_post and orch_lease_heartbeat_stop:
-    returns the Stop warning text, or None when there is nothing to surface. Scoped exactly like
+    returns the warning text, or None when there is nothing to surface (every warning is
+    returned on Stop only, except a written-not-durable refresh, returned on PostToolUse too,
+    where the binding carries it as the result's error text). Scoped exactly like
     the other registry components (silent with no root, no ok registry, or no declaration; silent
     too with no usable payload session_id, because no write and no holder-aimed message can be
     proven without one). The REAL per-tool-call cost: before any lease check, EVERY event pays the
@@ -18859,21 +18886,44 @@ def _orch_lease_heartbeat(data, event, holder=None):
         _orch_lease_hb_event_cleanup(holder, leaf, parent)
 
 
+def _orch_lease_hb_stop_exits_2(exc):
+    """True when a SystemExit leaving a lease-heartbeat binding would end the hook process with
+    status 2, the platform's blocking status: an integer code congruent to 2 modulo 256 within
+    the signed 64-bit range the interpreter converts the code through (the parent sees only the
+    low byte of the exit status, so a code of 258 ends the process with status 2 as well, while
+    a code outside that range ends it with status 255). Each binding re-raises such a stop as
+    SystemExit(1), so neither binding ever exits 2; every other stop propagates unchanged."""
+    code = exc.code
+    return isinstance(code, int) and -(1 << 63) <= code < (1 << 63) and code % 256 == 2
+
+
 def orch_lease_heartbeat_post(data):
     """cnclse/recncl, PostToolUse (warn-only keeper, never blocks): run the lease-heartbeat core
     after every tool call and stay SILENT on stdout (no systemMessage: guard-events rows, and
-    the result's error text carrying any withheld-bookkeeping report to the dispatcher's stderr,
-    are the only traces; the Stop binding owns the message). The binding contains the core's own
-    faults: without this catch a core fault would surface the dispatcher's fail-open
-    systemMessage on EVERY tool call."""
-    holder = _orch_lease_hb_holder()
+    the result's error text, the dispatcher's stderr, are the only traces; the Stop binding
+    owns the message). The error text carries any withheld-bookkeeping report and the one
+    warning the core returns on this event, a written-not-durable refresh (published and
+    verified, but its directory fsync failed), so that write is never reported as plain
+    success: the next Stop sees a fresh lease and would say nothing. The binding contains the
+    core's own faults: without this catch a core fault would surface the dispatcher's fail-open
+    systemMessage on EVERY tool call. A stop raised inside the core still propagates, but one
+    that would end the process with status 2 is re-raised as SystemExit(1)
+    (_orch_lease_hb_stop_exits_2), so this binding never exits 2."""
     try:
-        _orch_lease_heartbeat(data, "PostToolUse", holder)
-    except Exception as exc:
-        _orch_lease_hb_crash_row(holder, exc)
-    withheld = _orch_lease_hb_withheld_text(holder, "PostToolUse")
-    if withheld:
-        return (0, None, withheld)  # exit 0, nothing structured: the report, never a block
+        holder = _orch_lease_hb_holder()
+        notice = None
+        try:
+            notice = _orch_lease_heartbeat(data, "PostToolUse", holder)
+        except Exception as exc:
+            _orch_lease_hb_crash_row(holder, exc)
+        withheld = _orch_lease_hb_withheld_text(holder, "PostToolUse")
+    except SystemExit as exc:
+        if _orch_lease_hb_stop_exits_2(exc):
+            raise SystemExit(1) from exc
+        raise
+    report = " ".join(text for text in (notice, withheld) if text)
+    if report:
+        return (0, None, report)  # exit 0, nothing structured: the report, never a block
     return _allow()
 
 
@@ -18883,14 +18933,21 @@ def orch_lease_heartbeat_stop(data):
     holds, held, or has misconfigured). A withheld-bookkeeping report rides the hook result
     too: appended to the banner where one is surfaced, else carried as the result's error text
     (the dispatcher's stderr). It covers a turn that made no tool calls, never blocks, and
-    never alters orch_stop_guard's decision."""
-    message = None
-    holder = _orch_lease_hb_holder()
+    never alters orch_stop_guard's decision. A stop raised inside the core still propagates,
+    but one that would end the process with status 2 is re-raised as SystemExit(1)
+    (_orch_lease_hb_stop_exits_2), so this binding never exits 2."""
     try:
-        message = _orch_lease_heartbeat(data, "Stop", holder)
-    except Exception as exc:
-        _orch_lease_hb_crash_row(holder, exc)
-    withheld = _orch_lease_hb_withheld_text(holder, "Stop")
+        message = None
+        holder = _orch_lease_hb_holder()
+        try:
+            message = _orch_lease_heartbeat(data, "Stop", holder)
+        except Exception as exc:
+            _orch_lease_hb_crash_row(holder, exc)
+        withheld = _orch_lease_hb_withheld_text(holder, "Stop")
+    except SystemExit as exc:
+        if _orch_lease_hb_stop_exits_2(exc):
+            raise SystemExit(1) from exc
+        raise
     if message:
         return _stop_warn(message if not withheld else message + " " + withheld)
     if withheld:

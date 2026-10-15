@@ -359,8 +359,11 @@ descriptor withholds).
   `refresh`. `format` is `lines` (one `key: value`
   per PHYSICAL line, which ends only at a line feed, a carriage return directly before it being part
   of the line ending, so a Unicode separator such as U+2028, a form feed or a lone carriage return
-  inside a value never starts a new line; prose and other lines are allowed, so the lease may share a
-  file with the mode record) or `json` (a top-level object, duplicate keys rejected). `holder_field`
+  inside a value never starts a new line, and a declared field's value carrying a carriage return
+  is a cannot-evaluate: a lease whose lines end with a lone carriage return is ONE physical line,
+  so it is a cannot-evaluate, never a holder read as foreign; prose and other lines are allowed, so
+  the lease may share a file with the mode record) or `json` (a top-level object, duplicate keys
+  rejected). `holder_field`
   names the holder;
   `field` (optional) names the heartbeat timestamp, a UTC time ending `Z` or `+00:00`; `state_field`
   and `active_values` (together or not at all) gate on a lease state; `refresh_after_minutes` <
@@ -422,12 +425,18 @@ descriptor withholds).
   (the quick mtime path, which a declared `field` disables: a fresh mtime cannot prove the
   field's own recorded time fresh, so there the bounded walk-and-read runs on each call).
   In `refresh` mode a due refresh touches the mtime (no declared `field`: a clock read on
-  the open descriptor, no content change) or rewrites ONLY the declared field's value (refused,
-  with nothing written, for a lease carrying a setuid, setgid or sticky bit, which a replace cannot
-  carry over faithfully; otherwise an exclusive
-  temporary file beside the lease, the original permission bits in full, fsync, an identity
-  re-check against the proof fstat, a descriptor-anchored replace, a directory fsync whose failure
-  is reported on Stop as a write that HAPPENED but may not be durable, never as plain success, and
+  the open descriptor, no content change, and no permission bit changed, so the touch still runs
+  on a lease carrying a setuid, setgid or sticky bit) or rewrites ONLY the declared field's value
+  (the field write alone is refused, with nothing written, for a lease carrying a setuid, setgid
+  or sticky bit, which a replace cannot carry over faithfully; otherwise an exclusive
+  temporary file beside the lease, given the lease's group before its first byte (a new file
+  gets the directory's default group, which need not be the lease's; a failure to set it is the
+  named no-write refusal, with nothing published), the original permission bits in full, fsync,
+  an identity re-check against the proof fstat, a descriptor-anchored replace, a directory fsync
+  whose failure is a write that HAPPENED but may not be durable, never plain success: reported
+  as the Stop warning, or on PostToolUse as the result's error text, with an attempted
+  guard-events row (best-effort: a failed append is reported through the withheld-bookkeeping
+  warning instead), and
   a post-replace verification whose failure is reported as a write that HAPPENED; the failure
   cleanup runs from a finally for ANY exception class and unlinks the temporary name only when
   one stat just before the unlink finds it still carrying the inode the write created, so an
@@ -563,16 +572,21 @@ descriptor withholds).
   record on exactly those branches), while a core fault inside the judged table records its one
   crash row from within the critical section, before descriptors or lock are released, on the
   branches where the proven descriptor is held. Every
-  other cannot-evaluate is a named no-write warning on Stop plus a guard-events row, never a
+  other cannot-evaluate is a named no-write warning on Stop plus an attempted (best-effort)
+  guard-events row, never a
   write; a refusal that persists unchanged is recorded once per state change,
   never once per call, and its git tracking probe is backed off until the lease identity
   changes or the backoff elapses.
 - Fail direction. Neither binding ever exits 2, blocks or asks: each returns exit 0, and only a
   stop raised inside the core (an interrupt or an exit, not an `Exception`) propagates past the
-  binding, where it can end the hook process with a non-zero status; PostToolUse surfaces no
-  message (a withheld or failed bookkeeping write rides the result's error text to the
-  dispatcher's stderr); the bindings catch the core's own faults (a fault inside the judged
-  table becomes one guard-events row ONLY on the branches where the proven descriptor is held,
+  binding, where it can end the hook process with another non-zero status, never 2: each
+  binding re-raises an exit whose status would be 2 (an integer code congruent to 2 modulo 256
+  within the signed 64-bit range the interpreter converts it through, so 258 as well) as an exit
+  with status 1, and every other stop propagates unchanged; PostToolUse surfaces no
+  message (a withheld or failed bookkeeping write, and a written-not-durable refresh, ride the
+  result's error text to the dispatcher's stderr); the bindings catch the core's own faults (a
+  fault inside the judged table becomes one guard-events row ONLY on the branches where the
+  proven descriptor is held,
   recorded while it is held; on a busy or faulted lock the table runs with no held descriptor,
   so a fault there records no row and joins the Stop-only deferrals, dropped with a
   PostToolUse event's holder; a fault outside the table records no row and is surfaced AS the
