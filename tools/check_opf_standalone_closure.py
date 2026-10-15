@@ -104,8 +104,9 @@ _SUBSET = [
 # alone, blocked-isolation, is 31 fixture calls of about 186 s each), and their sum approaches the CI job limit
 # on its own, so no bound on that leg can honour it and still fit the job. Its bound is therefore a deliberate
 # deadline sized from its known runs; when it trips, _report names the bound, never a failure of the leg.
-# Each ceiling below is whole seconds, rounded up, from one of three sources, named on its row: a serial
-# isolated run on 2026-10-11 (1-minute load average 8.8 to 12.9 on 24 CPUs, under nice -n 10); the
+# Each ceiling below is whole seconds, rounded up, from one of the sources named on its row: a serial
+# isolated run on 2026-10-11 (1-minute load average 8.8 to 12.9 on 24 CPUs, under nice -n 10), or, for a
+# leg added after it, a serial run on 2026-10-14 (not under nice; its load average on the row); the
 # 2026-10-11 loaded-host record of the two legs the former bound killed; or, for a leg that run could not
 # measure (its fixtures refuse a scratch directory below an unreadable ancestor), the former 600 s bound,
 # which that record shows the leg finishing under (an inference, not a measurement: re-measure and tighten).
@@ -126,6 +127,7 @@ _LEG_CEILING_S = {
     "opf-adopt-complete-selftest": 600,  # not measured 2026-10-11; under the former 600 s bound (inferred)
     "opf-pack-manifest-selftest": 18,  # measured 2026-10-11: 17.3 s
     "opf-adopt-observe-selftest": 600,  # not measured 2026-10-11; under the former 600 s bound (inferred)
+    "opf-adopt-discover-selftest": 1,  # measured 2026-10-14: 0.4 s (load average 17.1 on 24 CPUs)
     "opf-prompt-pack-selftest": 1,  # measured 2026-10-11: 0.7 s
     "opf-prompt-pack": 1,  # measured 2026-10-11: 0.1 s
     "opf-oplock-selftest": 600,  # not measured 2026-10-11; under the former 600 s bound (inferred)

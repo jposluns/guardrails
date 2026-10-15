@@ -328,14 +328,35 @@ ALLOWLIST = (
      _MUTANT + " (each _CLOSE_SWEEP_REVERTS sweep revert, matched exactly once)"),
     ("tools/pin.py", "_recover_close_vectors", "code", 1,
      _MUTANT + " (the recover close reverts)"),
-    ("tools/selftest_git_fixture_env.py", "_system_pin_checks", "code", 1,
+    ("tools/selftest_git_fixture_env_core.py", "_system_pin_checks", "code", 1,
      "self-test mutant: compiles an AST of the repository's own tools/_git_fixture_env.py"
      " source (read from _git_fixture_env.__file__), its lifecycle PATH installation with one"
      " parsed literal replacement, into a fresh module; no external input"),
-    ("tools/selftest_git_fixture_env.py", "_manifest_extra_setup_failures", "code", 1,
+    ("tools/selftest_git_fixture_env_core.py", "_manifest_extra_setup_failures", "code", 1,
      "self-test probe: runs AST statements lifted from the repository's own"
      " tools/gen_manifest.py source (its fixture setup) against a stubbed git; no external"
      " input"),
+    ("tools/selftest_git_fixture_env_core.py", "_member_close_controls", "code", 2,
+     "self-test oracle probes: types.FunctionType wraps the code object compiled from a"
+     " self-test literal def written to a fixture file, so the lock-site and sweep-site oracles"
+     " parse that def's source at its recorded file and line; the function is never called; no"
+     " external input"),
+    ("tools/selftest_git_fixture_env_core.py", "_timeout_cleanup_order_controls", "shell", 1,
+     _SAVED),
+    ("tools/selftest_git_fixture_env_core.py", "_member_close_controls", "shell", 1, _SAVED),
+    ("tools/selftest_git_fixture_env_core.py", "_member_timeout_controls", "shell", 1, _SAVED),
+    ("tools/check_python_floor.py", "_tomllib_catches", "code", 1,
+     "static analysis: getattr(builtins, name) resolves an except-clause name in a scanned"
+     " file's AST and accepts it only as an exception class for issubclass; never called"),
+    ("tools/check_python_floor.py", "_load_path", "code", 1,
+     "self-test probe: exec_module of the repository's own NEWTAB contract script (a fixture"
+     " copy of .github/check_newtab_contract.py), opf/enforcement/claude/pretooluse_deny.py or"
+     " tools/_gen_common.py, the equivalent of an import; no external input"),
+    ("opf/tools/_opf_adopt_discover.py",
+     "self_test.DiscoveryTests.test_change_during_discovery_is_cannot_evaluate.os_hook", "shell", 1,
+     "self-test fault injector: mock.patch.object(os, attribute) where every caller passes the"
+     " literal open or read, wrapped to fire one discovery-time edit and then delegate to the"
+     " real function; never runs a shell"),
     ("opf/tools/_opf_adopt_observe.py", "_cancellation_self_test", "code", 2,
      _MUTANT + " (the descriptor cleanup and cancellation reverts)"),
     ("opf/tools/_opf_adopt_observe.py", "self_test.source_mutant", "code", 1,

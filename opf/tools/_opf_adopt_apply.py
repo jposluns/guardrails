@@ -2947,7 +2947,7 @@ def _init_store_scaffold(first_adoption, changelog_created):
     scaffold[init_op.PROVENANCE_RELPATH] = None
     try:
         views = tomllib.loads(manifest)["views"]
-    except (ValueError, RecursionError, MemoryError) as exc:   # UnicodeDecodeError, TOMLDecodeError included
+    except (ValueError, RecursionError, MemoryError) as exc:   # TOMLDecodeError included
         raise AdoptApplyError("the default manifest does not parse as TOML ({}); "
                               "fail-closed".format(exc))
     for view in views.values():
@@ -2996,7 +2996,7 @@ def _init_store_external_destinations():
     import _opf_init
     try:
         doc = tomllib.loads(_opf_init.build_manifest())
-    except (ValueError, RecursionError, MemoryError) as exc:   # UnicodeDecodeError, TOMLDecodeError included
+    except (ValueError, RecursionError, MemoryError) as exc:   # TOMLDecodeError included
         raise AdoptApplyError("the default manifest does not parse as TOML ({}); "
                               "fail-closed".format(exc))
     targets = {d.get("target") for d in doc.get("deliverables", {}).values() if isinstance(d, dict)}
@@ -12410,31 +12410,40 @@ def _self_test_checks():
     # converting it to the refusal path (AdoptApplyError, or a derivation finding), never an escaping
     # parse error. Deep nesting feeds a real RecursionError and an over-long integer literal a real bare
     # ValueError; MemoryError shares each handler (the static floor scan is its per-site guard, as the
-    # tomllib leg discloses).
+    # tomllib leg discloses). Every case here escapes before the floor change except the deep-nesting
+    # cases of _canonical_toml, _canonical_model and _store_model, whose handlers already named
+    # RecursionError: those three are regression guards for behaviour that already held.
     import _opf_init
     deep_toml = ("x = " + "[" * 6000 + "]" * 6000).encode("utf-8")
     long_int_toml = ("x = " + "9" * 5000).encode("utf-8")
-    check("toml-floor-plan-digest-deep-nesting-refused",
-          "no readable plan_digest" in (refusal(_plan_digest_of, deep_toml) or ""))
+    for probe_label, probe_payload in (("deep-nesting", deep_toml), ("long-integer", long_int_toml)):
+        check("toml-floor-plan-digest-{}-refused".format(probe_label),
+              "no readable plan_digest" in (refusal(_plan_digest_of, probe_payload) or ""))
+    # Regression guard: RecursionError was already in _canonical_toml's handler.
     check("toml-floor-canonical-toml-deep-nesting-refused",
           "unreadable or malformed TOML" in (refusal(_canonical_toml, deep_toml, "the probe") or ""))
+    # Regression guard: RecursionError was already in _canonical_model's handler.
     check("toml-floor-canonical-model-deep-nesting-refused",
           "does not parse as TOML" in (refusal(_canonical_model, "probe.toml", deep_toml) or ""))
     check("toml-floor-canonical-model-long-integer-refused",
           "does not parse as TOML" in (refusal(_canonical_model, "probe.toml", long_int_toml) or ""))
-    deep_staged = dict(good[1], **{inventory_rel(rid): deep_toml})
-    check("toml-floor-inventory-deep-nesting-refused",
-          any("no inventory can be derived" in f for f in findings_of(good[0], deep_staged)))
+    for probe_label, probe_payload in (("deep-nesting", deep_toml), ("long-integer", long_int_toml)):
+        probe_staged = dict(good[1], **{inventory_rel(rid): probe_payload})
+        check("toml-floor-inventory-{}-refused".format(probe_label),
+              any("no inventory can be derived" in f for f in findings_of(good[0], probe_staged)))
+    # The deep-nesting case is a regression guard (RecursionError was already in _store_model's
+    # handler); the long-integer case observes the newly added ValueError.
     for probe_label, probe_payload in (("deep-nesting", deep_toml), ("long-integer", long_int_toml)):
         probe_ctx = RegistrationContext(mock.Mock(staged={man: probe_payload}, ops=[]))
         probe_ctx.rewrites[man] = dict(op="write", path=man)
         check("toml-floor-store-model-{}-refused".format(probe_label),
               "does not parse as TOML" in (refusal(_store_model, probe_ctx, man) or ""))
-    with mock.patch.object(_opf_init, "build_manifest", lambda: deep_toml.decode("utf-8")):
-        check("toml-floor-init-scaffold-deep-nesting-refused",
-              "does not parse as TOML" in (refusal(_init_store_scaffold, True, True) or ""))
-        check("toml-floor-init-destinations-deep-nesting-refused",
-              "does not parse as TOML" in (refusal(_init_store_external_destinations) or ""))
+    for probe_label, probe_payload in (("deep-nesting", deep_toml), ("long-integer", long_int_toml)):
+        with mock.patch.object(_opf_init, "build_manifest", lambda: probe_payload.decode("utf-8")):
+            check("toml-floor-init-scaffold-{}-refused".format(probe_label),
+                  "does not parse as TOML" in (refusal(_init_store_scaffold, True, True) or ""))
+            check("toml-floor-init-destinations-{}-refused".format(probe_label),
+                  "does not parse as TOML" in (refusal(_init_store_external_destinations) or ""))
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
         probe_inv = home + "/inventory.toml"
         (Path(temp) / probe_inv).parent.mkdir(parents=True)
@@ -12452,21 +12461,23 @@ def _self_test_checks():
         register_fd = os.open(temp, os.O_RDONLY | os.O_DIRECTORY)
         try:
             probe_manifest = _opf_init.build_manifest().encode("utf-8")
-            probe_ops = mock.Mock(staged={man: probe_manifest}, ops=[], root_fd=register_fd, run_id=rid)
-            probe_ctx = RegistrationContext(probe_ops, reg_store, None, {keep: plan_digest(b"kept\n")})
-            probe_ctx.rewrites[man] = dict(op="write", path=man)
             probe_row = dict(op="register-unmanaged", entry=keep, old_digest=plan_digest(probe_manifest),
                              new_digest=_D_ZERO)
-            real_emit, emitted = emit_checked, []
+            real_emit = emit_checked
+            for probe_label, probe_payload in (("deep-nesting", deep_toml), ("long-integer", long_int_toml)):
+                probe_ops = mock.Mock(staged={man: probe_manifest}, ops=[], root_fd=register_fd, run_id=rid)
+                probe_ctx = RegistrationContext(probe_ops, reg_store, None, {keep: plan_digest(b"kept\n")})
+                probe_ctx.rewrites[man] = dict(op="write", path=man)
+                emitted = []
 
-            def emit_deep(model):
-                emitted.append(model)
-                return real_emit(model) if len(emitted) == 1 else deep_toml.decode("utf-8")
+                def emit_reparsed(model):
+                    emitted.append(model)
+                    return real_emit(model) if len(emitted) == 1 else probe_payload.decode("utf-8")
 
-            with mock.patch.dict(globals(), dict(emit_checked=emit_deep)):
-                probe_why = refusal(_compose_register_unmanaged, probe_row, probe_ctx)
-            check("toml-floor-register-reparse-deep-nesting-refused",
-                  probe_why is not None and "does not reparse as TOML" in probe_why)
+                with mock.patch.dict(globals(), dict(emit_checked=emit_reparsed)):
+                    probe_why = refusal(_compose_register_unmanaged, probe_row, probe_ctx)
+                check("toml-floor-register-reparse-{}-refused".format(probe_label),
+                      probe_why is not None and "does not reparse as TOML" in probe_why)
         finally:
             os.close(register_fd)
 
@@ -13137,7 +13148,8 @@ def _close_class_sweep_checks():
     quiet_code = _journal._close_fd_quietly.__code__
     # Every descriptor a class_run run leaves open, one row per run: (scenario, the injected exceptions,
     # the code that opened each descriptor left open, None when unattributed). Judged once the sweeps below
-    # have run. Nothing is closed for it: this child process ends, and every descriptor with it.
+    # have run. Only a disclosed window's held descriptor is closed, after its row is recorded (class_run);
+    # any other stays open until this child process ends, and every descriptor with it.
     class_reclaims = []
     # Every descriptor the foreign-thread vector's other thread opens (below), as (number, identity); and
     # those it still holds, the only ones exempt from a run's census. The exemption is by identity and
@@ -13268,6 +13280,16 @@ def _close_class_sweep_checks():
         if left:
             (class_reclaims if into is None else into).append(
                 (name, tuple(type(exc) for exc, _quiet in fired), tuple(left)))
+        # Once its row is recorded, each descriptor a disclosed window's own frame held at an injected fault
+        # (opened by the run, its identity unchanged, so it is the run's and no other code holds it) is
+        # closed, so the census each later run reads stays at the baseline: kept open, they accumulate
+        # across the tens of thousands of runs below (over a thousand open at the average census) and
+        # every census re-reads them all. Any other descriptor left open is never closed here (the judge
+        # below refuses it).
+        if into is None:
+            for window_fd, _opener, at_window in left:
+                if at_window:
+                    os.close(window_fd)
         return seen[0], fired, raised
 
     def class_named(exc, raised):

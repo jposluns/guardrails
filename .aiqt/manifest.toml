@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "c50a24bb58eb945540b40b9c0e8c67a3cd97073da60d1243133d8c72e3acbb8b"
+tree-sha256 = "ee5f5e717603bd54c2d7ca371ee9956902ffec772b0d04195306ba66eddcd083"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2666,8 +2666,8 @@ sha256 = "65ee9364396ac733e6717e905aaa50665ab68a091e97b6a82b47b56d3a5129ea"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_apply.py"
-bytes = 982053
-sha256 = "a7822f9f42bb97a4885f31e6ec743e35531545af97a9cb6bf624da8bd1b65bd9"
+bytes = 983993
+sha256 = "6bfcf6e2ea81e50b5dbff4f9651ff5b1376c4fa4d17276cc1576127c2d1f3945"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_complete.py"
@@ -2696,8 +2696,8 @@ sha256 = "24dc739648f0f51f44a16a57168ab4425ddcd77ad09ce11d28639812f9acfd64"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_state.py"
-bytes = 110962
-sha256 = "a2da6050b0d85e0a34afac111086c554d175a630355692b3c125cf43b57ef5c7"
+bytes = 111142
+sha256 = "6614c7781b10e427ce12f5bf6a1f6ece6c0e17c02b6ac86ceaf82245f573431a"
 
 [[sources]]
 path = "opf/tools/_opf_changelog.py"
@@ -2706,8 +2706,8 @@ sha256 = "785012cc91281f47261281a8bb412f8c56cd0201815d7e1ce43e1d1ee4010697"
 
 [[sources]]
 path = "opf/tools/_opf_check.py"
-bytes = 352561
-sha256 = "e6c1a9cc42fb067d5e122f2282ff7bcf33f50472084cd45dab40a52a47e572f4"
+bytes = 352737
+sha256 = "7bf7b739df0ef76b0670a9ac630044f00a6645c78ebd0c5401c5b21897d9d259"
 
 [[sources]]
 path = "opf/tools/_opf_emit.py"
@@ -2736,8 +2736,8 @@ sha256 = "77afb1dcded7f7990f1c2055b5a13c5df0c8fff59505f3e8da5b4a0608350334"
 
 [[sources]]
 path = "opf/tools/_opf_init_operation.py"
-bytes = 261773
-sha256 = "1d19471c1adb2d4233d207071b4b272d305a661770a47ddc398dfc027e14f7f3"
+bytes = 261943
+sha256 = "2a7fb29b03d2f5a2f4ab4fb27c9a91315e23503ed0fc91ef6c5cc2b54eadb641"
 
 [[sources]]
 path = "opf/tools/_opf_init_p0.py"
@@ -3331,8 +3331,8 @@ sha256 = "d7d7614791529f4ba2fc961b84e7a8dee7fcc832fd6c2d034c682fcfc1b7549c"
 
 [[sources]]
 path = "tools/check_dangerous_api.py"
-bytes = 120724
-sha256 = "1817421e438174314e4e5f34950032634915ca4ece49005521cd99e156178f42"
+bytes = 122381
+sha256 = "4420bdf42f58b72ba0367d728250b794729f72be1320885d17d68e37cc7863fc"
 
 [[sources]]
 path = "tools/check_derived_command_parameters.py"
@@ -3431,8 +3431,8 @@ sha256 = "81aa8f6297d4d5c1c1fd7a30ce325635f2a577d0065706c8f5393c65fa4cbb7f"
 
 [[sources]]
 path = "tools/check_opf_standalone_closure.py"
-bytes = 34109
-sha256 = "7733e38be9cef08f180c938133fabe047f2ac0e95821b69e9beb96c41dd30c5a"
+bytes = 34311
+sha256 = "2fa77418e733aa141e8f622417505ce31c65579a78a8b2277c67bcb942461839"
 
 [[sources]]
 path = "tools/check_overclaim.py"

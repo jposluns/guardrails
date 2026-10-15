@@ -3563,7 +3563,9 @@ def self_test():
     # The tomllib parse-site floor (tools/check_python_floor.py, tomllib leg): _prove_adoption_plan
     # disposes of RecursionError, MemoryError and the ValueError family at its parse, refusing as its
     # contract ValueError. Deep nesting feeds a real RecursionError; MemoryError shares the handler
-    # (the static floor scan is its per-site guard).
+    # (the static floor scan is its per-site guard). Regression guard: RecursionError was already in
+    # the handler before the floor change, which added only MemoryError, so this case guards behaviour
+    # that already held.
     try:
         _prove_adoption_plan(("x = " + "[" * 6000 + "]" * 6000).encode("utf-8"),
                              "adopt-20260917T120000Z-0123456789abcdef")
