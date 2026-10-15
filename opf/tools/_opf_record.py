@@ -118,9 +118,9 @@ run (re-run), never a duplicate. The homes-2 publication boundary itself (_publi
 open a transaction unless the canonical reservation of the run id it publishes under stands with this
 plan's claims. An unreadable, malformed or conflicting reservation refuses (exit 2),
 never a silent fallback to the homes-1 counters path; a run killed after reserving and before
-publishing leaves its reservation standing, its numbers conservatively still reserved (the final doctor
-does not yet read reservations, so a store carrying such an orphan grades the orphan's numbers as
-missing records until that later change). A legacy
+publishing leaves its reservation standing, its numbers conservatively still reserved: the final doctor
+treats a reserved number as issued (spec 8.2), so the orphaned numbers never grade as missing records
+and the next run records above them. A legacy
 .aiqt/record/journal found on a homes-2 store is refused and never recovered: homes 2 has no homes
 migration to carry it (spec 4.2).
 
@@ -502,7 +502,9 @@ def _read_operand(root_fd, rel):
         raise RecordError("{} is not a regular file; fail-closed".format(rel))
     try:
         model = tomllib.loads(data.decode("utf-8"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError, RecursionError) as exc:
+    except (UnicodeDecodeError, ValueError, RecursionError, MemoryError) as exc:
+        # ValueError: tomllib.TOMLDecodeError and an over-long integer literal; RecursionError and MemoryError:
+        # deep nesting and a many-part key.
         raise RecordError("{} does not parse as TOML ({}); fail-closed".format(rel, exc))
     return Operand(rel, data, stat.S_IMODE(st.st_mode), model)
 
@@ -693,7 +695,9 @@ def _read_reservation(afd, kind, entry):
         raise RecordError("cannot read the id reservation {} ({}); fail-closed".format(rel, exc))
     try:
         model = tomllib.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+    except (UnicodeDecodeError, ValueError, RecursionError, MemoryError) as exc:
+        # ValueError: tomllib.TOMLDecodeError and an over-long integer literal; RecursionError and MemoryError:
+        # deep nesting and a many-part key.
         raise RecordError("the id reservation {} is malformed ({}); fail-closed".format(rel, exc))
     claims = model.get("claims") if isinstance(model, dict) else None
     operation_id = model.get("operation_id") if isinstance(model, dict) else None
@@ -1482,7 +1486,7 @@ def _reparse(raw, rel):
     """A fresh model parsed from bytes: it shares no object with any model the planner built."""
     try:
         return tomllib.loads(raw.decode("utf-8"))
-    except (AttributeError, UnicodeDecodeError, tomllib.TOMLDecodeError, RecursionError) as exc:
+    except (AttributeError, UnicodeDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise _postcondition_failed("{} cannot be reparsed ({})".format(rel, exc))
 
 
