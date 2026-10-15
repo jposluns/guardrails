@@ -830,17 +830,25 @@ def main() -> int:
 #       generator rejects it, exercising the is_block probe path no other fixture covers,
 #   (s) the self-test verdict gives cannot-evaluate exit precedence: a vector that could not be evaluated
 #       beside an assertion failure exits 2 naming both, a cleanup or census error still prints every
-#       cannot line first, and a fixture setup or a vector evaluation raising any Exception (an injected
-#       ValueError, including one from the no-maintenance vector's _materialize_git call) is a named
-#       cannot-evaluate carrying its class,
+#       cannot line first, a fixture setup raising any Exception (an injected ValueError) or returning None
+#       is a named cannot-evaluate whose assertions are skipped with that line recorded, a vector
+#       evaluation raising any Exception (an injected ValueError at the no-maintenance vector's
+#       _materialize_git call, run through that vector's own run path) is a named cannot-evaluate carrying
+#       its class, and an Exception escaping the gate's sweep() is named as a gate defect (an assertion
+#       failure), not as an unevaluated vector,
 #   (t) a declared file target, tree target, or tree member that is a symlink to a node outside the
 #       fixture, a tree mixing regular members with one such symlink, a file target symlinked to a file
-#       inside the fixture, and a target whose parent directory is symlinked outside the fixture are not
-#       confirmed as produced (the confirmation follows no symlink at any component).
-# Every fixture is built with each setup subprocess checked and each declared target confirmed present (a
-# regular file or directory inside the fixture, following no symlink); a vector whose setup or evaluation
-# raises is a named cannot-evaluate (the self-test exits 2, even beside an assertion failure), never a
-# traceback or a pass.
+#       inside the fixture, a target whose parent directory is symlinked outside the fixture, a tree with a
+#       symlinked directory inside a nested subdirectory, a tree with a FIFO member, and a fixture base that
+#       is itself a symlink alias are not confirmed as produced (the confirmation follows no symlink at the
+#       fixture base or any component below it, and accepts only regular files and directories).
+# Every fixture vector runs through _run_vector: its setup is built with each setup subprocess checked and
+# each declared target confirmed present (a regular file or directory inside the fixture, following no
+# symlink); a vector whose setup raises or returns None, or whose evaluation raises, is a named
+# cannot-evaluate (the self-test exits 2, even beside an assertion failure), never a traceback or a pass. An
+# Exception outside a vector's setup and evaluation (for example from the fixture git lifecycle around the
+# self-test, or a cleanup error that is not an OSError) is not caught there and still ends the self-test
+# with a traceback.
 # Every fixture is synthetic; any invalid-UTF-8 corruption bytes are assembled from non-secret parts so
 # this file never trips the repo secret scan.
 
@@ -1236,13 +1244,15 @@ def _git_fixture(repo, *args):
 
 
 def _fixture_node(base, path, want_dir):
-    """True if `path` is, following no symlink at any component from the fixture `base` down, a directory
-    (want_dir) or a regular file (otherwise) inside the fixture. Two rules, each needed on its own:
-    containment (`path` lies lexically under `base` with no '..' component, and every ancestor component
-    below `base` is lstat-checked as a real directory, so no ancestor symlink, even one resolving inside the
-    fixture, can lead the node out of it) and no-follow (the final component is lstat-checked, so a symlink,
-    even one to a matching node inside the fixture, is refused). A special node or an absent path is not a
-    produced node either."""
+    """True if `path` is, following no symlink at the fixture `base` or at any component below it, a
+    directory (want_dir) or a regular file (otherwise) inside the fixture. Three rules, each needed on its
+    own: base (`base` itself is lstat-checked as a real directory, so a symlink alias to a fixture is not
+    the fixture), containment (`path` lies lexically under `base` with no '..' component, and every ancestor
+    component below `base` is lstat-checked as a real directory, so no ancestor symlink, even one resolving
+    inside the fixture, can lead the node out of it) and no-follow (the final component is lstat-checked, so
+    a symlink, even one to a matching node inside the fixture, is refused). A special node or an absent path
+    is not a produced node either. The ancestors of `base` (the temporary directory's own path) are not
+    checked."""
     try:
         parts = Path(path).relative_to(Path(base)).parts
     except ValueError:
@@ -1251,6 +1261,8 @@ def _fixture_node(base, path, want_dir):
         return False
     node = Path(base)
     try:
+        if not stat.S_ISDIR(os.lstat(node).st_mode):
+            return False
         for part in parts[:-1]:
             node = node / part
             if not stat.S_ISDIR(os.lstat(node).st_mode):
@@ -1356,27 +1368,47 @@ def _build_repo(base, gens):
 
 
 def _setup_vector(cannot, name, build):
-    """Run one vector's fixture setup. Any Exception raised by the setup appends a named cannot-evaluate
-    line (carrying the exception class) to `cannot` and returns None, so the caller skips that vector's
-    assertions instead of aborting the self-test with a traceback. A BaseException that is not an
-    Exception (KeyboardInterrupt, SystemExit) still propagates."""
+    """Run one vector's fixture setup. Any Exception raised by the setup, or a setup that returns None
+    instead of a fixture, appends a named cannot-evaluate line (carrying the exception class, if any) to
+    `cannot` and returns None, so the caller skips that vector's assertions with that line recorded,
+    never silently and never with a traceback. A BaseException that is not an Exception
+    (KeyboardInterrupt, SystemExit) still propagates."""
     try:
-        return build()
+        fixture = build()
     except Exception as exc:  # noqa: BLE001  every setup failure is a named cannot-evaluate, never a traceback
         cannot.append("{}: fixture setup failed, vector not evaluated ({}: {})"
                       .format(name, type(exc).__name__, exc))
         return None
+    if fixture is None:
+        cannot.append("{}: fixture setup returned no fixture, vector not evaluated".format(name))
+    return fixture
+
+
+class _GateRaised(Exception):
+    """An Exception that escaped sweep() while a vector evaluated it. sweep is required to return an exit
+    code on every path, so an escape is a gate defect the vector caught, named as that vector's assertion
+    failure, not as a vector left unevaluated."""
+
+
+def _gate_sweep(root):
+    """Run sweep(root) for a self-test vector, re-raising any Exception that escapes it as _GateRaised."""
+    try:
+        return sweep(root)
+    except Exception as exc:  # noqa: BLE001  an escape from the gate is a gate defect, named as such
+        raise _GateRaised("{}: {}".format(type(exc).__name__, exc)) from exc
 
 
 class _VectorEvaluation:
     """Context manager around one vector's evaluation (its sweep, check, or injected call, after setup).
-    Any Exception raised inside appends a named cannot-evaluate line (carrying the exception class) to
-    `cannot` and is suppressed, so the self-test still reaches its verdict (exit 2) instead of aborting
-    with a traceback. A BaseException that is not an Exception (KeyboardInterrupt, SystemExit) still
-    propagates."""
+    An Exception raised inside is suppressed and named under the vector: a _GateRaised (the gate itself
+    raised) appends an assertion failure to `failures`, and any other Exception appends a cannot-evaluate
+    line (carrying the exception class) to `cannot`, so the self-test goes on to the next vector instead of
+    aborting with a traceback. A BaseException that is not an Exception (KeyboardInterrupt, SystemExit)
+    still propagates."""
 
-    def __init__(self, cannot, name):
+    def __init__(self, cannot, failures, name):
         self.cannot = cannot
+        self.failures = failures
         self.name = name
 
     def __enter__(self):
@@ -1385,9 +1417,24 @@ class _VectorEvaluation:
     def __exit__(self, exc_type, exc, tb):
         if exc_type is None or not issubclass(exc_type, Exception):
             return False
-        self.cannot.append("{}: evaluation raised, vector not evaluated ({}: {})"
-                           .format(self.name, exc_type.__name__, exc))
+        if issubclass(exc_type, _GateRaised):
+            self.failures.append("{}: the gate raised instead of returning an exit code, a gate defect ({})"
+                                 .format(self.name, exc))
+        else:
+            self.cannot.append("{}: evaluation raised, vector not evaluated ({}: {})"
+                               .format(self.name, exc_type.__name__, exc))
         return True
+
+
+def _run_vector(cannot, failures, name, build, evaluate):
+    """Run one fixture vector: its setup through _setup_vector, then evaluate(fixture) inside
+    _VectorEvaluation. Every fixture vector goes through here, so a setup that raises or returns None and
+    an evaluation that raises are each named under that vector by this one path, which the injected
+    vectors exercise. evaluate runs only on a fixture that setup produced."""
+    fixture = _setup_vector(cannot, name, build)
+    if fixture is not None:
+        with _VectorEvaluation(cannot, failures, name):
+            evaluate(fixture)
 
 
 def _close_vectors(base):
@@ -1465,14 +1512,21 @@ def _self_test_main_isolated():
 
     def sweep_quiet(root):
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-            return sweep(root)
+            return _gate_sweep(root)
 
     def sweep_captured(root):
         # One buffer for both streams, so a named sweep line can be asserted on.
         buf = io.StringIO()
         with redirect_stdout(buf), redirect_stderr(buf):
-            rc = sweep(root)
+            rc = _gate_sweep(root)
         return rc, buf.getvalue()
+
+    def expect_sweep(want, message):
+        # The evaluation of a vector that asserts only the sweep's exit code.
+        def evaluate(root):
+            if sweep_quiet(root) != want:
+                failures.append(message)
+        return evaluate
 
     try:
         tmp = Path(tempfile.mkdtemp(prefix="aiqt-gensrc-failclose-selftest-"))
@@ -1481,63 +1535,54 @@ def _self_test_main_isolated():
         return 2
     failures = []
     cannot = []  # vectors whose setup or evaluation failed: named cannot-evaluate, never a pass or traceback
-    global _run_check, _now, _mkdtemp, _materialize_git
+    global _run_check, _now, _mkdtemp, _materialize_git, sweep
     saved_run_check = _run_check
     saved_now = _now
     saved_mkdtemp = _mkdtemp
     saved_materialize_git = _materialize_git
+    saved_sweep = sweep
     cleanup_error = None
     census_error = None
     close_runs = 0
     try:
         # (a) A conformant repo (content-guarding file + tree generators) passes.
-        good = _setup_vector(cannot, "conformant repo", lambda: _build_repo(
-            tmp / "good", {"goodfile": _GOODFILE, "goodtree": _GOODTREE}))
-        with _VectorEvaluation(cannot, "conformant repo"):
-            if good is not None and sweep_quiet(good) != 0:
-                failures.append("conformant repo: expected the sweep to pass (exit 0)")
+        _run_vector(cannot, failures, "conformant repo", lambda: _build_repo(
+            tmp / "good", {"goodfile": _GOODFILE, "goodtree": _GOODTREE}),
+            expect_sweep(0, "conformant repo: expected the sweep to pass (exit 0)"))
 
         # (b) A BYPASS generator is caught (exit 1) via valid-but-different content, not just invalid UTF-8.
-        byp = _setup_vector(cannot, "bypass generator", lambda: _build_repo(
-            tmp / "bypass", {"goodfile": _GOODFILE, "bypass": _BYPASS}))
-        with _VectorEvaluation(cannot, "bypass generator"):
-            if byp is not None and sweep_quiet(byp) != 1:
-                failures.append("bypass generator: expected exit 1 (F-154 regression caught)")
+        _run_vector(cannot, failures, "bypass generator", lambda: _build_repo(
+            tmp / "bypass", {"goodfile": _GOODFILE, "bypass": _BYPASS}),
+            expect_sweep(1, "bypass generator: expected exit 1 (F-154 regression caught)"))
 
         # (c) A STATEFUL generator is caught (exit 1): per-probe fresh sandboxes deny cross-call state.
-        stf = _setup_vector(cannot, "stateful generator", lambda: _build_repo(
-            tmp / "stateful", {"stateful": _STATEFUL}))
-        with _VectorEvaluation(cannot, "stateful generator"):
-            if stf is not None and sweep_quiet(stf) != 1:
-                failures.append("stateful generator: expected exit 1 (per-probe isolation)")
+        _run_vector(cannot, failures, "stateful generator", lambda: _build_repo(
+            tmp / "stateful", {"stateful": _STATEFUL}),
+            expect_sweep(1, "stateful generator: expected exit 1 (per-probe isolation)"))
 
         # (d) A SYMLINK-SWAP generator is cannot-evaluate (exit 2) and causes no real-tree write. The
         #     symlink points at sys.executable (outside the sandbox); assert it is untouched afterwards.
-        swp = _setup_vector(cannot, "symlink-swap generator", lambda: _build_repo(
-            tmp / "swap", {"swap": _SYMLINK_SWAP}))
-        with _VectorEvaluation(cannot, "symlink-swap generator"):
-            if swp is not None:
-                exe_before = os.stat(sys.executable)
-                if sweep_quiet(swp) != 2:
-                    failures.append("symlink-swap generator: expected cannot-evaluate exit 2 (containment)")
-                exe_after = os.stat(sys.executable)
-                if (exe_before.st_mode, exe_before.st_size, exe_before.st_mtime_ns) != \
-                   (exe_after.st_mode, exe_after.st_size, exe_after.st_mtime_ns):
-                    failures.append("symlink-swap generator: the out-of-sandbox symlink target was written")
+        def _evaluate_swap(swp):
+            exe_before = os.stat(sys.executable)
+            if sweep_quiet(swp) != 2:
+                failures.append("symlink-swap generator: expected cannot-evaluate exit 2 (containment)")
+            exe_after = os.stat(sys.executable)
+            if (exe_before.st_mode, exe_before.st_size, exe_before.st_mtime_ns) != \
+               (exe_after.st_mode, exe_after.st_size, exe_after.st_mtime_ns):
+                failures.append("symlink-swap generator: the out-of-sandbox symlink target was written")
+
+        _run_vector(cannot, failures, "symlink-swap generator", lambda: _build_repo(
+            tmp / "swap", {"swap": _SYMLINK_SWAP}), _evaluate_swap)
 
         # (e) A TOLERANT-READER that guards content passes (exit 0): no false violation.
-        tol = _setup_vector(cannot, "tolerant-reader generator", lambda: _build_repo(
-            tmp / "tolerant", {"tolerant": _TOLERANT}))
-        with _VectorEvaluation(cannot, "tolerant-reader generator"):
-            if tol is not None and sweep_quiet(tol) != 0:
-                failures.append("tolerant-reader generator: expected exit 0 (no false violation)")
+        _run_vector(cannot, failures, "tolerant-reader generator", lambda: _build_repo(
+            tmp / "tolerant", {"tolerant": _TOLERANT}),
+            expect_sweep(0, "tolerant-reader generator: expected exit 0 (no false violation)"))
 
         # (f) A TREE generator guarding only SOME members is caught (exit 1): every member is probed.
-        part = _setup_vector(cannot, "partial-coverage tree generator", lambda: _build_repo(
-            tmp / "partial", {"partialtree": _PARTIALTREE}))
-        with _VectorEvaluation(cannot, "partial-coverage tree generator"):
-            if part is not None and sweep_quiet(part) != 1:
-                failures.append("partial-coverage tree generator: expected exit 1 (every member probed)")
+        _run_vector(cannot, failures, "partial-coverage tree generator", lambda: _build_repo(
+            tmp / "partial", {"partialtree": _PARTIALTREE}),
+            expect_sweep(1, "partial-coverage tree generator: expected exit 1 (every member probed)"))
 
         # (g) A non-literal GENSRC_OUTPUTS makes enumeration fail closed (exit 2).
         def _malformed():
@@ -1550,10 +1595,8 @@ def _self_test_main_isolated():
             _write_gen(mal / "tools", "malformed", _MALFORMED)
             return mal
 
-        mal = _setup_vector(cannot, "malformed registry", _malformed)
-        with _VectorEvaluation(cannot, "malformed registry"):
-            if mal is not None and sweep_quiet(mal) != 2:
-                failures.append("malformed registry: expected fail-closed exit 2")
+        _run_vector(cannot, failures, "malformed registry", _malformed,
+                    expect_sweep(2, "malformed registry: expected fail-closed exit 2"))
 
         # (g) A declared target absent on disk fails closed (exit 2). Untrack it too, so real_root's
         #     tracked set still mirrors its on-disk files (the F-234 materialization equality stays clean)
@@ -1567,15 +1610,14 @@ def _self_test_main_isolated():
             _git_fixture(miss, "rm", "-q", "--cached", "out/goodfile.txt")
             return miss
 
-        miss = _setup_vector(cannot, "missing declared target", _missing_target)
-        with _VectorEvaluation(cannot, "missing declared target"):
-            if miss is not None:
-                rc_miss, text_miss = sweep_captured(miss)
-                absent_leg = "out/goodfile.txt: declared file target is absent or not a regular file"
-                if rc_miss != 2 or absent_leg not in text_miss:
-                    failures.append("missing declared target: expected fail-closed exit 2 from the absent-"
-                                    "declared-target leg naming {!r}, got exit {!r}"
-                                    .format(absent_leg, rc_miss))
+        def _evaluate_missing(miss):
+            rc_miss, text_miss = sweep_captured(miss)
+            absent_leg = "out/goodfile.txt: declared file target is absent or not a regular file"
+            if rc_miss != 2 or absent_leg not in text_miss:
+                failures.append("missing declared target: expected fail-closed exit 2 from the absent-"
+                                "declared-target leg naming {!r}, got exit {!r}".format(absent_leg, rc_miss))
+
+        _run_vector(cannot, failures, "missing declared target", _missing_target, _evaluate_missing)
 
         # (g) A non-clean per-generator baseline (source edited so the target is stale) fails closed (2).
         def _stale_baseline():
@@ -1583,136 +1625,128 @@ def _self_test_main_isolated():
             (stale / "src" / "goodfile-src.txt").write_text("edited after generation\n", encoding="utf-8")
             return stale
 
-        stale = _setup_vector(cannot, "non-clean baseline", _stale_baseline)
-        with _VectorEvaluation(cannot, "non-clean baseline"):
-            if stale is not None and sweep_quiet(stale) != 2:
-                failures.append("non-clean baseline: expected fail-closed exit 2")
+        _run_vector(cannot, failures, "non-clean baseline", _stale_baseline,
+                    expect_sweep(2, "non-clean baseline: expected fail-closed exit 2"))
 
         # (g) A regenerate off the grammar fails closed (exit 2).
-        badcmd = _setup_vector(cannot, "off-grammar regenerate", lambda: _build_repo(
-            tmp / "off-grammar", {"badcmd": _BADCMD}))
-        with _VectorEvaluation(cannot, "off-grammar regenerate"):
-            if badcmd is not None and sweep_quiet(badcmd) != 2:
-                failures.append("off-grammar regenerate: expected fail-closed exit 2")
+        _run_vector(cannot, failures, "off-grammar regenerate", lambda: _build_repo(
+            tmp / "off-grammar", {"badcmd": _BADCMD}),
+            expect_sweep(2, "off-grammar regenerate: expected fail-closed exit 2"))
 
         # (h) Restoration: the synthetic real tree is byte-AND-mode identical after a normal run and after
         #     a run whose corrupted PROBE raises (the baseline succeeds first), and the raising run returns
         #     the fail-closed exit 2.
-        rest = _setup_vector(cannot, "restoration", lambda: _build_repo(
-            tmp / "restoration", {"goodfile": _GOODFILE}))
-        with _VectorEvaluation(cannot, "restoration"):
-            if rest is not None:
-                before = _tree_manifest(rest)
-                if sweep_quiet(rest) != 0:
-                    failures.append("restoration: expected a clean normal run (exit 0)")
-                if _tree_manifest(rest) != before:
-                    failures.append("restoration: the real tree changed after a normal run")
+        def _evaluate_restoration(rest):
+            global _run_check
+            before = _tree_manifest(rest)
+            if sweep_quiet(rest) != 0:
+                failures.append("restoration: expected a clean normal run (exit 0)")
+            if _tree_manifest(rest) != before:
+                failures.append("restoration: the real tree changed after a normal run")
 
-                calls = {"n": 0}
+            calls = {"n": 0}
 
-                def _raise_after_baseline(script_path, cwd, timeout=PROBE_TIMEOUT, env_overrides=None):
-                    # Let the first call (a per-generator baseline, run on a pristine sandbox) succeed, then
-                    # raise on the next call (the first corrupted probe), so restoration-after-raise is
-                    # exercised.
-                    calls["n"] += 1
-                    if calls["n"] == 1:
-                        return saved_run_check(script_path, cwd, timeout, env_overrides)
-                    raise RuntimeError("injected probe failure after a clean baseline")
+            def _raise_after_baseline(script_path, cwd, timeout=PROBE_TIMEOUT, env_overrides=None):
+                # Let the first call (a per-generator baseline, run on a pristine sandbox) succeed, then
+                # raise on the next call (the first corrupted probe), so restoration-after-raise is
+                # exercised.
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    return saved_run_check(script_path, cwd, timeout, env_overrides)
+                raise RuntimeError("injected probe failure after a clean baseline")
 
-                _run_check = _raise_after_baseline
-                try:
-                    rc = sweep_quiet(rest)
-                finally:
-                    _run_check = saved_run_check
-                if rc != 2:
-                    failures.append("restoration: a run whose probe raises expected fail-closed exit 2, got "
-                                    "{!r}".format(rc))
-                if calls["n"] < 2:
-                    failures.append("restoration: expected a baseline call then a raising probe call, saw "
-                                    "{} call(s)".format(calls["n"]))
-                if _tree_manifest(rest) != before:
-                    failures.append("restoration: the real tree changed after a run whose probe raised")
+            _run_check = _raise_after_baseline
+            try:
+                rc = sweep_quiet(rest)
+            finally:
+                _run_check = saved_run_check
+            if rc != 2:
+                failures.append("restoration: a run whose probe raises expected fail-closed exit 2, got "
+                                "{!r}".format(rc))
+            if calls["n"] < 2:
+                failures.append("restoration: expected a baseline call then a raising probe call, saw "
+                                "{} call(s)".format(calls["n"]))
+            if _tree_manifest(rest) != before:
+                failures.append("restoration: the real tree changed after a run whose probe raised")
+
+        _run_vector(cannot, failures, "restoration", lambda: _build_repo(
+            tmp / "restoration", {"goodfile": _GOODFILE}), _evaluate_restoration)
 
         # (i) A generator that changes a real-tree file's MODE (out of its sandbox) is detected (exit 2).
-        moded = _setup_vector(cannot, "real-tree mode change", lambda: _build_repo(
-            tmp / "modechange", {"mode": _MODECHANGER}))
-        with _VectorEvaluation(cannot, "real-tree mode change"):
-            if moded is not None and sweep_quiet(moded) != 2:
-                failures.append("real-tree mode change: expected cannot-evaluate exit 2 (manifest detected)")
+        _run_vector(cannot, failures, "real-tree mode change", lambda: _build_repo(
+            tmp / "modechange", {"mode": _MODECHANGER}),
+            expect_sweep(2, "real-tree mode change: expected cannot-evaluate exit 2 (manifest detected)"))
 
         # (j) A DECODE-ONLY generator is caught (exit 1), SPECIFICALLY by a valid-but-different / same-length
         #     probe: it returns non-zero on the invalid-UTF-8 probe (it decodes and fail-closes there), so
         #     only a content probe can draw its exit-0 violation. Exit 1 therefore proves the content probe
         #     caught it, which makes those probes load-bearing: remove them and this fixture would pass.
-        dec = _setup_vector(cannot, "decode-only generator", lambda: _build_repo(
-            tmp / "decode", {"decode": _DECODEONLY}))
-        with _VectorEvaluation(cannot, "decode-only generator"):
-            if dec is not None and sweep_quiet(dec) != 1:
-                failures.append("decode-only generator: expected exit 1 (caught by a valid-but-different / "
-                                "same-length content probe, the invalid-UTF-8 probe alone would pass it)")
+        _run_vector(cannot, failures, "decode-only generator", lambda: _build_repo(
+            tmp / "decode", {"decode": _DECODEONLY}),
+            expect_sweep(1, "decode-only generator: expected exit 1 (caught by a valid-but-different / "
+                            "same-length content probe, the invalid-UTF-8 probe alone would pass it)"))
 
         # (k) A total-runtime deadline overrun (injected monotonic clock) returns cannot-evaluate (exit 2),
         #     never a fail-open 0. The clock returns a base on the first read (deadline setup) then jumps
         #     past the deadline, so the first baseline/probe deadline check fails closed.
-        dline = _setup_vector(cannot, "total-runtime deadline overrun", lambda: _build_repo(
-            tmp / "deadline", {"goodfile": _GOODFILE}))
-        with _VectorEvaluation(cannot, "total-runtime deadline overrun"):
-            if dline is not None:
-                clock_calls = {"n": 0}
+        def _evaluate_deadline(dline):
+            global _now
+            clock_calls = {"n": 0}
 
-                def _overrun_clock():
-                    clock_calls["n"] += 1
-                    if clock_calls["n"] == 1:
-                        return 0.0  # deadline := 0 + TOTAL_TIMEOUT
-                    return float(TOTAL_TIMEOUT) + 1000.0  # every later read is past the deadline
+            def _overrun_clock():
+                clock_calls["n"] += 1
+                if clock_calls["n"] == 1:
+                    return 0.0  # deadline := 0 + TOTAL_TIMEOUT
+                return float(TOTAL_TIMEOUT) + 1000.0  # every later read is past the deadline
 
-                _now = _overrun_clock
-                try:
-                    rc_deadline = sweep_quiet(dline)
-                finally:
-                    _now = saved_now
-                if rc_deadline != 2:
-                    failures.append("total-runtime deadline overrun: expected cannot-evaluate exit 2, got "
-                                    "{!r}".format(rc_deadline))
+            _now = _overrun_clock
+            try:
+                rc_deadline = sweep_quiet(dline)
+            finally:
+                _now = saved_now
+            if rc_deadline != 2:
+                failures.append("total-runtime deadline overrun: expected cannot-evaluate exit 2, got "
+                                "{!r}".format(rc_deadline))
+
+        _run_vector(cannot, failures, "total-runtime deadline overrun", lambda: _build_repo(
+            tmp / "deadline", {"goodfile": _GOODFILE}), _evaluate_deadline)
 
         # (l) A sandbox-setup mkdtemp failure (injected OSError) returns cannot-evaluate (exit 2), not an
         #     escaping raise (the work-dir mkdtemp now lives inside the try).
-        setupfail = _setup_vector(cannot, "sandbox-setup mkdtemp failure", lambda: _build_repo(
-            tmp / "setup-fail", {"goodfile": _GOODFILE}))
-        with _VectorEvaluation(cannot, "sandbox-setup mkdtemp failure"):
-            if setupfail is not None:
-                def _raise_mkdtemp(*args, **kwargs):
-                    raise OSError("injected sandbox-setup failure")
+        def _evaluate_mkdtemp_failure(setupfail):
+            global _mkdtemp
 
-                _mkdtemp = _raise_mkdtemp
-                try:
-                    rc_setup = sweep_quiet(setupfail)
-                finally:
-                    _mkdtemp = saved_mkdtemp
-                if rc_setup != 2:
-                    failures.append("sandbox-setup mkdtemp failure: expected cannot-evaluate exit 2, got "
-                                    "{!r}".format(rc_setup))
+            def _raise_mkdtemp(*args, **kwargs):
+                raise OSError("injected sandbox-setup failure")
+
+            _mkdtemp = _raise_mkdtemp
+            try:
+                rc_setup = sweep_quiet(setupfail)
+            finally:
+                _mkdtemp = saved_mkdtemp
+            if rc_setup != 2:
+                failures.append("sandbox-setup mkdtemp failure: expected cannot-evaluate exit 2, got "
+                                "{!r}".format(rc_setup))
+
+        _run_vector(cannot, failures, "sandbox-setup mkdtemp failure", lambda: _build_repo(
+            tmp / "setup-fail", {"goodfile": _GOODFILE}), _evaluate_mkdtemp_failure)
 
         # (m) A BLOCK-kind generator that reads+decodes the whole target and fail-closes (non-zero) on
         #     invalid UTF-8 passes (exit 0): a block target is probed with invalid UTF-8 only, which this
         #     generator rejects. This exercises the is_block probe path that no other fixture covers.
-        blk = _setup_vector(cannot, "block-kind generator", lambda: _build_repo(
-            tmp / "block", {"block": _BLOCKFILE}))
-        with _VectorEvaluation(cannot, "block-kind generator"):
-            if blk is not None and sweep_quiet(blk) != 0:
-                failures.append("block-kind generator: expected the sweep to pass (exit 0; a block target is "
-                                "probed with invalid UTF-8 only and the generator rejects it)")
+        _run_vector(cannot, failures, "block-kind generator", lambda: _build_repo(
+            tmp / "block", {"block": _BLOCKFILE}),
+            expect_sweep(0, "block-kind generator: expected the sweep to pass (exit 0; a block target is "
+                            "probed with invalid UTF-8 only and the generator rejects it)"))
 
         # (n) D6: a git-reading generator whose --check runs `git ls-files` and fail-closes without a
         #     usable repo passes the sweep (exit 0), because the D6 template materialization plants a real
         #     git repository (its baseline succeeds and a corrupt target drifts to non-zero). Under the old
         #     bare-.git-marker template its baseline would have fail-closed (exit 2), so this proves D6.
-        gitr = _setup_vector(cannot, "git-reading generator", lambda: _build_repo(
-            tmp / "gitreader", {"gitreader": _GITREADER}))
-        with _VectorEvaluation(cannot, "git-reading generator"):
-            if gitr is not None and sweep_quiet(gitr) != 0:
-                failures.append("git-reading generator: expected the sweep to pass (exit 0; D6 materializes "
-                                "a real git repo so the baseline git ls-files succeeds)")
+        _run_vector(cannot, failures, "git-reading generator", lambda: _build_repo(
+            tmp / "gitreader", {"gitreader": _GITREADER}),
+            expect_sweep(0, "git-reading generator: expected the sweep to pass (exit 0; D6 materializes "
+                            "a real git repo so the baseline git ls-files succeeds)"))
 
         # (o) F-234a: a real_root whose repo-LOCAL core.fsmonitor points at a hook that writes an outside
         #     marker. The probe runs `-c core.fsmonitor=false --no-optional-locks`, so git NEVER executes
@@ -1728,16 +1762,16 @@ def _self_test_main_isolated():
             _git_fixture(fsm, "config", "core.fsmonitor", str(hook))
             return fsm
 
-        fsm = _setup_vector(cannot, "fsmonitor probe", _fsmonitor)
-        with _VectorEvaluation(cannot, "fsmonitor probe"):
-            if fsm is not None:
-                rc_fsm = sweep_quiet(fsm)
-                if fsmon_marker.exists():
-                    failures.append("fsmonitor probe: the repo-local core.fsmonitor hook EXECUTED and wrote "
-                                    "an outside marker (the probe is missing -c core.fsmonitor=false)")
-                if rc_fsm != 0:
-                    failures.append("fsmonitor probe: expected a clean sweep (exit 0) with the fsmonitor "
-                                    "override suppressing the hook, got {!r}".format(rc_fsm))
+        def _evaluate_fsmonitor(fsm):
+            rc_fsm = sweep_quiet(fsm)
+            if fsmon_marker.exists():
+                failures.append("fsmonitor probe: the repo-local core.fsmonitor hook EXECUTED and wrote an "
+                                "outside marker (the probe is missing -c core.fsmonitor=false)")
+            if rc_fsm != 0:
+                failures.append("fsmonitor probe: expected a clean sweep (exit 0) with the fsmonitor "
+                                "override suppressing the hook, got {!r}".format(rc_fsm))
+
+        _run_vector(cannot, failures, "fsmonitor probe", _fsmonitor, _evaluate_fsmonitor)
 
         # (p) F-234b: a FORCED probe failure (real_root's .git replaced by a bare marker, so `git ls-files`
         #     exits nonzero) is cannot-evaluate (exit 2), NEVER a silent `git add -A` fallback that would
@@ -1749,11 +1783,9 @@ def _self_test_main_isolated():
             (probefail / ".git").write_text("marker\n", encoding="utf-8")
             return probefail
 
-        probefail = _setup_vector(cannot, "forced probe failure", _probe_fail)
-        with _VectorEvaluation(cannot, "forced probe failure"):
-            if probefail is not None and sweep_quiet(probefail) != 2:
-                failures.append("forced probe failure: expected cannot-evaluate exit 2 (no git add -A "
-                                "fallback), a nonzero real_root ls-files must fail closed")
+        _run_vector(cannot, failures, "forced probe failure", _probe_fail,
+                    expect_sweep(2, "forced probe failure: expected cannot-evaluate exit 2 (no git add -A "
+                                    "fallback), a nonzero real_root ls-files must fail closed"))
 
         # (q) F-234b: a TRACKED-SET MISMATCH (a file tracked in real_root's index but absent from the
         #     template) is detected as cannot-evaluate (exit 2). extra.txt is committed then deleted from
@@ -1767,11 +1799,9 @@ def _self_test_main_isolated():
             (mism / "extra.txt").unlink()
             return mism
 
-        mism = _setup_vector(cannot, "tracked-set mismatch", _tracked_mismatch)
-        with _VectorEvaluation(cannot, "tracked-set mismatch"):
-            if mism is not None and sweep_quiet(mism) != 2:
-                failures.append("tracked-set mismatch: expected cannot-evaluate exit 2 (the materialized "
-                                "template index must equal real_root's tracked set)")
+        _run_vector(cannot, failures, "tracked-set mismatch", _tracked_mismatch,
+                    expect_sweep(2, "tracked-set mismatch: expected cannot-evaluate exit 2 (the materialized "
+                                    "template index must equal real_root's tracked set)"))
 
         # (r) F-367: every TEMPLATE git command carries the no-maintenance hardening flags (gc.auto=0,
         #     gc.autoDetach=false, maintenance.auto=false), so no detached auto-gc / auto-maintenance run can
@@ -1836,10 +1866,13 @@ def _self_test_main_isolated():
                                       "{} (git() must splice _TEMPLATE_GIT_NO_MAINTENANCE)"
                                       .format(sub, flag))
 
-        f367 = _setup_vector(cannot, "F-367 no-maintenance flags", _no_maintenance)
-        with _VectorEvaluation(cannot, "F-367 no-maintenance flags"):
-            if f367 is not None:
-                _check_no_maintenance(f367, failures)
+        def _no_maintenance_vector(cannot_record, failure_record, build):
+            # The vector's one run path, shared by its real run below and the injected evaluation run in
+            # (s), so that injection exercises this vector's own setup and evaluation guard.
+            _run_vector(cannot_record, failure_record, "F-367 no-maintenance flags", build,
+                        lambda f367: _check_no_maintenance(f367, failure_record))
+
+        _no_maintenance_vector(cannot, failures, _no_maintenance)
 
         # (s) The self-test verdict: a cannot-evaluate vector beside an assertion failure exits 2 (not 1)
         #     and names both; a cleanup or census error still prints every cannot line, before its own
@@ -1853,7 +1886,7 @@ def _self_test_main_isolated():
 
         injected_failure = "injected assertion failure"
         injected_cannot = "injected vector: fixture setup failed, vector not evaluated"
-        with _VectorEvaluation(cannot, "verdict precedence"):
+        with _VectorEvaluation(cannot, failures, "verdict precedence"):
             rc_v, text_v = _verdict_run([injected_failure], [injected_cannot], None, None)
             if rc_v != 2 or injected_failure not in text_v or injected_cannot not in text_v:
                 failures.append("verdict precedence: an assertion failure beside a cannot-evaluate vector "
@@ -1873,75 +1906,121 @@ def _self_test_main_isolated():
 
         # (s) A fixture setup raising an exception class outside the old (_FixtureSetupError, OSError) pair
         #     (an injected ValueError) is a named cannot-evaluate carrying its class, not a traceback; a
-        #     BaseException that is not an Exception still propagates. A narrowed catch in _setup_vector
-        #     would let the ValueError escape: that escape is caught here and named as this vector's
-        #     assertion failure, so it can never surface as a bare traceback or an unnamed exit.
+        #     setup that returns None instead of a fixture is a named cannot-evaluate whose evaluation never
+        #     runs, not a silent skip of the vector's assertions; a BaseException that is not an Exception
+        #     still propagates. Each runs through _run_vector, the path every fixture vector takes. A
+        #     narrowed catch in _setup_vector would let the ValueError escape: that escape is caught here
+        #     and named as this vector's assertion failure, so it can never surface as a bare traceback or
+        #     an unnamed exit.
         class _InjectedBaseExit(BaseException):
             pass
 
-        with _VectorEvaluation(cannot, "injected setup vector"):
-            injected_cannot_lines = []
+        def _raise_base_exit(*_fixture):
+            raise _InjectedBaseExit()
+
+        with _VectorEvaluation(cannot, failures, "injected setup vector"):
+            injected_cannot_lines, injected_failure_lines, evaluated = [], [], []
 
             def _raise_value_error():
                 raise ValueError("injected setup failure")
 
-            got = escaped = None
+            escaped = None
             try:
-                got = _setup_vector(injected_cannot_lines, "injected setup vector", _raise_value_error)
+                _run_vector(injected_cannot_lines, injected_failure_lines, "injected setup vector",
+                            _raise_value_error, evaluated.append)
             except Exception as exc:  # noqa: BLE001  an escape is this vector's named failure, no traceback
                 escaped = exc
-            if (escaped is not None or got is not None or len(injected_cannot_lines) != 1
+            if (escaped is not None or evaluated or injected_failure_lines
+                    or len(injected_cannot_lines) != 1
                     or not injected_cannot_lines[0].startswith("injected setup vector: ")
                     or "ValueError: injected setup failure" not in injected_cannot_lines[0]):
                 failures.append("setup ValueError: expected one named cannot-evaluate line carrying the "
-                                "class, got {!r} and {!r}, escaped {!r}"
-                                .format(got, injected_cannot_lines, escaped))
+                                "class and no evaluation, got {!r}, evaluated {!r}, escaped {!r}"
+                                .format(injected_cannot_lines, evaluated, escaped))
 
-            def _raise_base_exit():
-                raise _InjectedBaseExit()
+            none_cannot_lines, none_failure_lines = [], []
+            none_line = "injected None-fixture vector: fixture setup returned no fixture, vector not evaluated"
+            _run_vector(none_cannot_lines, none_failure_lines, "injected None-fixture vector", lambda: None,
+                        evaluated.append)
+            if evaluated or none_failure_lines or none_cannot_lines != [none_line]:
+                failures.append("setup None: expected the one named cannot-evaluate line {!r} and no "
+                                "evaluation, got {!r}, evaluated {!r}"
+                                .format(none_line, none_cannot_lines, evaluated))
 
             try:
-                _setup_vector(injected_cannot_lines, "injected BaseException vector", _raise_base_exit)
+                _run_vector(injected_cannot_lines, injected_failure_lines, "injected BaseException vector",
+                            _raise_base_exit, evaluated.append)
                 failures.append("setup BaseException: expected a non-Exception BaseException to propagate, "
                                 "it was recorded as {!r}".format(injected_cannot_lines[1:]))
             except _InjectedBaseExit:
                 pass
 
         # (s) An Exception raised by a vector's EVALUATION (after a good setup) is a named cannot-evaluate
-        #     carrying its class and the verdict exits 2: an injected ValueError from the _materialize_git
-        #     call of the no-maintenance vector yields that vector's named line, and a BaseException that is
-        #     not an Exception still propagates out of the evaluation guard.
-        with _VectorEvaluation(cannot, "injected evaluation vector"):
-            injected_eval_lines = []
+        #     carrying its class and the verdict exits 2: the no-maintenance vector's own run path
+        #     (_no_maintenance_vector and its _run_vector guard) is run again over its fixture with an
+        #     injected ValueError at its _materialize_git call, and must yield that vector's named line,
+        #     with no escape. An Exception that escapes the gate's sweep() is a gate defect, named as the
+        #     vector's assertion failure and not as an unevaluated vector: an injected raising sweep,
+        #     reached through sweep_quiet as every sweep vector reaches it, must yield one such failure line
+        #     and no cannot-evaluate line. A BaseException that is not an Exception still propagates out of
+        #     the evaluation guard.
+        with _VectorEvaluation(cannot, failures, "injected evaluation vector"):
+            injected_eval_lines, injected_eval_failures = [], []
 
             def _raise_materialize(template, real_root):
                 raise ValueError("injected materialize failure")
 
+            escaped = None
             _materialize_git = _raise_materialize
             try:
-                with _VectorEvaluation(injected_eval_lines, "F-367 no-maintenance flags"):
-                    _check_no_maintenance(tmp / "no-maintenance", [])
+                _no_maintenance_vector(injected_eval_lines, injected_eval_failures,
+                                       lambda: tmp / "no-maintenance")
+            except Exception as exc:  # noqa: BLE001  an escape is this vector's named failure, no traceback
+                escaped = exc
             finally:
                 _materialize_git = saved_materialize_git
             rc_e, text_e = _verdict_run([], injected_eval_lines, None, None)
-            if (len(injected_eval_lines) != 1
+            if (escaped is not None or injected_eval_failures or len(injected_eval_lines) != 1
                     or not injected_eval_lines[0].startswith("F-367 no-maintenance flags: evaluation raised")
                     or "ValueError: injected materialize failure" not in injected_eval_lines[0]
                     or rc_e != 2 or injected_eval_lines[0] not in text_e):
                 failures.append("evaluation ValueError: expected one named no-maintenance cannot-evaluate "
-                                "line carrying the class and verdict exit 2, got {!r} and exit {!r}"
-                                .format(injected_eval_lines, rc_e))
+                                "line carrying the class and verdict exit 2, got {!r} and exit {!r}, "
+                                "escaped {!r}".format(injected_eval_lines, rc_e, escaped))
+
+            gate_cannot_lines, gate_failure_lines = [], []
+            gate_line = ("injected gate-raise vector: the gate raised instead of returning an exit code, a "
+                         "gate defect (RuntimeError: injected gate defect)")
+
+            def _raise_sweep(root):
+                raise RuntimeError("injected gate defect")
+
+            escaped = None
+            sweep = _raise_sweep
             try:
-                with _VectorEvaluation(injected_eval_lines, "injected BaseException evaluation"):
-                    raise _InjectedBaseExit()
+                _run_vector(gate_cannot_lines, gate_failure_lines, "injected gate-raise vector", lambda: tmp,
+                            sweep_quiet)
+            except Exception as exc:  # noqa: BLE001  an escape is this vector's named failure, no traceback
+                escaped = exc
+            finally:
+                sweep = saved_sweep
+            if escaped is not None or gate_cannot_lines or gate_failure_lines != [gate_line]:
+                failures.append("gate raise: expected the one named gate-defect failure line {!r} and no "
+                                "cannot-evaluate line, got failures {!r}, cannot {!r}, escaped {!r}"
+                                .format(gate_line, gate_failure_lines, gate_cannot_lines, escaped))
+
+            try:
+                _run_vector(injected_eval_lines, injected_eval_failures, "injected BaseException evaluation",
+                            lambda: tmp, _raise_base_exit)
                 failures.append("evaluation BaseException: expected a non-Exception BaseException to "
                                 "propagate, it was recorded as {!r}".format(injected_eval_lines[1:]))
             except _InjectedBaseExit:
                 pass
 
-        # (t) _confirm_targets follows no symlink at any component and confirms every tree member. Each case
-        #     below passed _confirm_targets inside _build_repo before its swap, and is then refused as not
-        #     produced, naming its declared target:
+        # (t) _confirm_targets follows no symlink at the fixture base or any component below it, and
+        #     confirms every tree member. Each case below passed _confirm_targets inside _build_repo before
+        #     its swap, and is then refused as not produced, naming its declared target (or, for the alias
+        #     base, the registry, the first node it checks):
         #       file, tree, member: a declared file target, a declared tree target, or every member of a tree
         #         target replaced by a symlink to a node OUTSIDE the fixture (same bytes, so a
         #         symlink-following check would accept it);
@@ -1951,11 +2030,19 @@ def _self_test_main_isolated():
         #         fixture (only the no-follow rule on the final component refuses it);
         #       outside ancestor: the target's parent directory replaced by a symlink to a same-content copy
         #         OUTSIDE the fixture (the final component is a regular file; only the containment rule on
-        #         the ancestors refuses it).
-        def _symlinked_target(case):
+        #         the ancestors refuses it);
+        #       nested directory member: a real subdirectory of the tree holding a regular file and a
+        #         symlink to a directory OUTSIDE the fixture (the walk lists that symlink as a directory and
+        #         never descends it; only the directory-member rule refuses it, at any depth);
+        #       special member: a FIFO beside the tree's regular members (it is not a symlink; only the
+        #         rule that a file member is a regular file refuses it; it is lstat-checked, never opened);
+        #       alias base: a symlink OUTSIDE the fixture pointing at a valid fixture, passed as the base
+        #         (every node below it is real; only the rule on the base itself refuses it).
+        def _unconfirmable(case):
             def build():
                 gens = {"goodfile": _GOODFILE}
-                if case in ("file", "tree", "member", "mixed tree"):
+                if case in ("file", "tree", "member", "mixed tree", "nested directory member",
+                            "special member"):
                     gens["goodtree"] = _GOODTREE
                 base = _build_repo(tmp / "symlink-{}".format(case.replace(" ", "-")), gens)
                 outside = tmp / "outside-{}".format(case.replace(" ", "-"))
@@ -1988,45 +2075,73 @@ def _self_test_main_isolated():
                     shutil.copy2(target, inside)
                     target.unlink()
                     target.symlink_to(inside)
-                else:
+                elif case == "outside ancestor":
                     os.rename(base / "out", outside)
                     (base / "out").symlink_to(outside, target_is_directory=True)
+                elif case == "nested directory member":
+                    members = sorted(p for p in tree.iterdir() if p.is_file() and not p.is_symlink())
+                    if not members:
+                        raise _FixtureSetupError("the nested directory case needs a regular tree member")
+                    nested = tree / "nested"
+                    nested.mkdir()
+                    shutil.copy2(members[0], nested / members[0].name)
+                    outside.mkdir()
+                    shutil.copy2(members[0], outside / members[0].name)
+                    (nested / "linked").symlink_to(outside, target_is_directory=True)
+                elif case == "special member":
+                    os.mkfifo(tree / "fifo-member")
+                elif case == "alias base":
+                    outside.symlink_to(base, target_is_directory=True)
+                    return outside
+                else:
+                    raise _FixtureSetupError("no fixture is defined for the case {!r}".format(case))
                 return base
             return build
 
-        for case, declared in (("file", "out/goodfile.txt"), ("tree", "out/tree/"), ("member", "out/tree/"),
-                               ("mixed tree", "out/tree/"), ("inside final", "out/goodfile.txt"),
-                               ("outside ancestor", "out/goodfile.txt")):
-            name = "symlinked {} target".format(case)
-            linked = _setup_vector(cannot, name, _symlinked_target(case))
-            if linked is None:
-                continue
-            with _VectorEvaluation(cannot, name):
+        def _expect_refused(name, refusal):
+            def evaluate(fixture):
                 try:
-                    _confirm_targets(linked)
-                    failures.append("{}: _confirm_targets accepted a declared target reached through a "
-                                    "symlink".format(name))
+                    _confirm_targets(fixture)
+                    failures.append("{}: _confirm_targets accepted it as produced".format(name))
                 except _FixtureSetupError as exc:
-                    if "declared target {} was not produced".format(declared) not in str(exc):
-                        failures.append("{}: expected the refusal to name {}, got {}"
-                                        .format(name, declared, exc))
+                    if refusal not in str(exc):
+                        failures.append("{}: expected the refusal {!r}, got {}".format(name, refusal, exc))
+            return evaluate
+
+        def declared(target):
+            return "declared target {} was not produced".format(target)
+
+        for case, name, refusal in (
+                ("file", "symlinked file target", declared("out/goodfile.txt")),
+                ("tree", "symlinked tree target", declared("out/tree/")),
+                ("member", "symlinked member target", declared("out/tree/")),
+                ("mixed tree", "symlinked mixed tree target", declared("out/tree/")),
+                ("inside final", "symlinked inside final target", declared("out/goodfile.txt")),
+                ("outside ancestor", "symlinked outside ancestor target", declared("out/goodfile.txt")),
+                ("nested directory member", "symlinked nested directory member", declared("out/tree/")),
+                ("special member", "special-node (FIFO) tree member", declared("out/tree/")),
+                ("alias base", "symlinked fixture base",
+                 "the registry {} was not produced".format(gen_gensrc.REGISTRY_REL))):
+            _run_vector(cannot, failures, name, _unconfirmable(case), _expect_refused(name, refusal))
 
         # #378: this tool's _close_fd_yielding copy and its representative site, each green and red under
         # its flip.
-        close_vectors = _setup_vector(cannot, "close vectors", lambda: _close_vectors(tmp / "close"))
-        with _VectorEvaluation(cannot, "close vectors"):
-            if close_vectors is not None:
-                import _close_selftest
-                try:
-                    close_failures, close_runs = _close_selftest._st_close_check(globals(), close_vectors)
-                    failures.extend(close_failures)
-                except _close_selftest._StCensusError as exc:  # the census cannot read one: cannot-evaluate
-                    census_error = exc
+        def _evaluate_close(close_vectors):
+            nonlocal close_runs, census_error
+            import _close_selftest
+            try:
+                close_failures, close_runs = _close_selftest._st_close_check(globals(), close_vectors)
+                failures.extend(close_failures)
+            except _close_selftest._StCensusError as exc:  # the census cannot read one: cannot-evaluate
+                census_error = exc
+
+        _run_vector(cannot, failures, "close vectors", lambda: _close_vectors(tmp / "close"), _evaluate_close)
     finally:
         _run_check = saved_run_check
         _now = saved_now
         _mkdtemp = saved_mkdtemp
         _materialize_git = saved_materialize_git
+        sweep = saved_sweep
         try:
             shutil.rmtree(tmp)  # no ignore_errors: a self-test cleanup failure must surface, not hide
         except OSError as exc:
@@ -2044,9 +2159,11 @@ def _self_test_main_isolated():
           "registry, a missing target (named by its own absent-target line), a non-clean baseline, and an "
           "off-grammar regenerate all fail closed (exit 2); the self-test verdict exits 2 when a vector "
           "could not be evaluated, even beside an assertion failure, and prints every cannot line before a "
-          "cleanup or census error; a setup or an evaluation raising any Exception is a named "
-          "cannot-evaluate; a declared target reached through a symlink at any component, or a tree with "
-          "any symlinked member, is not confirmed as produced; the synthetic real tree is byte-and-mode "
+          "cleanup or census error; a setup raising any Exception or returning None, and an evaluation "
+          "raising any Exception, are each a named cannot-evaluate, and an Exception escaping the gate is "
+          "named as a gate defect; a declared target reached through a symlink at the fixture base or any "
+          "component below it, or a tree with a symlinked member (a nested symlinked directory included) or "
+          "a FIFO member, is not confirmed as produced; the synthetic real tree is byte-and-mode "
           "identical after a normal run and after a run "
           "whose corrupted probe raises (itself exit 2); a generator changing a real-tree file's mode is "
           "detected (exit 2); a decode-only generator is caught (exit 1) specifically by a "
