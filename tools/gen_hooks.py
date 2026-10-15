@@ -345,8 +345,11 @@ def authoring_tree(root):
         raise ValueError("{}: the authoring marker exceeds the {}-byte bound".format(
             AUTHORING_MARKER_REL, AUTHORING_MARKER_MAX_BYTES))
     try:
-        data = tomllib.loads(raw.decode("utf-8"))  # UnicodeDecodeError and TOMLDecodeError are ValueErrors
-    except RecursionError as exc:
+        data = tomllib.loads(raw.decode("utf-8"))
+    except ValueError as exc:  # UnicodeDecodeError, TOMLDecodeError and an oversized integer
+        raise ValueError("{}: the authoring marker is not readable UTF-8 TOML ({})".format(
+            AUTHORING_MARKER_REL, exc)) from exc
+    except (RecursionError, MemoryError) as exc:
         raise ValueError("{}: the authoring marker nests too deeply to parse ({})".format(
             AUTHORING_MARKER_REL, exc)) from exc
     # type() as well as equality: the TOML bool true == 1 in Python, and gensrc_guard (which honours an

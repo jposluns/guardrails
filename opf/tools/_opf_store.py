@@ -102,9 +102,10 @@ WORKING_DIRNAME = ".working"           # fixed store-tree name at the STORE root
 # lives there. Keep this exclusion for those stores and for AIQT-owned material afterwards.
 # _opf_adopt derives its store-root exclusions from this tuple.
 STORE_ROOT_CONTROL_DIRS = (".git", ".aiqt")
-# Homes-2 topology is inert until migration and writer activation (spec 4.2 / 9.2).
-# SUPPORTED_HOMES is the highest homes generation this tooling activates; homes 2 activates with the
-# migration, so until then every store, whatever it declares, keeps its legacy grading (generation 1).
+# Homes-2 topology is inert until writer activation (spec 4.2). Homes 2 has no homes migration: a
+# store is at homes 2 only when created there, and no homes-1 store is migrated (spec 4.2 / 9.2).
+# SUPPORTED_HOMES is the highest homes generation this tooling activates; until homes 2 activates,
+# every store, whatever it declares, keeps its legacy grading (generation 1).
 SUPPORTED_HOMES = 1
 # Worklog 2 remains test-only until schema, doctor, and release support land.
 SUPPORTED_WORKLOG = 1
@@ -585,13 +586,37 @@ def _open_root_fd(root):
     return os.open(str(root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
 
 
-def _open_dir_nofollow(abspath):
+# The walk's TRAVERSE access mode: O_PATH where the platform has it (Linux), so a component that is only
+# crossed or probed, never read, needs SEARCH (execute) permission alone, exactly as the kernel's own path
+# resolution does. An ancestor with search but no read permission (mode 0711: a root-owned scratch root, or
+# many systems' /home/<user>) is therefore walkable, where the old O_RDONLY-per-component walk failed it
+# with EACCES and turned every store beneath it into CANNOT-EVALUATE. Where os.O_PATH is absent the walk
+# keeps the previous O_RDONLY open for every component, so a search-only ancestor still fails EACCES there
+# (disclosed residual, see _open_dir_nofollow). The symlink refusal is NOT weakened: O_PATH|O_NOFOLLOW on a
+# symlink opens the link object itself, and the paired O_DIRECTORY then refuses it. The refusal is accepted
+# as either errno of the no-follow pair, ENOTDIR or ELOOP, at an O_PATH step and an O_RDONLY step alike
+# (current Linux reports ENOTDIR for both; the self-test pins the pair, never one errno per access mode),
+# so a symlinked component still never resolves, with or without O_PATH.
+_WALK_O_TRAVERSE = getattr(os, "O_PATH", os.O_RDONLY)
+
+
+def _open_dir_nofollow(abspath, *, traverse_only=False):
     """Open an ABSOLUTE directory path as a dir fd by walking each component from the filesystem root with
-    O_DIRECTORY|O_NOFOLLOW, so a symlinked store root OR any symlinked ancestor is refused (ELOOP) rather
-    than silently followed off-tree, matching the contained no-follow discipline (spec 4.5, 17; the
-    symlink-resolution rule). `Path.resolve()` is deliberately NOT used to resolve a pointer target: it
-    canonicalizes symlinks BEFORE the open, so a symlinked target would resolve away and open
-    successfully. Raises OSError, which the caller maps to CANNOT-EVALUATE."""
+    O_DIRECTORY|O_NOFOLLOW, so a symlinked store root OR any symlinked ancestor is refused (either errno of
+    the no-follow pair, ENOTDIR or ELOOP, at an O_PATH step and an O_RDONLY step alike; see _WALK_O_TRAVERSE)
+    rather than silently followed off-tree, matching the contained no-follow discipline (spec 4.5, 17; the
+    symlink-resolution rule). INTERMEDIATE components are opened with _WALK_O_TRAVERSE (O_PATH, search
+    permission only, where it exists), so an ancestor with search but no read permission no longer fails the
+    walk; the FINAL component is opened O_RDONLY as before, so the caller receives a READABLE descriptor. With
+    traverse_only=True the final component too is opened _WALK_O_TRAVERSE, for a caller that only TRAVERSES
+    the result (fstat, or dir_fd-relative lookups, which need search permission only) and never reads it, so a
+    search-only directory can itself be opened and probed; such a descriptor is NOT readable where O_PATH
+    exists.
+    Where os.O_PATH is absent every component keeps the previous O_RDONLY open and a search-only ancestor
+    still refuses EACCES (disclosed residual; the refusal direction is fail-closed, never fail-open).
+    `Path.resolve()` is deliberately NOT used to resolve a pointer target: it canonicalizes symlinks
+    BEFORE the open, so a symlinked target would resolve away and open successfully. Raises OSError,
+    which the caller maps to CANNOT-EVALUATE."""
     if "\x00" in str(abspath):
         # os.open raises ValueError (not the OSError this helper documents) for an embedded NUL; refuse it
         # here as OSError so a NUL-bearing pointer target fails closed to CANNOT-EVALUATE at the caller
@@ -613,12 +638,16 @@ def _open_dir_nofollow(abspath):
     # can neither leak the child nor double-close the parent. Any failure or interruption closes every
     # descriptor still held and re-raises. Residual (sub-line, disclosed): an interruption between
     # an open returning and its append, or between a pop and its close, leaks that one descriptor.
+    final_access = _WALK_O_TRAVERSE if traverse_only else os.O_RDONLY
     held = []
     try:
-        # The filesystem root itself is never a symlink.
-        held.append(os.open(parts[0], os.O_RDONLY | os.O_DIRECTORY))
-        for comp in parts[1:]:
-            held.append(os.open(comp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=held[-1]))
+        # The filesystem root itself is never a symlink. It is the FINAL component only for "/" or "//".
+        root_access = final_access if len(parts) == 1 else _WALK_O_TRAVERSE
+        held.append(os.open(parts[0], root_access | os.O_DIRECTORY))
+        last = len(parts) - 1
+        for index, comp in enumerate(parts[1:], 1):
+            access = final_access if index == last else _WALK_O_TRAVERSE
+            held.append(os.open(comp, access | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=held[-1]))
             _journal._close_fd_propagating(held.pop(-2))
         return held.pop()
     except BaseException as exc:
@@ -653,12 +682,16 @@ def _read_toml_contained(root_fd, relpath, *, with_raw=False):
     return (data, parsed) if with_raw else parsed
 
 
-def _read_store_bytes_contained(root_fd, relpath):
+def _read_store_bytes_contained(root_fd, relpath, allowance=None):
     """The byte half of _read_toml_contained: read a contained store CONTROL file's exact bytes beneath
     root_fd, no-follow, singly-linked, capped. Returns the raw bytes, or None when the file (or a
     parent) is absent; StoreError on any unreadable shape. Split out so the descriptor-bound discovery
     (discover_machine_store_fd) can keep the EXACT bytes it parses for the resolved manifest rather
-    than re-opening it by path (round-5 defect 1)."""
+    than re-opening it by path (round-5 defect 1). `allowance`, when given, meters the read: a
+    one-element list holding the bytes the caller still allows its store reads, the read stopping at the
+    smaller of MAX_STORE_READ_BYTES and that remainder (never a byte past it) and the bytes read deducted
+    from it, a file that does not fit refused. None (every caller but source discovery) reads unmetered,
+    exactly as before."""
     try:
         st = _journal._lstat_contained(root_fd, relpath)
     except (_journal.JournalError, OSError) as exc:
@@ -685,13 +718,25 @@ def _read_store_bytes_contained(root_fd, relpath):
     if st.st_size > MAX_STORE_READ_BYTES:
         raise StoreError("{} is {} bytes, over the {}-byte store-read cap (fail-closed)".format(
             relpath, st.st_size, MAX_STORE_READ_BYTES))
+    limit = None
+    if allowance is not None:
+        # A metered read is bounded DURING the read, not only classified after it: a file grown between
+        # this lstat and the read stops at the limit, so it can outrun neither the per-file cap nor the
+        # budget the caller charged for its store reads (source discovery; SECA resource-bounds).
+        limit = min(MAX_STORE_READ_BYTES, allowance[0])
+        if st.st_size > limit:
+            raise StoreError("{} is {} bytes, over the {} bytes left of the read allowance (fail-closed)".format(
+                relpath, st.st_size, limit))
     try:
         # F-R17-A1: a STORE control file (a manifest or a `.opf.toml`/`.opf.local.toml` pointer) is refused
         # when it is multiply-linked. The decision is made on the OPENED fd's stat inside _read_contained,
         # not the pre-open _lstat_contained probe above, so a hardlink to an out-of-tree victim cannot let a
         # resolved store posture silently track the victim inode. This reader serves ONLY manifest and pointer
         # paths, so the single-link requirement covers both without touching generic product reads.
-        data, _ = _journal._read_contained(root_fd, relpath, require_single_link=True)
+        if limit is None:
+            data, _ = _journal._read_contained(root_fd, relpath, require_single_link=True)
+        else:
+            data, _ = _journal._read_contained(root_fd, relpath, require_single_link=True, cap=limit)
     except (_journal.JournalError, OSError) as exc:
         # _read_contained maps its open/read errors to JournalError, but its post-open os.fstat can still
         # raise a BARE OSError (a device/EIO-level failure) that would otherwise escape resolve_store
@@ -701,12 +746,15 @@ def _read_store_bytes_contained(root_fd, relpath):
         raise StoreError("cannot read {} ({})".format(relpath, exc))
     # Re-check the bytes ACTUALLY read against the cap: the pre-open lstat size is bound to the file as it
     # was BEFORE the open, so a store file swapped in or grown between that lstat and the open (a TOCTOU race
-    # on an adopter-controlled tree) is refused here rather than parsed over the cap. Residual: the bytes are
-    # read before this refusal, so a concurrently-growing file is bounded at classification, not mid-read
+    # on an adopter-controlled tree) is refused here rather than parsed over the cap. Residual: an unmetered
+    # read reads the bytes before this refusal, so a concurrently-growing file is bounded at classification
+    # (and by the journal product-read ceiling), not mid-read; a metered read stops at its limit instead
     # (SECA resource-bounds; disclose-guard-residuals).
     if len(data) > MAX_STORE_READ_BYTES:
         raise StoreError("{} read {} bytes, over the {}-byte store-read cap (a raced swap or growth past "
                          "the pre-open size; fail-closed)".format(relpath, len(data), MAX_STORE_READ_BYTES))
+    if allowance is not None:
+        allowance[0] -= len(data)
     return data
 
 
@@ -722,12 +770,53 @@ def _parse_store_toml(relpath, data):
         # ValueError base so a present-but-unparseable input is a fail-closed StoreError, never a crash
         # (check-fails-closed-on-unreadable; unreadable includes present-but-unparseable).
         raise StoreError("cannot parse {} ({})".format(relpath, exc))
-    except RecursionError as exc:
-        # A deeply-nested TOML value overflows the parser's recursion: a present-but-unparseable input is a
-        # fail-closed StoreError (the caller routes it to CANNOT-EVALUATE), never an uncontrolled crash
+    except (RecursionError, MemoryError) as exc:
+        # tomllib raises RecursionError on a deeply-nested value and, from CPython 3.14.8, on a key of more
+        # than 1000 dotted parts, and a many-part key can exhaust memory first (MemoryError under a memory
+        # limit): a present-but-unparseable input is a fail-closed StoreError (the caller routes it to
+        # CANNOT-EVALUATE), never an uncontrolled crash, and its message names both causes
         # (check-fails-closed-on-unreadable; unreadable includes present-but-unparseable).
-        raise StoreError("cannot parse {} (input nesting is too deep; present but unparseable): {}".format(
-            relpath, exc))
+        raise StoreError("cannot parse {} (input nesting is too deep or a dotted key has too many parts; present "
+                         "but unparseable): {}".format(relpath, exc))
+
+
+# Self-test seam for that RecursionError class, shared by the opf self-tests. _ST_DEEP_TOML nests a value past
+# the recursion limit; _ST_LONG_KEY_TOML is a 1001-part key, which raises only where tomllib caps key parts
+# (CPython 3.14.8 on) or under _StKeyPartCap, which emulates that cap on an interpreter without it.
+_ST_DEEP_TOML = "deep = " + "[" * 5000 + "]" * 5000 + "\n"
+_ST_LONG_KEY_TOML = "k" + ".k" * 1000 + " = 1\n"
+
+
+class _StKeyPartCap:
+    """While held, tomllib refuses a key of more than 1000 parts with RecursionError (or the class given,
+    MemoryError to emulate a many-part key under a memory limit): tomllib._parser.parse_key is rebound on
+    entry and restored on exit. The given class is injected even when the underlying parse_key refuses the
+    key first (an interpreter with its own cap, CPython 3.14.8 on, raises RecursionError inside it), so the
+    class a vector asserts never depends on the host. Self-test only; a vector asserts the class, never
+    this message."""
+
+    def __init__(self, kind=RecursionError):
+        self._kind = kind
+
+    def __enter__(self):
+        real = self._real = tomllib._parser.parse_key
+        kind = self._kind
+
+        def capped(src, pos):
+            try:
+                pos, key = real(src, pos)
+            except (RecursionError, MemoryError):
+                # the interpreter's own key-part cap fired first; still inject the requested class
+                raise kind("emulated key-part cap") from None
+            if len(key) > 1000:
+                raise kind("emulated key-part cap")
+            return pos, key
+        tomllib._parser.parse_key = capped
+        return self
+
+    def __exit__(self, *exc_info):
+        tomllib._parser.parse_key = self._real
+        return False
 
 
 def _immediate_subdirs(store_root_fd, working_rel):
@@ -839,7 +928,7 @@ def discover_machine_store(store_root_fd, store_root, accept_tokens=None):
     return _discovery_result(matches, legacy)
 
 
-def discover_machine_store_fd(store_root_fd, accept_tokens=None):
+def discover_machine_store_fd(store_root_fd, accept_tokens=None, allowance=None):
     """Descriptor-bound sibling of discover_machine_store (round-5 defect 1): the `.working` LISTING
     descriptor is held for the whole discovery and every listed name's manifest is read BENEATH it,
     so a `.working` swapped in after the listing is never read (the rounds-2-4 invariant: every name
@@ -848,7 +937,8 @@ def discover_machine_store_fd(store_root_fd, accept_tokens=None):
     status is "one", the resolved manifest's EXACT bytes as read through the held descriptor (None
     otherwise), so a descriptor-bound caller (resolve_store_fd, the adoption planner) parses the very
     bytes discovery matched rather than re-opening the manifest by path. Statuses, details, StoreError
-    behaviour and `accept_tokens` are exactly discover_machine_store's."""
+    behaviour and `accept_tokens` are exactly discover_machine_store's. `allowance` meters each manifest
+    read (_read_store_bytes_contained); None reads unmetered."""
     accept = (STANDARD_TOKEN,) if accept_tokens is None else tuple(accept_tokens)
     wfd = _open_working_dir_fd(store_root_fd, WORKING_DIRNAME)
     if wfd is None:
@@ -859,7 +949,7 @@ def discover_machine_store_fd(store_root_fd, accept_tokens=None):
 
         def load(name):
             rel = "{}/{}".format(name, MANIFEST_NAME)
-            data = _read_store_bytes_contained(wfd, rel)   # StoreError propagates (fail-closed)
+            data = _read_store_bytes_contained(wfd, rel, allowance)   # StoreError propagates (fail-closed)
             if data is None:
                 return None
             parsed = _parse_store_toml("{}/{}".format(WORKING_DIRNAME, rel), data)
@@ -983,11 +1073,16 @@ def _target_store_root(target, product_root):
     return Path(product_root) / path
 
 
-def _read_pointer_target(product_root_fd, relpath):
+def _read_pointer_target(product_root_fd, relpath, allowance=None):
     """The Target named by a pointer file at the product root, or None when the file is absent. Raises
     StoreError when the file is present but unreadable, unparseable, or carries no usable
-    `[store].target` (a pointer that names nothing is malformed, not absent)."""
-    data = _read_toml_contained(product_root_fd, relpath)
+    `[store].target` (a pointer that names nothing is malformed, not absent). `allowance` meters the
+    read as _read_store_bytes_contained states; None reads unmetered."""
+    if allowance is None:
+        data = _read_toml_contained(product_root_fd, relpath)
+    else:
+        raw = _read_store_bytes_contained(product_root_fd, relpath, allowance)
+        data = None if raw is None else _parse_store_toml(relpath, raw)
     if data is None:
         return None
     store = data.get("store")
@@ -1137,7 +1232,7 @@ def _resolve_at(store_root, source, target, pointer, accept_tokens=None):
                       store_root=store_root, pointer_source=source)
 
 
-def resolve_store_fd(product_root_fd, product_root, accept_tokens=None):
+def resolve_store_fd(product_root_fd, product_root, accept_tokens=None, allowance=None):
     """Descriptor-bound resolve_store (round-5 defect 1), for a caller that already HOLDS the product
     root open and keeps that descriptor for every subsequent read (the adoption planner, which opened
     it with the _open_dir_nofollow walk). Nothing is re-resolved by path: the pointer files are read
@@ -1151,16 +1246,19 @@ def resolve_store_fd(product_root_fd, product_root, accept_tokens=None):
     manifest's exact bytes as read through the listing descriptor (None unless RESOLVED), so the
     caller parses the same bytes discovery matched instead of re-opening the manifest by path.
     `product_root` is the path the held descriptor was opened from, used only for pointer-target
-    resolution and reporting; `accept_tokens` as in resolve_store. Statuses and details follow
+    resolution and reporting; `accept_tokens` as in resolve_store. `allowance` meters every pointer and
+    manifest read (_read_store_bytes_contained), so a caller that charged resolution to its own budget
+    (source discovery) is never read past that charge; a read that does not fit is CANNOT-EVALUATE. None
+    (investigation and every other caller) reads unmetered. Statuses and details follow
     resolve_store/_resolve_at."""
     product_root = Path(product_root)
     if not _containment.probe():
         return Resolution(CANNOT_EVALUATE, "race-free containment primitive absent; fail-closed",
                           product_root=product_root), None
     try:
-        local = _read_pointer_target(product_root_fd, LOCAL_POINTER_REL)
+        local = _read_pointer_target(product_root_fd, LOCAL_POINTER_REL, allowance)
         # The local override wins WHOLESALE (spec 4.3), exactly as in resolve_store (MAJOR 1).
-        committed = _read_pointer_target(product_root_fd, POINTER_REL) if local is None else None
+        committed = _read_pointer_target(product_root_fd, POINTER_REL, allowance) if local is None else None
     except StoreError as exc:
         return Resolution(CANNOT_EVALUATE, str(exc), product_root=product_root), None
     pointer = local is not None or committed is not None
@@ -1181,7 +1279,7 @@ def resolve_store_fd(product_root_fd, product_root, accept_tokens=None):
                 target=target, pointer_source=source, product_root=product_root), None
     try:
         status, machine_dir, detail, manifest_raw = discover_machine_store_fd(
-            product_root_fd, accept_tokens=accept_tokens)
+            product_root_fd, accept_tokens=accept_tokens, allowance=allowance)
     except StoreError as exc:
         return Resolution(CANNOT_EVALUATE, str(exc), store_root=product_root, target=target,
                           pointer_source=source, product_root=product_root), None
@@ -2624,10 +2722,105 @@ def self_test():
             _kind = "ValueError"
         check("s14-nul-target-oserror", _kind == "OSError")
 
+        # travanc: the no-follow walk crosses a TRAVERSE-ONLY ancestor (search permission, no read; the
+        # owner-bound spelling of the 0711 /home/<user> shape is 0111) without weakening symlink refusal.
+        # Vector 1 FAILS WITHOUT THE FIX (the mutant: intermediate components opened O_RDONLY instead of
+        # _WALK_O_TRAVERSE raises EACCES at "mid"); it discriminates only for a uid the mode bits bind
+        # (not uid 0) on a platform with O_PATH, so those runs disclose a skip rather than passing silently.
+        import errno as _ta_errno
+        _ta = base / "travanc-searchonly"
+        (_ta / "mid" / "leaf").mkdir(parents=True)
+        if hasattr(os, "O_PATH") and os.geteuid() != 0:
+            os.chmod(_ta / "mid", 0o111)
+            try:
+                def _ta_open():
+                    _ta_fd = _open_dir_nofollow(str(_ta / "mid" / "leaf"))
+                    try:
+                        _ta_names = os.listdir(_ta_fd)   # the returned FINAL descriptor stays READABLE
+                    finally:
+                        os.close(_ta_fd)
+                    return "opened" if _ta_names == [] else "unreadable-leaf"
+                check("travanc-search-only-ancestor-opens", _guard(_ta_open) == "opened")
+
+                def _ta_traverse():
+                    _ta_fd = _open_dir_nofollow(str(_ta / "mid"), traverse_only=True)
+                    try:
+                        # traverse-only: the search-only directory ITSELF opens, and dir_fd-relative
+                        # lookups (which need search permission only) work through it.
+                        _ta_st = os.stat("leaf", dir_fd=_ta_fd, follow_symlinks=False)
+                    finally:
+                        os.close(_ta_fd)
+                    return "probed" if stat.S_ISDIR(_ta_st.st_mode) else "not-a-dir"
+                check("travanc-traverse-only-final-probes", _guard(_ta_traverse) == "probed")
+            finally:
+                os.chmod(_ta / "mid", 0o755)
+        else:
+            print("DISCLOSED SKIP: travanc-search-only-ancestor-opens and "
+                  "travanc-traverse-only-final-probes not run (uid 0 is not bound by mode bits, or "
+                  "os.O_PATH is absent and the walk keeps the O_RDONLY fallback)")
+        # Symlink refusal is NOT relaxed by the O_PATH steps, leaf and intermediate alike. The errno is
+        # pinned to the no-follow pair {ENOTDIR, ELOOP}: with O_DIRECTORY|O_NOFOLLOW a symlink refuses as
+        # ENOTDIR on current Linux (verified: O_PATH and O_RDONLY modes alike, the link object is not a
+        # directory); ELOOP is accepted as the pair's other no-follow refusal (no kernel reporting it was
+        # exercised); both are refusals, and anything else (above all a successful open, the
+        # symlink-following defect) fails this check.
+        (_ta / "real" / "sub").mkdir(parents=True)
+        os.symlink("real", _ta / "lnk")
+
+        def _ta_errno_of(thunk):
+            try:
+                _ta_fd = thunk()
+            except OSError as exc:
+                return exc.errno
+            os.close(_ta_fd)
+            return "opened"
+        _ta_refusals = (_ta_errno.ENOTDIR, _ta_errno.ELOOP)
+        check("travanc-symlinked-leaf-still-refused",
+              _ta_errno_of(lambda: _open_dir_nofollow(str(_ta / "lnk"))) in _ta_refusals)
+        check("travanc-symlinked-intermediate-still-refused",
+              _ta_errno_of(lambda: _open_dir_nofollow(str(_ta / "lnk" / "sub"))) in _ta_refusals)
+        check("travanc-symlinked-leaf-traverse-only-still-refused",
+              _ta_errno_of(lambda: _open_dir_nofollow(str(_ta / "lnk"), traverse_only=True))
+              in _ta_refusals)
+
         # m8: a store file larger than the read cap is refused rather than read unboundedly.
         big_manifest = manifest_text() + chr(10) + "#" + ("x" * (MAX_STORE_READ_BYTES + 16))
         m8_root = build_store(manifest=big_manifest)
         check("m8-oversized-manifest-cannot-eval", resolve_store(m8_root).status == CANNOT_EVALUATE)
+
+        # m8b: a METERED read (the allowance source discovery passes resolve_store_fd) deducts what it read,
+        # refuses a file larger than the allowance left before opening it, and, for a file found larger only
+        # at the read (one grown after its lstat), stops at the limit: the read never takes a byte past it.
+        _m8b = base / "m8b-metered"; _m8b.mkdir()
+        (_m8b / "f.toml").write_bytes(b"a = 1\n")
+        _m8b_real_read = os.read
+        _m8b_bytes = [0]
+
+        def _m8b_read(fd_arg, n_arg):
+            block = _m8b_real_read(fd_arg, n_arg)
+            _m8b_bytes[0] += len(block)
+            return block
+        _m8b_fd = os.open(str(_m8b), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.read = _m8b_read
+            _m8b_left = [10]
+            check("m8b-metered-read-deducts",
+                  _guard(lambda: _read_store_bytes_contained(_m8b_fd, "f.toml", _m8b_left)) == b"a = 1\n"
+                  and _m8b_left == [4])
+            _m8b_left = [5]
+            _m8b_bytes[0] = 0
+            check("m8b-metered-over-allowance-refused-unread",
+                  _guard(lambda: _read_store_bytes_contained(_m8b_fd, "f.toml", _m8b_left)) == "RAISED"
+                  and _m8b_left == [5] and _m8b_bytes[0] == 0)
+            _m8b_bytes[0] = 0
+            check("m8b-stop-at-cap-reads-no-byte-past",
+                  _guard(lambda: _journal._read_contained(_m8b_fd, "f.toml", cap=4)) == "RAISED"
+                  and _m8b_bytes[0] == 4)
+            check("m8b-stop-at-cap-exact-fit",
+                  _guard(lambda: _journal._read_contained(_m8b_fd, "f.toml", cap=6)[0]) == b"a = 1\n")
+        finally:
+            os.read = _m8b_real_read
+            os.close(_m8b_fd)
 
         # ---- round-2 reconcile-draft fix vectors (fail pre-fix, pass post-fix) ------------------------
         # The FIFO-hang alarm marker MUST NOT derive from OSError: a reader's own `except OSError`
@@ -3704,6 +3897,38 @@ def self_test():
                   and "stale" not in hs_seam.views)
         finally:
             os.close(hs_wfd)
+
+        # tomllib's RecursionError (a deeply-nested value, and a 1001-part key under the emulated cap) is a
+        # StoreError naming both causes, so a long dotted key is never reported as nesting alone.
+        def recursion_refusal(text, capped):
+            try:
+                if capped:
+                    with _StKeyPartCap(capped):
+                        _parse_store_toml("m/manifest.toml", text.encode("utf-8"))
+                else:
+                    _parse_store_toml("m/manifest.toml", text.encode("utf-8"))
+            except StoreError as exc:
+                return type(exc.__context__).__name__, str(exc)
+            except Exception as exc:  # noqa: BLE001  an escape is a failed check, never a suite abort
+                return "escaped " + type(exc).__name__, ""
+            return "parsed", ""
+        # Message-free: the class tomllib raised and this module's own refusal text, never the parser's or the
+        # emulation's message, so a native 3.14.8 cap with any message of its own still passes.
+        rec_head = ("cannot parse m/manifest.toml (input nesting is too deep or a dotted key has too many parts; "
+                    "present but unparseable): ")
+        for label, text, capped, kind in (("deep-nesting", _ST_DEEP_TOML, None, "RecursionError"),
+                                          ("1001-part-key", _ST_LONG_KEY_TOML, RecursionError, "RecursionError"),
+                                          ("many-part-key-memory", _ST_LONG_KEY_TOML, MemoryError, "MemoryError")):
+            got_kind, got_text = recursion_refusal(text, capped)
+            check("recursion-{}-names-both-causes".format(label),
+                  got_kind == kind and got_text.startswith(rec_head))
+        # The emulation injects the class it is given even when an underlying key-part cap (here the
+        # emulation itself, standing in for a CPython 3.14.8 interpreter cap) refuses the key first with
+        # RecursionError: the memory vector must observe MemoryError, never the underlying class.
+        with _StKeyPartCap(RecursionError):
+            got_kind, got_text = recursion_refusal(_ST_LONG_KEY_TOML, MemoryError)
+        check("recursion-many-part-key-memory-independent-of-underlying-cap",
+              got_kind == "MemoryError" and got_text.startswith(rec_head))
 
     finally:
         shutil.rmtree(base, ignore_errors=True)

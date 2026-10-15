@@ -123,7 +123,7 @@ def load_crosswalk(root):
         raise RefuseError("no crosswalk at {} (nothing to plan)".format(CROSSWALK_REL))
     # RecursionError too: tomllib raises it (a RuntimeError, not a ValueError) on a deeply nested
     # array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
-    except (OSError, ValueError, RecursionError, tomllib.TOMLDecodeError) as exc:
+    except (OSError, ValueError, RecursionError, MemoryError, tomllib.TOMLDecodeError) as exc:
         raise RefuseError("cannot read {} ({})".format(CROSSWALK_REL, exc))
 
 
