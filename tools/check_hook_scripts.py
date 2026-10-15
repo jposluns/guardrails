@@ -578,7 +578,7 @@ def _below_floor(root):
         with open(root / FLOOR_REL, "rb") as fh:
             floor = tomllib.load(fh)["python-floor"]
         major, minor = (int(part) for part in floor.split("."))
-    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError, MemoryError) as exc:
         raise GateError("%s: no python-floor to run the guard under: %s" % (FLOOR_REL, _bounded(exc)))
     if minor < 1:
         raise GateError("%s: python-floor %s has no earlier minor version" % (FLOOR_REL, floor))
