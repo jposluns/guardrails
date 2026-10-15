@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "9e31f307aae1dd1e5e46ea3613a41e5025eb3add9330f4ba132279f3c34f32b7"
+tree-sha256 = "3f92fab56d7b232e37d92c925546be4a6995caf4f5c2f0488d64ff1919aa7533"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3446,8 +3446,8 @@ sha256 = "6bc8f8e89f8983d0d418e35dfaa96eda8aec0aa7274162dc61748906fcb695ba"
 
 [[sources]]
 path = "tools/check_release_cut.py"
-bytes = 159187
-sha256 = "527d08a4661de79f94c1a3a1a92a5e9fdce5181cf7cab5ee6c1f3b62547391b1"
+bytes = 158350
+sha256 = "b152fd17d163f7789b5f0386a8bbd031592a737c9074b1c0c8a73e92871554ad"
 
 [[sources]]
 path = "tools/check_release_delta.py"
@@ -3681,8 +3681,8 @@ sha256 = "26b2e951fe7c452e19c919e04bbc2cf3854eefd085fe3f10399678b84b4d5b9a"
 
 [[sources]]
 path = "tools/orch_register.py"
-bytes = 159503
-sha256 = "5d27da3548bab402682892957c9c19627a625083e41229e22286415a79e9cd57"
+bytes = 183098
+sha256 = "6adc22a44efaada5ad046f7a1f5ceff4e8f46b178299393f1750670dc0a11dff"
 
 [[sources]]
 path = "tools/pin.py"
