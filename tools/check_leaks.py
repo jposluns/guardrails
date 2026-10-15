@@ -15,13 +15,21 @@ so this is OBSCURITY, not secrecy (a salt cannot help: a public gate must hash a
 any salt would also be public). Deliberate obfuscation (mid-word splits, HTML entities, zero-width chars)
 can evade the hash layer; a ZIP archive is unpacked and its members scanned, but another compressed
 format (a gzip, bzip2 or 7z file), a ZIP that begins after leading bytes (a self-extracting ZIP) inside a
-walked file not named .zip or inside an archive member, and compressed bytes an archive holds in its
-archive comment, in an extra field or in a fixed-width record field the gate does not compare with the
-central directory (a timestamp, the attributes, the end record's disk numbers and entry counts, and a
-local header's CRC and size fields) are only byte-scanned, so text compressed inside them is not seen
-(a member comment, ZIP64 extensible data and a data descriptor that does not repeat the directory's CRC
-and sizes are refused instead, below); the structural path patterns are scoped to this host's Linux
-layout. The dual-family verifiers and the private plaintext check
+walked file not named .zip or inside an archive member, and an archive's bytes outside its members' data
+are only byte-scanned, so text compressed inside them is not seen. Those bytes are the archive comment
+and each extra field (up to 65535 bytes each), each member name (refused below unless it is printable
+text, yet printable bytes can still hold a deflate stream) and every fixed-width record field: the gate
+and zipfile check only the signatures and the lengths, sizes, CRCs, offsets, methods and flag bits that
+place and read the records (the end record's directory offset only as a shift common to every member's
+header offset), so any other fixed field holds any value. The longest run of contiguous bytes no check
+fixes is 28, a ZIP64 end record's versions, disk numbers and entry counts (its offsets 12 to 39), room
+for a short compressed text (a raw deflate stream of a private IP takes under 10 bytes); shorter runs
+include a local header's version, flags, method, timestamp, CRC and sizes (22 bytes, its offsets 4 to
+25) and, behind a ZIP64 locator, the end record's disk numbers, entry counts and the directory size and
+offset that the ZIP64 record replaces (16 bytes, its offsets 4 to 19). A member comment, ZIP64
+extensible data, a data descriptor that does not repeat the directory's CRC and sizes and a member name
+that is not printable text are refused instead, below; the structural path patterns are scoped to this
+host's Linux layout. The dual-family verifiers and the private plaintext check
 are the compensating layers. A line carrying a `leak-allow` marker is exempt from the STRUCTURAL layer.
 
 SCANNED SET. The walk yields every file in the working tree except the .git, node_modules and
@@ -38,13 +46,15 @@ __pycache__ subtrees (the denylist file included). Each yielded path is first CL
     name is used as a filesystem path), each member's content decoded by the three rules below and
     scanned, a finding named <archive>!<member>:<line>. Before any member is read, the central directory
     is checked against MAX_ARCHIVE_MEMBERS and MAX_ARCHIVE_TOTAL_SIZE (declared uncompressed bytes), and
-    each member against the encryption flag, a compression method outside ARCHIVE_METHODS, a
-    nested-archive name and a non-empty member comment (free bytes the gate cannot unpack); then the
-    byte spans of the parsed records (each member's local header with its name and extra field, its
-    data and any data descriptor, the central directory, any ZIP64 end record and locator, and the end
-    record with its comment) must be disjoint and cover the file exactly from its first byte to its
-    last, so leading bytes, a gap, an overlap, trailing bytes or a second archive in the same file are
-    CANNOT EVALUATE naming the archive. A data descriptor is parsed and must hold exactly the member's
+    each member against a name that is not printable text (_unprintable: a control, format or separator
+    character other than the space, a NUL included), the encryption flag, a compression method outside
+    ARCHIVE_METHODS, a nested-archive name and a non-empty member comment (free bytes the gate cannot
+    unpack); then the byte spans of the parsed records (each member's local header with its name and
+    extra field, its data and any data descriptor, the central directory, any ZIP64 end record and
+    locator, and the end record with its comment) must be disjoint and cover the file exactly from its
+    first byte to its last, so leading bytes, a gap, an overlap, trailing bytes or a second archive in
+    the same file are CANNOT EVALUATE naming the archive. A data descriptor is parsed and must hold
+    exactly the member's
     central-directory CRC and compressed and uncompressed sizes (8 bytes each when the local header
     carries a ZIP64 extra field), and a ZIP64 end record must carry no extensible data, so neither can
     hold bytes the directory does not declare; either failing is CANNOT EVALUATE naming the archive (and
@@ -235,6 +245,21 @@ def _member_display(name):
     """A printable form of an archive member name: every non-printable character (a newline included) is
     backslash-escaped, so a crafted member name cannot forge an output line."""
     return "".join(ch if ch.isprintable() else ascii(ch)[1:-1] for ch in name)
+
+
+def _unprintable(name):
+    """Where a member name stops being printable text: None when every character is printable
+    (str.isprintable: no control, format, private-use or unassigned character and no separator but the
+    space), else the position and code point of the first one that is not. `name` is the central
+    directory's copy as zipfile decodes it (UTF-8 under flag bit 11, else code page 437, which maps the
+    bytes 0x00 to 0x1F, 0x7F and 0xFF to characters that are not printable), before zipfile cuts it at a
+    NUL, so a NUL and every byte after it are checked. zipfile itself refuses a name that does not decode
+    by its declared encoding (a corrupt archive) and, when the member is read, a local header whose copy
+    does not decode to the same name, so both copies are this text."""
+    for index, char in enumerate(name):
+        if not char.isprintable():
+            return "character {} of {} is U+{:04X}".format(index + 1, len(name), ord(char))
+    return None
 
 
 class CannotEvaluate(Exception):
@@ -473,8 +498,9 @@ def read_archive(data):
     member is its printable name and texts its decode_views views. Nothing is extracted to disk and no
     member name is used as a filesystem path. Before any member is read, the central directory is
     checked: more than MAX_ARCHIVE_MEMBERS members, more than MAX_ARCHIVE_TOTAL_SIZE declared uncompressed
-    bytes, an encrypted member, a compression method outside ARCHIVE_METHODS, a member named as an
-    archive, a member with a central-directory comment, or parsed records that do not tile the archive's
+    bytes, a member name that is not printable text (_unprintable), an encrypted member, a compression
+    method outside ARCHIVE_METHODS, a member named as an archive, a member with a central-directory
+    comment, or parsed records that do not tile the archive's
     bytes exactly or hold bytes the directory does not declare (_coverage_problems) each
     raise CannotEvaluate. So do a corrupt archive, a member that cannot be read (each read asks for at
     most one byte past the member's declared size, and zipfile stops at that size and checks the CRC), a
@@ -496,6 +522,10 @@ def read_archive(data):
             raise CannotEvaluate("{} uncompressed bytes declared, over MAX_ARCHIVE_TOTAL_SIZE ({}); no "
                                  "member was read".format(total, MAX_ARCHIVE_TOTAL_SIZE))
         for info in infos:
+            unprintable = _unprintable(info.orig_filename)
+            if unprintable is not None:
+                raise CannotEvaluate("member name is not printable text ({}); no member was read"
+                                     .format(unprintable), _member_display(info.orig_filename))
             member = _member_display(info.filename)
             if info.flag_bits & 0x1:
                 raise CannotEvaluate("encrypted member; no member was read", member)
@@ -713,7 +743,11 @@ def main():
 #      local ZIP64 extra field) and one whose CRC, compressed size or uncompressed size alone is off by
 #      one are each CANNOT EVALUATE naming the member and offset; 5u-5x. ZIP64 extensible data and a
 #      member comment, each holding a deflate stream of a private IP, a directory record with no local
-#      header at its offset, and an injected unparsable record are each CANNOT EVALUATE, with no member read,
+#      header at its offset, and an injected unparsable record are each CANNOT EVALUATE, with no member read;
+#      5y. a member name that is a deflate stream of a private IP or holds a control character, a NUL or a
+#      no-break space is CANNOT EVALUATE naming the member and the character, with no member read, a name
+#      that does not decode as UTF-8 under flag bit 11 is a corrupt archive, and printable non-ASCII names
+#      are read,
 #   6. a non-regular file (injected FIFO mode) is CANNOT EVALUATE (exit 2, naming it), its content
 #      NEVER read (the read seam raises for it, so a read-before-classification regression shows as a
 #      read error, not the CANNOT EVALUATE line); 6b. a symlink to a regular file is followed and its
@@ -744,7 +778,11 @@ def main():
 # ZIP64 extensible data and member comments, and checked the archive-size bound on the stat size, each 5t
 # vector, 5u, 5v and the two outside 5s vectors pass (exit 0) and fail here; the 5r same-length content,
 # the 5s _read_bytes vectors, 5w and 5x pin conditions that gate held without a vector that discriminates
-# them. The planted host path and private IP are assembled from
+# them. Against the gate that accepted any member name, the 5y deflated, control-character, NUL and
+# no-break-space names pass (exit 0) and fail here (the NUL name also fails a rule that checks the name
+# zipfile cuts at the NUL, the no-break space one that refuses control characters alone); the 5y
+# undecodable name pins zipfile's own refusal, and the two printable 5y names fail a rule that refuses
+# every non-ASCII name. The planted host path and private IP are assembled from
 # pieces so this source stays clean under its own scan.
 _HOST_PATH = "/" + "opt/" + "fixture-host/private/path"
 _PRIVATE_IP = "10." + "20.30.40"
@@ -789,13 +827,15 @@ def self_test_main():
 
     def entry(name, content, method=zipfile.ZIP_DEFLATED, stored=None, size=None, before=b"", extra=b"",
               listed=1, descriptor=b""):
-        """One raw_zip member. Its data defaults to content as the method writes it, and its declared size
-        and CRC to content's; before is placed ahead of its local header, extra is its local header's extra
-        field (the directory's stays empty), listed is how many directory records name it (0 leaves it out),
-        and a non-empty descriptor follows its data and sets flag bit 3."""
+        """One raw_zip member. Its name is ASCII text or the raw bytes both its records hold; its data
+        defaults to content as the method writes it, and its declared size and CRC to content's; before is
+        placed ahead of its local header, extra is its local header's extra field (the directory's stays
+        empty), listed is how many directory records name it (0 leaves it out), and a non-empty descriptor
+        follows its data and sets flag bit 3."""
         if stored is None:
             stored = deflate(content) if method == zipfile.ZIP_DEFLATED else content
-        return (name.encode("ascii"), method, stored, zlib.crc32(content),
+        raw_name = name if isinstance(name, bytes) else name.encode("ascii")
+        return (raw_name, method, stored, zlib.crc32(content),
                 len(content) if size is None else size, before, extra, listed, descriptor)
 
     def raw_zip(entries, zip64=False, extensible=b""):
@@ -1489,6 +1529,49 @@ def self_test_main():
                 failures.append("a member was read from an archive the coverage check refused (case {}; got "
                                 "{}: {!r})".format(label, rc, out))
 
+        # 5y. a member name must be printable text: a name that is a deflate stream of a private IP, one
+        #     holding a terminal escape (a control character), one whose NUL zipfile cuts off (so the name it
+        #     reports is printable) and one holding a no-break space (code page 437's byte 0xFF, a separator
+        #     and not a control character) are each CANNOT EVALUATE naming the member and its first character
+        #     that is not printable, with no member read; each member's content is clean, so a gate without
+        #     the rule passes them (exit 0). A name that does not decode as UTF-8 under flag bit 11 is refused
+        #     by zipfile itself as a corrupt archive (pinned here, not discriminating), and printable non-ASCII
+        #     names (UTF-8, and code page 437's bytes 0x82 and 0xFE beside a space) are read.
+        packed_name, cafe = deflate(secret), "caf" + chr(0xE9)
+        if packed_name.decode("cp437").isprintable():
+            failures.append("the deflated-name fixture must hold a character that is not printable (case 5y; "
+                            "got {!r})".format(packed_name))
+        for label, name, blob, member, reason in (
+                ("5y-deflated", "deflated-name.zip", raw_zip([entry(packed_name, b"plain\n")]),
+                 _member_display(packed_name.decode("cp437")),
+                 "member name is not printable text (character "),
+                ("5y-control", "control-name.zip", raw_zip([entry(b"notes\x1b[8m.md", b"plain\n")]),
+                 "notes\\x1b[8m.md", "member name is not printable text (character 6 of 12 is U+001B)"),
+                ("5y-nul", "nul-name.zip", raw_zip([entry(b"a.txt\x00hidden", b"plain\n")]),
+                 "a.txt\\x00hidden", "member name is not printable text (character 6 of 12 is U+0000)"),
+                ("5y-no-break-space", "nbsp-name.zip", raw_zip([entry(b"caf\x82\xff.md", b"plain\n")]),
+                 cafe + "\\xa0.md", "member name is not printable text (character 5 of 8 is U+00A0)"),
+                ("5y-undecodable", "undecodable-name.zip",
+                 patch_directory(raw_zip([entry(b"a\xff.txt", b"plain\n")]), 0, 8, "<H", 0x0800), None,
+                 "not a readable ZIP archive: UnicodeDecodeError")):
+            files = dict(clean_files)
+            files["site/downloads/" + name] = blob
+            rc, out = run_capture(tree("zip-" + label, files))
+            expect_cannot_evaluate(label, "a member name that is not printable text", rc, out,
+                                   "site/downloads/" + name + ("" if member is None else "!" + member), reason)
+            if "with 1 member(s) scanned" in out:
+                failures.append("a member was read from an archive whose member name was refused (case {}; got "
+                                "{}: {!r})".format(label, rc, out))
+        for label, name, blob in (
+                ("5y-printable-utf8", "utf8-name.zip", zip_blob(((cafe + ".md", b"plain\n"),))),
+                ("5y-printable-cp437", "cp437-name.zip", raw_zip([entry(b"caf\x82 \xfe.md", b"plain\n")]))):
+            files = dict(clean_files)
+            files["site/downloads/" + name] = blob
+            rc, out = run_capture(tree("zip-" + label, files))
+            if rc != 0 or "including 1 ZIP archive(s) with 1 member(s) scanned" not in out:
+                failures.append("an archive whose member name is printable non-ASCII text expected exit 0 with "
+                                "its member scanned (case {}; got {}: {!r})".format(label, rc, out))
+
         # 6. a non-regular file is CANNOT EVALUATE (exit 2, naming it), its content never read.
         #    Deterministic: the stat seam reports a FIFO mode for one fixture file, so the case runs on
         #    every runner (no /dev/null dependency). The read seam RAISES for that file, so a scan that
@@ -1585,16 +1668,19 @@ def self_test_main():
           "in a deflated, Latin-1 or UTF-16 ZIP member (named <archive>!<member>:<line>), in a ZIP under "
           "another name, or in an archive comment are each a finding (exit 1); a clean archive passes, "
           "counted with its members, and so do records that tile an archive (data descriptors, ZIP64 sizes "
-          "and end records, local extra fields); each archive bound (member count, total declared size, and "
+          "and end records, local extra fields) and printable non-ASCII member names; each archive bound "
+          "(member count, total declared size, and "
           "the archive's own size, checked on the bytes read through one bounded read, never the stat size) "
           "passes just inside and at it and is CANNOT EVALUATE just outside it, with no member read; a corrupt "
-          "archive (in either suffix case), an archive whose records do not tile its bytes (an unlisted entry, "
+          "archive (in either suffix case, or naming a member in bytes that are not UTF-8 under its UTF-8 "
+          "flag), an archive whose records do not tile its bytes (an unlisted entry, "
           "a second archive, a gap, trailing bytes, overlapping records, a comment past the end, a directory "
           "record with no local header, an unparsable record), a data descriptor that does not repeat its "
           "member's directory CRC and sizes (one hiding a deflated private IP included), ZIP64 extensible "
-          "data, a member comment, an encrypted, unsupported-method, nested, CRC-failing, undecodable or "
-          "size-misstated member, a member with a second deflate stream or one that never ends, an injected "
-          "non-regular file (its content never read: its read seam raises if it is) and a symlinked "
+          "data, a member comment, a member name that is not printable text (a deflated private IP, a control "
+          "character, a NUL or a no-break space in it), an encrypted, unsupported-method, nested, "
+          "CRC-failing, undecodable or size-misstated member, a member with a second deflate stream or one "
+          "that never ends, an injected non-regular file (its content never read: its read seam raises if it is) and a symlinked "
           "directory are each CANNOT EVALUATE (exit 2, naming it), never a skip; and a dangling symlink, "
           "an injected unreadable file, and a BOM-declared stream that decodes as neither declared "
           "candidate each fail closed (exit 2, naming the file)")
