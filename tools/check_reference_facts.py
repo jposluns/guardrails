@@ -542,7 +542,7 @@ def check_subset_denominator(root, manifests, findings):
 
 
 def check_json_subset_denominator(root, manifests, findings):
-    """The catalogue invariant in the machine-readable export (GD-73): a curated-subset framework in
+    """The catalogue invariant in the machine-readable export: a curated-subset framework in
     site/downloads/mappings.json must carry ids_total: null (the KEY present for schema compatibility,
     value null = no computable edition denominator); only a full-edition manifest carries a numeric
     ids_total. Fail-closed read (exit 2) on a missing/unreadable/invalid export or a non-object entry; a
@@ -570,7 +570,7 @@ def check_json_subset_denominator(root, manifests, findings):
                           "(malformed export)".format(stem))
         if "ids_total" not in entry:
             findings.append("site/downloads/mappings.json: subset framework {!r} is missing ids_total; a "
-                            "subset must carry ids_total: null (GD-73)".format(man.name))
+                            "subset must carry ids_total: null".format(man.name))
         elif entry["ids_total"] is not None:
             findings.append("site/downloads/mappings.json: subset framework {!r} carries a non-null edition "
                             "denominator (ids_total={!r}); a subset must be null".format(
@@ -1332,13 +1332,13 @@ def self_test_main():
         if run_quiet(revsub) != 1:
             failures.append("a subset reverse-view coverage of 'N of M' expected exit 1")
 
-        # 13. a subset framework carrying a NON-NULL ids_total in the JSON export -> finding (GD-73).
+        # 13. a subset framework carrying a NON-NULL ids_total in the JSON export -> finding.
         jsondenom = tmp / "jsondenom"
         _write_fixture(jsondenom, json_export=_JSON.replace('"ids_total": null}', '"ids_total": 61}'))
         if run_quiet(jsondenom) != 1:
             failures.append("a subset framework carrying a non-null ids_total expected exit 1")
 
-        # 13c. a subset framework MISSING ids_total (the key must be present and null, GD-73) -> finding.
+        # 13c. a subset framework MISSING ids_total (the key must be present and null) -> finding.
         jsonabsent = tmp / "jsonabsent"
         _write_fixture(jsonabsent, json_export=_JSON.replace(', "ids_total": null}', '}'))
         if run_quiet(jsonabsent) != 1:

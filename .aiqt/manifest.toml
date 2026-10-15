@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "c5d593b945a36db08ed60353d106f9e4dc5c2efd36a71199527b5c1fb1f817b6"
+tree-sha256 = "f89ccd3f3aabd915ef1c3f63cc194290c7e6b0a57c4212a51a102f481c368840"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -61,8 +61,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 318833
-sha256 = "975de48ebe85cf8719ba49cf54aa06c844e7b2df4aa397620a5f7ba134b633c8"
+bytes = 319923
+sha256 = "33e20c5fb954276b8231a521fe4597848e08665b0c59d5637fddd5d76dff2b45"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -806,8 +806,8 @@ sha256 = "7854ba7c7fa8221a2b408deaf73505b492ff2d39f67d5addac1b20ed98ac2ba6"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 501686
-sha256 = "46155f9e9c9d26f16ba18f67d1c42df32d7527afc3d513996caedcd03e706128"
+bytes = 501677
+sha256 = "78309ad504e216d60376c87a85ce420cbc7067fb84fde9f031d478aa8165457a"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -2341,8 +2341,8 @@ sha256 = "001c5c3f13e7a7b0bc8c283ca1770545d7ba27cb734eff6517b6c03a868225ee"
 
 [[sources]]
 path = "ENFORCEMENT.md"
-bytes = 288411
-sha256 = "e49fb892e68afca44eb123e32c0fb2c6d20ef662f81ff0cab71a117cdbf5e61a"
+bytes = 288402
+sha256 = "8e59ea318461460ed2052582edcd201c30e7eb30f80b2556f4d46825083b8733"
 
 [[sources]]
 path = "GEMINI.md"
@@ -3141,8 +3141,8 @@ sha256 = "e5760448ade9fc0d5f59b9a6761e07f5e0e122157379ae7fcc0aa1fc59f0d0c2"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 341304
-sha256 = "eeb5ecab48cc3be3ed6617bb31506a3f70c9b014353e84441546bdc37d824845"
+bytes = 341295
+sha256 = "631db2ce0bab833e6f5a0339a905f21039acd895e819c8507e6a062bce8c8894"
 
 [[sources]]
 path = "site/evidence.html"
@@ -3371,8 +3371,8 @@ sha256 = "70450007242c36b6b5ce461795e2bd9281f4cf749e19e6812e3533d2d94fa25e"
 
 [[sources]]
 path = "tools/check_leaks.py"
-bytes = 96474
-sha256 = "f760f30e8cda3dd3d64d83e3bd548ed0dc6358cf6574f28b06a172da45a56370"
+bytes = 108607
+sha256 = "f7dbad783c86b624159f7df260f1fbee682d29b169e8cacb0b7f82d20a291fea"
 
 [[sources]]
 path = "tools/check_license_qualification.py"
@@ -3456,8 +3456,8 @@ sha256 = "0446386ea3b2d5f4b6dafefe6f56905661f775e9b926271b465de2e70445a195"
 
 [[sources]]
 path = "tools/check_reference_facts.py"
-bytes = 93627
-sha256 = "fa1a1f5fa5e9543c77fcf244550d0450ca204122a09cc84886ff78eef7f0668a"
+bytes = 93596
+sha256 = "952db59b0d8de2650de9e28d923388ef7d84202e1c66d9347eb72ceb93e4ab6e"
 
 [[sources]]
 path = "tools/check_release_build.py"
