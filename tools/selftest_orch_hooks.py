@@ -2773,7 +2773,9 @@ def _leasehb_cases(tmp):
     check("leasehb/lock-symlink-refused",
           "refused" in text_of(stop(lsym)) and snap(lsym.lease) == before, True)
 
-    # --- the shared age classifier (the pure refactor of the scope and resume boundaries) ---
+    # --- the shared age classifier of the scope and resume boundaries: NOT a pure refactor, a
+    # declared max_age_hours that main read as no horizon (0, a negative number, "24", false,
+    # NaN), as one hour (true) or as never reached (infinity) now classifies 'cannot' ---
     check("leasehb/age-fresh-at-horizon", aiqt_hooks._orch_lease_age_class(24 * 3600, 24), "fresh")
     check("leasehb/age-stale-past-horizon",
           aiqt_hooks._orch_lease_age_class(24 * 3600 + 1, 24), "stale")
@@ -7531,6 +7533,294 @@ def _leasehb_fix2_cases(tmp):
           ("SystemExit: injected field detail stop", None, [[]], []))
 
 
+def _leasehb_write_integrity_cases(tmp):
+    """Component: the lease-heartbeat write integrity vectors. (1) The failure cleanup unlinks by
+    NAME after one identity stat (POSIX offers no unlink-if-inode): an entry swapped onto the
+    temporary name between that stat and the unlink is removed in its place and the moved
+    temporary stays, undisclosed, the documented same-user concurrency window, witnessed for the
+    field write and the memory save through the cleanup's unlink seam. (2) A field write refuses
+    a lease carrying a setuid, setgid or sticky bit and carries every other permission bit over
+    exactly. (3) A failed directory fsync after a verified replace is the distinct
+    written-not-durable warning on Stop, never plain success, and the directory fsync is made on
+    the lease's parent after the replace and before the verification. (4) A json field write
+    changes only the declared field's value text: a huge number, a long decimal and non-ASCII
+    text in other members stay byte-identical, and a verification divergence refuses. (5) The
+    holder proof is exact equality in refresh mode: a holder longer than the session and a
+    session longer than the holder both write nothing. (6) The lines reader splits on line feeds
+    only, so a Unicode or control separator inside a value never yields a phantom holder line."""
+    base = tmp / "leasehbwi"
+    base.mkdir()
+    errno_wi = __import__("errno")
+
+    def hb(**overrides):
+        block = {"mode": "refresh", "format": "lines", "holder_field": "holder",
+                 "refresh_after_minutes": 10, "warn_after_minutes": 30}
+        block.update(overrides)
+        return block
+
+    def stop(f, sid="s1"):
+        payload = f.payload("Stop")
+        payload["session_id"] = sid
+        return aiqt_hooks.orch_lease_heartbeat_stop(payload)
+
+    def text_of(result):
+        obj = result[1]
+        return obj.get("systemMessage", "") if isinstance(obj, dict) else ""
+
+    def snap(path):
+        st = os.lstat(path)
+        return (path.read_bytes(), st.st_mtime_ns)
+
+    def fixture(name, lease_text, block, age_secs=7200, primed=True):
+        f = Fixture(base, name)
+        f.lease.write_bytes(lease_text.encode("utf-8"))
+        aged = datetime.datetime.now(datetime.timezone.utc).timestamp() - age_secs
+        os.utime(f.lease, times=(aged, aged))
+        reg_path = f.root / ".aiqt" / "orchestration.local.json"
+        reg = json.loads(reg_path.read_text(encoding="utf-8"))
+        reg["lease"] = {"path": str(f.lease), "max_age_hours": 24,
+                        "holder_is_session_id": True, "heartbeat": block}
+        reg_path.write_text(json.dumps(reg), encoding="utf-8")
+        if primed:
+            # the past-holder memory already names s1, so no holder-change save runs
+            sd = Path(aiqt_hooks._orch_state_dir_for_root(str(f.root)))
+            sd.mkdir(parents=True, exist_ok=True)
+            (sd / "lease-heartbeat.json").write_text(
+                json.dumps({"version": 1, "session_id": "s1", "ts": now_iso(1)}),
+                encoding="utf-8")
+        return f
+
+    def rows(f):
+        path = Path(aiqt_hooks._orch_state_dir_for_root(str(f.root))) / "guard-events.jsonl"
+        if not path.exists():
+            return []
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+                if line.strip()]
+
+    def patched(patches, fn):
+        # patches: (owner, attribute, replacement) triples, each restored afterwards (an
+        # attribute the owner lacked is removed again)
+        saved = [(owner, attr, getattr(owner, attr, None)) for owner, attr, _r in patches]
+        try:
+            for owner, attr, repl in patches:
+                setattr(owner, attr, repl)
+            return fn()
+        finally:
+            for owner, attr, orig in reversed(saved):
+                if orig is None:
+                    delattr(owner, attr)
+                else:
+                    setattr(owner, attr, orig)
+
+    def is_entry(fd, path):
+        try:
+            a, b = os.fstat(fd), os.lstat(str(path))
+        except OSError:
+            return False
+        return (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)
+
+    def is_dir_of(fd, ident):
+        st_fd = os.fstat(fd)
+        return stat.S_ISDIR(st_fd.st_mode) and (st_fd.st_dev, st_fd.st_ino) == ident
+
+    def tmp_names(directory):
+        return sorted(n for n in os.listdir(str(directory)) if n.endswith(".hb.tmp"))
+
+    real_fsync = os.fsync
+    real_cleanup_unlink = getattr(aiqt_hooks, "_orch_lease_hb_cleanup_unlink", None)
+
+    def swap_seam(plant, aside, fired):
+        # another process of the same user, between the cleanup's identity stat and its
+        # unlink: it moves this write's temporary aside and renames its own entry onto the name
+        def seam(tmp_arg, dirfd):
+            if not fired:
+                fired.append(tmp_arg)
+                os.rename(tmp_arg, aside, src_dir_fd=dirfd, dst_dir_fd=dirfd)
+                os.rename(plant, tmp_arg, src_dir_fd=dirfd, dst_dir_fd=dirfd)
+            return real_cleanup_unlink(tmp_arg, dirfd)
+        return seam
+
+    # --- (1) the cleanup's by-name unlink after its identity stat: an entry swapped onto the
+    # temporary name in between is removed in its place and the moved temporary stays,
+    # undisclosed (the documented same-user concurrency window; red where the cleanup does not
+    # unlink through the seam, so no swap can be planted there) ---
+    sw = fixture("swapfield", "holder: s1\nheartbeat_utc: " + now_iso(2) + "\n",
+                 hb(field="heartbeat_utc"))
+    sw_tmp = sw.root / ".forced.swapfield.hb.tmp"
+    (sw.root / "planted.txt").write_bytes(b"planted\n")
+    sw_before = snap(sw.lease)
+    sw_fired = []
+
+    def sw_fsync(fd):
+        if is_entry(fd, sw_tmp):
+            raise OSError(errno_wi.ENOSPC, "injected field write fault")
+        return real_fsync(fd)
+    result = patched([(aiqt_hooks, "_orch_lease_hb_tmp_name", lambda name_arg: sw_tmp.name),
+                      (os, "fsync", sw_fsync),
+                      (aiqt_hooks, "_orch_lease_hb_cleanup_unlink",
+                       swap_seam("planted.txt", "moved-aside.tmp", sw_fired))],
+                     lambda: stop(sw))
+    check("leasehb/field-tmp-cleanup-swap-after-stat-residual",
+          (sw_fired, os.path.lexists(str(sw_tmp)), (sw.root / "planted.txt").exists(),
+           (sw.root / "moved-aside.tmp").exists(),
+           "injected field write fault" in text_of(result), "may remain" in text_of(result),
+           snap(sw.lease) == sw_before),
+          ([sw_tmp.name], False, False, True, True, False, True))
+
+    ms = fixture("swapsave", "holder: s1\n", hb(mode="warn"), primed=False)
+    ms_sd = Path(aiqt_hooks._orch_state_dir_for_root(str(ms.root)))
+    ms_sd.mkdir(parents=True, exist_ok=True)
+    ms_tmp = ms_sd / ".forced.swapsave.hb.tmp"
+    (ms_sd / "planted.txt").write_bytes(b"planted\n")
+    ms_fired = []
+
+    def ms_replace(tmp_arg, name_arg, dirfd):
+        raise PermissionError(errno_wi.EACCES, "injected memory replace fault")
+    result = patched([(aiqt_hooks, "_orch_lease_hb_tmp_name", lambda name_arg: ms_tmp.name),
+                      (aiqt_hooks, "_orch_lease_hb_save_replace", ms_replace),
+                      (aiqt_hooks, "_orch_lease_hb_cleanup_unlink",
+                       swap_seam("planted.txt", "moved-aside.tmp", ms_fired))],
+                     lambda: stop(ms))
+    check("leasehb/save-tmp-cleanup-swap-after-stat-residual",
+          (ms_fired, os.path.lexists(str(ms_tmp)), (ms_sd / "planted.txt").exists(),
+           (ms_sd / "moved-aside.tmp").exists(),
+           "injected memory replace fault" in text_of(result), "may remain" in text_of(result),
+           (ms_sd / "lease-heartbeat.json").exists()),
+          ([ms_tmp.name], False, False, True, True, False, False))
+
+    # --- (2) a lease carrying a setuid, setgid or sticky bit is refused before any temporary
+    # exists, and every other permission bit is carried over exactly (red on a writer that
+    # masks the mode with 0o777: the special bit was silently dropped) ---
+    sg = fixture("setgid", "holder: s1\nheartbeat_utc: " + now_iso(2) + "\n",
+                 hb(field="heartbeat_utc"))
+    os.chmod(str(sg.lease), 0o2640)
+    sg_mode = stat.S_IMODE(os.lstat(str(sg.lease)).st_mode)
+    sg_before = snap(sg.lease)
+    result = stop(sg)
+    check("leasehb/field-setgid-lease-refused",
+          (sg_mode, _verdict(result),
+           "setuid, setgid or sticky bit (mode 2640)" in text_of(result),
+           snap(sg.lease) == sg_before, stat.S_IMODE(os.lstat(str(sg.lease)).st_mode),
+           tmp_names(sg.root)),
+          (0o2640, "warn", True, True, 0o2640, []))
+    modes = {}
+    for tag, mode in (("setuid", 0o4640), ("sticky", 0o1640), ("plain", 0o604)):
+        fm = fixture("mode" + tag, "holder: s1\nheartbeat_utc: " + now_iso(2) + "\n",
+                     hb(field="heartbeat_utc"))
+        os.chmod(str(fm.lease), mode)
+        set_mode = stat.S_IMODE(os.lstat(str(fm.lease)).st_mode)
+        fm_before = fm.lease.read_bytes()
+        result = stop(fm)
+        modes[tag] = (set_mode, fm.lease.read_bytes() != fm_before,
+                      stat.S_IMODE(os.lstat(str(fm.lease)).st_mode),
+                      "sticky bit (mode" in text_of(result))
+    check("leasehb/field-setuid-sticky-refused-plain-mode-kept", modes,
+          {"setuid": (0o4640, False, 0o4640, True), "sticky": (0o1640, False, 0o1640, True),
+           "plain": (0o604, True, 0o604, False)})
+
+    # --- (3) a failed directory fsync after a verified replace is the written-not-durable
+    # warning, never plain success (red where the fault is swallowed), and the directory fsync
+    # is made on the lease's parent after the replace and before the verification (red on a
+    # writer with the call removed) ---
+    df = fixture("dirfsynceio", "holder: s1\nheartbeat_utc: " + now_iso(0.25) + "\n",
+                 hb(field="heartbeat_utc"), age_secs=900)
+    df_st = os.stat(str(df.root))
+    df_before = df.lease.read_bytes()
+
+    def df_fsync(fd):
+        if is_dir_of(fd, (df_st.st_dev, df_st.st_ino)):
+            raise OSError(errno_wi.EIO, "injected directory fsync fault")
+        return real_fsync(fd)
+    result = patched([(os, "fsync", df_fsync)], lambda: stop(df))
+    check("leasehb/field-dir-fsync-eio-not-durable",
+          (_verdict(result), "not durable" in text_of(result),
+           "injected directory fsync fault" in text_of(result),
+           df.lease.read_bytes() != df_before,
+           [r.get("decision") for r in rows(df) if r.get("kind") == "lease-heartbeat"]),
+          ("warn", True, True, True, ["written-not-durable"]))
+    dc = fixture("dirfsynccall", "holder: s1\nheartbeat_utc: " + now_iso(0.25) + "\n",
+                 hb(field="heartbeat_utc"), age_secs=900)
+    dc_st = os.stat(str(dc.root))
+    dc_before = dc.lease.read_bytes()
+    dc_order = []
+    real_replace = aiqt_hooks._orch_lease_hb_replace
+    real_verify = aiqt_hooks._orch_lease_hb_verify
+
+    def dc_fsync(fd):
+        if is_dir_of(fd, (dc_st.st_dev, dc_st.st_ino)):
+            dc_order.append("dir-fsync")
+        return real_fsync(fd)
+
+    def dc_replace(*a):
+        dc_order.append("replace")
+        return real_replace(*a)
+
+    def dc_verify(*a):
+        dc_order.append("verify")
+        return real_verify(*a)
+    result = patched([(os, "fsync", dc_fsync),
+                      (aiqt_hooks, "_orch_lease_hb_replace", dc_replace),
+                      (aiqt_hooks, "_orch_lease_hb_verify", dc_verify)], lambda: stop(dc))
+    check("leasehb/field-dir-fsync-called-after-replace",
+          (_verdict(result), dc_order, dc.lease.read_bytes() != dc_before),
+          ("allow", ["replace", "dir-fsync", "verify"], True))
+
+    # --- (4) a json field write rewrites ONLY the declared field's value text: every other
+    # member stays byte-identical (red on a re-serializing writer: 1e400 became Infinity,
+    # 0.10000000000000000555 became 0.1, non-ASCII text became escapes) ---
+    def json_case(name, member_text):
+        old_hb = now_iso(2)
+        text = '{"holder": "s1", "heartbeat_utc": "' + old_hb + '", ' + member_text + '}\n'
+        fj = fixture(name, text, hb(format="json", field="heartbeat_utc"))
+        stop(fj)
+        new_text = fj.lease.read_bytes().decode("utf-8")
+        try:
+            new_hb = json.loads(new_text)["heartbeat_utc"]
+        except (ValueError, KeyError, TypeError):
+            return ("unparsed", new_text)
+        return (new_hb != old_hb, new_text == text.replace(old_hb, new_hb),
+                member_text in new_text)
+    check("leasehb/json-huge-number-kept", json_case("jsonhuge", '"big": 1e400'),
+          (True, True, True))
+    check("leasehb/json-long-decimal-kept",
+          json_case("jsondecimal", '"dec": 0.10000000000000000555'), (True, True, True))
+    check("leasehb/json-non-ascii-kept",
+          json_case("jsonnonascii", '"name": "café 日本"'), (True, True, True))
+    dv_text = '{"holder": "s1", "heartbeat_utc": "2020-01-01T00:00:00Z", "n": 1}'
+    dv_cfg = {"format": "json", "field": "heartbeat_utc", "holder_field": "holder"}
+    dv_status, dv_info = aiqt_hooks._orch_lease_hb_parse(dv_text, dv_cfg)
+    # a verification divergence (the parsed member read as True where the text says 1) is
+    # refused under exact comparison, never written
+    dv_info["json"] = dict(dv_info["json"], n=True)
+    check("leasehb/json-render-verify-refuses-divergence",
+          (dv_status, aiqt_hooks._orch_lease_hb_render(dv_text, dv_cfg, dv_info,
+                                                       "2026-01-01T00:00:00Z")),
+          ("ok", ("cannot",
+                  "the json lease cannot be rewritten with every other member unchanged")))
+
+    # --- (5) the holder proof is EXACT equality in refresh mode (red on a prefix or
+    # substring comparison, which every s1/s2 vector passes) ---
+    for cid, name, holder, sid in (
+            ("leasehb/holder-longer-than-session-no-write", "holderlonger", "s1x", "s1"),
+            ("leasehb/session-longer-than-holder-no-write", "sessionlonger", "s1", "s1x")):
+        fx = fixture(name, "holder: " + holder + "\n", hb(), primed=False)
+        fx_before = snap(fx.lease)
+        result = stop(fx, sid=sid)
+        check(cid, (_verdict(result), snap(fx.lease) == fx_before), ("allow", True))
+
+    # --- (6) a separator str.splitlines breaks on (U+2028, U+0085, a form feed) stays inside
+    # its line, so it never yields a phantom holder line (red on a splitlines reader: the
+    # phantom proved the holder and the lease was touched) ---
+    for cid, name, sep in (("leasehb/lines-u2028-no-phantom-holder", "sepu2028", " "),
+                           ("leasehb/lines-nel-no-phantom-holder", "sepnel", "\x85"),
+                           ("leasehb/lines-formfeed-no-phantom-holder", "sepff", "\x0c")):
+        fs = fixture(name, "note: x" + sep + "holder: s1\n", hb(), primed=False)
+        fs_before = snap(fs.lease)
+        result = stop(fs)
+        check(cid, (_verdict(result), "appears 0 times" in text_of(result),
+                    snap(fs.lease) == fs_before), ("warn", True, True))
+
+
 def main(report_path=None):
     if report_path is not None:
         # The execution report is finalized at interpreter exit, after this run's cleanup
@@ -12094,6 +12384,7 @@ def _main_isolated(report_path=None):
         check("forced5/second-pass-clean", aiqt_hooks._orch_forced_exit_findings(str(hsd)), [])
         _leasehb_cases(tmp)
         _leasehb_fix2_cases(tmp)
+        _leasehb_write_integrity_cases(tmp)
         _rdp_cases(tmp)
     finally:
         aiqt_hooks._orch_dirfd_has_registry = saved_probe

@@ -281,7 +281,12 @@ infinite or a non-number) on a lease that would otherwise read live is a scope C
 unlimited freshness and never a silent guards-off: the stop, idle and yield guards route it into their
 existing cannot-evaluate deny path (the loop bound, the schedule cap and the operator escape still
 release), while the dispatch ledger and the prompt stamp keep recording and surface it as a note; a live
-mode record outranks it, and a session the lease does not name stays a non-holder under it. The escape sentinel (default
+mode record outranks it, and a session the lease does not name stays a non-holder under it. This is a
+CHANGE for adopters: the scope check previously read a `max_age_hours` of zero, a negative number, a
+non-number such as the string `"24"`, `false` or NaN as no horizon at all (the lease never went stale),
+`true` as a one-hour horizon and infinity as a horizon never reached; with such a value the stop, idle
+and yield guards now deny through that cannot-evaluate path until it is corrected to a positive finite
+number of hours. The escape sentinel (default
 `<state_dir>/ESCAPE-ALLOW-YIELD`) is operator-owned by enforced acceptance, not convention: it is
 honoured only as a regular file (never a symlink), owned by a uid other than the assistant's
 effective uid, and not group- or other-writable. A present sentinel failing any condition is ignored
@@ -352,8 +357,11 @@ descriptor withholds).
 - Declaration. `mode` is `warn` (never writes the lease; bookkeeping rows and saves still
   run, through the same held-descriptor discipline as every other bookkeeping write) or
   `refresh`. `format` is `lines` (one `key: value`
-  per PHYSICAL line; prose and other lines are allowed, so the lease may share a file with the mode
-  record) or `json` (a top-level object, duplicate keys rejected). `holder_field` names the holder;
+  per PHYSICAL line, which ends only at a line feed, a carriage return directly before it being part
+  of the line ending, so a Unicode separator such as U+2028, a form feed or a lone carriage return
+  inside a value never starts a new line; prose and other lines are allowed, so the lease may share a
+  file with the mode record) or `json` (a top-level object, duplicate keys rejected). `holder_field`
+  names the holder;
   `field` (optional) names the heartbeat timestamp, a UTC time ending `Z` or `+00:00`; `state_field`
   and `active_values` (together or not at all) gate on a lease state; `refresh_after_minutes` <
   `warn_after_minutes`, and `warn_after_minutes` stays at least two clock skews (600 s) under
@@ -414,13 +422,19 @@ descriptor withholds).
   (the quick mtime path, which a declared `field` disables: a fresh mtime cannot prove the
   field's own recorded time fresh, so there the bounded walk-and-read runs on each call).
   In `refresh` mode a due refresh touches the mtime (no declared `field`: a clock read on
-  the open descriptor, no content change) or rewrites ONLY the declared field's value (an exclusive
-  temporary file beside the lease, original permission bits, fsync, an identity re-check against
-  the proof fstat, a descriptor-anchored replace, a directory fsync, and a post-replace
-  verification whose failure is reported as a write that HAPPENED; the failure cleanup runs
-  from a finally for ANY exception class and unlinks the temporary name only while it still
-  carries the inode the write created, so an entry whose ownership is unestablished is never
-  removed, and a temporary that may remain (a failed unlink, an identity never learned, a
+  the open descriptor, no content change) or rewrites ONLY the declared field's value (refused,
+  with nothing written, for a lease carrying a setuid, setgid or sticky bit, which a replace cannot
+  carry over faithfully; otherwise an exclusive
+  temporary file beside the lease, the original permission bits in full, fsync, an identity
+  re-check against the proof fstat, a descriptor-anchored replace, a directory fsync whose failure
+  is reported on Stop as a write that HAPPENED but may not be durable, never as plain success, and
+  a post-replace verification whose failure is reported as a write that HAPPENED; the failure
+  cleanup runs from a finally for ANY exception class and unlinks the temporary name only when
+  one stat just before the unlink finds it still carrying the inode the write created, so an
+  entry whose ownership is unestablished at that stat is never removed (the unlink itself is by
+  name, and POSIX offers no unlink-if-inode: an entry swapped onto the name between that stat and
+  the unlink is removed in its place, a window of the same-user concurrency class below), and a
+  temporary that may remain (a failed unlink, an identity never learned, a
   cleanup stat fault) is disclosed by name (save for the residuals below): in the refusal, or
   in the withheld report while an
   exception of any other class is propagating, the channel chosen by that propagation and
@@ -451,8 +465,11 @@ descriptor withholds).
   the record, and a stop delivered as a signal at an instant outside the guards leaves the
   cleanup at that point, unordered). The new
   value is the event's own clock read, never a recalled value, keeping the old value's `Z` or
-  `+00:00` suffix; the `json` form re-serializes in the original key order (a disclosed
-  formatting normalization).
+  `+00:00` suffix; the `json` form replaces only the declared field's value text in place and
+  never re-serializes the object (which would rewrite other members: `1e400` as `Infinity`, a long
+  decimal as its shortest float, non-ASCII text as escapes), and it refuses the write, with nothing
+  written, unless the re-parsed result carries the same members in the same order, every other
+  member's value text byte-identical and its parsed value exactly equal.
 - Never. It never creates, seizes, revives or releases a lease, and never renews a LAPSED one
   (refreshing a live, proven-held lease in the declared refresh mode is the feature): an
   absent lease is never
@@ -504,8 +521,9 @@ descriptor withholds).
   that same held state-directory descriptor on both sides (`src_dir_fd` and `dst_dir_fd`),
   after the same identity checks on the replace target and an identity re-check of the
   temporary NAME immediately before the replace (a re-pointed temporary name publishes
-  nothing, and the failure cleanup unlinks the temporary name only while it still carries the
-  inode the save created; a temporary that may remain is named in the withheld report, an
+  nothing, and the failure cleanup unlinks the temporary name only when one stat just before
+  the unlink finds it still carrying the inode the save created, with the same by-name window as
+  the field write; a temporary that may remain is named in the withheld report, an
   interrupted cleanup included, before any fault propagates (save for the residuals below),
   even when that fault's own text
   cannot be rendered (the fixed disclosure is formatted before the temporary is created and
@@ -549,7 +567,9 @@ descriptor withholds).
   write; a refusal that persists unchanged is recorded once per state change,
   never once per call, and its git tracking probe is backed off until the lease identity
   changes or the backoff elapses.
-- Fail direction. Both bindings always exit 0 and never block or ask; PostToolUse surfaces no
+- Fail direction. Neither binding ever exits 2, blocks or asks: each returns exit 0, and only a
+  stop raised inside the core (an interrupt or an exit, not an `Exception`) propagates past the
+  binding, where it can end the hook process with a non-zero status; PostToolUse surfaces no
   message (a withheld or failed bookkeeping write rides the result's error text to the
   dispatcher's stderr); the bindings catch the core's own faults (a fault inside the judged
   table becomes one guard-events row ONLY on the branches where the proven descriptor is held,
@@ -573,8 +593,9 @@ descriptor withholds).
   open, lstat, exclusive temporary create and replace runs RELATIVE to the held
   state-directory and lease parent-directory descriptors, with the saves' temporary descriptor
   checked before its first byte, the temporary name re-checked immediately before the
-  replace, and the failure cleanup unlinking the temporary only while its name still carries
-  the inode the save created, running from a finally for ANY exception class (one whose
+  replace, and the failure cleanup unlinking the temporary only when one stat just before the
+  unlink finds its name still carrying the inode the save created, running from a finally for
+  ANY exception class (one whose
   identity was never learned, because the pre-write stat itself faulted, is disclosed in the
   report and never unlinked, and a cleanup stat fault other than confirmed absence also never
   unlinks and discloses the name and the fault, save for the residuals stated with the memory
@@ -590,7 +611,11 @@ descriptor withholds).
   a bookkeeping destination, a temporary file), so a row can land at a declared path (the suite
   keeps a disclosed-residual WITNESS vector that re-points the lease's parent directory at the
   state directory between the destination open and the identity read and shows the row landing
-  at the declared lease path) or a bookkeeping write can be lost; the checks cover ACCIDENTAL
+  at the declared lease path) or a bookkeeping write can be lost, and the failure cleanup of a
+  field write or a save, whose unlink is by NAME after one identity stat because POSIX offers no
+  unlink-if-inode, removes an entry swapped onto the temporary name between that stat and the
+  unlink in its place, leaving the moved temporary undisclosed (the suite keeps a WITNESS vector
+  for this window too); the checks cover ACCIDENTAL
   mis-targeting and a stale or replaced lease, and they do not guarantee a boundary against a
   same-user concurrent actor, which needs OS isolation (distinct users, or a state directory
   and lease directory private to this keeper). A refused append can still have CREATED an empty destination file (the

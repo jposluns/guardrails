@@ -16069,7 +16069,12 @@ def orch_resume_barrier(data):
 # destination, a temporary file), so a row can land at a declared path (the suite keeps a
 # disclosed-residual WITNESS vector that re-points the lease's parent directory at the state
 # directory between the destination open and the identity read and shows the row landing at the
-# declared lease path) or a bookkeeping write can be lost. The checks therefore cover
+# declared lease path) or a bookkeeping write can be lost. The same holds for the failure
+# cleanup of a temporary file: its unlink is by NAME after one identity stat, and POSIX offers no
+# unlink-if-inode, so an entry swapped onto the temporary name between that stat and the unlink
+# is removed in its place (the suite witnesses this window through _orch_lease_hb_cleanup_unlink),
+# and the temporary itself then stays where that process moved it, undisclosed. The checks
+# therefore cover
 # ACCIDENTAL mis-targeting and a stale or replaced lease, and they do not guarantee a boundary
 # against a same-user concurrent actor: on POSIX every path-based step can be raced by a process
 # of the same user, so closing that class needs OS isolation (distinct users, or a state
@@ -16697,17 +16702,32 @@ def _orch_lease_hb_load(fd):
     return ("ok", (st, text))
 
 
+def _orch_lease_hb_split(text):
+    """The PHYSICAL lines of a lines-format lease, each with its own ending kept: a line ends ONLY
+    at a line feed, so a Unicode separator str.splitlines would also break on (U+2028, U+2029,
+    U+0085, a form feed, a vertical tab, a lone carriage return) stays inside its line and can
+    never start a phantom line (a holder line hidden in another field's value). The reader and
+    the renderer share this one split, so a line index means the same line in both."""
+    pieces = text.split("\n")
+    lines = [piece + "\n" for piece in pieces[:-1]]
+    if pieces[-1]:
+        lines.append(pieces[-1])
+    return lines
+
+
 def _orch_lease_hb_lines(text, key):
     """Every PHYSICAL line of a lines-format lease that declares key, as (index, prefix, value,
-    trail, ending): the reader splits on line endings FIRST (keepends), so a value can never cross
-    a line boundary, and the pieces are byte-exact (prefix is the leading run through the colon and
-    its horizontal whitespace, trail the trailing horizontal whitespace, ending the line's own
-    terminator), so a rewrite of the one value changes no other byte."""
+    trail, ending): the reader splits on line feeds FIRST (_orch_lease_hb_split), so a value can
+    never cross a line boundary, and the pieces are byte-exact (prefix is the leading run through
+    the colon and its horizontal whitespace, trail the trailing horizontal whitespace, ending the
+    line's own terminator: a line feed, with a carriage return directly before it kept as part of
+    the ending, or nothing on a last line without one), so a rewrite of the one value changes no
+    other byte."""
     out = []
     head = re.compile(r"^([ \t]*" + re.escape(key) + r"[ \t]*:[ \t]*)(.*)")
-    for index, line in enumerate(text.splitlines(keepends=True)):
+    for index, line in enumerate(_orch_lease_hb_split(text)):
         body, ending = line, ""
-        for candidate in ("\r\n", "\n", "\r"):
+        for candidate in ("\r\n", "\n"):
             if body.endswith(candidate):
                 body, ending = body[:-len(candidate)], candidate
                 break
@@ -16836,14 +16856,29 @@ def _orch_lease_hb_save_tmp_fstat(fd):
     return os.fstat(fd)
 
 
+def _orch_lease_hb_cleanup_unlink(tmp, dirfd):
+    """The ONE unlink of the failure cleanup (_orch_lease_hb_save_cleanup), by NAME relative to
+    the held directory descriptor. POSIX offers no unlink-if-inode, so an entry another process
+    of the same user swaps onto the name between the cleanup's identity stat and this call is
+    removed in its place (a window of the same-user concurrency class, the section comment above
+    _ORCH_LEASE_HB_KIND). A seam so the self-test can plant that swap deterministically and
+    witness the documented outcome."""
+    os.unlink(tmp, dir_fd=dirfd)
+
+
 def _orch_lease_hb_save_cleanup(tmp, tmp_id, state_fd):
     """The failure cleanup of one bookkeeping save (and of the heartbeat field write,
     _orch_lease_hb_write_field, which passes the held lease parent-directory descriptor as
     state_fd), returning the leftover DISCLOSURE detail
-    (joined into the withheld report) or None: the temporary NAME is unlinked only while ONE
-    bounded no-follow stat proves it still carries the inode this save created (this save
-    never removes an entry it did not create; a name re-pointed at a DIFFERENT learned inode
-    is left alone silently, as the entry there is not this save's); a temporary whose identity
+    (joined into the withheld report) or None: the temporary NAME is unlinked only when ONE
+    bounded no-follow stat, taken just before the unlink, finds it still carrying the inode this
+    save created (a name re-pointed at a DIFFERENT learned inode BEFORE that stat is left alone
+    silently, as the entry there is not this save's). The unlink itself is by name
+    (_orch_lease_hb_cleanup_unlink): POSIX offers no unlink-if-inode, so an entry another
+    process of the same user swaps onto the name between that stat and the unlink is removed in
+    its place, and this save's own temporary then stays wherever that process moved it,
+    undisclosed (a window of the same-user concurrency class, stated in the section comment
+    above _ORCH_LEASE_HB_KIND); a temporary whose identity
     was never learned, because the pre-write stat itself faulted, is NEVER unlinked and the
     leftover is disclosed by name; a cleanup stat fault other than CONFIRMED absence
     (FileNotFoundError) also never unlinks and discloses the name AND the fault, because an
@@ -16865,7 +16900,7 @@ def _orch_lease_hb_save_cleanup(tmp, tmp_id, state_fd):
                 "({})".format(exc, tmp))
     if tmp_id is not None and (cst.st_dev, cst.st_ino) == tmp_id:
         try:
-            os.unlink(tmp, dir_fd=state_fd)
+            _orch_lease_hb_cleanup_unlink(tmp, state_fd)
         except OSError as exc:
             return ("its temporary file cannot be removed ({}) and may remain "
                     "({})".format(exc, tmp))
@@ -17057,8 +17092,11 @@ def _orch_lease_hb_memory_save(holder, memory):
     publishes nothing. The failure cleanup and the leftover disclosure
     (_orch_lease_hb_save_cleanup) run from a FINALLY, for ANY exception class (a core fault
     mid-save included, which still propagates to the crash path afterwards): the temporary
-    name is unlinked only while one bounded no-follow stat proves it still carries the inode
-    this save created (this save never removes an entry it did not create), a temporary whose
+    name is unlinked only when one bounded no-follow stat just before the unlink finds it still
+    carrying the inode this save created (the unlink is by name and POSIX offers no
+    unlink-if-inode, so an entry swapped onto the name between that stat and the unlink is
+    removed in its place: the same-user concurrency window _orch_lease_hb_save_cleanup
+    states), a temporary whose
     identity was never learned, because the pre-write stat itself faulted, is never unlinked
     and the leftover is DISCLOSED in the report instead (save for the residuals stated below),
     and a cleanup stat fault other than confirmed absence also never unlinks and discloses the
@@ -17865,20 +17903,107 @@ def _orch_lease_hb_lock(root, lock_path):
             raise fault2
 
 
+_ORCH_LEASE_HB_JSON_WS = re.compile(r"[ \t\n\r]*")  # the whitespace json.loads skips
+
+
+def _orch_lease_hb_json_spans(text):
+    """[(key, start, end), ...]: every top-level member of a json lease in document order, with
+    the span of its VALUE text (start inclusive, end exclusive), walked by the stdlib decoder's
+    own scanners (json.decoder.scanstring for each key, JSONDecoder.raw_decode for each value).
+    None when the text is not exactly one top-level object those scanners walk to its end."""
+    ws = _ORCH_LEASE_HB_JSON_WS
+    decoder = json.JSONDecoder()
+    spans = []
+    try:
+        i = ws.match(text, 0).end()
+        if text[i:i + 1] != "{":
+            return None
+        i = ws.match(text, i + 1).end()
+        if text[i:i + 1] == "}":
+            i += 1
+        else:
+            while True:
+                if text[i:i + 1] != '"':
+                    return None
+                key, i = json.decoder.scanstring(text, i + 1)
+                i = ws.match(text, i).end()
+                if text[i:i + 1] != ":":
+                    return None
+                start = ws.match(text, i + 1).end()
+                _value, end = decoder.raw_decode(text, start)
+                spans.append((key, start, end))
+                i = ws.match(text, end).end()
+                if text[i:i + 1] == ",":
+                    i = ws.match(text, i + 1).end()
+                    continue
+                if text[i:i + 1] != "}":
+                    return None
+                i += 1
+                break
+    except (ValueError, RecursionError):
+        return None
+    return spans if ws.match(text, i).end() == len(text) else None
+
+
+def _orch_lease_hb_json_same(old, new):
+    """Exact equality of two parsed json values: the same type at every level (True is never 1, 1
+    is never 1.0), a float by its repr (so -0.0 is not 0.0 and a NaN equals only a NaN), and
+    containers member by member in order."""
+    if type(old) is not type(new):
+        return False
+    if isinstance(old, float):
+        return repr(old) == repr(new)
+    if isinstance(old, dict):
+        return list(old) == list(new) and all(_orch_lease_hb_json_same(old[k], new[k])
+                                              for k in old)
+    if isinstance(old, list):
+        return len(old) == len(new) and all(_orch_lease_hb_json_same(a, b)
+                                            for a, b in zip(old, new))
+    return old == new
+
+
 def _orch_lease_hb_render(text, cfg, info, new_value):
-    """The refreshed lease content: in lines format ONLY the one heartbeat value changes (the
-    line's own prefix, trailing whitespace and ending, and every other line, stay byte-identical);
-    in json format the object is re-serialized in its original key order with only the heartbeat
-    value changed, a DISCLOSED formatting normalization (json.dumps spacing; a trailing newline is
-    kept when the original ended with one)."""
+    """('ok', the refreshed lease content) or ('cannot', detail): ONLY the declared heartbeat
+    field's value changes, every other byte stays as it was. In lines format the one heartbeat
+    line keeps its own prefix, trailing whitespace and ending, and every other line is
+    byte-identical (the same line split as the reader, _orch_lease_hb_split). In json format the
+    declared field's VALUE text alone is replaced in place (never a re-serialization, which would
+    rewrite other members: 1e400 as Infinity, 0.10000000000000000555 as 0.1, non-ASCII text as
+    escapes), and the result is VERIFIED before it is used: re-parsed by the strict
+    duplicate-rejecting reader, it must carry the same members in the same order, every other
+    member's value text byte-identical and its parsed value exactly equal
+    (_orch_lease_hb_json_same), and the declared field the new value. Anything else is the named
+    cannot-evaluate, and the caller writes nothing."""
     if cfg["format"] == "lines":
-        pieces = text.splitlines(keepends=True)
+        pieces = _orch_lease_hb_split(text)
         index, prefix, _old, trail, ending = info["hb_line"]
         pieces[index] = prefix + new_value + trail + ending
-        return "".join(pieces)
-    obj = dict(info["json"])
-    obj[cfg["field"]] = new_value
-    return json.dumps(obj) + ("\n" if text.endswith("\n") else "")
+        return ("ok", "".join(pieces))
+    refused = ("cannot", "the json lease cannot be rewritten with every other member unchanged")
+    field = cfg["field"]
+    spans = _orch_lease_hb_json_spans(text)
+    hits = [span for span in spans or () if span[0] == field]
+    if len(hits) != 1:
+        return refused
+    _key, start, end = hits[0]
+    rendered = text[:start] + json.dumps(new_value) + text[end:]
+    new_spans = _orch_lease_hb_json_spans(rendered)
+    if new_spans is None or [s[0] for s in new_spans] != [s[0] for s in spans]:
+        return refused
+    for (key, a, b), (_same, c, d) in zip(spans, new_spans):
+        if key != field and text[a:b] != rendered[c:d]:
+            return refused
+    try:
+        obj = json.loads(rendered, object_pairs_hook=_orch_reject_duplicate_keys)
+        if not isinstance(obj, dict) or list(obj) != list(info["json"]) \
+                or obj.get(field) != new_value or not isinstance(obj.get(field), str):
+            return refused
+        for key, value in info["json"].items():
+            if key != field and not _orch_lease_hb_json_same(value, obj[key]):
+                return refused
+    except (ValueError, RecursionError):
+        return refused
+    return ("ok", rendered)
 
 
 def _orch_lease_hb_verify(dirfd, name, cfg, session_id, new_value):
@@ -17916,7 +18041,7 @@ def _orch_lease_hb_tmp_name(name):
 def _orch_lease_hb_field_tmp_fstat(fd):
     """The field write's temporary-descriptor identity stat, taken on the very descriptor the
     exclusive create returned, BEFORE its mode change or first byte, so the failure cleanup can
-    prove it still owns the temporary NAME it would unlink. A seam, as
+    check, at its own stat, that it still owns the temporary NAME it would unlink. A seam, as
     _orch_lease_hb_save_tmp_fstat is, so the self-test can fault it and prove an entry whose
     ownership was never established is never removed and is disclosed."""
     return os.fstat(fd)
@@ -17924,20 +18049,30 @@ def _orch_lease_hb_field_tmp_fstat(fd):
 
 def _orch_lease_hb_write_field(root, cfg, session_id, now, path, parent, name, st, text, info,
                                suffix, memory, holder=None):
-    """The heartbeat FIELD write (refresh mode with a declared field): build the new bytes with the
-    event's own clock read, create an exclusive temporary file beside the lease (a random name with
+    """The heartbeat FIELD write (refresh mode with a declared field): refuse a lease carrying a
+    setuid, setgid or sticky bit (a replace cannot carry those over faithfully: the kernel may
+    clear a setgid bit on the mode change, and the temporary's group is the one a new file gets
+    in that directory, not necessarily the lease's), build the new bytes with the event's own
+    clock read, changing ONLY the declared
+    field's value (_orch_lease_hb_render, whose cannot-evaluate is the named no-write refusal),
+    create an exclusive temporary file beside the lease (a random name with
     O_EXCL|O_NOFOLLOW, so nothing planted at a temporary-like name is ever opened or replaced),
     learn its identity on the descriptor (_orch_lease_hb_field_tmp_fstat), carry over the
-    original permission bits, write and fsync it, re-check the lease's identity
+    original permission bits in full, write and fsync it, re-check the lease's identity
     against the proof fstat (dev, ino, mtime_ns, size), replace through the held directory
     descriptor, fsync that directory, and verify. Returns None, ('no-write', detail) with the
-    lease untouched, or ('written-unverified', detail) after a replace that could not be
-    confirmed. The failure cleanup runs from a FINALLY, for ANY exception class, through the
+    lease untouched, ('written-unverified', detail) after a replace that could not be
+    confirmed, or ('written-not-durable', detail) after a confirmed replace whose directory
+    fsync failed (published, but it may not survive a crash: never reported as plain success).
+    The failure cleanup runs from a FINALLY, for ANY exception class, through the
     same identity-aware cleanup as the bookkeeping saves (_orch_lease_hb_save_cleanup, relative
-    to the held lease parent descriptor): the temporary NAME is unlinked only while one bounded
-    no-follow stat proves it still carries the inode this write created, so an entry whose
-    ownership is unestablished (the identity stat itself faulted, or the name now carries
-    another inode) is NEVER removed; a temporary that may remain (identity never learned, a
+    to the held lease parent descriptor): the temporary NAME is unlinked only when one bounded
+    no-follow stat just before the unlink finds it still carrying the inode this write created,
+    so an entry whose ownership is unestablished at that stat (the identity stat itself
+    faulted, or the name now carries another inode) is NEVER removed, while an entry swapped
+    onto the name between that stat and the by-name unlink is removed in its place (the
+    same-user concurrency window _orch_lease_hb_save_cleanup states); a temporary that may
+    remain (identity never learned, a
     cleanup stat fault other than confirmed absence, a failed unlink) is DISCLOSED by name, in
     the no-write detail on a named refusal, and through the event holder's withheld report
     whenever an exception of any other class is propagating to the crash path (a named
@@ -17972,8 +18107,16 @@ def _orch_lease_hb_write_field(root, cfg, session_id, now, path, parent, name, s
     form and the mtime form alike; this writer does NOT reuse _orch_write_json_atomic, whose
     makedirs and pathname-resolved directory open fit the state directory, not an
     adopter-declared lease path."""
+    mode = stat.S_IMODE(st.st_mode)
+    if mode & (stat.S_ISUID | stat.S_ISGID | stat.S_ISVTX):
+        # refused BEFORE any temporary exists: the replace would drop or alter the special bit
+        return ("no-write", "the lease carries a setuid, setgid or sticky bit (mode {:04o}), "
+                "which a field write cannot carry over".format(mode))
     new_value = now.replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%S") + suffix
-    blob = _orch_lease_hb_render(text, cfg, info, new_value).encode("utf-8")
+    rendered, content = _orch_lease_hb_render(text, cfg, info, new_value)
+    if rendered != "ok":
+        return ("no-write", content)
+    blob = content.encode("utf-8")
     tmp = _orch_lease_hb_tmp_name(name)
     # the fixed disclosure and the fallback record are formatted HERE, before the temporary
     # exists, as in the memory save (_orch_lease_hb_cleanup_record)
@@ -17994,10 +18137,11 @@ def _orch_lease_hb_write_field(root, cfg, session_id, now, path, parent, name, s
     try:
         try:
             # the temporary's identity is learned FIRST, on its own descriptor, so the cleanup
-            # below can prove it still owns the name it would unlink
+            # below can check it still owns the name it would unlink (at its stat; the by-name
+            # unlink after it keeps the window _orch_lease_hb_save_cleanup states)
             tst = _orch_lease_hb_field_tmp_fstat(tmp_fd)
             tmp_id = (tst.st_dev, tst.st_ino)
-            os.fchmod(tmp_fd, stat.S_IMODE(st.st_mode) & 0o777)
+            os.fchmod(tmp_fd, mode)  # in full: a special bit was refused above
             view = memoryview(blob)
             while view:
                 view = view[os.write(tmp_fd, view):]
@@ -18044,8 +18188,10 @@ def _orch_lease_hb_write_field(root, cfg, session_id, now, path, parent, name, s
     finally:
         if not published:
             # the failure cleanup and the residue DISCLOSURE run from this finally for ANY
-            # exception class: the name is unlinked only while it provably carries the inode
-            # this write created, and a temporary that may remain is disclosed by name. The
+            # exception class: the name is unlinked only when the stat just before the unlink
+            # finds it carrying the inode this write created (the by-name unlink keeps the
+            # window _orch_lease_hb_save_cleanup states), and a temporary that may remain is
+            # disclosed by name. The
             # CHANNEL is chosen by whether an exception is propagating, never by whether a
             # failure was named: the no-write detail below when none is, else the holder's
             # withheld report (a named failure followed by an interrupting close fault would
@@ -18095,13 +18241,21 @@ def _orch_lease_hb_write_field(root, cfg, session_id, now, path, parent, name, s
                 raise cleanup_fault
     if failure is not None:
         return ("no-write", failure)
+    not_durable = None
     try:
         os.fsync(parent)
-    except OSError:
-        pass  # the replace is already published; a directory fsync fault only weakens durability
+    except OSError as exc:
+        # the replace is already published, but its directory entry may not survive a crash:
+        # a distinct written-not-durable result, never plain success
+        not_durable = ("the lease directory fsync failed ({}), so the replace may not survive "
+                       "a crash".format(exc))
     verify = _orch_lease_hb_verify(parent, name, cfg, session_id, new_value)
     if verify is not None:
+        if not_durable is not None:
+            verify = "{}; {}".format(verify, not_durable)
         return ("written-unverified", verify)
+    if not_durable is not None:
+        return ("written-not-durable", not_durable)
     return None
 
 
@@ -18109,7 +18263,8 @@ def _orch_lease_hb_refresh(root, cfg, session_id, now, path, parent, name, leaf,
                            suffix, memory, holder):
     """One refresh attempt on a lease proven inside the caller's critical section (the caller
     takes any declared lock BEFORE the lease is read and holds it across this write): None on
-    success, else ('no-write'|'written-unverified', detail) from the write discipline. BOTH forms
+    success, else ('no-write'|'written-unverified'|'written-not-durable', detail) from the
+    write discipline. BOTH forms
     pass the same protected-path and git-tracking gates BEFORE the form split (in the mtime form
     the mtime IS the recorded liveness value, so a touch changes lease semantics even though no
     content byte changes): a protected target, a git-tracked lease, a failed tracking probe
@@ -18414,6 +18569,15 @@ def _orch_lease_hb_judge(root, cfg, lease, session_id, event, now, path, parent,
                     return ("AIQT guardrail (lease heartbeat): the heartbeat WAS replaced but "
                             "could not be verified afterwards ({}). A write happened; inspect "
                             "the lease by hand.".format(detail))
+                return None
+            if kind == "written-not-durable":
+                # a verified write HAPPENED but may not survive a crash: recorded per
+                # occurrence and surfaced on Stop as a warning, never as plain success
+                _orch_lease_hb_event(holder, kind, detail)
+                if event == "Stop":
+                    return ("AIQT guardrail (lease heartbeat): the heartbeat WAS replaced and "
+                            "verified, but it is not durable ({}). A write happened; check the "
+                            "filesystem holding the lease.".format(detail))
                 return None
             _orch_lease_hb_row_once(holder, memory, now, kind, detail, detail, lease_key)
             if event == "Stop":
