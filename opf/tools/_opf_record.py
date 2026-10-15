@@ -3054,31 +3054,38 @@ def _self_test_units(check):
     finally:
         os.close(empty_fd)
         os.rmdir(empty)
-    # FIX-OPF-CLEAN-PATH-DEEP-RENDER R2 (the parsed-manifest route): _probe_homes reads the manifest through
+    # FIX-OPF-CLEAN-PATH-DEEP-RENDER R2 (the manifest route): _probe_homes reads the manifest through
     # _read_operand, and tomllib builds a dotted [opf.homes.a.a ...] header of 100,000 parts into a
     # 100,000-level nested table. The refusal naming that declaration renders it bounded; pre-fix its {!r}
-    # render raised RecursionError out of the probe.
+    # render raised RecursionError out of the probe. CPython 3.14.8 and later refuse a TOML key of more than
+    # 1,000 dotted parts, so the table is built directly and iteratively, in the shape tomllib gives that
+    # header (compared below with tomllib's own parse of the header at 999 parts, under that cap), and
+    # _read_operand is replaced for the probe by one that returns it, so the check runs on every supported
+    # interpreter and parses no longer key.
     from types import SimpleNamespace
-    deep_root = tempfile.mkdtemp(prefix="opf-record-self-test-")
-    deep_manifest = Path(deep_root, ".working", "toml", _opf_store.MANIFEST_NAME)
-    deep_manifest.parent.mkdir(parents=True)
-    deep_manifest.write_text("[opf.homes" + ".a" * 100000 + "]\nb = 1\n", encoding="utf-8")
-    deep_fd = os.open(deep_root, os.O_RDONLY | os.O_DIRECTORY)
+    deep_homes = {"b": 1}
+    for _ in range(100000):
+        deep_homes = {"a": deep_homes}
+    deep_model = {_opf_store.STANDARD_TOKEN: {"homes": deep_homes}}
+    shape_homes = {"b": 1}
+    for _ in range(997):
+        shape_homes = {"a": shape_homes}
+    deep_shape = (tomllib.loads("[{}.homes".format(_opf_store.STANDARD_TOKEN) + ".a" * 997 + "]\nb = 1\n")
+                  == {_opf_store.STANDARD_TOKEN: {"homes": shape_homes}})
+    deep_globals = globals()
+    deep_read = deep_globals["_read_operand"]
+    deep_globals["_read_operand"] = lambda root_fd, rel: Operand(rel, b"", 0o644, deep_model)
     deep_probe = None
     try:
-        _probe_homes(Context(SimpleNamespace(machine_rel=".working/toml"), ".", deep_fd))
+        _probe_homes(Context(SimpleNamespace(machine_rel=".working/toml"), ".", -1))
     except RecordError as exc:
         deep_probe = str(exc)
     except RecursionError:
         pass                 # the pre-fix escape: the check below then fails rather than aborting the suite
     finally:
-        os.close(deep_fd)
-        deep_manifest.unlink()
-        deep_manifest.parent.rmdir()
-        deep_manifest.parent.parent.rmdir()
-        os.rmdir(deep_root)
-    check("a deeply nested parsed homes declaration refuses the homes probe with a bounded message",
-          deep_probe is not None and "declares homes generation" in deep_probe
+        deep_globals["_read_operand"] = deep_read
+    check("a deeply nested manifest homes declaration refuses the homes probe with a bounded message",
+          deep_shape and deep_probe is not None and "declares homes generation" in deep_probe
           and "nested deeper than" in deep_probe
           and len(deep_probe) <= 512 + _opf_store._DISPLAY_MAX_CHARS + _opf_store._DISPLAY_MARKER_MAX)
 

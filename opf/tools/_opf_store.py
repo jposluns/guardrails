@@ -1421,7 +1421,8 @@ def _sorted_key_names(keys):
 
 _DISPLAY_MAX_DEPTH = 32      # container levels a finding-message render descends before a depth marker
 _DISPLAY_MAX_NODES = 512     # values (containers and scalars) a render copies before it stops
-_DISPLAY_MAX_CHARS = 1024    # characters of rendered content before a cut (on a whole escape) and a marker
+_DISPLAY_FULL_MAX_CHARS = 65536   # widest whole, uncut repr() a value within the two bounds above renders as
+_DISPLAY_MAX_CHARS = 1024    # characters of bounded-render content before a cut (on a whole escape) and a marker
 _DISPLAY_MARKER_MAX = 37     # longest marker appended after that cut: "...<str of N chars>", N at sys.maxsize
 _DISPLAY_NAME_MAX = 64       # characters of a type or timezone name a marker or a rendered datetime may carry
 _DISPLAY_CONTAINERS = (dict, list, tuple, set, frozenset)       # exact types; a subclass is unsupported
@@ -1429,6 +1430,7 @@ _DISPLAY_TIMES = (datetime.datetime, datetime.date, datetime.time)   # exact typ
 _DISPLAY_ATOM = re.compile(r"\\(?:x[0-9a-f]{2}|u[0-9a-f]{4}|U[0-9a-f]{8}|.)|.", re.DOTALL)
 _DISPLAY_ATOM_MAX = 10       # the longest _DISPLAY_ATOM: a backslash, U and eight hex digits
 _DISPLAY_STOP = ("stop",)    # the _display_snapshot entry where the copy reached _DISPLAY_MAX_NODES values
+_DISPLAY_FULL_INT_BITS = 4 * _DISPLAY_FULL_MAX_CHARS   # an int of more bits has more digits than that width
 _DISPLAY_INT_CEILING = 10 ** _DISPLAY_MAX_CHARS          # the least positive int whose repr() is too wide
 _DISPLAY_INT_FLOOR = -(10 ** (_DISPLAY_MAX_CHARS - 1))   # the greatest negative int whose repr() is too wide
 _TYPE_NAME = type.__dict__["__name__"]   # the getter of type itself, so a metaclass __name__ never runs
@@ -1471,18 +1473,44 @@ def _display_scalar_ok(value):
 
 
 def _display_int(value):
-    """repr() of an exact int when that is at most _DISPLAY_MAX_CHARS characters, decided exactly before any
-    conversion: it is exactly when _DISPLAY_INT_FLOOR < value < _DISPLAY_INT_CEILING (a negative int spends one
-    character on its sign), and CPython compares two ints of different lengths by their lengths alone, so the
-    test does not grow with the size of the int. A wider int, or one whose repr() trips the
-    integer-string-conversion limit (which can be set as low as 640 digits), renders as the type-and-size
-    marker <oversized-int: N bits>, built from the bit length without converting the int."""
+    """The bounded rendering of an exact int: its repr() when that is at most _DISPLAY_MAX_CHARS characters,
+    decided exactly before any conversion: it is exactly when _DISPLAY_INT_FLOOR < value < _DISPLAY_INT_CEILING
+    (a negative int spends one character on its sign), and CPython compares two ints of different lengths by
+    their lengths alone, so the test does not grow with the size of the int. A wider int, or one whose repr()
+    trips the integer-string-conversion limit (which can be set as low as 640 digits), renders as the
+    type-and-size marker <oversized-int: N bits>, built from the bit length without converting the int. Only
+    the int that is the whole value, or one that does not trip the limit, reaches here with that marker:
+    _display_render renders a container whose rendering reaches an int that trips the limit as
+    <oversized-value> as a whole."""
     if _DISPLAY_INT_FLOOR < value < _DISPLAY_INT_CEILING:
         try:
             return repr(value)
         except ValueError:
             pass
     return "<oversized-int: {} bits>".format(value.bit_length())
+
+
+def _display_int_trips(value):
+    """True when repr() of the exact int `value` raises ValueError under the integer-string-conversion limit
+    in force (sys.get_int_max_str_digits(), 0 for none): the oversized int of the whole-value rule, which
+    renders alone as <oversized-int: N bits> and makes a container holding it <oversized-value>. An int of at
+    most three bits per limit digit has at most that many digits and never trips. One of more than
+    _DISPLAY_FULL_INT_BITS bits has more digits than any limit of at most _DISPLAY_FULL_MAX_CHARS digits, the
+    default 4,300 among them, and CPython refuses it before converting, so it trips under such a limit; under
+    a higher limit it is taken as not tripping without converting it (the residual _safe_display item 6
+    names). Any other int is asked through repr() itself, so the answer is CPython's own, and the conversion
+    is bounded: at most _DISPLAY_FULL_INT_BITS bits."""
+    limit = sys.get_int_max_str_digits()
+    bits = value.bit_length()
+    if not limit or bits <= 3 * limit:
+        return False
+    if bits > _DISPLAY_FULL_INT_BITS:
+        return limit <= _DISPLAY_FULL_MAX_CHARS
+    try:
+        repr(value)
+    except ValueError:
+        return True
+    return False
 
 
 def _display_take(out, room, text):
@@ -1517,14 +1545,16 @@ def _display_unsupported(value):
 
 
 def _display_leaf(value):
-    """The rendering of one non-container value, its work bounded by _DISPLAY_MAX_CHARS whatever the value
-    size, because every supported scalar is sized BEFORE it is converted: a str is cut on the value to its
+    """The bounded rendering of one non-container value, its work bounded by _DISPLAY_MAX_CHARS whatever the
+    value size, because every supported scalar is sized BEFORE it is converted: a str is cut on the value to its
     first _DISPLAY_MAX_CHARS characters before repr() and, when cut, reports its length (...<str of N chars>);
     a bytes longer than _DISPLAY_MAX_CHARS renders as <oversized-bytes: N bytes> and an int whose repr() would
     be wider than _DISPLAY_MAX_CHARS characters (an exact test, _display_int) as <oversized-int: N bits>,
-    neither building its repr(); None, a bool, a float and a supported date or time render through their
-    built-in repr(); any other value is unsupported (_display_unsupported). The text can exceed
-    _DISPLAY_MAX_CHARS (a cut str repr() with its escapes); the caller bounds it with _display_take."""
+    neither building its repr() (an int inside a container that trips the integer-string-conversion limit
+    never reaches here: _display_render renders the container as <oversized-value>); None, a bool, a float
+    and a supported date or time render through their built-in repr(); any other value is unsupported
+    (_display_unsupported). The text can exceed _DISPLAY_MAX_CHARS (a cut str repr() with its escapes); the
+    caller bounds it with _display_take."""
     kind = type(value)
     if kind is str:
         if len(value) > _DISPLAY_MAX_CHARS:
@@ -1562,15 +1592,16 @@ def _display_snapshot(value):
     on a cycle) is read again at each occurrence, each read checked as it is made, so its occurrences can
     differ when another thread changes it in between. An entry is ("leaf", v) for a supported scalar
     (_display_scalar_ok, so v is immutable and stays supported); ("text", marker) for an unsupported value (its
-    _display_unsupported marker, built at once) or for a container _DISPLAY_MAX_DEPTH levels deep (a depth
-    marker); ("box", kind, members) for a container of an exact _DISPLAY_CONTAINERS type, members being a
-    fresh list of the entries of its members (a dict as key, value, key, value); and _DISPLAY_STOP where the
-    copy reached _DISPLAY_MAX_NODES values. The walk is depth first in rendering order, iterative, and steps
-    through each container with its built-in iterator, so it copies at most _DISPLAY_MAX_NODES values and holds
-    at most 2 * _DISPLAY_MAX_DEPTH + 1 iterators whatever the size, depth or width of the input. A frame ends
-    when its iterator raises StopIteration, never on a member compared with a marker, so any value supplied
-    as data, an object of this module included, is copied as a member like any other. It reads only exact
-    built-in types (never len() of a live container), so no method a caller can define runs."""
+    _display_unsupported marker, built at once); ("deep", marker) for a container _DISPLAY_MAX_DEPTH levels
+    deep (a depth marker, which _display_full reads as an incomplete copy); ("box", kind, members) for a
+    container of an exact _DISPLAY_CONTAINERS type, members being a fresh list of the entries of its members
+    (a dict as key, value, key, value); and _DISPLAY_STOP where the copy reached _DISPLAY_MAX_NODES values.
+    The walk is depth first in rendering order, iterative, and steps through each container with its built-in
+    iterator, so it copies at most _DISPLAY_MAX_NODES values and holds at most 2 * _DISPLAY_MAX_DEPTH + 1
+    iterators whatever the size, depth or width of the input. A frame ends when its iterator raises
+    StopIteration, never on a member compared with a marker, so any value supplied as data, an object of this
+    module included, is copied as a member like any other. It reads only exact built-in types (never len() of
+    a live container), so no method a caller can define runs."""
     nodes = 0
     top = []
     frames = [(iter((value,)), top, 0, False)]   # (member iterator, entries copied, member depth, dict pairs)
@@ -1593,7 +1624,7 @@ def _display_snapshot(value):
                 copied.append(("leaf", item) if _display_scalar_ok(item)
                               else ("text", _display_unsupported(item)))
             elif depth >= _DISPLAY_MAX_DEPTH:
-                copied.append(("text", "<{} nested deeper than {} levels>".format(kind.__name__,
+                copied.append(("deep", "<{} nested deeper than {} levels>".format(kind.__name__,
                                                                                   _DISPLAY_MAX_DEPTH)))
             else:
                 box = []
@@ -1603,9 +1634,12 @@ def _display_snapshot(value):
 
 
 def _display_render(snapshot, escape):
-    """Render a _display_snapshot as repr() spells it: a leaf through _display_leaf, a marker as itself, a box
-    with the brackets and separators repr() writes. Rendering stops at _DISPLAY_MAX_CHARS characters, cut on a
-    whole escape (_display_take) and followed by ...<truncated>; _DISPLAY_STOP stops it the same way. With
+    """The bounded rendering of a _display_snapshot, spelled as repr() spells it: a leaf through _display_leaf,
+    a marker as itself, a box with the brackets and separators repr() writes. Rendering stops at
+    _DISPLAY_MAX_CHARS characters, cut on a whole escape (_display_take) and followed by ...<truncated>;
+    _DISPLAY_STOP stops it the same way. A container whose rendering reaches an int whose repr() trips the
+    integer-string-conversion limit (_display_int_trips) before the cut renders as <oversized-value> as a
+    whole, as _safe_display renders a complete copy holding one; an int past the cut is never read. With
     `escape`, each piece is escaped (_escape_line_unsafe) BEFORE the cut, so escaping can never take the
     result over the bound; only the first room + _DISPLAY_ATOM_MAX characters of a piece are escaped, since
     no more of it can fit. It keeps its own work stack and never recurses; it reads only the snapshot."""
@@ -1619,9 +1653,11 @@ def _display_render(snapshot, escape):
             truncated = True
             break
         if entry[0] == "leaf":
+            if entry is not snapshot and type(entry[1]) is int and _display_int_trips(entry[1]):
+                return "<oversized-value>"
             piece = _display_leaf(entry[1])
-        elif entry[0] == "text":
-            piece = entry[1]
+        elif entry[0] != "box":
+            piece = entry[1]   # a "text" or a "deep" marker
         else:
             kind, members = entry[1], entry[2]
             piece, close = _display_brackets(kind, len(members))
@@ -1642,6 +1678,74 @@ def _display_render(snapshot, escape):
     return text + "...<truncated>" if truncated else text
 
 
+def _display_full_leaf(value, room):
+    """The whole repr() of one supported scalar when that is at most `room` characters, else None, each sized
+    BEFORE it is converted so the work stays bounded by _DISPLAY_FULL_MAX_CHARS: a str whose length, with
+    the two quotes, already exceeds `room` and a bytes whose length, with b and the quotes, does, are never
+    converted, nor is an int of more than _DISPLAY_FULL_INT_BITS bits (more digits than any room). None, a
+    bool, a float and a supported date or time have a short built-in repr()."""
+    kind = type(value)
+    if kind is str and len(value) + 2 > room:
+        return None
+    if kind is bytes and len(value) + 3 > room:
+        return None
+    if kind is int and value.bit_length() > _DISPLAY_FULL_INT_BITS:
+        return None
+    text = repr(value)
+    return text if len(text) <= room else None
+
+
+def _display_full(snapshot, escape):
+    """The whole-value rendering of a COMPLETE _display_snapshot (no depth marker, no _DISPLAY_STOP: every
+    container at most _DISPLAY_MAX_DEPTH deep and at most _DISPLAY_MAX_NODES values in all), read from that
+    copy alone, or None when the copy is not complete or the rendering would be wider than
+    _DISPLAY_FULL_MAX_CHARS characters, where the caller renders the bounded form (_display_render). Within
+    those limits it is what repr() gives: every int is tested first, so when any int the copy holds trips the
+    integer-string-conversion limit (_display_int_trips) the result is <oversized-int: N bits> for the int
+    that is the whole value and <oversized-value> for a container, whatever its width, as repr() raising
+    ValueError gives; otherwise it is the repr() of the copy, uncut, each leaf through _display_full_leaf and
+    each container with the brackets and separators repr() writes. With `escape`, each piece is escaped
+    (_escape_line_unsafe) and the width counts the escaped text. It keeps its own work stack and never
+    recurses."""
+    todo = [snapshot]
+    while todo:
+        entry = todo.pop()
+        if entry is _DISPLAY_STOP or entry[0] == "deep":
+            return None
+        if entry[0] == "box":
+            todo.extend(entry[2])
+        elif entry[0] == "leaf" and type(entry[1]) is int and _display_int_trips(entry[1]):
+            if entry is snapshot:
+                return "<oversized-int: {} bits>".format(entry[1].bit_length())
+            return "<oversized-value>"
+    out = []
+    used = 0
+    stack = [snapshot]
+    while stack:
+        entry = stack.pop()
+        if entry[0] == "leaf":
+            piece = _display_full_leaf(entry[1], _DISPLAY_FULL_MAX_CHARS - used)
+            if piece is None:
+                return None
+        elif entry[0] == "text":
+            piece = entry[1]
+        else:
+            kind, members = entry[1], entry[2]
+            piece, close = _display_brackets(kind, len(members))
+            stack.append(("text", close))
+            for i in range(len(members) - 1, -1, -1):
+                stack.append(members[i])
+                if i:
+                    stack.append(("text", ": " if kind is dict and i % 2 else ", "))
+        if escape:
+            piece = _escape_line_unsafe(piece)
+        used += len(piece)
+        if used > _DISPLAY_FULL_MAX_CHARS:
+            return None
+        out.append(piece)
+    return "".join(out)
+
+
 def _safe_display(value):
     """Render a value for a FINDING MESSAGE (or a controlled-refusal message), BOUNDED in work and output and
     NEVER RAISING (the one residual is item 6 below). Three hazards reach a message from a parsed manifest,
@@ -1651,45 +1755,63 @@ def _safe_display(value):
     repr() of such an int either raises ValueError or runs in time and memory proportional to its size.
     Second, tomllib builds a dotted table header or dotted key iteratively, so a header such as
     [id.a.a ... .a] with 100,000 parts parses into a 100,000-level nested table whose repr() overflows the
-    stack (a RecursionError, "Stack overflow ... while getting the repr of an object", on CPython 3.14).
-    Third, a wide array or a long string or bytes value makes repr() run to megabytes. The contract:
+    stack (a RecursionError, "Stack overflow ... while getting the repr of an object", on CPython 3.14;
+    CPython 3.14.8 and later refuse a key of more than 1,000 dotted parts, so there one header nests at
+    most 1,000 levels, still past any depth bound here). Third, a wide array or a long string or bytes
+    value makes repr() run to megabytes. The contract:
       1. Supported types are an explicit allow-list of EXACT types: None, bool, int, float, str, bytes,
          datetime.date, datetime.datetime and datetime.time (with a tzinfo _display_time_ok admits), and
          dict, list, tuple, set and frozenset. Any other value, a subclass of a supported type included,
          renders as the fixed marker <unrenderable NAME> naming only its type (_display_unsupported): its
          __repr__, __str__, __format__, __eq__ and __hash__ are never called, and no metaclass method runs.
-      2. Every supported scalar is sized BEFORE it is converted (_display_leaf): a bytes or an int over the
-         bound renders a type-and-size marker without building its repr(), and a str is cut on the value.
+      2. Every supported scalar is sized BEFORE it is converted: against _DISPLAY_FULL_MAX_CHARS in the
+         whole rendering (_display_full_leaf), and against _DISPLAY_MAX_CHARS in the bounded one
+         (_display_leaf, where a bytes or an int over that bound renders a type-and-size marker without
+         building its repr(), and a str is cut on the value).
       3. No container is passed to repr() or str(). The renderer takes ONE bounded copy first
          (_display_snapshot: exact types only, at most _DISPLAY_MAX_NODES values and _DISPLAY_MAX_DEPTH
-         container levels) and renders only that copy (_display_render), spelling each value as repr() does.
-         A member another thread replaces after it was read is never rendered, and no method a caller can
-         define runs on the value. Each member is read once for each occurrence the copy reaches, so a
-         container the value holds more than once (aliased, repeated, or on a cycle) is read at each
-         occurrence, each read checked as it is made, and its occurrences can differ when another thread
+         container levels) and renders only that copy (_display_full, else _display_render), spelling each
+         value as repr() does. A member another thread replaces after it was read is never rendered, and no
+         method a caller can define runs on the value. Each member is read once for each occurrence the copy
+         reaches, so a container the value holds more than once (aliased, repeated, or on a cycle) is read at
+         each occurrence, each read checked as it is made, and its occurrences can differ when another thread
          changes it in between.
-      4. A value whose members are all supported, whose containers nest at most _DISPLAY_MAX_DEPTH deep and
-         hold at most _DISPLAY_MAX_NODES values in all, and whose repr() is at most _DISPLAY_MAX_CHARS
-         characters renders as repr(value), byte for byte; that is the whole byte-identity guarantee. Any
-         other value differs from repr() even when short (a scalar nested 33 levels deep shows a depth
-         marker; a cyclic list shows its expansion up to the bounds). A str renders as repr() when that is
-         at most _DISPLAY_MAX_CHARS characters, and otherwise as the longest whole-escape prefix of at most
-         _DISPLAY_MAX_CHARS characters of the repr() of its first _DISPLAY_MAX_CHARS characters, followed by
-         ...<str of N chars>.
-      5. The result is at most _DISPLAY_MAX_CHARS + _DISPLAY_MARKER_MAX characters: content is cut on a whole
-         escape at _DISPLAY_MAX_CHARS, and the marker after a cut is ...<truncated> (14 characters) or
-         ...<str of N chars> (at most 37, N being a str length and so at most sys.maxsize). The work is
-         bounded by the _DISPLAY_ constants whatever the size, depth or width of the input, with one
-         exception: a set or dict whose table deletions left sparse is scanned by its built-in iterator up to
-         the size the table reached, so stepping through its members takes time in proportion to that size,
-         not to the members left. A value tomllib builds holds no set and no table it deleted from, so a
-         parsed value cannot reach this.
+      4. A value whose members are all supported and whose containers nest at most _DISPLAY_MAX_DEPTH deep
+         and hold at most _DISPLAY_MAX_NODES values in all renders by the whole-value rule (_display_full):
+         when an int it holds trips the integer-string-conversion limit (_display_int_trips), as
+         <oversized-int: N bits> if it is that int and as <oversized-value> if it is a container, whatever
+         its width; otherwise, when its repr() is at most _DISPLAY_FULL_MAX_CHARS characters, as
+         repr(value), byte for byte and uncut. That is the whole byte-identity guarantee. Past any of those
+         limits (depth, values, width) it renders in the bounded form (_display_render): content cut on a
+         whole escape at _DISPLAY_MAX_CHARS characters and followed by ...<truncated>, a container whose
+         rendering reaches an int that trips the limit before the cut rendered as <oversized-value> as a
+         whole, and an int wider than _DISPLAY_MAX_CHARS characters that does not trip it shown in place as
+         its <oversized-int: N bits> size marker. So a value past a limit differs from repr() even when
+         short (a scalar nested 33 levels deep shows a depth marker; a cyclic list shows its expansion up to
+         the bounds). A str renders as repr() when that is at most _DISPLAY_FULL_MAX_CHARS characters, and
+         otherwise as the longest whole-escape prefix of at most _DISPLAY_MAX_CHARS characters of the repr()
+         of its first _DISPLAY_MAX_CHARS characters, followed by ...<str of N chars>.
+      5. The result is at most _DISPLAY_FULL_MAX_CHARS characters: a whole rendering is at most that, and a
+         bounded one at most _DISPLAY_MAX_CHARS + _DISPLAY_MARKER_MAX characters (content cut on a whole
+         escape at _DISPLAY_MAX_CHARS, and the marker after a cut ...<truncated>, 14 characters, or
+         ...<str of N chars>, at most 37, N being a str length and so at most sys.maxsize). The work is
+         bounded by the _DISPLAY_ constants whatever the size, depth or width of the input (an int is
+         converted only when it has at most _DISPLAY_FULL_INT_BITS bits), with one exception: a set or dict
+         whose table deletions left sparse is scanned by its built-in iterator up to the size the table
+         reached, so stepping through its members takes time in proportion to that size, not to the members
+         left. A value tomllib builds holds no set and no table it deleted from, so a parsed value cannot
+         reach this.
       6. Residual: a MemoryError, a RuntimeError (another thread resizing a dict or set while it is copied) or
-         a ValueError yields the fixed placeholder <unrenderable-value>; an asynchronous exception
-         (KeyboardInterrupt, or one a signal handler raises) is not caught and propagates. A container another
-         thread changes while it is copied, in a way its iterator does not refuse (a list, a replaced dict
-         value, a set changed at the same size), renders the members the copy read, each checked as it was
-         read. A finalizer the garbage collector runs during a render is outside the value and is not prevented.
+         a ValueError (another thread changing the integer-string-conversion limit during a render among
+         them) yields the fixed placeholder <unrenderable-value>; an asynchronous exception (KeyboardInterrupt,
+         or one a signal handler raises) is not caught and propagates. A container another thread changes
+         while it is copied, in a way its iterator does not refuse (a list, a replaced dict value, a set
+         changed at the same size), renders the members the copy read, each checked as it was read. A
+         finalizer the garbage collector runs during a render is outside the value and is not prevented. With
+         the integer-string-conversion limit raised above _DISPLAY_FULL_MAX_CHARS digits, an int of more than
+         _DISPLAY_FULL_INT_BITS bits is never converted, so whether its repr() trips that limit is not
+         decided: it is taken as not tripping, and, being wider than _DISPLAY_FULL_MAX_CHARS characters, it
+         renders in the bounded form, as its size marker in place, where repr() could raise ValueError.
     So the message is always produced and the caller still records its finding or refusal (fail-closed;
     guard-input-soundness). It is the shared message-rendering guard for the finding-message idiom across
     the three OPF pass-A validators (store, schema, release), the doctor and the record verb. Like
@@ -1698,13 +1820,15 @@ def _safe_display(value):
     marker in the digest would change the bytes; spec 6.1)."""
     try:
         if type(value) is str:
-            text = repr(value[:_DISPLAY_MAX_CHARS])
-            if len(value) <= _DISPLAY_MAX_CHARS and len(text) <= _DISPLAY_MAX_CHARS:
+            text = _display_full_leaf(value, _DISPLAY_FULL_MAX_CHARS)
+            if text is not None:
                 return text
             out = []
-            _display_take(out, _DISPLAY_MAX_CHARS, text)
+            _display_take(out, _DISPLAY_MAX_CHARS, repr(value[:_DISPLAY_MAX_CHARS]))
             return "{}...<str of {} chars>".format("".join(out), len(value))
-        return _display_render(_display_snapshot(value), False)
+        snapshot = _display_snapshot(value)
+        text = _display_full(snapshot, False)
+        return _display_render(snapshot, False) if text is None else text
     except (MemoryError, RuntimeError, ValueError):
         return "<unrenderable-value>"
 
@@ -1752,32 +1876,39 @@ def _escape_bounded(s, room):
 def _safe_str(value):
     """The str()-style companion of _safe_display, for a finding-message position that renders a value with
     {} (no surrounding repr quotes) rather than {!r}: a version string interpolated into a `release #N
-    (<version>)` label, for instance. It shares the allow-list, the sizing before conversion, the bounded copy
-    and the residual of _safe_display, and its result is likewise at most _DISPLAY_MAX_CHARS +
-    _DISPLAY_MARKER_MAX characters. A str renders with every NON-PRINTABLE character escaped to a backslash
-    form (_escape_line_unsafe), so a value carrying a control character cannot inject a second diagnostic
-    line; the ESCAPED text is cut on a whole escape at _DISPLAY_MAX_CHARS characters (_escape_bounded) and a
-    cut appends ...<str of N chars>, so a str whose escaped form is at most _DISPLAY_MAX_CHARS characters
-    renders exactly as before, byte for byte. A supported date or time renders as its built-in str(). Every
-    other value renders from its _display_snapshot as _safe_display renders it, with each piece escaped
-    BEFORE the cut at _DISPLAY_MAX_CHARS characters (_display_render), so escaping never takes the result over
-    the bound: a built-in container renders as _safe_display does (its str() IS its repr(), and repr()
-    escapes every character str.isprintable() rejects, so the escape changes nothing), an exact int, float,
-    bool, None or bytes as its repr() (which equals its str()), an oversized int as the oversized-int marker
-    and an unsupported type as <unrenderable NAME>, and no __str__ or __repr__ a caller can define is called.
+    (<version>)` label, for instance. It shares the allow-list, the sizing before conversion, the bounded copy,
+    the limits and the residual of _safe_display, and its result is likewise at most _DISPLAY_FULL_MAX_CHARS
+    characters. A str renders with every NON-PRINTABLE character escaped to a backslash form
+    (_escape_line_unsafe), so a value carrying a control character cannot inject a second diagnostic line;
+    a str whose ESCAPED form is at most _DISPLAY_FULL_MAX_CHARS characters renders as that escaped form,
+    uncut, byte for byte, and a longer one is cut on a whole escape at _DISPLAY_MAX_CHARS characters
+    (_escape_bounded) and followed by ...<str of N chars>. A supported date or time renders as its built-in
+    str(). Every other value renders from its _display_snapshot as _safe_display renders it, by the
+    whole-value rule within the limits (_display_full) and in the bounded form past them (_display_render),
+    with each piece escaped BEFORE the width is measured or the cut is made, so escaping never takes the
+    result over either bound: a built-in container renders as _safe_display does (its str() IS its repr(),
+    and repr() escapes every character str.isprintable() rejects, so the escape changes nothing), an exact
+    int, float, bool, None or bytes as its repr() (which equals its str()), an int that trips the
+    integer-string-conversion limit as the oversized-int marker alone and as <oversized-value> for a
+    container holding it, and an unsupported type as <unrenderable NAME>, and no __str__ or __repr__ a caller
+    can define is called.
     Unlike _safe_display, which renders through repr() and so already escapes controls, this str()-based
     renderer must escape them itself (the store/release sibling the schema newline-hardening left exposed;
     codex round-6). It is for MESSAGE rendering only, never the byte-stable coverage digest."""
     try:
         kind = type(value)
         if kind is str:
+            if len(value) <= _DISPLAY_FULL_MAX_CHARS:
+                text, count = _escape_bounded(value, _DISPLAY_FULL_MAX_CHARS)
+                if count == len(value):
+                    return text
             text, count = _escape_bounded(value, _DISPLAY_MAX_CHARS)
-            if count == len(value):
-                return text
             return "{}...<str of {} chars>".format(text, len(value))
         if _display_kind(kind, _DISPLAY_TIMES) and _display_time_ok(value):
             return _escape_line_unsafe(str(value))
-        return _display_render(_display_snapshot(value), True)
+        snapshot = _display_snapshot(value)
+        text = _display_full(snapshot, True)
+        return _display_render(snapshot, True) if text is None else text
     except (MemoryError, RuntimeError, ValueError):
         return "<unrenderable-value>"
 
@@ -3967,11 +4098,11 @@ def self_test():
         # nested 100,000 levels deep (what tomllib builds from a 100,000-part dotted header) overflowed the
         # stack in repr() pre-fix (RecursionError, "Stack overflow ... while getting the repr of an object"),
         # so it runs in a bounded child: a regression is the ERROR:RecursionError sentinel, never a crash of
-        # this suite. A wide array and a long string rendered to megabytes pre-fix. A value within every
-        # render bound whose repr() is at most _DISPLAY_MAX_CHARS characters still renders exactly as repr(),
-        # and a str whose escaped form is at most _DISPLAY_MAX_CHARS characters exactly as the escaped str();
-        # a value past a bound renders differently by design (see _safe_display), so a message is
-        # byte-identical to its earlier form only when every value it renders is within the bounds.
+        # this suite. A wide array and a long string rendered to megabytes pre-fix. A value within the depth
+        # and value bounds whose repr() is at most _DISPLAY_FULL_MAX_CHARS characters still renders exactly as
+        # repr(), uncut, and a str whose escaped form is at most _DISPLAY_FULL_MAX_CHARS characters exactly as
+        # the escaped str(); a value past a limit renders in the bounded form by design (see _safe_display),
+        # so a message is byte-identical to its earlier form only when every value it renders is within them.
         _dr_cap = _DISPLAY_MAX_CHARS + _DISPLAY_MARKER_MAX
 
         def _dr_deep_render():
@@ -4007,28 +4138,39 @@ def self_test():
         check("deeprender-depth-at-bound-byte-identical", _safe_display(_dr_nest) == repr(_dr_nest))
         check("deeprender-depth-past-bound-marker", _safe_display([_dr_nest]) == "[" * _DISPLAY_MAX_DEPTH
               + "<list nested deeper than {} levels>".format(_DISPLAY_MAX_DEPTH) + "]" * _DISPLAY_MAX_DEPTH)
-        # Round 2: the ESCAPED output is bounded exactly. Content is cut on a whole escape at _DISPLAY_MAX_CHARS
+        # Round 2: the ESCAPED output is bounded exactly. Past the width limit (_DISPLAY_FULL_MAX_CHARS
+        # characters of repr() or of escaped str()), content is cut on a whole escape at _DISPLAY_MAX_CHARS
         # characters, never splitting one, and the marker after the cut is at most _DISPLAY_MARKER_MAX
-        # characters (the longest, a str-length marker at sys.maxsize). The marker-max check reads constants
-        # only: it guards the constant against a longer marker and is red on no renderer reversion. The
-        # escaped-str and whole-escape checks are red on the round-1 renderer.
+        # characters (the longest, a str-length marker at sys.maxsize); at the width limit the escaped form is
+        # whole, and one character more is cut. Each input is past the width limit (16,385 NULs escape to
+        # 65,540 characters, 6,554 astral characters to 65,540). The marker-max check reads constants only: it
+        # guards the constant against a longer marker and is red on no renderer reversion. The escaped-str and
+        # whole-escape checks are red on the round-1 renderer.
         check("deeprender-marker-max-is-the-longest-marker",
               _DISPLAY_MARKER_MAX >= len("...<str of {} chars>".format(sys.maxsize)) >= len("...<truncated>"))
-        _dr_nul, _dr_astral = chr(0) * 1024, chr(0x1000C) * 1024
+        _dr_nul, _dr_astral = chr(0) * 16385, chr(0x1000C) * 6554
         check("deeprender-escaped-str-bound-exact",
-              _safe_str(_dr_nul) == "\\x00" * 256 + "...<str of 1024 chars>"
-              and _safe_str(_dr_astral) == "\\U0001000c" * 102 + "...<str of 1024 chars>"
-              and _safe_str(chr(10) * 5000) == "\\x0a" * 256 + "...<str of 5000 chars>"
-              and _safe_display(_dr_nul) == chr(39) + "\\x00" * 255 + "...<str of 1024 chars>"
+              _safe_str(_dr_nul) == "\\x00" * 256 + "...<str of 16385 chars>"
+              and _safe_str(_dr_astral) == "\\U0001000c" * 102 + "...<str of 6554 chars>"
+              and _safe_str(chr(10) * 20000) == "\\x0a" * 256 + "...<str of 20000 chars>"
+              and _safe_display(_dr_nul) == chr(39) + "\\x00" * 255 + "...<str of 16385 chars>"
+              and _safe_str(chr(0) * 16384) == "\\x00" * 16384
+              and _safe_display("x" * (_DISPLAY_FULL_MAX_CHARS - 2)) == repr("x" * (_DISPLAY_FULL_MAX_CHARS - 2))
+              and _safe_display("x" * (_DISPLAY_FULL_MAX_CHARS - 1))
+              == chr(39) + "x" * (_DISPLAY_MAX_CHARS - 1) + "...<str of 65535 chars>"
               and all(len(f(v)) <= _dr_cap for f in (_safe_display, _safe_str)
-                      for v in (_dr_nul, _dr_astral, chr(0x2028) * 2000, bytes(1024), [_dr_astral] * 4)))
+                      for v in (_dr_nul, _dr_astral, chr(0x2028) * 11000, bytes(16384), [_dr_astral] * 4)))
         check("deeprender-cut-on-whole-escape",
-              _safe_display([chr(0x1000C) * 200]) == "[" + chr(39) + "\\U0001000c" * 102 + "...<truncated>"
-              and _safe_str(bytes(1024)) == "b" + chr(39) + "\\x00" * 255 + "...<truncated>")
+              _safe_display([chr(0x1000C) * 6554]) == "[" + chr(39) + "\\U0001000c" * 102 + "...<truncated>"
+              and _safe_str([bytes(1024), "x" * _DISPLAY_FULL_MAX_CHARS])
+              == "[b" + chr(39) + "\\x00" * 255 + "...<truncated>")
         # Round 2: every supported scalar is sized BEFORE it is converted, so rendering a bytes or an int far
         # over the bound neither builds its repr() nor allocates in proportion to it (the round-1 renderer
         # allocated about 2 MB for a 1,000,000-byte value, and about 1.7 MB for a 100,000-digit hexadecimal int
-        # under a lifted integer-string limit). The traced peak covers the renders only.
+        # under a lifted integer-string limit). The traced peak covers the renders only. With the limit
+        # lifted neither value trips it, and each is past the width limit, so the pair renders in the bounded
+        # form with each size marker in place (an int that trips the limit makes its container
+        # <oversized-value> instead, checked next).
         import tracemalloc
         _dr_bytes = b"x" * 1000000
         _dr_idlimit = sys.get_int_max_str_digits()
@@ -4050,17 +4192,25 @@ def self_test():
         check("deeprender-scalars-sized-before-repr",
               _dr_sized == ("<oversized-bytes: 1000000 bytes>",) * 2 + ("<oversized-int: 400000 bits>",) * 2
               + ("[<oversized-int: 400000 bits>, <oversized-bytes: 1000000 bytes>]",) and _dr_peak < 65536)
-        # The int marker is per leaf: an oversized int inside a container renders its own type-and-size marker
-        # in place (round 1 replaced the whole container with <oversized-value>). The int-to-str limit is
-        # pinned to the default and restored, so the verdict comes from the code under test.
+        # The whole-value rule for an int whose repr() trips the integer-string-conversion limit: alone it
+        # renders as <oversized-int: N bits>, and a container holding it renders as <oversized-value> as a
+        # whole, as repr() raising ValueError gives. That holds within the limits, whatever the width (a
+        # 70,000-character str beside the int changes nothing), and past them for an int the bounded rendering
+        # reaches before its cut (the list of 601 values is past the value bound); an int the copy never
+        # reaches is never read. The int-to-str limit is pinned to the default and restored, so the verdict
+        # comes from the code under test.
         _dr_idlimit = sys.get_int_max_str_digits()
         sys.set_int_max_str_digits(4300)
         try:
-            check("deeprender-oversized-int-marker-per-leaf",
+            _dr_unread = _safe_display([0] * 600 + [10 ** 5000])
+            check("deeprender-oversized-int-in-container-whole-value-marker",
                   _safe_display(10 ** 5000) == "<oversized-int: 16610 bits>"
                   and _safe_str(10 ** 5000) == "<oversized-int: 16610 bits>"
-                  and _safe_display([10 ** 5000]) == "[<oversized-int: 16610 bits>]"
-                  and _safe_str([10 ** 5000]) == "[<oversized-int: 16610 bits>]")
+                  and _safe_display([10 ** 5000]) == _safe_str([10 ** 5000]) == "<oversized-value>"
+                  and _safe_display(["x" * 70000, 10 ** 5000]) == "<oversized-value>"
+                  and _safe_display([10 ** 5000] + [0] * 600) == _safe_str([10 ** 5000] + [0] * 600)
+                  == "<oversized-value>"
+                  and _dr_unread.startswith("[0, 0, ") and _dr_unread.endswith("...<truncated>"))
         finally:
             sys.set_int_max_str_digits(_dr_idlimit)
         # Round 2: a type off the allow-list (a container subclass, any other object) never has its __repr__,
@@ -4253,38 +4403,52 @@ def self_test():
               _guard(lambda: _dr_entries(_display_snapshot(_dr_shallow))) == _DISPLAY_MAX_NODES
               and _safe_display(_dr_shallow) == "[[[" + ", ".join(["None"] * 170) + "], ...<truncated>")
         # Round 3: a cut never splits a u-form escape (the x and U forms are checked above), in a container, in a
-        # str rendered with repr() and in a str rendered escaped.
-        _dr_sep = chr(0x2028) * 300
+        # str rendered with repr() and in a str rendered escaped. 11,000 separators escape to 66,000
+        # characters, past the width limit.
+        _dr_sep = chr(0x2028) * 11000
         check("deeprender-cut-on-whole-u-escape",
               _safe_display([_dr_sep]) == "[" + chr(39) + "\\u2028" * 170 + "...<truncated>"
-              and _safe_display(_dr_sep) == chr(39) + "\\u2028" * 170 + "...<str of 300 chars>"
-              and _safe_str(_dr_sep) == "\\u2028" * 170 + "...<str of 300 chars>")
+              and _safe_display(_dr_sep) == chr(39) + "\\u2028" * 170 + "...<str of 11000 chars>"
+              and _safe_str(_dr_sep) == "\\u2028" * 170 + "...<str of 11000 chars>")
         # Round 3: escaping keeps the output budget for a container as for a scalar: _safe_str escapes each
         # piece BEFORE the cut, so the result stays within the bound however a piece escapes. No supported value
         # renders a non-printable character, so a leaf rendering of 2,000 NULs is substituted to reach that path
-        # (round 2 escaped the whole rendered container after its cut, with no budget).
+        # (round 2 escaped the whole rendered container after its cut, with no budget). Each value holds a str
+        # past the width limit, so it renders in the bounded form, the one that reads _display_leaf.
         _dr_globals = globals()
         _dr_leaf = _dr_globals["_display_leaf"]
         _dr_globals["_display_leaf"] = lambda value: chr(0) * 2000
         try:
-            _dr_escaped = (_safe_str([None]), _safe_str({"k": None}))
+            _dr_escaped = (_safe_str([None, "x" * _DISPLAY_FULL_MAX_CHARS]),
+                           _safe_str({"k": None, "w": "x" * _DISPLAY_FULL_MAX_CHARS}))
         finally:
             _dr_globals["_display_leaf"] = _dr_leaf
         check("deeprender-container-escape-keeps-budget",
               _dr_escaped == ("[" + "\\x00" * 255 + "...<truncated>", "{" + "\\x00" * 255 + "...<truncated>"))
-        # Round 3: the int width test is exact at the bound (round 2 estimated it from the bit length, so an int
-        # whose repr() is exactly 1,024 characters, 2 ** 3401 among them, could render the marker), and a
-        # negative int spends one character on its sign. The int-to-str limit is pinned to the default and
-        # restored, so the verdict comes from the code under test.
+        # Round 3: the int width test is exact at the width limit: an int whose repr() is exactly
+        # _DISPLAY_FULL_MAX_CHARS characters (2 ** 217705, the largest power of two that wide, among them) or
+        # one character less renders as repr(), uncut, and one a character wider renders in the bounded form,
+        # as its size marker; a negative int spends one character on its sign. The bounded form's own test is
+        # exact at _DISPLAY_MAX_CHARS too (round 2 estimated it from the bit length, so an int whose repr() is
+        # exactly 1,024 characters, 2 ** 3401 among them, could render the marker): in a list past the value
+        # bound, such an int renders as its digits, cut, and 10 ** 1024 as its marker. The int-to-str limit is
+        # lifted and restored, so the width, not that limit, decides and the verdict comes from the code under
+        # test.
         _dr_idlimit = sys.get_int_max_str_digits()
-        sys.set_int_max_str_digits(4300)
+        sys.set_int_max_str_digits(0)
         try:
-            _dr_fit = (2 ** 3401, 10 ** 1023, -(10 ** 1022), 10 ** 1024 - 1, -(10 ** 1023) + 1)
+            _dr_fit = (2 ** 217705, 10 ** 65535, -(10 ** 65534), 10 ** 65536 - 1, -(10 ** 65535) + 1)
+            _dr_inside = (10 ** 65535 - 1, -(10 ** 65534) + 1)
             check("deeprender-int-width-exact-at-bound",
-                  all(len(repr(v)) == _DISPLAY_MAX_CHARS and _safe_display(v) == _safe_str(v) == repr(v)
+                  all(len(repr(v)) == _DISPLAY_FULL_MAX_CHARS and _safe_display(v) == _safe_str(v) == repr(v)
                       for v in _dr_fit)
-                  and [f(v) for f in (_safe_display, _safe_str) for v in (10 ** 1024, -(10 ** 1023))]
-                  == ["<oversized-int: 3402 bits>", "<oversized-int: 3399 bits>"] * 2)
+                  and all(len(repr(v)) == _DISPLAY_FULL_MAX_CHARS - 1
+                          and _safe_display(v) == _safe_str(v) == repr(v) for v in _dr_inside)
+                  and [f(v) for f in (_safe_display, _safe_str) for v in (10 ** 65536, -(10 ** 65535))]
+                  == ["<oversized-int: 217706 bits>", "<oversized-int: 217703 bits>"] * 2
+                  and _safe_display([2 ** 3401] + [0] * 600)
+                  == "[" + repr(2 ** 3401)[:_DISPLAY_MAX_CHARS - 1] + "...<truncated>"
+                  and _safe_display([10 ** 1024] + [0] * 600).startswith("[<oversized-int: 3402 bits>, 0, 0"))
         finally:
             sys.set_int_max_str_digits(_dr_idlimit)
         # Round 3: a timezone renders through repr() only when it holds nothing a caller defines and its name is
@@ -4308,8 +4472,9 @@ def self_test():
               _safe_display(_dr_zone64) == repr(_dr_zone64) and _safe_display([_dr_zone64]) == repr([_dr_zone64])
               and [f(v) for f in (_safe_display, _safe_str) for v in _dr_zones] == ["<unrenderable datetime>"] * 6)
         # Round 3: require_ordinary_target renders its refusal through _safe_display (a {!r} there renders a long
-        # target whole). The target is a contained path under the journal home, 2,000 characters long.
-        _dr_target = JOURNALS_REL + "/" + "a" * 2000
+        # target whole). The target is a contained path under the journal home, past the width limit (more than
+        # 70,000 characters), so its refusal is bounded.
+        _dr_target = JOURNALS_REL + "/" + "a" * 70000
         try:
             require_ordinary_target(_dr_target)
             _dr_refusal = "accepted"
