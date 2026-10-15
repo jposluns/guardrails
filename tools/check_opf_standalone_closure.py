@@ -531,26 +531,32 @@ def _kill_and_reap(proc, drain_s=_DRAIN_MARGIN_S, killpg=os.killpg):
     LEADER under ONE absolute deadline of drain_s seconds that the two waits SHARE (the reap gets only
     what the drain left, so the whole cleanup costs at most drain_s, the one cleanup term the fit model
     counts per killed leg), and close the output pipe this runner owns in a finally, on EVERY path (a
-    normal drain, a drain timeout, an OSError from the kill or the drain). Returns (output, faults):
-    output is whatever the drain collected (TimeoutExpired carries the partial output; b"" when the
-    drain failed), and faults names each cleanup step that did not complete: `kill-error`,
-    `drain-timeout`, `drain-error`, and `leader-unreaped` for a leader still unreaped at the deadline
-    (never suppressed, never claimed reaped). Disclosed residual: a descendant that called setpgid() or
-    setsid() has LEFT the group; it is neither killed nor reaped here, and it can hold the output pipe
-    open past the kill, which is why the drain is bounded (a `drain-timeout` fault), never a wait on the
-    whole descendant tree. killpg is os.killpg; the self-test's process doubles replace it with a
-    recorder, so a double is never signalled."""
+    normal drain, a drain timeout, an OSError from the kill, the drain or the reap). Returns (output,
+    faults): output is whatever the drain collected (TimeoutExpired carries the partial output; b""
+    when the drain failed), and faults names each cleanup step that did not complete:
+    `group-kill-error` for a group kill that failed while the leader kill was delivered (descendants
+    in the group may survive), `kill-error` when neither kill was delivered, `drain-timeout`,
+    `drain-error`, `reap-error` for an OSError from the reap, and `leader-unreaped` for a leader still
+    unreaped at the deadline (never suppressed, never claimed reaped). Disclosed residual: a descendant
+    that called setpgid() or setsid() has LEFT the group; it is neither killed nor reaped here, and it
+    can hold the output pipe open past the kill, which is why the drain is bounded (a `drain-timeout`
+    fault), never a wait on the whole descendant tree. killpg is os.killpg; the self-test's process
+    doubles replace it with a recorder, so a double is never signalled."""
     deadline = time.monotonic() + drain_s
     out, faults = b"", []
     try:
         try:
             killpg(proc.pid, signal.SIGKILL)
-        except OSError:
+        except OSError as group_exc:
             try:
                 proc.kill()
             except OSError as exc:
                 faults.append("kill-error: neither the group kill nor the leader kill was "
                               "delivered: {}".format(exc))
+            else:
+                # The leader kill reaches the leader alone: the rest of the group was not signalled.
+                faults.append("group-kill-error: the process-group kill failed: {}; descendants "
+                              "may survive".format(group_exc))
         try:
             out, _err = proc.communicate(timeout=max(0.0, deadline - time.monotonic()))
         except subprocess.TimeoutExpired as exc:
@@ -564,6 +570,8 @@ def _kill_and_reap(proc, drain_s=_DRAIN_MARGIN_S, killpg=os.killpg):
                 proc.wait(timeout=max(0.0, deadline - time.monotonic()))
             except subprocess.TimeoutExpired:
                 pass  # the leader is still unreaped: named below, never suppressed
+            except OSError as exc:
+                faults.append("reap-error: the leader reap failed: {}".format(exc))
     finally:
         if proc.stdout is not None:
             proc.stdout.close()
@@ -1034,16 +1042,18 @@ class _LegDouble:
     """A stand-in for a killed leg's Popen whose kill, drain and reap outcomes are scripted. No process
     stands behind it and nothing is signalled: the group kill goes to the recorder the test passes as
     _kill_and_reap's killpg, kill() only records (or raises, scripted), and the pid is -1, which killpg
-    refuses (EINVAL) rather than reads as a group, should a broken caller pass it there. The drain
+    refuses (EINVAL) rather than reads as a group, should a broken caller pass it there. kill is "ok",
+    "group" (the group kill raises, the leader kill is delivered) or "both" (both raise). The drain
     spends drain_used_s seconds before its scripted outcome, so the reap's share of the one cleanup
     deadline is observable."""
 
-    def __init__(self, drain, reap, kill_fails=False, drain_used_s=0.0):
+    def __init__(self, drain, reap, kill="ok", drain_used_s=0.0):
         self.pid = -1
         self.args = ["leg-double"]
         self.returncode = None
         self.stdout = _PipeDouble()
-        self.drain, self.reap, self.kill_fails, self.drain_used_s = drain, reap, kill_fails, drain_used_s
+        self.drain, self.reap, self.drain_used_s = drain, reap, drain_used_s
+        self.group_kill_fails, self.kill_fails = kill in ("group", "both"), kill == "both"
         self.calls = []
 
     def kill(self):
@@ -1065,32 +1075,42 @@ class _LegDouble:
         self.calls.append(("reap", timeout))
         if self.reap == "timeout":
             raise subprocess.TimeoutExpired(self.args, timeout)
+        if self.reap == "oserror":
+            raise OSError("scripted reap failure")
         self.returncode = -9
         return self.returncode
 
 
 def _cleanup_doubles_self_test():
     """_kill_and_reap at the unit, on process doubles (deterministic: no scheduling delay can turn a
-    scripted drain timeout into a normal drain). On every path (a normal drain, a drain timeout, a reap
-    timeout, an OSError from the drain, a kill that could not be delivered) the pipe is closed and each
-    incomplete step is NAMED (an unreaped leader as leader-unreaped, never claimed reaped); the partial
-    output is kept; and the reap gets only what the drain left of the ONE cleanup deadline."""
+    scripted drain timeout into a normal drain). On every path the doubles script (a normal drain, a
+    drain timeout, a reap timeout, an OSError from the drain or the reap, a group kill that failed while
+    the leader kill was delivered, a kill that could not be delivered at all) the pipe is closed and each
+    incomplete step is NAMED (an unreaped leader as leader-unreaped, never claimed reaped; a failed group
+    kill as group-kill-error with its error, even when the leader kill was delivered; a reap OSError as
+    reap-error with its error, the leader still named unreaped); the leader kill is tried exactly when
+    the group kill failed; the partial output is kept; and the reap gets only what the drain left of the
+    ONE cleanup deadline."""
     drain_s, used_s = 1.0, 0.6
     partial = b"partial before the kill\n"
-    for check, drain, reap, kill_fails, want_faults, want_out, want_reaped in (
-            ("cleanup-normal-drain", "ok", "ok", False, [], b"whole output\n", True),
-            ("cleanup-drain-timeout", "timeout", "ok", False, ["drain-timeout"], partial, True),
-            ("cleanup-reap-timeout", "timeout", "timeout", False, ["drain-timeout", "leader-unreaped"],
+    for check, drain, reap, kill, want_faults, want_out, want_reaped in (
+            ("cleanup-normal-drain", "ok", "ok", "ok", [], b"whole output\n", True),
+            ("cleanup-drain-timeout", "timeout", "ok", "ok", ["drain-timeout"], partial, True),
+            ("cleanup-reap-timeout", "timeout", "timeout", "ok", ["drain-timeout", "leader-unreaped"],
              partial, False),
-            ("cleanup-drain-oserror", "oserror", "ok", False, ["drain-error"], b"", True),
-            ("cleanup-kill-error", "timeout", "timeout", True,
+            ("cleanup-reap-oserror", "timeout", "oserror", "ok",
+             ["drain-timeout", "reap-error", "leader-unreaped"], partial, False),
+            ("cleanup-drain-oserror", "oserror", "ok", "ok", ["drain-error"], b"", True),
+            ("cleanup-group-kill-error", "ok", "ok", "group", ["group-kill-error"], b"whole output\n",
+             True),
+            ("cleanup-kill-error", "timeout", "timeout", "both",
              ["kill-error", "drain-timeout", "leader-unreaped"], partial, False)):
-        double = _LegDouble(drain, reap, kill_fails, 0.0 if drain == "ok" else used_s)
+        double = _LegDouble(drain, reap, kill, 0.0 if drain == "ok" else used_s)
         group_kills = []
 
         def killpg(pid, sig, double=double, group_kills=group_kills):
             group_kills.append((pid, sig))
-            if double.kill_fails:
+            if double.group_kill_fails:
                 raise OSError("scripted group-kill failure")
 
         try:
@@ -1100,9 +1120,11 @@ def _cleanup_doubles_self_test():
                                  "(pipe closed: {})".format(check, exc, double.stdout.closed))
         named = [fault.split(":", 1)[0] for fault in faults]
         reaps = [timeout for call, timeout in double.calls if call == "reap"]
+        leader_kills = [call for call, _timeout in double.calls if call == "kill"]
         if (named != want_faults or out != want_out or not double.stdout.closed
                 or (double.returncode is not None) != want_reaped
                 or group_kills != [(double.pid, signal.SIGKILL)]
+                or leader_kills != (["kill"] if double.group_kill_fails else [])
                 or any(timeout > drain_s - used_s + 1e-6 for timeout in reaps)):
             raise AssertionError("closure/{}: faults {!r}, output {!r}, pipe closed {}, returncode {!r}, "
                                  "group kills {!r}, calls {!r}".format(
@@ -1111,10 +1133,16 @@ def _cleanup_doubles_self_test():
         if "leader-unreaped" in named and "leader pid {}".format(double.pid) not in faults[-1]:
             raise AssertionError("closure/{}: the unreaped leader is not named by pid: {!r}".format(
                 check, faults))
-    print("RED cleanup doubles -> a drain timeout, a reap timeout, a drain OSError and an undelivered "
-          "kill each close the pipe and name the incomplete step (an unreaped leader by pid, never "
-          "claimed reaped); partial output kept; the reap waits only the {:g}s the drain left of the "
-          "{:g}s cleanup deadline".format(drain_s - used_s, drain_s))
+        for name, cause in (("group-kill-error", "scripted group-kill failure"),
+                            ("reap-error", "scripted reap failure")):
+            if name in named and cause not in faults[named.index(name)]:
+                raise AssertionError("closure/{}: {} does not carry its error: {!r}".format(
+                    check, name, faults))
+    print("RED cleanup doubles -> a drain timeout, a reap timeout, a drain or reap OSError, a failed "
+          "group kill (the leader kill delivered) and an undelivered kill each close the pipe and name "
+          "the incomplete step (an unreaped leader by pid, never claimed reaped); partial output kept; "
+          "the reap waits only the {:g}s the drain left of the {:g}s cleanup deadline".format(
+              drain_s - used_s, drain_s))
 
 
 def _timeout_vectors_self_test(required):
@@ -1436,8 +1464,10 @@ def self_test_main():
     verdict legs run first and fast: the per-leg bounds cover each leg's table-derived need and fit the
     CI job, time-scaled stub legs show a flat bound below the recorded work killing a correct leg while
     a hang is still cut off and named (descendants that stayed in the leg's process group included),
-    the post-kill cleanup closes the pipe and names what it could not complete on every path, and the
-    negative-leg verdict is shown discriminating. The positive leg runs run() over the real
+    the post-kill cleanup closes the pipe and names what it could not complete on every path the
+    cleanup doubles script (a failed group kill, whether or not the leader kill was delivered; a drain
+    timeout or OSError; a reap timeout or OSError), and the negative-leg verdict is shown
+    discriminating. The positive leg runs run() over the real
     opf/ and requires 0. The negative leg materializes opf/ alone, then RE-INTRODUCES the pre-move
     upward edge (opf/tools/_opf_store.py importing `_parse` from AIQT `check_versions` instead of the
     extracted `_semver`); with no AIQT tree reachable that import fails, so the leg must itself report
