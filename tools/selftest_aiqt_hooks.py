@@ -38,8 +38,12 @@ target and is decided on it) - this no-cwd resolved-target form is not separatel
 wrapper form that hides a real `git reset --hard` while the raw scan still sees a contiguous git+verb keyword
 (an `if`/`for`, a backtick or `$()` substitution, a `|&`, a leading or interspersed redirect, and the
 wrappers sudo/nice/timeout/nohup/sh -c/bash -c/...) now ASKS (pristine-* cases); a wrapper that ALSO
-fragments the command word `git` or the verb so no recognized lossy verb is seen is a DISCLOSED best-effort
-residual, silently ALLOWED and not chased. It also proves the four accuracy fixes: (1) a config-forced probe defeats
+fragments the command word `git` or the verb with quotes or a backslash is in scope through the de-quoted
+reading (gd-dequoted-* cases), while a word no raw, joined or de-quoted reading assembles (an escape decoded
+inside $'...', a parameter expansion) is a DISCLOSED best-effort residual, silently ALLOWED
+(gd-dequoted-residual-* cases); the de-quoted reading also reads quoted prose, a DISCLOSED over-refusal (an
+echo or printf of fragmented work-losing prose is in scope and the closed allowlist grammar denies it:
+gd-dequote-prose-* cases). It also proves the four accuracy fixes: (1) a config-forced probe defeats
 status.showUntrackedFiles=no so an untracked file still reads dirty (cfg-* cases: reset --hard/checkout -f
 DENY, clean -f ASKS); (2) the arg-consuming clean options `-e`/`--exclude` are respected so `-n` is not
 mis-read as a dry run (cle-* cases); (3) `switch --merge`/`--conflict` route to scoped and ASK on a dirty
@@ -2099,6 +2103,64 @@ def _init_repo(path):
     return path
 
 
+def _make_badname_fixture(badname, failures):
+    """Create the non-UTF-8 fixture file of the rec-badname case and return True. A filesystem that refuses
+    the byte name cannot evaluate that case: record the NAMED failure and return False, so the non-UTF-8
+    discard assertion is never silently omitted from a passing run."""
+    try:
+        with open(badname, "wb") as fh:
+            fh.write(b"junk\n")
+        return True
+    except OSError as exc:
+        failures.append("(rec-badname-cannot-evaluate) the non-UTF-8 fixture filename could not be "
+                        "created ({}), so the non-UTF-8 discard case was not evaluated".format(exc))
+        return False
+
+
+def _make_stash_fixture(repo, failures):
+    """Create the one stash entry the cf4 stash-recovery case preserves and return True; on a setup fault
+    record the NAMED cannot-evaluate failure and return False."""
+    try:
+        _git(repo, "stash", "push", "-m", "wip", env_identity=True)
+        return True
+    except (OSError, subprocess.SubprocessError) as exc:
+        failures.append("(cf4-stash-cannot-evaluate) the stash entry fixture could not be created ({}), "
+                        "so the target-bound stash recovery case was not evaluated".format(exc))
+        return False
+
+
+def _symlink_probe(target, link, failures):
+    """Create and remove a probe symlink at link and return True; on a platform that cannot create it
+    record the NAMED cannot-evaluate failure and return False."""
+    try:
+        os.symlink(str(target), str(link))
+        os.unlink(str(link))
+        return True
+    except OSError as exc:
+        failures.append("(ws-cs-symlink-cannot-evaluate) the symlink probe failed ({}), so the frozen-floor, "
+                        "frozen-registry and lexical-tree symlink cases were not evaluated".format(exc))
+        return False
+
+
+def _test_cannot_evaluate_paths(failures, tmp):
+    """Inject the setup fault each cannot-evaluate path guards (a fixture filename that cannot be created, a
+    stash fixture whose git call fails, a symlink that cannot be made) and require the NAMED failure to be
+    recorded and the case skipped, so removing the recording reds this check instead of silently omitting
+    the guarded case from a passing run."""
+    missing = tmp / "cannot-evaluate-missing"  # never created: every write under it raises OSError
+    for name, inject in (
+            ("rec-badname-cannot-evaluate",
+             lambda probe: _make_badname_fixture(os.fsencode(str(missing / "bad")), probe)),
+            ("cf4-stash-cannot-evaluate", lambda probe: _make_stash_fixture(missing, probe)),
+            ("ws-cs-symlink-cannot-evaluate", lambda probe: _symlink_probe(tmp, missing / "link", probe)),
+    ):
+        probe = []
+        made = inject(probe)
+        if made is not False or len(probe) != 1 or not probe[0].startswith("(" + name + ")"):
+            failures.append("({}-inject) an injected setup fault must record the named failure and skip "
+                            "the case; got made={!r} recorded={!r}".format(name, made, probe))
+
+
 def _test_git_stash_ref(failures):
     """Direct, warn-distinct checks; no submitted Bash command is executed."""
     handler = aiqt_hooks.git_stash_ref
@@ -4081,17 +4143,9 @@ def _main_isolated(monitor):
         rec_bad = _init_repo(tmp / "rec-badname")
         (rec_bad / "file.txt").write_text("committed line\ndirty\n", encoding="utf-8")  # tracked-dirty
         badname = os.fsencode(str(rec_bad)) + b"/\xff\xfe-bad.txt"  # invalid UTF-8 bytes in the name
-        try:
-            with open(badname, "wb") as fh:
-                fh.write(b"junk\n")
-            made_bad = True
-        except OSError as _bad_exc:
-            made_bad = False
-            # R11 (DECIDED item 5): a silent skip here could ship a non-UTF-8 recovery defect
-            # behind a green run; record a NAMED coverage failure instead.
-            failures.append("(rec-badname-cov) could not create the non-UTF-8 byte-name fixture "
-                            "({}): the non-UTF-8 snapshot-failure case is UNCOVERED on this "
-                            "filesystem, recorded as a failure rather than skipped".format(_bad_exc))
+        # A filesystem that refuses the byte name cannot evaluate this case: the helper records a NAMED
+        # failure, so the non-UTF-8 discard assertion is never silently omitted from a passing run.
+        made_bad = _make_badname_fixture(badname, failures)
         if made_bad:
             try:
                 got_bad = _decision(handler, "git checkout -- file.txt", cwd=str(rec_bad))
@@ -4880,16 +4934,7 @@ def _main_isolated(monitor):
                 failures.append("(cf3-pointer-quoted) the recovery pointer must shell-quote the repo PATH "
                                 "(codex finding 3)")
         # F4: the redirected-stash recovery command binds to 'git -C <quoted repo> stash apply <ref>'.
-        try:
-            _git(cf3, "stash", "push", "-m", "wip", env_identity=True)   # one stash entry to preserve
-            _cf3stashok = True
-        except (OSError, subprocess.SubprocessError) as _cf3_exc:
-            _cf3stashok = False
-            # R11 (DECIDED item 5): record the lost cf4 coverage instead of silently skipping it.
-            failures.append("(cf4-stash-cov) could not create the stash entry for the bound "
-                            "recovery-advice assertion ({}): the cf4 target-bound stash recovery "
-                            "case is UNCOVERED, recorded as a failure rather than skipped"
-                            .format(_cf3_exc))
+        _cf3stashok = _make_stash_fixture(cf3, failures)   # one stash entry to preserve, or a NAMED failure
         if _cf3stashok:
             _cf3code, _cf3obj, _ = aiqt_hooks._stash_drop_clear_outcome(str(cf3), "clear")
             _cf3msg = _cf3obj.get("systemMessage", "") if isinstance(_cf3obj, dict) else ""
@@ -5867,6 +5912,18 @@ def _main_isolated(monitor):
             if got != want:
                 failures.append("{}: expected {}, got {}".format(label, want, got))
 
+        def pexpect_layer(label, command, want, cwd=None, detail=None):
+            """Pexpect with the raw-text backstop stood down. The backstop reads each segment
+            de-quoted, so it now denies some fragmented vectors before the layer they were written to
+            witness (the parsed classifier or the uncertain-lex fallback); this keeps that layer and its
+            own reason witnessed."""
+            original_match = aiqt_hooks._raw_push_match
+            aiqt_hooks._raw_push_match = lambda command: False
+            try:
+                pexpect(label, command, want, cwd=cwd, detail=detail)
+            finally:
+                aiqt_hooks._raw_push_match = original_match
+
         pl_repo = _init_repo(tmp / "pl-repo")  # HEAD is main (a protected name) by construction
         # Give both protected-line fixtures a configured remote, so a direct commit on their protected
         # HEAD is denied as a REMOTE-BACKED repo (the whole existing commit-on-protected suite is the
@@ -5889,8 +5946,16 @@ def _main_isolated(monitor):
         pexpect("(pl-d) plain push to main allows", "git push origin main", "allow", cwd=plr)
         pexpect("(pl-e) '+' refspec to a feature branch allows",
                 "git push origin +my-feature", "allow", cwd=plr)
-        pexpect("(pl-e2) '+main:feature' forces only feature: allows",
-                "git push origin +main:feature", "allow", cwd=plr)
+        # The raw-text backstop reads each raw command segment (_raw_push_segments); a +
+        # refspec is a force spelling, so pairing it with a protected name in the same segment denies
+        # even though the parsed path proves the forced destination is only the feature ref (a
+        # disclosed over-denial, the safe direction). The same shape with no protected name keeps the
+        # parsed reading.
+        pexpect('(pl-e2) a forced src:dst whose SOURCE is the protected name: the raw-text backstop denies',
+                'git push origin +main:feature', 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
+        pexpect('(pl-e2b) the same forced src:dst with no protected name anywhere: allows',
+                'git push origin +dev:feature', 'allow', cwd=plr)
 
         # Force spellings: -f, clustered, with-lease bare and =value, if-includes, a conservative long
         # prefix, the refs/heads/ qualifier, src:dst destination matching, and the master name.
@@ -5908,21 +5973,30 @@ def _main_isolated(monitor):
                 "git push --force origin refs/heads/main", "deny", cwd=plr)
         pexpect("(pl-f8) src:dst matches the DESTINATION: feature:main denies",
                 "git push --force origin feature:main", "deny", cwd=plr)
-        pexpect("(pl-f9) main:feature forces only feature: allows",
-                "git push --force origin main:feature", "allow", cwd=plr)
+        pexpect('(pl-f9) a forced src:dst naming the protected SOURCE: the raw-text backstop denies (a disclosed over-denial)',
+                'git push --force origin main:feature', 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
+        pexpect('(pl-f9b) the same forced src:dst with an unprotected source: allows',
+                'git push --force origin dev:feature', 'allow', cwd=plr)
         pexpect("(pl-f10) push --force to master denies", "git push --force origin master", "deny",
                 cwd=plr)
 
         # Argument-aware flags (the F-94/F-82 lesson): an '-o' VALUE is never scanned as flags or read
         # as a refspec, and a non-force long option sharing a prefix letter is not force.
-        pexpect("(pl-g1) '-of' is -o with attached value 'f', not force",
-                "git push -of origin main", "allow", cwd=plr)
+        pexpect('(pl-g1) the -of attached-value false-hit beside the protected name: the raw-text backstop denies (a disclosed over-denial)',
+                'git push -of origin main', 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
+        pexpect('(pl-g1b) -of with no protected name keeps the parsed -o value reading: allows',
+                'git push -of origin dev', 'allow', cwd=plr)
         pexpect("(pl-g2) separated '-o force' value is not a flag",
                 "git push -o force origin my-feature", "allow", cwd=plr)
         pexpect("(pl-g3) --follow-tags is not force", "git push --follow-tags origin main", "allow",
                 cwd=plr)
-        pexpect("(pl-g4) a separated --push-option value naming main is consumed, not a refspec",
-                "git push --force --push-option main origin my-feature", "allow", cwd=plr)
+        pexpect('(pl-g4) a consumed option value spelling the protected name beside a force flag: the raw-text backstop denies (a disclosed over-denial)',
+                'git push --force --push-option main origin my-feature', 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
+        pexpect('(pl-g4b) the same consumed option value with no protected name: allows',
+                'git push --force --push-option dev origin my-feature', 'allow', cwd=plr)
 
         # A forced sweep the guard cannot prove misses the protected names ASKS.
         pexpect("(pl-h1) forced wildcard refspec denies (fail-safe: unprovable protected-line rewrite)",
@@ -6710,13 +6784,797 @@ def _main_isolated(monitor):
         # erased a real force-push behind a STACKED heredoc and behind a nested-quote command
         # substitution (both red by outcome below on the R9 delivery). The cost is this ACCEPTED,
         # DISCLOSED over-deny: force-push-shaped PROSE inside a purely quoted heredoc body now DENIES
-        # on the fallback path (it was (pl-cf1)'s allow through R9).
-        pexpect("(pl-cf1) push-force prose inside a QUOTED heredoc body DENIES on the raw fallback "
+        # on the fallback path (it was (pl-cf1)'s allow through R9). The raw-text backstop reaches the
+        # same deny one layer earlier: it scans the UNSTRIPPED command (one
+        # newline/;/&/|-split segment at a time), and push-shaped prose pairing a push, a force
+        # spelling and a protected name inside ONE segment (here: the whole body line) denies there
+        # first, with the backstop's own reason.
+        pexpect("(pl-cf1) push-force prose inside a QUOTED heredoc body DENIES via the raw-text backstop "
                 "(accepted, disclosed over-deny; R10 item 3)",
-                "cat <(echo x) <<'EOF'\ngit push -f origin main\nEOF", "deny", cwd=plr)
+                "cat <(echo x) <<'EOF'\ngit push -f origin main\nEOF", "deny", cwd=plr,
+                detail="raw command text pairs a git push")
         # A REAL force-push OUTSIDE the quoted heredoc body on the same unparseable command still DENIES.
         pexpect("(pl-cf1-outside) a real force-push OUTSIDE the quoted heredoc body still DENIES (CLAUDE-F1)",
                 "git push -f origin main <(echo x)", "deny", cwd=plr)
+        # DISCLOSED over-denial, witnessed: the broad fallback still
+        # scans the UNSTRIPPED text (no stripping may remove a line from it), so push-shaped prose naming
+        # only a FEATURE ref inside a quoted heredoc body still denies when the command is
+        # unparseable (the process substitution forces the fallback) and no protected name gates it.
+        pexpect('(pl-fallback-prose) feature-only push prose in a quoted heredoc body of an unparseable command denies via the fallback (disclosed over-denial)',
+                "cat <(echo x) <<'EOF'\ngit push --force origin feature\nEOF", 'deny', cwd=plr,
+                detail='appears to force-push or delete a target this guard cannot read')
+
+        # These three nested-quote forms (the shapes the nested-quote lexer was written for) are covered
+        # by BOTH layers again: the RESTORED nested-quote lexer reads the opener as data, so the push is a visible
+        # segment (asserted directly by tok-lexnest-*), and the raw-text backstop, which runs first,
+        # denies them here with its own reason. The identical lines carrying only a harmless command
+        # still ALLOW (the discrimination control).
+        pexpect('(pl-lexnest-dollar-paren) a force-push behind a nested-quote heredoc opener DENIES via the raw-text backstop',
+                'echo "$(echo "<<\'EOF\'")"\ngit push --force origin main', 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
+        pexpect('(pl-lexnest-dollar-paren-ctl) the same nested-quote form with only a harmless command ALLOWS',
+                'echo "$(echo "<<\'EOF\'")"\necho done', 'allow', cwd=plr)
+        pexpect('(pl-lexnest-backquote) a force-push behind a nested-quote heredoc opener DENIES via the raw-text backstop',
+                'echo "`echo "<<\'EOF\'"`"\ngit push --force origin main', 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
+        pexpect('(pl-lexnest-backquote-ctl) the same nested-quote form with only a harmless command ALLOWS',
+                'echo "`echo "<<\'EOF\'"`"\necho done', 'allow', cwd=plr)
+        pexpect('(pl-lexnest-brace) a force-push behind a nested-quote heredoc opener DENIES via the raw-text backstop',
+                'echo "${x:-"<<\'EOF\'"}"\ngit push --force origin main', 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
+        pexpect('(pl-lexnest-brace-ctl) the same nested-quote form with only a harmless command ALLOWS',
+                'echo "${x:-"<<\'EOF\'"}"\necho done', 'allow', cwd=plr)
+
+        # Raw-text backstop regression vectors: each DENIES via the raw-text backstop and each was a
+        # SILENT ALLOW before the backstop existed (a nested-quote mis-pairing swallowed the push line, and
+        # a benign leading git segment suppressed the old raw fallback). Forms: a comment or a heredoc
+        # body inside a nested substitution (with and without a leading benign git segment), a nested
+        # heredoc whose body looks like a closing quote, and a commented close-paren that fakes a
+        # heredoc opener. The same shapes carrying only a harmless command ALLOW (controls).
+        pexpect('(pl-mispair-comment-paren) a push hidden by a quoting mis-read DENIES via the raw-text backstop',
+                'git status\necho "$(echo hi # (\n)"\ngit push --force origin main\necho ")"', 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
+        pexpect('(pl-mispair-comment-apostrophe) a push hidden by a quoting mis-read DENIES via the raw-text backstop',
+                'git status\necho "$(echo hi # it\'s\n)"\ngit push --force origin main\necho "\')"', 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
+        pexpect('(pl-mispair-heredoc-paren) a push hidden by a quoting mis-read DENIES via the raw-text backstop',
+                'git status\necho "$(cat <<\'EOF\'\n(\nEOF\n)"\ngit push --force origin main\necho ")"', 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
+        pexpect('(pl-mispair-heredoc-quote) a push hidden by a quoting mis-read DENIES via the raw-text backstop',
+                'git status\necho "$(cat <<\'EOF\'\n\'\nEOF\n)"\ngit push --force origin main\necho \')"\'\\\'', 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
+        pexpect('(pl-mispair-heredoc-unquoted) a push hidden by a quoting mis-read DENIES via the raw-text backstop',
+                'git status\necho "$(cat <<EOF\n(\nEOF\n)"\ngit push --force origin main\necho ")"', 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
+        pexpect('(pl-mispair-nested-heredoc-close) a push hidden by a quoting mis-read DENIES via the raw-text backstop',
+                'echo "$(cat <<\'EOF\'\n)"<<\'X\'\nEOF\n)"\ngit push --force origin main', 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
+        pexpect('(pl-mispair-commented-close) a push hidden by a quoting mis-read DENIES via the raw-text backstop',
+                'echo "$(echo ok # )\n echo "<<\'EOF\'"\n)"\ngit push --force origin main', 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
+        pexpect('(pl-mispair-commented-close-heredoc) a push hidden by a quoting mis-read DENIES via the raw-text backstop',
+                'echo "$(echo a # )" <<\'EOF\'\n)"\ngit push --force origin main\nEOF', 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
+        pexpect('(pl-mispair-comment-paren-ctl) the same shape carrying only a harmless command ALLOWS',
+                'git status\necho "$(echo hi # (\n)"\necho done\necho ")"', 'allow', cwd=plr)
+        pexpect('(pl-mispair-heredoc-paren-ctl) the same shape carrying only a harmless command ALLOWS',
+                'git status\necho "$(cat <<\'EOF\'\n(\nEOF\n)"\necho done\necho ")"', 'allow', cwd=plr)
+        pexpect('(pl-mispair-nested-heredoc-close-ctl) the same shape carrying only a harmless command ALLOWS',
+                'echo "$(cat <<\'EOF\'\n)"<<\'X\'\nEOF\n)"\necho done', 'allow', cwd=plr)
+        pexpect('(pl-mispair-commented-close-heredoc-ctl) the same shape carrying only a harmless command ALLOWS',
+                'echo "$(echo a # )" <<\'EOF\'\n)"\necho done\nEOF', 'allow', cwd=plr)
+        # The disclosed over-denial, witnessed: push-shaped PROSE naming a protected branch inside a
+        # quoted heredoc body DENIES (red before the backstop, when a stripped fallback allowed it), and
+        # the same prose nested inside a substitution denies too.
+        pexpect('(pl-mispair-prose) push-shaped prose in a plain quoted heredoc body DENIES (the raw-text backstop, a disclosed over-denial)',
+                "cat <<'EOF'\ngit push --force origin main\nEOF", 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
+        pexpect('(pl-mispair-prose-nested) push-shaped prose in a quoted heredoc nested in a substitution DENIES too (same disclosure)',
+                'echo "$(cat <<\'EOF\'\nDo not run git push --force origin main\nEOF\n)"', 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
+
+        # Hidden-shape vectors: the
+        # nested-quote lexer is RESTORED, so a push hidden behind a nested-substitution heredoc opener is
+        # a VISIBLE segment and the PARSED classifier denies it even when no literal protected name
+        # or no contiguous force spelling appears for the raw backstop. Each opener also carries a '$(',
+        # a backtick or a '<<', so the lex is UNCERTAIN and the broad fallback reads the push line as
+        # well, whatever the leading benign git segment: the decision is held by both the lexer read
+        # and that fallback. Reverting the lexer read therefore no longer turns these vectors into a
+        # silent allow; it changes the deny reason from the PARSED one ('this git push'), which each
+        # vector asserts and which neither the backstop nor the fallback wording can satisfy, to the
+        # fallback's. The backstop now reads each segment de-quoted, so the seven
+        # shapes whose protected name, force flag or push verb is fragmented by quotes or a backslash
+        # deny first through it (deny reason changed, decision unchanged); the -layer vectors after them
+        # keep the PARSED path witnessed with the backstop stood down.
+        _hid = 'git status\necho "$(echo "<<\'EOF\'")"\n'
+        _hid_bq = 'git status\necho "`echo "<<\'EOF\'"`"\n'
+        _hid_br = 'git status\necho "${x:-"<<\'EOF\'"}"\n'
+        pexpect('(pl-hidden-head) hidden force-push to HEAD (no literal protected name) DENIES via the parsed path',
+                _hid + 'git push --force origin HEAD', 'deny', cwd=plr, detail='this git push')
+        pexpect('(pl-hidden-bare) hidden refspec-less force-push DENIES via the parsed HEAD probe',
+                _hid + 'git push --force', 'deny', cwd=plr, detail='this git push')
+        pexpect('(pl-hidden-remote) hidden refspec-less -f with a remote DENIES',
+                _hid + 'git push -f origin', 'deny', cwd=plr, detail='this git push')
+        pexpect('(pl-hidden-at) hidden forced @ refspec DENIES',
+                _hid + 'git push -f origin @', 'deny', cwd=plr, detail='this git push')
+        pexpect('(pl-hidden-splitname) hidden force-push to a quote-fragmented protected name DENIES',
+                _hid + 'git push --force origin ma""in', 'deny', cwd=plr, detail='raw command text pairs a git push')
+        pexpect('(pl-hidden-splitdest) hidden forced refspec with a quote-fragmented protected destination DENIES',
+                _hid + "git push origin +HEAD:ma''in", 'deny', cwd=plr, detail='raw command text pairs a git push')
+        pexpect('(pl-hidden-mirror) hidden --mirror sweep DENIES',
+                _hid + 'git push --mirror origin', 'deny', cwd=plr, detail='this git push')
+        pexpect('(pl-hidden-delsplit) hidden --delete of a quote-fragmented protected name DENIES',
+                _hid + "git push origin --delete ma''in", 'deny', cwd=plr, detail='raw command text pairs a git push')
+        pexpect('(pl-hidden-backquote) the backquote opener hiding a force-push to HEAD DENIES',
+                _hid_bq + 'git push --force origin HEAD', 'deny', cwd=plr, detail='this git push')
+        pexpect('(pl-hidden-brace) the brace-expansion opener hiding a force-push to HEAD DENIES',
+                _hid_br + 'git push --force origin HEAD', 'deny', cwd=plr, detail='this git push')
+        pexpect('(pl-hidden-sameline) the opener on the same line as the benign segment DENIES',
+                'git status; echo "$(echo "<<\'EOF\'")"\ngit push --force origin HEAD', 'deny', cwd=plr,
+                detail='this git push')
+        pexpect('(pl-hidden-fragflag) hidden quote-fragmented -f beside the protected name DENIES (the tokenizer normalizes quotes)',
+                _hid + 'git push -""f origin main', 'deny', cwd=plr, detail='raw command text pairs a git push')
+        pexpect('(pl-hidden-escflag) hidden backslash-escaped -f DENIES',
+                _hid + 'git push \\-f origin main', 'deny', cwd=plr, detail='raw command text pairs a git push')
+        pexpect('(pl-hidden-fragverb) hidden quote-fragmented push verb DENIES',
+                _hid + 'git pu""sh --force origin main', 'deny', cwd=plr, detail='raw command text pairs a git push')
+        pexpect('(pl-hidden-fragdel) hidden quote-fragmented --delete of the protected name DENIES',
+                _hid + 'git push origin --""delete main', 'deny', cwd=plr, detail='raw command text pairs a git push')
+        for _hln, _hlc in (
+                ('splitname', 'git push --force origin ma""in'),
+                ('splitdest', "git push origin +HEAD:ma''in"),
+                ('delsplit', "git push origin --delete ma''in"),
+                ('fragflag', 'git push -""f origin main'),
+                ('escflag', 'git push \\-f origin main'),
+                ('fragverb', 'git pu""sh --force origin main'),
+                ('fragdel', 'git push origin --""delete main'),
+        ):
+            pexpect_layer('(pl-hidden-{}-layer) with the backstop stood down the hidden fragmented push still '
+                          'DENIES via the parsed path'.format(_hln),
+                          _hid + _hlc, 'deny', cwd=plr, detail='this git push')
+
+        # Ordinary flows: the backstop judges ONE raw segment at a time
+        # (split at newlines and unquoted ;/&/| separators), so a force spelling, a --format or
+        # --depth value, an rm -rf, or origin/main as another command's argument in a DIFFERENT
+        # segment no longer pairs with an unrelated push. Each of these DENIED under a whole-text
+        # backstop read and must ALLOW.
+        pexpect('(pl-segflow1) rebase onto origin/main then force-with-lease to a feature ref allows',
+                'git fetch origin && git rebase origin/main && git push --force-with-lease origin my-feature',
+                'allow', cwd=plr)
+        pexpect('(pl-segflow2) the same update-a-PR-branch flow from a feature-HEAD repo allows',
+                'git fetch origin && git rebase origin/main && git push --force-with-lease origin my-feature',
+                'allow', cwd=plf)
+        pexpect('(pl-segflow3) rebase onto origin/main then a bare force-with-lease on a feature HEAD allows',
+                'git rebase origin/main && git push --force-with-lease', 'allow', cwd=plf)
+        pexpect('(pl-segflow4) rm -rf of a build dir in another segment beside a plain push to main allows',
+                'rm -rf build && git push origin main', 'allow', cwd=plr)
+        pexpect('(pl-segflow5) branch -d in another segment beside a plain push to main allows',
+                'git branch -d old-topic && git push origin main', 'allow', cwd=plr)
+        pexpect('(pl-segflow6) a --format value in another segment beside a plain feature push allows',
+                'git log --format=%h origin/main..HEAD && git push origin my-feature', 'allow', cwd=plr)
+        pexpect('(pl-segflow7) a --depth value in another segment beside a plain push to main allows',
+                'git fetch --depth=1 origin && git push origin main', 'allow', cwd=plr)
+        pexpect('(pl-segflow8) a tail -f pipe stage beside a plain push to main allows',
+                'git push origin main 2>&1 | tail -f /dev/null', 'allow', cwd=plr)
+
+        # A redirection operator NEVER splits a raw push segment -
+        # the '&' of 2>&1/>&2/1>&2/<&0/2>&-/&>/&>> and the '|' of >| stay inside their segment -
+        # because bash reads a redirection as part of ONE simple command. The old split put
+        # 'env git push origin 2>' and '1 --force main' in DIFFERENT segments, so a wrapped
+        # protected push slipped the backstop (no segment paired its elements), the parsed path
+        # (the env wrapper hides the push) AND the fallback (suppressed by the leading or
+        # trailing benign git segment): each of these was a SILENT ALLOW while a redirection
+        # operator split segments, and must DENY via the raw-text backstop.
+        for _rnm, _rcmd in (
+                ('r1', 'git status && env git push origin 2>&1 --force main'),
+                ('r2', 'git status && env git push --force origin 2>&1 main'),
+                ('r3', 'git status && env git push --force 2>&1 origin main'),
+                ('r4', 'git status && env git push origin --force &>/dev/null main'),
+                ('r5', 'git status && env git push origin &>/dev/null --force main'),
+                ('r6', 'git status && env git push --force origin >&2 main'),
+                ('r7', 'git status && env git push origin 1>&2 -f main'),
+                ('r8', 'env git push origin 2>&1 --force main && git status'),
+                ('r9', 'env git push --force origin 2>&1 main && git status'),
+                ('r10', 'git status && env git push --delete origin 2>&1 main'),
+                ('r11', 'git status && env git push origin 2>&1 --delete main'),
+                ('r12', 'git status && env git push --force origin <&0 main'),
+                ('r13', 'git status && env git push --force origin >|/dev/null main'),
+                ('r14', 'git status && env git push --force origin >| /dev/null main'),
+                ('r15', 'git status && env git push --force origin &>>/dev/null main'),
+                ('r16', 'git status && env git push --force origin 2>&- main'),
+                ('r17', 'git status && env git push origin 2>&1 :main'),
+                ('r18', 'git status; env git push origin 2>&1 +main'),
+                ('r19', 'git status && command git push origin 2>&1 --force main'),
+                ('r20', 'git status && env git push 2>&1 --mirror origin # main'),
+        ):
+            pexpect('(pl-redirect-{}) a redirection never splits a wrapped protected push out of its raw segment: denies'.format(_rnm),
+                    _rcmd, 'deny', cwd=plr, detail='raw command text pairs a git push')
+        # The still-allowed controls: ordinary flows keep flowing with the same operators present,
+        # and |& (a real pipeline separator) still splits.
+        pexpect('(pl-redirect-c1) flow1 with a trailing 2>&1 still allows',
+                'git fetch origin && git rebase origin/main && git push --force-with-lease origin my-feature 2>&1', 'allow', cwd=plr)
+        pexpect('(pl-redirect-c2) a |& pipe stage beside a plain redirected push still allows',
+                'git push origin main 2>&1 |& tail -f /dev/null', 'allow', cwd=plr)
+        pexpect('(pl-redirect-c3) the unwrapped redirected force-push keeps denying',
+                'git push origin 2>&1 --force main', 'deny', cwd=plr)
+        pexpect('(pl-redirect-c4) |& still splits; a one-segment pairing beside it keeps denying',
+                'git status && env git push --force origin main |& cat', 'deny', cwd=plr, detail='raw command text pairs a git push')
+        # The segmentation itself, asserted for one shape.
+        _r4seg = aiqt_hooks._raw_push_segments('git status && env git push origin 2>&1 --force main')
+        if _r4seg != ['git status ', '', ' env git push origin 2>&1 --force main']:
+            failures.append('(pl-redirect-seg) the redirection must stay inside one raw segment; '
+                            'got {!r}'.format(_r4seg))
+
+        # Mirror abbreviations: the raw backstop recognizes EVERY prefix
+        # of --mirror git accepts (--m through --mirror; the derivation vectors below cover --m), as
+        # it already recognizes --force from '--for' and --delete from '--de'. The wrapped abbreviated
+        # forms beside a benign git segment were SILENT ALLOWS before this (the benign segment suppressed
+        # the fallback and the backstop spelled only the full '--mirror').
+        pexpect('(pl-mirror-abbrev1) a visible abbreviated mirror push still denies via the parsed path',
+                'git push --mi origin', 'deny', cwd=plr)
+        pexpect('(pl-mirror-abbrev2) a wrapped --mi push behind a benign git segment: the raw-text backstop denies',
+                'git status && env git push --mi origin # main', 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
+        # The old spelling commented OUT its own trailing segment
+        # ('# main && git status' is ONE bash comment), so no trailing benign git segment was
+        # ever lexed and the vector exercised a leading-only arrangement; a REAL trailing segment
+        # needs a newline. The segmentation is asserted too, and the --mirr abbreviation gets its
+        # own witness (the new-mirror vectors previously skipped it).
+        pexpect('(pl-mirror-abbrev3) a wrapped --mir push before a REAL trailing benign git segment: denies',
+                'env git push --mir origin # main\ngit status', 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
+        _mi3seg = aiqt_hooks._raw_push_segments('env git push --mir origin # main\ngit status')
+        if _mi3seg != ['env git push --mir origin # main', 'git status']:
+            failures.append('(pl-mirror-abbrev3-seg) the trailing benign git segment must be its own raw '
+                            'segment (and the push segment keeps the commented protected name); got {!r}'.format(_mi3seg))
+        pexpect('(pl-mirror-abbrev3b) the --mirr abbreviation under the same wrap denies too (witness)',
+                'git status && env git push --mirr origin # main', 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
+        pexpect('(pl-mirror-abbrev4) a wrapped --mirro push behind a benign git segment: denies',
+                'git status && env git push --mirro origin # main', 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
+        pexpect('(pl-mirror-abbrev5) the --de delete abbreviation under the same wrap keeps denying (regression control)',
+                'git status && env git push --de origin main', 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
+        pexpect('(pl-mirror-abbrev6) re-expected: the trailing "# feature" comment makes the lex uncertain, so the same wrapped --mi push now denies via the fallback (a named over-denial)',
+                'git status && env git push --mi origin # feature', 'deny', cwd=plr,
+                detail='a target this guard cannot read')
+
+        # Remote-overwriting push options at every abbreviation git accepts, DERIVED from git push's
+        # own long-option set. The recorded copy below is that set (git 2.55, as 'git push -h' lists
+        # it). git takes a prefix that names exactly ONE option (an exact name wins; --branches is an
+        # alias of --all, so the two never clash); a negated 'no-<name>' spelling starts with 'n' and
+        # shares no prefix with a listed option. The shortest accepted prefix of each listed option is
+        # recomputed here and must equal the hook's row (_PUSH_FORCE_ABBREVS, _PUSH_DELETE_ABBREVS); the
+        # alternative built from it must be one of the raw pattern's alternatives, must match every
+        # prefix from the shortest to the full name and neither the prefix one character shorter nor
+        # the full name with a letter added; and the parsed classifier must read every accepted prefix
+        # as the same option.
+        _git_push_long = (
+            "verbose", "quiet", "repo", "all", "branches", "mirror", "delete", "tags", "dry-run",
+            "porcelain", "force", "force-with-lease", "force-if-includes", "recurse-submodules", "thin",
+            "receive-pack", "exec", "set-upstream", "progress", "prune", "no-verify", "verify",
+            "follow-tags", "signed", "atomic", "push-option", "ipv4", "ipv6")
+        _push_alias = {"all": {"branches"}, "branches": {"all"}}
+        # option -> the _push_parse result field it sets (force, delete, mirror, sweep_all, prune)
+        _push_field = {"force": 0, "force-with-lease": 0, "force-if-includes": 0, "delete": 1,
+                       "mirror": 2, "all": 3, "branches": 3, "prune": 4}
+
+        def _push_shortest(name):
+            for k in range(1, len(name) + 1):
+                prefix = name[:k]
+                named = {o for o in _git_push_long if o.startswith(prefix)} - _push_alias.get(name, set())
+                if prefix == name or named == {name}:
+                    return prefix
+            return name
+
+        _push_rows = dict(aiqt_hooks._PUSH_FORCE_ABBREVS + aiqt_hooks._PUSH_DELETE_ABBREVS)
+        if sorted(_push_rows) != sorted(_push_field):
+            failures.append('(pl-abbrev-derive-rows) the hook must list exactly the remote-overwriting '
+                            'options {!r}; got {!r}'.format(sorted(_push_field), sorted(_push_rows)))
+        for _pan, _paf in sorted(_push_field.items()):
+            _pas = _push_shortest(_pan)
+            if _push_rows.get(_pan) != _pas:
+                failures.append("(pl-abbrev-derive-{}) git push's option set gives the shortest accepted "
+                                "prefix --{}; the hook row says {!r}".format(_pan, _pas, _push_rows.get(_pan)))
+            _pat = aiqt_hooks._RAW_PUSH_DELETE_RE if _pan in ("delete", "prune") else aiqt_hooks._RAW_PUSH_FORCE_RE
+            _palt = aiqt_hooks._push_abbrev_alternative(_pan, _pas)
+            if "|" + _palt + "|" not in _pat.pattern:
+                failures.append('(pl-abbrev-derive-{}-alt) the raw pattern must carry the derived '
+                                'alternative {!r}'.format(_pan, _palt))
+            _paonly = re.compile(_palt, re.IGNORECASE)
+            if _paonly.search("git push --" + _pas[:-1] + " origin"):
+                failures.append('(pl-abbrev-derive-{}-start) the derived alternative must start at --{}, '
+                                'not before it'.format(_pan, _pas))
+            if _paonly.search("git push --" + _pan + "x origin"):
+                failures.append('(pl-abbrev-derive-{}-end) the derived alternative must end at --{}, '
+                                'not match a longer word'.format(_pan, _pan))
+            for _pak in range(len(_pas), len(_pan) + 1):
+                _patok = "--" + _pan[:_pak]
+                if not _pat.search("git push " + _patok + " origin"):
+                    failures.append('(pl-abbrev-derive-{}-raw) the raw pattern must match the accepted '
+                                    'abbreviation {}'.format(_pan, _patok))
+                if not aiqt_hooks._push_parse([_patok, "origin"])[_paf]:
+                    failures.append('(pl-abbrev-derive-{}-parsed) the parsed classifier must read {} as '
+                                    '--{}'.format(_pan, _patok, _pan))
+        # Each listed option at its shortest accepted abbreviation under a wrapper, where the parsed
+        # path cannot see the push: 'env git push <abbr> origin' denies through the fallback and, for an
+        # option that takes refs, the same push to the protected branch denies through the backstop
+        # (git refuses refspecs beside --mirror, --all and --branches). Red at the pin for --m, --al
+        # and --b, which it allowed; the rest were already matched there and stay as regression vectors.
+        for _pan, _pab, _paref in (
+                ("force", "--force", True), ("force-with-lease", "--force-w", True),
+                ("force-if-includes", "--force-i", True), ("mirror", "--m", False),
+                ("all", "--al", False), ("branches", "--b", False),
+                ("delete", "--de", True), ("prune", "--pru", True)):
+            if _pab != "--" + _push_shortest(_pan):
+                failures.append('(pl-abbrev-wrapped-{}-shortest) the vector must use the shortest accepted '
+                                'abbreviation --{}; got {}'.format(_pan, _push_shortest(_pan), _pab))
+            pexpect('(pl-abbrev-wrapped-{}) env git push {} origin denies'.format(_pan, _pab),
+                    'env git push {} origin'.format(_pab), 'deny', cwd=plr,
+                    detail='appears to force-push or delete')
+            if _paref:
+                pexpect('(pl-abbrev-wrapped-{}-main) env git push {} origin main denies'.format(_pan, _pab),
+                        'env git push {} origin main'.format(_pab), 'deny', cwd=plr,
+                        detail='raw command text pairs a git push')
+        # Controls: a wrapped feature-branch push with no remote-overwriting option still allows, including
+        # options that share leading letters with a listed one.
+        for _pcn, _pcc in (
+                ("plain", "env git push origin my-feature"),
+                ("atomic", "env git push --atomic origin my-feature"),
+                ("dry-run", "env git push --dry-run origin my-feature"),
+                ("progress", "env git push --progress origin my-feature"),
+                ("follow-tags", "env git push --follow-tags origin my-feature"),
+        ):
+            pexpect('(pl-abbrev-wrapped-ctl-{}) a wrapped feature push with no remote-overwriting option '
+                    'allows'.format(_pcn), _pcc, 'allow', cwd=plr)
+
+        # The git gate in front of the broad fallback reads the de-quoted text too, so a command word
+        # 'git' fragmented by quotes or a backslash under a wrapper still reaches the fallback. Each
+        # vector pushes HEAD (no protected name for the backstop) and allows when the gate reads only
+        # the raw command.
+        pexpect('(pl-gate-dequote-quotes) a quote-fragmented g""it under env reaches the fallback; denies',
+                'env g""it push --force origin HEAD', 'deny', cwd=plr,
+                detail='appears to force-push or delete')
+        pexpect('(pl-gate-dequote-backslash) a backslash-fragmented g\\it under env reaches the fallback; denies',
+                'env g' + chr(92) + 'it push --force origin HEAD', 'deny', cwd=plr,
+                detail='appears to force-push or delete')
+
+        # When the lexed reading is UNCERTAIN (_lex_uncertain: a
+        # substitution spanning a newline, or a '#' comment or heredoc inside a command
+        # substitution), a benign parsed git segment no longer suppresses the broad raw fallback:
+        # the fallback decides from the raw text. Each pl-mispair hidden shape is re-spelled so
+        # NEITHER prior layer can deny it - no literal protected name for the backstop, and the
+        # push line is swallowed into an opaque word, so the parsed classifier never sees it -
+        # and each was therefore a SILENT ALLOW before this gate, where the leading
+        # 'git status' set saw_git and suppressed the fallback. The pl-mispair shapes that had no
+        # leading benign segment get one HERE: that suppression is exactly what these vectors
+        # must defeat. Each must DENY with the fallback's fail-safe reason.
+        _unc_shapes = (
+            ('comment-paren', 'git status\necho "$(echo hi # (\n)"\ngit push --force origin main\necho ")"'),
+            ('comment-apostrophe', 'git status\necho "$(echo hi # it\'s\n)"\ngit push --force origin main\necho "\')"'),
+            ('heredoc-paren', 'git status\necho "$(cat <<\'EOF\'\n(\nEOF\n)"\ngit push --force origin main\necho ")"'),
+            ('heredoc-quote', 'git status\necho "$(cat <<\'EOF\'\n\'\nEOF\n)"\ngit push --force origin main\necho \')"\'\\\''),
+            ('heredoc-unquoted', 'git status\necho "$(cat <<EOF\n(\nEOF\n)"\ngit push --force origin main\necho ")"'),
+            ('nested-heredoc-close', 'git status\necho "$(cat <<\'EOF\'\n)"<<\'X\'\nEOF\n)"\ngit push --force origin main'),
+            ('commented-close', 'git status\necho "$(echo ok # )\n echo "<<\'EOF\'"\n)"\ngit push --force origin main'),
+            ('commented-close-heredoc', 'git status\necho "$(echo a # )" <<\'EOF\'\n)"\ngit push --force origin main\nEOF'),
+        )
+        for _unm, _ucmd in _unc_shapes:  # each _ucmd still spells the pl-mispair push; re-spelled below
+            for _usn, _usp in (
+                ('head', 'git push --force origin HEAD'),
+                ('bare', 'git push --force'),
+                ('at', 'git push -f origin @'),
+                ('frag', 'git push --force origin ma""in'),
+            ):
+                _ucmdx = _ucmd.replace('git push --force origin main', _usp)
+                _udetail = 'appears to force-push or delete'
+                if _usn == 'frag':
+                    # The backstop's de-quoted reading now denies the fragmented protected name
+                    # first (deny reason changed, decision unchanged); the fallback beneath it stays
+                    # witnessed with the backstop stood down.
+                    pexpect_layer('(pl-uncertain-{}-frag-layer) with the backstop stood down the fallback still '
+                                  'denies'.format(_unm), _ucmdx, 'deny', cwd=plr, detail=_udetail)
+                    _udetail = 'raw command text pairs a git push'
+                pexpect('(pl-uncertain-{}-{}) an uncertain lex: a benign git segment does not suppress the fallback'.format(_unm, _usn),
+                        _ucmdx, 'deny', cwd=plr, detail=_udetail)
+        # The DISCLOSED over-denial this adds (the safe direction), witnessed: an uncertain lex
+        # beside a push naming only a FEATURE ref now denies via the fallback (the pin allowed it
+        # silently); the same shapes carrying no push spelling still allow (the pl-mispair-*-ctl
+        # vectors above stay the standing controls).
+        pexpect('(pl-uncertain-cost) DISCLOSED over-denial: an uncertain lex beside a FEATURE force-push denies via the fallback',
+                'git status\necho "$(echo hi # (\n)"\ngit push --force origin my-feature\necho ")"', 'deny', cwd=plr,
+                detail='appears to force-push or delete')
+        # The uncertainty signal itself, pinned at both ends (an uncertain shape reads True; a
+        # plain redirected pipeline reads False, so the gate cannot quietly widen to every command).
+        if not aiqt_hooks._lex_uncertain('git status\necho "$(echo hi # (\n)"\necho done\necho ")"'):
+            failures.append('(pl-uncertain-sig) the commented-paren substitution shape must read as an uncertain lex')
+        if aiqt_hooks._lex_uncertain('git push origin main 2>&1 | tail -f /dev/null'):
+            failures.append('(pl-uncertain-sig2) a plain redirected pipeline must NOT read as an uncertain lex')
+
+        # A heredoc opener carried inside a COMMENT.
+        # At the pin _strip_quoted_heredoc_bodies read the commented "<<'true'" as a real quoted
+        # heredoc and swallowed the substitution and the push line into its body, so _lex_uncertain
+        # returned False and a benign 'git status' suppressed the fallback while the restored lexer
+        # mis-paired the substitution and never saw the push: a SILENT ALLOW. The blunt uncertainty
+        # signal (an unquoted word-start '#' anywhere) now flags it and the fallback decides. Red at
+        # the pin (allowed there).
+        # The backstop's de-quoted reading now denies the fragmented protected name first
+        # (deny reason changed, decision unchanged); the -layer vector keeps the fallback witnessed.
+        _hc5 = '# <<\'true\'\ngit status\necho "$(echo hi # (\n)"\ngit push --force origin ma""in\necho ")"\ntrue'
+        pexpect('(pl-comment-heredoc) a commented heredoc opener no longer suppresses the uncertainty signal; denies',
+                _hc5, 'deny', cwd=plr, detail='raw command text pairs a git push')
+        pexpect_layer('(pl-comment-heredoc-layer) with the backstop stood down the fallback still denies',
+                      _hc5, 'deny', cwd=plr, detail='appears to force-push or delete')
+        # The signal itself for each commented opener FORM (quoted, bare, tab-strip, single-char),
+        # pinned directly; each reads True at head and False at the pin (the pin skipped the top-level
+        # comment and, for the quoted forms, stripped it away before the scan).
+        for _hcn, _hcc in (
+                ('true', "# <<'true'\ngit status"),
+                ('eof', '# <<EOF\ngit status'),
+                ('dash', '# <<-X\ngit status'),
+                ('quoted-x', "# <<'X'\ngit status"),
+        ):
+            if not aiqt_hooks._lex_uncertain(_hcc):
+                failures.append('(pl-comment-heredoc-sig-{}) a commented heredoc opener must read as an uncertain lex'.format(_hcn))
+
+        # A quote inside a COMMENT must not open a quoting
+        # context in the raw splitter. At the pin the '"' on a '# "' line paired with a later '"' and
+        # split the wrapped push inside its quoted remote name, so no raw segment paired git..push, a
+        # force spelling and the protected name: a SILENT ALLOW with a LITERAL protected name. The
+        # splitter now skips comment text (its quotes and separators) while keeping the text in the
+        # segment, so the push segment stays whole and the backstop denies. Both wrappers (env,
+        # command) and both quoted-name separators (& and |), with the benign 'git status' leading
+        # here; the trailing-sibling variants are pl-comment-quote-trailing below. Each red at the pin.
+        for _cqn, _cqc in (
+                ('env-amp', 'git status\n# "\nenv git push --force "origin&other" main\n# "'),
+                ('command-amp', 'git status\n# "\ncommand git push --force "origin&other" main\n# "'),
+                ('env-pipe', 'git status\n# "\nenv git push --force "origin|other" main\n# "'),
+                ('command-pipe', 'git status\n# "\ncommand git push --force "origin|other" main\n# "'),
+        ):
+            pexpect('(pl-comment-quote-{}) a comment quote no longer mis-pairs and splits the wrapped push; denies'.format(_cqn),
+                    _cqc, 'deny', cwd=plr, detail='raw command text pairs a git push')
+
+        # Operator membership in _raw_push_segments is read in escape and
+        # line-continuation context. A line continuation between '>' and '&' keeps 2>&1 one segment; an
+        # ESCAPED '\>' is literal, so a real '&' or '|' after it splits; an IO number and an fd-var
+        # redirect stay unsplit; a plain '&', '|' and '|&' split. Direct segmentation assertions.
+        _r5seg = (
+                ('cont', '2>' + chr(92) + '\n&1', ['2>' + chr(92) + '\n&1']),
+                ('esc-amp', 'a ' + chr(92) + '>&b', ['a ' + chr(92) + '>', 'b']),
+                ('esc-pipe', 'a ' + chr(92) + '>|b', ['a ' + chr(92) + '>', 'b']),
+                ('ionum', '12>&1', ['12>&1']),
+                ('fdvar', '{fd}>&1', ['{fd}>&1']),
+                ('plain-amp', 'a & b', ['a ', ' b']),
+                ('plain-pipe', 'a | b', ['a ', ' b']),
+                ('pipe-amp', 'a |& b', ['a ', '', ' b']),
+        )
+        for _sn, _sc, _sexp in _r5seg:
+            _sgot = aiqt_hooks._raw_push_segments(_sc)
+            if _sgot != _sexp:
+                failures.append('(pl-escape-seg-{}) escape/continuation-aware segmentation; expected {!r} got {!r}'
+                                .format(_sn, _sexp, _sgot))
+
+        # _lex_uncertain reports an unmatched double quote and a
+        # trailing backslash escape as uncertain (both make the full lexer raise).
+        if not aiqt_hooks._lex_uncertain('"'):
+            failures.append('(pl-uncertain-minor-dq) an unmatched double quote must read as an uncertain lex')
+        if not aiqt_hooks._lex_uncertain('echo x' + chr(92)):
+            failures.append('(pl-uncertain-minor-esc) a trailing backslash escape must read as an uncertain lex')
+
+        # Continuations are joined before either scanner runs, and the lex is uncertain
+        # whenever the joined text holds ANY unquoted '#', '<<', '(' or ')', any backtick or '$(',
+        # or anything the full lexer refuses; no comment-boundary predicate decides it.
+        # (a) A comment opened right after '(' : the splitter read '(# "' as text, its quote paired
+        # with a later one and split the wrapped push inside "origin&other", and _lex_uncertain read
+        # it as certain, so the leading 'git status' suppressed the fallback: a silent allow at the
+        # pin. '(' is now a word break (the push segment stays whole, the backstop denies) and any
+        # unquoted '#' is uncertain (with HEAD, which the backstop cannot spell, the fallback denies).
+        _p6 = 'git status\n(# "\nenv git push --force "origin&other" main\n# "\n)'
+        pexpect('(pl-paren-comment) a comment after "(" no longer splits the wrapped protected push; denies',
+                _p6, 'deny', cwd=plr, detail='raw command text pairs a git push')
+        pexpect('(pl-paren-comment-head) the same shape pushing HEAD denies via the uncertain-lex fallback',
+                _p6.replace(' main\n', ' HEAD\n'), 'deny', cwd=plr, detail='appears to force-push or delete')
+        _p6seg = aiqt_hooks._raw_push_segments(_p6)
+        if _p6seg != ['git status', '(# "', 'env git push --force "origin&other" main', '# "', ')']:
+            failures.append('(pl-paren-comment-seg) a "(# " comment must not open a quote in the raw '
+                            'splitter; got {!r}'.format(_p6seg))
+        if aiqt_hooks._lex_uncertain_causes(_p6) != ('grouping', 'comment'):
+            failures.append('(pl-paren-comment-sig) the "(# " shape must report grouping and comment; '
+                            'got {!r}'.format(aiqt_hooks._lex_uncertain_causes(_p6)))
+        # (b) A continuation BEFORE a redirect: bash joins '&\<newline>>' into the '&>' redirect, so the
+        # push and 'main' are one command; the pin split at the '&' (its lookahead did not cross the
+        # continuation) and the full lexer read a background '&': a silent allow. The join runs first,
+        # so the segment stays whole (the backstop denies) and the lexer's disagreement with the joined
+        # text marks the lex uncertain ('continuation').
+        _c6 = 'git status\nenv git push --force origin &' + chr(92) + '\n>/dev/fd/1 main'
+        pexpect('(pl-cont-redirect-amp) a continuation inside the &> redirect keeps the wrapped protected push whole; denies',
+                _c6, 'deny', cwd=plr, detail='raw command text pairs a git push')
+        pexpect('(pl-cont-redirect-amp-head) the same shape pushing HEAD denies via the uncertain-lex fallback',
+                _c6.replace(' main', ' HEAD'), 'deny', cwd=plr, detail='appears to force-push or delete')
+        pexpect('(pl-cont-redirect-back) a continuation inside 2>&1 (the other direction) keeps denying (control)',
+                'git status\nenv git push origin 2>' + chr(92) + '\n&1 --force main', 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
+        for _fsn, _fsc, _fsexp in (
+                ('amp-redir', 'env git push --force origin &' + chr(92) + '\n>/dev/fd/1 main',
+                 ['env git push --force origin &' + chr(92) + '\n>/dev/fd/1 main']),
+                ('amp-append', 'a &' + chr(92) + '\n>>/dev/null b', ['a &' + chr(92) + '\n>>/dev/null b']),
+                ('amp-split', 'a &' + chr(92) + '\n b', ['a ', chr(92) + '\n b']),
+                ('pipe-clobber', 'a >' + chr(92) + '\n|b', ['a >' + chr(92) + '\n|b']),
+        ):
+            _fsgot = aiqt_hooks._raw_push_segments(_fsc)
+            if _fsgot != _fsexp:
+                failures.append('(pl-cont-seg-{}) forward-continuation segmentation; expected {!r} got {!r}'
+                                .format(_fsn, _fsexp, _fsgot))
+        # The join itself, against bash behaviour: removed at top level, inside double quotes and
+        # mid-word (so 'a\<newline>#b' is the word 'a#b'), kept inside single quotes, $'...' and a
+        # comment; the raw index maps each joined character back.
+        for _jn, _jc, _jexp in (
+                ('top', 'a&' + chr(92) + '\n>b', ('a&>b', [0, 1, 4, 5, 6])),
+                ('dq', 'echo "a' + chr(92) + '\nb"', ('echo "ab"', [0, 1, 2, 3, 4, 5, 6, 9, 10, 11])),
+                ('midword', 'echo a' + chr(92) + '\n#b', ('echo a#b', [0, 1, 2, 3, 4, 5, 8, 9, 10])),
+                ('sq', "echo 'a" + chr(92) + "\nb'", ("echo 'a" + chr(92) + "\nb'", list(range(12)))),
+                ('ansi', "echo $'a" + chr(92) + "\nb'", ("echo $'a" + chr(92) + "\nb'", list(range(13)))),
+                ('comment', 'echo a # x ' + chr(92) + '\necho b',
+                 ('echo a # x ' + chr(92) + '\necho b', list(range(20)))),
+        ):
+            _jgot = aiqt_hooks._join_continuations(_jc)
+            if _jgot != _jexp:
+                failures.append('(pl-cont-join-{}) bash continuation joining; expected {!r} got {!r}'
+                                .format(_jn, _jexp, _jgot))
+        # (c) The trailing-sibling variants of the pl-comment-quote vectors: the benign 'git status' AFTER
+        # the push. Each must deny via the raw-text backstop.
+        for _ctn, _ctc in (
+                ('env-amp', '# "\nenv git push --force "origin&other" main\n# "\ngit status'),
+                ('command-amp', '# "\ncommand git push --force "origin&other" main\n# "\ngit status'),
+                ('env-pipe', '# "\nenv git push --force "origin|other" main\n# "\ngit status'),
+                ('command-pipe', '# "\ncommand git push --force "origin|other" main\n# "\ngit status'),
+        ):
+            pexpect('(pl-comment-quote-trailing-{}) a comment quote does not split the wrapped push before a trailing git status; denies'.format(_ctn),
+                    _ctc, 'deny', cwd=plr, detail='raw command text pairs a git push')
+        # (d) A fragmented push after a quoted heredoc: no raw segment spells 'push' or 'main', the
+        # wrapper hides the push from the parsed path, and the leading 'git status' suppressed the
+        # fallback on the pin's reading. The heredoc makes the lex uncertain and the fallback reads
+        # the de-quoted text, where bash's 'git push --force origin main' is visible. The
+        # backstop reads the segment de-quoted too and now denies it first (deny reason changed, decision
+        # unchanged); the -layer vector keeps the de-quoted fallback witnessed.
+        _f6 = "git status\ncat <<'EOF'\nnote\nEOF\nenv git pu\"\"sh --force origin ma\"\"in"
+        pexpect('(pl-dequote-frag) a quote-fragmented wrapped push after a quoted heredoc denies via the de-quoted backstop',
+                _f6, 'deny', cwd=plr, detail='raw command text pairs a git push')
+        pexpect_layer('(pl-dequote-frag-layer) with the backstop stood down the de-quoted fallback still denies',
+                      _f6, 'deny', cwd=plr, detail='appears to force-push or delete')
+        # (e) The heredoc signal on its own, with no comment anywhere: each opener form reports
+        # exactly 'heredoc'; quoted literals report nothing (negative controls); and an end-to-end
+        # deny that depends only on the heredoc signal (no '#', no grouping, no protected name for
+        # the backstop, and the wrapped push is invisible to the parsed path).
+        for _hn, _hc in (
+                ('quoted', "cat <<'EOF'\ntext\nEOF"),
+                ('bare', 'cat <<EOF\ntext\nEOF'),
+                ('dash', 'cat <<-X\n\ttext\nX'),
+                ('herestring', 'cat <<<word'),
+        ):
+            if aiqt_hooks._lex_uncertain_causes(_hc) != ('heredoc',):
+                failures.append('(pl-heredoc-sig-{}) a comment-free heredoc must report exactly the heredoc cause; '
+                                'got {!r}'.format(_hn, aiqt_hooks._lex_uncertain_causes(_hc)))
+        for _qn, _qc in (
+                ('sq-heredoc', "echo '<<EOF'"),
+                ('dq-heredoc', 'echo "<<EOF"'),
+                ('sq-hash', "echo 'a # b'"),
+                ('dq-hash', 'echo "a # b"'),
+                ('sq-paren', "echo '(x)'"),
+                ('dq-paren', 'echo "(x)"'),
+                ('sq-subst', "echo '$(x)' '`x`'"),
+                ('ansi-escaped-quote', "echo $'a" + chr(92) + "'b # (c)'"),
+                ('plain', 'git push origin main 2>&1 | tail -f /dev/null'),
+        ):
+            if aiqt_hooks._lex_uncertain_causes(_qc) != ():
+                failures.append('(pl-quoted-ctl-{}) a quoted literal must not make the lex uncertain; got {!r}'
+                                .format(_qn, aiqt_hooks._lex_uncertain_causes(_qc)))
+        _h6 = "git status\ncat <<'EOF'\nnote\nEOF\nenv git push --force origin HEAD"
+        if aiqt_hooks._lex_uncertain_causes(_h6) != ('heredoc',):
+            failures.append('(pl-heredoc-sig-e2e) the end-to-end heredoc vector must be uncertain by the heredoc '
+                            'signal alone; got {!r}'.format(aiqt_hooks._lex_uncertain_causes(_h6)))
+        pexpect('(pl-heredoc-only) a wrapped HEAD force-push after a comment-free quoted heredoc denies via the fallback',
+                _h6, 'deny', cwd=plr, detail='appears to force-push or delete')
+        # (f) The fallback message names the ACTUAL cause, never 'unbalanced quotes' for a balanced,
+        # unwrapped command (each input reaches the fallback; each named cause is the only one).
+        for _mn, _mc, _mwant in (
+                ('comment', 'git push --force origin feature # note', "an unquoted '#'"),
+                ('heredoc', _h6, "a '<<' heredoc"),
+                ('grouping', 'git status\n(env git push --force origin HEAD)', "'(' or ')' grouping"),
+                ('substitution', 'git status\necho "$(date)"\nenv git push --force origin HEAD', "'$(' command substitution"),
+                ('continuation', 'git status\nenv git push --force origin &' + chr(92) + '\n>/dev/null HEAD',
+                 'line continuation the lexer reads differently'),
+                ('quote', 'git status; env git push --force origin "HEAD', 'unbalanced quote'),
+                ('wrapper', 'env git push --force origin HEAD', 'command-word wrapper'),
+        ):
+            pexpect('(pl-cause-msg-{}) the fallback reason names the {} cause'.format(_mn, _mn),
+                    _mc, 'deny', cwd=plr, detail=_mwant)
+            _mres = plg({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                         "tool_input": {"command": _mc}, "cwd": plr})
+            _mreason = ((_mres[1] or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
+            _mothers = [t for k, t in aiqt_hooks._LEX_UNCERTAIN_CAUSE_TEXT.items() if k != _mn and t in _mreason]
+            if _mothers or (_mn != 'wrapper' and 'command-word wrapper' in _mreason):
+                failures.append('(pl-cause-msg-{}-only) the fallback reason must name only the {} cause; '
+                                'also named {!r}'.format(_mn, _mn, _mothers))
+        # The DISCLOSED over-refusals this rule adds (the safe direction), each witnessed and each an
+        # allow at the pin: a FEATURE force-push becomes a deny wherever the command is now uncertain
+        # (a mid-word '#', a subshell, a substitution, a continuation the lexer reads differently, or a
+        # brace group beside another git command),
+        # because the fallback needs no protected name and pairs spellings across the whole text. A
+        # word-start comment, heredoc prose and the cross-command '# feature' pairing already denied
+        # at the pin (pl-uncertain-cost, pl-mirror-abbrev6).
+        for _on, _oc in (
+                ('midword-hash', 'git push --force origin ticket#12'),
+                ('subshell', '(git push --force origin feature)'),
+                ('substitution', 'git push --force origin "$(git branch --show-current)"'),
+                ('backtick', 'git push --force origin `git branch --show-current`'),
+                ('continuation', 'git status\nenv git push --force origin &' + chr(92) + '\n>/dev/null feature'),
+                ('brace', 'git status; { git push --force origin feature; }'),
+        ):
+            pexpect('(pl-overrefusal-cost-{}) DISCLOSED over-refusal: an uncertain lex beside a feature force spelling denies'.format(_on),
+                    _oc, 'deny', cwd=plr, detail='appears to force-push or delete')
+
+        # (a) A continuation INSIDE a word on a certain lex. The lexer joins it, so the lex
+        # is certain and the leading 'git status' keeps the fallback off; the backstop matched each raw
+        # slice unjoined, so 'pu\<newline>sh', 'ma\<newline>in' and '--fo\<newline>rce' hid the push, the
+        # protected name and the force spelling: a silent allow at the pin. Each slice is now matched on
+        # its joined text too, so each denies via the backstop.
+        for _r7n, _r7c in (
+                ('verb', 'git status\nenv git pu' + chr(92) + '\nsh --force origin main'),
+                ('ref', 'git status\nenv git push --force origin ma' + chr(92) + '\nin'),
+                ('flag', 'git status\nenv git push --fo' + chr(92) + '\nrce origin main'),
+        ):
+            pexpect('(pl-word-cont-{}) a continuation inside the {} of a wrapped protected force-push denies via the backstop'.format(_r7n, _r7n),
+                    _r7c, 'deny', cwd=plr, detail='raw command text pairs a git push')
+        # (b) A brace group: the lexer reads '{' as a plain command word, so the wrapped, quote-fragmented
+        # push inside it was invisible to the parsed path and the leading 'git status' kept the fallback
+        # off: a silent allow at the pin. A lone '{' or '}' word now makes the lex uncertain (the
+        # 'grouping' cause), the fallback reads the de-quoted text, and the reason names that cause.
+        # The backstop reads the segment de-quoted too and now denies it first (deny reason
+        # changed, decision unchanged); the -layer vector keeps the brace-cause reason witnessed.
+        _r7b = 'git status; { env git pu""sh --force origin ma""in; }'
+        if aiqt_hooks._lex_uncertain_causes(_r7b) != ('grouping',):
+            failures.append('(pl-brace-group-sig) a brace group must report exactly the grouping cause; got {!r}'
+                            .format(aiqt_hooks._lex_uncertain_causes(_r7b)))
+        pexpect('(pl-brace-group) a quote-fragmented wrapped push inside a brace group denies via the de-quoted backstop',
+                _r7b, 'deny', cwd=plr, detail='raw command text pairs a git push')
+        pexpect_layer('(pl-brace-group-layer) with the backstop stood down the fallback still denies and names the brace cause',
+                      _r7b, 'deny', cwd=plr, detail="'{' or '}' brace-group word")
+        for _bcn, _bcc in (
+                ('find', 'find . -name x -exec true {} +'),
+                ('param', 'echo ${x} ${x:-y}'),
+                ('expansion', 'echo {a,b} x{y}'),
+                ('quoted', "echo '{' \"}\" " + chr(92) + "{"),
+        ):
+            _bcgot = aiqt_hooks._lex_uncertain_causes(_bcc)
+            if _bcgot != ():
+                failures.append('(pl-brace-group-ctl-{}) a brace that is not a lone unquoted word must not make the '
+                                'lex uncertain; got {!r}'.format(_bcn, _bcgot))
+        # (c) The splitter's comment predicate: a '#' starts a comment only just past an UNESCAPED word
+        # break, as in bash. At the pin 'x\ #"' read as a comment, so the quote bash opens there was
+        # skipped and the push line split from its protected name (masked end to end only because any
+        # '#' makes the lex uncertain). A '#' just past the ')' that closes a '$(' or '<(' substitution
+        # continues the word too, while a '#' past a group's ')' is a comment.
+        _r7e = 'git status\nenv git -c user.name=x' + chr(92) + ' #"\n" push --force origin main'
+        for _sgn, _sgc, _sgexp in (
+                ('esc-hash', _r7e, ['git status', _r7e[len('git status\n'):]]),
+                ('subst-hash', 'env git push --force $(true)#"x\n" origin main',
+                 ['env git push --force $(true)#"x\n" origin main']),
+                ('procsub-hash', 'env git push --force <(true)#"x\n" origin main',
+                 ['env git push --force <(true)#"x\n" origin main']),
+                ('group-comment', '(true)#"\nenv git push --force origin main',
+                 ['(true)#"', 'env git push --force origin main']),
+        ):
+            _sggot = aiqt_hooks._raw_push_segments(_sgc)
+            if _sggot != _sgexp:
+                failures.append('(pl-comment-seg-{}) comment-predicate segmentation; expected {!r} got {!r}'
+                                .format(_sgn, _sgexp, _sggot))
+        pexpect('(pl-esc-hash) an escaped blank before "#" opens no comment: the quoted push stays whole; denies via the backstop',
+                _r7e, 'deny', cwd=plr, detail='raw command text pairs a git push')
+        # (d) The join follows bash's word starts and substitution nesting: a '#' just past the ')' that
+        # closes a '$(' or '<(' substitution, or inside a backtick substitution, opens no comment, and a
+        # quote nested in "$(...)" opens a fresh context, so the continuation after each is removed as
+        # bash removes it (each kept at the pin's and the previous reading); a comment inside a
+        # substitution, '${#x}' and a comment after a group's ')' keep bash's reading.
+        for _j7n, _j7c, _j7exp in (
+                ('subst-hash', 'echo $(x)#y re' + chr(92) + '\nset', 'echo $(x)#y reset'),
+                ('procsub-hash', 'cat <(x)#y re' + chr(92) + '\nset', 'cat <(x)#y reset'),
+                ('bq-hash', 'echo `x #y` re' + chr(92) + '\nset', 'echo `x #y` reset'),
+                ('dq-nested', 'echo "$(echo "\'")" re' + chr(92) + '\nset', 'echo "$(echo "\'")" reset'),
+                ('subst-comment', 'echo "$(echo a # c ' + chr(92) + '\n)"', 'echo "$(echo a # c ' + chr(92) + '\n)"'),
+                ('param-len', 'echo ${#x} re' + chr(92) + '\nset', 'echo ${#x} reset'),
+                ('group-comment', '(echo a)#c ' + chr(92) + '\necho b', '(echo a)#c ' + chr(92) + '\necho b'),
+        ):
+            _j7got = aiqt_hooks._join_continuations(_j7c)[0]
+            if _j7got != _j7exp:
+                failures.append('(pl-word-join-{}) bash continuation joining; expected {!r} got {!r}'
+                                .format(_j7n, _j7exp, _j7got))
+        _r7d = aiqt_hooks._dequoted_text("git re$''set; git check$\"\"out")
+        if _r7d != 'git reset; git checkout':
+            failures.append("(pl-dequote-dollar) the de-quoted copy must drop a '$' before a quote; got {!r}"
+                            .format(_r7d))
+        # The backstop reads each segment's DE-QUOTED copy too. With no brace group nothing makes
+        # these lexes uncertain, so the leading 'git status' keeps the broad fallback off and the wrapper
+        # hides the push from the parsed path: a push word, force flag or protected name fragmented by
+        # quotes or a backslash was a silent allow at the pin and at the previous reading. Each now denies
+        # via the backstop; the same fragments naming a FEATURE branch still allow (the pl-segment-res1
+        # residual, unchanged), so the de-quoted reading adds no feature-branch denial.
+        for _r8n, _r8c, _r8w in (
+                ('dq-semi', 'git status; env git pu""sh --force origin ma""in', 'deny'),
+                ('dq-nl', 'git status\nenv git pu""sh --force origin ma""in', 'deny'),
+                ('sq-semi', "git status; env git push -'f' origin 'ma'in", 'deny'),
+                ('sq-nl', "git status\nenv git push -'f' origin 'ma'in", 'deny'),
+                ('esc', 'git status; env git push --force origin ma' + chr(92) + 'in', 'deny'),
+                ('ctl-dq', 'git status; env git pu""sh --force origin fea""ture', 'allow'),
+                ('ctl-sq', "git status; env git push -'f' origin 'fea'ture", 'allow'),
+        ):
+            if aiqt_hooks._lex_uncertain_causes(_r8c) != ():
+                failures.append('(pl-dequote-seg-{}-certain) the vector must read as a certain lex, so only the backstop '
+                                'can deny it; got {!r}'.format(_r8n, aiqt_hooks._lex_uncertain_causes(_r8c)))
+            pexpect('(pl-dequote-seg-{}) a fragmented wrapped force-push beside git status: {}'.format(_r8n, _r8w),
+                    _r8c, _r8w, cwd=plr,
+                    detail='raw command text pairs a git push' if _r8w == 'deny' else None)
+        # The same reading end to end for a backslash inside the push word or the force flag
+        # (the fragment sits before '--for', which already reads as a force prefix). Each was a silent
+        # allow at the pin; each denies via the backstop now, and its feature-branch control allows.
+        for _r9n, _r9c, _r9w in (
+                ('bs-push', 'git status; env git pu' + chr(92) + 'sh --force origin main', 'deny'),
+                ('bs-push-ctl', 'git status; env git pu' + chr(92) + 'sh --force origin feature', 'allow'),
+                ('bs-force', 'git status; env git push --' + chr(92) + 'force origin main', 'deny'),
+                ('bs-force-ctl', 'git status; env git push --' + chr(92) + 'force origin feature', 'allow'),
+                ('bs-force-short', 'git status; env git push -' + chr(92) + 'f origin main', 'deny'),
+                ('bs-force-short-ctl', 'git status; env git push -' + chr(92) + 'f origin feature', 'allow'),
+        ):
+            if aiqt_hooks._lex_uncertain_causes(_r9c) != ():
+                failures.append('(pl-dequote-word-{}-certain) the vector must read as a certain lex, so only the backstop '
+                                'can deny it; got {!r}'.format(_r9n, aiqt_hooks._lex_uncertain_causes(_r9c)))
+            pexpect('(pl-dequote-word-{}) a backslash-fragmented wrapped force-push beside git status: {}'.format(_r9n, _r9w),
+                    _r9c, _r9w, cwd=plr,
+                    detail='raw command text pairs a git push' if _r9w == 'deny' else None)
+        # A '$' before a quote (the push word, the force flag or the protected name fragmented by $'' or
+        # $""). End to end the commit-proof layer refuses ANY such command first, at the pin and now,
+        # whatever the push names (artbr1: 'ANSI-C or locale quoting has unknown execution-time bytes'),
+        # so the protected push already denied at the pin by that layer and its feature-branch control
+        # denies too: the plain vectors assert those actual outcomes (the backstop's reason first now) and
+        # that the de-quoted reading does not pair the feature push. The -iso vectors stand that one
+        # commit-proof check down so the push layers alone decide: there the protected push was a silent
+        # allow at the pin and now denies via the backstop, and the feature-branch control allows.
+        _orig_quote_bytes_known = aiqt_hooks._commit_quote_bytes_known
+        for _r9n, _r9m, _r9f in (
+                ('dollar-push', "git status; env git pu$''sh --force origin main",
+                 "git status; env git pu$''sh --force origin feature"),
+                ('dollar-push-dq', 'git status; env git pu$""sh --force origin main',
+                 'git status; env git pu$""sh --force origin feature'),
+                ('dollar-force', "git status; env git push --$''force origin main",
+                 "git status; env git push --$''force origin feature"),
+                ('dollar-force-short', "git status; env git push -$''f origin main",
+                 "git status; env git push -$''f origin feature"),
+                ('dollar-name', "git status; env git push --force origin ma$''in",
+                 "git status; env git push --force origin fea$''ture"),
+                ('dollar-name-dq', 'git status; env git push --force origin ma$""in',
+                 'git status; env git push --force origin fea$""ture'),
+        ):
+            for _r9s, _r9c in (('', _r9m), ('-ctl', _r9f)):
+                if aiqt_hooks._lex_uncertain_causes(_r9c) != ():
+                    failures.append('(pl-dequote-word-{}{}-certain) the vector must read as a certain lex; got {!r}'
+                                    .format(_r9n, _r9s, aiqt_hooks._lex_uncertain_causes(_r9c)))
+            if aiqt_hooks._raw_push_match(_r9f):
+                failures.append('(pl-dequote-word-{}-ctl-backstop) the de-quoted reading must not pair a feature-branch '
+                                'force-push with a protected name'.format(_r9n))
+            pexpect('(pl-dequote-word-{}) end to end the backstop denies the $-quote-fragmented protected push first'
+                    .format(_r9n), _r9m, 'deny', cwd=plr, detail='raw command text pairs a git push')
+            pexpect('(pl-dequote-word-{}-ctl) end to end the feature-branch control is refused by the commit-proof quote '
+                    'check, not the backstop'.format(_r9n), _r9f, 'deny', cwd=plr, detail='ANSI-C or locale quoting')
+            aiqt_hooks._commit_quote_bytes_known = lambda raw: True
+            try:
+                pexpect('(pl-dequote-word-{}-iso) with the commit-proof quote check stood down the backstop denies'
+                        .format(_r9n), _r9m, 'deny', cwd=plr, detail='raw command text pairs a git push')
+                pexpect('(pl-dequote-word-{}-ctl-iso) with the commit-proof quote check stood down the feature-branch '
+                        'control allows'.format(_r9n), _r9f, 'allow', cwd=plr)
+            finally:
+                aiqt_hooks._commit_quote_bytes_known = _orig_quote_bytes_known
+
 
         # R9 (codex 1) closed the single unquoted-opener case by returning the command unstripped; R10
         # (DECIDED item 3) removes stripping outright, because the R9 stripper still mis-tracked the
@@ -6906,8 +7764,15 @@ def _main_isolated(monitor):
                 "git push -f --push-opt marker origin", "deny", cwd=plr)
         pexpect("(f117r9-e) a genuine separated --push-option value is still skipped (plain push allows)",
                 "git push --push-option marker origin main", "allow", cwd=plr)
-        pexpect("(f117r7-x1) embedded-quote flag in the raw fallback is a DISCLOSED inherent residual",
-                "env git push -'f' origin main", "allow", cwd=plr)
+        # Re-expected from allow to deny: the wrapper-hidden fallback now also reads the
+        # DE-QUOTED text, where -'f' is the -f bash passes, so this force-push to main is caught (a
+        # closed residual, not an over-refusal). The raw-text backstop reads each segment
+        # de-quoted too and now denies it first (deny reason changed, decision unchanged); the -layer
+        # vector keeps the wrapper-hidden fallback witnessed.
+        pexpect("(f117r7-x1) an embedded-quote flag under a wrapper is read de-quoted by the raw backstop: denies",
+                "env git push -'f' origin main", "deny", cwd=plr, detail="raw command text pairs a git push")
+        pexpect_layer("(f117r7-x1-layer) with the backstop stood down the wrapper-hidden fallback still denies",
+                      "env git push -'f' origin main", "deny", cwd=plr, detail="appears to force-push or delete")
         # L11 AIRTIGHT-NARROW redesign: the former F-119 disclosed silent-allow residuals now ASK. A
         # producer-capable form outside the four closed proofs (extra summary modifiers, a wrapper, a
         # benign 'git log', a pickaxe listing) is producer-capable-but-unproven -> ASK, never ALLOW.
@@ -7404,29 +8269,33 @@ def _main_isolated(monitor):
         except ValueError:
             failures.append("(f17-lex-raise) a QUOTED heredoc must NOT raise (its body is literal data; "
                             "finding 17)")
-        # No lexical Bash guard fires on the quoted-heredoc prose (each returns allow / allow-note, never a
-        # deny caused by the body). ROUND 8 removed git_discard from this battery: its raw scan no longer
-        # strips heredoc bodies (stripping could hide a real discard), so the prose's lossy keywords put
-        # the command in scope and the positive grammar denies the heredoc operator - a disclosed
-        # over-deny, asserted separately below (f17-discard-deny).
+        # No lexical Bash guard fires on the quoted-heredoc prose: each returns the exact SILENT
+        # (0, None, None) allow (this control was strengthened from
+        # 'not deny', so an ask, a note or an explicit-allow can no longer false-pass). ROUND 8 removed
+        # git_discard from this battery: its raw scan no longer strips heredoc bodies (stripping could
+        # hide a real discard), so the prose's lossy keywords put the command in scope and the positive
+        # grammar denies the heredoc operator - a disclosed over-deny, asserted separately below
+        # (f17-discard-deny).
         for _f17g in (aiqt_hooks.diff_source_pretool, aiqt_hooks.gate_weakening,
                       aiqt_hooks.bash_absolute_paths, aiqt_hooks.git_explicit_binding,
                       aiqt_hooks.commit_msg_subst):
-            _f17c, _f17o, _ = _f17g({"hook_event_name": "PreToolUse", "tool_name": "Bash",
-                                     "tool_input": {"command": _f17_quoted}, "cwd": "/tmp"})
-            _f17d = (_f17o.get("hookSpecificOutput", {}).get("permissionDecision")
-                     if isinstance(_f17o, dict) else None)
-            if _f17d == "deny":
-                failures.append("(f17-guard-{}) a lexical guard must not fire on quoted-heredoc prose "
-                                "(finding 17); got deny".format(getattr(_f17g, "__name__", _f17g)))
+            _f17res = _f17g({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                             "tool_input": {"command": _f17_quoted}, "cwd": "/tmp"})
+            if _f17res != (0, None, None):
+                failures.append("(f17-guard-{}) a lexical guard must stay SILENT (0, None, None) on "
+                                "quoted-heredoc prose (finding 17); got {!r}"
+                                .format(getattr(_f17g, "__name__", _f17g), _f17res))
         _f17dd, _f17do, _ = aiqt_hooks.git_discard({"hook_event_name": "PreToolUse", "tool_name": "Bash",
                                                     "tool_input": {"command": _f17_quoted}, "cwd": "/tmp"})
         _f17ddec = (_f17do.get("hookSpecificOutput", {}).get("permissionDecision")
                     if isinstance(_f17do, dict) else None)
-        if _f17ddec != "deny":
-            failures.append("(f17-discard-deny) git_discard must DENY heredoc prose whose raw text names a "
-                            "lossy keyword (R8: no body stripping, the grammar denies the operator); got "
-                            "{!r}".format(_f17ddec))
+        _f17dreason = ((_f17do.get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
+                       if isinstance(_f17do, dict) else "")
+        if _f17ddec != "deny" or "prsunc" not in _f17dreason:
+            failures.append("(f17-discard-deny) git_discard must DENY under prsunc heredoc prose whose "
+                            "raw text names a lossy keyword (R8: no body stripping, the grammar denies "
+                            "the operator; an uncertain command is read unstripped too); got "
+                            "{!r}".format(_f17dd if _f17ddec is None else (_f17ddec, _f17dreason)))
         # DISCRIMINATION: the SAME lossy verb OUTSIDE a quoted heredoc stays IN SCOPE (the raw scan reads
         # the FULL raw text; git_discard strips nothing), so it gets a structured decision, never the
         # out-of-scope boundary allow.
@@ -7444,6 +8313,325 @@ def _main_isolated(monitor):
             failures.append("(f17-outside) a real 'git reset --hard' OUTSIDE a quoted heredoc must still be "
                             "in scope and DENY (the positive grammar denies the heredoc operator), "
                             "got {!r}; finding 17 preserves it".format(_f17rodec))
+
+
+        # The restored nested-quote lexer and its second consumer, git_discard: a nested-quote
+        # << opener is data at any depth, so the hidden git command is a visible segment and
+        # git_discard keeps a hidden reset in scope rather than silently allowing it at the true
+        # boundary. Under the closed allowlist grammar an in-scope command carrying a
+        # double quote, a substitution or an expansion is DENIED with the grammar reason, so each case
+        # asserts the DECISION (a deny, never a silent allow), the REASON (the prsunc closed allowlist
+        # grammar deny) and the RECOVERY behaviour (the denied command runs nothing, so this dirty
+        # fixture tree must gain no refs/aiqt-recovery ref).
+        gdl_repo = _init_repo(tmp / "gd-lexnest-repo")
+        (gdl_repo / "file.txt").write_text("uncommitted change\n", encoding="utf-8")
+        gdlr = str(gdl_repo)
+        for _xnm, _xhead in (
+                ("dollar-paren", 'echo "$(echo "<<\'EOF\'")"'),
+                ("backquote", 'echo "`echo "<<\'EOF\'"`"'),
+                ("brace", 'echo "${x:-"<<\'EOF\'"}"'),
+        ):
+            _xcmd = _xhead + '\ngit push --force origin main'
+            texpect("(tok-lexnest-{}) a nested-quote heredoc opener is data; the hidden git push is a visible final segment".format(_xnm),
+                    (len(_argv(_xcmd)), _argv(_xcmd)[-1]),
+                    (2, ["git", "push", "--force", "origin", "main"]))
+            # Verify the recovery against the REPOSITORY, not the
+            # banner: record the recovery refs before the call and require the deny to add none.
+            _xbefore = set(_recovery_refs(gdl_repo))
+            _xro = aiqt_hooks.git_discard({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                           "tool_input": {"command": _xhead + '\ngit reset --hard HEAD~1'}, "cwd": gdlr})
+            _xobj = _xro[1] if isinstance(_xro[1], dict) else {}
+            _xdec = (_xobj.get("hookSpecificOutput") or {}).get("permissionDecision")
+            _xreason = (_xobj.get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
+            _xnew = sorted(set(_recovery_refs(gdl_repo)) - _xbefore)
+            if (_xro[0] != 0 or _xdec != "deny" or "prsunc" not in _xreason
+                    or "closed allowlist grammar" not in _xreason or _xnew):
+                failures.append("(gd-lexnest-{}) a hidden work-losing verb behind a nested-quote heredoc "
+                                "opener must stay IN SCOPE, where the closed allowlist grammar DENIES it "
+                                "(decision: deny; reason: the prsunc grammar deny; recovery: no new "
+                                "refs/aiqt-recovery ref, the denied command runs nothing), got {!r} "
+                                "(new refs {!r})".format(_xnm, _xro, _xnew))
+        # gd-nested-prose is no longer a silent allow: work-losing prose in a
+        # quoted heredoc body NESTED INSIDE A SUBSTITUTION stays in the raw scan (the raw scan strips
+        # no heredoc body), so git_discard OVER-REFUSES in the safe direction: the closed allowlist
+        # grammar DENIES the in-scope command (it carries a double quote and a substitution), like
+        # the plain quoted-heredoc prose of the git_discard deny vector above. Asserted on the
+        # decision AND the reason, not only the response shape.
+        _nprose = aiqt_hooks.git_discard({'hook_event_name': 'PreToolUse', 'tool_name': 'Bash',
+                                          'tool_input': {'command': 'echo "$(cat <<\'EOF\'\nmention git reset --hard HEAD~1 in prose\nEOF\n)"'},
+                                          'cwd': brr})
+        _nprose_obj = _nprose[1] if isinstance(_nprose[1], dict) else {}
+        _nprose_dec = (_nprose_obj.get('hookSpecificOutput') or {}).get('permissionDecision')
+        _nprose_reason = (_nprose_obj.get('hookSpecificOutput') or {}).get('permissionDecisionReason', '')
+        if (_nprose[0] != 0 or _nprose_dec != 'deny' or 'prsunc' not in _nprose_reason
+                or 'closed allowlist grammar' not in _nprose_reason):
+            failures.append(
+                '(gd-nested-prose) work-losing prose in a quoted heredoc body nested in a substitution must stay in the git_discard raw scan and be DENIED by the closed allowlist grammar (exit 0, permissionDecision deny, the prsunc grammar reason; never a silent allow), got {!r}'.format(_nprose))
+        # Assert the DECISION and the REASON, and
+        # the reason must name the SPECIFIC verb. With the nested-quote lexer restored, _skip_quoting reads
+        # the commented paren as a real paren (a comment inside a substitution is not modelled),
+        # swallowing the reset into the opaque word; the GENERIC work-losing wording could then ship
+        # while this test passed. The uncertain-lex per-line re-read (_uncertain_line_lossy) now names
+        # it. With a session directory the closed allowlist grammar DENIES this in-scope command (bash
+        # itself would run the final lines, so a deny, never a silent allow, is the safe outcome); with
+        # NO session directory the fail-closed deny names the verb, so the second predicate is RED
+        # whenever the reset is swallowed back into the generic wording.
+        _rstu_cmd = 'git status\necho "$(echo hi # (\n)"\ngit reset --hard HEAD~1\necho ")"'
+        _rstu = aiqt_hooks.git_discard({'hook_event_name': 'PreToolUse', 'tool_name': 'Bash',
+                                        'tool_input': {'command': _rstu_cmd}, 'cwd': brr})
+        _rstu_obj = _rstu[1] if isinstance(_rstu[1], dict) else {}
+        _rstu_dec = (_rstu_obj.get('hookSpecificOutput') or {}).get('permissionDecision')
+        _rstu_reason = (_rstu_obj.get('hookSpecificOutput') or {}).get('permissionDecisionReason', '')
+        if (_rstu[0] != 0 or _rstu_dec != 'deny'
+                or 'closed allowlist grammar' not in _rstu_reason or 'prsunc' not in _rstu_reason):
+            failures.append(
+                '(gd-uncertain-reset-reason) the in-scope work-losing command behind a nested-quote commented-paren line must be DENIED by the prsunc closed allowlist grammar (exit 0, permissionDecision deny), got {!r}'.format(_rstu))
+        _rstun = aiqt_hooks.git_discard({'hook_event_name': 'PreToolUse', 'tool_name': 'Bash',
+                                         'tool_input': {'command': _rstu_cmd}})
+        _rstun_obj = _rstun[1] if isinstance(_rstun[1], dict) else {}
+        _rstun_dec = (_rstun_obj.get('hookSpecificOutput') or {}).get('permissionDecision')
+        _rstun_reason = (_rstun_obj.get('hookSpecificOutput') or {}).get('permissionDecisionReason', '')
+        if (_rstun[0] != 0 or _rstun_dec != 'deny'
+                or 'git reset --hard runs in a compound' not in _rstun_reason or 'prsunc' not in _rstun_reason):
+            failures.append(
+                '(gd-uncertain-reset-name) with no session directory the same command must DENY under prsunc NAMING THE RESET (the reset-specific no-cwd reason, not the generic work-losing wording), got {!r}'.format(_rstun))
+
+        # An UNCERTAIN command never reaches the no-lossy-verb allow on the stripped scan.
+        # A commented "# <<'true'" line made _strip_quoted_heredoc_bodies strip every following line
+        # up to 'true' as heredoc body, so the real work-losing line vanished from the scope scan and
+        # the parsed list (swallowed by the mis-paired substitution) was empty: a SILENT ALLOW at the
+        # pin for each verb below (a pre-existing hole). The scope of an uncertain command is now read
+        # from the unstripped and de-quoted text. On this dirty fixture (a modified tracked file and an
+        # untracked file) each must DENY, or allow with exactly ONE new recovery ref, named in the note,
+        # whose tree holds BOTH endangered contents.
+        gd6_repo = _init_repo(tmp / "gd-unstripped-repo")
+        (gd6_repo / "file.txt").write_text("uncommitted change\n", encoding="utf-8")
+        (gd6_repo / "untracked.txt").write_text("untracked work\n", encoding="utf-8")
+        gd6r = str(gd6_repo)
+
+        def _gd6_outcome(command):
+            """(result, decision, note, new refs, saved contents) for one git_discard call on gd6_repo."""
+            before = set(_recovery_refs(gd6_repo))
+            res = aiqt_hooks.git_discard({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                          "tool_input": {"command": command}, "cwd": gd6r})
+            obj = res[1] if isinstance(res[1], dict) else {}
+            dec = (obj.get("hookSpecificOutput") or {}).get("permissionDecision")
+            note = obj.get("systemMessage", "")
+            new = sorted(set(_recovery_refs(gd6_repo)) - before)
+            saved = {}
+            if len(new) == 1:
+                for name in ("file.txt", "untracked.txt"):
+                    try:
+                        shown = subprocess.run(["git", "-C", gd6r, "show", new[0] + ":" + name],
+                                               capture_output=True, text=True, timeout=30,
+                                               env=git_fixture_env())
+                        saved[name] = shown.stdout if shown.returncode == 0 else None
+                    except (subprocess.SubprocessError, OSError):
+                        saved[name] = None
+            return res, dec, note, new, saved
+
+        def _gd6_protected(outcome):
+            """True when the outcome denies, or allows only after a verified recovery snapshot."""
+            res, dec, note, new, saved = outcome
+            if dec == "deny":
+                return True
+            return (res[0] == 0 and dec is None and "A pre-command recovery snapshot was saved" in note
+                    and len(new) == 1 and ("at ref " + new[0]) in note
+                    and saved == {"file.txt": "uncommitted change\n", "untracked.txt": "untracked work\n"})
+
+        for _g6n, _g6v in (("reset", "git reset --hard"), ("checkout", "git checkout -- file.txt"),
+                           ("clean", "git clean -fd"), ("restore", "git restore file.txt")):
+            _g6 = _gd6_outcome("# <<'true'\ngit status\necho \"$(echo hi # (\n)\"\n" + _g6v
+                               + "\necho \")\"\ntrue")
+            if not _gd6_protected(_g6):
+                failures.append("(gd-unstripped-hc-{}) a work-losing verb behind a commented heredoc opener must "
+                                "deny or allow only after a recovery snapshot holding the dirty file.txt and "
+                                "the untracked file; got {!r}".format(_g6n, _g6))
+        # A fragmented verb after a quoted heredoc: the raw text has no contiguous 'reset', so only the
+        # de-quoted scope scan brings it into scope (a silent allow at the pin).
+        _g6f = _gd6_outcome("git status\ncat <<'EOF'\nnote\nEOF\nenv git re\"\"set --hard")
+        if not _gd6_protected(_g6f):
+            failures.append("(gd-unstripped-frag) a quote-fragmented wrapped reset after a quoted heredoc must deny or "
+                            "allow only after a verified recovery snapshot; got {!r}".format(_g6f))
+        # The DISCLOSED over-refusal (the safe direction): work-losing PROSE in a plain quoted heredoc is
+        # in scope (the raw scan strips no heredoc body, and every '<<' makes the lex uncertain too), so the
+        # closed allowlist grammar DENIES it on this dirty repository as well, with no recovery snapshot
+        # (outside a repository: the git_discard heredoc-prose deny vector). The control: an uncertain
+        # command naming no work-losing verb still allows silently, so the scope does not widen to
+        # every heredoc.
+        _g6p = _gd6_outcome("cat <<'EOF'\nrun git reset --hard to undo\nEOF")
+        _g6preason = ((_g6p[0][1] or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
+        if _g6p[1] != "deny" or "closed allowlist grammar" not in _g6preason or _g6p[3]:
+            failures.append("(gd-unstripped-prose) DISCLOSED over-refusal: heredoc prose naming a work-losing verb is "
+                            "denied by the closed allowlist grammar on a dirty repository, with no new recovery "
+                            "ref; got {!r}".format(_g6p))
+        _g6c = aiqt_hooks.git_discard({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                       "tool_input": {"command": "git status\ncat <<'EOF'\nnote\nEOF"}, "cwd": gd6r})
+        if _g6c != (0, None, None):
+            failures.append("(gd-unstripped-ctl) an uncertain command naming no work-losing verb must stay a silent "
+                            "allow; got {!r}".format(_g6c))
+
+        # A CERTAIN lex no longer hides a verb split by a continuation. The lexer joins
+        # 'env git re\<newline>set --hard', so the lex is certain, the wrapper hides the verb from the
+        # parsed scan, and the raw scope scan saw no contiguous verb: a silent allow at the pin, alone and
+        # after 'git status'. The certain-path scope scan now reads the joined text too.
+        for _g7v, _g7c in (("reset", "env git re" + chr(92) + "\nset --hard"),
+                           ("checkout", "env git check" + chr(92) + "\nout -- file.txt"),
+                           ("clean", "env git cle" + chr(92) + "\nan -fd"),
+                           ("restore", "env git rest" + chr(92) + "\nore file.txt")):
+            for _g7s, _g7p in (("", ""), ("-after", "git status\n")):
+                _g7 = _gd6_outcome(_g7p + _g7c)
+                if not _gd6_protected(_g7):
+                    failures.append("(gd-joined-cont-{}{}) a work-losing verb split by a continuation under a "
+                                    "wrapper must deny or allow only after a recovery snapshot holding the dirty "
+                                    "file.txt and the untracked file; got {!r}".format(_g7v, _g7s, _g7))
+        # The de-quoted copy drops a '$' before a quote, so a $'' or $"" fragmented verb after a commented
+        # heredoc opener or a quoted heredoc is in scope (a silent allow at the pin and at the previous
+        # reading, which kept the '$').
+        for _g7n, _g7c in (
+                ("hc-reset", "# <<'true'\ngit status\necho \"$(echo hi # (\n)\"\ngit re$''set --hard\necho \")\"\ntrue"),
+                ("hc-checkout", "# <<'true'\ngit status\necho \"$(echo hi # (\n)\"\ngit check$\"\"out -- file.txt"
+                                "\necho \")\"\ntrue"),
+                ("qh-reset", "git status\ncat <<'EOF'\nnote\nEOF\nenv git re$''set --hard"),
+                ("qh-checkout", "git status\ncat <<'EOF'\nnote\nEOF\nenv git check$\"\"out -- file.txt"),
+        ):
+            _g7 = _gd6_outcome(_g7c)
+            if not _gd6_protected(_g7):
+                failures.append("(gd-joined-dollar-{}) a $'' or $\"\" fragmented verb must deny or allow only after "
+                                "a verified recovery snapshot; got {!r}".format(_g7n, _g7))
+        # A brace group makes the lex uncertain, so a quote-fragmented wrapped verb inside one is in scope;
+        # and the join follows bash past a substitution's ')' and inside backticks, so a verb a continuation
+        # splits after '$(x)#y', '<(x)#y' or '`x #y`' is in scope (each a silent allow at the pin).
+        for _g7n, _g7c in (
+                ("brace", 'git status; { env git re""set --hard; }'),
+                ("subst-hash", "printf x $(printf a)#y; git re" + chr(92) + "\nset --hard"),
+                ("procsub-hash", "cat <(true)#y; git re" + chr(92) + "\nset --hard"),
+                ("bq-hash", "printf x `printf a #b`; git re" + chr(92) + "\nset --hard"),
+        ):
+            _g7 = _gd6_outcome(_g7c)
+            if not _gd6_protected(_g7):
+                failures.append("(gd-joined-{}) a work-losing verb the brace cause or the join exposes must deny or "
+                                "allow only after a verified recovery snapshot; got {!r}".format(_g7n, _g7))
+        # The unparseable-command fallback (a {fd} redirect the lexer refuses, which bash runs): every
+        # flagged unparseable command DENIES under the fail-closed fallback with no snapshot, so a -C redirect split
+        # by a continuation, or quote-fragmented beside a fragmented verb, never reaches a
+        # session-directory snapshot that would not hold the target's work (an allow-note at the pin for
+        # the first, a silent allow at the pin for the second). The quote case is flagged only through
+        # the de-quoted scope read of the fallback (its raw text holds no contiguous verb).
+        gd7_target = _init_repo(tmp / "gd-joined-target")
+        (gd7_target / "file.txt").write_text("target change\n", encoding="utf-8")
+        for _g7n, _g7c in (
+                ("cont", "git -" + chr(92) + "\nC " + shlex.quote(str(gd7_target)) + " reset --hard {fd}>/dev/null"),
+                ("quote", "git -\"C\" " + shlex.quote(str(gd7_target)) + " re\"\"set --hard {fd}>/dev/null"),
+        ):
+            _g7 = _gd6_outcome(_g7c)
+            _g7reason = ((_g7[0][1] or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
+            if _g7[1] != "deny" or "could not be parsed by the shell lexer" not in _g7reason or _g7[3]:
+                failures.append("(gd-joined-fb-redirect-{}) an unparseable discard whose -C redirect is split or "
+                                "quote-fragmented must be flagged and denied by the fallback with no new "
+                                "recovery ref; got {!r}".format(_g7n, _g7))
+        # On a CERTAIN lex the scope scan reads the DE-QUOTED copy too, so a verb or the command
+        # word fragmented by quotes or a backslash under a wrapper is in scope: each was a silent allow with
+        # no snapshot at the pin and at the previous reading (nothing made the lex uncertain, the wrapper hid
+        # the verb from the parsed scan, and the raw and joined text held no contiguous verb). In scope, the
+        # closed allowlist grammar DENIES each (a wrapper word, a double quote, a concatenated quote, a
+        # backslash or a '$' is outside it), and the denied command takes no recovery snapshot.
+        for _g8n, _g8c in (
+                ("dq-reset", 'git status; env git re""set --hard'),
+                ("sq-reset", "env git re'set' --hard"),
+                ("cmdword", 'command g""it reset --hard'),
+                ("dq-checkout", 'git status; env git check""out -- file.txt'),
+                ("esc-reset", "git status; env git re" + chr(92) + "set --hard"),
+                ("dollar-reset", "git status; env git re$''set --hard"),
+        ):
+            if aiqt_hooks._lex_uncertain_causes(_g8c) != ():
+                failures.append("(gd-dequoted-{}-certain) the vector must read as a certain lex; got {!r}"
+                                .format(_g8n, aiqt_hooks._lex_uncertain_causes(_g8c)))
+            _g8 = _gd6_outcome(_g8c)
+            _g8reason = ((_g8[0][1] or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
+            if _g8[1] != "deny" or "closed allowlist grammar" not in _g8reason or _g8[3]:
+                failures.append("(gd-dequoted-{}) a fragmented wrapped work-losing verb on a certain lex must be in "
+                                "scope and denied by the closed allowlist grammar with no new recovery ref; got "
+                                "{!r}".format(_g8n, _g8))
+        # The same scope reading feeds the unrecognized-subcommand deny: a quote-fragmented
+        # 'checkout-index' (outside the recognized verb set, its sub not snapshottable) was a silent allow
+        # at the pin and at the previous reading; pristine or -C redirected, it now denies like
+        # 'git checkout-index -a -f'.
+        for _g8n, _g8c in (
+                ("checkout-index-pristine", 'git "check"out-index -a -f'),
+                ("checkout-index-redirect", "git -C " + shlex.quote(gd6r) + ' "check"out-index -a -f'),
+        ):
+            _g8 = _gd6_outcome(_g8c)
+            _g8reason = ((_g8[0][1] or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
+            if _g8[1] != "deny" or "outside the recognized lossy-verb set" not in _g8reason:
+                failures.append("(gd-dequoted-{}) a quote-fragmented checkout-index must deny as an unrecognized flagged "
+                                "subcommand; got {!r}".format(_g8n, _g8))
+        # Once in scope, a fragmented spelling also reaches the non-pristine path: a wrapped 'git' carrying
+        # a quote-fragmented -C redirect to another repository was a silent allow at the pin and at the
+        # previous reading; the closed allowlist grammar now denies it, like 'env git -C <repo> reset --hard'.
+        _g8w = _gd6_outcome('git status; env git -""C ' + shlex.quote(str(gd7_target)) + ' re""set --hard')
+        _g8wreason = ((_g8w[0][1] or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
+        if _g8w[1] != "deny" or "closed allowlist grammar" not in _g8wreason or _g8w[3]:
+            failures.append("(gd-dequoted-wrapped-redirect) a fragmented wrapped discard with a fragmented -C redirect to "
+                            "another repository must be denied by the closed allowlist grammar; got {!r}".format(_g8w))
+        # The DISCLOSED residual, witnessed: a verb no raw, joined or de-quoted reading assembles (an escape
+        # decoded inside $'...', a word a parameter expansion builds at run time) still reads as no
+        # recognized lossy verb and allows silently.
+        for _g8n, _g8c in (
+                ("residual-ansi", "env git $'" + chr(92) + "x72'eset --hard"),
+                ("residual-param", "r=re; env git ${r}set --hard"),
+        ):
+            _g8 = aiqt_hooks.git_discard({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                          "tool_input": {"command": _g8c}, "cwd": gd6r})
+            if _g8 != (0, None, None):
+                failures.append("(gd-dequoted-{}) the disclosed residual changed (update the git_discard docstring and "
+                                "the manifest residue with it); got {!r}".format(_g8n, _g8))
+        # The DISCLOSED over-refusal of that de-quoted read, pinned. It reads quoted prose too,
+        # so a command that only prints fragmented work-losing prose is in scope although bash runs only
+        # echo or printf, and the closed allowlist grammar DENIES it (echo, printf, a double quote and a
+        # concatenated quote are outside it) with no recovery snapshot. The read is kept, because quoted
+        # text is code under eval, 'bash -c' or 'sh -c' and the same read brings a fragmented verb there
+        # into scope (the -code vectors, denied the same way). Each was a silent allow with no snapshot at
+        # the pin.
+        _g9prose = (("prose-echo", "echo 'git re\"\"set --hard'"),
+                    ("prose-printf", "printf '%s" + chr(92) + "n' \"run git re''set --hard to undo\""))
+        for _g9n, _g9c in _g9prose + (("code-eval", "eval 'git re\"\"set --hard'"),
+                                      ("code-bash", "bash -c 'git re\"\"set --hard'")):
+            if aiqt_hooks._lex_uncertain_causes(_g9c) != ():
+                failures.append("(gd-dequote-prose-{}-certain) the vector must read as a certain lex; got {!r}"
+                                .format(_g9n, aiqt_hooks._lex_uncertain_causes(_g9c)))
+            _g9 = _gd6_outcome(_g9c)
+            _g9reason = ((_g9[0][1] or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
+            if _g9[1] != "deny" or "closed allowlist grammar" not in _g9reason or _g9[3]:
+                failures.append("(gd-dequote-prose-{}) quoted text that de-quotes to a work-losing git verb on a certain lex "
+                                "must be in scope and denied by the closed allowlist grammar with no new recovery "
+                                "ref; got {!r}".format(_g9n, _g9))
+        # The grammar decides before any snapshot is attempted, so an injected snapshot failure changes
+        # nothing: the prose still denies with the grammar reason and no new ref.
+        _orig_record_recovery = aiqt_hooks._record_recovery
+        aiqt_hooks._record_recovery = lambda *args, **kwargs: ("fail", "injected snapshot failure")
+        try:
+            for _g9n, _g9c in _g9prose:
+                _g9 = _gd6_outcome(_g9c)
+                _g9reason = ((_g9[0][1] or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
+                if _g9[1] != "deny" or "closed allowlist grammar" not in _g9reason or _g9[3]:
+                    failures.append("(gd-dequote-prose-{}-nosnap) fragmented work-losing prose under an injected snapshot "
+                                    "failure must still deny with the grammar reason and no new ref; got {!r}"
+                                    .format(_g9n, _g9))
+        finally:
+            aiqt_hooks._record_recovery = _orig_record_recovery
+        # The same read feeds the unrecognized-subcommand deny: a read-only subcommand whose quoted
+        # argument de-quotes to a work-losing keyword denies as an unrecognized flagged subcommand, as
+        # 'git log --grep=reset' already did at the pin (a silent allow at the pin).
+        _g9l = 'git log --grep="re""set"'
+        if aiqt_hooks._lex_uncertain_causes(_g9l) != ():
+            failures.append("(gd-dequote-prose-readonly-certain) the vector must read as a certain lex; got {!r}"
+                            .format(aiqt_hooks._lex_uncertain_causes(_g9l)))
+        _g9 = _gd6_outcome(_g9l)
+        _g9reason = ((_g9[0][1] or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
+        if _g9[1] != "deny" or "outside the recognized lossy-verb set" not in _g9reason:
+            failures.append("(gd-dequote-prose-readonly) a read-only subcommand whose quoted argument de-quotes to a "
+                            "work-losing keyword must deny as an unrecognized flagged subcommand; got {!r}".format(_g9))
 
         # === L11: additional diff-source vectors (the AIRTIGHT-NARROW contract) =======================
         dexpect("(l11-d1) bare git diff denies", "git diff", "deny")
@@ -7833,15 +9021,26 @@ def _main_isolated(monitor):
         dexpect("(qa-b5j) a nested 'dev' component ('git diff > foo/dev/x') is a plain file -> allows",
                 "git diff > foo/dev/x", "allow")
 
-        # Force detection is VALUE-AWARE: a force spelling in an option-value position is not a flag.
-        pexpect("(pl-v1) '-o --force' is the push-option value, not force",
-                "git push -o --force origin main", "allow", cwd=plr)
-        pexpect("(pl-v2) '--push-option --force' is its value, not force",
-                "git push --push-option --force origin main", "allow", cwd=plr)
+        # The parsed path still reads these spellings as option VALUES, but the raw-text
+        # backstop sees the push verb, a force spelling and a protected name in the raw string and
+        # denies (a disclosed over-denial); with no protected name the value reading shows.
+        pexpect('(pl-v1) a value-position force spelling beside the protected name: the raw-text backstop denies',
+                'git push -o --force origin main', 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
+        pexpect('(pl-v1b) the same value-position spelling with no protected name is the consumed value: allows',
+                'git push -o --force origin dev', 'allow', cwd=plr)
+        pexpect('(pl-v2) the long-option value spelling beside the protected name: the raw-text backstop denies',
+                'git push --push-option --force origin main', 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
+        pexpect('(pl-v2b) the same long-option value with no protected name is its value: allows',
+                'git push --push-option --force origin dev', 'allow', cwd=plr)
         # Operand ROLES: the first bare operand is the repository, never judged as a destination; and
         # the restored --recurse-submodules value-skip means a truly refspec-less force still probes.
-        pexpect("(pl-w1) a remote literally named 'main' is not a protected refspec",
-                "git push --force main my-feature", "allow", cwd=plr)
+        pexpect('(pl-w1) a remote literally named like the protected branch beside a force flag still trips the raw-text backstop: denies (a disclosed over-denial)',
+                'git push --force main my-feature', 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
+        pexpect('(pl-w1b) a remote named dev is not read as a refspec: allows',
+                'git push --force dev my-feature', 'allow', cwd=plr)
         pexpect("(pl-w2) '-f --recurse-submodules on-demand origin' is refspec-less: probes and denies on main",
                 "git push -f --recurse-submodules on-demand origin", "deny", cwd=plr)
         # Fallback widening: a quote-anchored '+refspec' under a wrapper, and the delete spellings.
@@ -7851,16 +9050,30 @@ def _main_isolated(monitor):
                 "env git push --delete origin main", "deny", cwd=plr)
         pexpect("(pl-x3) an unparseable ':main' delete denies via the fallback",
                 'git push origin :main "unbalanced', "deny", cwd=plr)
-        # Disclosed residuals, witnessed so the residue cannot drift from reality: ANY benign parsed
-        # git segment - earlier OR later - suppresses the wrapped-catch (best-effort, not chased),
-        # and --dry-run with a force spelling over-denies (the safe direction).
-        pexpect("(pl-r1) DISCLOSED residual: a benign git segment BEFORE a wrapped force-push allows",
-                "git status && env git push --force origin main", "allow", cwd=plr)
-        pexpect("(pl-r1b) DISCLOSED residual: a benign git segment AFTER a wrapped force-push also "
-                "suppresses the wrapped-catch and allows",
-                "env git push --force origin main && git status", "allow", cwd=plr)
+        # The raw-text backstop CLOSES the old pl-r1/pl-r1b residual for pushes naming a protected
+        # branch: it runs on EVERY call, so a benign git segment before or after a wrapped
+        # force-push no longer suppresses the scan. This stays closed under the
+        # per-segment split: the wrapped push and the protected name share ONE segment. A wrapped
+        # force-push naming NO protected branch keeps the old suppression residual: the broad
+        # fallback still runs only when no git segment was lexed, because run unconditionally it
+        # would deny every feature-branch force-push (witnessed by pl-segment-res1/res1b).
+        pexpect('(pl-r1) a benign git segment BEFORE a wrapped force-push to the protected branch no longer hides it: the raw-text backstop denies',
+                'git status && env git push --force origin main', 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
+        pexpect('(pl-r1b) a benign git segment AFTER a wrapped force-push to the protected branch no longer hides it either: denies',
+                'env git push --force origin main && git status', 'deny', cwd=plr,
+                detail='raw command text pairs a git push')
         pexpect("(pl-r2) DISCLOSED over-deny: --dry-run --force to main still denies",
                 "git push --dry-run --force origin main", "deny", cwd=plr)
+        # The NARROWED residual's witness (so the residue cannot
+        # drift from reality): a wrapped force-push naming NO protected branch, beside a benign
+        # parsed git segment, is still suppressed from the broad fallback and ALLOWS; the residue
+        # discloses exactly this. (The protected-name variants are pl-r1/pl-r1b above, closed by the
+        # per-segment backstop: the wrap and the name share one segment.)
+        pexpect('(pl-segment-res1) DISCLOSED residual: a benign git segment BEFORE a wrapped no-protected-name force-push allows',
+                'git status && env git push --force origin HEAD', 'allow', cwd=plr)
+        pexpect('(pl-segment-res1b) DISCLOSED residual: a benign git segment AFTER it also suppresses the broad fallback and allows',
+                'env git push --force origin HEAD && git status', 'allow', cwd=plr)
 
         # === EN-5 PR-A round-4: matching/prune sweeps, the widened -d fallback, wrapped delete and
         # commit coverage, and the disclosed over-denies and lexical boundary, witnessed ===
@@ -8039,9 +9252,15 @@ def _main_isolated(monitor):
         # comment. This lock asserts it is DELIBERATE, not accidental; the PARSED path stays complete (m1-m25)
         # and network-side branch protection remains the backstop. Flip: contiguous 'remote.origin.mirror'
         # (m28) ASKS, so this ALLOW isolates the key-fragmentation boundary.
-        pexpect("(gd146-m37) a KEY-FRAGMENTED wrapped raw mirror config is a DISCLOSED inherent "
-                "lexical-scan residual, allows",
-                "env git -c remote.origin.'mirror'=true push origin", "allow", cwd=plf)
+        # Re-expected from allow to deny: the wrapper-hidden fallback now also reads the
+        # DE-QUOTED text, where the quote-fragmented key is the contiguous remote.origin.mirror git
+        # reconstructs, so this mirror push is caught (a closed residual for quote and backslash
+        # fragments; other fragmentation such as an escape decoded inside $'...' or an expansion stays the
+        # disclosed boundary).
+        pexpect("(gd146-m37) a KEY-FRAGMENTED wrapped raw mirror config is read de-quoted by the raw "
+                "fallback: denies",
+                "env git -c remote.origin.'mirror'=true push origin", "deny", cwd=plf,
+                detail="appears to force-push or delete")
 
         # === GD-146 round-1 tri-family QA fixes (a discriminating test per confirmed finding) =========
         # QA-BLOCKER (raw fallback): a shell quote BETWEEN the -c/--config-env option and its
@@ -11507,6 +12726,7 @@ def _main_isolated(monitor):
         _test_note_shape_pins(failures, tmp)
         _test_stream_failure_exits(failures)
         _test_stop_field_claim_check(failures, tmp)
+        _test_cannot_evaluate_paths(failures, tmp)
 
         # === write_scope_guard (wrtscp, EN-8): confine guarded-tool writes to a per-slice scope =========
         # declaration; hard-deny writes to the frozen floor and to other/nested repos as an un-lowerable
@@ -12102,19 +13322,9 @@ def _main_isolated(monitor):
         # --- or a floor entry that resolves) OUTSIDE the session repo INTO a declared store still DENIES; the
         # --- companion allow can never win a HEAD ALLOW over the freeze. Each assertion below FLIPS to
         # --- "allow" if the ordering is reverted (companion-before-freeze), so it discriminates the fix.
-        # --- Symlinks are required; if the platform cannot create them the sub-block is skipped (recorded).
-        _cs_can_symlink = True
-        try:
-            _cs_probe_link = cs_sess / ".aiqt" / "_symlink_probe"
-            os.symlink(str(cs_store), str(_cs_probe_link))
-            _cs_probe_link.unlink()
-        except OSError as _cs_exc:
-            _cs_can_symlink = False
-            # R11 (DECIDED item 5): the finding-2 freeze-ordering assertions need symlinks; a
-            # silent skip could ship an ordering regression behind a green run on such a platform.
-            failures.append("(ws-cs-symlink-cov) cannot create symlinks on this platform ({}): the "
-                            "finding-2 freeze-before-companion assertions are UNCOVERED, recorded "
-                            "as a failure rather than skipped".format(_cs_exc))
+        # --- Symlinks are required; if the platform cannot create them the sub-block cannot be
+        # --- evaluated, which is recorded as a named failure rather than skipped.
+        _cs_can_symlink = _symlink_probe(cs_store, cs_sess / ".aiqt" / "_symlink_probe", failures)
         if _cs_can_symlink:
             # (a) A frozen-FLOOR entry that symlinks INTO the declared store. A covered Write to it resolves
             # OUT into the store, yet the floor freeze DENIES it (not a companion allow).
