@@ -47,11 +47,15 @@ Legs, in order:
                  pin            that python-version is the host patch;
                  gate-step      the step right after the setup-python step is the Python host pin step, an
                                 executable step whose run: is GATE_RUN; an executable step carries
-                                exactly the keys name, run and shell, with shell: bash (RUN_KEYS,
-                                STEP_SHELL: tools/check_ci_parity.py binds that line on every run:
-                                step, and this gate accepts only that exact value), so a step with
-                                no shell: and a shell: other than bash are each refused in their own
-                                words, and so are any other key and a missing name:;
+                                exactly the keys name, run and shell, its shell: written as the
+                                exact line shell: bash once its indentation is removed (RUN_KEYS,
+                                STEP_SHELL_LINE: tools/check_ci_parity.py binds that line on every
+                                run: step), so a step with no shell:, a shell: other than bash and a
+                                shell: bash written on any other line (a quoted 'bash' or "bash", a
+                                trailing comment, trailing whitespace, a second space before the
+                                value or a - list-item line among them, each of which a YAML reader
+                                parses to bash) are each refused in their own words, and so are any
+                                other key and a missing name:;
                  suite-step     the job's suite steps, each step whose run: is a HOST_SUITES run or
                                 names a suite runner (SUITE_RUNNERS) by a token's normpath base name
                                 (_suite_shaped), run exactly the job's HOST_SUITES tuple, in that
@@ -107,8 +111,9 @@ Legs, in order:
                                 naming either literal (a matrix or include value, an env value, a
                                 with: input, a name: or a bare list item among them), are each a
                                 finding: only a step's own run: may carry the judge. The counted step
-                                carries exactly name, run and shell: bash (a missing shell: and a
-                                shell: other than bash each named); no non-comment line of a HOST_JOBS
+                                carries exactly name, run and the line shell: bash (a missing shell:,
+                                a shell: other than bash and a shell: bash written on any other line
+                                each named); no non-comment line of a HOST_JOBS
                                 job names --jobs-only, and no run: line of a HOST_JOBS job names
                                 the flag's stem --jobs-o once every quote, backslash and dollar
                                 character is deleted from its raw text (a raw-text read, never
@@ -190,7 +195,8 @@ Legs, in order:
                host-patch job, its setup-python step, its Python host pin step or one of its suite steps,
                omitting, reordering, repeating or adding a suite step, changing a job id or the command a held
                step runs, and disabling or re-pointing a held step (if:, continue-on-error:,
-               working-directory:, a missing shell: or a shell: other than bash) are each a finding. A held
+               working-directory:, a missing shell:, a shell: other than bash or a shell: bash written
+               on any line but the exact line shell: bash) are each a finding. A held
                step carries a name:, but its display text is not held: it changes neither what a step runs nor how
                the Quality gates job reads a job's result, which is by job id. Jobs are read by a line model.
                A line that still carries a carriage return once its one trailing CR is removed, or carries
@@ -236,7 +242,8 @@ Legs, in order:
                                         TOMLDecodeError lets a parser RecursionError escape, and a
                                         copy whose source parse drops one of RecursionError,
                                         MemoryError and ValueError lets that class, injected at the
-                                        parse, escape; and the
+                                        parse, escape, also over a key parser emulating a release
+                                        that refuses the key inside it first; and the
                                         --jobs-only CLI wiring runs through main() on a pristine copy,
                                         with a copy that stops forwarding the flag and a copy whose main
                                         returns 0 without evaluating each red
@@ -284,16 +291,21 @@ run: line carrying any character outside the closed safe set it is held to (HOST
 sign, a backquote, a brace, a bracket, a glob character, a redirection, a parenthesis and the other
 shell-active characters, each named) or one whose first word is a shell assignment (a PATH=
 prefix among them, the assignment named). This gate holds the Python host pin step and each suite
-step to exactly name, run and shell: bash, and the judge step too; on another step of a host-patch job
+step to exactly name, run and the line shell: bash, and the judge step too; a suite step is one whose
+run: is a HOST_SUITES run or has a token whose normpath base name is a suite runner's file name, so a
+step that runs a suite runner as a module (python3 -m tools.check_selftest_execution among them)
+names no such file, is not a suite step and is not refused when added; on another step of a host-patch job
 it does not judge a working-directory:, an if: or a shell: other than bash, which changes what, where
 or whether that step runs; and what the suites
 test is theirs: a step whose run: command starts another interpreter, appends to GITHUB_PATH or GITHUB_ENV,
 changes the checked-out tree, uses a local or composite action, or names an executable that itself
 prints or re-interprets text (a script that echoes the flag, or env running its arguments as a
 command under an assignment, among them, out of a text grammar's reach) is not judged here.
-tools/check_ci_parity.py is the second holder for those edits: it binds the exact line shell: bash on
-every step with a run: key, and its step grammar accepts only name:, uses:, run:, env:, with: and that
-line as step keys, so a working-directory:, an if: or any shell: other than shell: bash is
+tools/check_ci_parity.py is the second holder for those edits: it binds the line shell: bash on
+every step with a run: key (read once a trailing comment and trailing whitespace are removed, two
+spellings this gate refuses on the steps it holds), and its step grammar accepts only name:, uses:,
+run:, env:, with: and that line as step keys, so a working-directory:, an if: or any shell: other than
+shell: bash is
 cannot-evaluate for it (measured at this commit on an extra host-patch-job step carrying each of the
 three: this gate passed, check_ci_parity refused), and in every job it refuses a uses: of an action
 other than actions/checkout and actions/setup-python and a run: command outside its parity grammar. In
@@ -307,7 +319,7 @@ space, a ./tools/ path, quoted trailing whitespace, a quote-spliced path or flag
 literal block scalar among them), running any other judge-shaped command outside the
 host-patch jobs, naming this gate's file name or the flag in a value that is not a step's own run:
 property (a matrix or include value, an env value, a with: input or a job-level run: among them),
-putting a key beyond name, run and shell on the judge step or leaving it without shell: bash, or an
+putting a key beyond name, run and shell on the judge step or leaving it without the line shell: bash, or an
 env: on a job that carries a counted or
 judge-shaped step or on any of that job's steps is a finding; a line of any outside job the extended
 job model cannot read (a re-indented job body, a quoted env key, a flow-mapping step, a block opener
@@ -430,11 +442,16 @@ CHECKOUT_KEYS = {"uses", "with"}
 CHECKOUT_INPUTS = {"fetch-depth": "0", "fetch-tags": "true"}
 SETUP_KEYS = {"name", "uses", "with"}
 # The keys of an executable step (_step_departures): the Python host pin step, each suite step and the
-# --jobs-only judge step carry exactly these, with shell: bash (STEP_SHELL). tools/check_ci_parity.py binds
-# that line on every step with a run: key, and this gate accepts only that exact value, so a step with no
-# shell: and a shell: other than bash are each refused in their own words (_shell_departure).
+# --jobs-only judge step carry exactly these, their shell: written as the one line STEP_SHELL_LINE once its
+# indentation is removed (_shell_departure), so a step with no shell:, a shell: other than bash and a
+# shell: bash on any other line (a quoted 'bash' or "bash", a trailing comment, trailing whitespace, a
+# second space before the value, a - list-item line) are each refused in their own words.
+# tools/check_ci_parity.py binds the line shell: bash on every step with a run: key, read once a trailing
+# comment and trailing whitespace are removed: this gate is the stricter of the two on those two
+# spellings, and both refuse the quoted and doubled-space ones.
 RUN_KEYS = frozenset({"name", "run", "shell"})
 STEP_SHELL = "bash"
+STEP_SHELL_LINE = "shell: " + STEP_SHELL
 # The rules of the jobs leg; the self-test removes each from a copy of this gate to show its cases red on
 # revert.
 JOB_RULES = frozenset({"workflow-keys", "job-keys", "runner", "checkout", "step-env", "setup", "pin",
@@ -486,8 +503,8 @@ JOBS_ONLY_STEM = "--jobs-o"
 # assignment named) when its first word, once any leading HOST_RUN_PREFIX_WORDS are skipped, is a
 # shell assignment (HOST_RUN_ASSIGNMENT_RE, _leading_assignment): a PATH=tools:/usr/bin prefix is
 # spelled in safe characters only, yet it re-points which file the named command runs. The held
-# steps (the Python host pin step and each suite step) carry exactly name, run and shell: bash
-# (RUN_KEYS, STEP_SHELL), so this safe-set reading of their run: lines is a bash reading. RESIDUAL,
+# steps (the Python host pin step and each suite step) carry exactly name, run and the line shell: bash
+# (RUN_KEYS, STEP_SHELL_LINE), so this safe-set reading of their run: lines is a bash reading. RESIDUAL,
 # the set the module docstring lists: on a host-patch step this gate does not hold (an extra step
 # such as the OPF job's Python host pin self-test step), it does not judge a working-directory:,
 # an if: or a shell: other than bash, which changes what, where or whether that step runs (under
@@ -634,11 +651,14 @@ class CannotEvaluate(Exception):
 
 
 class _Scalar(str):
-    """A scalar value of a job, with the number of the line it sits on and the spelling kind it was
-    read from (plain, quoted, flow, bare or block): _refuse_non_string_runs reads the kind at run:
-    keys, because only an unquoted spelling can resolve to a non-string in a YAML reader."""
+    """A scalar value of a job, with the number of the line it sits on, the spelling kind it was
+    read from (plain, quoted, flow, bare or block) and that line as written (written, its indentation,
+    any list dash and any trailing comment included): _refuse_non_string_runs reads the kind at run:
+    keys, because only an unquoted spelling can resolve to a non-string in a YAML reader, and
+    _shell_departure reads the written line of a shell: value."""
     line = 0
     kind = None
+    written = ""
 
 
 class _Mapping(dict):
@@ -717,6 +737,7 @@ def _entry(job, number, line, where=None):
         value = _Scalar(value)
         value.line = number
         value.kind = "plain" if plain is not None else "quoted"
+        value.written = line
     return number, indent, indent + len(dash), bool(dash), match.group("key"), value
 
 
@@ -786,22 +807,30 @@ def _count_key(node, key):
 
 
 def _shell_departure(step):
-    """The words of how a step's shell: departs from shell: bash (STEP_SHELL), or None when it carries
-    exactly that value: a step with no shell: key and a shell: whose parsed value is anything other than
-    the string bash (bash -e {0}, Bash, perl {0} or an empty value among them) are each named in their
-    own words. A quoted 'bash' parses to that string and is accepted; tools/check_ci_parity.py, which
-    reads the literal line shell: bash, refuses that spelling there."""
+    """The words of how a step's shell: departs from the exact line shell: bash (STEP_SHELL_LINE), or
+    None when it is that line: a step with no shell: key, a shell: whose parsed value is anything other
+    than the string bash (bash -e {0}, Bash, perl {0} or an empty value among them), and a shell: bash
+    written on any other line once its indentation is removed (a quoted 'bash' or "bash", a trailing
+    comment, trailing whitespace, a second space before the value or a - list-item line among them,
+    each of which parses to bash) are each named in their own words. tools/check_ci_parity.py binds
+    the same line but reads it once a trailing comment and trailing whitespace are removed, so this
+    gate refuses those two spellings where that gate accepts them."""
     if "shell" not in step:
         return "carries no shell: (want shell: bash)"
-    if step["shell"] != STEP_SHELL:
-        return "carries shell: {!r}, not shell: bash".format(step["shell"])
+    shell = step["shell"]
+    written = getattr(shell, "written", "").lstrip(" ")
+    if shell == STEP_SHELL and written != STEP_SHELL_LINE:
+        return "writes shell: bash as {!r}, not as the exact line {}".format(written, STEP_SHELL_LINE)
+    if shell != STEP_SHELL:
+        return "carries shell: {!r}, not shell: bash".format(shell)
     return None
 
 
 def _step_departures(step):
     """Each way a step departs from an executable step, in its own words (an empty list when it is one):
-    an executable step carries exactly the keys RUN_KEYS (name, run and shell) with shell: bash, so a
-    step with no shell: or another shell (_shell_departure), a key beyond RUN_KEYS (an if:,
+    an executable step carries exactly the keys RUN_KEYS (name, run and shell) with the line shell: bash,
+    so a step with no shell:, another shell or shell: bash written on another line (_shell_departure), a
+    key beyond RUN_KEYS (an if:,
     continue-on-error:, working-directory: or env: among them, any of which can skip, mask or change
     what it runs) and a missing name: are each named."""
     shell = _shell_departure(step)
@@ -818,7 +847,10 @@ def _suite_shaped(step):
     lines (shlex, POSIX) has an os.path.normpath base name in SUITE_RUNNERS (a respelled, renamed or
     other suite of a suite runner among them). A run: line shlex cannot tokenize counts as one, so it
     is held, never passed unread (_host_flag_findings refuses such a line first while the outside-judge
-    rule runs)."""
+    rule runs). A step that runs a suite runner as a module (python3 -m
+    tools.check_selftest_execution --suite git-fixture-env-core among them) has no token whose base
+    name is a runner's file name, so it is not a suite step and adding one is not refused here; the
+    HOST_SUITES steps themselves stay required."""
     run = step.get("run")
     if not isinstance(run, str):
         return False
@@ -956,6 +988,7 @@ def _outside_entries(job, raw, where):
             value = _Scalar("\n".join(body))
             value.line = number
             value.kind = "block"
+            value.written = line
             entries.append((number, indent, column, bool(dash), match.group("key"), value))
             continue
         match = FLOW_RE.fullmatch(line)
@@ -964,6 +997,7 @@ def _outside_entries(job, raw, where):
             value = _Scalar(match.group("flow"))
             value.line = number
             value.kind = "flow"
+            value.written = line
             entries.append((number, indent, indent + len(dash), bool(dash), match.group("key"),
                             value))
             continue
@@ -973,6 +1007,7 @@ def _outside_entries(job, raw, where):
             value = _Scalar(match.group("text"))
             value.line = number
             value.kind = "bare"
+            value.written = line
             entries.append((number, indent, indent, True, None, value))
             continue
         entries.append(_entry(job, number, line, where))
@@ -1319,8 +1354,9 @@ def _judge_findings(host_judges, other_lines, other_raw, headers):
     whose tokens are judge-shaped or the judge's or whose text names either literal (_other_runs), and
     any other scalar value naming either literal (_judge_values), are each a finding: only a step's
     own run: may carry the judge. Exactly one step outside the host-patch jobs runs JOBS_ONLY_RUN; that
-    step carries exactly name, run and shell: bash (a missing shell:, a shell: other than bash and a
-    missing name: each named); no non-comment host-patch-job line names the flag; and no job
+    step carries exactly name, run and the line shell: bash (a missing shell:, a shell: other than bash,
+    a shell: bash written on another line and a missing name: each named); no non-comment
+    host-patch-job line names the flag; and no job
     that carries a counted or judge-shaped step, nor any step of such a job, carries env: (in CI a
     job-level env: such as a BASH_ENV value can silence every step of the carrying job, an env: on the
     judge step the judge itself, and an env: on an earlier step every later step of the job, through a
@@ -1413,7 +1449,7 @@ def _judge_findings(host_judges, other_lines, other_raw, headers):
                 if shell is not None:
                     found.append("{}:{}: the step that carries {} {}: tools/check_ci_parity.py binds "
                                  "shell: bash on every run: step, and the judge step carries exactly that "
-                                 "value".format(WORKFLOW_REL, step.lines.get("shell", step.lines.get("run")),
+                                 "line".format(WORKFLOW_REL, step.lines.get("shell", step.lines.get("run")),
                                                 step_kind, shell))
                 if "name" not in step:
                     found.append("{}:{}: the step that carries {} carries no name: (the judge step carries "
@@ -1677,6 +1713,33 @@ def _committed_host_runs():
     return runs
 
 
+def _workflow_lanes(text):
+    """The git-fixture-env lanes of a workflow text outside HOST_JOBS: (each non-comment line of a job
+    under the top-level jobs: key that names both --suite and git-fixture-env, stripped of its
+    indentation and kept as written, in file order; for each such line, the stripped lines of its job
+    that name python-version). A lane spelled any other way is kept, never skipped, so it differs from
+    the lane lines HOST_SUITES names, and a lane's job is read for its pin rather than assumed to pin
+    '3.14'."""
+    lanes, pins, in_jobs, job = [], {}, False, None
+    for line in text.split("\n"):
+        line = line[:-1] if line.endswith("\r") else line
+        stripped = line.strip(" \t")
+        if not stripped or stripped.startswith("#"):
+            continue
+        if not line.startswith((" ", "\t")):
+            in_jobs, job = line.split("#", 1)[0].rstrip(" \t") == "jobs:", None
+            continue
+        header = JOB_RE.fullmatch(line) if in_jobs else None
+        if header is not None:
+            job = header.group("id")
+        elif job is not None and job not in HOST_JOBS:
+            if "--suite" in stripped and "git-fixture-env" in stripped:
+                lanes.append((stripped, job))
+            if PIN_KEY in stripped:
+                pins.setdefault(job, []).append(stripped)
+    return tuple(lane for lane, _ in lanes), tuple(tuple(pins.get(job, ())) for _, job in lanes)
+
+
 def _host_job(job):
     """A whole host-patch job, laid out as quality.yml lays it out."""
     return ("  {0}:\n    name: {0}\n    runs-on: {1}\n    steps:\n      - uses: actions/checkout@v4\n"
@@ -1740,15 +1803,20 @@ class _ParserMismatch(Exception):
 def _key_depth_bounded(real, calls, kind=RecursionError):
     """tomllib's key parser, made to raise RecursionError on a key of more than 1000 dotted parts, as a
     release that bounds key depth does, or kind (MemoryError or ValueError, to inject that class at the
-    parse: real memory exhaustion cannot be provoked safely). calls records each call; a call or a
-    result that does not fit parse_key(src, pos) -> (pos, key), pos an int within src and key a tuple of
-    str, raises _ParserMismatch."""
+    parse: real memory exhaustion cannot be provoked safely). A RecursionError or MemoryError that the
+    real parser raises itself (a release whose own parser bounds key depth refuses such a key inside
+    it) is raised as kind too, so the class a vector asserts never depends on the patch release that
+    runs the self-test. calls records each call; a call or a result that does not fit
+    parse_key(src, pos) -> (pos, key), pos an int within src and key a tuple of str, raises
+    _ParserMismatch."""
     def parse_key(*args, **kwargs):
         calls.append(len(args))
         try:
             result = real(*args, **kwargs)
         except TypeError as exc:
             raise _ParserMismatch("calling it raised TypeError: {}".format(exc))
+        except (RecursionError, MemoryError):
+            raise kind("injected: the key parser itself refused a key") from None
         src = args[0] if args else kwargs.get("src")
         if not (isinstance(result, tuple) and len(result) == 2):
             raise _ParserMismatch("it returned {} rather than (pos, key)".format(type(result).__name__))
@@ -1763,10 +1831,25 @@ def _key_depth_bounded(real, calls, kind=RecursionError):
     return parse_key
 
 
-def _parse_refusal(evaluate_tree, root, bound, kind=RecursionError):
+def _capped_parser(real):
+    """real, tomllib's key parser, as a release whose own parser bounds key depth runs it: a key of more
+    than 1000 dotted parts is refused by a RecursionError from inside the parser (emulated here once the
+    real parser returns such a key), so a vector shows what the injection does on such a release
+    whatever patch release runs the self-test."""
+    def parse_key(*args, **kwargs):
+        result = real(*args, **kwargs)
+        if isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], tuple) \
+                and len(result[1]) > 1000:
+            raise RecursionError("emulated: a key parser that bounds key depth")
+        return result
+    return parse_key
+
+
+def _parse_refusal(evaluate_tree, root, bound, kind=RecursionError, capped=False):
     """(exit code, whether the report says the source does not parse) for evaluate_tree over root at HOST,
-    with tomllib's key parser bounded when bound is true (raising kind, _key_depth_bounded); "raised NAME"
-    when the exception escapes. The bound
+    with tomllib's key parser bounded when bound is true (raising kind, _key_depth_bounded) and, when
+    capped is true, the parser under that bound refusing such a key itself (_capped_parser); "raised
+    NAME" when the exception escapes. The bound
     patches a private tomllib function: on a release where it is missing, has another shape or is never
     called, the result is a text naming that cause, so the case fails cleanly rather than crashing."""
     parser = getattr(tomllib, "_parser", None)
@@ -1776,7 +1859,7 @@ def _parse_refusal(evaluate_tree, root, bound, kind=RecursionError):
                 "key-depth case cannot run")
     calls = []
     if bound:
-        parser.parse_key = _key_depth_bounded(real, calls, kind)
+        parser.parse_key = _key_depth_bounded(_capped_parser(real) if capped else real, calls, kind)
     try:
         result = _outcome(evaluate_tree, root, HOST, SOURCE_REL + ": does not parse")
     except _ParserMismatch as exc:
@@ -1867,8 +1950,8 @@ def _job_cases():
         ("jobs/setup-step-extra-input-finding",
          ((OPF, "          " + PIN + "\n", "          " + PIN + "\n          update-environment: false\n"),),
          (), "holds ['python-version', 'update-environment']", "setup"),
-        # A reviewer reproduction: the setup-python step and the gate step removed, and a job-level env:
-        # that names python-version in their place.
+        # The setup-python step and the gate step removed, and a job-level env: that names
+        # python-version in their place.
         ("jobs/job-env-pin-finding",
          ((GFE, SETUP_STEP + GATE_STEP, ""), (GFE, runs, "    env:\n      " + PIN + "\n" + runs)), (),
          GFE + " carries 0 setup-python steps", None),
@@ -1935,7 +2018,7 @@ def _job_cases():
          "runs on 'ubuntu-latest', not 'ubuntu-24.04'", "runner"),
         ("jobs/runs-on-newer-image-finding", ((GFE, runs + RUNNER, runs + "ubuntu-26.04"),), (),
          "runs on 'ubuntu-26.04', not 'ubuntu-24.04'", "runner"),
-        # A reviewer reproduction: a workflow-level shell default that runs no step's command.
+        # A workflow-level shell default that runs no step's command.
         ("jobs/workflow-defaults-echo-finding",
          ((None, "jobs:\n", "defaults:\n  run:\n    shell: echo {0}\n\njobs:\n"),), (),
          "carries the top-level key defaults:", "workflow-keys"),
@@ -1950,8 +2033,8 @@ def _job_cases():
         ("jobs/job-defaults-finding",
          ((OPF, runs, "    defaults:\n      run:\n        shell: echo {0}\n" + runs),), (),
          "opf-host-patch carries defaults:", "job-keys"),
-        # Reviewer reproductions: an extra, otherwise unheld step whose env: makes BASH_ENV append to
-        # GITHUB_PATH before an otherwise accepted command runs, and the GITHUB_ENV variant.
+        # An extra, otherwise unheld step whose env: makes BASH_ENV append to GITHUB_PATH before an
+        # otherwise accepted command runs, and the GITHUB_ENV variant.
         ("jobs/step-env-github-path-finding",
          ((OPF, GATE_STEP, GATE_STEP + "      - name: Extra check\n        run: " + GATE_RUN
            + " --self-test\n        env:\n"
@@ -1962,8 +2045,8 @@ def _job_cases():
            + " --self-test\n        env:\n"
            + "          BASH_ENV: $(printf REVIEW_PROBE=1 >> \"$GITHUB_ENV\")\n\n"),), (),
          GFE + " sets env: on step 4", "step-env"),
-        # A reviewer reproduction: a job-level env: (BASH_ENV) in BOTH host-patch jobs, which in CI
-        # silences every step of those jobs, this gate's own steps included; job-keys keeps refusing it.
+        # A job-level env: (BASH_ENV) in BOTH host-patch jobs, which in CI silences every step of those
+        # jobs, this gate's own steps included; job-keys keeps refusing it.
         ("jobs/job-env-bash-env-both-jobs-finding",
          ((OPF, runs, "    env:\n      BASH_ENV: '$(: > \"$0\")'\n" + runs),
           (GFE, runs, "    env:\n      BASH_ENV: '$(: > \"$0\")'\n" + runs)), (),
@@ -1989,10 +2072,9 @@ def _job_cases():
         ("jobs/jobs-only-job-env-finding",
          (("registry", "    runs-on: ", "    env:\n      BASH_ENV: '$(: > \"$0\")'\n    runs-on: "),), (),
          "sets a job-level env:", "outside-judge"),
-        # Reviewer reproductions: a command-shaped value that is not a step's own run: property never
-        # counts as the judge (a with: input of the registry checkout step, and a job-level run:), and
-        # an env: on an earlier step of the judge's job (whose GITHUB_ENV write reaches the judge step)
-        # is a finding.
+        # A command-shaped value that is not a step's own run: property never counts as the judge (a
+        # with: input of the registry checkout step, and a job-level run:), and an env: on an earlier
+        # step of the judge's job (whose GITHUB_ENV write reaches the judge step) is a finding.
         ("jobs/jobs-only-with-input-decoy-finding",
          (("registry", JUDGE_STEP, ""),
           ("registry", "      - uses: actions/checkout@v4\n",
@@ -2006,9 +2088,9 @@ def _job_cases():
          (("registry", "      - uses: actions/setup-python@v5\n",
            "      - uses: actions/setup-python@v5\n        env:\n          BASH_ENV: '$(: > \"$0\")'\n"),),
          (), "sets env: on step 2", "outside-judge"),
-        # Reviewer reproductions: the relocation above with a job-level env: (BASH_ENV) in both
-        # host-patch jobs, and an env: on the judge step with the same host-job env:; the outside-judge
-        # and job-keys rules both refuse each.
+        # The relocation above with a job-level env: (BASH_ENV) in both host-patch jobs, and an env: on
+        # the judge step with the same host-job env:; the outside-judge and job-keys rules both refuse
+        # each.
         ("jobs/jobs-only-moved-and-host-jobs-env-finding",
          (("registry", JUDGE_STEP, ""),
           (OPF, suite[OPF], suite[OPF] + "\n      - name: Python host pin jobs leg\n        run: "
@@ -2022,9 +2104,9 @@ def _job_cases():
           (OPF, runs, "    env:\n      BASH_ENV: '$(: > \"$0\")'\n" + runs),
           (GFE, runs, "    env:\n      BASH_ENV: '$(: > \"$0\")'\n" + runs)), (),
          "the step that carries the --jobs-only judge sets env:", None),
-        # Round-6 reviewer reproductions: the canonical registry judge KEPT, and a second judge added in
-        # a spelling the job model reads (a quoted run: value, a tab before the value): each parses to
-        # the judge command, so the doubled judge is a finding, never a silent pass.
+        # The canonical registry judge KEPT, and a second judge added in a spelling the job model reads
+        # (a quoted run: value, a tab before the value): each parses to the judge command, so the
+        # doubled judge is a finding, never a silent pass.
         ("jobs/jobs-only-single-quoted-second-judge-finding",
          (("registry", JUDGE_STEP,
            JUDGE_STEP + second + "      - run: '" + JOBS_ONLY_RUN + "'\n"),), (),
@@ -2048,8 +2130,8 @@ def _job_cases():
          (("registry", JUDGE_STEP, JUDGE_STEP + "      - name: Later step\n        run: echo done\n"
            "        env:\n          SAMPLE: value\n"),), (),
          "sets env: on step 4, after the judge step", "outside-judge"),
-        # A reviewer reproduction (round 6, combined): the registry judge re-quoted, a job-level env:
-        # on the registry job, and a decoy job carrying the canonical judge under if: false. The quoted
+        # Three edits combined: the registry judge re-quoted, a job-level env: on the registry job, and
+        # a decoy job carrying the canonical judge under if: false. The quoted
         # judge still parses and counts, so the doubled judge, the env: on its job and the if: on the
         # decoy judge step are each findings.
         ("jobs/jobs-only-requoted-judge-env-and-decoy-finding",
@@ -2057,11 +2139,11 @@ def _job_cases():
           ("registry", "    runs-on: ", "    env:\n      SAMPLE: value\n    runs-on: "),
           ("registry", "'" + JOBS_ONLY_RUN + "'\n", "'" + JOBS_ONLY_RUN + "'\n" + decoy)), (),
          "sets a job-level env:", "outside-judge"),
-        # FIX-529-R7 reviewer reproductions: the judge judged by command tokens. With the canonical
-        # registry judge KEPT, a second spelling whose tokens equal the judge command's (a doubled
-        # space, a ./tools/ path, quoted trailing whitespace) counts, so the doubled judge is a
-        # finding; a flag-free step running this gate's path is judge-shaped without counting (an
-        # unresolved judge-shaped command); and a judge spelled as a matrix value is a value finding.
+        # The judge is judged by command tokens. With the canonical registry judge KEPT, a second
+        # spelling whose tokens equal the judge command's (a doubled space, a ./tools/ path, quoted
+        # trailing whitespace) counts, so the doubled judge is a finding; a flag-free step running
+        # this gate's path is judge-shaped without counting (an unresolved judge-shaped command); and
+        # a judge spelled as a matrix value is a value finding.
         ("jobs/jobs-only-doubled-space-second-judge-finding",
          (("registry", JUDGE_STEP,
            JUDGE_STEP + second + "      - run: " + JOBS_ONLY_RUN.replace("python3 ", "python3  ")
@@ -2084,12 +2166,11 @@ def _job_cases():
            JUDGE_STEP + "  second:\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n"
            "        command: '" + JOBS_ONLY_RUN + "'\n    steps:\n      - run: echo ok\n"),), (),
          "in a value that is not a step's own run: command", "outside-judge"),
-        # FIX-529-R8 reviewer reproductions: selection follows the tokens of every run: of every job
-        # outside the host-patch jobs, so a quote-spliced spelling (shell quote removal builds the
-        # name from parts no literal substring spells), a canonical or spliced judge inside a
-        # one-line literal block scalar (a folded opener is cannot-evaluate, FIX-529-R9), and a
-        # docs/../tools/ path that only the lexical normpath folds are
-        # each classified, never passed unread.
+        # Selection follows the tokens of every run: of every job outside the host-patch jobs, so a
+        # quote-spliced spelling (shell quote removal builds the name from parts no literal substring
+        # spells), a canonical or spliced judge inside a one-line literal block scalar (a folded
+        # opener is cannot-evaluate instead), and a docs/../tools/ path that only the lexical
+        # normpath folds are each classified, never passed unread.
         ("jobs/jobs-only-double-quote-spliced-second-judge-finding",
          (("registry", JUDGE_STEP, JUDGE_STEP + second
            + '      - run: python3 -I -B tools/check_python_host_"pin".py --jobs-o""nly\n'),), (),
@@ -2106,17 +2187,16 @@ def _job_cases():
          (("registry", JUDGE_STEP, JUDGE_STEP + second
            + "      - run: |\n          " + JOBS_ONLY_RUN + "\n"),), (),
          "2 steps outside the host-patch jobs run", "outside-judge"),
-        # FIX-529-R9 reviewer reproductions: the judge counts only when EXACTLY ONE line of a run:
-        # carries tokens and that line's tokens are the judge command's, so a judge spread over two
-        # block-scalar lines (either line order) never counts (a shell runs each line as its own
-        # command, and the flag line alone fails in CI), and a #-leading body line is content, not a
-        # comment: a judge beside one, or spelled on one, is an unresolved judge-shaped finding,
-        # never a counted judge and never a silent pass.
-        # The flag-first order below is PREVIOUSLY ENFORCED documentation, not a discriminating
-        # vector of the line-boundary read: it is red at the parent too, through the same
-        # zero-judge count, and its targeted line-boundary mutant lives in _self_test_cases
-        # (jobs/jobs-only-split-flag-first-line-boundary-mutant-red); that mutant counts either
-        # split order, and the command-first order is asserted red under it there too
+        # The judge counts only when EXACTLY ONE line of a run: carries tokens and that line's tokens
+        # are the judge command's, so a judge spread over two block-scalar lines (either line order)
+        # never counts (a shell runs each line as its own command, and the flag line alone fails in
+        # CI), and a #-leading body line is content, not a comment: a judge beside one, or spelled on
+        # one, is an unresolved judge-shaped finding, never a counted judge and never a silent pass.
+        # The flag-first order below is not a discriminating vector of the line-boundary read: a read
+        # that joins a run:'s lines in order still finds its tokens out of the judge command's order,
+        # so it is red through the same zero-judge count. Its targeted line-boundary mutant lives in
+        # _self_test_cases (jobs/jobs-only-split-flag-first-line-boundary-mutant-red); that mutant
+        # counts either split order, and the command-first order is asserted red under it there too
         # (jobs/jobs-only-split-command-line-boundary-mutant-red).
         ("jobs/jobs-only-split-command-judge-finding",
          (("registry", "run: " + JOBS_ONLY_RUN,
@@ -2377,9 +2457,9 @@ def _self_test_cases(base):
              (("registry", "    steps:\n", "    # judge\f notes\n    steps:\n"),), "\f"),
             ("jobs/jobs-only-name-vertical-tab-cannot-evaluate",
              (("registry", "Python host pin (jobs leg", "Python host pin\v (jobs leg"),), "\v"),
-            # FIX-529-R7/R8: a second job whose header comment carries a form feed: every outside
-            # job's lines, its header included, are refused for control characters, so the character
-            # is never read past, whatever the header names.
+            # A second job whose header comment carries a form feed: every outside job's lines, its
+            # header included, are refused for control characters, so the character is never read
+            # past, whatever the header names.
             ("jobs/jobs-only-header-mention-form-feed-cannot-evaluate",
              (("registry", JUDGE_STEP,
                JUDGE_STEP + "  second: # --jobs-only\f\n    runs-on: ubuntu-latest\n"
@@ -2391,9 +2471,9 @@ def _self_test_cases(base):
 
     # Every job outside the host-patch jobs is read whole with the host-patch jobs' own line model,
     # extended by block scalars, colon-free flow sequences and bare list items: a job property at an
-    # unexpected indent (the job body re-indented by two spaces with a job-level env:, a reviewer
-    # reproduction; its setup-python with: dropped so every line stays within MAX_INDENT and the
-    # placement refusal is what fires), a quoted key YAML reads as env (on the job and on the judge
+    # unexpected indent (the job body re-indented by two spaces with a job-level env:, its
+    # setup-python with: dropped so every line stays within MAX_INDENT and the placement refusal is
+    # what fires), a quoted key YAML reads as env (on the job and on the judge
     # step), an explicit ? key, a quoted run key, a flow-mapping step and a block opener carrying an
     # indentation indicator are each cannot-evaluate, and the copy with the outside-judge rule removed
     # never reads the job and passes (red on revert). A run: carrying a ${{ }} expression, a run: shlex
@@ -2468,7 +2548,7 @@ def _self_test_cases(base):
              ((None, "name: Quality\n", "name: &judge " + JOBS_ONLY_RUN + "\n"),
               ("registry", JUDGE_STEP, JUDGE_STEP + second + "      - run: *judge\n")),
              "opens a YAML anchor, alias or tag"),
-            # FIX-529-R9: a folded (>) run: block is cannot-evaluate, never decoded (the canonical
+            # A folded (>) run: block is cannot-evaluate, never decoded (the canonical
             # judge and a commented-out judge inside one included); a ${{ }} expression and a
             # backslash on a #-leading literal-block body line are refused like any other body line;
             # and the real parsed value type of a run: (a flow sequence, an explicit null in both
@@ -2515,7 +2595,7 @@ def _self_test_cases(base):
             rules.JOB_RULES = JOB_RULES
         check(check_id, (code, _has(lines, marker), removed), (2, True, 0))
 
-    # FIX-529-R7/R8: the env and judge-step-key diagnostics carry exact line numbers, the
+    # The env and judge-step-key diagnostics carry exact line numbers, the
     # before-the-judge wording is its own, every judge-carrying job reports, the run: classification
     # reads token shape (not only the literal fallback), the carrier set holds judge-shaped steps as
     # well as counted judges, and the value scan reads this gate's file name as well as the flag. Each
@@ -2658,7 +2738,7 @@ def _self_test_cases(base):
           (code, _has(lines, "in a value that is not a step's own run: command"),
            value_scan_mutant.evaluate(root, HOST)[0]), (1, True, 0))
 
-    # FIX-529-R9 targeted mutants. The MAX_INDENT bound on the three extended entry kinds (a block
+    # The MAX_INDENT bound on the three extended entry kinds (a block
     # opener, a flow sequence, a bare list item nested deeper than a step input): each vector is
     # cannot-evaluate through deep() in _outside_entries, and the copy with that bound removed reads
     # each and passes (red on revert).
@@ -2722,10 +2802,10 @@ def _self_test_cases(base):
     # The host-patch flag read is raw text, never shlex token equality: every quote, backslash and
     # dollar character is deleted from each line of the parsed run: scalar, and a result naming
     # JOBS_ONLY_STEM anywhere is a finding. A quote splice whose shlex token is not the exact flag
-    # (echo "--jobs-o here") is red under the token-equality mutant (the previous read, which the
+    # (echo "--jobs-o here") is red under the token-equality mutant (a token-equality read, which the
     # quoted argument defeats); the plain spelling carries the literal flag, which the literal line
-    # scan (host_judges) already refused, so it is PREVIOUSLY ENFORCED (the mutant stays red on it
-    # through that scan) and is listed as such, not as a discriminating vector of that change.
+    # scan (host_judges) refuses as well, so the mutant stays exit 1 on it through that scan: it is
+    # listed as a vector that does not discriminate the raw-text read.
     token_equality_mutant = _mutant(
         base, "python_host_pin_token_equality_mutant", source,
         (('if any(_names_flag_text(text) for text in value.split("\\n")):',
@@ -2756,21 +2836,19 @@ def _self_test_cases(base):
                       + " carries a ${{ }} expression"),
            host_scan_mutant.evaluate(root, HOST)[0]), (2, True, 0))
 
-    # FIX-529-R13: a host-patch run: line is held to a CLOSED safe-character grammar, not a list of
-    # refused openers: any character outside HOST_RUN_SAFE makes the line cannot-evaluate (exit 2,
-    # the character named). BEHAVIOUR CHANGES against the parent commit, which carried the opener
-    # list, in four vectors only: the [o] glob and the process substitution (exit 0 at the parent,
-    # whose raw text does not spell the stem --jobs-o) and the * and ? globs (exit 1 at the parent,
-    # a finding of the deletion read), each now exit 2. PREVIOUSLY REFUSED at the parent (exit 2
-    # through its opener list) and only reworded here, to the refused character: the eval spelled
-    # with a $' opener, the ANSI-C octal and hex quotes, the brace sequence, the backquote and $(
-    # substitutions and the dollar-single-quote --jobs-o$'n'ly. An eval spelled only in safe
-    # characters needs no refused character and is not refused by the grammar (the deletion read
-    # still reads its line). grammar_removed_mutant is NOT the parent: it drops the whole character
-    # refusal, opener list included, so each vector is red under it, exit 0 where the raw text does
-    # not spell the stem (the [o] glob, the process substitution, the eval and the ANSI-C, brace,
-    # backquote and $( forms) and exit 1 where the deletion read still finds it (echo --jobs-o*,
-    # echo --jobs-o?ly and --jobs-o$'n'ly).
+    # A host-patch run: line is held to a CLOSED safe-character grammar, not a list of refused
+    # openers: any character outside HOST_RUN_SAFE makes the line cannot-evaluate (exit 2, the
+    # character named). A list of refused openers leaves pathname expansion and process substitution
+    # unread (the [o] glob, the * and ? globs and source <(...) among them, HOST_RUN_SAFE above); the
+    # grammar refuses each by the character it must spell, and refuses the other expansion forms
+    # here (the eval spelled with a $' opener, the ANSI-C octal and hex quotes, the brace sequence,
+    # the backquote and $( substitutions and the dollar-single-quote --jobs-o$'n'ly) by their
+    # refused character too. An eval spelled only in safe characters needs no refused character and
+    # is not refused by the grammar (the deletion read still reads its line). grammar_removed_mutant
+    # drops the whole character refusal, so each vector is red under it, exit 0 where the raw text
+    # does not spell the stem (the [o] glob, the process substitution, the eval and the ANSI-C,
+    # brace, backquote and $( forms) and exit 1 where the deletion read still finds it (echo
+    # --jobs-o*, echo --jobs-o?ly and --jobs-o$'n'ly).
     grammar_removed_mutant = _mutant(
         base, "python_host_pin_no_run_grammar_mutant", source,
         (("named = _refused_run_char" + "(text)", "named = None"),))
@@ -2806,10 +2884,10 @@ def _self_test_cases(base):
 
     # A host-patch run: line whose first word is a shell assignment is cannot-evaluate (exit 2, the
     # assignment named): a safe-character PATH= prefix re-points which file the named command runs
-    # (the parent commit and the closed grammar alone passed it, exit 0), and so does one after a
-    # time -p prefix word, and a += append. Each is red under assignment_removed_mutant (exit 0).
-    # The control after them is ACCEPTANCE ONLY: an assignment-shaped ARGUMENT after the command
-    # word is no prefix and passes (exit 0 at the parent, the pin and under the mutant alike).
+    # (the closed grammar alone passes it), and so does one after a time -p prefix word, and a +=
+    # append. Each is red under assignment_removed_mutant (exit 0). The control after them is
+    # ACCEPTANCE ONLY: an assignment-shaped ARGUMENT after the command word is no prefix and passes
+    # (exit 0); the refusal reads the first word alone.
     assignment_removed_mutant = _mutant(
         base, "python_host_pin_no_run_assignment_mutant", source,
         (("assigned = _leading_assignment" + "(text)", "assigned = None"),))
@@ -2845,18 +2923,23 @@ def _self_test_cases(base):
                          for text in texts], [(count, None, None)] * len(texts))
     check("jobs/host-job-committed-run-lines-counted", (len(committed), len(set(committed))), (8, 7))
 
-    # The step shape (RUN_KEYS, STEP_SHELL): the Python host pin step, each suite step and the --jobs-only
-    # judge step carry exactly name, run and shell, with shell: bash. A held step with no shell: or with
-    # a shell: other than bash (each end of the one accepted value: bash with arguments, Bash, a quoted
-    # 'bash ' and an empty value) is a finding in its own words, red in the copy with its rule removed
-    # and in the copy whose _shell_departure no longer names that departure; a working-directory:, an
-    # env: or a missing name: on a held step is a finding too. Exactly shell: bash, quoted or with a
-    # trailing comment, passes.
+    # The step shape (RUN_KEYS, STEP_SHELL_LINE): the Python host pin step, each suite step and the
+    # --jobs-only judge step carry exactly name, run and shell, the shell: written as the exact line
+    # shell: bash. A held step with no shell: or with a shell: other than bash (each end of the one
+    # accepted value: bash with arguments, Bash, a quoted 'bash ' and an empty value) is a finding in its
+    # own words, red in the copy with its rule removed and in the copy whose _shell_departure no longer
+    # names that departure; so is a shell: bash written on any other line (a quoted 'bash' or "bash", a
+    # trailing comment, a second space before the value, trailing whitespace), each of which parses to
+    # bash, red under spelling_mutant, whose _shell_departure reads the parsed value alone. A
+    # working-directory:, an env: or a missing name: on a held step is a finding too. The exact line
+    # passes in every held step of the clean fixture (fixture/clean-tree-passes).
     no_shell_mutant = _mutant(base, "python_host_pin_no_shell_mutant", source,
                               (('if "shell" not in ' + 'step:\n        return',
                                 'if "shell" not in step:\n        return None\n    if False:\n        return'),))
     other_shell_mutant = _mutant(base, "python_host_pin_other_shell_mutant", source,
-                                 (('if step["shell"] != ' + 'STEP_SHELL:', 'if False:'),))
+                                 (('if shell != ' + 'STEP_SHELL:', 'if False:'),))
+    spelling_mutant = _mutant(base, "python_host_pin_shell_spelling_mutant", source,
+                              (('if shell == STEP_SHELL and ' + 'written != STEP_SHELL_LINE:', 'if False:'),))
     gate_lines = SHELL_LINE + "        run: " + GATE_RUN + "\n"
     judge_lines = SHELL_LINE + "        run: " + JOBS_ONLY_RUN + "\n"
     core_lines = SHELL_LINE + "        run: " + HOST_SUITES[GFE][0] + "\n"
@@ -2866,6 +2949,7 @@ def _self_test_cases(base):
         return lines.replace(SHELL_LINE, "        shell:" + (" " + value if value else "") + "\n")
 
     judge_carries = "the step that carries the --jobs-only judge carries "
+    judge_writes = "the step that carries the --jobs-only judge writes shell: bash as "
     core_step = "does not run its suite {} as an executable step: step 4 ".format(HOST_SUITES[GFE][0])
     opf_step = "does not run its suite {} as an executable step: step 4 ".format(HOST_SUITES[OPF][0])
     for check_id, edits, marker, rule, mutant in (
@@ -2891,6 +2975,23 @@ def _self_test_cases(base):
              judge_carries + "no shell: (want shell: bash)", "outside-judge", no_shell_mutant),
             ("jobs/jobs-only-step-other-shell-finding", (("registry", judge_lines, shell(judge_lines, "pwsh")),),
              judge_carries + "shell: 'pwsh', not shell: bash", "outside-judge", other_shell_mutant),
+            ("jobs/gate-step-single-quoted-shell-finding", ((OPF, gate_lines, shell(gate_lines, "'bash'")),),
+             "but writes shell: bash as \"shell: 'bash'\", not as the exact line shell: bash", "gate-step",
+             spelling_mutant),
+            ("jobs/jobs-only-step-double-quoted-shell-finding",
+             (("registry", judge_lines, shell(judge_lines, "\"bash\"")),),
+             judge_writes + "'shell: \"bash\"', not as the exact line shell: bash", "outside-judge",
+             spelling_mutant),
+            ("jobs/suite-step-shell-trailing-comment-finding",
+             ((GFE, core_lines, shell(core_lines, "bash  # the bound shell")),),
+             core_step + "writes shell: bash as 'shell: bash  # the bound shell', not as the exact line",
+             "suite-step", spelling_mutant),
+            ("jobs/gate-step-shell-double-space-finding", ((GFE, gate_lines, shell(gate_lines, " bash")),),
+             "but writes shell: bash as 'shell:  bash', not as the exact line shell: bash", "gate-step",
+             spelling_mutant),
+            ("jobs/suite-step-shell-trailing-space-finding", ((OPF, opf_lines, shell(opf_lines, "bash ")),),
+             opf_step + "writes shell: bash as 'shell: bash ', not as the exact line", "suite-step",
+             spelling_mutant),
             ("jobs/gate-step-working-directory-finding",
              ((OPF, gate_lines, "        working-directory: opf\n" + gate_lines),),
              "but carries working-directory:, which can skip", "gate-step", None),
@@ -2898,11 +2999,11 @@ def _self_test_cases(base):
              (("registry", judge_lines, "        working-directory: tools\n" + judge_lines),),
              judge_carries + "working-directory:", "outside-judge", None),
             ("jobs/gate-step-no-name-finding",
-             ((OPF, "      - name: Python host pin\n" + SHELL_LINE, "      - shell: bash\n"),),
+             ((OPF, "      - name: Python host pin\n" + gate_lines, "      - run: " + GATE_RUN + "\n" + SHELL_LINE),),
              "but carries no name:", "gate-step", None),
             ("jobs/jobs-only-step-no-name-finding",
-             (("registry", "      - name: Python host pin (jobs leg, outside the host-patch jobs)\n" + SHELL_LINE,
-               "      - shell: bash\n"),),
+             (("registry", "      - name: Python host pin (jobs leg, outside the host-patch jobs)\n" + judge_lines,
+               "      - run: " + JOBS_ONLY_RUN + "\n" + SHELL_LINE),),
              judge_carries + "no name:", "outside-judge", None),
             # An env: on the Python host pin step: the step-env and gate-step rules both refuse it.
             ("jobs/gate-step-env-finding",
@@ -2920,13 +3021,6 @@ def _self_test_cases(base):
         if mutant is not None:
             got, want = got + (mutant.evaluate(root, HOST)[0],), want + (0,)
         check(check_id, got, want)
-    for check_id, edits in (
-            ("jobs/gate-step-single-quoted-shell-passes", ((OPF, gate_lines, shell(gate_lines, "'bash'")),)),
-            ("jobs/jobs-only-step-double-quoted-shell-passes",
-             (("registry", judge_lines, shell(judge_lines, "\"bash\"")),)),
-            ("jobs/suite-step-shell-trailing-comment-passes",
-             ((GFE, core_lines, shell(core_lines, "bash  # the bound shell")),))):
-        check(check_id, evaluate(_fixture(base, workflow=_workflow(edits)), HOST)[0], 0)
     # The suite-shape read: a suite of a suite runner that HOST_SUITES does not name is a suite step, so
     # adding one is a finding; the copy whose _suite_shaped reads only the SUITE_RUNS texts passes it.
     suite_shape_mutant = _mutant(base, "python_host_pin_suite_runs_only_mutant", source,
@@ -2941,9 +3035,9 @@ def _self_test_cases(base):
           (code, _has(lines, "adds python3 -I -B tools/check_selftest_execution.py --suite python-floor-selftest"),
            suite_shape_mutant.evaluate(root, HOST)[0]), (1, True, 0))
 
-    # FIX-529-R10: the number read is the conservative spelling classifier, which covers the
-    # fractional sexagesimal forms the previous pattern missed; each vector is red under the mutant
-    # carrying the previous pattern. The = value key, the date-led timestamp carrying a time part
+    # The number read is the conservative spelling classifier, which covers the fractional
+    # sexagesimal forms a narrower numeric pattern misses; each vector is red under the mutant
+    # carrying that narrower pattern. The = value key, the date-led timestamp carrying a time part
     # and the quoted-scalar exemption each hold their own targeted mutant; the quoted case is an
     # ACCEPTANCE check WITH a discriminating mutant (the copy without the exemption refuses the
     # string the intact gate accepts), listed apart from the regression vectors above.
@@ -2964,10 +3058,10 @@ def _self_test_cases(base):
         code, lines = evaluate(root, HOST)
         check(check_id, (code, _has(lines, "a number"),
                          old_number_mutant.evaluate(root, HOST)[0]), (2, True, 0))
-    # FIX-529-R12 (the radix letters match in either case; no reader's case folding is assumed):
-    # 0X1F, 0O17 and +0X1F are numbers like their lower-case spellings; each is red under the copy
-    # carrying the lower-case-only class, and 0B101, which already matched through the hex letters
-    # A-F, was previously enforced and stays exit 2 under it.
+    # The radix letters match in either case (no reader's case folding is assumed): 0X1F, 0O17 and
+    # +0X1F are numbers like their lower-case spellings, each red under the copy carrying the
+    # lower-case-only class; 0B101 matches through the hex letters A-F in that class too, so it stays
+    # exit 2 under it and does not discriminate the radix change.
     lowercase_radix_mutant = _mutant(
         base, "python_host_pin_lowercase_radix_only_mutant", source,
         (('r"[-+.0-9][0-9_:' + '.a-fA-FoxOX+-]*"', 'r"[-+.0-9][0-9_:.a-fA-Fox+-]*"'),))
@@ -2992,7 +3086,7 @@ def _self_test_cases(base):
            equals_mutant.evaluate(root, HOST)[0]), (2, True, 0))
     timestamp_mutant = _mutant(base, "python_host_pin_no_timestamp_kind_mutant", source,
                                (("if TIMESTAMP_PLAIN_RE" + ".fullmatch(value):", "if False:"),))
-    # FIX-529-R13: the timestamp classifier now REQUIRES the YAML 1.1 time fields after the T, t or
+    # The timestamp classifier REQUIRES the YAML 1.1 time fields after the T, t or
     # whitespace separator (an hour of one or two digits, :MM:SS, an optional fraction and an
     # optional Z or +-HH[:MM] zone), so only a real date-and-time spelling is a timestamp. A valid T,
     # tab, mixed-whitespace or space spelling stays refused (exit 2), red under timestamp_mutant (the
@@ -3012,8 +3106,8 @@ def _self_test_cases(base):
     # Each OPTIONAL time field of TIMESTAMP_PLAIN_RE has a positive vector (exit 2, a timestamp),
     # red under a flip of that field alone, which reads the vector as a string (exit 0): a
     # fraction, a signed offset, a one-digit hour, a lower-case t, a zone-less time and whitespace
-    # before the zone. Each was exit 2 at the parent too (its looser pattern matched any suffix), so
-    # these vectors hold the fields, not a change of behaviour.
+    # before the zone. A pattern that reads any suffix after the separator as a time refuses each of
+    # them too, so these vectors hold the fields; the string vectors below hold the suffix reading.
     for check_id, scalar, anchor, replacement in (
             ("jobs/jobs-only-fraction-timestamp-run-cannot-evaluate", "2026-10-14T06:30:00.5Z",
              'r"(?:\\.[0-9]*)?' + '(?:[ \\t]*', 'r"(?:[ \\t]*'),
@@ -3037,10 +3131,10 @@ def _self_test_cases(base):
         code, lines = evaluate(root, HOST)
         check(check_id, (code, _has(lines, "a timestamp"), field_mutant.evaluate(root, HOST)[0]),
               (2, True, 0))
-    # FIX-529-R13: a date-led value whose suffix after the separator is NOT a time (--help after a
-    # tab, nonsense after a space, garbage after T) is a STRING, not a timestamp, so the run: passes
-    # (exit 0). Each is red under loose_timestamp_mutant (the pin's pattern, whose .+ suffix matched
-    # any text and misread these as timestamps, exit 2): the fix ends that false-positive class.
+    # A date-led value whose suffix after the separator is NOT a time (--help after a tab, nonsense
+    # after a space, garbage after T) is a STRING, not a timestamp, so the run: passes (exit 0). Each
+    # is red under loose_timestamp_mutant (a pattern whose .+ suffix matches any text and misreads
+    # these as timestamps, exit 2), so the time fields keep that false-positive class out.
     loose_timestamp_mutant = _mutant(
         base, "python_host_pin_loose_timestamp_pattern_mutant", source,
         (('r"[0-9]{4}-[0-9][0-9]?-[0-9][0-9]?(?:(?:[Tt]|[ \\t]+)[0-9][0-9]?:[0-9][0-9]:[0-9][0-9]"\n'
@@ -3063,15 +3157,14 @@ def _self_test_cases(base):
     check("jobs/jobs-only-quoted-number-run-passes",
           (evaluate(root, HOST)[0], quoted_exemption_mutant.evaluate(root, HOST)[0]), (0, 2))
 
-    # FIX-529-R10: the flag-first split judge, red under a targeted mutant of the LINE-BOUNDARY
-    # read: the copy that counts a run: as the judge when the tokens of all its lines, line
-    # boundaries and token order ignored, are the judge command's counts the two-line spelling and
-    # passes the fixture the intact gate refuses (at the parent this fixture was red only through
-    # the zero-judge count; _job_cases keeps that case and marks it previously enforced).
-    # FIX-529-R12 (the mutant's scope): the mutation replaces the whole single-line token-equality
-    # read (the normalized-path comparison among what it drops), so it counts EITHER split order,
-    # never the flag-first order alone; the command-first split is asserted red under the same
-    # mutant right after.
+    # The flag-first split judge, red under a targeted mutant of the LINE-BOUNDARY read: the copy
+    # that counts a run: as the judge when the tokens of all its lines, line boundaries and token
+    # order ignored, are the judge command's counts the two-line spelling and passes the fixture the
+    # intact gate refuses (without that mutant the fixture is red through the zero-judge count alone;
+    # _job_cases keeps that case and marks it as not discriminating). The mutation replaces the whole
+    # single-line token-equality read (the normalized-path comparison among what it drops), so it
+    # counts EITHER split order, never the flag-first order alone; the command-first split is
+    # asserted red under the same mutant right after.
     line_boundary_mutant = _mutant(
         base, "python_host_pin_joined_lines_judge_mutant", source,
         (("if len(groups) == 1 and _counts_as_judge" + "(groups[0]):",
@@ -3132,9 +3225,8 @@ def _self_test_cases(base):
           evaluate(_fixture(base, workflow=_workflow((("registry", JUDGE_STEP,
                                                        JUDGE_STEP + needs_job),))), HOST)[0], 0)
 
-    # FIX-529-R9/R10 ACCEPTANCE ONLY (each exit 0; by design these two checks are red neither at
-    # the parent nor under a mutant of this change, so they are listed apart from every regression
-    # vector): a #-leading line inside a literal block body is read and passed (the committed
+    # ACCEPTANCE ONLY (each exit 0; by design these two checks are red under no mutant, so they are
+    # listed apart from every regression vector): a #-leading line inside a literal block body is read and passed (the committed
     # workflow carries comment lines inside block bodies), and a literal block whose body carries a
     # blank line is accepted: the blank body line is DROPPED by the line reader, as the shell
     # ignores one (the value joins the non-blank body lines; dropping is the disclosed behaviour,
@@ -3150,8 +3242,8 @@ def _self_test_cases(base):
                                                        + "      - run: |\n          echo first\n"
                                                        "\n          echo second\n"),))), HOST)[0], 0)
 
-    # FIX-529-R12 ACCEPTANCE ONLY (exit 0 by design, red neither at the parent nor under a mutant
-    # of this change): the host-patch flag read scans the PARSED run: scalar, so a stem spelled
+    # ACCEPTANCE ONLY (exit 0 by design, red under no mutant): the host-patch flag read scans the
+    # PARSED run: scalar, so a stem spelled
     # only inside a trailing YAML comment of a one-line plain run: is YAML-dropped text, never
     # command text, and selects and refuses nothing. The two block-scalar scopes differ by job kind:
     # a HOST-PATCH job's run: | block scalar is cannot-evaluate at the host-job line model (ENTRY_RE,
@@ -3162,7 +3254,7 @@ def _self_test_cases(base):
     root = _fixture(base, workflow=_workflow(((OPF, _suite_step(OPF),
                                                _suite_step(OPF) + comment_extra),)))
     check("jobs/host-job-comment-only-stem-passes", evaluate(root, HOST)[0], 0)
-    # FIX-529-R13: the two block-scalar scopes shown directly. A run: | block (echo ok, then a
+    # The two block-scalar scopes shown directly. A run: | block (echo ok, then a
     # #-leading body line) is cannot-evaluate (exit 2) in a HOST-PATCH job, refused by the host-job
     # line model before the flag read. An OUTSIDE job's literal block KEEPS its #-leading body line,
     # shown observably: when that line carries a ${{ }} expression the run: is cannot-evaluate
@@ -3247,17 +3339,12 @@ def _self_test_cases(base):
         FAILURES.append("real/source: {}".format(exc))
     if real is not None:
         check("real/tree-passes-at-its-host-patch", evaluate(ROOT, real)[0], 0)
-    # The git-fixture-env host-patch suites are the '3.14' lanes of the committed workflow, in its order:
-    # the run: of every step outside HOST_JOBS that runs a git-fixture-env suite through the suite runner.
-    lane = "run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-"
-    lanes, job = [], None
-    for line in _read_text(ROOT / WORKFLOW_REL).split("\n"):
-        header = JOB_RE.fullmatch(line.rstrip("\r"))
-        if header is not None:
-            job = header.group("id")
-        elif job not in HOST_JOBS and line.strip().startswith(lane):
-            lanes.append(line.strip()[len("run: "):])
-    check("real/git-fixture-env-host-suites-are-the-lanes", tuple(lanes), HOST_SUITES[GFE])
+    # The git-fixture-env host-patch suites are the '3.14' lanes of the committed workflow, in its order
+    # (_workflow_lanes): each lane line as written, and the pin lines of the job that carries it.
+    check("real/git-fixture-env-host-suites-are-the-lanes",
+          _workflow_lanes(_read_text(ROOT / WORKFLOW_REL)),
+          (tuple("run: " + run for run in HOST_SUITES[GFE]),
+           (("python-version: '3.14'",),) * len(HOST_SUITES[GFE])))
     # The python-floor gate accepts a host-patch pin only inside these jobs of this workflow, read from this
     # source in this form, and refuses these line-break characters: its copies of those names must be these.
     floor = _copy(base, "python_floor_names", _read_text(ROOT / "tools" / "check_python_floor.py"))
@@ -3309,6 +3396,26 @@ def _red_on_revert(base):
                            ((anchor, "except (" + kept + ") as exc:"),))
         check(check_id, (_parse_refusal(evaluate, root, True, kind),
                          _parse_refusal(unmapped.evaluate, root, True, kind)), ((2, True), "raised " + kind.__name__))
+    # The same injection over a key parser that refuses the key itself first, by RecursionError, as a
+    # release that bounds key depth does (_capped_parser emulates one, so these vectors do not depend on
+    # the patch release that runs the self-test): MemoryError and ValueError still escape the copy that
+    # no longer maps them. Each is red under passthrough_mutant, whose _key_depth_bounded lets the
+    # parser's own RecursionError through: the copy that maps RecursionError then reports
+    # cannot-evaluate instead of letting the injected class escape.
+    passthrough_mutant = _mutant(base, "python_host_pin_parser_class_passthrough_mutant", source,
+                                 (('raise kind("injected: the key parser itself ' + 'refused a key") from None',
+                                   "raise"),))
+    for check_id, kind, kept in (
+            ("source/capped-parser-injected-memory-error-cannot-evaluate", MemoryError,
+             "ValueError, RecursionError"),
+            ("source/capped-parser-injected-value-error-cannot-evaluate", ValueError,
+             "RecursionError, MemoryError")):
+        unmapped = _mutant(base, "python_host_pin_capped_without_" + kind.__name__.lower(), source,
+                           ((anchor, "except (" + kept + ") as exc:"),))
+        check(check_id, (_parse_refusal(evaluate, root, True, kind, capped=True),
+                         _parse_refusal(unmapped.evaluate, root, True, kind, capped=True),
+                         passthrough_mutant._parse_refusal(unmapped.evaluate, root, True, kind, capped=True)),
+              ((2, True), "raised " + kind.__name__, (2, True)))
 
 
 def self_test():

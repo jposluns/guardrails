@@ -2704,15 +2704,20 @@ class _ParserMismatch(Exception):
 def _key_depth_bounded(real, calls, kind=RecursionError):
     """tomllib's key parser, made to raise RecursionError on a key of more than 1000 dotted parts, as a
     release that bounds key depth does, or kind (MemoryError or ValueError, to inject that class at the
-    parse: real memory exhaustion cannot be provoked safely). calls records each call; a call or a
-    result that does not fit parse_key(src, pos) -> (pos, key), pos an int within src and key a tuple of
-    str, raises _ParserMismatch."""
+    parse: real memory exhaustion cannot be provoked safely). A RecursionError or MemoryError that the
+    real parser raises itself (a release whose own parser bounds key depth refuses such a key inside
+    it) is raised as kind too, as _key_part_capped does, so the class a vector asserts never depends on
+    the patch release that runs the self-test. calls records each call; a call or a result that does
+    not fit parse_key(src, pos) -> (pos, key), pos an int within src and key a tuple of str, raises
+    _ParserMismatch."""
     def parse_key(*args, **kwargs):
         calls.append(len(args))
         try:
             result = real(*args, **kwargs)
         except TypeError as exc:
             raise _ParserMismatch("calling it raised TypeError: {}".format(exc))
+        except (RecursionError, MemoryError):
+            raise kind("injected: the key parser itself refused a key") from None
         src = args[0] if args else kwargs.get("src")
         if not (isinstance(result, tuple) and len(result) == 2):
             raise _ParserMismatch("it returned {} rather than (pos, key)".format(type(result).__name__))
@@ -2727,10 +2732,25 @@ def _key_depth_bounded(real, calls, kind=RecursionError):
     return parse_key
 
 
-def _host_parse_refusal(root, bound, kind=RecursionError, evaluate_tree=None):
+def _capped_parser(real):
+    """real, tomllib's key parser, as a release whose own parser bounds key depth runs it: a key of more
+    than 1000 dotted parts is refused by a RecursionError from inside the parser (emulated here once the
+    real parser returns such a key), so a vector shows what the injection does on such a release
+    whatever patch release runs the self-test."""
+    def parse_key(*args, **kwargs):
+        result = real(*args, **kwargs)
+        if isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], tuple) \
+                and len(result[1]) > 1000:
+            raise RecursionError("emulated: a key parser that bounds key depth")
+        return result
+    return parse_key
+
+
+def _host_parse_refusal(root, bound, kind=RecursionError, evaluate_tree=None, capped=False):
     """(exit code, whether the report says HOST_SOURCE_REL does not parse) for evaluate_tree (evaluate when
     None) over root, with tomllib's key parser bounded when bound is true (raising kind,
-    _key_depth_bounded); "raised NAME" when the exception escapes. The bound
+    _key_depth_bounded) and, when capped is true, the parser under that bound refusing such a key itself
+    (_capped_parser); "raised NAME" when the exception escapes. The bound
     patches a private tomllib function: on a release where it is missing, has another shape or is never
     called, the result is a text naming that cause, so the case fails cleanly rather than crashing."""
     parser = getattr(tomllib, "_parser", None)
@@ -2740,7 +2760,7 @@ def _host_parse_refusal(root, bound, kind=RecursionError, evaluate_tree=None):
                 "key-depth case cannot run")
     calls = []
     if bound:
-        parser.parse_key = _key_depth_bounded(real, calls, kind)
+        parser.parse_key = _key_depth_bounded(_capped_parser(real) if capped else real, calls, kind)
     try:
         code, lines = (evaluate if evaluate_tree is None else evaluate_tree)(root)
     except (RecursionError, ValueError, MemoryError) as exc:
@@ -3008,8 +3028,8 @@ def _self_test_cases(base):
     check("pins/host-patch-unplain-job-id-finding",
           (code, _has(lines, "quality.yml:11: python-version '3.14.4' differs"),
            _has(lines, "quality.yml:6: python-version")), (1, True, False))
-    # A reviewer reproduction: the real workflows with every '3.14' pin moved to the host patch. Only the
-    # host-patch jobs' pins pass; each pin that was '3.14' is a finding.
+    # The real workflows with every '3.14' pin moved to the host patch. Only the host-patch jobs' pins
+    # pass; each pin that was '3.14' is a finding.
     real = {WORKFLOWS_REL + "/" + name: _read_text(ROOT / WORKFLOWS_REL / name)
             for name in sorted(os.listdir(ROOT / WORKFLOWS_REL)) if _yaml_name(name)}
     floor_pin = "python-version: '3.14'"
@@ -3079,6 +3099,32 @@ def _self_test_cases(base):
         check(check_id, (_host_parse_refusal(root, True, kind),
                          _host_parse_refusal(root, True, kind, unmapped.evaluate)),
               ((2, True), "raised " + kind.__name__))
+    # The same injection over a key parser that refuses the key itself first, by RecursionError, as a
+    # release that bounds key depth does (_capped_parser emulates one, so these vectors do not depend on
+    # the patch release that runs the self-test): MemoryError and ValueError still escape the copy that
+    # no longer maps them. Each is red in the copy whose _key_depth_bounded lets the parser's own
+    # RecursionError through: the copy that maps RecursionError then reports cannot-evaluate instead of
+    # letting the injected class escape.
+    passthrough = 'raise kind("injected: the key parser itself ' + 'refused a key") from None'
+    if gate.count(passthrough) != 1:
+        raise CannotEvaluate("the _key_depth_bounded conversion anchor occurs {} times".format(
+            gate.count(passthrough)))
+    _write(base, "python_floor_parser_class_passthrough.py", gate.replace(passthrough, "raise"))
+    passthrough_copy = _load_path("python_floor_parser_class_passthrough",
+                                  base / "python_floor_parser_class_passthrough.py")
+    for check_id, kind, kept in (
+            ("pins/host-patch-source-capped-parser-injected-memory-error-cannot-evaluate", MemoryError,
+             "ValueError, RecursionError"),
+            ("pins/host-patch-source-capped-parser-injected-value-error-cannot-evaluate", ValueError,
+             "RecursionError, MemoryError")):
+        name = "python_floor_capped_without_" + kind.__name__.lower()
+        _write(base, name + ".py", gate.replace(mapping, mapping.replace(
+            "ValueError, RecursionError, " + "MemoryError", kept)))
+        unmapped = _load_path(name, base / (name + ".py"))
+        check(check_id, (_host_parse_refusal(root, True, kind, capped=True),
+                         _host_parse_refusal(root, True, kind, unmapped.evaluate, capped=True),
+                         passthrough_copy._host_parse_refusal(root, True, kind, unmapped.evaluate, capped=True)),
+              ((2, True), "raised " + kind.__name__, (2, True)))
     # A key parser whose result breaks the (pos, key) contract: the bounded parser names the mismatch.
     root = _fixture(base, workflow_pin="3.14.4", job=opf, files=host)
     for check_id, name in (
@@ -3580,8 +3626,8 @@ def _self_test_cases(base):
             (fallback_head + "    @staticmethod\n    def load():\n        return 1\n", 7),
             (fallback_head + "    class Fallback(dict):\n        pass\n", 6))], [(1, True)] * 2)
     # The canonical grammar, rule by rule. Each case breaks one rule, so it passes when that rule alone
-    # is removed from the matcher. The round-3 QA forms first: a message that execs a clean exit 0 or
-    # closes the stream, and a version test that raises (exit 1).
+    # is removed from the matcher. First a message that execs a clean exit 0 or closes the stream, and
+    # a version test that raises (exit 1).
     check("fallback/message-call-findings", [fallback_case(fallback_refusal(write=write), 7) for write in (
         "sys.stderr.write(os.execl(sys.executable, sys.executable, \"-I\", \"-B\", \"-c\", "
         "\"raise SystemExit(0)\"))",
@@ -3604,8 +3650,7 @@ def _self_test_cases(base):
             ("TOOL = str(1)", "TOOL"), ("TOOL = 1", "TOOL"), ("sys = \"error\\n\"", "sys"),
             ("TOOL = sys.stderr = \"error\\n\"", "TOOL"), ("sys.stderr = \"error\\n\"", "\"error\\n\""),
             ("TOOL: str = \"error\\n\"", "TOOL"))], [(1, True)] * 6)
-    # The round-3 QA MINOR 3: `import os` is required and must bind os (an unbound os is a NameError,
-    # exit 1).
+    # `import os` is required and must bind os (an unbound os is a NameError, exit 1).
     check("fallback/import-os-findings", [fallback_case(fallback_refusal(before=before), 6) for before in (
         "", "    import os as _os\n", "    import posix as os\n", "    import os, sys\n")], [(1, True)] * 4)
     check("fallback/version-split-findings", [fallback_case(source, 7) for source in (
@@ -3641,8 +3686,8 @@ def _self_test_cases(base):
         "    os._exit(2, os._exit(0))\n", "    os._exit(2, flag=os._exit(0))\n", "    sys._exit(2)\n",
         "    os.umask(2)\n", "    _exit(2)\n", "    os.path._exit(2)\n", "    CODE = os._exit(2)\n",
         "    os._exit\n")], [(1, True)] * 12)
-    # The round-3 QA MINOR 2 first: a re-raise naming another module re-raises the guarded module's
-    # own import error (exit 1). A dotted or from-import can fail on a module the re-raise does not name.
+    # A re-raise naming another module re-raises the guarded module's own import error (exit 1). A
+    # dotted or from-import can fail on a module the re-raise does not name.
     check("fallback/reraise-findings", [fallback_case(source, line) for source, line in (
         (fallback_reraise(reraise="    if exc.name != \"tomli\":\n        raise\n"), 6),
         (fallback_reraise(reraise="    if True:\n        raise\n"), 6),
@@ -3661,7 +3706,7 @@ def _self_test_cases(base):
         (fallback_reraise(guarded="    from tomllib import loads\n",
                           reraise="    if exc.name != \"loads\":\n        raise\n"), 6),
         (fallback_reraise(guarded="    import tomllib\n    import json\n"), 7))], [(1, True)] * 14)
-    # The round-4 QA MEDIUM: a re-raise in an unnamed handler reads None.name, one after a from-import
+    # A re-raise in an unnamed handler reads None.name, one after a from-import
     # compares exc.name with None (every import error is re-raised), and one under except* reads the
     # .name an ExceptionGroup lacks; each exits 1 without the diagnostic.
     check("fallback/reraise-binding-findings", [fallback_case(source, 6) for source in (
@@ -3676,7 +3721,7 @@ def _self_test_cases(base):
         prefix."""
         return prefix + "try:\n    import tomllib\nexcept ModuleNotFoundError" + name + ":\n"
 
-    # The round-4 QA MINOR 2: the handler's `as` clause rebinds a name the grammar reads (as sys the
+    # The handler's `as` clause rebinds a name the grammar reads (as sys the
     # diagnostic is never written, or the version split exits 1; as tuple the split exits 1; as
     # BaseException the wrapping try catches nothing). An `as os` is refused with them, though the
     # handler's `import os` rebinds os.
@@ -3685,7 +3730,7 @@ def _self_test_cases(base):
         fallback_split(head=fallback_named(" as tuple")),
         fallback_refusal(head=fallback_named(" as BaseException")),
         fallback_refusal(head=fallback_named(" as os")))], [(1, True)] * 5)
-    # The round-4 QA MINOR 3: sys is bound by a module-level `import sys` before the try. With none,
+    # The fallback needs sys bound by a module-level `import sys` before the try. With none,
     # with one after the try, an aliased one or one in a function body, the plain diagnostic's
     # NameError is swallowed (the diagnostic is lost) and the version split's exits 1.
     check("fallback/sys-binding-findings", [fallback_case(source, 5) for source in (
@@ -3897,8 +3942,8 @@ def _red_on_revert(base, good):
 
 
 def _rule_reverts(base):
-    """Red-on-revert for each rule of the line model: a reviewer reproduction judged by evaluate() of this
-    gate and of a copy loaded through importlib with that one rule removed from RULES."""
+    """Red-on-revert for each rule of the line model: a fixture that breaks that rule, judged by evaluate()
+    of this gate and of a copy loaded through importlib with that one rule removed from RULES."""
     copy = base / "python_floor_copy.py"
     _write(base, copy.name, _read_text(Path(__file__).resolve()))
     spec = importlib.util.spec_from_file_location("python_floor_copy", copy)
