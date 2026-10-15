@@ -21,12 +21,17 @@ failed_names=""
 # D-400-SPECIAL-FILE-PRECHECK: ONE walk of the tree (the authoring repository when this is its opf/
 # subtree, else the standalone opf/ tree; derived from this script's fixed location and confirmed by
 # git when git can answer, never from an upward .git search) BEFORE any gate runs; a special file, a
-# symlink to one, an unresolvable symlink that git does not ignore, or a symlink to a directory outside
-# the root, git-ignored or not (a tree copy follows such a link and opens every file under it with a
-# plain blocking read), is refused by name and the run STOPS here with exit 2, so no gate or self-test
-# below can block on a plain read of a FIFO. A dangling symlink, a git-ignored unresolvable symlink and
-# a symlink to a regular file pass: every open of the first two fails at once, and a plain read of a
-# regular file does not block. The shell test on the first line is the BOOTSTRAP: python3 would
+# symlink to one, an unresolvable symlink that git does not ignore, a symlink to a directory outside
+# the root, git-ignored or not, or, while git can list the tracked paths, a git-ignored symlink to an
+# in-root directory that is, lies inside or holds the repository's own git dir (a tree copy follows a
+# directory link and reads every file under it but a FIFO, a character device included, with a plain
+# blocking read), is refused by name and the run STOPS here with exit 2, so no gate or self-test
+# below can block on a plain read of a FIFO. Its link exemptions, exactly: a dangling symlink and a
+# git-ignored unresolvable symlink pass (every read open of either fails at once); a symlink to a
+# regular file passes (a plain read of a regular file on a local filesystem does not block; FUSE or
+# network storage can); and, while git can list the tracked paths, a git-ignored in-root directory
+# link is not walked under its own path (its target is walked under the target's path). The shell
+# test on the first line is the BOOTSTRAP: python3 would
 # block LOADING the precheck
 # script itself if that path were a FIFO. Residual: the interpreter binary and THIS runner script are
 # read before the bootstrap line can run.

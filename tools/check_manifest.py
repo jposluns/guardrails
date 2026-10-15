@@ -1377,8 +1377,9 @@ def _self_test_main_isolated():
             _entry_expect("an in-root directory link into an ignored directory", iglinkdir_tree,
                           "opf", 2, "SPEC.fifo")
             # (s3) a GIT-IGNORED out-of-root directory link is refused by name, whatever it holds:
-            # a tree copy (shutil.copytree, symlinks=False) follows it and opens every file under
-            # it with a plain blocking read. Here it holds one regular file only, so the refusal
+            # a tree copy (shutil.copytree, symlinks=False) follows it and reads every file under
+            # it but a FIFO, a character device included, with a plain blocking read. Here it
+            # holds one regular file only, so the refusal
             # rests on the link alone. Fails without the refusal (exit 0: the link was accepted
             # un-walked when it shadowed no tracked path).
             igext_tree = _mini_tree("ignored-ext-dirlink")
@@ -1447,7 +1448,7 @@ def _self_test_main_isolated():
                 os.mkfifo(nested_tree / "tools" / "qa" / ".git" / "x.py")
             _entry_expect("a FIFO inside a nested .git directory", nested_tree, "gen", 2, "x.py")
             _entry_expect("a FIFO inside a nested .git directory", nested_tree, "opf", 2, "x.py")
-            # (s8) QA round 6 (claude M3): a STAGED REMOVAL (git rm --cached) of the content an
+            # (s8) a STAGED REMOVAL (git rm --cached) of the content an
             # ignored out-of-root link shadows does not exempt the link; it is refused by name, as
             # every out-of-root directory link is (s3 above).
             staged_tree = _mini_tree("staged-removal-shadow")
@@ -1470,6 +1471,31 @@ def _self_test_main_isolated():
                           "outside the repository root")
             _entry_expect("a staged-removal shadowing out-of-root link", staged_tree, "opf", 2,
                           "outside the repository root")
+            # (s30) a path tracked ONLY in HEAD (a staged removal, git rm --cached) whose route
+            # leaves the root through a link to a REGULAR file: the walk accepts a link to a
+            # regular file, so only the tracked-path layer can refuse it, and only when HEAD's
+            # paths join the index's. Fails without that union (exit 0: the index alone no
+            # longer lists notes.md).
+            headonly_tree = _mini_tree("staged-removal-file-link")
+            if headonly_tree is not None:
+                (headonly_tree / "notes.md").write_text("x\n", encoding="utf-8")
+                if (gm._git(headonly_tree, "add", "--", "notes.md").returncode != 0
+                        or gm._git(headonly_tree, "-c", "user.name=t", "-c",
+                                   "user.email=t@example.invalid", "-c", "commit.gpgsign=false",
+                                   "commit", "-q", "-m", "seed").returncode != 0
+                        or gm._git(headonly_tree, "rm", "-q", "--cached", "--",
+                                   "notes.md").returncode != 0):
+                    headonly_tree = None
+            if headonly_tree is not None:
+                (headonly_tree / "notes.md").unlink()
+                (tmp / "ext-headonly-target.md").write_text("x\n", encoding="utf-8")
+                (headonly_tree / "notes.md").symlink_to(tmp / "ext-headonly-target.md")
+            for which in ("gen", "opf"):
+                _entry_expect("a HEAD-only tracked path through a link to an outside regular file",
+                              headonly_tree, which, 2,
+                              "{}: refused, a tracked path that resolves through a link leaving "
+                              "the repository root".format(headonly_tree / "notes.md")
+                              if headonly_tree else None)
             # (s9) QA round 6 (claude M5): the live-tree fixture copy (_copy_live_tree) leaves out
             # an ignored out-of-root directory link (a developer's .venv ignored via
             # info/exclude, whose ignore status the copy loses), which a self-test run directly,
@@ -1882,9 +1908,12 @@ def _self_test_main_isolated():
             # (every HEAD query None, or for-each-ref None) is not an unborn HEAD, a branch ref
             # for-each-ref still lists is a HEAD with a commit, and an unterminated, empty-record,
             # absolute or '..' record is malformed: each leaves no tracked list, so the link is
-            # walked and the FIFO refused (exit 2). The two controls (a PROVEN unborn HEAD; a
-            # well-formed list) keep the skip, exit 0. The failure and malformed cases fail
-            # without the round-14 rules (exit 0: the skip applies and .git is pruned).
+            # walked and the FIFO refused by name (exit 2). The two controls (a PROVEN unborn HEAD;
+            # a well-formed list) keep the skip, so the ignored link into the repository's own git
+            # dir is itself refused by name (exit 2), never walked to docs/x.md. The failure and
+            # malformed cases fail without those rules (the skip applies, so the refusal names
+            # the link, not docs/x.md); the controls fail without the own-git-dir refusal (exit
+            # 0: the skip applies and .git is pruned).
             _ok_ref = b"refs/heads/main\n"
             for case_no, (label, index_out, tree_out, sym_out, each_out, want) in enumerate((
                     ("every HEAD query fails", b"", None, None, None, 2),
@@ -1897,9 +1926,9 @@ def _self_test_main_isolated():
                     ("an absolute HEAD record", b"", b"/etc/x\0", _ok_ref, b"", 2),
                     ("a '..' index record", b"a/../b\0", b"", _ok_ref, b"", 2),
                     ("a '.' index record", b"a/./b\0", b"", _ok_ref, b"", 2),
-                    ("a proven unborn HEAD (control)", b"", None, _ok_ref, b"", 0),
+                    ("a proven unborn HEAD (control)", b"", None, _ok_ref, b"", "link"),
                     ("a well-formed list (control)", b"README.md\0", b"README.md\0", _ok_ref,
-                     b"", 0))):
+                     b"", "link"))):
                 for _label, _mod in (("_gen_common", _gc), ("_containment", _ct)):
                     case = tmp / "inproc-s27-{}-{}".format(case_no, _label)
                     (case / ".git").mkdir(parents=True)
@@ -1926,10 +1955,17 @@ def _self_test_main_isolated():
                         got = 0
                     except SystemExit as exc:
                         got = exc.code
-                    named = want == 0 or str(case / "docs" / "x.md") in err.getvalue()
-                    if got != want or not named:
-                        failures.append("(s27) {} ({}): expected exit {}{}, got {!r}".format(
-                            label, _label, want, " naming docs/x.md" if want else "", got))
+                    walked = str(case / "docs" / "x.md") in err.getvalue()
+                    if want == "link":
+                        ok = (got == 2 and not walked and "{}: refused, a git-ignored symlink to "
+                              "a directory that is, lies inside or holds the repository's own "
+                              "git dir".format(case / "docs") in err.getvalue())
+                    else:
+                        ok = got == want and walked
+                    if not ok:
+                        failures.append("(s27) {} ({}): expected exit 2 naming {}, got {!r}".format(
+                            label, _label, "the docs link" if want == "link" else "docs/x.md",
+                            got))
             # (s28) a socket and a symlink to a character device are refused by name in both
             # copies, as a FIFO is. Each fails when _SPECIAL_KINDS keeps only the FIFO kind (exit
             # 0). A child process binds the socket from inside the tree, so the bound path stays
@@ -1962,8 +1998,8 @@ def _self_test_main_isolated():
                     _entry_expect("a symlink to a character device", chr_tree, which, 2,
                                   "null-link: refused, a symlink to a character device")
             # (s29) the link exemptions, each pinned in both copies: a git-ignored symlink loop
-            # and a git-ignored dangling link pass, because every open of either, and of any path
-            # through it, fails at once (a non-ignored dangling link passes too: the hazardless
+            # and a git-ignored dangling link pass, because every read open of either, and of any
+            # path through it, fails at once (a non-ignored dangling link passes too: the hazardless
             # tree above). The CONTROL, the same loop not ignored, is refused by name. The
             # ignored tree fails when the ignored-unresolvable or the dangling exemption is
             # removed (exit 2); the control fails when the non-ignored loop refusal is (exit 0).
@@ -1980,6 +2016,34 @@ def _self_test_main_isolated():
                                   loops_tree, which, want_rc,
                                   "loop-a: refused, a symlink whose target cannot be resolved"
                                   if want_rc else None)
+            # (s31) a GIT-IGNORED in-root directory link whose target is the repository's own git
+            # dir (opf/gitlink -> ../.git) or holds it (opf/up -> .., the root itself) is refused
+            # by name in both copies: the walk does not enter that git dir, and a tree copy of
+            # opf/ (shutil.copytree, symlinks=False) follows either link into it, where a link to
+            # a character device such as /dev/ptmx blocks the copy's read (the .git/dev-link plant
+            # here points at os.devnull, which does not block: the refusal rests on the link
+            # alone, and the walk never classifies anything inside .git). Each fails without
+            # the own-git-dir refusal (exit 0: the link is skipped and .git is not entered); the
+            # root link also fails without the refusal of a target that holds the git dir.
+            for label, link_name, link_target in (("into", "gitlink", "../.git"),
+                                                  ("over", "up", "..")):
+                owngit_tree = _mini_tree("ignored-link-{}-own-git".format(label))
+                if owngit_tree is None or not stat.S_ISCHR(os.stat(os.devnull).st_mode):
+                    failures.append("(s31) cannot build the ignored link {} the own git dir "
+                                    "(no git-init, or os.devnull is not a character "
+                                    "device)".format(label))
+                    continue
+                (owngit_tree / ".git" / "dev-link").symlink_to(os.devnull)
+                exclude = owngit_tree / ".git" / "info" / "exclude"
+                exclude.parent.mkdir(parents=True, exist_ok=True)
+                exclude.write_text("/opf/{}\n".format(link_name), encoding="utf-8")
+                (owngit_tree / "opf" / link_name).symlink_to(link_target)
+                for which in ("gen", "opf"):
+                    _entry_expect("a git-ignored link {} the repository's own git dir".format(
+                                      label), owngit_tree, which, 2,
+                                  "{}: refused, a git-ignored symlink to a directory that is, "
+                                  "lies inside or holds the repository's own git dir".format(
+                                      owngit_tree / "opf" / link_name))
         else:
             # #400 re-cut (codex MEDIUM 4, claude MINOR 11): a capability-gated vector is an
             # explicit NOT RUN and a recorded failure, never a silent pass.
@@ -2013,7 +2077,9 @@ def _self_test_main_isolated():
           "subprocess, refuses a FIFO, a link to a FIFO, a FIFO behind a planted nested .git or an "
           "in-root directory link, an outside-root directory link, git-ignored or not, a socket, a "
           "link to a character device, a non-ignored link loop, a git-ignored link to a FIFO, a "
-          "FIFO behind an in-root link into an ignored directory, and a symlinked tools/ or opf/ "
+          "FIFO behind an in-root link into an ignored directory, a git-ignored in-root link into "
+          "or over the repository's own git dir, a HEAD-only tracked path routed out of the root "
+          "through a link to a regular file, and a symlinked tools/ or opf/ "
           "directory that would redirect the root, by name, classifies a walked directory by its own path even when an ignored link reaches it first (round 9), walks a tracked link into an ignored directory strictly in both directions (round 10), refuses a FIFO behind two or three chained directory links in either walk order, resolves every tracked logical path component by component so a tracked path through an ignored link loop is refused by the logical path, and screens a nested .git and its HEAD before the ignore query (round 11), follows a nested gitfile without blocking, refusing an out-of-tree target and screening each nested git dir's HEAD and commondir, and passes 70 in-root directory links inside an ignored directory while the same links at a non-ignored path stay bounded (round 12), refuses a FIFO in .git reached by a tracked path through an ignored link when HEAD's tree cannot be listed (round 13) or a HEAD query fails or a tracked-list answer is malformed (round 14), while a dangling link, a "
           "git-ignored link loop and dangling link, and a venv-like ignored tree pass; a multi-newline "
           "rev-parse answer fails closed, one trailing newline stays accepted, and a NUL root is "
