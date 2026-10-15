@@ -3014,7 +3014,7 @@ def _self_test_units(check):
     for bad in (0, 3, None, "2", True):
         check("an unknown homes generation refuses the journal home ({!r})".format(bad),
               _refuses(lambda bad=bad: _record_journal_rel(bad), "unknown homes generation"))
-    # FIX-OPF-CLEAN-PATH-DEEP-RENDER: a homes declaration nested 100,000 levels deep (what tomllib builds from
+    # Deep values: a homes declaration nested 100,000 levels deep (what tomllib builds from
     # a dotted [opf.homes.a.a ...] header) still refuses as a RecordError with a bounded message; pre-fix its
     # {!r} render raised RecursionError out of the refusal.
     _deep_homes = _deep_cur = {}
@@ -3054,7 +3054,7 @@ def _self_test_units(check):
     finally:
         os.close(empty_fd)
         os.rmdir(empty)
-    # FIX-OPF-CLEAN-PATH-DEEP-RENDER R2 (the manifest route): _probe_homes reads the manifest through
+    # The manifest route: _probe_homes reads the manifest through
     # _read_operand, and tomllib builds a dotted [opf.homes.a.a ...] header of 100,000 parts into a
     # 100,000-level nested table. The refusal naming that declaration renders it bounded; pre-fix its {!r}
     # render raised RecursionError out of the probe. CPython 3.14.8 and later refuse a TOML key of more than

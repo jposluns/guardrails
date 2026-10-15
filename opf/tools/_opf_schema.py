@@ -5373,7 +5373,7 @@ def self_test():
             check("self-test-caller-timer-mask-clause-sees-" + _name,
                   _lost_on(_mask_left(_start), "mask", "", _start))
 
-    # ----- FIX-OPF-CLEAN-PATH-DEEP-RENDER: a finding message renders a parsed value through the bounded
+    # ----- Deep values: a finding message renders a parsed value through the bounded
     # _safe_display. tomllib builds a dotted table header iteratively, so a 100,000-part header parses into a
     # 100,000-level nested table whose plain repr() overflowed the stack pre-fix (RecursionError, "Stack
     # overflow ... while getting the repr of an object", escaping validate_record). CPython 3.14.8 and later

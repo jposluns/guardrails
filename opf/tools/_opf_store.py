@@ -1892,9 +1892,10 @@ def _safe_str(value):
     integer-string-conversion limit as the oversized-int marker alone and as <oversized-value> for a
     container holding it, and an unsupported type as <unrenderable NAME>, and no __str__ or __repr__ a caller
     can define is called.
-    Unlike _safe_display, which renders through repr() and so already escapes controls, this str()-based
-    renderer must escape them itself (the store/release sibling the schema newline-hardening left exposed;
-    codex round-6). It is for MESSAGE rendering only, never the byte-stable coverage digest."""
+    Unlike _safe_display, which renders through repr() and so already
+    escapes controls, this str()-based renderer must escape them itself (the store/release sibling the
+    schema newline-hardening left exposed; codex round-6). It is for MESSAGE rendering only, never the
+    byte-stable coverage digest."""
     try:
         kind = type(value)
         if kind is str:
@@ -4094,7 +4095,7 @@ def self_test():
         check("r6-safe-str-controls-composed",
               all(chr(10) not in _safe_str(k) for k in ("a" + chr(10) + "b", "plain")))
 
-        # FIX-OPF-CLEAN-PATH-DEEP-RENDER: _safe_display and _safe_str are bounded and never raise. A table
+        # Deep, wide and long values: _safe_display and _safe_str are bounded and never raise. A table
         # nested 100,000 levels deep (what tomllib builds from a 100,000-part dotted header) overflowed the
         # stack in repr() pre-fix (RecursionError, "Stack overflow ... while getting the repr of an object"),
         # so it runs in a bounded child: a regression is the ERROR:RecursionError sentinel, never a crash of
@@ -4138,14 +4139,14 @@ def self_test():
         check("deeprender-depth-at-bound-byte-identical", _safe_display(_dr_nest) == repr(_dr_nest))
         check("deeprender-depth-past-bound-marker", _safe_display([_dr_nest]) == "[" * _DISPLAY_MAX_DEPTH
               + "<list nested deeper than {} levels>".format(_DISPLAY_MAX_DEPTH) + "]" * _DISPLAY_MAX_DEPTH)
-        # Round 2: the ESCAPED output is bounded exactly. Past the width limit (_DISPLAY_FULL_MAX_CHARS
+        # The ESCAPED output is bounded exactly. Past the width limit (_DISPLAY_FULL_MAX_CHARS
         # characters of repr() or of escaped str()), content is cut on a whole escape at _DISPLAY_MAX_CHARS
         # characters, never splitting one, and the marker after the cut is at most _DISPLAY_MARKER_MAX
         # characters (the longest, a str-length marker at sys.maxsize); at the width limit the escaped form is
         # whole, and one character more is cut. Each input is past the width limit (16,385 NULs escape to
         # 65,540 characters, 6,554 astral characters to 65,540). The marker-max check reads constants only: it
         # guards the constant against a longer marker and is red on no renderer reversion. The escaped-str and
-        # whole-escape checks are red on the round-1 renderer.
+        # whole-escape checks are red on a renderer that escapes after its cut, without a budget.
         check("deeprender-marker-max-is-the-longest-marker",
               _DISPLAY_MARKER_MAX >= len("...<str of {} chars>".format(sys.maxsize)) >= len("...<truncated>"))
         _dr_nul, _dr_astral = chr(0) * 16385, chr(0x1000C) * 6554
@@ -4164,8 +4165,8 @@ def self_test():
               _safe_display([chr(0x1000C) * 6554]) == "[" + chr(39) + "\\U0001000c" * 102 + "...<truncated>"
               and _safe_str([bytes(1024), "x" * _DISPLAY_FULL_MAX_CHARS])
               == "[b" + chr(39) + "\\x00" * 255 + "...<truncated>")
-        # Round 2: every supported scalar is sized BEFORE it is converted, so rendering a bytes or an int far
-        # over the bound neither builds its repr() nor allocates in proportion to it (the round-1 renderer
+        # Every supported scalar is sized BEFORE it is converted, so rendering a bytes or an int far
+        # over the bound neither builds its repr() nor allocates in proportion to it (a convert-first renderer
         # allocated about 2 MB for a 1,000,000-byte value, and about 1.7 MB for a 100,000-digit hexadecimal int
         # under a lifted integer-string limit). The traced peak covers the renders only. With the limit
         # lifted neither value trips it, and each is past the width limit, so the pair renders in the bounded
@@ -4213,9 +4214,10 @@ def self_test():
                   and _dr_unread.startswith("[0, 0, ") and _dr_unread.endswith("...<truncated>"))
         finally:
             sys.set_int_max_str_digits(_dr_idlimit)
-        # Round 2: a type off the allow-list (a container subclass, any other object) never has its __repr__,
+        # A type off the allow-list (a container subclass, any other object) never has its __repr__,
         # __str__, metaclass __name__ or metaclass __eq__ run, so neither renderer can raise on it; it renders
-        # a fixed marker naming only its type. Round 1 raised RuntimeError from the subclass __repr__/__str__.
+        # a fixed marker naming only its type. A renderer that calls repr() raises RuntimeError from the
+        # subclass __repr__/__str__.
 
         class _DrBad(list):
             def __repr__(self):
@@ -4247,14 +4249,14 @@ def self_test():
         for _dr_v in (_DrBad(), [1, _DrBad()], _DrOdd(), {"k": _DrOdd()}, _dr_tzbad):
             try:
                 _dr_unsupported.append((_safe_display(_dr_v), _safe_str(_dr_v)))
-            except Exception as exc:  # noqa: BLE001  the round-1 escape: recorded, so the check fails
+            except Exception as exc:  # noqa: BLE001  a subclass method escape: recorded, so the check fails
                 _dr_unsupported.append(type(exc).__name__)
         check("deeprender-unsupported-types-never-called", _dr_unsupported == [
             ("<unrenderable _DrBad>",) * 2, ("[1, <unrenderable _DrBad>]",) * 2, ("<unrenderable _DrOdd>",) * 2,
             ("{" + chr(39) + "k" + chr(39) + ": <unrenderable _DrOdd>}",) * 2, ("<unrenderable datetime>",) * 2])
-        # Round 2 (the store path helpers): a deeply nested value reaching a path helper refuses through the
-        # bounded renderer. evidence_inventory checks the phase type BEFORE it builds the file name (round 1
-        # formatted the phase raw first, so a nested phase raised RecursionError before its guard ran), and
+        # The store path helpers: a deeply nested value reaching a path helper refuses through the
+        # bounded renderer. evidence_inventory checks the phase type BEFORE it builds the file name (formatting
+        # the phase raw first, so a nested phase raised RecursionError before its guard ran), and
         # store_control_roots renders its refusal bounded (a {!r} there raises the same). Bounded children.
 
         def _dr_path_helper(fn, prefix):
@@ -4276,13 +4278,13 @@ def self_test():
             timeout_s=60) == "True|True|True")
         check("deeprender-store-control-roots-deep-homes-refused", run_bounded(_dr_path_helper(
             store_control_roots, "unknown homes generation: "), timeout_s=60) == "True|True|True")
-        # Round 3: a renderer reads each live member once per occurrence, into one bounded private copy,
+        # A renderer reads each live member once per occurrence, into one bounded private copy,
         # and renders only that copy. A profile hook stands in for another thread: it replaces a member at the
         # N-th profile event of one render, for every N an unmutated render reaches, so each interleaving at
         # event granularity is tried deterministically. Wherever the replacement lands, the member read is the
         # original or the replacement, checked as it was read, so the result is one of two exact strings (both
-        # must occur, so the hook is known to land) and the replacement __repr__ never runs. Red on the round-2
-        # renderer, which ran repr() on the live container after a separate preflight: on the dict case, 24
+        # must occur, so the hook is known to land) and the replacement __repr__ never runs. Red on a
+        # renderer that runs repr() on the live container after a separate preflight: on the dict case, 24
         # interleavings of each renderer ran the replacement __repr__ (1,000 NULs, raw from _safe_display, and
         # 4,007 characters escaped from _safe_str).
         _dr_calls = []
@@ -4332,7 +4334,7 @@ def self_test():
         check("deeprender-member-replaced-mid-render-never-rendered",
               all(_dr_race_sweep(f, make, put, allowed) for f in (_safe_display, _safe_str)
                   for make, put, allowed in _dr_cases))
-        # Round 4: another thread resizing a dict or set while it is copied makes its iterator raise RuntimeError,
+        # Another thread resizing a dict or set while it is copied makes its iterator raise RuntimeError,
         # which both renderers turn into the fixed placeholder <unrenderable-value>. A profile hook grows a dict
         # and a set at each profile event of one render, as above, so the result is the original, the grown
         # value or the placeholder, and all three must occur. Red when RuntimeError is dropped from the except
@@ -4343,10 +4345,10 @@ def self_test():
         check("deeprender-resized-mid-copy-placeholder",
               all(_dr_race_sweep(f, make, grow, allowed) for f in (_safe_display, _safe_str)
                   for make, grow, allowed in _dr_grown))
-        # Round 3: a type name is escaped, so a newline in it cannot forge a line, and since it can be a str
+        # A type name is escaped, so a newline in it cannot forge a line, and since it can be a str
         # subclass of any length it is read only through the str slots: no method of the subclass runs and only
         # _DISPLAY_NAME_MAX characters are copied. The copy check (deeprender-type-name-copy-bounded) is red on
-        # the round-2 renderer, which copied a str-subclass name whole (about 1 MB traced for a 1,000,000-character
+        # a renderer that copies a str-subclass name whole (about 1 MB traced for a 1,000,000-character
         # name); the escape check passes there and is red when the type name is not escaped.
 
         class _DrName(str):
@@ -4384,7 +4386,7 @@ def self_test():
                 tracemalloc.stop()
         check("deeprender-type-name-copy-bounded",
               _dr_names == ("<unrenderable " + "N" * _DISPLAY_NAME_MAX + "...>",) * 2 and _dr_peak < 65536)
-        # Round 3: the copy is bounded by count as well as by depth. A wide, shallow value of zero-cost leaves
+        # The copy is bounded by count as well as by depth. A wide, shallow value of zero-cost leaves
         # (491,300 values: 17 lists of 170 lists of 170 None) is copied only up to _DISPLAY_MAX_NODES values and
         # renders the exact bounded prefix. The text is the same with or without the count bound (the character
         # bound cuts first), so the copied-entry count is what goes red when the count bound is removed.
@@ -4402,7 +4404,7 @@ def self_test():
         check("deeprender-wide-shallow-copy-bounded",
               _guard(lambda: _dr_entries(_display_snapshot(_dr_shallow))) == _DISPLAY_MAX_NODES
               and _safe_display(_dr_shallow) == "[[[" + ", ".join(["None"] * 170) + "], ...<truncated>")
-        # Round 3: a cut never splits a u-form escape (the x and U forms are checked above), in a container, in a
+        # A cut never splits a u-form escape (the x and U forms are checked above), in a container, in a
         # str rendered with repr() and in a str rendered escaped. 11,000 separators escape to 66,000
         # characters, past the width limit.
         _dr_sep = chr(0x2028) * 11000
@@ -4410,10 +4412,10 @@ def self_test():
               _safe_display([_dr_sep]) == "[" + chr(39) + "\\u2028" * 170 + "...<truncated>"
               and _safe_display(_dr_sep) == chr(39) + "\\u2028" * 170 + "...<str of 11000 chars>"
               and _safe_str(_dr_sep) == "\\u2028" * 170 + "...<str of 11000 chars>")
-        # Round 3: escaping keeps the output budget for a container as for a scalar: _safe_str escapes each
+        # Escaping keeps the output budget for a container as for a scalar: _safe_str escapes each
         # piece BEFORE the cut, so the result stays within the bound however a piece escapes. No supported value
         # renders a non-printable character, so a leaf rendering of 2,000 NULs is substituted to reach that path
-        # (round 2 escaped the whole rendered container after its cut, with no budget). Each value holds a str
+        # (escaping the whole rendered container after its cut, with no budget, overruns it). Each value has a str
         # past the width limit, so it renders in the bounded form, the one that reads _display_leaf.
         _dr_globals = globals()
         _dr_leaf = _dr_globals["_display_leaf"]
@@ -4425,11 +4427,11 @@ def self_test():
             _dr_globals["_display_leaf"] = _dr_leaf
         check("deeprender-container-escape-keeps-budget",
               _dr_escaped == ("[" + "\\x00" * 255 + "...<truncated>", "{" + "\\x00" * 255 + "...<truncated>"))
-        # Round 3: the int width test is exact at the width limit: an int whose repr() is exactly
+        # The int width test is exact at the width limit: an int whose repr() is exactly
         # _DISPLAY_FULL_MAX_CHARS characters (2 ** 217705, the largest power of two that wide, among them) or
         # one character less renders as repr(), uncut, and one a character wider renders in the bounded form,
         # as its size marker; a negative int spends one character on its sign. The bounded form's own test is
-        # exact at _DISPLAY_MAX_CHARS too (round 2 estimated it from the bit length, so an int whose repr() is
+        # exact at _DISPLAY_MAX_CHARS too (an estimate from the bit length is not exact, so an int whose repr() is
         # exactly 1,024 characters, 2 ** 3401 among them, could render the marker): in a list past the value
         # bound, such an int renders as its digits, cut, and 10 ** 1024 as its marker. The int-to-str limit is
         # lifted and restored, so the width, not that limit, decides and the verdict comes from the code under
@@ -4451,7 +4453,7 @@ def self_test():
                   and _safe_display([10 ** 1024] + [0] * 600).startswith("[<oversized-int: 3402 bits>, 0, 0"))
         finally:
             sys.set_int_max_str_digits(_dr_idlimit)
-        # Round 3: a timezone renders through repr() only when it holds nothing a caller defines and its name is
+        # A timezone renders through repr() only when it holds nothing a caller defines and its name is
         # at most _DISPLAY_NAME_MAX characters. A 64-character name renders as repr(), byte for byte; a
         # 65-character name, a timedelta-subclass offset and a str-subclass name each render the fixed marker
         # from both renderers, and no subclass __repr__ runs.
@@ -4471,7 +4473,7 @@ def self_test():
         check("deeprender-timezone-admission-exact",
               _safe_display(_dr_zone64) == repr(_dr_zone64) and _safe_display([_dr_zone64]) == repr([_dr_zone64])
               and [f(v) for f in (_safe_display, _safe_str) for v in _dr_zones] == ["<unrenderable datetime>"] * 6)
-        # Round 3: require_ordinary_target renders its refusal through _safe_display (a {!r} there renders a long
+        # require_ordinary_target renders its refusal through _safe_display (a {!r} there renders a long
         # target whole). The target is a contained path under the journal home, past the width limit (more than
         # 70,000 characters), so its refusal is bounded.
         _dr_target = JOURNALS_REL + "/" + "a" * 70000
@@ -4483,22 +4485,22 @@ def self_test():
         _dr_expected = "ordinary operation target {}{}...<str of {} chars> overlaps the journal home".format(
             chr(39), _dr_target[:_DISPLAY_MAX_CHARS - 1], len(_dr_target))
         check("deeprender-ordinary-target-refusal-bounded", _dr_refusal == _dr_expected)
-        # Round 4: a frame of the copy ends when its iterator raises StopIteration, never on a member compared
+        # A frame of the copy ends when its iterator raises StopIteration, never on a member compared
         # with a marker, so whatever object a value holds renders the same at the root, in a list, as a dict key
         # and as a dict value. Each bare object() this module holds, a fresh one and the stop entry _DISPLAY_STOP
         # are tried against their exact renderings, and every other value this module holds renders in a list
         # and in a dict as it renders alone in a list, so a sentinel held here is caught whatever its type (a
-        # value too long to place with three more members is skipped). Red on the round-3 renderer, which ended
-        # a frame on a module sentinel (a bare object()): supplied as data, that sentinel raised IndexError at
-        # the root, ended a list or a dict early ([1] for [1, sentinel, 2, 3]) and, as a dict value, rendered the
-        # next key as its value.
+        # value too long to place with three more members is skipped). Red on a renderer that ends a frame on
+        # a module sentinel (a bare object()): supplied as data, that sentinel raises IndexError at the root,
+        # ends a list or a dict early ([1] for [1, sentinel, 2, 3]) and, as a dict value, renders the next key
+        # as its value.
 
         def _dr_positions(render, obj, mark):
             shown = []
             for value in (obj, [1, obj, 2, 3], {obj: 1}, {"k": obj, "j": 2}):
                 try:
                     shown.append(render(value))
-                except Exception as exc:  # noqa: BLE001  the round-3 escape: recorded, so the check fails
+                except Exception as exc:  # noqa: BLE001  a sentinel escape: recorded, so the check fails
                     shown.append(type(exc).__name__)
             return shown == [mark, "[1, " + mark + ", 2, 3]", "{" + mark + ": 1}",
                              _dr_kq + mark + ", " + _dr_q + "j" + _dr_q + ": 2}"]
@@ -4522,8 +4524,8 @@ def self_test():
         check("deeprender-module-objects-render-as-data",
               all(_dr_positions(f, v, mark) for f in (_safe_display, _safe_str) for v, mark in _dr_objects)
               and all(_dr_in_place(f, v) for f in (_safe_display, _safe_str) for v in list(globals().values())))
-        # Round 4: the node bound stops a render with the truncation marker. A list holding one chain of 31
-        # nested lists around 0 sixteen times is 513 values as the copy counts them (each occurrence is copied),
+        # The node bound stops a render with the truncation marker. A list holding one chain of 31
+        # nested lists wrapping 0 sixteen times is 513 values as the copy counts them (each occurrence is copied),
         # so the copy stops before the last 0 and the render is the 1,007-character prefix of repr() before it,
         # then ...<truncated>, within the character bound. Red when the stop drops its marker (the same prefix,
         # unmarked) and when the node bound is removed (1,024 characters, cut by the character bound).
