@@ -41,10 +41,11 @@ treats a live result exceeding the recorded one as a fresh, unaddressed finding.
 the cited instance while a sibling of the same class survives unaddressed is an incomplete fix,
 the completeness-claim-enumerates-its-set discipline applied to a defect class standing in for
 the registry that class otherwise lacks. For example, a wording fix is a defect class whose
-author-declared probe is the superseded phrase, scoped to the places where that phrase still
-operates, and whose named exemptions are the history and correction surfaces that quote it on
-purpose, such as changelog entries, a mistakes register, and corrections that warn against the
-old phrase.
+probe is derived from the superseded wording, matches it across line wraps and escapes, and is
+validated against the correction that defines the class. Each instance the probe finds is fixed
+or carries one of exactly two named exemptions: history (a quotation recording the superseded
+wording) or warning (a correction that warns against it). A copy that must change with the
+wording, such as a clause register's canonical text, is in scope, never exempt.
 
 After an edit applied by a script, a bulk operation, or a subagent, the claim that it landed rests on
 re-reading the resulting source and confirming the intended change is present in it, never on the applier's
