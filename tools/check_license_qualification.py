@@ -1522,12 +1522,17 @@ def _self_test_class3():
         parsed = _parse_config(tomllib.loads(_CFG_VALID), "fixture")
         if parsed != _CFG_VALID_PARSED:
             failures.append("CONFIG PARSE: valid fixture parsed to {!r}".format((parsed,)))
+    except (ValueError, RecursionError, MemoryError) as exc:
+        failures.append("CONFIG PARSE: valid fixture did not parse as TOML: {}".format(type(exc).__name__))
     except _FailClosed as exc:
         failures.append("CONFIG PARSE: valid fixture refused: {}".format(exc))
     for label, bad, want in _CFG_MALFORMED:
         try:
             _parse_config(tomllib.loads(bad), "fixture")
             failures.append("CONFIG PARSE: malformed fixture accepted ({})".format(label))
+        except (ValueError, RecursionError, MemoryError) as exc:
+            failures.append("CONFIG PARSE: malformed fixture {} did not parse as TOML: {}".format(
+                label, type(exc).__name__))
         except _FailClosed as exc:
             if want not in str(exc):
                 failures.append(
