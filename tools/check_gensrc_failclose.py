@@ -138,6 +138,7 @@ import stat  # noqa: E402
 import subprocess  # noqa: E402
 import tempfile  # noqa: E402
 import time  # noqa: E402
+from collections import Counter  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -841,14 +842,19 @@ def main() -> int:
 #       inside the fixture, a target whose parent directory is symlinked outside the fixture, a tree with a
 #       symlinked directory inside a nested subdirectory, a tree with a FIFO member, and a fixture base that
 #       is itself a symlink alias are not confirmed as produced (the confirmation follows no symlink at the
-#       fixture base or any component below it, and accepts only regular files and directories).
+#       fixture base or any component below it, and accepts only regular files and directories), while a
+#       tree holding a real nested subdirectory of regular files is confirmed as produced,
+#   (u) the vector census reconciles the vectors that ran against the fixed list _SELF_TEST_VECTORS: a
+#       listed vector that did not run, or ran fewer times than listed, and an unlisted one that ran are
+#       each an assertion failure.
 # Every fixture vector runs through _run_vector: its setup is built with each setup subprocess checked and
 # each declared target confirmed present (a regular file or directory inside the fixture, following no
 # symlink); a vector whose setup raises or returns None, or whose evaluation raises, is a named
 # cannot-evaluate (the self-test exits 2, even beside an assertion failure), never a traceback or a pass. An
 # Exception outside a vector's setup and evaluation (for example from the fixture git lifecycle around the
 # self-test, or a cleanup error that is not an OSError) is not caught there and still ends the self-test
-# with a traceback.
+# with a traceback. _run_vector records every vector it runs for the census, so a vector dropped from the
+# self-test fails it; a check written outside _run_vector is not counted.
 # Every fixture is synthetic; any invalid-UTF-8 corruption bytes are assembled from non-secret parts so
 # this file never trips the repo secret scan.
 
@@ -1350,7 +1356,7 @@ def _build_repo(base, gens):
     (base / "src" / "victim-path.txt").write_text(str(victim) + "\n", encoding="utf-8")
     for stem, body in gens.items():
         _write_gen(tools, stem, body)
-    # Make the fixture a REAL git repository (F-234): _materialize_git enumerates real_root's tracked set
+    # Make the fixture a REAL git repository: _materialize_git enumerates real_root's tracked set
     # via `git ls-files` and no longer falls back to `git add -A` on a bare .git marker, so every fixture
     # that reaches materialization must be a genuine repo whose tracked set mirrors its on-disk files. The
     # init comes first so each generator's repo_root() resolves to base (see the docstring).
@@ -1426,11 +1432,80 @@ class _VectorEvaluation:
         return True
 
 
+# Every vector the self-test must run through _run_vector, by name, listed as many times as it runs (the
+# no-maintenance vector runs twice: its own run, then the injected evaluation error that reuses its run
+# path). The self-test fails when a listed vector did not run, or ran fewer times than listed, or when an
+# unlisted vector ran, so a vector removed from the self-test, together with the rule only it guards,
+# cannot disappear unnoticed: removing one means removing its name here too.
+_SELF_TEST_VECTORS = (
+    "conformant repo",
+    "bypass generator",
+    "stateful generator",
+    "symlink-swap generator",
+    "tolerant-reader generator",
+    "partial-coverage tree generator",
+    "malformed registry",
+    "missing declared target",
+    "non-clean baseline",
+    "off-grammar regenerate",
+    "restoration",
+    "real-tree mode change",
+    "decode-only generator",
+    "total-runtime deadline overrun",
+    "sandbox-setup mkdtemp failure",
+    "block-kind generator",
+    "git-reading generator",
+    "fsmonitor probe",
+    "forced probe failure",
+    "tracked-set mismatch",
+    "no-maintenance flags",
+    "injected setup vector",
+    "injected None-fixture vector",
+    "injected BaseException vector",
+    "no-maintenance flags",
+    "injected gate-raise vector",
+    "injected BaseException evaluation",
+    "symlinked file target",
+    "symlinked tree target",
+    "symlinked member target",
+    "symlinked mixed tree target",
+    "symlinked inside final target",
+    "symlinked outside ancestor target",
+    "symlinked nested directory member",
+    "special-node (FIFO) tree member",
+    "symlinked fixture base",
+    "nested tree subdirectory",
+    "close vectors",
+)
+# The name of every vector _run_vector has run, in order; the self-test clears it before its first vector.
+_VECTORS_RUN = []
+
+
+def _vector_census(ran, listed):
+    """Reconcile the vectors that ran (`ran`, the names _run_vector recorded) against the vectors the
+    self-test must run (`listed`), each name counted as often as it occurs and order ignored. Returns one
+    line per name whose counts differ: a listed vector that ran fewer times than listed (including one that
+    never ran), and a vector that ran more often than listed (including an unlisted one). Empty when the
+    two agree."""
+    ran_counts, listed_counts = Counter(ran), Counter(listed)
+    lines = []
+    for name in sorted(set(ran_counts) | set(listed_counts)):
+        ran_n, listed_n = ran_counts[name], listed_counts[name]
+        if ran_n < listed_n:
+            lines.append("vector census: {!r} is listed to run {} time(s) but ran {}, so the rule it guards "
+                         "went unchecked".format(name, listed_n, ran_n))
+        elif ran_n > listed_n:
+            lines.append("vector census: {!r} ran {} time(s) but is listed {}; list every vector the "
+                         "self-test runs in _SELF_TEST_VECTORS".format(name, ran_n, listed_n))
+    return lines
+
+
 def _run_vector(cannot, failures, name, build, evaluate):
-    """Run one fixture vector: its setup through _setup_vector, then evaluate(fixture) inside
-    _VectorEvaluation. Every fixture vector goes through here, so a setup that raises or returns None and
-    an evaluation that raises are each named under that vector by this one path, which the injected
-    vectors exercise. evaluate runs only on a fixture that setup produced."""
+    """Run one fixture vector: record its name for the vector census, run its setup through _setup_vector,
+    then evaluate(fixture) inside _VectorEvaluation. Every fixture vector goes through here, so a setup
+    that raises or returns None and an evaluation that raises are each named under that vector by this one
+    path, which the injected vectors exercise. evaluate runs only on a fixture that setup produced."""
+    _VECTORS_RUN.append(name)
     fixture = _setup_vector(cannot, name, build)
     if fixture is not None:
         with _VectorEvaluation(cannot, failures, name):
@@ -1535,6 +1610,7 @@ def _self_test_main_isolated():
         return 2
     failures = []
     cannot = []  # vectors whose setup or evaluation failed: named cannot-evaluate, never a pass or traceback
+    _VECTORS_RUN.clear()  # this run's vector census starts empty
     global _run_check, _now, _mkdtemp, _materialize_git, sweep
     saved_run_check = _run_check
     saved_now = _now
@@ -1553,7 +1629,8 @@ def _self_test_main_isolated():
         # (b) A BYPASS generator is caught (exit 1) via valid-but-different content, not just invalid UTF-8.
         _run_vector(cannot, failures, "bypass generator", lambda: _build_repo(
             tmp / "bypass", {"goodfile": _GOODFILE, "bypass": _BYPASS}),
-            expect_sweep(1, "bypass generator: expected exit 1 (F-154 regression caught)"))
+            expect_sweep(1, "bypass generator: expected exit 1 (a generator that ignores its target is "
+                            "caught)"))
 
         # (c) A STATEFUL generator is caught (exit 1): per-probe fresh sandboxes deny cross-call state.
         _run_vector(cannot, failures, "stateful generator", lambda: _build_repo(
@@ -1745,8 +1822,8 @@ def _self_test_main_isolated():
         #     bare-.git-marker template its baseline would have fail-closed (exit 2), so this proves D6.
         _run_vector(cannot, failures, "git-reading generator", lambda: _build_repo(
             tmp / "gitreader", {"gitreader": _GITREADER}),
-            expect_sweep(0, "git-reading generator: expected the sweep to pass (exit 0; D6 materializes "
-                            "a real git repo so the baseline git ls-files succeeds)"))
+            expect_sweep(0, "git-reading generator: expected the sweep to pass (exit 0; the template "
+                            "materializes a real git repo so the baseline git ls-files succeeds)"))
 
         # (o) F-234a: a real_root whose repo-LOCAL core.fsmonitor points at a hook that writes an outside
         #     marker. The probe runs `-c core.fsmonitor=false --no-optional-locks`, so git NEVER executes
@@ -1812,14 +1889,14 @@ def _self_test_main_isolated():
         #     asserted to carry all three flags. The discriminating flip is removing
         #     _TEMPLATE_GIT_NO_MAINTENANCE from the git() helper: the captured argv would then lack the flags
         #     and this assertion would fail.
-        f367_template = tmp / "no-maintenance-template"
+        no_maintenance_template = tmp / "no-maintenance-template"
 
         def _no_maintenance():
-            f367 = _build_repo(tmp / "no-maintenance", {"goodfile": _GOODFILE})
-            shutil.copytree(f367, f367_template, symlinks=False, ignore=_copy_ignore)
-            return f367
+            repo = _build_repo(tmp / "no-maintenance", {"goodfile": _GOODFILE})
+            shutil.copytree(repo, no_maintenance_template, symlinks=False, ignore=_copy_ignore)
+            return repo
 
-        def _check_no_maintenance(f367, record):
+        def _check_no_maintenance(repo, record):
             captured = []
             saved_subprocess_run = subprocess.run
 
@@ -1827,10 +1904,10 @@ def _self_test_main_isolated():
                 captured.append(list(cmd))  # record argv, then delegate to the real subprocess.run
                 return saved_subprocess_run(cmd, *a, **kw)
 
-            template_str = str(f367_template)
+            template_str = str(no_maintenance_template)
             try:
                 subprocess.run = _recording_run
-                _materialize_git(f367_template, f367)
+                _materialize_git(no_maintenance_template, repo)
             finally:
                 subprocess.run = saved_subprocess_run
 
@@ -1846,8 +1923,7 @@ def _self_test_main_isolated():
             # Validate EVERY captured template git call (not just the first per subcommand), and reconcile
             # the observed subcommand set against the exact expected multiset, so the "every template git
             # command" claim is substantiated rather than asserted: a flag withheld on ls-files (the
-            # readback), on any single subcommand, or on a non-first occurrence is caught (codex/gemini
-            # round-2 findings).
+            # readback), on any single subcommand, or on a non-first occurrence is caught.
             template_calls = []  # (subcommand, its -c values) for EVERY template git call captured
             for cmd in captured:
                 if len(cmd) >= 3 and cmd[0] == "git" and cmd[1] == "-C" and cmd[2] == template_str:
@@ -1857,20 +1933,22 @@ def _self_test_main_isolated():
             seen_subs = {sub for sub, _ in template_calls}
             missing_subs = expected_subs - seen_subs
             if missing_subs:
-                record.append("F-367 no-maintenance flags: expected a template `git` call for each of {}, "
+                record.append("no-maintenance flags: expected a template `git` call for each of {}, "
                               "none captured for {}".format(sorted(expected_subs), sorted(missing_subs)))
             for sub, cvals in template_calls:
                 for flag in ("gc.auto=0", "gc.autoDetach=false", "maintenance.auto=false"):
                     if flag not in cvals:
-                        record.append("F-367 no-maintenance flags: template `git {}` call is missing -c "
+                        record.append("no-maintenance flags: template `git {}` call is missing -c "
                                       "{} (git() must splice _TEMPLATE_GIT_NO_MAINTENANCE)"
                                       .format(sub, flag))
 
         def _no_maintenance_vector(cannot_record, failure_record, build):
             # The vector's one run path, shared by its real run below and the injected evaluation run in
-            # (s), so that injection exercises this vector's own setup and evaluation guard.
-            _run_vector(cannot_record, failure_record, "F-367 no-maintenance flags", build,
-                        lambda f367: _check_no_maintenance(f367, failure_record))
+            # (s). That injected run passes a build returning the fixture the real run made, not
+            # _no_maintenance, so it exercises the setup guard and the evaluation guard this path puts
+            # around the vector's own evaluation, not the vector's own setup.
+            _run_vector(cannot_record, failure_record, "no-maintenance flags", build,
+                        lambda repo: _check_no_maintenance(repo, failure_record))
 
         _no_maintenance_vector(cannot, failures, _no_maintenance)
 
@@ -1981,7 +2059,7 @@ def _self_test_main_isolated():
                 _materialize_git = saved_materialize_git
             rc_e, text_e = _verdict_run([], injected_eval_lines, None, None)
             if (escaped is not None or injected_eval_failures or len(injected_eval_lines) != 1
-                    or not injected_eval_lines[0].startswith("F-367 no-maintenance flags: evaluation raised")
+                    or not injected_eval_lines[0].startswith("no-maintenance flags: evaluation raised")
                     or "ValueError: injected materialize failure" not in injected_eval_lines[0]
                     or rc_e != 2 or injected_eval_lines[0] not in text_e):
                 failures.append("evaluation ValueError: expected one named no-maintenance cannot-evaluate "
@@ -2124,6 +2202,26 @@ def _self_test_main_isolated():
                  "the registry {} was not produced".format(gen_gensrc.REGISTRY_REL))):
             _run_vector(cannot, failures, name, _unconfirmable(case), _expect_refused(name, refusal))
 
+        # (t) The accepting counterpart: a tree target holding a real nested subdirectory of regular files
+        #     (out/tree/sub/x.txt beside the tree's flat members) is confirmed as produced. Every case above
+        #     expects a refusal, so a confirmation rule that refused every subdirectory would pass them all;
+        #     it fails this vector.
+        def _nested_tree():
+            nested = _build_repo(tmp / "nested-tree", {"goodfile": _GOODFILE, "goodtree": _GOODTREE})
+            sub = nested / "out" / "tree" / "sub"
+            sub.mkdir()
+            (sub / "x.txt").write_text("nested member\n", encoding="utf-8")
+            return nested
+
+        def _evaluate_nested_tree(nested):
+            try:
+                _confirm_targets(nested)
+            except _FixtureSetupError as exc:
+                failures.append("nested tree subdirectory: expected out/tree/sub/x.txt to be confirmed as "
+                                "produced, got the refusal {}".format(exc))
+
+        _run_vector(cannot, failures, "nested tree subdirectory", _nested_tree, _evaluate_nested_tree)
+
         # #378: this tool's _close_fd_yielding copy and its representative site, each green and red under
         # its flip.
         def _evaluate_close(close_vectors):
@@ -2136,6 +2234,20 @@ def _self_test_main_isolated():
                 census_error = exc
 
         _run_vector(cannot, failures, "close vectors", lambda: _close_vectors(tmp / "close"), _evaluate_close)
+
+        # (u) The vector census reconciliation, checked on injected lists: it is silent when the vectors
+        #     that ran match the listed ones in any order, and names a listed vector that ran fewer times
+        #     than listed, an unlisted vector that ran, and a vector that ran more often than listed.
+        with _VectorEvaluation(cannot, failures, "vector census"):
+            listed = ("a", "b", "b")
+            for ran, want in ((("b", "a", "b"), []),
+                              (("a", "b"), ["'b' is listed to run 2 time(s) but ran 1"]),
+                              (("a", "b", "b", "c"), ["'c' ran 1 time(s) but is listed 0"]),
+                              (("a", "b", "b", "b"), ["'b' ran 3 time(s) but is listed 2"])):
+                got = _vector_census(ran, listed)
+                if len(got) != len(want) or not all(w in line for w, line in zip(want, got)):
+                    failures.append("vector census: {!r} against {!r} expected lines naming {!r}, got {!r}"
+                                    .format(ran, listed, want, got))
     finally:
         _run_check = saved_run_check
         _now = saved_now
@@ -2147,6 +2259,8 @@ def _self_test_main_isolated():
         except OSError as exc:
             cleanup_error = exc
 
+    # Every listed vector ran as often as listed, and no unlisted vector ran.
+    failures.extend(_vector_census(_VECTORS_RUN, _SELF_TEST_VECTORS))
     rc = _self_test_verdict(failures, cannot, cleanup_error, census_error)
     if rc != 0:
         return rc
@@ -2163,7 +2277,10 @@ def _self_test_main_isolated():
           "raising any Exception, are each a named cannot-evaluate, and an Exception escaping the gate is "
           "named as a gate defect; a declared target reached through a symlink at the fixture base or any "
           "component below it, or a tree with a symlinked member (a nested symlinked directory included) or "
-          "a FIFO member, is not confirmed as produced; the synthetic real tree is byte-and-mode "
+          "a FIFO member, is not confirmed as produced, while a tree holding a real nested subdirectory of "
+          "regular files is; the vector census matches the {} vector runs against the listed vectors, and "
+          "a listed vector that did not run or an unlisted one that ran fails the self-test; the synthetic "
+          "real tree is byte-and-mode "
           "identical after a normal run and after a run "
           "whose corrupted probe raises (itself exit 2); a generator changing a real-tree file's mode is "
           "detected (exit 2); a decode-only generator is caught (exit 1) specifically by a "
@@ -2177,7 +2294,7 @@ def _self_test_main_isolated():
           "every template git command carries the F-367 no-maintenance flags (gc.auto=0, gc.autoDetach="
           "false, maintenance.auto=false) so no detached auto-gc / auto-maintenance can race the per-call "
           "copytree of the template; and the {} #378 close-vector runs pass, each flip leg red by its own "
-          "assertion".format(close_runs))
+          "assertion".format(len(_VECTORS_RUN), close_runs))
     return 0
 
 
