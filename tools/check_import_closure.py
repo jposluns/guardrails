@@ -1112,7 +1112,8 @@ def _text(path, rel):
 def _toml(path, rel):
     try:
         return tomllib.loads(_text(path, rel))
-    except tomllib.TOMLDecodeError as exc:
+    except (ValueError, RecursionError, MemoryError) as exc:
+        # TOMLDecodeError is a ValueError; a deeply nested or oversized file raises the other two
         raise CannotEvaluate("%s: does not parse as TOML: %s" % (rel, exc))
 
 
