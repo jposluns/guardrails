@@ -269,6 +269,8 @@ def load_registry(root, absent_is_legacy=False):
         raise ComposeError("{}: {}".format(REGISTRY_REL, exc)) from None
     except RecursionError as exc:
         raise ComposeError("{}: TOML nesting is too deep to parse ({})".format(REGISTRY_REL, exc)) from None
+    except (ValueError, MemoryError) as exc:   # a bare ValueError: an over-long integer literal
+        raise ComposeError("{}: does not parse ({}): {}".format(REGISTRY_REL, type(exc).__name__, exc)) from None
     where = REGISTRY_REL
     if set(data) - TOP_KEYS or TOP_REQUIRED - set(data):
         raise ComposeError("{}: top-level keys must be {} (block optional); got {}".format(

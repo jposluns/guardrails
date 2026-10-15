@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "61a543eb58472c847091c115ae3745443ca824447cebbe6f834cc0cbbd8bb04d"
+tree-sha256 = "6c047d89a0d6993a73e43d987debb481601fd833308b878846243a1b213eddfe"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3226,8 +3226,8 @@ sha256 = "60d56244cf05535c7c4a5cd04750f8f9f1815cf0d6708474de5c6f8e7e43b79a"
 
 [[sources]]
 path = "tools/_adapter_compose.py"
-bytes = 45813
-sha256 = "79a647e85413d7a1ec5429734d2bbc84b9b2cf3363790e642a020a8a592f57c3"
+bytes = 46024
+sha256 = "9bbc248790fa1236a6c86322a5bd768df125d435b190d7821d8a9271d5322ea9"
 
 [[sources]]
 path = "tools/_close_selftest.py"
