@@ -69,11 +69,11 @@ handler's structured decision.
 
 It also covers the gate-weakening guard (gate_weakening, gatdis): a git verification-hook bypass
 (--no-verify on commit/merge/push/pull/rebase/am, exact or abbreviated; the short -n only on
-commit/am, where -n IS --no-verify) denies; a checker-shaped segment whose failure is swallowed
-(|| true, || :) or piped into an adjacent head or tail allows with a note, except that a narrow
-verification run on the allow-list whose output reaches a sink on the allow-list (head or tail with
-one positive line count, grep -m N/-q/-c/-l/-L, rg -q/-c/-l) denies; option-value, post-'--', and
-push/merge -n edges stay allowed; and the parse-error fallback fails safe.
+commit/am, where -n IS --no-verify), bare or behind a command-word wrapper, denies; a checker-shaped
+segment whose failure is swallowed (|| true, || :) or piped into an adjacent head or tail allows with a
+note, except that a narrow verification run on the allow-list whose output reaches a sink on the
+allow-list (head or tail with one positive line count, grep -m N/-q/-c/-l/-L, rg -q/-c/-l) denies;
+option-value, post-'--', and push/merge -n edges stay allowed; and the parse-error fallback fails safe.
 
 It also covers the BEST-EFFORT, ASK-only git-commit argument substitution guard
 (commit_msg_subst, sectvl). In a parsed simple segment whose effective command resolves past the named
@@ -8258,6 +8258,59 @@ def _main_isolated(monitor):
         # bypass subcommand from the gate-weakening scan -> DENY.
         gexpect("(qa-b1-gw) backslash-newline no-verify does not slip via an empty argv element, denies",
                 "git \\\n commit --no-verify -m x", "deny")
+
+        # === the hook bypass behind a command-word wrapper (_gate_git_commands) ==========================
+        # A wrapper word (env, timeout, command, exec, nohup, xargs, sudo, nice, setsid, stdbuf, time) is the
+        # command word, so the git command after it was never judged: every deny below allowed before the
+        # rule. Every later git word after a wrapper starts a judged command, whatever the wrapper's own
+        # options and operands; leading reserved words and VAR=value words are passed over first. Each
+        # control (gw-wr-c*) turns red when one restriction of the rule is dropped: the spelling test (c1),
+        # the short -n verb discipline (c2), the bound to wrapper words (c3), the VAR=value filter (c4), the
+        # help-flag test (c5, c6).
+        gexpect("(gw-wr1) env git commit --no-verify denies (the wrapper is passed over)",
+                "env git commit --no-verify -m x", "deny")
+        gexpect("(gw-wr2) command git commit --no-verify denies", "command git commit --no-verify -m x", "deny")
+        gexpect("(gw-wr3) env with assignments before git still denies",
+                "env FOO=1 BAR=2 git commit --no-verify -m x", "deny")
+        gexpect("(gw-wr4) env with an option and an assignment still finds the short -n",
+                "env -i PATH=/usr/bin git commit -n -m x", "deny")
+        gexpect("(gw-wr5) a VAR=value prefix before the env wrapper still denies a push bypass",
+                "FOO=1 env git push --no-verify origin feature", "deny")
+        gexpect("(gw-wr6) timeout with its options and duration denies",
+                "timeout -s KILL 60 git commit --no-verify -m x", "deny")
+        gexpect("(gw-wr7) exec git commit -n denies", "exec git commit -n -m x", "deny")
+        gexpect("(gw-wr8) nohup git push --no-verify denies", "nohup git push --no-verify origin feature", "deny")
+        gexpect("(gw-wr9) xargs -I{} git commit --no-verify denies",
+                "xargs -I{} git commit --no-verify -m {}", "deny")
+        gexpect("(gw-wr10) sudo -u ci git commit --no-verify denies (the -u value is passed over)",
+                "sudo -u ci git commit --no-verify -m x", "deny")
+        gexpect("(gw-wr11) nice -n 10 git rebase --no-verify denies",
+                "nice -n 10 git rebase --no-verify origin/main", "deny")
+        gexpect("(gw-wr12) setsid -w git merge --no-verify denies", "setsid -w git merge --no-verify topic", "deny")
+        gexpect("(gw-wr13) stdbuf -oL git am -n denies", "stdbuf -oL git am -n patch.mbox", "deny")
+        gexpect("(gw-wr14) time -p git pull --no-verify denies", "time -p git pull --no-verify", "deny")
+        gexpect("(gw-wr15) a pathed wrapper and a pathed git still deny",
+                "/usr/bin/env /usr/bin/git commit --no-verify -m x", "deny")
+        gexpect("(gw-wr16) nested wrappers still deny", "sudo env git commit -n -m x", "deny")
+        gexpect("(gw-wr17) a wrapper value spelled git does not hide the real git command, denies",
+                "sudo -u git git commit -n -m x", "deny")
+        gexpect("(gw-wr18) a leading ! reserved word is passed over, denies", "! git commit --no-verify -m x", "deny")
+        gexpect("(gw-wr19) a git command in an if condition denies", "if git commit -n -m x; then :; fi", "deny")
+        gexpect("(gw-wr20) a git command in a brace group denies", "{ git commit --no-verify -m x; }", "deny")
+        gexpect("(gw-wr21) a continuation-joined --no-verify behind env denies",
+                "env git commit --no-ve\\\nrify -m x", "deny")
+        gexpect("(gw-wr22) a wrapped non-git command whose operands spell a bypass over-denies (disclosed)",
+                "xargs echo git commit -n", "deny")
+        gexpect("(gw-wr-c1) a wrapped commit with no bypass spelling allows", "env git commit -m x", "allow")
+        gexpect("(gw-wr-c2) a wrapped push -n is a dry run, allows", "sudo git push -n origin feature", "allow")
+        gexpect("(gw-wr-c3) the operands of a command that is not a wrapper are not judged, allows",
+                "echo git commit --no-verify", "allow")
+        gexpect("(gw-wr-c4) an assignment whose value ends in git starts no command, allows",
+                "env GIT_BIN=/usr/bin/git ./release.sh push --no-verify", "allow")
+        gexpect("(gw-wr-c5) a wrapped commit --help shows the manual and commits nothing, allows",
+                "env git commit --help --no-verify", "allow")
+        gexpect("(gw-wr-c6) a bare commit --help shows the manual and commits nothing, allows",
+                "git commit --help --no-verify", "allow")
 
         # === gatdis deny tier: a VERIFICATION RUN whose output reaches a truncating sink =====================
         # Two tiers: the narrow verification-run predicate piped into a truncating sink DENIES; everything else

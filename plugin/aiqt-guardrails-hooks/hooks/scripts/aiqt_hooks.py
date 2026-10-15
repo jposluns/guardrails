@@ -8655,13 +8655,50 @@ def _gate_weakening_fallback(command):
     return _allow()
 
 
+# The wrapper words that run the command after them (their own options and operands first) for the hook-bypass
+# check: when one is a segment's command word, every later word that is git starts a command the check judges
+# (_gate_git_commands). One bounded rule rather than an option grammar per wrapper, so a wrapper option or operand
+# that is not git is passed over whatever its arity (sudo -u ci, timeout -s KILL 60, nice -n 10, xargs -I{}). The
+# cost is a safe-direction over-deny when a wrapped command that is not git carries git, a verb that accepts
+# --no-verify and a bypass spelling as its own operands ('xargs echo git commit -n').
+_GATE_GIT_WRAPPERS = frozenset((
+    "env", "timeout", "command", "exec", "nohup", "xargs", "sudo", "nice", "setsid", "stdbuf", "time"))
+
+
+def _gate_git_commands(argv):
+    """Yield the git command lines of one segment that the hook-bypass check judges, one at a time, so a long
+    wrapped segment never holds every suffix at once. Leading reserved words (_GATE_RESERVED: '!', 'if', 'then',
+    'do', '{' and the rest) and VAR=value words are passed over first; then the segment itself when its command
+    word is git; when its command word is a wrapper (_GATE_GIT_WRAPPERS), every later suffix that starts at a
+    word whose basename is git and that is not a VAR=value word; otherwise none. Purely lexical: a git word the
+    shell builds at run time is not seen (the residue lists them)."""
+    k = 0
+    while k < len(argv) and argv[k] in _GATE_RESERVED:
+        k += 1
+    argv = argv[k:]
+    i = _command_word_index(argv)
+    if i >= len(argv):
+        return
+    word = argv[i].rsplit("/", 1)[-1]
+    if word == "git":
+        yield argv
+    elif word in _GATE_GIT_WRAPPERS:
+        for m in range(i + 1, len(argv)):
+            if argv[m].rsplit("/", 1)[-1] == "git" and not _ENV_ASSIGN_RE.match(argv[m]):
+                yield argv[m:]
+
+
 def gate_weakening(data):
     """gatdis (integ/gate-discipline), PreToolUse/Bash. DENY a git segment that bypasses its
     verification hooks: a --no-verify spelling (exact or conservative long prefix) on a subcommand
     that accepts it (commit, merge, push, pull, rebase, am), or the short -n on the two verbs where
     -n IS --no-verify (commit, am; on push -n is --dry-run and on merge/pull it is --no-stat, so it
     is deliberately not flagged there); the CONFIRMED --no-verify bypass DENIES (certain, returned
-    immediately). The checker-output check has TWO TIERS. DENY tier, held to one canonical shape whose two
+    immediately). The git command is found after leading reserved words and VAR=value words, and behind a
+    wrapper word (_GATE_GIT_WRAPPERS: env, timeout, command, exec, nohup, xargs, sudo, nice, setsid, stdbuf,
+    time) every later git word starts a command judged the same way (_gate_git_commands), so 'env git commit
+    --no-verify' and 'sudo -u ci git commit -n' deny as the bare forms do. The checker-output check has TWO
+    TIERS. DENY tier, held to one canonical shape whose two
     ends are ALLOW-LISTS (_verification_sink): the first simple command of a pipeline is a KNOWN VERIFICATION
     INVOCATION (_is_verification_run: a run form in _GATE_VERIFY_RUNS, or a python script form) and pipes
     through pass-through stages (_gate_plain_filter: cat, tee, tr, uniq) into a sink on the sink allow-list
@@ -8684,7 +8721,10 @@ def gate_weakening(data):
     otherwise the raw fallback stands. Disclosed residuals: R1 a check inside an sh -c/bash -c, eval or
     xargs body; R2 an alias or shell function; R3 a gate whose name and options carry no checker part
     (tools/doctor.py, sha256sum -c, a build); R4 a plain '| grep PATTERN' filter or '| wc', which are not
-    counted as truncating sinks."""
+    counted as truncating sinks; R5 a hook bypass the lexer cannot see as words after a listed wrapper: a
+    wrapper outside _GATE_GIT_WRAPPERS (doas, ionice, chrt, taskset, flock, busybox), a command string a
+    wrapper splits at run time (env -S), or a bypass spelling a wrapper reads at run time (xargs from its
+    input)."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: gate_weakening wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))
@@ -8717,9 +8757,11 @@ def gate_weakening(data):
     segments = [(seg.argv, seg.sep_after) for seg in records]
     pending_note = None  # the first heuristic gate-weakening allow-note; a certain --no-verify deny wins first
     for index, (tokens, sep_after) in enumerate(segments):
-        if _command_word(tokens) == "git" and not _has_info_flag(tokens):
-            sub, args = _git_sub_and_args(tokens)
-            if sub in _NOVERIFY_VERBS:
+        for git_argv in _gate_git_commands(tokens):
+            # The subcommand is read before the full scans, so a git word that starts no bypass-capable verb
+            # (the many operands of 'xargs echo git git ...') costs no help-flag or spelling scan.
+            sub, args = _git_sub_and_args(git_argv)
+            if sub in _NOVERIFY_VERBS and not _has_info_flag(git_argv):
                 spelling = _no_verify_spelling(sub, args)
                 if spelling is not None:
                     return _deny(
