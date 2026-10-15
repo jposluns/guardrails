@@ -827,9 +827,16 @@ def main() -> int:
 #   (l) a sandbox-setup mkdtemp failure (injected OSError) returns cannot-evaluate (exit 2),
 #   (m) a BLOCK-kind generator that reads+decodes the whole target and fail-closes (non-zero) on invalid
 #       UTF-8 passes the sweep (exit 0): the gate probes a block target with invalid UTF-8 only and the
-#       generator rejects it, exercising the is_block probe path no other fixture covers.
-# Every fixture is built with each setup subprocess checked and each declared target confirmed present; a
-# vector whose setup fails is a named cannot-evaluate (the self-test exits 2), never a traceback or a pass.
+#       generator rejects it, exercising the is_block probe path no other fixture covers,
+#   (s) the self-test verdict gives cannot-evaluate exit precedence: a vector that could not be evaluated
+#       beside an assertion failure exits 2 naming both, a cleanup or census error still prints every
+#       cannot line first, and a fixture setup raising any Exception (an injected ValueError) is a named
+#       cannot-evaluate carrying its class,
+#   (t) a declared file target, tree target, or tree member that is a symlink to a node outside the fixture
+#       is not confirmed as produced (the confirmation follows no symlink).
+# Every fixture is built with each setup subprocess checked and each declared target confirmed present (a
+# regular file or directory inside the fixture, following no symlink); a vector whose setup fails is a named
+# cannot-evaluate (the self-test exits 2, even beside an assertion failure), never a traceback or a pass.
 # Every fixture is synthetic; any invalid-UTF-8 corruption bytes are assembled from non-secret parts so
 # this file never trips the repo secret scan.
 
@@ -1224,11 +1231,24 @@ def _git_fixture(repo, *args):
         raise _FixtureSetupError("git {} did not complete ({})".format(" ".join(args), exc)) from exc
 
 
+def _fixture_node(base, path, want_dir):
+    """True if `path` is, following no symlink, a directory (want_dir) or a regular file (otherwise) whose
+    realpath lies inside the fixture `base`. A symlink (even one to a matching node), a special node, an
+    absent path, or a node reached through an ancestor that leaves the fixture is not a produced node."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    if not (stat.S_ISDIR(st.st_mode) if want_dir else stat.S_ISREG(st.st_mode)):
+        return False
+    return _within(os.path.realpath(path), os.path.realpath(base))
+
+
 def _confirm_targets(base):
-    """Confirm the fixture's registry and every target it declares exist in base (a file target as a
-    regular file, a tree target as a directory holding at least one regular file). Raises
-    _FixtureSetupError naming the first absent one."""
-    if not (base / gen_gensrc.REGISTRY_REL).is_file():
+    """Confirm the fixture's registry and every target it declares exist in base, following no symlink (the
+    registry and a file target as a regular file, a tree target as a directory holding at least one regular
+    file, each inside the fixture). Raises _FixtureSetupError naming the first absent one."""
+    if not _fixture_node(base, base / gen_gensrc.REGISTRY_REL, False):
         raise _FixtureSetupError("the registry {} was not produced".format(gen_gensrc.REGISTRY_REL))
     try:
         entries = gen_gensrc.collect_entries(gen_gensrc.discover_declarations(base / "tools"), base)
@@ -1237,9 +1257,12 @@ def _confirm_targets(base):
     for entry in entries:
         target = base / entry["target"].rstrip("/")
         if entry["kind"] == "tree":
-            present = target.is_dir() and any(p.is_file() for p in target.rglob("*"))
+            # os.walk follows no symlinked directory; each member is lstat-checked by _fixture_node.
+            present = _fixture_node(base, target, True) and any(
+                _fixture_node(base, os.path.join(dirpath, name), False)
+                for dirpath, _dirnames, filenames in os.walk(target) for name in filenames)
         else:
-            present = target.is_file()
+            present = _fixture_node(base, target, False)
         if not present:
             raise _FixtureSetupError("declared target {} was not produced".format(entry["target"]))
 
@@ -1296,26 +1319,29 @@ def _build_repo(base, gens):
 
 
 def _setup_vector(cannot, name, build):
-    """Run one vector's fixture setup. A setup failure (_FixtureSetupError or OSError) appends a named
-    cannot-evaluate line to `cannot` and returns None, so the caller skips that vector's assertions."""
+    """Run one vector's fixture setup. Any Exception raised by the setup appends a named cannot-evaluate
+    line (carrying the exception class) to `cannot` and returns None, so the caller skips that vector's
+    assertions instead of aborting the self-test with a traceback. A BaseException that is not an
+    Exception (KeyboardInterrupt, SystemExit) still propagates."""
     try:
         return build()
-    except (_FixtureSetupError, OSError) as exc:
-        cannot.append("{}: fixture setup failed, vector not evaluated ({})".format(name, exc))
+    except Exception as exc:  # noqa: BLE001  every setup failure is a named cannot-evaluate, never a traceback
+        cannot.append("{}: fixture setup failed, vector not evaluated ({}: {})"
+                      .format(name, type(exc).__name__, exc))
         return None
 
 
 def _close_vectors(base):
     """#378: the vectors for this tool's _close_fd_yielding copy and its representative site,
     _read_bytes_safe. A close that fails while an exception unwinds lets that exception through as the same
-    object; one that fails on the normal path raises; neither leaves a descriptor open. Returns (failures,
-    runs)."""
+    object; one that fails on the normal path raises; neither leaves a descriptor open. Builds the fixture
+    and returns the vectors for _close_selftest._st_close_check; the caller runs this through _setup_vector
+    so a setup failure is a named cannot-evaluate."""
     import _close_selftest
     base.mkdir()
     target = base / "target"
     target.write_bytes(b"payload")
     sandbox_real = os.path.realpath(str(base))
-    ns = globals()
     sent = _close_selftest._StSentinel("in flight at _read_bytes_safe")
 
     def read_bytes(raise_sent):
@@ -1334,11 +1360,37 @@ def _close_vectors(base):
                 os.read = real
         return call
 
-    vectors = (("check_gensrc_failclose site _read_bytes_safe: finally while an exception unwinds", True, "AR",
-                read_bytes(True), lambda e: e is sent),
-               ("check_gensrc_failclose site _read_bytes_safe: normal path", False, "BR", read_bytes(False),
-                None)) + _close_selftest._st_helper_vectors(ns)
-    return _close_selftest._st_close_check(ns, vectors)
+    return (("check_gensrc_failclose site _read_bytes_safe: finally while an exception unwinds", True, "AR",
+             read_bytes(True), lambda e: e is sent),
+            ("check_gensrc_failclose site _read_bytes_safe: normal path", False, "BR", read_bytes(False),
+             None)) + _close_selftest._st_helper_vectors(globals())
+
+
+def _self_test_verdict(failures, cannot, cleanup_error=None, census_error=None):
+    """Print the self-test outcome and return its exit code, never hiding a recorded line: every assertion
+    failure and every cannot-evaluate line is printed before a cleanup or census error. Cannot-evaluate
+    takes exit precedence (2) over an assertion failure (1): a self-test that could not evaluate every
+    vector, could not remove its tempdir, or could not read the descriptor census cannot certify the gate,
+    whatever else it found. Returns 0 only when nothing was recorded (the caller then prints the PASS
+    line)."""
+    if failures:
+        print("SELF-TEST FAIL:")
+        for failure in failures:
+            print("  - " + failure)
+    if cannot:
+        print("SELF-TEST CANNOT-EVALUATE: {} vector(s) could not be set up, so the self-test cannot "
+              "certify the gate; fail-closed:".format(len(cannot)))
+        for line in cannot:
+            print("  - " + line)
+    sys.stdout.flush()  # the lines above reach the reader before any error line written to stderr
+    if cleanup_error is not None:
+        print("SELF-TEST ERROR: could not remove the self-test tempdir ({}); fail-closed"
+              .format(cleanup_error), file=sys.stderr)
+    if census_error is not None:
+        print("SELF-TEST ERROR: {}".format(census_error), file=sys.stderr)
+    if cannot or cleanup_error is not None or census_error is not None:
+        return 2
+    return 1 if failures else 0
 
 
 def self_test_main():
@@ -1355,6 +1407,13 @@ def _self_test_main_isolated():
     def sweep_quiet(root):
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             return sweep(root)
+
+    def sweep_captured(root):
+        # One buffer for both streams, so a named sweep line can be asserted on.
+        buf = io.StringIO()
+        with redirect_stdout(buf), redirect_stderr(buf):
+            rc = sweep(root)
+        return rc, buf.getvalue()
 
     try:
         tmp = Path(tempfile.mkdtemp(prefix="aiqt-gensrc-failclose-selftest-"))
@@ -1432,7 +1491,9 @@ def _self_test_main_isolated():
         # (g) A declared target absent on disk fails closed (exit 2). Untrack it too, so real_root's
         #     tracked set still mirrors its on-disk files (the F-234 materialization equality stays clean)
         #     and the ABSENT-DECLARED-TARGET leg of _process_entry is what fails closed, not the new
-        #     tracked-set guard (which the dedicated case below covers).
+        #     tracked-set guard (which the dedicated case below covers). The baseline --check of gen_goodfile
+        #     would also exit non-zero on the absent target, so exit 2 alone cannot tell the two legs apart:
+        #     the absent-declared-target leg's own named line must be printed too.
         def _missing_target():
             miss = _build_repo(tmp / "missing-target", {"goodfile": _GOODFILE})
             (miss / "out" / "goodfile.txt").unlink()
@@ -1440,8 +1501,12 @@ def _self_test_main_isolated():
             return miss
 
         miss = _setup_vector(cannot, "missing declared target", _missing_target)
-        if miss is not None and sweep_quiet(miss) != 2:
-            failures.append("missing declared target: expected fail-closed exit 2")
+        if miss is not None:
+            rc_miss, text_miss = sweep_captured(miss)
+            absent_leg = "out/goodfile.txt: declared file target is absent or not a regular file"
+            if rc_miss != 2 or absent_leg not in text_miss:
+                failures.append("missing declared target: expected fail-closed exit 2 from the absent-declared-"
+                                "target leg naming {!r}, got exit {!r}".format(absent_leg, rc_miss))
 
         # (g) A non-clean per-generator baseline (source edited so the target is stale) fails closed (2).
         def _stale_baseline():
@@ -1684,14 +1749,113 @@ def _self_test_main_isolated():
                                         "{} (git() must splice _TEMPLATE_GIT_NO_MAINTENANCE)"
                                         .format(sub, flag))
 
+        # (s) The self-test verdict: a cannot-evaluate vector beside an assertion failure exits 2 (not 1)
+        #     and names both; a cleanup or census error still prints every cannot line, before its own
+        #     error line; an assertion failure alone exits 1 and an empty record exits 0. One buffer takes
+        #     both streams so the printed order is asserted.
+        def _verdict_run(*args):
+            buf = io.StringIO()
+            with redirect_stdout(buf), redirect_stderr(buf):
+                rc_v = _self_test_verdict(*args)
+            return rc_v, buf.getvalue()
+
+        injected_failure = "injected assertion failure"
+        injected_cannot = "injected vector: fixture setup failed, vector not evaluated"
+        rc_v, text_v = _verdict_run([injected_failure], [injected_cannot], None, None)
+        if rc_v != 2 or injected_failure not in text_v or injected_cannot not in text_v:
+            failures.append("verdict precedence: an assertion failure beside a cannot-evaluate vector expected "
+                            "exit 2 naming both, got exit {!r}: {!r}".format(rc_v, text_v))
+        for label, errors in (("cleanup", (OSError("injected cleanup failure"), None)),
+                              ("census", (None, RuntimeError("injected census failure")))):
+            rc_v, text_v = _verdict_run([], [injected_cannot], *errors)
+            error_line = "SELF-TEST ERROR: " if label == "census" else "SELF-TEST ERROR: could not remove"
+            if (rc_v != 2 or injected_cannot not in text_v or error_line not in text_v
+                    or text_v.index(injected_cannot) > text_v.index(error_line)):
+                failures.append("verdict {} error: expected exit 2 printing the cannot line before the error "
+                                "line, got exit {!r}: {!r}".format(label, rc_v, text_v))
+        for want, args in ((1, ([injected_failure], [], None, None)), (0, ([], [], None, None))):
+            rc_v, text_v = _verdict_run(*args)
+            if rc_v != want:
+                failures.append("verdict: {!r} expected exit {}, got {!r}".format(args, want, rc_v))
+
+        # (s) A fixture setup raising an exception class outside the old (_FixtureSetupError, OSError) pair
+        #     (an injected ValueError) is a named cannot-evaluate carrying its class, not a traceback; a
+        #     BaseException that is not an Exception still propagates.
+        injected_cannot_lines = []
+
+        def _raise_value_error():
+            raise ValueError("injected setup failure")
+
+        got = _setup_vector(injected_cannot_lines, "injected setup vector", _raise_value_error)
+        if (got is not None or len(injected_cannot_lines) != 1
+                or not injected_cannot_lines[0].startswith("injected setup vector: ")
+                or "ValueError: injected setup failure" not in injected_cannot_lines[0]):
+            failures.append("setup ValueError: expected one named cannot-evaluate line carrying the class, got "
+                            "{!r} and {!r}".format(got, injected_cannot_lines))
+
+        class _InjectedBaseExit(BaseException):
+            pass
+
+        def _raise_base_exit():
+            raise _InjectedBaseExit()
+
+        try:
+            _setup_vector(injected_cannot_lines, "injected BaseException vector", _raise_base_exit)
+            failures.append("setup BaseException: expected a non-Exception BaseException to propagate, it was "
+                            "recorded as {!r}".format(injected_cannot_lines[1:]))
+        except _InjectedBaseExit:
+            pass
+
+        # (t) _confirm_targets follows no symlink: a declared file target, a declared tree target, or every
+        #     member of a tree target replaced by a symlink to a node OUTSIDE the fixture (with the same
+        #     bytes, so a symlink-following check would accept it) is refused as not produced. The same fixture
+        #     passed _confirm_targets inside _build_repo before the swap.
+        def _symlinked_target(case):
+            def build():
+                base = _build_repo(tmp / "symlink-{}".format(case),
+                                   {"goodfile": _GOODFILE, "goodtree": _GOODTREE})
+                outside = tmp / "outside-{}".format(case)
+                tree = base / "out" / "tree"
+                if case == "file":
+                    outside.mkdir()
+                    target = base / "out" / "goodfile.txt"
+                    shutil.copy2(target, outside / "goodfile.txt")
+                    target.unlink()
+                    target.symlink_to(outside / "goodfile.txt")
+                elif case == "tree":
+                    os.rename(tree, outside)
+                    tree.symlink_to(outside, target_is_directory=True)
+                else:
+                    os.rename(tree, outside)
+                    tree.mkdir()
+                    for member in sorted(outside.iterdir()):
+                        (tree / member.name).symlink_to(member)
+                return base
+            return build
+
+        for case, declared in (("file", "out/goodfile.txt"), ("tree", "out/tree/"), ("member", "out/tree/")):
+            linked = _setup_vector(cannot, "symlinked {} target".format(case), _symlinked_target(case))
+            if linked is None:
+                continue
+            try:
+                _confirm_targets(linked)
+                failures.append("symlinked {} target: _confirm_targets accepted a declared target that is a "
+                                "symlink out of the fixture".format(case))
+            except _FixtureSetupError as exc:
+                if "declared target {} was not produced".format(declared) not in str(exc):
+                    failures.append("symlinked {} target: expected the refusal to name {}, got {}"
+                                    .format(case, declared, exc))
+
         # #378: this tool's _close_fd_yielding copy and its representative site, each green and red under
         # its flip.
         import _close_selftest
-        try:
-            close_failures, close_runs = _close_vectors(tmp / "close")
-            failures.extend(close_failures)
-        except _close_selftest._StCensusError as exc:  # the descriptor census cannot read one: cannot-evaluate
-            census_error = exc
+        close_vectors = _setup_vector(cannot, "close vectors", lambda: _close_vectors(tmp / "close"))
+        if close_vectors is not None:
+            try:
+                close_failures, close_runs = _close_selftest._st_close_check(globals(), close_vectors)
+                failures.extend(close_failures)
+            except _close_selftest._StCensusError as exc:  # the census cannot read one: cannot-evaluate
+                census_error = exc
     finally:
         _run_check = saved_run_check
         _now = saved_now
@@ -1701,34 +1865,20 @@ def _self_test_main_isolated():
         except OSError as exc:
             cleanup_error = exc
 
-    if cleanup_error is not None:
-        print("SELF-TEST ERROR: could not remove the self-test tempdir ({}); fail-closed"
-              .format(cleanup_error), file=sys.stderr)
-        return 2
-    if census_error is not None:
-        print("SELF-TEST ERROR: {}".format(census_error), file=sys.stderr)
-        return 2
-    if failures:
-        print("SELF-TEST FAIL:")
-        for failure in failures:
-            print("  - " + failure)
-        for line in cannot:
-            print("  (also could not evaluate) " + line)
-        return 1
-    if cannot:
-        print("SELF-TEST CANNOT-EVALUATE: {} vector(s) could not be set up, so the self-test cannot "
-              "certify the gate; fail-closed:".format(len(cannot)))
-        for line in cannot:
-            print("  - " + line)
-        return 2
+    rc = _self_test_verdict(failures, cannot, cleanup_error, census_error)
+    if rc != 0:
+        return rc
     print("SELF-TEST PASS: a conformant repo (content-guarding file and tree generators) passes; a bypass "
           "generator is caught (exit 1) via valid-but-different content; a stateful generator keying off a "
           "$HOME marker is caught (exit 1) because per-call unique HOME/TMPDIR and fresh independent "
           "sandboxes deny cross-call state; a symlink-swap generator is cannot-evaluate (exit 2) with no "
           "out-of-sandbox write; a tolerant reader that guards content passes (exit 0, no false violation); "
           "a tree generator guarding only some members is caught (exit 1, every member probed); a malformed "
-          "registry, a missing target, a non-clean baseline, and an off-grammar regenerate all fail closed "
-          "(exit 2); the synthetic real tree is byte-and-mode identical after a normal run and after a run "
+          "registry, a missing target (named by its own absent-target line), a non-clean baseline, and an "
+          "off-grammar regenerate all fail closed (exit 2); the self-test verdict exits 2 when a vector "
+          "could not be evaluated, even beside an assertion failure, and prints every cannot line before a "
+          "cleanup or census error; a setup raising any Exception is a named cannot-evaluate; a declared "
+          "target symlinked out of the fixture is not confirmed as produced; the synthetic real tree is byte-and-mode identical after a normal run and after a run "
           "whose corrupted probe raises (itself exit 2); a generator changing a real-tree file's mode is "
           "detected (exit 2); a decode-only generator is caught (exit 1) specifically by a "
           "valid-but-different / same-length content probe; a total-runtime deadline overrun returns exit "
