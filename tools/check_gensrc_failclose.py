@@ -828,6 +828,8 @@ def main() -> int:
 #   (m) a BLOCK-kind generator that reads+decodes the whole target and fail-closes (non-zero) on invalid
 #       UTF-8 passes the sweep (exit 0): the gate probes a block target with invalid UTF-8 only and the
 #       generator rejects it, exercising the is_block probe path no other fixture covers.
+# Every fixture is built with each setup subprocess checked and each declared target confirmed present; a
+# vector whose setup fails is a named cannot-evaluate (the self-test exits 2), never a traceback or a pass.
 # Every fixture is synthetic; any invalid-UTF-8 corruption bytes are assembled from non-secret parts so
 # this file never trips the repo secret scan.
 
@@ -1173,35 +1175,85 @@ if __name__ == "__main__":
 _MALFORMED = "GENSRC_OUTPUTS = some_undefined_symbol\n"
 
 
+class _FixtureSetupError(Exception):
+    """A self-test fixture could not be built as intended (a setup subprocess failed, or a file it was
+    meant to produce is absent). The vector it serves is cannot-evaluate, never a pass or a traceback."""
+
+
+def _tail(data):
+    """The last few lines of a subprocess's captured output, decoded for a setup-failure message."""
+    text = data.decode("utf-8", errors="replace") if isinstance(data, bytes) else (data or "")
+    return " | ".join(text.strip().splitlines()[-3:]) or "no output"
+
+
 def _write_gen(tools_dir, stem, body):
     (tools_dir / "gen_{}.py".format(stem)).write_text(body, encoding="utf-8")
 
 
 def _run_write(root, stem):
-    """Run a synthetic generator in WRITE mode to establish a clean baseline in a fixture repo."""
-    subprocess.run([sys.executable, str(root / "tools" / "gen_{}.py".format(stem))],
-                   cwd=str(root), env=_sanitized_env(), capture_output=True, timeout=PROBE_TIMEOUT,
-                   check=False)
+    """Run a synthetic generator in WRITE mode to establish a clean baseline in a fixture repo. A launch
+    failure, a timeout, or a nonzero exit raises _FixtureSetupError naming the generator."""
+    try:
+        proc = subprocess.run([sys.executable, str(root / "tools" / "gen_{}.py".format(stem))],
+                              cwd=str(root), env=_sanitized_env(), capture_output=True,
+                              timeout=PROBE_TIMEOUT, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise _FixtureSetupError("gen_{}.py write run did not complete ({})".format(stem, exc)) from exc
+    if proc.returncode != 0:
+        raise _FixtureSetupError("gen_{}.py write run exited {} ({})"
+                                 .format(stem, proc.returncode, _tail(proc.stderr)))
 
 
 def _git_fixture(repo, *args):
     """Run git in a fixture repo with a pinned identity and no user config.
     git_fixture_env preserves non-GIT variables; _materialize_git uses an allowlist.
-    check=True: a setup failure surfaces loudly rather than a silently broken fixture."""
+    A launch failure, a timeout, or a nonzero exit raises _FixtureSetupError naming the git command, so a
+    setup failure surfaces as a named cannot-evaluate rather than a silently broken fixture."""
     from _git_fixture_env import git_fixture_env
     env = git_fixture_env(PYTHONDONTWRITEBYTECODE="1")
-    return subprocess.run(
-        ["git", "-C", str(repo), "-c", "user.name=aiqt-failclose",
-         "-c", "user.email=failclose@invalid", "-c", "commit.gpgsign=false",
-         "-c", "init.defaultBranch=main", *args],
-        capture_output=True, env=env, timeout=PROBE_TIMEOUT, shell=False, check=True)
+    try:
+        return subprocess.run(
+            ["git", "-C", str(repo), "-c", "user.name=aiqt-failclose",
+             "-c", "user.email=failclose@invalid", "-c", "commit.gpgsign=false",
+             "-c", "init.defaultBranch=main", *args],
+            capture_output=True, env=env, timeout=PROBE_TIMEOUT, shell=False, check=True)
+    except subprocess.CalledProcessError as exc:
+        raise _FixtureSetupError("git {} exited {} ({})"
+                                 .format(" ".join(args), exc.returncode, _tail(exc.stderr))) from exc
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise _FixtureSetupError("git {} did not complete ({})".format(" ".join(args), exc)) from exc
+
+
+def _confirm_targets(base):
+    """Confirm the fixture's registry and every target it declares exist in base (a file target as a
+    regular file, a tree target as a directory holding at least one regular file). Raises
+    _FixtureSetupError naming the first absent one."""
+    if not (base / gen_gensrc.REGISTRY_REL).is_file():
+        raise _FixtureSetupError("the registry {} was not produced".format(gen_gensrc.REGISTRY_REL))
+    try:
+        entries = gen_gensrc.collect_entries(gen_gensrc.discover_declarations(base / "tools"), base)
+    except (ValueError, OSError) as exc:
+        raise _FixtureSetupError("cannot read the fixture's declarations ({})".format(exc)) from exc
+    for entry in entries:
+        target = base / entry["target"].rstrip("/")
+        if entry["kind"] == "tree":
+            present = target.is_dir() and any(p.is_file() for p in target.rglob("*"))
+        else:
+            present = target.is_file()
+        if not present:
+            raise _FixtureSetupError("declared target {} was not produced".format(entry["target"]))
 
 
 def _build_repo(base, gens):
     """Assemble a synthetic repo under base carrying the named generators plus the real gen_gensrc loader,
     generate every target into a clean state, then write the .aiqt/gensrc.json registry. `gens` maps a
     stem to its source body. A broad set of harmless sources is created so any generator finds its
-    declared inputs; the modechanger fixture also gets a victim file plus the absolute path to it."""
+    declared inputs; the modechanger fixture also gets a victim file plus the absolute path to it.
+    base is made a git repository BEFORE any generator runs: _gen_common.repo_root() resolves the nearest
+    ancestor holding .git, so a generator run before `git init` resolves a root ABOVE base whenever an
+    ancestor of the temporary directory is itself a git checkout, reads its sources there, and writes no
+    target into base (or writes into that ancestor). Every subprocess is checked and every declared target
+    confirmed; a failure raises _FixtureSetupError."""
     here = Path(__file__).resolve().parent
     tools = base / "tools"
     tools.mkdir(parents=True)
@@ -1226,17 +1278,31 @@ def _build_repo(base, gens):
     (base / "src" / "victim-path.txt").write_text(str(victim) + "\n", encoding="utf-8")
     for stem, body in gens.items():
         _write_gen(tools, stem, body)
+    # Make the fixture a REAL git repository (F-234): _materialize_git enumerates real_root's tracked set
+    # via `git ls-files` and no longer falls back to `git add -A` on a bare .git marker, so every fixture
+    # that reaches materialization must be a genuine repo whose tracked set mirrors its on-disk files. The
+    # init comes first so each generator's repo_root() resolves to base (see the docstring).
+    _git_fixture(base, "init", "-q", "--template=")
+    if repo_root(tools / "gen_gensrc.py") != base.resolve():
+        raise _FixtureSetupError("repo_root() of the fixture does not resolve to {}".format(base))
     # Generate targets clean, then the registry last (it lists tools/ and every target).
     for stem in gens:
         _run_write(base, stem)
     _run_write(base, "gensrc")
-    # Make the fixture a REAL git repository (F-234): _materialize_git enumerates real_root's tracked set
-    # via `git ls-files` and no longer falls back to `git add -A` on a bare .git marker, so every fixture
-    # that reaches materialization must be a genuine repo whose tracked set mirrors its on-disk files.
-    _git_fixture(base, "init", "-q", "--template=")
+    _confirm_targets(base)
     _git_fixture(base, "add", "-A")
     _git_fixture(base, "commit", "-q", "-m", "fixture baseline", "--no-verify")
     return base
+
+
+def _setup_vector(cannot, name, build):
+    """Run one vector's fixture setup. A setup failure (_FixtureSetupError or OSError) appends a named
+    cannot-evaluate line to `cannot` and returns None, so the caller skips that vector's assertions."""
+    try:
+        return build()
+    except (_FixtureSetupError, OSError) as exc:
+        cannot.append("{}: fixture setup failed, vector not evaluated ({})".format(name, exc))
+        return None
 
 
 def _close_vectors(base):
@@ -1296,6 +1362,7 @@ def _self_test_main_isolated():
         print("SELF-TEST ERROR: no writable temporary directory: {}".format(exc), file=sys.stderr)
         return 2
     failures = []
+    cannot = []  # vectors whose fixture setup failed: named cannot-evaluate, never a pass or a traceback
     global _run_check, _now, _mkdtemp
     saved_run_check = _run_check
     saved_now = _now
@@ -1305,157 +1372,185 @@ def _self_test_main_isolated():
     close_runs = 0
     try:
         # (a) A conformant repo (content-guarding file + tree generators) passes.
-        good = _build_repo(tmp / "good", {"goodfile": _GOODFILE, "goodtree": _GOODTREE})
-        if sweep_quiet(good) != 0:
+        good = _setup_vector(cannot, "conformant repo", lambda: _build_repo(
+            tmp / "good", {"goodfile": _GOODFILE, "goodtree": _GOODTREE}))
+        if good is not None and sweep_quiet(good) != 0:
             failures.append("conformant repo: expected the sweep to pass (exit 0)")
 
         # (b) A BYPASS generator is caught (exit 1) via valid-but-different content, not just invalid UTF-8.
-        byp = _build_repo(tmp / "bypass", {"goodfile": _GOODFILE, "bypass": _BYPASS})
-        if sweep_quiet(byp) != 1:
+        byp = _setup_vector(cannot, "bypass generator", lambda: _build_repo(
+            tmp / "bypass", {"goodfile": _GOODFILE, "bypass": _BYPASS}))
+        if byp is not None and sweep_quiet(byp) != 1:
             failures.append("bypass generator: expected exit 1 (F-154 regression caught)")
 
         # (c) A STATEFUL generator is caught (exit 1): per-probe fresh sandboxes deny cross-call state.
-        stf = _build_repo(tmp / "stateful", {"stateful": _STATEFUL})
-        if sweep_quiet(stf) != 1:
+        stf = _setup_vector(cannot, "stateful generator", lambda: _build_repo(
+            tmp / "stateful", {"stateful": _STATEFUL}))
+        if stf is not None and sweep_quiet(stf) != 1:
             failures.append("stateful generator: expected exit 1 (per-probe isolation)")
 
         # (d) A SYMLINK-SWAP generator is cannot-evaluate (exit 2) and causes no real-tree write. The
         #     symlink points at sys.executable (outside the sandbox); assert it is untouched afterwards.
-        swp = _build_repo(tmp / "swap", {"swap": _SYMLINK_SWAP})
-        exe_before = os.stat(sys.executable)
-        if sweep_quiet(swp) != 2:
-            failures.append("symlink-swap generator: expected cannot-evaluate exit 2 (containment)")
-        exe_after = os.stat(sys.executable)
-        if (exe_before.st_mode, exe_before.st_size, exe_before.st_mtime_ns) != \
-           (exe_after.st_mode, exe_after.st_size, exe_after.st_mtime_ns):
-            failures.append("symlink-swap generator: the out-of-sandbox symlink target was written")
+        swp = _setup_vector(cannot, "symlink-swap generator", lambda: _build_repo(
+            tmp / "swap", {"swap": _SYMLINK_SWAP}))
+        if swp is not None:
+            exe_before = os.stat(sys.executable)
+            if sweep_quiet(swp) != 2:
+                failures.append("symlink-swap generator: expected cannot-evaluate exit 2 (containment)")
+            exe_after = os.stat(sys.executable)
+            if (exe_before.st_mode, exe_before.st_size, exe_before.st_mtime_ns) != \
+               (exe_after.st_mode, exe_after.st_size, exe_after.st_mtime_ns):
+                failures.append("symlink-swap generator: the out-of-sandbox symlink target was written")
 
         # (e) A TOLERANT-READER that guards content passes (exit 0): no false violation.
-        tol = _build_repo(tmp / "tolerant", {"tolerant": _TOLERANT})
-        if sweep_quiet(tol) != 0:
+        tol = _setup_vector(cannot, "tolerant-reader generator", lambda: _build_repo(
+            tmp / "tolerant", {"tolerant": _TOLERANT}))
+        if tol is not None and sweep_quiet(tol) != 0:
             failures.append("tolerant-reader generator: expected exit 0 (no false violation)")
 
         # (f) A TREE generator guarding only SOME members is caught (exit 1): every member is probed.
-        part = _build_repo(tmp / "partial", {"partialtree": _PARTIALTREE})
-        if sweep_quiet(part) != 1:
+        part = _setup_vector(cannot, "partial-coverage tree generator", lambda: _build_repo(
+            tmp / "partial", {"partialtree": _PARTIALTREE}))
+        if part is not None and sweep_quiet(part) != 1:
             failures.append("partial-coverage tree generator: expected exit 1 (every member probed)")
 
         # (g) A non-literal GENSRC_OUTPUTS makes enumeration fail closed (exit 2).
-        mal = tmp / "malformed"
-        (mal / "tools").mkdir(parents=True)
-        here = Path(__file__).resolve().parent
-        shutil.copy2(here / "_gen_common.py", mal / "tools" / "_gen_common.py")
-        shutil.copy2(here / "gen_gensrc.py", mal / "tools" / "gen_gensrc.py")
-        (mal / ".git").write_text("marker\n", encoding="utf-8")
-        _write_gen(mal / "tools", "malformed", _MALFORMED)
-        if sweep_quiet(mal) != 2:
+        def _malformed():
+            mal = tmp / "malformed"
+            (mal / "tools").mkdir(parents=True)
+            here = Path(__file__).resolve().parent
+            shutil.copy2(here / "_gen_common.py", mal / "tools" / "_gen_common.py")
+            shutil.copy2(here / "gen_gensrc.py", mal / "tools" / "gen_gensrc.py")
+            (mal / ".git").write_text("marker\n", encoding="utf-8")
+            _write_gen(mal / "tools", "malformed", _MALFORMED)
+            return mal
+
+        mal = _setup_vector(cannot, "malformed registry", _malformed)
+        if mal is not None and sweep_quiet(mal) != 2:
             failures.append("malformed registry: expected fail-closed exit 2")
 
         # (g) A declared target absent on disk fails closed (exit 2). Untrack it too, so real_root's
         #     tracked set still mirrors its on-disk files (the F-234 materialization equality stays clean)
         #     and the ABSENT-DECLARED-TARGET leg of _process_entry is what fails closed, not the new
         #     tracked-set guard (which the dedicated case below covers).
-        miss = _build_repo(tmp / "missing-target", {"goodfile": _GOODFILE})
-        (miss / "out" / "goodfile.txt").unlink()
-        _git_fixture(miss, "rm", "-q", "--cached", "out/goodfile.txt")
-        if sweep_quiet(miss) != 2:
+        def _missing_target():
+            miss = _build_repo(tmp / "missing-target", {"goodfile": _GOODFILE})
+            (miss / "out" / "goodfile.txt").unlink()
+            _git_fixture(miss, "rm", "-q", "--cached", "out/goodfile.txt")
+            return miss
+
+        miss = _setup_vector(cannot, "missing declared target", _missing_target)
+        if miss is not None and sweep_quiet(miss) != 2:
             failures.append("missing declared target: expected fail-closed exit 2")
 
         # (g) A non-clean per-generator baseline (source edited so the target is stale) fails closed (2).
-        stale = _build_repo(tmp / "stale-baseline", {"goodfile": _GOODFILE})
-        (stale / "src" / "goodfile-src.txt").write_text("edited after generation\n", encoding="utf-8")
-        if sweep_quiet(stale) != 2:
+        def _stale_baseline():
+            stale = _build_repo(tmp / "stale-baseline", {"goodfile": _GOODFILE})
+            (stale / "src" / "goodfile-src.txt").write_text("edited after generation\n", encoding="utf-8")
+            return stale
+
+        stale = _setup_vector(cannot, "non-clean baseline", _stale_baseline)
+        if stale is not None and sweep_quiet(stale) != 2:
             failures.append("non-clean baseline: expected fail-closed exit 2")
 
         # (g) A regenerate off the grammar fails closed (exit 2).
-        badcmd = _build_repo(tmp / "off-grammar", {"badcmd": _BADCMD})
-        if sweep_quiet(badcmd) != 2:
+        badcmd = _setup_vector(cannot, "off-grammar regenerate", lambda: _build_repo(
+            tmp / "off-grammar", {"badcmd": _BADCMD}))
+        if badcmd is not None and sweep_quiet(badcmd) != 2:
             failures.append("off-grammar regenerate: expected fail-closed exit 2")
 
         # (h) Restoration: the synthetic real tree is byte-AND-mode identical after a normal run and after
         #     a run whose corrupted PROBE raises (the baseline succeeds first), and the raising run returns
         #     the fail-closed exit 2.
-        rest = _build_repo(tmp / "restoration", {"goodfile": _GOODFILE})
-        before = _tree_manifest(rest)
-        if sweep_quiet(rest) != 0:
-            failures.append("restoration: expected a clean normal run (exit 0)")
-        if _tree_manifest(rest) != before:
-            failures.append("restoration: the real tree changed after a normal run")
+        rest = _setup_vector(cannot, "restoration", lambda: _build_repo(
+            tmp / "restoration", {"goodfile": _GOODFILE}))
+        if rest is not None:
+            before = _tree_manifest(rest)
+            if sweep_quiet(rest) != 0:
+                failures.append("restoration: expected a clean normal run (exit 0)")
+            if _tree_manifest(rest) != before:
+                failures.append("restoration: the real tree changed after a normal run")
 
-        calls = {"n": 0}
+            calls = {"n": 0}
 
-        def _raise_after_baseline(script_path, cwd, timeout=PROBE_TIMEOUT, env_overrides=None):
-            # Let the first call (a per-generator baseline, run on a pristine sandbox) succeed, then raise
-            # on the next call (the first corrupted probe), so restoration-after-raise is exercised.
-            calls["n"] += 1
-            if calls["n"] == 1:
-                return saved_run_check(script_path, cwd, timeout, env_overrides)
-            raise RuntimeError("injected probe failure after a clean baseline")
+            def _raise_after_baseline(script_path, cwd, timeout=PROBE_TIMEOUT, env_overrides=None):
+                # Let the first call (a per-generator baseline, run on a pristine sandbox) succeed, then
+                # raise on the next call (the first corrupted probe), so restoration-after-raise is exercised.
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    return saved_run_check(script_path, cwd, timeout, env_overrides)
+                raise RuntimeError("injected probe failure after a clean baseline")
 
-        _run_check = _raise_after_baseline
-        rc = sweep_quiet(rest)
-        _run_check = saved_run_check
-        if rc != 2:
-            failures.append("restoration: a run whose probe raises expected fail-closed exit 2, got "
-                            "{!r}".format(rc))
-        if calls["n"] < 2:
-            failures.append("restoration: expected a baseline call then a raising probe call, saw "
-                            "{} call(s)".format(calls["n"]))
-        if _tree_manifest(rest) != before:
-            failures.append("restoration: the real tree changed after a run whose probe raised")
+            _run_check = _raise_after_baseline
+            rc = sweep_quiet(rest)
+            _run_check = saved_run_check
+            if rc != 2:
+                failures.append("restoration: a run whose probe raises expected fail-closed exit 2, got "
+                                "{!r}".format(rc))
+            if calls["n"] < 2:
+                failures.append("restoration: expected a baseline call then a raising probe call, saw "
+                                "{} call(s)".format(calls["n"]))
+            if _tree_manifest(rest) != before:
+                failures.append("restoration: the real tree changed after a run whose probe raised")
 
         # (i) A generator that changes a real-tree file's MODE (out of its sandbox) is detected (exit 2).
-        moded = _build_repo(tmp / "modechange", {"mode": _MODECHANGER})
-        if sweep_quiet(moded) != 2:
+        moded = _setup_vector(cannot, "real-tree mode change", lambda: _build_repo(
+            tmp / "modechange", {"mode": _MODECHANGER}))
+        if moded is not None and sweep_quiet(moded) != 2:
             failures.append("real-tree mode change: expected cannot-evaluate exit 2 (manifest detected)")
 
         # (j) A DECODE-ONLY generator is caught (exit 1), SPECIFICALLY by a valid-but-different / same-length
         #     probe: it returns non-zero on the invalid-UTF-8 probe (it decodes and fail-closes there), so
         #     only a content probe can draw its exit-0 violation. Exit 1 therefore proves the content probe
         #     caught it, which makes those probes load-bearing: remove them and this fixture would pass.
-        dec = _build_repo(tmp / "decode", {"decode": _DECODEONLY})
-        if sweep_quiet(dec) != 1:
+        dec = _setup_vector(cannot, "decode-only generator", lambda: _build_repo(
+            tmp / "decode", {"decode": _DECODEONLY}))
+        if dec is not None and sweep_quiet(dec) != 1:
             failures.append("decode-only generator: expected exit 1 (caught by a valid-but-different / "
                             "same-length content probe, the invalid-UTF-8 probe alone would pass it)")
 
         # (k) A total-runtime deadline overrun (injected monotonic clock) returns cannot-evaluate (exit 2),
         #     never a fail-open 0. The clock returns a base on the first read (deadline setup) then jumps
         #     past the deadline, so the first baseline/probe deadline check fails closed.
-        dline = _build_repo(tmp / "deadline", {"goodfile": _GOODFILE})
-        clock_calls = {"n": 0}
+        dline = _setup_vector(cannot, "total-runtime deadline overrun", lambda: _build_repo(
+            tmp / "deadline", {"goodfile": _GOODFILE}))
+        if dline is not None:
+            clock_calls = {"n": 0}
 
-        def _overrun_clock():
-            clock_calls["n"] += 1
-            if clock_calls["n"] == 1:
-                return 0.0  # deadline := 0 + TOTAL_TIMEOUT
-            return float(TOTAL_TIMEOUT) + 1000.0  # every later read is past the deadline
+            def _overrun_clock():
+                clock_calls["n"] += 1
+                if clock_calls["n"] == 1:
+                    return 0.0  # deadline := 0 + TOTAL_TIMEOUT
+                return float(TOTAL_TIMEOUT) + 1000.0  # every later read is past the deadline
 
-        _now = _overrun_clock
-        rc_deadline = sweep_quiet(dline)
-        _now = saved_now
-        if rc_deadline != 2:
-            failures.append("total-runtime deadline overrun: expected cannot-evaluate exit 2, got "
-                            "{!r}".format(rc_deadline))
+            _now = _overrun_clock
+            rc_deadline = sweep_quiet(dline)
+            _now = saved_now
+            if rc_deadline != 2:
+                failures.append("total-runtime deadline overrun: expected cannot-evaluate exit 2, got "
+                                "{!r}".format(rc_deadline))
 
         # (l) A sandbox-setup mkdtemp failure (injected OSError) returns cannot-evaluate (exit 2), not an
         #     escaping raise (the work-dir mkdtemp now lives inside the try).
-        setupfail = _build_repo(tmp / "setup-fail", {"goodfile": _GOODFILE})
+        setupfail = _setup_vector(cannot, "sandbox-setup mkdtemp failure", lambda: _build_repo(
+            tmp / "setup-fail", {"goodfile": _GOODFILE}))
+        if setupfail is not None:
+            def _raise_mkdtemp(*args, **kwargs):
+                raise OSError("injected sandbox-setup failure")
 
-        def _raise_mkdtemp(*args, **kwargs):
-            raise OSError("injected sandbox-setup failure")
-
-        _mkdtemp = _raise_mkdtemp
-        rc_setup = sweep_quiet(setupfail)
-        _mkdtemp = saved_mkdtemp
-        if rc_setup != 2:
-            failures.append("sandbox-setup mkdtemp failure: expected cannot-evaluate exit 2, got "
-                            "{!r}".format(rc_setup))
+            _mkdtemp = _raise_mkdtemp
+            rc_setup = sweep_quiet(setupfail)
+            _mkdtemp = saved_mkdtemp
+            if rc_setup != 2:
+                failures.append("sandbox-setup mkdtemp failure: expected cannot-evaluate exit 2, got "
+                                "{!r}".format(rc_setup))
 
         # (m) A BLOCK-kind generator that reads+decodes the whole target and fail-closes (non-zero) on
         #     invalid UTF-8 passes (exit 0): a block target is probed with invalid UTF-8 only, which this
         #     generator rejects. This exercises the is_block probe path that no other fixture covers.
-        blk = _build_repo(tmp / "block", {"block": _BLOCKFILE})
-        if sweep_quiet(blk) != 0:
+        blk = _setup_vector(cannot, "block-kind generator", lambda: _build_repo(
+            tmp / "block", {"block": _BLOCKFILE}))
+        if blk is not None and sweep_quiet(blk) != 0:
             failures.append("block-kind generator: expected the sweep to pass (exit 0; a block target is "
                             "probed with invalid UTF-8 only and the generator rejects it)")
 
@@ -1463,8 +1558,9 @@ def _self_test_main_isolated():
         #     usable repo passes the sweep (exit 0), because the D6 template materialization plants a real
         #     git repository (its baseline succeeds and a corrupt target drifts to non-zero). Under the old
         #     bare-.git-marker template its baseline would have fail-closed (exit 2), so this proves D6.
-        gitr = _build_repo(tmp / "gitreader", {"gitreader": _GITREADER})
-        if sweep_quiet(gitr) != 0:
+        gitr = _setup_vector(cannot, "git-reading generator", lambda: _build_repo(
+            tmp / "gitreader", {"gitreader": _GITREADER}))
+        if gitr is not None and sweep_quiet(gitr) != 0:
             failures.append("git-reading generator: expected the sweep to pass (exit 0; D6 materializes a "
                             "real git repo so the baseline git ls-files succeeds)")
 
@@ -1472,28 +1568,38 @@ def _self_test_main_isolated():
         #     marker. The probe runs `-c core.fsmonitor=false --no-optional-locks`, so git NEVER executes
         #     the hook and the marker is never written; the sweep still completes (the goodfile fixture is
         #     otherwise clean). Without the override git would run the hook (arbitrary code out of scope).
-        fsm = _build_repo(tmp / "fsmonitor", {"goodfile": _GOODFILE})
         fsmon_marker = tmp / "fsmonitor-executed.marker"
-        hook = fsm / "fsmon-hook.sh"
-        hook.write_text("#!/bin/sh\necho executed > '{}'\n".format(fsmon_marker), encoding="utf-8")
-        os.chmod(hook, 0o755)
-        _git_fixture(fsm, "config", "core.fsmonitor", str(hook))
-        rc_fsm = sweep_quiet(fsm)
-        if fsmon_marker.exists():
-            failures.append("fsmonitor probe: the repo-local core.fsmonitor hook EXECUTED and wrote an "
-                            "outside marker (the probe is missing -c core.fsmonitor=false)")
-        if rc_fsm != 0:
-            failures.append("fsmonitor probe: expected a clean sweep (exit 0) with the fsmonitor override "
-                            "suppressing the hook, got {!r}".format(rc_fsm))
+
+        def _fsmonitor():
+            fsm = _build_repo(tmp / "fsmonitor", {"goodfile": _GOODFILE})
+            hook = fsm / "fsmon-hook.sh"
+            hook.write_text("#!/bin/sh\necho executed > '{}'\n".format(fsmon_marker), encoding="utf-8")
+            os.chmod(hook, 0o755)
+            _git_fixture(fsm, "config", "core.fsmonitor", str(hook))
+            return fsm
+
+        fsm = _setup_vector(cannot, "fsmonitor probe", _fsmonitor)
+        if fsm is not None:
+            rc_fsm = sweep_quiet(fsm)
+            if fsmon_marker.exists():
+                failures.append("fsmonitor probe: the repo-local core.fsmonitor hook EXECUTED and wrote an "
+                                "outside marker (the probe is missing -c core.fsmonitor=false)")
+            if rc_fsm != 0:
+                failures.append("fsmonitor probe: expected a clean sweep (exit 0) with the fsmonitor "
+                                "override suppressing the hook, got {!r}".format(rc_fsm))
 
         # (p) F-234b: a FORCED probe failure (real_root's .git replaced by a bare marker, so `git ls-files`
         #     exits nonzero) is cannot-evaluate (exit 2), NEVER a silent `git add -A` fallback that would
         #     certify a bogus baseline. Without the fix the old fallback would materialize a repo and the
         #     goodfile fixture would sweep to exit 0.
-        probefail = _build_repo(tmp / "probe-fail", {"goodfile": _GOODFILE})
-        shutil.rmtree(probefail / ".git")
-        (probefail / ".git").write_text("marker\n", encoding="utf-8")
-        if sweep_quiet(probefail) != 2:
+        def _probe_fail():
+            probefail = _build_repo(tmp / "probe-fail", {"goodfile": _GOODFILE})
+            shutil.rmtree(probefail / ".git")
+            (probefail / ".git").write_text("marker\n", encoding="utf-8")
+            return probefail
+
+        probefail = _setup_vector(cannot, "forced probe failure", _probe_fail)
+        if probefail is not None and sweep_quiet(probefail) != 2:
             failures.append("forced probe failure: expected cannot-evaluate exit 2 (no git add -A "
                             "fallback), a nonzero real_root ls-files must fail closed")
 
@@ -1501,12 +1607,16 @@ def _self_test_main_isolated():
         #     template) is detected as cannot-evaluate (exit 2). extra.txt is committed then deleted from
         #     disk, so copytree never copies it and the materialized template index lacks it. Without the
         #     equality guard the mismatch is unnoticed and the goodfile fixture sweeps to exit 0.
-        mism = _build_repo(tmp / "tracked-mismatch", {"goodfile": _GOODFILE})
-        (mism / "extra.txt").write_text("tracked extra\n", encoding="utf-8")
-        _git_fixture(mism, "add", "extra.txt")
-        _git_fixture(mism, "commit", "-q", "-m", "add extra", "--no-verify")
-        (mism / "extra.txt").unlink()
-        if sweep_quiet(mism) != 2:
+        def _tracked_mismatch():
+            mism = _build_repo(tmp / "tracked-mismatch", {"goodfile": _GOODFILE})
+            (mism / "extra.txt").write_text("tracked extra\n", encoding="utf-8")
+            _git_fixture(mism, "add", "extra.txt")
+            _git_fixture(mism, "commit", "-q", "-m", "add extra", "--no-verify")
+            (mism / "extra.txt").unlink()
+            return mism
+
+        mism = _setup_vector(cannot, "tracked-set mismatch", _tracked_mismatch)
+        if mism is not None and sweep_quiet(mism) != 2:
             failures.append("tracked-set mismatch: expected cannot-evaluate exit 2 (the materialized "
                             "template index must equal real_root's tracked set)")
 
@@ -1519,51 +1629,60 @@ def _self_test_main_isolated():
         #     asserted to carry all three flags. The discriminating flip is removing
         #     _TEMPLATE_GIT_NO_MAINTENANCE from the git() helper: the captured argv would then lack the flags
         #     and this assertion would fail.
-        f367 = _build_repo(tmp / "no-maintenance", {"goodfile": _GOODFILE})
         f367_template = tmp / "no-maintenance-template"
-        shutil.copytree(f367, f367_template, symlinks=False, ignore=_copy_ignore)
-        captured = []
-        saved_subprocess_run = subprocess.run
 
-        def _recording_run(cmd, *a, **kw):
-            captured.append(list(cmd))  # record argv, then delegate to the real subprocess.run
-            return saved_subprocess_run(cmd, *a, **kw)
+        def _no_maintenance():
+            f367 = _build_repo(tmp / "no-maintenance", {"goodfile": _GOODFILE})
+            shutil.copytree(f367, f367_template, symlinks=False, ignore=_copy_ignore)
+            return f367
 
-        template_str = str(f367_template)
-        try:
-            subprocess.run = _recording_run
-            _materialize_git(f367_template, f367)
-        finally:
-            subprocess.run = saved_subprocess_run
+        f367 = _setup_vector(cannot, "F-367 no-maintenance flags", _no_maintenance)
+        if f367 is not None:
+            captured = []
+            saved_subprocess_run = subprocess.run
 
-        def _top_c_values(cmd):
-            # The `-c key=value` top-level options git carries before its subcommand, plus that subcommand.
-            vals, i = [], 3  # past `git -C <template>`
-            while i + 1 < len(cmd) and cmd[i] == "-c":
-                vals.append(cmd[i + 1])
-                i += 2
-            return vals, (cmd[i] if i < len(cmd) else None)
+            def _recording_run(cmd, *a, **kw):
+                captured.append(list(cmd))  # record argv, then delegate to the real subprocess.run
+                return saved_subprocess_run(cmd, *a, **kw)
 
-        # Validate EVERY captured template git call (not just the first per subcommand), and reconcile the
-        # observed subcommand set against the exact expected multiset, so the "every template git command"
-        # claim is substantiated rather than asserted: a flag withheld on ls-files (the readback), on any
-        # single subcommand, or on a non-first occurrence is caught (codex/gemini round-2 findings).
-        template_calls = []  # (subcommand, its -c values) for EVERY template git call captured
-        for cmd in captured:
-            if len(cmd) >= 3 and cmd[0] == "git" and cmd[1] == "-C" and cmd[2] == template_str:
-                cvals, sub = _top_c_values(cmd)
-                template_calls.append((sub, cvals))
-        expected_subs = {"init", "add", "commit", "ls-files", "gc"}
-        seen_subs = {sub for sub, _ in template_calls}
-        missing_subs = expected_subs - seen_subs
-        if missing_subs:
-            failures.append("F-367 no-maintenance flags: expected a template `git` call for each of {}, "
-                            "none captured for {}".format(sorted(expected_subs), sorted(missing_subs)))
-        for sub, cvals in template_calls:
-            for flag in ("gc.auto=0", "gc.autoDetach=false", "maintenance.auto=false"):
-                if flag not in cvals:
-                    failures.append("F-367 no-maintenance flags: template `git {}` call is missing -c {} "
-                                    "(git() must splice _TEMPLATE_GIT_NO_MAINTENANCE)".format(sub, flag))
+            template_str = str(f367_template)
+            try:
+                subprocess.run = _recording_run
+                _materialize_git(f367_template, f367)
+            finally:
+                subprocess.run = saved_subprocess_run
+
+            def _top_c_values(cmd):
+                # The `-c key=value` top-level options git carries before its subcommand, plus that
+                # subcommand.
+                vals, i = [], 3  # past `git -C <template>`
+                while i + 1 < len(cmd) and cmd[i] == "-c":
+                    vals.append(cmd[i + 1])
+                    i += 2
+                return vals, (cmd[i] if i < len(cmd) else None)
+
+            # Validate EVERY captured template git call (not just the first per subcommand), and reconcile
+            # the observed subcommand set against the exact expected multiset, so the "every template git
+            # command" claim is substantiated rather than asserted: a flag withheld on ls-files (the
+            # readback), on any single subcommand, or on a non-first occurrence is caught (codex/gemini
+            # round-2 findings).
+            template_calls = []  # (subcommand, its -c values) for EVERY template git call captured
+            for cmd in captured:
+                if len(cmd) >= 3 and cmd[0] == "git" and cmd[1] == "-C" and cmd[2] == template_str:
+                    cvals, sub = _top_c_values(cmd)
+                    template_calls.append((sub, cvals))
+            expected_subs = {"init", "add", "commit", "ls-files", "gc"}
+            seen_subs = {sub for sub, _ in template_calls}
+            missing_subs = expected_subs - seen_subs
+            if missing_subs:
+                failures.append("F-367 no-maintenance flags: expected a template `git` call for each of {}, "
+                                "none captured for {}".format(sorted(expected_subs), sorted(missing_subs)))
+            for sub, cvals in template_calls:
+                for flag in ("gc.auto=0", "gc.autoDetach=false", "maintenance.auto=false"):
+                    if flag not in cvals:
+                        failures.append("F-367 no-maintenance flags: template `git {}` call is missing -c "
+                                        "{} (git() must splice _TEMPLATE_GIT_NO_MAINTENANCE)"
+                                        .format(sub, flag))
 
         # #378: this tool's _close_fd_yielding copy and its representative site, each green and red under
         # its flip.
@@ -1593,7 +1712,15 @@ def _self_test_main_isolated():
         print("SELF-TEST FAIL:")
         for failure in failures:
             print("  - " + failure)
+        for line in cannot:
+            print("  (also could not evaluate) " + line)
         return 1
+    if cannot:
+        print("SELF-TEST CANNOT-EVALUATE: {} vector(s) could not be set up, so the self-test cannot "
+              "certify the gate; fail-closed:".format(len(cannot)))
+        for line in cannot:
+            print("  - " + line)
+        return 2
     print("SELF-TEST PASS: a conformant repo (content-guarding file and tree generators) passes; a bypass "
           "generator is caught (exit 1) via valid-but-different content; a stateful generator keying off a "
           "$HOME marker is caught (exit 1) because per-call unique HOME/TMPDIR and fresh independent "
