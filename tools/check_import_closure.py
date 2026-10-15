@@ -269,8 +269,10 @@ or action line outside the accepted YAML subset (above).
                                        fatal signal or a hang stops or stalls it), and the user's own SIGINT
                                        (under Python's default handler) is not contained: one delivered in a
                                        mutant's run propagates, and the handler is restored on every path. The
-                                       checks of those two run whatever handler SIGINT had at the start, also in
-                                       a child launched with SIGINT ignored; one that cannot run fails the
+                                       checks of those two run under any SIGINT handler this process can read
+                                       and put back, also in a child launched with SIGINT ignored; where it
+                                       cannot (a handler set outside Python, a thread other than the main one,
+                                       or a restore that raises) the check cannot evaluate, which fails the
                                        self-test, never a skip
   check_import_closure.py --interrupt-leg
                                        those two checks alone (the child the self-test launches)
@@ -4003,6 +4005,84 @@ def _scan_rc(module, base, rules=None, special=None, **kwargs):
     return (1 if findings else 0), findings
 
 
+# One special for each replacement _scan_rc makes: os.scandir, Path.read_bytes, the gate's dynamic_sites and
+# scope_identities, and tomllib.loads.
+_SCAN_PATCHES = ("unlistable", "unreadable-file", "twin-sites", "merged-scopes", "toml-recursion")
+
+
+class _AtBoundary(Exception):
+    """Raised into _scan_rc by _scan_patch_check's tracer, as an interrupt could be, at the first line it runs with
+    a replacement in place."""
+
+
+def _scan_state(module):
+    """Everything _scan_rc replaces for module (a scratch copy of this gate), each object as it is now."""
+    return (os.scandir, Path.__dict__.get("read_bytes"), module.__dict__.get("dynamic_sites"),
+            module.__dict__.get("scope_identities"), _toml_parser())
+
+
+def _replaced(module, before):
+    """The indexes, in _scan_state, of what is no longer the object before holds."""
+    return [index for index, (now, was) in enumerate(zip(_scan_state(module), before)) if now is not was]
+
+
+def _boundary_run(module, base, special):
+    """The line of _scan_rc(module, base, special=special) at which _AtBoundary was raised, the first it runs with a
+    replacement in place, or None when it made none (and so ran to its end)."""
+    before = _scan_state(module)
+    hit = []
+
+    def _at_line(frame, event, _arg):
+        if event == "line" and not hit and _replaced(module, before):
+            hit.append(frame.f_lineno)
+            raise _AtBoundary("line %d" % frame.f_lineno)
+        return _at_line
+
+    def _on_call(frame, _event, _arg):
+        return _at_line if frame.f_code is _scan_rc.__code__ else None
+    tracing = sys.gettrace()
+    sys.settrace(_on_call)
+    try:
+        _scan_rc(module, base, special=special)
+    except _AtBoundary:
+        pass
+    finally:
+        sys.settrace(tracing)
+    return hit[0] if hit else None
+
+
+def _scan_patch_check(module, base):
+    """The failures of _scan_rc's restore: for each special of _SCAN_PATCHES, _AtBoundary raised at the first line
+    _scan_rc runs with that special's replacement in place (the line after its assignment) must leave nothing
+    replaced. A replacement made before the try whose finally restores it stays in place; the check then puts it
+    back itself, so the rest of the self-test runs unpatched."""
+    failures = []
+    names = ("os.scandir", "Path.read_bytes", "dynamic_sites", "scope_identities", "tomllib.loads")
+    for special in _SCAN_PATCHES:
+        before = _scan_state(module)
+        line = _boundary_run(module, base, special)
+        left = _replaced(module, before)
+        if left:
+            os.scandir = before[0]
+            if before[1] is None:
+                if "read_bytes" in Path.__dict__:
+                    del Path.read_bytes
+            else:
+                Path.read_bytes = before[1]
+            module.dynamic_sites = before[2]
+            if before[3] is not None:
+                module.scope_identities = before[3]
+            elif "scope_identities" in module.__dict__:
+                del module.scope_identities
+            tomllib.loads = before[4]
+        if line is None:
+            failures.append("scan patch %s: _scan_rc made no replacement for it" % special)
+        elif left:
+            failures.append("scan patch %s: an exception at line %d of _scan_rc left %s replaced"
+                            % (special, line, " and ".join(names[index] for index in left)))
+    return failures
+
+
 # The prefix of a problem that is not the vector's own failure (an edit vector's control failing, a finding outside
 # the edited file, or an exception, SystemExit and KeyboardInterrupt among them, that propagates from the mutant's
 # load or run): the self-test fails it against this gate and credits no mutant with it.
@@ -4868,13 +4948,23 @@ def _sigint_restorable():
     return handler, None
 
 
+def _put_back_sigint(check, before):
+    """None once SIGINT's handler is before again, else check's cannot-evaluate failure naming why it is not."""
+    try:
+        signal.signal(signal.SIGINT, before)
+    except (TypeError, ValueError, OSError) as exc:
+        return "%s cannot evaluate: SIGINT's handler %r was not put back: %s" % (check, before, exc)
+    return None
+
+
 def _interrupt_check(copy, case):
     """None when the user's interrupt is not contained, else the failure. A SIGINT delivered (os.kill: real
     delivery, not a direct call of _interrupted) in a mutant's run is recorded by _interrupted and propagates
     rather than failing that mutant; a KeyboardInterrupt the check did not provoke (none sent, or more interrupts
     recorded than the one it sent) propagates on, so the check cannot swallow the user's own interrupt. The check
     installs _interrupted for its own run whatever SIGINT had (ignored, or another handler) and puts the original
-    back on every path; where it cannot, the check cannot evaluate, a failure and never a skip."""
+    back on every path; where it cannot read that handler or put it back, the check cannot evaluate, a failure and
+    never a skip."""
     before, problem = _sigint_restorable()
     if problem is not None:
         return "INTERRUPT cannot evaluate: " + problem
@@ -4889,46 +4979,55 @@ def _interrupt_check(copy, case):
         signal.signal(signal.SIGINT, _interrupted)
         copy.dynamic_sites = _deliver
         credited, problem = _mutant_credit(copy, case)
-        return "a SIGINT delivered in a mutant's run did not propagate: credited %r, %s" % (credited, problem)
+        problem = "a SIGINT delivered in a mutant's run did not propagate: credited %r, %s" % (credited, problem)
     except KeyboardInterrupt:
-        if sent and len(_INTERRUPTS) == sent[0] + 1:
-            del _INTERRUPTS[sent[0]:]
-            print(_INTERRUPT_HELD)
-            return None
-        raise
+        if not (sent and len(_INTERRUPTS) == sent[0] + 1):
+            raise
+        del _INTERRUPTS[sent[0]:]
+        problem = None
     finally:
         copy.dynamic_sites = own_sites
-        signal.signal(signal.SIGINT, before)
+        unrestored = _put_back_sigint("INTERRUPT", before)
+    if unrestored is not None:
+        return unrestored
+    if problem is None:
+        print(_INTERRUPT_HELD)
+    return problem
 
 
 def _setup_check(copy):
     """None when the self-test's restore runs even when setup fails, else the failure: with mkdtemp raising, the
-    copy's self-test propagates the OSError and puts Python's default SIGINT handler back. The check gives SIGINT
-    that default handler for its own run whatever it had and puts the original back on every path; where it
-    cannot, the check cannot evaluate, a failure and never a skip."""
+    copy's self-test propagates that very exception (another, raised with mkdtemp never called or in place of
+    mkdtemp's, fails the check) and puts Python's default SIGINT handler back. The check gives SIGINT that default
+    handler for its own run whatever it had and puts the original back on every path; where it cannot read that
+    handler or put it back, the check cannot evaluate, a failure and never a skip."""
     before, problem = _sigint_restorable()
     if problem is not None:
         return "SETUP cannot evaluate: " + problem
     own_mkdtemp = tempfile.mkdtemp
+    injected = OSError("no scratch directory")
 
     def _no_tmp(*_args, **_kwargs):
-        raise OSError("no scratch directory")
-    raised = False
+        raise injected
+    caught = None
     try:
         signal.signal(signal.SIGINT, signal.default_int_handler)
         sys.modules[copy.__name__] = copy
         tempfile.mkdtemp = _no_tmp
         try:
             copy.self_test_main()
-        except OSError:
-            raised = True
+        except Exception as exc:
+            caught = exc
     finally:
         tempfile.mkdtemp = own_mkdtemp
         sys.modules.pop(copy.__name__, None)
         left = signal.getsignal(signal.SIGINT)
-        signal.signal(signal.SIGINT, before)
-    if not raised:
-        return "setup: a failing mkdtemp did not propagate from the copy's self-test"
+        unrestored = _put_back_sigint("SETUP", before)
+    if unrestored is not None:
+        return unrestored
+    if caught is not injected:
+        return "setup: the failing mkdtemp's own OSError did not propagate from the copy's self-test: %s" % (
+            "it returned" if caught is None else "it raised another, %r" % caught)
     if left is not signal.default_int_handler:
         return "setup: a failing mkdtemp left the copy's SIGINT handler installed, not restored"
     print(_SETUP_HELD)
@@ -4939,6 +5038,95 @@ def _interrupt_leg(copy, case):
     """The failures of the INTERRUPT check (case is the vector its mutant run uses) and the SETUP check, on copy,
     a scratch copy of this gate."""
     return [failure for failure in (_interrupt_check(copy, case), _setup_check(copy)) if failure is not None]
+
+
+def _raise_other_oserror():
+    """A copy's self-test that raises an OSError of its own, mkdtemp never called."""
+    raise OSError("not the failing mkdtemp's")
+
+
+def _replace_mkdtemp_error():
+    """A copy's self-test that calls mkdtemp and raises another OSError in place of mkdtemp's."""
+    try:
+        tempfile.mkdtemp()
+    except OSError:
+        raise OSError("in place of the failing mkdtemp's") from None
+
+
+# Copies' self-tests that raise an OSError other than the failing mkdtemp's: the SETUP check must fail on each.
+_OTHER_OSERRORS = (_raise_other_oserror, _replace_mkdtemp_error)
+
+
+def _setup_other_error(copy):
+    """The failures of SETUP's own-exception rule: with copy's self-test replaced by each of _OTHER_OSERRORS, the
+    SETUP check must fail, naming that other OSError, never hold."""
+    failures = []
+    own_main = copy.self_test_main
+    try:
+        for other in _OTHER_OSERRORS:
+            copy.self_test_main = other
+            with contextlib.redirect_stdout(io.StringIO()):
+                problem = _setup_check(copy)
+            if problem is None or "it raised another, OSError(" not in problem:
+                failures.append("SETUP with the copy's self-test %s: expected a failure naming its OSError, got %r"
+                                % (other.__name__, problem))
+    finally:
+        copy.self_test_main = own_main
+    return failures
+
+
+def _sigint_blocked(check, args, how):
+    """What check (the INTERRUPT or SETUP check) returns for args, or the exception it lets escape, when SIGINT's
+    handler reads as None (how "read", as for one set outside Python) or putting it back raises OSError (how
+    "restore"). SIGINT's handler and signal's functions are put back afterwards."""
+    previous, problem = _sigint_restorable()
+    if problem is not None:
+        return problem
+    own_signal, own_getsignal = signal.signal, signal.getsignal
+
+    def _marked(signum, frame):
+        return _interrupted(signum, frame)
+
+    def _blocked(signum, handler):
+        if signum == signal.SIGINT and handler is _marked and own_getsignal(signum) is not _marked:
+            raise OSError("putting SIGINT's handler back is blocked")
+        return own_signal(signum, handler)
+
+    def _unread(signum):
+        return None if signum == signal.SIGINT else own_getsignal(signum)
+    try:
+        own_signal(signal.SIGINT, _marked)
+        if how == "restore":
+            signal.signal = _blocked
+        else:
+            signal.getsignal = _unread
+        try:
+            return check(*args)
+        except Exception as exc:
+            return exc
+    finally:
+        signal.signal, signal.getsignal = own_signal, own_getsignal
+        own_signal(signal.SIGINT, previous)
+
+
+# How each SIGINT check must fail where SIGINT's handler cannot be read or put back (_sigint_blocked): its
+# cannot-evaluate failure, with this text of why.
+_UNRESTORABLE = (("read", "cannot be put back"), ("restore", "was not put back"))
+
+
+def _unrestorable_check(copy, case):
+    """The failures of the SIGINT checks' cannot-evaluate rule: each of INTERRUPT and SETUP, with SIGINT's handler
+    not read or not put back (_UNRESTORABLE), must return its cannot-evaluate failure for that cause, never hold,
+    fail another way or let the exception escape."""
+    failures = []
+    for label, check, args in (("INTERRUPT", _interrupt_check, (copy, case)), ("SETUP", _setup_check, (copy,))):
+        for how, why in _UNRESTORABLE:
+            with contextlib.redirect_stdout(io.StringIO()):
+                got = _sigint_blocked(check, args, how)
+            if not (isinstance(got, str) and got.startswith(label + " cannot evaluate: ") and why in got):
+                failures.append("%s with SIGINT's handler blocked at %s: expected cannot evaluate (%s), got %r"
+                                % (label, how, why, got))
+    return failures
 
 
 def _interrupt_leg_main():
@@ -5097,14 +5285,33 @@ def self_test_main():
             else:
                 print("REMOVED importer %s caught by its vector" % callee)
         copy.IMPORTERS = IMPORTERS
-        # The INTERRUPT and SETUP checks run whatever handler SIGINT had at the start (_interrupt_leg), so neither
-        # is skipped where SIGINT was ignored; a child launched with SIGINT ignored must run both and pass them.
+        # Each replacement _scan_rc makes is put back by an exception raised at the line after it.
+        unpatched = _scan_patch_check(copy, clean)
+        failures.extend(unpatched)
+        if not unpatched:
+            print("SCAN-RESTORE each of _scan_rc's %d replacements is put back after an exception at the line after "
+                  "it" % len(_SCAN_PATCHES))
+        # The INTERRUPT and SETUP checks run under whatever handler SIGINT had at the start where this process can
+        # put it back (_interrupt_leg), so neither is skipped where SIGINT was ignored; a child launched with SIGINT
+        # ignored must run both and pass them.
         failures.extend(_interrupt_leg(copy, by_name["reference moved within its lambda"]))
         problem = _ignored_sigint_run(__file__, ["--interrupt-leg"])
         if problem is not None:
             failures.append(problem)
         else:
             print("IGNORED with SIGINT ignored from its start, a child still runs and passes INTERRUPT and SETUP")
+        # SETUP holds only by the failing mkdtemp's own OSError, and each check cannot evaluate, a failure, where
+        # SIGINT's handler cannot be read or put back.
+        other_errors = _setup_other_error(copy)
+        failures.extend(other_errors)
+        if not other_errors:
+            print("OTHER-OSERROR SETUP fails when the copy's self-test raises another OSError, with mkdtemp never "
+                  "called or in place of its error")
+        unrestorable = _unrestorable_check(copy, by_name["reference moved within its lambda"])
+        failures.extend(unrestorable)
+        if not unrestorable:
+            print("UNRESTORABLE INTERRUPT and SETUP each cannot evaluate when SIGINT's handler cannot be read or put "
+                  "back")
 
         # A SystemExit that escapes the self-test fails it (main), whatever its code, never ends it with that code.
         def _exit_zero():
@@ -5143,10 +5350,14 @@ def self_test_main():
           "by their vectors, never through an exception that propagates from the load or the run, SystemExit and "
           "KeyboardInterrupt included (%d of them, as "
           "MUTANTS marks, only through their backstop's refusal), %d runs that raise, exit or refuse credited by "
-          "none, %d watched names, %d members and %d importers each removed and caught, the live tree passes"
+          "none, %d watched names, %d members and %d importers each removed and caught, %d scan replacements put "
+          "back after an exception at the line after each, INTERRUPT and SETUP held here and in a child with SIGINT "
+          "ignored, SETUP failed on %d other OSErrors, each of the two cannot evaluate in the %d cases of SIGINT's "
+          "handler not read or not put back, the live tree passes"
           % (len(_RULE_VECTORS) + len(names | members) + importers, len(names | members), importers,
              len(_GREEN_VECTORS), len(_CANNOT_VECTORS), len(_SITE_VECTORS), len(_MOVE_VECTORS), len(MUTANTS),
-             backstops, len(_UNCREDITED_RUNS), len(names), len(members), importers))
+             backstops, len(_UNCREDITED_RUNS), len(names), len(members), importers, len(_SCAN_PATCHES),
+             len(_OTHER_OSERRORS), len(_UNRESTORABLE)))
     return 0
 
 
