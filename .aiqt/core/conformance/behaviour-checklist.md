@@ -26,6 +26,28 @@ not a gate.
 - Retrieval and tool access enforce the requester's own authorization, not the assistant's broader access.
 - Generated output is treated as untrusted input to whatever consumes it.
 
+## Review habits
+These are habits for whoever reviews the work, a person or the assistant checking its own output. They
+are not gates: each rests on a reviewer's judgement, such as whether two wordings mean the same thing. Each
+makes a lapse the rules already forbid easy to see.
+- When a claim is rewritten, shortened, or merged into another, map it: list each clause of the original
+  and, beside it, the words in the new text that carry it. A clause with nothing beside it was dropped, and
+  one whose new words say less or more was changed. Splitting or joining clauses is fine when every row is
+  filled (claims-rest-on-observation).
+- Before saying a source is silent on something ("it never says", "nowhere states"), quote the paragraph
+  around each hit of your search, not only the matching line. A search shows where a word appears, not what
+  the text says there: a hit may use the word in another sense, and the point may be made in other words a
+  line or two away (partial-read-is-not-the-whole, read-before-characterizing).
+- When you draft a decision entry from a ruling, put the ruling's own words, quoted exactly, beside the
+  draft, so a reviewer compares the two directly and sees any condition the paraphrase dropped, softened,
+  or added. The record-sections gate keeps an entry's heading through a merge but does not read its text
+  (records-first).
+- Apply steps that depend on each other one at a time: make one change, re-read the result to confirm it
+  landed, then make the next. A step depends on another when it reads what that one writes, such as
+  regenerating a file after editing its source, or updating a register after the file it describes.
+  Batching them hides which step failed and lets a later step build on one that did not land
+  (workers-produce-inert-data, evidence-grounded-completion).
+
 ## Notes
 Behavioural conformance is best evidenced by the adopter's own review, sample adversarial prompts, and
 incident record. Where a platform offers hooks or gates, prefer mechanical enforcement over attestation;
