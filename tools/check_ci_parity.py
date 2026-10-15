@@ -411,7 +411,7 @@ RUNTIME_VALUE_FLAGS = frozenset({"--base", "--protected", "--head"})
 # new runtime spelling stays refused until this reviewed set is extended.
 # Membership is read on the de-quoted token; the RAW spelling screen in
 # _mask_value additionally requires each member's one reviewed workflow
-# spelling, its double-quoted form as quality.yml writes it (FIX-551-R8).
+# spelling, its double-quoted form as quality.yml writes it.
 MASKED_REF_EXPRESSIONS = frozenset({
     "origin/${GITHUB_REF_NAME}",
     "origin/${GITHUB_BASE_REF}",
@@ -504,7 +504,7 @@ MSG_LEAKS_SCAN = "tools/check_msg_leaks.py"  # the live scan (module docstring, 
 # The only members msg-leaks.yml may run (module docstring, TWO WORKFLOWS): its own scan and that
 # scan's self-test. Any other member there is a relocation finding, because that workflow's status
 # is separate from the aggregated Quality gates and re-runs on every PR metadata edit, so a gate
-# moved into it would leave the aggregated required check silently (D-551-MERGE-LANE-GUARD).
+# moved into it would leave the aggregated required check silently.
 MSG_LEAKS_WORKFLOW_MEMBERS = frozenset(
     (MSG_LEAKS_SCAN, MSG_LEAKS_SCAN + " --self-test"))
 EDIT_EVENTS = ("pull_request", "pull_request_target")
@@ -725,8 +725,8 @@ def _raw_lexemes(code, tokens):
     kept) from a command _tokenize already split, by walking the same shlex
     grammar (posix, whitespace_split, punctuation_chars "|&;<>"). The walk
     must reproduce the de-quoted token list byte-for-byte; where it cannot,
-    the result is None and normalize grants no masked identity (FIX-551-R8:
-    a missing raw spelling fails closed), so a divergence between the two
+    the result is None and normalize grants no masked identity (a
+    missing raw spelling fails closed), so a divergence between the two
     readers can refuse a mask but never grant one."""
     raws = []
     values = []
@@ -839,7 +839,7 @@ def _mask_value(value, masked_ok=False, raw=None):
     expansion, so an unreviewed expression is refused, never masked. The value's
     RAW workflow spelling, before shell de-quoting, must also be byte-for-byte
     the one reviewed spelling of that expression, its double-quoted form as
-    quality.yml writes it (FIX-551-R8). Tokenization removes quotes and escaping
+    quality.yml writes it. Tokenization removes quotes and escaping
     backslashes, so a backslash-escaped, backslash-split, adjacent-quoted
     ("$PUSH""_BEFORE") or single-quoted ('$PUSH_BEFORE') spelling de-quotes
     into a reviewed value while bash hands the gate different bytes at runtime;
@@ -852,7 +852,7 @@ def _mask_value(value, masked_ok=False, raw=None):
     through unchanged so the form is idempotent there, which the allowlist
     canonical-identity check relies on; no raw spelling exists or is read on that
     path. A workflow value gets no placeholder
-    reading (FIX-551-R7): a <ref:...> spelling carrying $ or a backquote is
+    reading: a <ref:...> spelling carrying $ or a backquote is
     screened like any other value and refused, because no whole placeholder is in
     MASKED_REF_EXPRESSIONS, so a quoted <ref:...> literal never collapses into the
     masked identity of the expression it names; one carrying neither character
@@ -891,7 +891,7 @@ def normalize(tokens, masked_ok=False, raws=None):
     is the allowlist-identity path, the one place a <ref:...> placeholder of a
     reviewed expression is accepted back (_mask_value). raws, where given, holds
     each token's raw spelling as _raw_lexemes recovered it, consulted only to
-    grant a masked identity (FIX-551-R8); with no raws a runtime-derived value
+    grant a masked identity; with no raws a runtime-derived value
     in the reviewed set is refused (masked-spelling), never masked, so the
     grant fails closed."""
     tokens = list(tokens)
@@ -2292,7 +2292,7 @@ def _edit_event_types(lines, source, diagnostics):
         # characters, a one-line tag such as !!str before it, a one-line
         # explicit '?' key, or one with whitespace around it. Each
         # non-plain spelling among these is refused below, never read.
-        # FIX-551-R5: spellings YAML also reads as this key but that this
+        # Spellings YAML also reads as this key but that this
         # helper does NOT recognize fall through here (a double-quoted
         # escape spelling such as "o\x6e", an anchored key such as &a on,
         # a verbatim-tag form, a multi-line explicit '?' key, and a BOM
@@ -2315,7 +2315,7 @@ def _edit_event_types(lines, source, diagnostics):
         key, colon, raw_rest = stripped.partition(":")
         if not is_on_spelling(key):
             continue
-        # FIX-551-R4: the top-level on: header is held to the same strict key
+        # The top-level on: header is held to the same strict key
         # rule as every key below it, BEFORE its value is read: a bare on (no
         # colon anywhere on the line), a non-plain spelling, and a colon with
         # no space after it each hide or change the trigger block YAML and
@@ -2835,7 +2835,7 @@ def extract_ci(text, source=CI_SOURCE):
                             # content line is inside the scalar wherever
                             # it falls; ahead of it, YAML rejects one
                             # indented past the content indentation the
-                            # first content line sets (FIX-551-R9), so
+                            # first content line sets, so
                             # the deepest leading blank is held and
                             # judged there.
                             if content_indent is None:
@@ -2859,8 +2859,8 @@ def extract_ci(text, source=CI_SOURCE):
                                 # empty and this line is outside it.
                                 break
                             # YAML detects a literal scalar's content
-                            # indentation from its FIRST non-empty line
-                            # (FIX-551-R8); every non-empty line at or
+                            # indentation from its FIRST non-empty line;
+                            # every non-empty line at or
                             # beyond it is scalar content, comment
                             # spellings included.
                             content_indent = body_indent
@@ -2868,7 +2868,7 @@ def extract_ci(text, source=CI_SOURCE):
                                     and leading_blank[0] > content_indent):
                                 # YAML rejects a leading blank line with
                                 # more spaces than the first content line
-                                # (FIX-551-R9), so the layout is refused,
+                                # does, so the layout is refused,
                                 # never read as scalar content.
                                 diagnostics.append(_diagnostic(
                                     source,
@@ -2890,7 +2890,7 @@ def extract_ci(text, source=CI_SOURCE):
 
                         if "${{" in body_raw:
                             # The RAW scalar line, before shell-comment
-                            # stripping (FIX-551-R7): GitHub substitutes
+                            # stripping: GitHub substitutes
                             # ${{ }} into the script text before the shell
                             # runs, comments included, so a substituted
                             # value carrying a newline leaves the comment.
@@ -6243,7 +6243,7 @@ def self_test():
         failures.append("35o a msg-leaks.yml diagnostic does not carry its own "
                         "source: {!r}".format(labelled.diagnostics))
 
-    # FIX-551: quoted keys, whitespace before a colon, indentless sequences
+    # Quoted keys, whitespace before a colon, indentless sequences
     # and keyless lines under an edit event are refused (exit 2), on the
     # workflow that runs the scan and on the one that does not alike. The
     # first three spellings formerly read as a key they are not, so GitHub
@@ -6271,7 +6271,7 @@ def self_test():
                   + label, quality_side,
                   ((MSG_LEAKS_CI_SOURCE, with_on(scan_text, shape)),), 2)
 
-    # FIX-551-R2: shapes the round-1 strict parsing still read permissively,
+    # Shapes an earlier strict parser still read permissively,
     # each hiding or inventing a types: list. A colon-less event key and an
     # explicit '?' key are not read as keys by this rule while YAML reads the
     # block differently; a tagged key and a colon with no space after it are
@@ -6279,7 +6279,7 @@ def self_test():
     # the other way around; and a non-standard indent for the on: block or an
     # event's properties hid the whole block from this rule while GitHub
     # still reads it. Each is now cannot-evaluate on both workflows.
-    # FIX-551-R4: each 35r vector also requires its OWN branch's diagnostic,
+    # Each 35r vector also requires its OWN branch's diagnostic,
     # as 35s does: the exit code alone cannot tell two refusal branches
     # apart, so a branch whose removal re-routes its shape to another refusal
     # formerly stayed green.
@@ -6311,7 +6311,7 @@ def self_test():
                   ((MSG_LEAKS_CI_SOURCE, with_on(scan_text, shape)),), 2,
                   diagnostic=named)
 
-    # FIX-551-R2: the indent-4 sequence branch is pinned on its own named
+    # The indent-4 sequence branch is pinned on its own named
     # diagnostic. Dropping the branch still refuses the line (it has no
     # colon), so the 35p exit code alone cannot tell the two refusals apart;
     # the message can.
@@ -6328,13 +6328,13 @@ def self_test():
             "35s the indent-4 sequence item is not refused by the named "
             "indentless-sequence branch: {!r}".format(indentless.diagnostics))
 
-    # FIX-551-R4 (PR 551 round-3 reviews): the top-level on: header itself is
+    # The top-level on: header itself is
     # held to the strict key rule BEFORE its value is read: on:[...] with no
     # space after the colon formerly passed clean (YAML reads that line as
     # one plain scalar, so GitHub sees no such trigger block), and a bare on
     # raised an IndexError. Each is a trigger-shape cannot-evaluate on both
     # workflows, pinned to the header branch's own diagnostic.
-    # FIX-551-R5: EXACTLY SIX compatibility controls follow, three per
+    # EXACTLY SIX compatibility controls follow, three per
     # workflow. A refusal of a read spelling would turn each control's exit
     # to 2. Only the msg-leaks.yml block-spelling control ALSO pins that the
     # value stays read: a silently skipped on: header flips its exit 0 to 1
@@ -6395,7 +6395,7 @@ def self_test():
     scan_case("35t a block on: value with edited on msg-leaks.yml stays read "
               "(pass)", quality_side, msg_side, 0)
 
-    # FIX-551-R5 (PR 551 round-4 reviews): spellings YAML also reads as the
+    # Spellings YAML also reads as the
     # top-level on key but that the trigger rule's is_on_spelling does not
     # recognize are refused by the strict top-level parser, never read: each
     # is exit 2 END TO END with the refusing layer's own diagnostic
@@ -6425,7 +6425,7 @@ def self_test():
                             "the outer parser: {!r}".format(
                                 label, outer.diagnostics))
 
-    # FIX-551-R4: the indent-2 on-key refusal branches are discriminated by
+    # The indent-2 on-key refusal branches are discriminated by
     # their own diagnostics (dropping one re-routes its shape to another
     # refusal branch, so the exit code alone stayed green).
     for label, shape, named in (
@@ -6449,7 +6449,7 @@ def self_test():
                   ((MSG_LEAKS_CI_SOURCE, with_on(scan_text, shape)),), 2,
                   diagnostic=named)
 
-    # FIX-551 (D-551-MERGE-LANE-GUARD): a gate moved from quality.yml into
+    # A gate moved from quality.yml into
     # msg-leaks.yml is a relocation finding (the CI side is the union of both
     # files, so set parity alone would stay green while the aggregated
     # Quality gates status silently lost the gate); the scan itself and its
@@ -6463,7 +6463,7 @@ def self_test():
                   ci_fixture((msg_selftest, msg_scan, moved)), edited)),),
               1, ("relocation",))
 
-    # FIX-551-R6: the step-shell rule is pinned on msg-leaks.yml by its own
+    # The step-shell rule is pinned on msg-leaks.yml by its own
     # vector. ci_fixture writes shell: bash into every generated command
     # step (not its checkout step or appended extra_steps), so before this
     # vector no case removed the line on the msg-leaks.yml side, and a
@@ -6489,7 +6489,7 @@ def self_test():
             "35w expected exactly one step-shell finding naming {}: "
             "{!r}".format(MSG_LEAKS_CI_SOURCE, shell_dropped.findings))
 
-    # FIX-551-R7 (PR 551 round-6 reviews, MAJOR): a ${{ }} GitHub expression
+    # A ${{ }} GitHub expression
     # anywhere in the RAW run: value is cannot-evaluate (workflow-expression),
     # read before shell-comment stripping: GitHub substitutes expressions
     # into the script text before the shell runs, comments included, so a
@@ -6540,7 +6540,7 @@ def self_test():
             "35x control: no workflow-expression diagnostic: {!r}".format(
                 inline_expr.diagnostics))
 
-    # FIX-551-R7 (PR 551 round-6 reviews, MEDIUM): a <ref:...> placeholder is
+    # A <ref:...> placeholder is
     # the OUTPUT of the masking; a workflow value is screened like any other,
     # so a placeholder spelling carrying $ is cannot-evaluate (masked-value),
     # never masked, and a quoted <ref:...> literal never collapses into the
@@ -6586,7 +6586,7 @@ def self_test():
          0, active={(
              "ci-only", "tools/check_leaks.py --base <ref:$PUSH_BEFORE>")})
 
-    # FIX-551-R8 (PR 551 round-7 reviews, MEDIUM): the equals form
+    # The equals form
     # --flag=value runs through its own branch of normalize, which the
     # space-form 35y vectors never reach; a mutant passing masked_ok=True
     # there accepted a placeholder literal while the whole 35 series stayed
@@ -6621,7 +6621,7 @@ def self_test():
          0, active={(
              "ci-only", "tools/check_leaks.py --base <ref:$PUSH_BEFORE>")})
 
-    # FIX-551-R8 (PR 551 round-7 reviews, MAJOR): a masked identity is
+    # A masked identity is
     # granted only when the value's RAW workflow spelling, before shell
     # de-quoting, is byte-for-byte the reviewed double-quoted spelling. shlex
     # removes quotes and escaping backslashes, so before the change every
@@ -6658,7 +6658,7 @@ def self_test():
                     "35z {} ({} form): no masked-spelling diagnostic: "
                     "{!r}".format(label, form, unreviewed.diagnostics))
 
-    # FIX-551-R9 (PR 551 round-8 review, MEDIUM): the raw-spelling screen
+    # The raw-spelling screen
     # fails closed where no raw spelling reached it: normalize drops a
     # raws list whose length disagrees with the token list, and
     # _mask_value refuses a reviewed runtime value whose raw spelling is
@@ -6669,7 +6669,7 @@ def self_test():
     # both flag forms, and the disagreeing-walk vector pins that
     # _raw_lexemes returns None rather than raws another tokenization
     # produced.
-    # FIX-551-R10 (PR 551 round-9 review, MINOR): the shorter list alone
+    # The shorter list alone
     # caught a removed length guard only through an IndexError, so a
     # longer list carrying the reviewed spelling at the index of the flag
     # now pins the guard through its assertion; the reviewed list of the
@@ -6719,7 +6719,7 @@ def self_test():
             "token list must return None, never raws from another "
             "tokenization")
 
-    # FIX-551-R8 (PR 551 round-7 reviews, MEDIUM): the raw ${{ }} screen
+    # The raw ${{ }} screen
     # reads the run: block scalar as YAML does, from its content indentation
     # (the first non-empty line) to its end (the first non-empty line below
     # that indentation), not from a fixed threshold of 8. A dedented YAML
@@ -6778,7 +6778,7 @@ def self_test():
             "36 dedented re-entry: no step-structure diagnostic: "
             "{!r}".format(reentry.diagnostics))
 
-    # FIX-551-R9 (PR 551 round-8 review, MAJOR): YAML rejects a leading
+    # YAML rejects a leading
     # blank line in a literal block scalar carrying more spaces than the
     # first content line (the auto-detected content indentation), so the
     # reader refuses that layout (scalar-blank-indent) instead of
@@ -6828,7 +6828,7 @@ def self_test():
                 "diagnostic: {!r}".format(
                     label, at_or_below.diagnostics))
 
-    # FIX-551-R10 (PR 551 round-9 review, MEDIUM): the reader holds the
+    # The reader holds the
     # deepest leading blank, so the order of the leading blanks never
     # decides the outcome. Each vector below puts a blank past the content
     # indentation and a blank at column 0 ahead of the first content line,
@@ -6852,7 +6852,7 @@ def self_test():
                 "37 two leading blanks ({}): no scalar-blank-indent "
                 "diagnostic: {!r}".format(label, two_blanks.diagnostics))
 
-    # FIX-551-R10 (PR 551 round-9 review, MINOR): YAML keeps a blank after
+    # YAML keeps a blank after
     # the first content line inside the scalar however deep it is, so the
     # reader judges leading blanks only; this control holds a later blank
     # indented past the content indentation accepted.
@@ -6871,7 +6871,7 @@ def self_test():
             "37 control later blank: unexpected scalar-blank-indent "
             "diagnostic: {!r}".format(later_blank.diagnostics))
 
-    # FIX-551-R9 (PR 551 round-8 review, MINOR): the YAML feature screen
+    # The YAML feature screen
     # reads an anchor or alias spelling only after whitespace, a colon
     # or a hyphen, so it refuses the space-separated inline *name and
     # &name flag spellings, while the equals form bypasses it:

@@ -1018,7 +1018,7 @@ def _run_checks():
         check("ci/filtered-only-failure-reported",
               (rc, "Repository quality checks" in output and "failure" in output), (1, True))
 
-        # FIX-551 (D-551-MERGE-LANE-GUARD): under --require-base BRANCH a run counts only when its
+        # Under --require-base BRANCH a run counts only when its
         # event is pull_request and the pull request GitHub recorded on the run at its creation
         # names BRANCH as its base (pull_requests[].base.ref). Both runs conform here, so the
         # verdict stays green; without the option the same fields go unread, so a run recorded
@@ -1113,14 +1113,14 @@ def _run_checks():
         shapes.append((rc, unmet_note in output))
         check("ci/require-base-malformed-fail-closed", shapes, [(2, True)] * 3 + [(1, True)])
 
-        # FIX-551-R2 BLOCKER (PR 551 round-2 reviews): a conforming run set alone is not Quality
+        # A conforming run set alone is not Quality
         # evidence. After a retarget to main the only run on the head can be the msg-leaks run
         # (quality.yml filters pull_request on branches: [main] and does not list edited), so a
         # lone conforming sibling formerly read green with no Quality run at all. Under
         # --require-base at least one completed successful conforming run of the workflow file
         # .github/workflows/quality.yml (--require-workflow's default) is required; its absence
         # is unmet (exit 1, naming the missing workflow file) in one-shot and --wait mode alike.
-        # FIX-551-R4: report-once refuses on its single snapshot; --wait keeps polling through
+        # Report-once refuses on its single snapshot; --wait keeps polling through
         # the settle window first (a qualifying run can be registered late on this same head; a
         # reopen schedules one), so the refusal comes only once the run set has been stable for
         # five observations and still holds no qualifying run.
@@ -1171,10 +1171,10 @@ def _run_checks():
                                needle in output))
         check("ci/require-workflow-value-refused", wf_refused, [(2, True, True, True)] * 7)
 
-        # FIX-551-R2 MEDIUM (PR 551 round-2 reviews): each --require-base value is validated AS
+        # Each --require-base value is validated AS
         # IT IS CONSUMED (a later value cannot repair or replace an earlier one), a
         # whitespace-only value is refused before any git or API read, and a repeated
-        # --require-base is refused (exit 2), never last-wins. FIX-551-R4: the git argv log is
+        # --require-base is refused (exit 2), never last-wins. The git argv log is
         # asserted too, so validation moved behind a git read turns these red.
         consumed = []
         for extra, needle in (
@@ -1189,7 +1189,7 @@ def _run_checks():
                              needle in output))
         check("ci/require-base-value-consumed", consumed, [(2, True, True, True)] * 5)
 
-        # FIX-551-R2 MEDIUM (PR 551 round-2 reviews): a malformed run record is a property of the
+        # A malformed run record is a property of the
         # stored evidence, not a retryable API condition, so it exits 2 under --wait too (one
         # poll, never a timeout misread as a verdict).
         malformed_wait = []
@@ -1202,7 +1202,7 @@ def _run_checks():
         check("ci/require-base-malformed-fail-closed-wait", malformed_wait,
               [(2, 1, True, False)] * 3)
 
-        # FIX-551-R2 MEDIUM (PR 551 round-2 reviews): the two sources disagreeing about a run's
+        # The two sources disagreeing about a run's
         # recorded base or event is a conflicting duplicate record (exit 2 after the one-shot
         # re-read), never a pass: dropping event, path or pull_requests from the cross-source
         # projection would let the filtered record's conforming base win while the scan recorded
@@ -1230,7 +1230,7 @@ def _run_checks():
                  "conflicting duplicate workflow-run records" in output))
         check("ci/require-base-cross-source-conflict", conflicts, [(2, 2, True)] * 4)
 
-        # FIX-551-R4 BLOCKER (PR 551 round-3 reviews): the required run is bound to its
+        # The required run is bound to its
         # workflow FILE (the run's recorded path), never its display name: any workflow can
         # carry name: Quality, so a conforming same-named run from another file must never
         # satisfy the requirement, in one-shot and --wait mode alike (exit 1, never 0), while
@@ -1250,7 +1250,7 @@ def _run_checks():
         check("ci/require-workflow-file-binding", bound,
               [(1, 1, True), (1, 5, True), (0, 5, False)])
 
-        # FIX-551-R4: under --require-base a run record whose workflow path is missing, empty
+        # Under --require-base a run record whose workflow path is missing, empty
         # or not a string is a malformed run record (exit 2), in one-shot and --wait mode
         # alike: without a usable path the required-workflow match cannot be evaluated, and
         # reading such a run as some other file would be the name-collision fail-open again.
@@ -1270,7 +1270,7 @@ def _run_checks():
         check("ci/require-base-path-missing-fail-closed", pathless,
               [(2, True)] * 3 + [(2, 1, True, False)])
 
-        # FIX-551-R4 (PR 551 round-3 reviews): a required-workflow run REGISTERED LATE must not
+        # A required-workflow run REGISTERED LATE must not
         # end the wait at once: the first poll holds only the conforming msg-leaks run, the
         # qualifying Quality run appears from the second poll on (the shape a reopen produces
         # on the SAME head), and the wait settles green instead of refusing on poll one.
@@ -1278,8 +1278,8 @@ def _run_checks():
         rc, _output, calls = fixture.invoke(polls, wait=True, extra_args=require)
         check("ci/require-base-wait-late-quality-run", (rc, calls), (0, 6))
 
-        # FIX-551-R5 (PR 551 round-4 reviews, MAJOR): the required-workflow match reads the run's
-        # RAW JSON .path inside jq, never Bash's @tsv-escaped path column. The parent of this fix
+        # The required-workflow match reads the run's
+        # RAW JSON .path inside jq, never Bash's @tsv-escaped path column. An earlier revision
         # compared the escaped column with the unescaped required path, so two DIFFERENT paths
         # that escape alike (a recorded real tab versus a requested literal backslash-t) read as
         # equal, and a path holding a tab, newline, carriage return or backslash never equalled
@@ -1306,7 +1306,7 @@ def _run_checks():
         check("ci/require-workflow-raw-path-match", raw_match,
               [(1, True)] * 4 + [(0, False)] * 4)
 
-        # FIX-551-R5 (PR 551 round-4 reviews, MEDIUM): under --require-base a malformed record is
+        # Under --require-base a malformed record is
         # refused from EITHER source alone, a malformed sibling beside a valid required run
         # included, in one-shot and --wait mode alike (exit 2, one read, never a timeout). The
         # vectors above feed every malformed record through both listings at once, so they alone
@@ -1329,7 +1329,7 @@ def _run_checks():
         check("ci/require-base-single-source-malformed", single_source,
               [(2, 1, True, False)] * 8)
 
-        # FIX-551-R5 (PR 551 round-4 reviews, MINOR): without --require-base the path column is
+        # Without --require-base the path column is
         # display-only and unvalidated, so a path that is not a nonempty string reads as "-"
         # rather than collapsing the TSV row (IFS=tab folds an empty field, shifting every later
         # column) or aborting it (@tsv refuses an object). Status, conclusion, name and URL must
@@ -1343,7 +1343,7 @@ def _run_checks():
                                "  https://example.invalid/runs/920" in output))
         check("ci/plain-mode-path-column-inert", plain_rows, [(0, True, True)] * 2)
 
-        # FIX-551-R4 MINOR: a second positional rev is refused (exit 2) before any git or API
+        # A second positional rev is refused (exit 2) before any git or API
         # read, never read last-wins: a stray positional that resolves (a branch name, say)
         # would silently change which commit is checked.
         rc, output, _calls = fixture.invoke([[page([pr_quality])]], extra_args=("HEAD",))
@@ -1351,7 +1351,7 @@ def _run_checks():
               (rc, fixture.gh_argv == [], fixture.git_argv == [],
                "a repeated rev is refused" in output), (2, True, True, True))
 
-        # FIX-551-R5 (PR 551 round-4 reviews, MINOR): the git argv recorder is proven to log real
+        # The git argv recorder is proven to log real
         # git reads on a run that does read git, so the fixture.git_argv == [] assertions above
         # cannot pass vacuously under a recorder that stopped logging (or a script that reached
         # git around the PATH fixture).

@@ -311,7 +311,7 @@ SETTLE_OBSERVATIONS=5
 # payload plus a complete GitHub workflow YAML, event-filter, and glob implementation; the SHA and
 # repository files alone cannot answer that question for pull_request base branches or paths.
 
-# THE BASE-BRANCH REQUIREMENT (--require-base BRANCH; D-551-MERGE-LANE-GUARD). The merge lane trusts
+# THE BASE-BRANCH REQUIREMENT (--require-base BRANCH). The merge lane trusts
 # a green run for a merge into BRANCH only when that run evaluated its pull request against BRANCH: a
 # run that passed while the PR targeted another branch says nothing about a merge into BRANCH, and
 # quality.yml no longer carries `edited`, so a base retarget alone schedules no fresh run. Under this
@@ -378,7 +378,7 @@ SETTLE_OBSERVATIONS=5
 # in every TSV row, then the base verdict's display detail, then the run's recorded workflow path
 # (display-only; anything but a nonempty string reads as "-", so an empty or non-string path in
 # plain mode can neither shift later columns nor abort the row), then id, name and URL.
-# FIX-551-R5: the required-workflow match is computed INSIDE jq, on the run's raw JSON .path
+# The required-workflow match is computed INSIDE jq, on the run's raw JSON .path
 # against the required path passed in as --arg require_workflow, and only the fixed token reaches
 # Bash. An earlier revision compared Bash's @tsv-escaped path column with the unescaped required
 # path, so two different paths that escape alike (a recorded real tab versus a requested literal
@@ -706,8 +706,8 @@ while :; do
     # The gating tokens come from the jq program's fixed sets ("-", "met", "unmet" for the base
     # requirement; "-", "match", "other" for the required workflow), never from a display field;
     # under the requirement anything other than "met" or "match" fails closed, so an unexpected
-    # token never passes. base_detail is display-only (@tsv-escaped); path is display-only too
-    # (FIX-551-R5): the required-workflow match is wf_state, computed in jq on the run's raw JSON
+    # token never passes. base_detail is display-only (@tsv-escaped); path is display-only too:
+    # the required-workflow match is wf_state, computed in jq on the run's raw JSON
     # .path (validated nonempty under the requirement), never on this escaped column; name stays
     # display-only.
     if [ -n "$REQUIRE_BASE" ] && [ "$base_state" != "met" ]; then
