@@ -1064,11 +1064,24 @@ def _self_test_main_isolated():
         expect("_PRECHECKED_ROOTS.add(os.path.abspath(Path(__file__).resolve().parents[2]))",
                "references _PRECHECKED_ROOTS in top-level code",
                "a top-level _PRECHECKED_ROOTS.add() that pre-fills the cache")
-        diverged_main = opf_text.replace("    precheck_special_files(_root)\n", "    pass\n", 1)
+        # The precheck call lives in _precheck_entry, which the __main__ block calls: neutering
+        # that call proves the _precheck_entry comparison, and a separate vector diverges the
+        # __main__ block itself, so each compared entry has a vector of its own.
+        diverged_entry = opf_text.replace("    precheck_special_files(_root)\n", "    pass\n", 1)
         if opf_text.count("    precheck_special_files(_root)\n") != 1 \
-                or not _precheck_copies_problems(gen_text, diverged_main):
-            failures.append("D-400-SPECIAL-FILE-PRECHECK: a neutered __main__ block in the OPF precheck "
-                            "copy was not caught by the copy comparison")
+                or not any("_precheck_entry differs" in problem
+                           for problem in _precheck_copies_problems(gen_text, diverged_entry)):
+            failures.append("D-400-SPECIAL-FILE-PRECHECK: a neutered precheck call in the OPF copy's "
+                            "_precheck_entry was not caught by the copy comparison as "
+                            "'_precheck_entry differs'")
+        main_call = "    raise SystemExit(_precheck_entry(sys.argv[1:]))\n"
+        diverged_main = opf_text.replace(main_call, "    raise SystemExit(0)\n", 1)
+        if opf_text.count(main_call) != 1 \
+                or not any("__main__ differs" in problem
+                           for problem in _precheck_copies_problems(gen_text, diverged_main)):
+            failures.append("D-400-SPECIAL-FILE-PRECHECK: a diverged __main__ block in the OPF precheck "
+                            "copy (its _precheck_entry call replaced by SystemExit(0)) was not caught by "
+                            "the copy comparison as '__main__ differs'")
 
         # codex round-4 findings 4 and 5, both precheck copies: a rev-parse answer with more than one
         # trailing newline is MALFORMED (exit 2, not exactly one line), never silently accepted as a
@@ -1161,7 +1174,8 @@ def _self_test_main_isolated():
         #     is confirmed by rev-parse on the tree itself and the ignore filter is live; the planted
         #     nested .git case proves a marker cannot narrow the root; the venv-like and dangling-link
         #     cases prove the hazard-scoped rules do not over-refuse. The final two trees run a
-        #     MUTATED module (a neutered __main__ call; refusals turned into returns) and must then
+        #     MUTATED module (a neutered precheck call in _precheck_entry; refusals turned into
+        #     returns) and must then
         #     PASS the FIFO tree, proving these subprocess vectors discriminate on exactly the rules
         #     they pin. POSIX only (os.mkfifo).
         if hasattr(os, "mkfifo"):
@@ -1316,13 +1330,13 @@ def _self_test_main_isolated():
             gen_src = _entry_src["gen"].decode("utf-8")
             mutant_tree = _mini_tree("neutered-main")
             if gen_src.count("    precheck_special_files(_root)\n") != 1 or mutant_tree is None:
-                failures.append("(r) cannot build the neutered __main__ mutant")
+                failures.append("(r) cannot build the neutered _precheck_entry mutant")
             else:
                 (mutant_tree / "tools" / "_gen_common.py").write_text(
                     gen_src.replace("    precheck_special_files(_root)\n", "    pass\n", 1),
                     encoding="utf-8")
                 os.mkfifo(mutant_tree / "evil.fifo")
-                _entry_expect("the neutered __main__ mutant (vector sensitivity)",
+                _entry_expect("the neutered _precheck_entry mutant (vector sensitivity)",
                               mutant_tree, "gen", 0)
             refusal = ('    def _refuse(path, why):\n        print("error: {}: refused, {}; remove it;'
                        ' fail-closed".format(path, why), file=sys.stderr)\n        raise SystemExit(2)\n')
@@ -1939,8 +1953,9 @@ def _self_test_main_isolated():
           "hang; reconcile refuses a symlinked or directory target (exit 2); and a FIFO at any of six tree "
           "paths makes six gates exit 2 by name at the repo_root() special-file precheck; a stray FIFO makes the "
           "nine gates that find their root on their own exit 2 by name; the OPF copy of the precheck "
-          "matches _gen_common's (a changed copy, a globals() rebinding, a cache pre-fill and a "
-          "diverged __main__ block are each caught); and each --precheck entry point, run as a "
+          "matches _gen_common's (a changed copy, a globals() rebinding, a cache pre-fill, a "
+          "neutered precheck call in _precheck_entry and a diverged __main__ block are each caught, "
+          "the last two by name); and each --precheck entry point, run as a "
           "subprocess, refuses a FIFO, a link to a FIFO, a FIFO behind a planted nested .git or an "
           "in-root directory link, an outside-root directory link, a git-ignored link to a FIFO, a "
           "FIFO behind an in-root link into an ignored directory, and a symlinked tools/ or opf/ "

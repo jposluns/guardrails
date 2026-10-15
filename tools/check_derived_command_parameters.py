@@ -543,11 +543,14 @@ def _not_run_vectors(failures):
     """Red-on-revert vectors for the skips that printed SELF-TEST PASS (PARTIAL) and exited 0. Nested
     self-test runs inject an unavailable temp directory (mkdtemp raises OSError), a failing symlink for case
     (m) alone, for case (n) alone (the other case's symlink made for real), and for both; each run must exit
-    nonzero AND carry every unrun case's NOT RUN bullet on its failure list. The single-case runs matter: in
-    the both-cases run the sibling's recorded failure alone makes the exit nonzero, so a call site that only
-    printed its NOT RUN line would pass there."""
+    exactly 3 (cannot evaluate) AND carry every unrun case's NOT RUN bullet on its failure list. The
+    single-case runs matter: in the both-cases run the sibling's recorded failure alone makes the exit
+    nonzero, so a call site that only printed its NOT RUN line would pass there. A final mixed run adds one
+    definite failure beside the unavailable temp directory and must exit 1: a definite failure outranks a
+    NOT RUN entry, never the cannot-evaluate exit 3."""
     import io
     from contextlib import redirect_stderr, redirect_stdout
+    from unittest.mock import patch
 
     def _unavailable(*_args, **_kwargs):
         raise OSError("injected: unavailable")
@@ -563,9 +566,9 @@ def _not_run_vectors(failures):
 
     want_m = "NOT RUN: {}: no symlink support".format(_SYMLINK_CASE)
     want_n = "NOT RUN: {}: no symlink support".format(_DANGLING_CASE)
+    want_e2e = "NOT RUN: {}: no writable temp directory".format(_E2E_CASES)
     for label, kwargs, wants in (
-            ("no-tempdir", {"_mkdtemp": _unavailable},
-             ("NOT RUN: {}: no writable temp directory".format(_E2E_CASES),)),
+            ("no-tempdir", {"_mkdtemp": _unavailable}, (want_e2e,)),
             ("no-symlink (m) only", {"_symlink": _unavailable_for("resume.md")}, (want_m,)),
             ("no-symlink (n) only", {"_symlink": _unavailable_for("derived-command-parameters.toml")},
              (want_n,)),
@@ -574,10 +577,28 @@ def _not_run_vectors(failures):
         with redirect_stdout(out), redirect_stderr(io.StringIO()):
             rc = self_test_main(_vectors=False, **kwargs)
         missing = [want for want in wants if not _recorded(out.getvalue(), want)]
-        if rc == 0 or missing:
-            failures.append("(NOT RUN vector {}) must exit nonzero AND record {!r} on the failure list, never "
-                            "a PASS (PARTIAL) exit 0 or a bare printed line (got exit {})"
-                            .format(label, missing or wants, rc))
+        if rc != 3 or missing:
+            failures.append("(NOT RUN vector {}) must exit 3 (cannot evaluate) AND record {!r} on the failure "
+                            "list, never a PASS (PARTIAL) exit 0, a definite-failure exit 1 or a bare printed "
+                            "line (got exit {})".format(label, missing or wants, rc))
+
+    # The mixed run: the unavailable temp directory records the e2e NOT RUN entry, and a mis-graded
+    # even backslash run (the real helper for every other input) records exactly one definite failure.
+    real_ends = _ends_with_continuation
+
+    def _misgraded(text):
+        return text == "a \\\\" or real_ends(text)
+
+    definite = "_ends_with_continuation mis-graded an odd/even trailing backslash run"
+    out = io.StringIO()
+    with patch.object(sys.modules[__name__], "_ends_with_continuation", _misgraded), \
+            redirect_stdout(out), redirect_stderr(io.StringIO()):
+        rc = self_test_main(_vectors=False, _mkdtemp=_unavailable)
+    missing = [want for want in (want_e2e, definite) if not _recorded(out.getvalue(), want)]
+    if rc != 1 or missing:
+        failures.append("(NOT RUN vector mixed) a definite failure beside a NOT RUN entry must exit 1 AND "
+                        "record {!r} on the failure list, never the cannot-evaluate exit 3 (got exit {})"
+                        .format(missing or (want_e2e, definite), rc))
 
 
 _SENTINEL_FAILURE = ("the injected unavailable-fixture cases ((w)) and the inherited-sentinel "
@@ -1049,8 +1070,8 @@ def self_test_main(_mkdtemp=None, _symlink=None, _vectors=True,  # noqa: C901  a
           "reconciliation of an unmatched-command/unmatched-option/duplicate-path/overlapping-path/"
           "duplicate-option control failing closed, a line-continuation split sink scanned whole, a "
           "commented-out literal not firing, and a bundled short-option value scanned); an unavailable "
-          "temp directory or symlink support is a NOT RUN failure (nonzero exit), never a PASS (PARTIAL)"
-          .format(core))
+          "temp directory or symlink support is a NOT RUN failure (exit 3), never a PASS (PARTIAL), and a "
+          "definite failure beside a NOT RUN entry exits 1".format(core))
     return 0
 
 

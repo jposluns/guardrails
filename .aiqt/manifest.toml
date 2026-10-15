@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "2948ad3ee25a197e3d64326c7e139f2fddc5d38f03a48353ea75b09f9c9975a9"
+tree-sha256 = "7b8ecb54157934707a057502a5c4deba70901131416e85707ac0b2e832bc0aad"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3306,8 +3306,8 @@ sha256 = "21e65b471c836b53055bbebb12a628dcef09d07252841d3d1c4e559057b38499"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
-bytes = 355238
-sha256 = "2ec5b3516a5c3ec61a7e4d505396a6c5e95d3d7aba9ebb34e9267c9e70481da7"
+bytes = 355445
+sha256 = "a3bf1c305d7d4eafb937bc4fe77c61c5c6571c650164133bec3a9657202deec7"
 
 [[sources]]
 path = "tools/check_cited_standards.py"
@@ -3326,8 +3326,8 @@ sha256 = "4cfa9f0ced5501b884037715a4083a11de68b0f8bfa11f80bc57cd7da309f745"
 
 [[sources]]
 path = "tools/check_derived_command_parameters.py"
-bytes = 63450
-sha256 = "5462d584c66c31ea7722cbba3608b3b9f79009a421091d42e635a874d07f254e"
+bytes = 64853
+sha256 = "d240b2c5891da386cf80dba3e9170e766f51f14c663127cc286e950cdacc99f4"
 
 [[sources]]
 path = "tools/check_entry_guard.py"
@@ -3386,8 +3386,8 @@ sha256 = "c3890ef39af64190b8fedbeb468d73f6370d235b2ef78acde8a4ddff2829139c"
 
 [[sources]]
 path = "tools/check_manifest.py"
-bytes = 125098
-sha256 = "80b9e038c013f4dded1ce33ec843457b2bc1fea938f9f39de70af43258930c18"
+bytes = 126292
+sha256 = "45447bdba558ac448fa18ced9be25aecd8b5d965dd0e7d96718cf6b317db5f51"
 
 [[sources]]
 path = "tools/check_mappings.py"

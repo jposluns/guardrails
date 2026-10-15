@@ -7206,8 +7206,10 @@ def workflow_precheck_order_problems(text, source):
     applies workflow- and job-level env: and defaults: (and a job-level if: or
     continue-on-error:) to every step, so those levels are ALLOWLISTS over the grammar's plain
     keys: a workflow-level key outside WORKFLOW_LEVEL_KEYS (workflow-key), a job-level key
-    outside JOB_LEVEL_KEYS (job-key), a step key outside STEP_KEYS (step-key), and a step env
-    entry naming an execution-control variable (BASH_ENV, ENV, SHELLOPTS, PATH, PYTHON*, LD_*
+    outside JOB_LEVEL_KEYS (job-key), a step key outside STEP_KEYS (step-key; shell is a step key
+    accepted ONLY as the exact line STEP_SHELL_LINE, shell: bash, on a step with a run: key, so
+    any other shell value, and a shell: on a step with no run: key, is a step-key refusal), and
+    a step env entry naming an execution-control variable (BASH_ENV, ENV, SHELLOPTS, PATH, PYTHON*, LD_*
     or BASH_FUNC*; env-override) are each refused, never a clean order pass. Residuals: an
     execution-control variable that list does not name, and semantics GitHub adds later, stay
     outside this parse (the canonical step body itself is pinned by PRECHECK_STEP_RUN_LINES);
