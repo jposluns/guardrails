@@ -3475,7 +3475,7 @@ def _real_pack_not_run_vectors(tmp, failures):
             return True
         return _pin
 
-    saved = {name: globals()[name] for name in ("_archive_head", "_pin_fixture_version")}
+    saved = {"_archive_head": _archive_head, "_pin_fixture_version": _pin_fixture_version}
     for name, lock_index, want in (("not-run-commit", True, "could not build the fixture git repo"),
                                    ("not-run-clause", False, "no sole-coverer clause to edit")):
         got = []
@@ -3581,7 +3581,7 @@ def _not_run_net_vectors(tmp, failures):
                 "False and a NOT RUN failure naming {!r}".format(want), planted, got))
 
     # The caller nets: an end-to-end function that returns False and records nothing.
-    saved = {name: globals()[name] for name in ("_real_pack_e2e", "_post_release_e2e")}
+    saved = {"_real_pack_e2e": _real_pack_e2e, "_post_release_e2e": _post_release_e2e}
     got = []
     globals().update(_real_pack_e2e=lambda _tmp, _failures: False,
                      _post_release_e2e=lambda _tmp, _failures: False)
@@ -3636,8 +3636,8 @@ def _not_run_net_vectors(tmp, failures):
     # (so this vector is not re-entered from the nested run, and the final gate's dispatch is itself
     # observed). Scenario 2: no gate reports git, so every block must be named, the final one included.
     real_probe = _git_available
-    saved_sets = {name: globals()[name] for name in (
-        "_real_pack_not_run_vectors", "_not_run_net_vectors", "_e2e_git_cases")}
+    saved_sets = {"_real_pack_not_run_vectors": _real_pack_not_run_vectors,
+                  "_not_run_net_vectors": _not_run_net_vectors, "_e2e_git_cases": _e2e_git_cases}
     for scenario, answers, named, unnamed in (
             ("transient probe (final gate succeeds)",
              [False] * (len(_GIT_GATE_LABELS) - 1) + [True],
