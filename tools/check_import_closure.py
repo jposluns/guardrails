@@ -268,7 +268,12 @@ or action line outside the accepted YAML subset (above).
                                        contained: os._exit(0) would end it with exit 0 and no PASS line, and a
                                        fatal signal or a hang stops or stalls it), and the user's own SIGINT
                                        (under Python's default handler) is not contained: one delivered in a
-                                       mutant's run propagates, and the handler is restored on every path
+                                       mutant's run propagates, and the handler is restored on every path. The
+                                       checks of those two run whatever handler SIGINT had at the start, also in
+                                       a child launched with SIGINT ignored; one that cannot run fails the
+                                       self-test, never a skip
+  check_import_closure.py --interrupt-leg
+                                       those two checks alone (the child the self-test launches)
 
 Exit convention: 0 clean; 1 a finding; 2 usage or cannot-evaluate.
 
@@ -425,6 +430,7 @@ import re
 import shutil
 import signal
 import stat
+import subprocess
 import symtable
 import tempfile
 import tomllib
@@ -2608,7 +2614,8 @@ _RULE_VECTORS = (
      (("tools/t.py", "from importlib import util\nutil.find_spec('json')\n"),), (), {}, True),
     ("getattr with a literal name", "dynamic-import", "tools/t.py",
      (("tools/t.py", "import importlib\ngetattr(importlib, 'import_module')('json')\n"),), (), {}, True),
-    # Reproductions that each escaped the gate before dynamic imports were refused outside the allowlist.
+    # Each indirect dynamic import below (through an alias, a fromlist, a loader, a package path, or a name reached
+    # through getattr, vars or sys.modules, among others) is a finding unless an allowlist row lists it.
     ("function-local alias beside a module-level __import__", "dynamic-import", "tools/t.py",
      (("tools/t.py", "def unrelated():\n    from builtins import print as __import__\n__import__('json')\n"),),
      (), {}, True),
@@ -2752,8 +2759,8 @@ _RULE_VECTORS = (
      (("tools/t.py", "def f():\n    return __import__\n"),), (),
      dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "f", ("#1: __import__",), "r"),
                                       ("tools/t.py", "f", ("#1: __import__",), "s"))), True),
-    # Reproductions from when a permission named one line's text, not one node, and an importer's module name was
-    # read only by position or the keyword name, and help was not watched.
+    # A permission names one node, not one line's text: two identical calls on one line need a reference each, two
+    # nodes cannot share one permission key, and a row cannot list one reference twice.
     ("two identical calls on one line, one listed", "dynamic-import", "tools/t.py",
      (("tools/t.py", "def f(x):\n    __import__(x); x = 'requests'; __import__(x)\n"),), (),
      dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "f", ("#1: __import__(x)",), "r"),)), True),
@@ -3957,18 +3964,20 @@ def _scan_rc(module, base, rules=None, special=None, **kwargs):
         if os.fspath(path).endswith(os.sep + "locked"):
             raise PermissionError(13, "Permission denied", os.fspath(path))
         return original(path)
-    if special == "unlistable":
-        os.scandir = _locked
-    if special == "unreadable-file":
-        Path.read_bytes = _unreadable
-    if special == "twin-sites":
-        module.dynamic_sites = lambda tree, *watched: original_sites(tree, *watched) * 2
-    if special == "merged-scopes":
-        module.scope_identities = lambda tree: dict((key, re.sub(r"#[0-9]+/[0-9]+", "", identity))
-                                                    for key, identity in original_identities(tree).items())
-    if injected is not None:
-        tomllib.loads = _failing
+    # Each replacement is made inside the try whose finally restores it, so none is left in place by an exception
+    # raised between the two.
     try:
+        if special == "unlistable":
+            os.scandir = _locked
+        if special == "unreadable-file":
+            Path.read_bytes = _unreadable
+        if special == "twin-sites":
+            module.dynamic_sites = lambda tree, *watched: original_sites(tree, *watched) * 2
+        if special == "merged-scopes":
+            module.scope_identities = lambda tree: dict((key, re.sub(r"#[0-9]+/[0-9]+", "", identity))
+                                                        for key, identity in original_identities(tree).items())
+        if injected is not None:
+            tomllib.loads = _failing
         findings, _shown, _stats = module.scan(base, rules=module.RULES if rules is None else rules, **kwargs)
     except module.CannotEvaluate as exc:
         return 2, ["cannot evaluate: %s" % exc]
@@ -4844,11 +4853,144 @@ def _case_line(case):
     return "SITES %s -> %d found" % (case[0], len(case[2]))
 
 
+_INTERRUPT_HELD = "INTERRUPT a SIGINT delivered in a mutant's run is recorded and propagates"
+_SETUP_HELD = "SETUP a failing mkdtemp propagates and the SIGINT handler is still restored"
+
+
+def _sigint_restorable():
+    """(SIGINT's handler now, None) when this process can put that handler back (signal.signal works only in the
+    main thread, and getsignal gives None for a handler not installed from Python), else (None, why not)."""
+    handler = signal.getsignal(signal.SIGINT)
+    try:
+        signal.signal(signal.SIGINT, handler)
+    except (TypeError, ValueError, OSError) as exc:
+        return None, "SIGINT's handler %r cannot be put back: %s" % (handler, exc)
+    return handler, None
+
+
+def _interrupt_check(copy, case):
+    """None when the user's interrupt is not contained, else the failure. A SIGINT delivered (os.kill: real
+    delivery, not a direct call of _interrupted) in a mutant's run is recorded by _interrupted and propagates
+    rather than failing that mutant; a KeyboardInterrupt the check did not provoke (none sent, or more interrupts
+    recorded than the one it sent) propagates on, so the check cannot swallow the user's own interrupt. The check
+    installs _interrupted for its own run whatever SIGINT had (ignored, or another handler) and puts the original
+    back on every path; where it cannot, the check cannot evaluate, a failure and never a skip."""
+    before, problem = _sigint_restorable()
+    if problem is not None:
+        return "INTERRUPT cannot evaluate: " + problem
+    own_sites = copy.dynamic_sites
+    sent = []
+
+    def _deliver(*_args):
+        sent.append(len(_INTERRUPTS))
+        os.kill(os.getpid(), signal.SIGINT)
+        raise AssertionError("the SIGINT this check delivered to itself was not handled")
+    try:
+        signal.signal(signal.SIGINT, _interrupted)
+        copy.dynamic_sites = _deliver
+        credited, problem = _mutant_credit(copy, case)
+        return "a SIGINT delivered in a mutant's run did not propagate: credited %r, %s" % (credited, problem)
+    except KeyboardInterrupt:
+        if sent and len(_INTERRUPTS) == sent[0] + 1:
+            del _INTERRUPTS[sent[0]:]
+            print(_INTERRUPT_HELD)
+            return None
+        raise
+    finally:
+        copy.dynamic_sites = own_sites
+        signal.signal(signal.SIGINT, before)
+
+
+def _setup_check(copy):
+    """None when the self-test's restore runs even when setup fails, else the failure: with mkdtemp raising, the
+    copy's self-test propagates the OSError and puts Python's default SIGINT handler back. The check gives SIGINT
+    that default handler for its own run whatever it had and puts the original back on every path; where it
+    cannot, the check cannot evaluate, a failure and never a skip."""
+    before, problem = _sigint_restorable()
+    if problem is not None:
+        return "SETUP cannot evaluate: " + problem
+    own_mkdtemp = tempfile.mkdtemp
+
+    def _no_tmp(*_args, **_kwargs):
+        raise OSError("no scratch directory")
+    raised = False
+    try:
+        signal.signal(signal.SIGINT, signal.default_int_handler)
+        sys.modules[copy.__name__] = copy
+        tempfile.mkdtemp = _no_tmp
+        try:
+            copy.self_test_main()
+        except OSError:
+            raised = True
+    finally:
+        tempfile.mkdtemp = own_mkdtemp
+        sys.modules.pop(copy.__name__, None)
+        left = signal.getsignal(signal.SIGINT)
+        signal.signal(signal.SIGINT, before)
+    if not raised:
+        return "setup: a failing mkdtemp did not propagate from the copy's self-test"
+    if left is not signal.default_int_handler:
+        return "setup: a failing mkdtemp left the copy's SIGINT handler installed, not restored"
+    print(_SETUP_HELD)
+    return None
+
+
+def _interrupt_leg(copy, case):
+    """The failures of the INTERRUPT check (case is the vector its mutant run uses) and the SETUP check, on copy,
+    a scratch copy of this gate."""
+    return [failure for failure in (_interrupt_check(copy, case), _setup_check(copy)) if failure is not None]
+
+
+def _interrupt_leg_main():
+    """--interrupt-leg: the INTERRUPT and SETUP checks alone, on a scratch copy of this gate; 0 only when both ran
+    and held."""
+    tmp = None
+    try:
+        tmp = Path(tempfile.mkdtemp(prefix="import-closure-"))
+        case = dict((case[0], case) for case in _vector_cases(tmp))["reference moved within its lambda"]
+        os.makedirs(tmp / "mutants")
+        copy = _load_mutant(Path(__file__).read_text(encoding="utf-8"), tmp / "mutants", 0)
+        failures = _interrupt_leg(copy, case)
+    finally:
+        if tmp is not None:
+            shutil.rmtree(tmp, ignore_errors=True)
+    for failure in failures:
+        print("SELF-TEST FAIL: %s" % failure, file=sys.stderr)
+    return 1 if failures else 0
+
+
+def _ignore_sigint():
+    """The child's SIGINT disposition from its start: ignored, as for a background job of a non-interactive
+    shell."""
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+
+def _ignored_sigint_run(path, argv):
+    """None when path, launched with argv as a child whose SIGINT is ignored from its start, exits 0 having passed
+    the INTERRUPT and SETUP checks (both lines printed), else the failure: a child that does not run, a nonzero
+    exit, or an exit 0 with either check not run (a PASS with the check skipped)."""
+    command = "%s %s" % (path, " ".join(argv))
+    try:
+        child = subprocess.run([sys.executable, "-I", "-B", os.fspath(path)] + list(argv), stdin=subprocess.DEVNULL,
+                               capture_output=True, text=True, timeout=600, preexec_fn=_ignore_sigint)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return "ignored SIGINT: %s did not run: %s" % (command, exc)
+    if child.returncode != 0:
+        said = (child.stderr.strip() or "no output").splitlines()[-1]
+        return "ignored SIGINT: %s exited %d: %s" % (command, child.returncode, said)
+    lines = child.stdout.splitlines()
+    missing = [held.split(" ", 1)[0] for held in (_INTERRUPT_HELD, _SETUP_HELD) if held not in lines]
+    if missing:
+        return "ignored SIGINT: %s exited 0 without passing %s" % (command, " and ".join(missing))
+    return None
+
+
 def self_test_main():
     failures = []
     this = sys.modules[__name__]
     # The user's interrupt is recorded (_interrupted) only where SIGINT has Python's default handler in the main
-    # thread; anywhere else a KeyboardInterrupt in a mutant's run is contained like any other exception.
+    # thread; anywhere else a KeyboardInterrupt in a mutant's run is contained like any other exception. The
+    # INTERRUPT check installs _interrupted for its own run whatever SIGINT had (_interrupt_check).
     handler = signal.getsignal(signal.SIGINT)
     installed = handler is signal.default_int_handler
     if installed:
@@ -4955,60 +5097,14 @@ def self_test_main():
             else:
                 print("REMOVED importer %s caught by its vector" % callee)
         copy.IMPORTERS = IMPORTERS
-        # The user's interrupt is not contained: a SIGINT delivered (os.kill: real delivery, not a direct call of
-        # _interrupted) in a mutant's run is recorded by the installed handler and propagates rather than failing
-        # that mutant. A KeyboardInterrupt the check did not provoke (none sent, or more interrupts recorded than
-        # the one it sent) propagates on: the check cannot swallow the user's own interrupt. Where SIGINT did not
-        # have Python's default handler nothing was installed, so there is nothing to exercise.
-        if installed:
-            own_sites = copy.dynamic_sites
-            sent = []
-
-            def _deliver(*_args):
-                sent.append(len(_INTERRUPTS))
-                os.kill(os.getpid(), signal.SIGINT)
-                raise AssertionError("the SIGINT this check delivered to itself was not handled")
-            copy.dynamic_sites = _deliver
-            try:
-                credited, problem = _mutant_credit(copy, by_name["reference moved within its lambda"])
-                failures.append("a SIGINT delivered in a mutant's run did not propagate: credited %r, %s"
-                                % (credited, problem))
-            except KeyboardInterrupt:
-                if sent and len(_INTERRUPTS) == sent[0] + 1:
-                    del _INTERRUPTS[sent[0]:]
-                    print("INTERRUPT a SIGINT delivered in a mutant's run is recorded and propagates")
-                else:
-                    raise
-            finally:
-                copy.dynamic_sites = own_sites
-            # The restore runs even when setup fails: with mkdtemp raising, the copy's self-test propagates the
-            # OSError and puts Python's default SIGINT handler back.
-            own_mkdtemp = tempfile.mkdtemp
-
-            def _no_tmp(*_args, **_kwargs):
-                raise OSError("no scratch directory")
-            sys.modules[copy.__name__] = copy
-            signal.signal(signal.SIGINT, signal.default_int_handler)
-            tempfile.mkdtemp = _no_tmp
-            try:
-                raised = False
-                try:
-                    copy.self_test_main()
-                except OSError:
-                    raised = True
-            finally:
-                tempfile.mkdtemp = own_mkdtemp
-                del sys.modules[copy.__name__]
-                left = signal.getsignal(signal.SIGINT)
-                signal.signal(signal.SIGINT, _interrupted)
-            if not raised:
-                failures.append("setup: a failing mkdtemp did not propagate from the copy's self-test")
-            elif left is not signal.default_int_handler:
-                failures.append("setup: a failing mkdtemp left the copy's SIGINT handler installed, not restored")
-            else:
-                print("SETUP a failing mkdtemp propagates and the SIGINT handler is still restored")
+        # The INTERRUPT and SETUP checks run whatever handler SIGINT had at the start (_interrupt_leg), so neither
+        # is skipped where SIGINT was ignored; a child launched with SIGINT ignored must run both and pass them.
+        failures.extend(_interrupt_leg(copy, by_name["reference moved within its lambda"]))
+        problem = _ignored_sigint_run(__file__, ["--interrupt-leg"])
+        if problem is not None:
+            failures.append(problem)
         else:
-            print("INTERRUPT and SETUP skipped: SIGINT did not have Python's default handler, none was installed")
+            print("IGNORED with SIGINT ignored from its start, a child still runs and passes INTERRUPT and SETUP")
 
         # A SystemExit that escapes the self-test fails it (main), whatever its code, never ends it with that code.
         def _exit_zero():
@@ -5055,12 +5151,12 @@ def self_test_main():
 
 
 def main(argv):
-    if argv == ["--self-test"]:
+    if argv in (["--self-test"], ["--interrupt-leg"]):
         # The self-test puts the SIGINT handler back on every path (its restore is in a finally no setup or
         # cleanup failure skips); this checks that it did, so removing the restore turns the self-test red.
         before = signal.getsignal(signal.SIGINT)
         try:
-            code = self_test_main()
+            code = self_test_main() if argv == ["--self-test"] else _interrupt_leg_main()
         except SystemExit as exc:
             print("SELF-TEST FAIL: SystemExit(%r) exited before its verdict" % (exc.code,), file=sys.stderr)
             code = 1
@@ -5070,7 +5166,7 @@ def main(argv):
             return 1
         return code
     if argv:
-        print("usage: check_import_closure.py [--self-test]", file=sys.stderr)
+        print("usage: check_import_closure.py [--self-test | --interrupt-leg]", file=sys.stderr)
         return 2
     return run(ROOT)
 
