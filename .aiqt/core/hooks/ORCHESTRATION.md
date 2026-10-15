@@ -429,12 +429,17 @@ descriptor withholds).
   on a lease carrying a setuid, setgid or sticky bit) or rewrites ONLY the declared field's value
   (the field write alone is refused, with nothing written, for a lease carrying a setuid, setgid
   or sticky bit, which a replace cannot carry over faithfully; otherwise an exclusive
-  temporary file beside the lease, given the lease's group before its first byte (a new file
-  gets the directory's default group, which need not be the lease's; a failure to set it is the
-  named no-write refusal, with nothing published, so where it always fails, for a lease whose
-  group this user is not a member of and is not the directory's default group, or on a
-  filesystem that refuses the change, EVERY field refresh is refused and the lease lapses, with
-  the refusal warned on Stop), the original permission bits in full, fsync,
+  temporary file beside the lease, given the lease's group before its first byte (on Linux a
+  new file starts in the creating process's effective group, or in the directory's group where
+  the directory is setgid or the filesystem is mounted with grpid, so it need not be the
+  lease's; a failure to set it is the named no-write refusal, with nothing published, so where
+  it always fails, for example for a process without CAP_CHOWN whose effective and
+  supplementary groups do not include the lease's group, writing where a new file does not
+  start in that group, or on a filesystem that refuses the change, EVERY field refresh is
+  refused: Stop warns of that refusal only while the lease is still eligible for a refresh,
+  and once the lease is inside two clock skews of its staleness horizon Stop warns instead that
+  it is too close to renew, then, once stale, that it has lapsed), the original permission bits
+  in full (a failure to set them is the same named no-write refusal), fsync,
   an identity re-check against the proof fstat, a descriptor-anchored replace, a directory fsync
   whose failure is a write that HAPPENED but may not be durable, never plain success: reported
   as the Stop warning, or on PostToolUse as the result's error text, with an attempted
@@ -609,8 +614,10 @@ descriptor withholds).
   revived by the replace or a swapped-in acquire is overwritten: the identity re-check
   narrows that window (it cannot remove it), and the post-replace verification does not report
   either case (it reads the replace's own content, which carries this session's refreshed
-  value, so the revived lease or the overwritten acquire reads as a clean refresh; it reports
-  only a change that lands after the replace, and it can undo nothing). Bash can still rewrite
+  value, so the revived lease or the overwritten acquire reads as a clean refresh; it can
+  report a change that lands between the replace and its own re-read, or a verification fault,
+  where the refreshed lease cannot be re-opened, re-read or re-parsed, and it can undo
+  nothing). Bash can still rewrite
   the lease or the registry. The past-holder memory
   (`lease-heartbeat.json`) and the guard-events append are best-effort, and every bookkeeping
   open, lstat, exclusive temporary create and replace runs RELATIVE to the held

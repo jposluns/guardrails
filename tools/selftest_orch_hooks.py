@@ -7846,11 +7846,13 @@ def _leasehb_status_and_parse_cases(tmp):
     plain success, with an attempted guard-events row; when that row's append fails too, the
     withheld-bookkeeping report rides the same text and no row lands; a written-unverified
     refresh (the replace happened, its verification failed) on PostToolUse is surfaced the same
-    way. (3) A field write passes the lease's proven group to the group change (a proof gid
-    injected distinct from every gid this process could pass otherwise, so a wrong gid is red on
-    a single-group host too), gives the temporary that group, then the lease's mode, then its
-    first byte (the lease in a real other group where this process can set one), and a failure
-    to set the group refuses the write with nothing published. (4) The special-bit refusal is
+    way, and when its row append fails too, both texts ride the error text and no row lands. (3)
+    A field write passes the lease's proven group to the group change (a proof gid injected
+    distinct from the new-file, real, effective, supplementary, directory and lease gids, so a
+    wrong gid is red on a single-group host too), gives the temporary that group, then the
+    lease's mode, then its first byte (the lease in a real other group where this process can
+    set one), and a failure to set the group, or the mode, refuses the write under that step's
+    own name with nothing published. (4) The special-bit refusal is
     the field write's alone: the mtime touch
     refreshes a setgid lease and keeps its mode. (5) A json field write keeps nested members
     (one of them named like the declared field), escaped key spellings and whitespace variants
@@ -8021,6 +8023,22 @@ def _leasehb_status_and_parse_cases(tmp):
            "WAS replaced but could not be verified afterwards (injected verify fault)" in err,
            pv.lease.read_bytes() != pv_before, decisions(pv)),
           (1, 0, None, True, True, ["written-unverified"]))
+    # the same unverified write with its row append failing too: the written-unverified warning
+    # and the withheld-bookkeeping report both ride the error text, and no row lands (red where
+    # either text is lost, or the row is written by another route)
+    pw = fixture("postunverifiedrow", "holder: s1\nheartbeat_utc: " + now_iso(0.25) + "\n",
+                 hb(field="heartbeat_utc"), age_secs=900)
+    pw_before = pw.lease.read_bytes()
+    pv_fired.clear()
+    result = patched([(aiqt_hooks, "_orch_lease_hb_verify", verify_fault),
+                      (aiqt_hooks, "_orch_lease_hb_row_write", row_fault)], lambda: post(pw))
+    err = result[2] if isinstance(result[2], str) else ""
+    check("leasehb/post-verify-fault-row-fault-withheld",
+          (len(pv_fired), result[0], result[1],
+           "WAS replaced but could not be verified afterwards (injected verify fault)" in err,
+           "bookkeeping withheld (the bookkeeping append failed ([Errno {}] injected row write "
+           "fault))".format(errno_sp.EIO) in err, pw.lease.read_bytes() != pw_before, rows(pw)),
+          (1, 0, None, True, True, True, []))
 
     # --- (3) the temporary takes the lease's proven group, then the lease's mode, then its
     # first byte (red where no group change is made, where any gid other than the proven one is
@@ -8044,12 +8062,13 @@ def _leasehb_status_and_parse_cases(tmp):
     # group bits a mode change made ahead of the group change would grant the default group
     os.chmod(str(gp.lease), 0o640)
     gp_mode = stat.S_IMODE(os.lstat(str(gp.lease)).st_mode)
-    # the proof stat the keeper reads carries a gid that is none of the directory default, the
-    # effective gid, a supplementary gid or the lease's real gid, so only the lease's PROVEN
-    # group can be the argument: on a host with one group those real gids all coincide, and a
-    # writer passing the effective or the default gid would pass a real-gid comparison there.
-    # The group change then applies the lease's real group in the proof gid's place.
-    known_gids = set(os.getgroups()) | {os.getegid(), default_gid, lease_gid,
+    # the proof stat the keeper reads carries a gid that is none of the new-file group, the real
+    # or effective gid, a supplementary gid, the directory's gid or the lease's real gid, so
+    # only the lease's PROVEN group can be the argument: on a host with one group those real
+    # gids all coincide, and a writer passing the effective or the new-file gid would pass a
+    # real-gid comparison there. The group change then applies the lease's real group in the
+    # proof gid's place.
+    known_gids = set(os.getgroups()) | {os.getgid(), os.getegid(), default_gid, lease_gid,
                                         os.stat(str(gp.root)).st_gid}
     proof_gid = max(known_gids) + 1
     real_load = aiqt_hooks._orch_lease_hb_load
@@ -8095,10 +8114,10 @@ def _leasehb_status_and_parse_cases(tmp):
                       (aiqt_hooks, "_orch_lease_hb_load", gp_load), (os, "fchown", gp_fchown),
                       (os, "fchmod", gp_fchmod), (os, "write", gp_write)], lambda: stop(gp))
     check("leasehb/field-tmp-takes-lease-group",
-          (proof_gid in known_gids, [e[2] for e in gp_events if e[0] == "fchown"],
-           _verdict(result), gp.lease.read_bytes() != gp_before,
-           os.stat(str(gp.lease)).st_gid == lease_gid, tmp_names(gp.root)),
-          (False, [proof_gid], "allow", True, True, []))
+          ([e[2] for e in gp_events if e[0] == "fchown"], _verdict(result),
+           gp.lease.read_bytes() != gp_before, os.stat(str(gp.lease)).st_gid == lease_gid,
+           tmp_names(gp.root)),
+          ([proof_gid], "allow", True, True, []))
     check("leasehb/field-tmp-group-before-mode-and-write",
           (gp_mode, gp_events[:3], stat.S_IMODE(os.lstat(str(gp.lease)).st_mode)),
           (0o640, [("fchown", -1, proof_gid), ("fchmod", 0o640), ("write",)], 0o640))
@@ -8122,6 +8141,28 @@ def _leasehb_status_and_parse_cases(tmp):
            "the lease is unchanged" in text_of(result), snap(gf.lease) == gf_before,
            tmp_names(gf.root), decisions(gf)),
           (1, "warn", True, True, True, [], ["no-write"]))
+    # a failure of the temporary's mode change is refused under its own name, never labelled a
+    # write failure (red where the mode change runs under the write step's label)
+    gm = fixture("tmpmodefault", "holder: s1\nheartbeat_utc: " + now_iso(0.25) + "\n",
+                 hb(field="heartbeat_utc"), age_secs=900)
+    gm_tmp = gm.root / ".forced.tmpmodefault.hb.tmp"
+    gm_fired = []
+
+    def gm_fchmod(fd, mode):
+        if is_entry(fd, gm_tmp):
+            gm_fired.append(mode)
+            raise PermissionError(errno_sp.EPERM, "injected mode change fault")
+        return real_fchmod(fd, mode)
+    gm_before = snap(gm.lease)
+    result = patched([(aiqt_hooks, "_orch_lease_hb_tmp_name", lambda name_arg: gm_tmp.name),
+                      (os, "fchmod", gm_fchmod)], lambda: stop(gm))
+    check("leasehb/field-tmp-mode-fault-refused",
+          (len(gm_fired), _verdict(result),
+           "the temporary file cannot be given the lease's mode ([Errno {}] injected mode "
+           "change fault)".format(errno_sp.EPERM) in text_of(result),
+           "cannot be written" in text_of(result), "the lease is unchanged" in text_of(result),
+           snap(gm.lease) == gm_before, tmp_names(gm.root), decisions(gm)),
+          (1, "warn", True, False, True, True, [], ["no-write"]))
 
     # --- (4) the special-bit refusal is the field write's alone: the mtime touch refreshes a
     # setgid lease and leaves its mode as it was ---

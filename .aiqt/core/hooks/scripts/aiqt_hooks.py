@@ -18024,7 +18024,8 @@ def _orch_lease_hb_verify(dirfd, name, cfg, session_id, new_value):
     accurately, never claimed clean: the replace is already published when this runs). It reads
     the lease as it stands AFTER the replace, so it confirms only that this session's refreshed
     value is there: a lease this replace revived or overwrote carries that very value and
-    passes."""
+    passes. A failure is either a verification fault (the refreshed lease cannot be re-opened,
+    re-read or re-parsed) or a change that landed between the replace and this re-read."""
     try:
         fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0)
                      | getattr(os, "O_NOCTTY", 0) | getattr(os, "O_CLOEXEC", 0), dir_fd=dirfd)
@@ -18072,10 +18073,11 @@ def _orch_lease_hb_write_field(root, cfg, session_id, now, path, parent, name, s
     create an exclusive temporary file beside the lease (a random name with
     O_EXCL|O_NOFOLLOW, so nothing planted at a temporary-like name is ever opened or replaced),
     learn its identity on the descriptor (_orch_lease_hb_field_tmp_fstat), give it the lease's
-    group (os.fchown on the descriptor: a new file gets the directory's default group, which
-    need not be the lease's, and a failure is the named no-write refusal with nothing
-    published), carry over the
-    original permission bits in full, write and fsync it, re-check the lease's identity
+    group (os.fchown on the descriptor: on Linux a new file starts in the creating process's
+    effective group, or in the directory's group where the directory is setgid or the
+    filesystem is mounted with grpid, so it need not be the lease's, and a failure is the named
+    no-write refusal with nothing published), carry over the original permission bits in full
+    (a failure there is that refusal too), write and fsync it, re-check the lease's identity
     against the proof fstat (dev, ino, mtime_ns, size), replace through the held directory
     descriptor, fsync that directory, and verify. Returns None, ('no-write', detail) with the
     lease untouched, ('written-unverified', detail) after a replace that could not be
@@ -18165,8 +18167,9 @@ def _orch_lease_hb_write_field(root, cfg, session_id, now, path, parent, name, s
             # so the carried-over group bits never grant another group access, and a failure
             # refuses the write with nothing published
             os.fchown(tmp_fd, -1, st.st_gid)
-            step = "written"
+            step = "given the lease's mode"
             os.fchmod(tmp_fd, mode)  # in full: a special bit was refused above
+            step = "written"
             view = memoryview(blob)
             while view:
                 view = view[os.write(tmp_fd, view):]
@@ -18197,8 +18200,9 @@ def _orch_lease_hb_write_field(root, cfg, session_id, now, path, parent, name, s
                 # the window (it cannot remove it). The post-replace verification does NOT
                 # report either case: it reads this replace's own content, which carries this
                 # session's refreshed value, so the overwritten acquire or the revived lease
-                # reads as a clean refresh; it reports only a change that lands after the
-                # replace, and it can undo nothing.
+                # reads as a clean refresh. It can report a change that lands between the
+                # replace and its own re-read, or a verification fault (the refreshed lease
+                # cannot be re-opened, re-read or re-parsed), and it can undo nothing.
                 _orch_lease_hb_replace(tmp, name, parent)
                 published = True
             except OSError as exc:
