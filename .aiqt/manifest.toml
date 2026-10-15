@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "3f92fab56d7b232e37d92c925546be4a6995caf4f5c2f0488d64ff1919aa7533"
+tree-sha256 = "0e3b33cc6e8cf695dd7eefea58558e47e63856709de1ff66a31e58f0bc88cd3a"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3681,8 +3681,8 @@ sha256 = "26b2e951fe7c452e19c919e04bbc2cf3854eefd085fe3f10399678b84b4d5b9a"
 
 [[sources]]
 path = "tools/orch_register.py"
-bytes = 183098
-sha256 = "6adc22a44efaada5ad046f7a1f5ceff4e8f46b178299393f1750670dc0a11dff"
+bytes = 206611
+sha256 = "d87bc81355c6ba03c17df5366759a1b04c433ba5b2e5039a00ed80a25318b5a3"
 
 [[sources]]
 path = "tools/pin.py"
