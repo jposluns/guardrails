@@ -1741,11 +1741,12 @@ def _leftover_lock_outcome(owner, states):
 def _with_recovery_lease(ctx, pending, recover):
     """Run `recover` holding the single-writer lease, claimed for RECOVERY through
     _opf_write_guard.acquire_lease_for_recovery: the atomic claim publication uses, with the spec 5.7
-    live-holder rule applied to exactly the present-lease refusal. A leftover lease whose complete
-    well-formed payload names a holder on THIS host confirmed dead (positive evidence only) is released
-    through this reconciliation and the claim retried once; a lease held by a live or possibly-live
-    holder, a cross-host holder, or one with a malformed payload refuses before any recovery write and is
-    never seized, and releasing any such lease stays the operator's explicit reconciliation step. A
+    never-seize and dead-run release clauses applied to exactly the present-lease refusal. A leftover
+    lease whose complete well-formed payload names a holder on THIS host confirmed dead (positive
+    evidence only) is released through this reconciliation and the claim retried once; a lease held by a
+    live or possibly-live holder, a cross-host holder, or one with a malformed payload refuses before any
+    recovery write and is never seized, and releasing any such lease stays the operator's explicit
+    reconciliation step. A
     released leftover is REPORTED whatever follows it: it heads the outcome lines `recover` returns, a
     RecordError that `recover` raises carries it appended, a WriteGuardError from the release after a
     clean recovery carries it appended, and any other failure surfaces it on stderr (best-effort, never
