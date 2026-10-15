@@ -8931,13 +8931,20 @@ def commit_msg_subst(data):
 # so a program fed by the heredoc (python3 - <<'PY', bash -s <<'SH') can run the rest of the command as its
 # own code while the shell runs none of it. The shared _lex_command cannot judge this (it refuses an unquoted
 # heredoc, and reads a double-quoted "$(cat <<'EOF' ...)" as one word), so this guard makes its own raw pass,
-# tracking only what decides whether a << is an opener: quoting, escapes, comments, and the command,
-# arithmetic and parameter substitutions that nest inside a command or a double-quoted string. A delimiter
+# tracking only what decides whether a << is an opener: quoting, escapes, comments, assignment subscripts,
+# and the command, arithmetic and parameter substitutions that nest inside one another. A delimiter
 # word is read by the shared _parse_heredoc_delim, so both passes read a delimiter alike.
 _HeredocOpener = collections.namedtuple(
     "_HeredocOpener", ("spec", "line", "delim", "strip_tabs", "quoted", "terminated", "near", "stop"))
 _HEREDOC_NEAR_MISS_MAX = 2  # the largest edit distance at which a body line is named as a near miss
 _HEREDOC_SHOWN = 80  # the longest opener, delimiter or near-miss text quoted in a deny reason
+_HEREDOC_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# Words after which bash still reads the next word as a possible assignment: reserved words that begin a
+# command. A declaration builtin lets a later name=(...) argument be a compound assignment, but bash does
+# not read a name[...] argument of it as a subscript.
+_HEREDOC_COMMAND_WORDS = frozenset(("!", "{", "coproc", "do", "elif", "else", "if", "then", "time", "until",
+                                    "while"))
+_HEREDOC_DECL_WORDS = frozenset(("alias", "declare", "eval", "export", "let", "local", "readonly", "typeset"))
 
 
 def _heredoc_edit_distance(a, b, bound):
@@ -8969,8 +8976,10 @@ def _heredoc_edit_distance(a, b, bound):
 
 
 def _heredoc_body(command, i, n, opener, in_subst, line_no):
-    """Read one heredoc body the way bash does, from index i (the start of the line after the opener's line,
-    or where the previous body ended), which is on line line_no. Returns (next_i, terminated, near, stop):
+    """Read one heredoc body the way bash does, from index i (where _heredoc_openers says bash starts it: the
+    line after a newline of the opener's own command context, or after the line on which its substitution
+    closed, or where the previous body ended), which is on line line_no. Returns (next_i, terminated, near,
+    stop):
     next_i is where scanning resumes; terminated is True when a line EXACTLY equal to the delimiter was found
     (next_i is then just past that line); near is None or, for an unterminated body, (line, text, distance)
     for the closest body line (the first on a tie) that is not blank and is within _HEREDOC_NEAR_MISS_MAX
@@ -9039,25 +9048,52 @@ def _heredoc_skip_to(command, i, n, close):
 def _heredoc_openers(command):
     """Every heredoc opener bash would act on in a raw Bash command, in source order, each read through to its
     terminator by _heredoc_body. An opener is a << that is not part of a here-string <<<, and that is not
-    quoted, escaped, commented out, inside arithmetic ($((...)), $[...], ((...))), inside a ${...} parameter
-    expansion, or inside a backtick substitution or ANSI-C $'...' text (both skipped unread). A << inside a
-    $(...) command substitution or a <(...)/>(...) process substitution IS an opener, also within double
-    quotes. Bodies are read at the next newline of a command context, in the order their openers appeared,
-    as bash reads them. A << whose delimiter word _parse_heredoc_delim cannot read is returned with delim
-    None and terminated False. One linear pass with a stack of open contexts, each [kind, depth]: cmd (a
-    command; depth counts plain parentheses), dq (a double-quoted string), param (${...}), arith (depth
-    counts parentheses) and bracket ($[...]; depth counts brackets)."""
+    quoted, escaped, commented out, inside arithmetic ($((...)), $[...], ((...))) or the subscript of an
+    assignment (name[...]= where an assignment can stand, or [...]= in a compound assignment name=(...)),
+    inside a ${...} parameter expansion, or inside a backtick substitution or ANSI-C $'...' text (both
+    skipped unread). A << inside a $(...) command substitution or a <(...)/>(...) process substitution IS
+    an opener, also within double quotes, in arithmetic, in a subscript or in a ${...}; a <( directly inside
+    double quotes or in arithmetic is literal text, as in bash. A << whose delimiter word
+    _parse_heredoc_delim cannot read is returned with delim None and terminated False.
+    Bodies are read in bash's order. Each command context (the command, and each $(...), <(...) or >(...)
+    in it at any depth) keeps its own pending openers, and a newline of that context reads only its own
+    pending bodies, in the order their openers appeared; the pending bodies of the contexts around it wait
+    for a newline of their own. So when a line cat <<A "$(cat <<B is followed by lines B, )" and A, the
+    body of B (the line B) is read before the body of A (the line A). A substitution that closes with
+    bodies still unread (bash warns of an unterminated here-document) has them read at once, from the line
+    after the one it closes on (or after bodies already read that way), before anything still pending
+    around it; the scan then finishes that line and, at its newline (also within a string or expansion,
+    or after a backslash), resumes after those bodies. One forward pass with a stack of open contexts, each [kind, depth]: cmd (a command; depth
+    counts plain parentheses; then its pending openers, whether a word starting now can be an assignment,
+    and whether it is the parentheses of a compound assignment), dq (a double-quoted string), param
+    (${...}), arith (depth counts parentheses; then whether a word ends with it) and bracket ($[...] or a
+    subscript; depth counts brackets; then whether a word ends with it, and whether it is a subscript)."""
     n = len(command)
     openers = []
-    pending = []  # indexes into openers whose bodies start at the next newline of a command context
-    stack = [["cmd", 0]]
+    # a cmd frame's third item lists indexes into openers whose bodies it has not read; its fourth is
+    # "command" before a command's first word, "assign" after only assignments (a word read in either can
+    # be an assignment), "decl" after a declaration builtin, else ""; its fifth marks a compound assignment
+    stack = [["cmd", 0, [], "command", False]]
     word_start = True  # a '#' starts a comment only at the start of a word
     seen = [0, 1]  # [index, its line]; the scan only moves forward, so line counting stays linear
+    ahead = None  # (index, line) just past the bodies read when a substitution closed with bodies unread
+    redirect = False  # the next word is a redirection's target, which leaves a command's position as it was
+    compound_at = -1  # the index of the ( that opens a compound assignment name=(...)
 
     def line_at(index):
         seen[1] += command.count("\n", seen[0], index)
         seen[0] = index
         return seen[1]
+
+    def read_bodies(pending, i, line_no, in_subst):
+        """Read each pending body in turn from index i on line line_no; returns where the next one starts."""
+        for index in pending:
+            start = i
+            i, terminated, near, stop = _heredoc_body(command, i, n, openers[index], in_subst, line_no)
+            openers[index] = openers[index]._replace(terminated=terminated, near=near, stop=stop)
+            line_no += command.count("\n", start, i)
+        del pending[:]
+        return i, line_no
 
     i = 0
     while i < n:
@@ -9065,12 +9101,61 @@ def _heredoc_openers(command):
         kind = frame[0]
         c = command[i]
         nx = command[i + 1] if i + 1 < n else ""
+        if ahead is not None and ahead[0] <= i:
+            ahead = None  # a quoted or skipped span crossed lines past those bodies; never scan backwards
+        if ahead is not None and (c == "\n" and kind != "cmd" or c == "\\" and nx == "\n"):
+            # the line ends inside a string or an expansion, or is continued by a backslash: bash goes on with
+            # the line after the bodies a closed substitution already read (a newline of a command is below)
+            i = ahead[0]
+            ahead = None
+            continue
+        if kind == "cmd" and word_start and c not in " \t\n;&|<>()#" and not (c == "\\" and nx == "\n"):
+            # the first character of a word. Bash reads name[...] as an assignment's subscript, in which << is a
+            # shift, only where an assignment can stand (not after a command word, and not as an argument of a
+            # declaration builtin), and [...] at the start of a word inside a compound assignment's parentheses
+            match = _HEREDOC_NAME_RE.match(command, i)
+            j = match.end() if match else i
+            digits = i
+            while digits < n and command[digits].isdigit():
+                digits += 1
+            if (frame[4] and c == "[" or match and frame[3] in ("command", "assign")
+                    and command.startswith("[", j)):
+                stack.append(["bracket", 0, False, True])
+                word_start = False
+                i = (i if c == "[" else j) + 1
+                continue
+            if digits > i and command[digits:digits + 1] in ("<", ">"):
+                pass  # the file descriptor number of a redirection
+            elif redirect:
+                redirect = False  # a redirection's target; after an assignment it ends the command position
+                if frame[3] == "assign":
+                    frame[3] = ""
+            elif match and frame[3] and (command.startswith("=", j) or command.startswith("+=", j)):
+                if frame[3] == "command":
+                    frame[3] = "assign"  # the next word can still be an assignment
+                equals = j + (command[j] == "+")
+                if command.startswith("(", equals + 1):
+                    compound_at = equals + 1
+            elif not frame[4]:
+                end = j if match else i + (c in "!{")
+                word = command[i:end] if end >= n or command[end] in " \t\n;&|<>()" else None
+                if frame[3] in ("command", "assign") and word in _HEREDOC_DECL_WORDS:
+                    frame[3] = "decl"
+                elif not (frame[3] == "command" and word in _HEREDOC_COMMAND_WORDS) and frame[3] != "decl":
+                    frame[3] = ""
         if c == "\\":  # the next character is literal; a backslash-newline joins lines and ends no word
             if nx != "\n":
                 word_start = False
             i += 2
             continue
-        if kind in ("arith", "bracket"):
+        if kind in ("arith", "bracket") and c not in "$`\"":
+            # << here is a shift; a $(...), ${...} or nested arithmetic, a backtick or a double-quoted string
+            # inside it is read below as it is elsewhere, so a heredoc in a $(...) in arithmetic is checked
+            if kind == "bracket" and frame[3] and c in "<>" and nx == "(":
+                stack.append(["cmd", 0, [], "command", False])  # bash runs a <(...) inside a subscript
+                word_start = True
+                i += 2
+                continue
             if c == ("(" if kind == "arith" else "["):
                 frame[1] += 1
             elif c == (")" if kind == "arith" else "]"):
@@ -9078,23 +9163,30 @@ def _heredoc_openers(command):
                     frame[1] -= 1
                 else:
                     stack.pop()
+                    word_start = frame[2]  # mid-word after an expansion; a new word after a ((...)) command
                     if kind == "arith" and nx == ")":
                         i += 1  # the second ) of a closing ))
+                    elif kind == "bracket" and frame[3] and not stack[-1][4]:
+                        # name[...]= is an assignment; name[...] with no = after it is a command word
+                        assigned = command.startswith("=", i + 1) or command.startswith("+=", i + 1)
+                        stack[-1][3] = "assign" if assigned else ""
             i += 1
             continue
         if c == "$":
             if command.startswith("$((", i):
-                stack.append(["arith", 0])
+                stack.append(["arith", 0, False])
+                word_start = False
                 i += 3
             elif nx == "(":
-                stack.append(["cmd", 0])
+                stack.append(["cmd", 0, [], "command", False])
                 word_start = True
                 i += 2
             elif nx == "{":
                 stack.append(["param", 0])
                 i += 2
             elif nx == "[":
-                stack.append(["bracket", 0])
+                stack.append(["bracket", 0, False, False])
+                word_start = False
                 i += 2
             elif nx == "'" and kind != "dq":  # ANSI-C quoting (inside double quotes $' is literal)
                 i = _heredoc_skip_to(command, i + 2, n, "'")
@@ -9124,19 +9216,29 @@ def _heredoc_openers(command):
             i += 1
             continue
         if kind == "param":
+            if c in "<>" and nx == "(":  # bash runs a <(...) inside ${...}, also within double quotes
+                stack.append(["cmd", 0, [], "command", False])
+                word_start = True
+                i += 2
+                continue
             if c == "}":
                 stack.pop()
                 word_start = False
             i += 1
             continue
-        if c == "\n":
+        if c == "\n":  # a newline of this command context reads its own pending bodies, and no others
             i += 1
             word_start = True
-            for index in pending:
-                i, terminated, near, stop = _heredoc_body(
-                    command, i, n, openers[index], len(stack) > 1, line_at(i))
-                openers[index] = openers[index]._replace(terminated=terminated, near=near, stop=stop)
-            del pending[:]
+            redirect = False
+            if not frame[4]:
+                frame[3] = "command"
+            if ahead is not None:
+                i, line_no = ahead
+                ahead = None
+            else:
+                line_no = line_at(i)
+            if frame[2]:
+                i, _line_no = read_bodies(frame[2], i, line_no, len(stack) > 1)
             continue
         if c == "#" and word_start:
             nl = command.find("\n", i)
@@ -9145,6 +9247,7 @@ def _heredoc_openers(command):
         if c == "<" and nx == "<":
             if command.startswith("<<<", i):  # a here-string: no body and no terminator line
                 word_start = True
+                redirect = True
                 i += 3
                 continue
             parsed = _parse_heredoc_delim(command, i + 2, n)
@@ -9155,29 +9258,56 @@ def _heredoc_openers(command):
                 quoted, delim, strip_tabs, _end = parsed
                 openers.append(_HeredocOpener(command[i:end], line_at(i), delim, strip_tabs, quoted, False, None,
                                               None))
-                pending.append(len(openers) - 1)
+                frame[2].append(len(openers) - 1)
             word_start = parsed is None
             i = end
             continue
         if c in "<>" and nx == "(":  # a process substitution runs a command
-            stack.append(["cmd", 0])
+            stack.append(["cmd", 0, [], "command", False])
             word_start = True
             i += 2
             continue
+        if c in "<>" or c == "&" and nx == ">":  # a redirection operator (>&, >>, >|, <&, <> and &> in full)
+            redirect = True
+            if nx and nx in "&>|" or c == "<" and nx == ">":
+                i += 1
+            i += 1
+            word_start = True
+            continue
         if c == "(":
+            if i == compound_at:  # the parentheses of a compound assignment name=(...)
+                stack.append(["cmd", 0, [], "", True])
+                word_start = True
+                i += 1
+                continue
             if nx == "(" and word_start:  # an arithmetic command
-                stack.append(["arith", 0])
+                stack.append(["arith", 0, True])
                 i += 2
                 continue
             frame[1] += 1
         elif c == ")":
             if frame[1]:
                 frame[1] -= 1
-            elif len(stack) > 1:  # the ) that closes a $(...), <(...) or >(...)
+            elif frame[4]:  # the ) that closes a compound assignment
                 stack.pop()
                 word_start = False
                 i += 1
                 continue
+            elif len(stack) > 1:  # the ) that closes a $(...), <(...) or >(...)
+                stack.pop()
+                if frame[2]:
+                    # bodies the substitution never reached a newline for: bash warns, then reads them at once
+                    # from the line after this one (or after bodies already read so), early-end rule included
+                    if ahead is None:
+                        nl = command.find("\n", i)
+                        ahead = (n if nl < 0 else nl + 1, line_at(i) + 1)
+                    ahead = read_bodies(frame[2], ahead[0], ahead[1], True)
+                word_start = False
+                i += 1
+                continue
+        if c in ";&|()" and not frame[4]:  # a command operator: the next word starts a command
+            frame[3] = "command"
+            redirect = False
         word_start = c in " \t;&|<>()"
         i += 1
     return openers

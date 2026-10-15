@@ -86,8 +86,13 @@ universal-coverage claim.
 It also covers the heredoc terminator guard (heredoc_terminator, sectvl): a heredoc opener with no later
 line exactly equal to its delimiter (after the line's leading tabs for <<-) denies, naming the opener and
 the closest near-miss line; matched quoted and unquoted openers, a here-string, and a << inside quotes, a
-comment, arithmetic or a parameter expansion allow; a heredoc inside a $(...) or <(...) is judged, also in
-double quotes; and the near-miss bound, the payload postures, and named residual allows are pinned.
+comment, arithmetic, an assignment subscript or a parameter expansion allow; a # inside a word after
+$((...)) or $[...] hides no opener; a heredoc inside a $(...) or <(...) is judged, also in double quotes,
+arithmetic, a subscript or a ${...}, with a substitution's bodies read before the outer command's pending
+bodies at any depth; and the near-miss bound (a line of the opener's own body only), the payload postures,
+and named residual allows are pinned. A no-op handler passes every allow case, so each allow case is
+written to deny when the one behaviour it names is broken; this suite does not run such broken versions
+itself.
 
 It also covers the secrets-shift-left guard (secrets_shift_left, secsec): a Write content, an Edit
 new_string, or a Bash command that carries an obvious hardcoded secret (a provider-token prefix or a
@@ -2264,7 +2269,8 @@ def _test_heredoc_terminator(failures):
     """(hd-*) heredoc_terminator (sectvl): every heredoc opener bash acts on needs a later line exactly equal to
     its delimiter (after the line's leading tabs for <<-) before the end of the command, or the command is
     denied, naming the opener and any near-miss line. Synthetic payloads only; no submitted Bash command is
-    executed."""
+    executed. A no-op handler passes every allow case (hd-a*, hd-r*), so each one is written to deny when the
+    behaviour its label names is broken; the deny cases (hd-d*, hd-n*) fail under a no-op handler."""
     handler = aiqt_hooks.heredoc_terminator
 
     def payload(command):
@@ -2318,11 +2324,37 @@ def _test_heredoc_terminator(failures):
              "cat <<EOF\nfoo\\\\\nEOF\necho after", "allow")
     hdexpect("(hd-a23) <<- with a space before the delimiter allows", "cat <<- EOF\n\tbody\n\tEOF", "allow")
     hdexpect("(hd-a24) a comment after the opener allows", "cat <<EOF # note\nbody\nEOF", "allow")
-    hdexpect("(hd-a25) a line continuation after the opener allows", "cat <<EOF \\\n | tr a-z A-Z\nbody\nEOF",
-             "allow")
+    hdexpect("(hd-a25) a line continued after the opener is command text, even one equal to the delimiter",
+             "cat <<EOF \\\nEOF\nbody <<NOT\nEOF", "allow")
     hdexpect("(hd-a26) a plain subshell does not end a body at a delimiter followed by )",
              "(cat <<EOF\nbody\nEOF)\nEOF\n)", "allow")
     hdexpect("(hd-a27) an escaped quote inside ANSI-C text does not end it", "echo $'it\\'s <<EOF'", "allow")
+    # Bash order: a substitution's bodies are read before the pending bodies of the command around it, and a
+    # substitution that closes with a body unread has it read at once from the line after it closes.
+    hdexpect("(hd-a28) an inner substitution's body is read before the outer body",
+             'cat <<A "$(cat <<B\nB\n)"\nA\n', "allow")
+    hdexpect("(hd-a29) two levels of substitution are read innermost first",
+             'cat <<A "$(cat <<B "$(cat <<C\nC\n)"\nB\n)"\nA\n', "allow")
+    hdexpect("(hd-a30) an outer opener after an inner one on the same line is read after it",
+             'cat "$(cat <<B)" <<A\nB\nA\n', "allow")
+    hdexpect("(hd-a31) a substitution closed on the opener's line is read before an earlier outer opener",
+             'cat <<A "$(cat <<B)"\nB\nA\n', "allow")
+    hdexpect("(hd-a32) a string running past that line resumes after the body already read",
+             'cat "$(cat <<B)" "x\nsay "<<Q\nB\ny"\n', "allow")
+    hdexpect("(hd-a33) a backslash continuing that line resumes after the body already read",
+             "cat $(cat <<B) \\\nx <<Q\nB\n| cat\n", "allow")
+    hdexpect("(hd-a34) a # right after a ((...)) command starts a comment, as in bash",
+             "((1))#; cat <<EOF\nx\nEOX", "allow")
+    hdexpect("(hd-a35) a closed heredoc in a $(...) in arithmetic allows, and a << beside it is a shift",
+             "echo $(( $(cat <<EOF\n1\nEOF\n) << 2 ))\necho after", "allow")
+    hdexpect("(hd-a36) a << in the subscript of an assignment is a shift", 'a[1<<2]=3; echo "idx4=${a[4]}"',
+             "allow")
+    hdexpect("(hd-a37) a << in a subscript of a compound assignment is a shift",
+             "declare -A m=([k<<x]=1); a=([1<<2]=3)", "allow")
+    hdexpect("(hd-a38) a <( inside double quotes is literal text, not a process substitution",
+             'echo "<(cat <<EOF\nx\nEOX\n)"', "allow")
+    hdexpect("(hd-a39) a line continuation between assignments is no word, so a later subscript stays one",
+             "a=1 \\\nb[1<<2]=3", "allow")
     # Disclosed residuals: text another parser reads later is not scanned, and a later exact line closes a body.
     hdexpect("(hd-r1) a heredoc inside backticks is not checked (disclosed residual)", "x=`cat <<EOF\nin\nEOX\n`",
              "allow")
@@ -2374,6 +2406,36 @@ def _test_heredoc_terminator(failures):
              "x=$(cat <<EOF\nmsg\nEOF)\ncat <<Z\nZ)\nZ", "deny", has=("cut short at line 3",), lacks=("<<Z",))
     hdexpect("(hd-d19) a terminator sharing its line with the ) of a process substitution denies",
              "cat <(cat <<EOF\na\nEOF) /tmp/x\nEOF", "deny", has=("cut short at line 3, 'EOF) /tmp/x'",))
+    hdexpect("(hd-d20) an outer delimiter line inside the inner body does not close the outer heredoc",
+             'cat <<A "$(cat <<B\nA\nB\n)"\n', "deny", has=("<<A on line 1",), lacks=("<<B on",))
+    hdexpect("(hd-d21) a near miss inside an inner body is not named for the outer opener",
+             'cat <<LONG "$(cat <<B\nLONGX\nB\n)"\n', "deny", has=("<<LONG on line 1",),
+             lacks=("LONGX", "away from it", "<<B on"))
+    hdexpect("(hd-d22) two levels of substitution read in the wrong order deny",
+             'cat <<A "$(cat <<B "$(cat <<C\nA\nB\nC\n)"\n)"\n', "deny", has=("<<B on line 1",),
+             lacks=("<<C on",))
+    hdexpect("(hd-d23) a substitution closed on the opener's line takes the next lines before an outer opener",
+             'cat <<A "$(cat <<B)"\nA\nB\n', "deny", has=("<<A on line 1",), lacks=("<<B on",))
+    hdexpect("(hd-d24) a # right after $((...)) is inside the word and hides no later opener",
+             "echo $((1))#; python3 - <<'PY'\nprint(1)\nPYX\necho after", "deny", has=("<<'PY' on line 1",))
+    hdexpect("(hd-d25) a # right after $[...] is inside the word and hides no later opener",
+             "echo $[1]#; cat <<EOF\nx\nEOX", "deny", has=("<<EOF on line 1",))
+    hdexpect("(hd-d26) a heredoc in a $(...) inside $((...)) is checked",
+             "echo $(( $(cat <<EOF\n1\nEOX\n) ))\necho after", "deny", has=("<<EOF on line 1", "'EOX'"))
+    hdexpect("(hd-d27) a heredoc in a $(...) inside a ((...)) command is checked",
+             "(( $(cat <<EOF\n1\nEOX\n) )); echo after", "deny", has=("<<EOF on line 1",))
+    hdexpect("(hd-d28) a heredoc in a $(...) inside $[...] is checked",
+             "echo $[ $(cat <<EOF\n1\nEOX\n) ]\necho after", "deny", has=("<<EOF on line 1",))
+    hdexpect("(hd-d29) a name[...] argument of a declaration builtin is no subscript, as in bash",
+             "declare a[1<<2]=3", "deny", has=("<<2]=3 on line 1",))
+    hdexpect("(hd-d30) a heredoc in a $(...) inside an assignment subscript is checked",
+             "a[$(cat <<EOF\n1\nEOX\n)]=3\necho after", "deny", has=("<<EOF on line 1",))
+    hdexpect("(hd-d31) a heredoc in a $(...) inside a ${...} expansion is checked",
+             'echo "${x:-$(cat <<EOF\nx\nEOX\n)}"', "deny", has=("<<EOF on line 1",))
+    hdexpect("(hd-d32) a heredoc in a <(...) inside a quoted ${...} expansion is checked",
+             'echo "${x:-<(cat <<EOF\nx\nEOX\n)}"\necho after', "deny", has=("<<EOF on line 1",))
+    hdexpect("(hd-d33) a heredoc in a <(...) inside an assignment subscript is checked",
+             "a[<(cat <<EOF\nx\nEOX\n)]=1\necho after", "deny", has=("<<EOF on line 1",))
 
     # Near-miss bounds: within 2 edits AND fewer edits than the delimiter has characters, closest first.
     hdexpect("(hd-n1) a line 1 edit away is named", "cat <<END_OF\nx\nEND_OF ", "deny",
@@ -2391,6 +2453,9 @@ def _test_heredoc_terminator(failures):
     hdexpect("(hd-n7) the closest near miss is named, not the first", "cat <<EOF\nEOF  \nEOF \n", "deny",
              has=("line 3, 'EOF ', is 1 edit away",))
     hdexpect("(hd-n8) a blank line is never a near miss", "cat <<'A B'\n \nx", "deny", lacks=("away from it",))
+    hdexpect("(hd-n9) the near miss comes from the opener's own body, not an inner one",
+             'cat <<LONG "$(cat <<B\nLONGX\nB\n)"\nLONGY\n', "deny", has=("line 5, 'LONGY', is 1 edit away",),
+             lacks=("LONGX",))
 
     # The banded edit distance equals the full Levenshtein distance, capped at bound + 1.
     def levenshtein(a, b):
@@ -12432,7 +12497,14 @@ def _main_isolated(monitor):
         'git commit -m "fix `whoami`"', "git commit -m x", "git -c alias.co=checkout co -- f",
         "git checkout-index -a -f", "eval 'git reset --hard'", 'git reset --hard "unbalanced',
         'git push --force "unbalanced', 'git commit -m "x `y', "git branch --track t origin/x",
+        "python3 - <<'PY'\nprint(1)\nPYX\necho after",
     ]
+    # (noask-heredoc-deny) the << vector reaches the heredoc guard's deny path, so the sweep below would see an
+    # ask there; every other vector stops at the guard's early allow for a command with no <<.
+    _hd_sweep = {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                 "tool_input": {"command": _bash_vectors[-1]}}
+    if _decision_any(aiqt_hooks.heredoc_terminator, _hd_sweep) != "deny":
+        failures.append("(noask-heredoc-deny) the sweep's << vector must reach the heredoc_terminator deny path")
     for _g in _bash_guards:
         for _cmd in _bash_vectors:
             for _cwd in (None, "/nonexistent-noask-probe"):
