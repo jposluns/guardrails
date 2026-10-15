@@ -22,7 +22,9 @@
 # Usage:
 #   tools/ci-status.sh                              # current HEAD, report once
 #   tools/ci-status.sh <sha>                        # a given commit, report once
-#   tools/ci-status.sh <sha> --wait                 # poll until terminal, bounded and fail-loud
+#   tools/ci-status.sh <sha> --wait                 # poll until terminal, bounded and fail-loud,
+#                                                   # refusing at once a head GitHub will never run
+#                                                   # pull_request CI for (THE PULL-REQUEST PROBE)
 #   tools/ci-status.sh <sha> --require-base main    # additionally trust only pull_request runs
 #                                                   # recorded against base main, and require a
 #                                                   # conforming completed successful run of the
@@ -34,9 +36,12 @@
 # Exit codes: 0 success, 1 failed / timed out / not-yet-terminal on a one-shot check, a run that
 # does not satisfy --require-base, or no conforming completed successful run of the required
 # workflow file under --require-base (report-once refuses at once; --wait refuses after its
-# settle window), 2 no run found, API error, a malformed run record (in one-shot
+# settle window), a --wait whose head has no open pull request, whose open pull request targets
+# another base, or whose pull request GitHub reports CONFLICTING (see THE PULL-REQUEST PROBE below),
+# 2 no run found, API error, a malformed run record (in one-shot
 # and --wait mode alike), a missing, unusable or repeated --require-base or --require-workflow
-# value, or the repository cannot be determined (see THE REPOSITORY IS THE CHECKOUT'S OWN below).
+# value, the repository cannot be determined (see THE REPOSITORY IS THE CHECKOUT'S OWN below), or a
+# --wait whose pull-request probe cannot read the pull requests or still reads UNKNOWN at its bound.
 # Report-once (no --wait) never returns 0 for a non-terminal run.
 set -uo pipefail
 
@@ -619,12 +624,192 @@ report() {
   [ -n "${url:-}" ] && [ "$url" != "-" ] && printf '  %s\n' "$url"
 }
 
+# THE PULL-REQUEST PROBE (--wait only). quality.yml runs on pull requests into main only, for the
+# opened, synchronize and reopened types, so only an open pull request into main gets a Quality run,
+# and GitHub's Actions documentation states that a pull_request workflow does not run while the pull
+# request has a merge conflict (not verified live here). A --wait on any other head can only idle to
+# its deadline, and a head that is mergeable when the wait begins can turn CONFLICTING mid-wait when
+# another pull request merges. So under --wait, before EVERY poll, not only the first, the probe
+# lists the repository's open pull requests, keeps those whose head SHA is exactly this commit, and
+# refuses at once (exit 1, naming the cause, before that poll reads any run) when none is open
+# (closed, merged, never opened, or its branch moved to another head), when none targets PR_BASE
+# (the --require-base value, else main; each pull request is named with its base), or when GitHub
+# reports every one into PR_BASE CONFLICTING. One reported MERGEABLE lets the poll proceed. UNKNOWN
+# (GitHub has not finished computing mergeability), a pull request that changed between the listing
+# and its own read, and a read failure other than the permanent signatures below are re-read: at
+# most PR_PROBE_READS reads, PR_PROBE_RETRY_SECONDS apart (at most 55 seconds of sleep between reads
+# per probe); still unresolved at the last read is cannot-evaluate (exit 2), never a wait. A read
+# refused as not accessible or not found, and a malformed response, are cannot-evaluate (exit 2) at
+# once, as for the runs reads. Report-once mode runs no probe: it waits on nothing and reports the
+# runs as they are. The probe can only refuse a wait, never produce a pass: a green verdict still
+# rests on the runs alone.
+# The REST pulls API states mergeability as .mergeable: true, false or null, null meaning GitHub has
+# not finished computing it, and a read of the one pull request starts that computation (GitHub's
+# REST documentation, not verified live here; the self-test stubs gh). The probe names the three
+# values MERGEABLE, CONFLICTING and UNKNOWN, as GitHub's GraphQL API does; that false means a merge
+# conflict is inferred from that documentation, not verified live. The listing carries no
+# .mergeable, so each open pull request into PR_BASE at this head is read on its own on every probe
+# read. Every listed and every read record must carry a positive integer number, a string state, a
+# head SHA string and a nonempty base branch string, and each single read a .mergeable of true,
+# false or null; anything else is a malformed response. The listing is offset paginated like the
+# runs listing: a pull request a page shift skips can only make the probe re-read or refuse a head
+# it would have waited on, never wait on a head it would have refused.
+# PERMISSIONS: the runs reads need Actions: Read. On a public repository the pull requests the
+# probe reads are public data, expected to be readable with no further permission (not verified
+# live here). AVAILABILITY COST (disclosed): a private repository's token also needs Pull requests:
+# Read, or the probe's read is refused and every --wait exits 2. AVAILABILITY COST (disclosed,
+# accepted): a commit with no open pull request whose CI comes from another event (a push to main
+# after a merge) is refused under --wait although its push run would come; report-once still reads
+# it. RESIDUAL (disclosed, not closed): the probe's re-reads do not consult CI_STATUS_TIMEOUT, so a
+# wait can end up to 55 seconds, plus the reads' own time, past its deadline.
+PR_BASE="${REQUIRE_BASE:-main}"
+PR_PROBE_READS=12
+PR_PROBE_RETRY_SECONDS=5
+# "list" reads the slurped pages of the open pull-request listing and prints one TSV row: "none",
+# "base" (with each open pull request at this head and its base), or "candidates" (the numbers of
+# those into PR_BASE). "merge" reads those pull requests' own records and prints "mergeable",
+# "unknown" or "conflicting" (with the pull requests named), or "changed" when none is still open at
+# this head into PR_BASE. The first column is always one of those fixed tokens; the second is
+# display-only and @tsv-escaped, so a branch name cannot add a row or a column.
+CI_STATUS_PR_JQ='
+def malformed_pull:
+  (type != "object")
+  or ((.number | type) != "number")
+  or (.number <= 0)
+  or ((.number | floor) != .number)
+  or ((.state | type) != "string")
+  or ((.head | type) != "object")
+  or ((.head.sha | type) != "string")
+  or ((.base | type) != "object")
+  or ((.base.ref | type) != "string")
+  or ((.base.ref | length) == 0);
+def malformed_mergeable:
+  (has("mergeable") | not)
+  or ((.mergeable != null) and ((.mergeable | type) != "boolean"));
+def open_at_head: (.state == "open") and (.head.sha == $requested_sha);
+def numbered: map("#" + (.number | tostring)) | join(", ");
+if $mode == "list" then
+  if (length != 1) or ((.[0] | type) != "array") or ((.[0] | length) == 0)
+     or any(.[0][]; type != "array") or any(.[0][][]; malformed_pull) then
+    error("malformed pull-request response")
+  else
+    [.[0][][] | select(open_at_head)] as $open
+    | [$open[] | select(.base.ref == $base)] as $on_base
+    | if ($open | length) == 0 then ["none", "-"]
+      elif ($on_base | length) == 0 then
+        ["base", ([$open[] | "#" + (.number | tostring) + " into " + .base.ref] | join(", "))]
+      else ["candidates", ([$on_base[] | .number] | unique | map(tostring) | join(" "))]
+      end
+    | @tsv
+  end
+elif $mode == "merge" then
+  if (length == 0) or any(.[]; malformed_pull or malformed_mergeable) then
+    error("malformed pull-request response")
+  else
+    [.[] | select(open_at_head and (.base.ref == $base))] as $live
+    | if ($live | length) == 0 then ["changed", "-"]
+      elif any($live[]; .mergeable == true) then
+        ["mergeable", ([$live[] | select(.mergeable == true)] | numbered)]
+      elif any($live[]; .mergeable == null) then
+        ["unknown", ([$live[] | select(.mergeable == null)] | numbered)]
+      else ["conflicting", ($live | numbered)]
+      end
+    | @tsv
+  end
+else
+  error("unknown mode")
+end'
+
+pr_jq() {
+  jq -s -r --arg mode "$1" --arg requested_sha "$SHA" --arg base "$PR_BASE" "$CI_STATUS_PR_JQ"
+}
+
+# One probe read: prints one TSV row from CI_STATUS_PR_JQ, or returns 1 with the raw gh or jq
+# diagnostic.
+pr_probe_read() {
+  local listing listed number record records=""
+  {
+    listing="$(gh api "repos/$REPO/pulls?state=open&per_page=100" --paginate --slurp)" || return 1
+    listed="$(printf '%s\n' "$listing" | pr_jq list)" || return 1
+    if [ "${listed%%$'\t'*}" != "candidates" ]; then
+      printf '%s\n' "$listed"
+      return 0
+    fi
+    for number in ${listed#*$'\t'}; do
+      if ! [[ "$number" =~ ^[0-9]+$ ]]; then
+        echo "unexpected pull-request probe output"
+        return 1
+      fi
+      record="$(gh api "repos/$REPO/pulls/$number")" || return 1
+      records+="$record"$'\n'
+    done
+    printf '%s' "$records" | pr_jq merge
+  } 2>&1
+}
+
+# Returns only when the head may be waited on; every refusal exits here (see THE PULL-REQUEST PROBE).
+pr_probe() {
+  local read_no=0 line probe_rc token detail cause
+  while :; do
+    read_no=$((read_no + 1))
+    line="$(pr_probe_read)"
+    probe_rc=$?
+    if [ "$probe_rc" -ne 0 ] || [ -z "$line" ]; then
+      case "$line" in
+        *"malformed pull-request response"*|*"unexpected pull-request probe output"*|\
+        *"Resource not accessible"*|*"Not Found"*|*"404"*)
+          echo "ERROR: cannot evaluate: could not read the pull requests of ${REPO} for ${SHA}, so whether a pull_request run will come for this head is unknown; refusing to wait."
+          echo "  raw: ${line}"
+          exit 2
+          ;;
+      esac
+      cause="the pull-request read failed (raw: ${line})"
+    else
+      token="${line%%$'\t'*}"
+      detail="${line#*$'\t'}"
+      case "$token" in
+        mergeable) return 0 ;;
+        none)
+          echo "RESULT: refusing to wait: no open pull request has ${SHA} as its head (closed, merged, never opened, or its branch moved on), so no pull_request run will come for it."
+          exit 1
+          ;;
+        base)
+          echo "RESULT: refusing to wait: no open pull request for ${SHA} targets ${PR_BASE} (${detail}), so no pull_request run into ${PR_BASE} will come for it."
+          exit 1
+          ;;
+        conflicting)
+          echo "RESULT: refusing to wait: GitHub reports pull request ${detail} CONFLICTING with ${PR_BASE}, and no pull_request run comes for a conflicting head; resolve the conflict (a refresh push moves the head SHA)."
+          exit 1
+          ;;
+        unknown) cause="GitHub reports the mergeability of pull request ${detail} as UNKNOWN (not yet computed)" ;;
+        changed) cause="the open pull request into ${PR_BASE} for this head changed between the listing and its own read" ;;
+        *)
+          echo "ERROR: cannot evaluate: unexpected pull-request probe output for ${SHA} in ${REPO}"
+          echo "  raw: ${line}"
+          exit 2
+          ;;
+      esac
+    fi
+    if [ "$read_no" -ge "$PR_PROBE_READS" ]; then
+      echo "ERROR: cannot evaluate: ${cause}, still after ${PR_PROBE_READS} reads ${PR_PROBE_RETRY_SECONDS}s apart; refusing to wait on a head whose pull-request state cannot be established."
+      exit 2
+    fi
+    echo "NOTE: ${cause}; re-reading (read ${read_no} of ${PR_PROBE_READS})."
+    sleep "$PR_PROBE_RETRY_SECONDS"
+  done
+}
+
 SETTLE_FINGERPRINT=""
 SETTLE_COUNT=0
 last_summary="no workflow run registered"
 RETRIED=0
 
 while :; do
+  # THE PULL-REQUEST PROBE (see above): before every poll, because a head can turn CONFLICTING
+  # mid-wait.
+  if [ "$WAIT" = "--wait" ]; then
+    pr_probe
+  fi
   lines="$(query)"
   query_rc=$?
   # A failed query is an API error even if its output resembles a valid sentinel or run row.

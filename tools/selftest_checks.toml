@@ -820,6 +820,13 @@ expected-check-ids = [
   "ci/repo-origin-empty-refused",
   "ci/repo-name-length-bounds",
   "ci/repo-override-mismatch-not-echoed",
+  "ci/wait-pr-probe-no-open-pull-request",
+  "ci/wait-pr-probe-base-not-main",
+  "ci/wait-pr-probe-conflicting",
+  "ci/wait-pr-probe-unknown-bound",
+  "ci/wait-pr-probe-read-failure",
+  "ci/wait-pr-probe-changed-between-reads",
+  "ci/wait-pr-probe-every-poll-not-report-once",
   "ci/finalise-harness-error-keeps-failures",
 ]
 [[suite]]
