@@ -94,7 +94,9 @@ designator (RFC. 2 and RFC.<break>2. Next read RFC 2).
   check_cited_standards.py --self-test      run the fixture vectors
 
 Without --config the built-in default applies: corpus [".aiqt/core/rules/*.md"] and no exclusions; no
-default file is read. A config file carries:
+default file is read. This repository's own CI and tools/run_all_checks.sh pass --config
+.aiqt/cited-standards.toml (tracked, not shipped), whose corpus adds the OPF prompt-pack members
+(opf/prompt-pack/**/*.md) to the rule files. A config file carries:
   format-version = 1                        required
   corpus = ["<root-relative glob>", ...]    optional; each glob must match at least one file
   [[exclusion]]                             optional, repeatable
@@ -331,7 +333,7 @@ def load_config(path):
         raise CannotEvaluate("config {} cannot be read: {}".format(path, exc))
     # ValueError and RecursionError too: tomllib raises a bare ValueError past the int-string digit limit and a
     # RecursionError on deep nesting, the same family _standards.load_manifests catches.
-    except (tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise CannotEvaluate("config {} is not valid TOML: {}".format(path, exc))
     unknown = sorted(set(data) - CONFIG_KEYS)
     if unknown:
@@ -532,10 +534,11 @@ def _manifest_text(stem, name, edition="2023", kind="control"):
             'retrieved = "2026-01-01"\n\n[[id]]\ncode = "1"\n').format(stem, name, edition, kind)
 
 
-def _fixture(tmp, manifests=None, rules=None, config=None):
+def _fixture(tmp, manifests=None, rules=None, config=None, others=None):
     """A temp root with a .git marker, the given manifests ({stem: toml text}) and rule files ({name: bytes or
     str}; None is a dangling symlink, ("outside", text) a symlink to a file beside the root, ("socket",) a unix
-    socket). config is TOML text written beside the root, or used as the literal path when it is a Path."""
+    socket). config is TOML text written beside the root, or used as the literal path when it is a Path. others
+    ({root-relative path: text}) are files outside the rules directory, such as an OPF prompt-pack member."""
     root = Path(tmp) / "root"
     (root / ".git").mkdir(parents=True)
     std = root / STANDARDS_REL
@@ -565,6 +568,9 @@ def _fixture(tmp, manifests=None, rules=None, config=None):
             (rules_dir / name).symlink_to(target)
             continue
         (rules_dir / name).write_bytes(body.encode("utf-8") if isinstance(body, str) else body)
+    for rel, text in (others or {}).items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(text, encoding="utf-8")
     cfg = None
     if isinstance(config, Path):
         cfg = config
@@ -574,11 +580,17 @@ def _fixture(tmp, manifests=None, rules=None, config=None):
     return root, cfg
 
 
-def _drive(manifests=None, rules=None, config=None, patch=None):
-    """run() over a fixture; patch ({global name: value}) is swapped into this module for the run only."""
-    saved = {name: globals()[name] for name in (patch or {})}
+def _drive(manifests=None, rules=None, config=None, patch=None, others=None):
+    """run() over a fixture; patch ({global name: value}) is swapped into this module for the run only.
+    Every patch name must already be a module global: an unknown name (a misspelling, say) is rejected
+    before anything is applied, because installing it would leave the intended fault uninjected and
+    restoring the saved names could never remove it from this module."""
+    unknown = sorted(name for name in (patch or {}) if name not in globals())
+    if unknown:
+        raise ValueError("_drive patch name(s) not module globals: {}".format(", ".join(unknown)))
+    saved = {name: value for name, value in globals().items() if name in (patch or {})}
     with tempfile.TemporaryDirectory(prefix="aiqt-cited-standards-selftest-") as tmp:
-        root, cfg = _fixture(tmp, manifests, rules, config)
+        root, cfg = _fixture(tmp, manifests, rules, config, others)
         buf = io.StringIO()
         globals().update(patch or {})
         try:
@@ -839,6 +851,25 @@ _VECTORS += (
      _EXCL.format("ISO 99999-", _A, "a wrapped year"), lambda o: o.startswith("PASS") and "1 exclusion(s)" in o),
 )
 
+# V104 to V106 hold a corpus wider than the rule files, as this repository's .aiqt/cited-standards.toml configures.
+# V104 expects a designator in a prompt-pack member to fail the gate; run with the built-in default, which never reads
+# the prompt pack, the gate passes and V104 fails. V105 pins that default, and V106 that an exclusion may name a
+# member. Each has no patch (None) and, as an eighth element, the files written outside the rules directory.
+# They carry their own corpus and read neither .aiqt/cited-standards.toml nor the runners that pass it; the
+# repository-only .github/check_cited_standards_contract.py pins that config and wiring.
+_PACK = {"opf/prompt-pack/flow/SKILL.md": "# Flow\n\nFollow ISO/IEC 99999:2031 here.\n"}
+_WIDE = 'format-version = 1\ncorpus = [".aiqt/core/rules/*.md", "opf/prompt-pack/**/*.md"]\n'
+_VECTORS += (
+    ("V104 a designator in an OPF prompt-pack member fails under a config that adds the prompt pack", 1, None, None,
+     _WIDE, lambda o: ("ISO 99999: cited in 1 document(s)" in o and "FAIL: 1 unresolved" in o
+                       and "opf/prompt-pack/flow/SKILL.md:3: ISO/IEC 99999:2031\n" in o), None, _PACK),
+    ("V105 the built-in default reads the rule files alone, so the same prompt-pack member is not seen", 0, None,
+     None, None, lambda o: o.startswith("PASS: 1 corpus document(s) checked; 0 cited"), None, _PACK),
+    ("V106 an exclusion may name a prompt-pack member", 0, None, None,
+     _WIDE + _EXCL.format("ISO/IEC 99999", "opf/prompt-pack/flow/SKILL.md", "r").replace("format-version = 1\n", ""),
+     lambda o: o.startswith("PASS: 2 corpus document(s)") and "1 exclusion(s)" in o, None, _PACK),
+)
+
 _NORMALISATION = (
     ("ISO/IEC 42001:2023", "ISO 42001"),
     ("iso 42001", "ISO 42001"),
@@ -1018,10 +1049,52 @@ def self_test_main():
     derived = sorted(ident for fields in _ROSTER for field in fields for ident, _l, _t in designators(field))
     if derived != _ROSTER_IDENTITIES:
         failures.append("manifest-field identities: expected {}, got {}".format(_ROSTER_IDENTITIES, derived))
-    for label, expect, manifests, rules, config, predicate, *patch in _VECTORS:
-        code, out = _drive(manifests, rules, config, patch[0] if patch else None)
+    for label, expect, manifests, rules, config, predicate, *extra in _VECTORS:
+        code, out = _drive(manifests, rules, config, extra[0] if extra else None, extra[1] if len(extra) > 1 else None)
         if code != expect or not predicate(out):
             failures.append("{}: expected exit {}, got {}; output:\n{}".format(label, expect, code, out))
+    # _drive patch contract: an unknown patch name is rejected before anything is applied (installed, it
+    # would leave the intended fault uninjected and contaminate every later vector), and every patched
+    # name is restored after a run that returns non-zero, after one that returns 0 (the injected run must
+    # have run, and the restored binding must be the saved original by identity) and after one that raises.
+    try:
+        _drive(patch={"QA_UNKNOWN_PATCH": object()})
+        failures.append("_drive: an unknown patch name expected ValueError, got a completed run")
+    except ValueError as exc:
+        if "QA_UNKNOWN_PATCH" not in str(exc):
+            failures.append("_drive: the unknown-name refusal must name the key, got {!r}".format(str(exc)))
+    if "QA_UNKNOWN_PATCH" in globals():
+        failures.append("_drive: a rejected patch name must not be installed in module globals")
+    code, out = _drive(patch={"ensure_listable": _unlistable})
+    if code != 2 or "cannot be listed" not in out:
+        failures.append("_drive: a patched run that returns expected exit 2 naming the injected fault, got "
+                        "exit {}; output:\n{}".format(code, out))
+    if ensure_listable is _unlistable:
+        failures.append("_drive: after a patched run that returns, the patch must not stay installed")
+    saved_run = run
+    succeeded = []
+
+    def _succeeding_run(root, _config):
+        succeeded.append(root)
+        return 0
+
+    code, out = _drive(patch={"run": _succeeding_run})
+    if code != 0 or not succeeded:
+        failures.append("_drive: a patched run that returns 0 expected exit 0 from the injected run, got exit "
+                        "{} with the injected run called {} time(s); output:\n{}".format(code, len(succeeded), out))
+    if run is not saved_run:
+        failures.append("_drive: after a patched run that returns 0, run must be the saved original")
+
+    def _raising_run(_root, _config):
+        raise RuntimeError("injected by the self-test")
+
+    try:
+        _drive(patch={"run": _raising_run})
+        failures.append("_drive: an injected run exception expected to propagate, got a completed run")
+    except RuntimeError:
+        pass
+    if run is not saved_run:
+        failures.append("_drive: after a patched run that raises, run must be the original")
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
         code = main(["--root"])
@@ -1036,7 +1109,10 @@ def self_test_main():
             print(line)
         return 1
     print("SELF-TEST PASS: {} normalisation case(s), {} in-text case(s), {} non-designator case(s), the roster's "
-          "manifest-field identities, {} fixture vector(s) and the usage error: an unresolved designator fails, a "
+          "manifest-field identities, {} fixture vector(s), the _drive patch contract (an unknown name is "
+          "rejected; a patched name is restored after a non-zero return, a zero return and a raise) and the "
+          "usage error: an "
+          "unresolved designator fails, a "
           "manifest resolves it, a suffixed token never resolves to a shorter identity, an exclusion is per path, "
           "needs a reason and goes stale, and a contradicted or malformed input fails closed".format(
               len(_NORMALISATION), len(_IN_TEXT), len(_NOT_DESIGNATORS), len(_VECTORS)))

@@ -4949,7 +4949,7 @@ def _main_isolated(report_path=None):
         _r18_omitted = _r18_rows[len(_r18_stored):]
         _r18_m = _r18_re.search(r"read every forced-exit record in full in (.+?) \(an ignored", _r18_line)
         _r18_named = _r18_m.group(1) if _r18_m else None
-        _r18_log = aiqt_hooks._orch_read_jsonl(_r18_named)[0] if _r18_named else None
+        _r18_log, _r18_logbad = (aiqt_hooks._orch_read_jsonl(_r18_named) if _r18_named else (None, 0))
         _r18_doc_out = _r18_out.getvalue()
         check("barrier/omitted-findings-line-names-surviving-forced-exit-log",
               (_verdict(_r18_ss), 0 < len(_r18_stored) < 400,
@@ -4958,8 +4958,10 @@ def _main_isolated(report_path=None):
                "handoff names branch r18-other-branch" in _r18_doc_out,
                _r18_named == str(_r18_sd / "forced-exit.jsonl"),
                _r18_log == _r18_rows and all(row in _r18_log for row in _r18_omitted),
+               # the named log must parse whole: a malformed row is a failure, never a silent skip
+               _r18_logbad,
                "tools/orch_doctor.py --resume-audit" in _r18_line and "to list them all" not in _r18_line),
-              ("warn", True, True, 1, False, True, True, True, True))
+              ("warn", True, True, 1, False, True, True, True, 0, True))
         # ROUND 19, THE OMITTED-FINDINGS LINE NAMES THE LASTING ESCAPE RECORD: the count line a barrier
         # too large to store gets (_orch_barrier_fit) is read for the files it names, and each one is read
         # back. Two ignored escape sentinels in a row (T1, then T2) are each recorded, raised by the resume
@@ -5140,6 +5142,37 @@ def _main_isolated(report_path=None):
                 for n in (limit - 1, limit, limit + 1, aiqt_hooks._ORCH_COUNTER_MAX)]
                for _kind, key, limit, ctx in _core_branches],
               [["DENY"] + ["ALLOW_WITH_FINDINGS"] * 3] * len(_core_branches))
+
+        # Load-shed characterization pins (the load-shed mechanism itself was declined): decide_yield
+        # sets no live-worker count floor, and a shed recorded as a fresh external blocker on queued
+        # items exhausts the set and licenses a stop. They pin CURRENT behaviour, not an endorsement of
+        # it; a reword of cntdef.8 or secres.7 should prompt a recheck that the load-shed advice holds.
+        _ls_live = dict(base, waiting=[("A", "tracked-task", "t1")])
+        _ls_queued = dict(_ls_live, actionable=[("B", "t", "no blocker recorded")])
+        _ls_idle = dict(_ls_live, kind="schedule_idle", wake_named=True)
+        v, _r, _d = aiqt_hooks.decide_yield(dict(_ls_live))
+        check("core/one-live-worker-stop-allows", v, "ALLOW")
+        v, _r, _d = aiqt_hooks.decide_yield(dict(_ls_queued))
+        check("core/one-live-plus-queued-denies", (v, "Two legal exits" in _r), ("DENY", True))
+        v, _r, _d = aiqt_hooks.decide_yield(dict(_ls_idle))
+        check("core/one-live-named-idle-allows", v, "ALLOW")
+        v, _r, _d = aiqt_hooks.decide_yield(dict(_ls_idle, actionable=_ls_queued["actionable"]))
+        check("core/one-live-queued-idle-denies", v, "DENY")
+        v, _r, _d = aiqt_hooks.decide_yield(dict(_ls_queued, counter=2))
+        check("core/queued-loop-bound-findings", v, "ALLOW_WITH_FINDINGS")
+        # the hazard: classify_backlog marks the shed item blocked, so decide_yield sees no actionable
+        # item and ALLOWs the stop (a concurrency cap read as whole-set exhaustion)
+        _ls_cls = aiqt_hooks.classify_backlog(
+            [item("A", blocker={"kind": "tracked-task", "ref": "t1"}),
+             item("B", blocker={"kind": "external", "ref": "load-shed",
+                                "evidence": "host load shed to one workstream",
+                                "observed_at_utc": now_iso(0)})],
+            {"t1"}, True, "", {})
+        v, _r, _d = aiqt_hooks.decide_yield(dict(base, **_ls_cls))
+        check("core/external-shed-blocker-exhausts",
+              (_ls_cls["actionable"], _ls_cls["blocked"], v,
+               _r.startswith("no actionable item remains")),
+              ([], [("B", "external", "load-shed")], "ALLOW", True))
 
         # ---------- C.2: the attestation register for blocker evidence ----------
         # The no-register behaviour stays byte-identical and is already covered above by the fixture-f
@@ -5538,7 +5571,8 @@ def _main_isolated(report_path=None):
         check("forced/bound-exit-warns", _verdict(dstop()), "warn")
         check("forced/artefact-written", (dsd / "forced-exit.jsonl").exists(), True)
         frows, _fbad = aiqt_hooks._orch_read_jsonl(str(dsd / "forced-exit.jsonl"))
-        check("forced/artefact-names-open-ids", frows[-1].get("open_ids"), ["FX-1"])
+        # the artefact must parse whole: a malformed row is a failure, never a silent skip
+        check("forced/artefact-names-open-ids", (frows[-1].get("open_ids"), _fbad), (["FX-1"], 0))
         check("forced/guard-event-kind",
               '"forced_unresolved"' in (dsd / "guard-events.jsonl").read_text(encoding="utf-8"),
               True)
@@ -5564,6 +5598,28 @@ def _main_isolated(report_path=None):
                   in fobj.get("systemMessage", ""), True)
         finally:
             aiqt_hooks._orch_append_jsonl = _orig_append
+
+        # THE DOCUMENTED STOP FIELD: the hooks reference (Stop input) sends stop_hook_active, true when Claude
+        # Code is already continuing as a result of a stop hook, and advises a blocking Stop hook to check it.
+        # The stop guard honours it as a loop signal below its own counter: an actionable backlog that denies
+        # with no prior denial yields with findings (the recorded forced exit) once the payload says the stop
+        # continues a stop-hook block. Only the JSON true is that signal; a string "true" and an explicit
+        # false still deny.
+        _sha = Fixture(tmp, "stop-hook-active")
+        _sha_sd = Path(aiqt_hooks._orch_state_dir_for_root(str(_sha.root)))
+        _sha.set_items([item("SHA-1")])
+        for _sha_value, _sha_id in ((False, "stop-hook-active/false-denies"),
+                                    ("true", "stop-hook-active/string-denies")):
+            _sha.set_turn_state({})
+            check(_sha_id, _verdict(aiqt_hooks.orch_stop_guard(
+                _sha.payload("Stop", extra={"stop_hook_active": _sha_value}))), "block2")
+        _sha.set_turn_state({})
+        check("stop-hook-active/true-yields-with-findings", _verdict(aiqt_hooks.orch_stop_guard(
+            _sha.payload("Stop", extra={"stop_hook_active": True}))), "warn")
+        _sha_rows, _sha_bad = aiqt_hooks._orch_read_jsonl(str(_sha_sd / "forced-exit.jsonl"))
+        # the artefact must hold exactly the expected row and parse whole: a malformed row is a failure
+        check("stop-hook-active/forced-exit-recorded",
+              ([r.get("open_ids") for r in _sha_rows], _sha_bad), ([["SHA-1"]], 0))
 
         # ROUND 21, A FAILED GUARD-EVENTS APPEND ON A DENY IS WARNED ABOUT AND THE DENY HOLDS: with
         # guard-events.jsonl a directory (a real failed append, no patched seam), the shared Stop and
@@ -6642,13 +6698,14 @@ def _main_isolated(report_path=None):
                           aiqt_hooks.orch_yield_tool(_r10.payload("PreToolUse", "ScheduleWakeup",
                                                                   dict(prompt="done", stop=True))))
             rows, _bad = aiqt_hooks._orch_read_jsonl(str(_r10_sd / "forced-exit.jsonl"))
-            return _verdict(result), len(rows or [])
+            # the record must parse whole: a malformed row is a failure, never a silent skip
+            return _verdict(result), len(rows or []), _bad
         _r10_limits = dict(schedule=aiqt_hooks._ORCH_SCHEDULE_CAP, stop=aiqt_hooks._ORCH_LOOP_BOUND,
                            ystop=aiqt_hooks._ORCH_LOOP_BOUND)
         check("recwrite10/forced-exit-recorded-at-and-above-the-bound-and-cap",
               [(kind, count, _r10_forced(kind, count)) for kind, limit in sorted(_r10_limits.items())
                for count in (limit, limit + 1, aiqt_hooks._ORCH_COUNTER_MAX)],
-              [(kind, count, ("warn", 1)) for kind, limit in sorted(_r10_limits.items())
+              [(kind, count, ("warn", 1, 0)) for kind, limit in sorted(_r10_limits.items())
                for count in (limit, limit + 1, aiqt_hooks._ORCH_COUNTER_MAX)])
 
         # ---------- C.4 FIX 5: cap-relief over a BLOCKED row + append-only no-clobber ----------
@@ -6667,11 +6724,12 @@ def _main_isolated(report_path=None):
         check("forced5/cap-exit-warns", _verdict(esched({"prompt": "waiting"})), "warn")
         check("forced5/recorded-over-blocked", (esd / "forced-exit.jsonl").exists(), True)
         e1, _b1 = aiqt_hooks._orch_read_jsonl(str(esd / "forced-exit.jsonl"))
-        check("forced5/blocked-id-recorded", e1[-1].get("open_ids"), ["BW-1"])
+        # both reads must parse whole: a malformed row is a failure, never a silent skip
+        check("forced5/blocked-id-recorded", (e1[-1].get("open_ids"), _b1), (["BW-1"], 0))
         # a SECOND forced exit appends (append-only), never clobbering the first
         check("forced5/cap-exit-warns-2", _verdict(esched({"prompt": "waiting"})), "warn")
         e2, _b2 = aiqt_hooks._orch_read_jsonl(str(esd / "forced-exit.jsonl"))
-        check("forced5/two-rows-appended", len(e2), 2)
+        check("forced5/two-rows-appended", (len(e2), _b2), (2, 0))
         # the resume audit surfaces BOTH, then a second resume is clean (the surfaced-set write succeeds
         # here; a failed one would raise them again, at least once)
         check("forced5/resume-surfaces-both",
