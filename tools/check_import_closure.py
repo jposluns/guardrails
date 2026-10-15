@@ -987,6 +987,18 @@ DYNAMIC_IMPORT_SITES = (
       "#1: importlib.util.module_from_spec(spec)",
       "#1: spec.loader.exec_module(module)"),
      "self-test loads a scratch copy or mutant of this file, written from its own source, by its path"),
+    ("tools/check_python_floor.py", "_tomllib_by_name",
+     ("#1: '__import__'",
+      "#1: 'find_spec'",
+      "#1: 'import_module'"),
+     "the strings name loader callables the tomllib leg recognizes in the source it scans; each is compared "
+     "against a call's name in that source, never called or resolved"),
+    ("tools/check_python_floor.py", "_load_path",
+     ("#1: importlib.util.spec_from_file_location(name, path)",
+      "#1: importlib.util.module_from_spec(spec)",
+      "#1: spec.loader.exec_module(module)"),
+     "self-test loads, by a path its caller builds from ROOT, the in-repo tools/_gen_common.py and "
+     "opf/enforcement/claude/pretooluse_deny.py and a fixture copy of .github/check_newtab_contract.py"),
     ("tools/check_release_delta.py", "_post_release_e2e",
      ("#1: import importlib.util as _ilu",
       "#1: _ilu.cache_from_source(str(src))",),
