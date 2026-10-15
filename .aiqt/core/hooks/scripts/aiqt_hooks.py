@@ -16,6 +16,7 @@ handler function per control declared in .aiqt/core/hooks/manifest.toml:
   branch_root         PreToolUse  brnrot  deny branch creation from an orphaned or unprovable start point
   gate_weakening      PreToolUse  gatdis  deny a git hook bypass and a verification run piped into a truncating sink; allow+note another swallowed or truncated checker
   commit_msg_subst    PreToolUse  sectvl  deny shell substitution in a git commit argument
+  heredoc_terminator  PreToolUse  sectvl  deny a Bash heredoc whose opener has no exactly matching terminator line
   secrets_shift_left  PreToolUse  secsec  deny a Write/Edit/MultiEdit/Bash writing an obvious hardcoded secret
   gensrc_guard        PreToolUse  gensrc  a Write/Edit/MultiEdit that hand-edits a registered generated artefact
 
@@ -79,6 +80,11 @@ commit_msg_subst (sectvl): a backtick or $( command substitution in a git commit
 command-injection hazard the shell runs before git sees the argument, so it DENIES and names the safe
 re-issue (single quotes, escape the marker, or git commit -F <file>); the unparseable-fallback and unreadable
 -command cases deny fail-safe on the same terms. Only a mis-wired event hard-blocks (no structured decision).
+
+heredoc_terminator (sectvl): a heredoc opener with no line exactly equal to its delimiter before the end of the
+command makes bash read the rest of the command as heredoc text, so it DENIES, naming the opener and any
+near-miss line; a << whose delimiter word cannot be read and an unreadable command deny fail-safe on the same
+terms. Only a mis-wired event hard-blocks.
 
 git_explicit_binding (expbnd): an ambient git target or a whole-tree breadth+publish is a binding CONVENTION
 where the orchestrator normally binds its own target, not a hazard, so every former ask (including the
@@ -8918,6 +8924,336 @@ def commit_msg_subst(data):
     return _allow()
 
 
+# --- sectvl: a heredoc opener with no exactly matching terminator line ------------------------------
+# A heredoc ends at the first body line that is EXACTLY its delimiter. A mistyped terminator (EFO, a trailing
+# space or carriage return after EOF, a <<- terminator indented with spaces, an EOF sharing its line with the
+# ) of a command substitution) ends nothing: bash reads every remaining line of the command as heredoc text,
+# so a program fed by the heredoc (python3 - <<'PY', bash -s <<'SH') can run the rest of the command as its
+# own code while the shell runs none of it. The shared _lex_command cannot judge this (it refuses an unquoted
+# heredoc, and reads a double-quoted "$(cat <<'EOF' ...)" as one word), so this guard makes its own raw pass,
+# tracking only what decides whether a << is an opener: quoting, escapes, comments, and the command,
+# arithmetic and parameter substitutions that nest inside a command or a double-quoted string. A delimiter
+# word is read by the shared _parse_heredoc_delim, so both passes read a delimiter alike.
+_HeredocOpener = collections.namedtuple(
+    "_HeredocOpener", ("spec", "line", "delim", "strip_tabs", "quoted", "terminated", "near", "stop"))
+_HEREDOC_NEAR_MISS_MAX = 2  # the largest edit distance at which a body line is named as a near miss
+_HEREDOC_SHOWN = 80  # the longest opener, delimiter or near-miss text quoted in a deny reason
+
+
+def _heredoc_edit_distance(a, b, bound):
+    """The Levenshtein distance between a and b when it is at most bound, else bound + 1. Only the cells within
+    bound of the diagonal are computed, so the cost is linear in len(a)."""
+    big = bound + 1
+    if abs(len(a) - len(b)) > bound:
+        return big
+    width = 2 * bound + 1
+    # prev[k] is row i - 1 at column j = (i - 1) + k - bound; row 0 holds the distance from "" to b[:j], j
+    prev = [k - bound if 0 <= k - bound <= len(b) else big for k in range(width)]
+    for i in range(1, len(a) + 1):
+        cur = [big] * width
+        for k in range(width):
+            j = i + k - bound
+            if j < 0 or j > len(b):
+                continue
+            if j == 0:
+                cur[k] = min(i, big)
+                continue
+            best = prev[k] + (a[i - 1] != b[j - 1])  # match or substitute, from (i - 1, j - 1)
+            if k + 1 < width:
+                best = min(best, prev[k + 1] + 1)  # delete a[i - 1], from (i - 1, j)
+            if k > 0:
+                best = min(best, cur[k - 1] + 1)  # insert b[j - 1], from (i, j - 1)
+            cur[k] = min(best, big)
+        prev = cur
+    return prev[len(b) - len(a) + bound]
+
+
+def _heredoc_body(command, i, n, opener, in_subst, line_no):
+    """Read one heredoc body the way bash does, from index i (the start of the line after the opener's line,
+    or where the previous body ended), which is on line line_no. Returns (next_i, terminated, near, stop):
+    next_i is where scanning resumes; terminated is True when a line EXACTLY equal to the delimiter was found
+    (next_i is then just past that line); near is None or, for an unterminated body, (line, text, distance)
+    for the closest body line (the first on a tie) that is not blank and is within _HEREDOC_NEAR_MISS_MAX
+    edits of the delimiter and fewer edits than the delimiter has characters; stop is None or (line, text)
+    for the early end below.
+    A line is one physical line, except that for an UNQUOTED delimiter a line ending in an odd run of
+    backslashes is joined to the next with that backslash and the newline removed (bash's line continuation
+    in an interpolating heredoc; a quoted delimiter's body is read verbatim). For <<- the leading tabs of
+    the line are removed before it is compared. In a $(...), <(...) or >(...) substitution (in_subst), bash
+    5.3 also ends the body early, with a here-document warning, at a line that starts with the delimiter and
+    holds a ) later on, such as EOF) or EOF;true): it reads the rest of that line, from just after the
+    delimiter, as commands, so next_i is that point and the body is not terminated. With no terminator
+    next_i is n."""
+    delim = opener.delim
+    bound = min(_HEREDOC_NEAR_MISS_MAX, len(delim) - 1)
+    near = None
+    while i < n:
+        first_line = line_no
+        pieces = []  # (index in command, text) of each physical part of this line
+        while True:
+            nl = command.find("\n", i)
+            physical = command[i:n if nl < 0 else nl]
+            start = i
+            i = n if nl < 0 else nl + 1
+            line_no += 1
+            backslashes = len(physical) - len(physical.rstrip("\\"))
+            if opener.quoted or nl < 0 or backslashes % 2 == 0:
+                pieces.append((start, physical))
+                break
+            pieces.append((start, physical[:-1]))
+            if i >= n:
+                break
+        text = "".join(piece for _start, piece in pieces)
+        tabs = len(text) - len(text.lstrip("\t")) if opener.strip_tabs else 0
+        candidate = text[tabs:]
+        if candidate == delim:
+            return i, True, None, None
+        if in_subst and candidate.startswith(delim) and ")" in candidate[len(delim):]:
+            offset = tabs + len(delim)  # the line holds a ) past this offset, so one of its pieces holds it
+            for start, piece in pieces:
+                if offset < len(piece):
+                    return start + offset, False, None, (first_line, text)
+                offset -= len(piece)
+        if bound > 0 and candidate.strip():
+            distance = _heredoc_edit_distance(candidate, delim, bound)
+            if distance <= bound and (near is None or distance < near[2]):
+                near = (first_line, text, distance)
+    return n, False, near, None
+
+
+def _heredoc_skip_to(command, i, n, close):
+    """The index just past the first unescaped close character at or after i (n when there is none); a
+    backslash escapes the character after it. Skips an ANSI-C $'...' body or a backtick command substitution,
+    whose text this pass does not scan for openers."""
+    while i < n:
+        c = command[i]
+        if c == "\\":
+            i += 2
+        elif c == close:
+            return i + 1
+        else:
+            i += 1
+    return n
+
+
+def _heredoc_openers(command):
+    """Every heredoc opener bash would act on in a raw Bash command, in source order, each read through to its
+    terminator by _heredoc_body. An opener is a << that is not part of a here-string <<<, and that is not
+    quoted, escaped, commented out, inside arithmetic ($((...)), $[...], ((...))), inside a ${...} parameter
+    expansion, or inside a backtick substitution or ANSI-C $'...' text (both skipped unread). A << inside a
+    $(...) command substitution or a <(...)/>(...) process substitution IS an opener, also within double
+    quotes. Bodies are read at the next newline of a command context, in the order their openers appeared,
+    as bash reads them. A << whose delimiter word _parse_heredoc_delim cannot read is returned with delim
+    None and terminated False. One linear pass with a stack of open contexts, each [kind, depth]: cmd (a
+    command; depth counts plain parentheses), dq (a double-quoted string), param (${...}), arith (depth
+    counts parentheses) and bracket ($[...]; depth counts brackets)."""
+    n = len(command)
+    openers = []
+    pending = []  # indexes into openers whose bodies start at the next newline of a command context
+    stack = [["cmd", 0]]
+    word_start = True  # a '#' starts a comment only at the start of a word
+    seen = [0, 1]  # [index, its line]; the scan only moves forward, so line counting stays linear
+
+    def line_at(index):
+        seen[1] += command.count("\n", seen[0], index)
+        seen[0] = index
+        return seen[1]
+
+    i = 0
+    while i < n:
+        frame = stack[-1]
+        kind = frame[0]
+        c = command[i]
+        nx = command[i + 1] if i + 1 < n else ""
+        if c == "\\":  # the next character is literal; a backslash-newline joins lines and ends no word
+            if nx != "\n":
+                word_start = False
+            i += 2
+            continue
+        if kind in ("arith", "bracket"):
+            if c == ("(" if kind == "arith" else "["):
+                frame[1] += 1
+            elif c == (")" if kind == "arith" else "]"):
+                if frame[1]:
+                    frame[1] -= 1
+                else:
+                    stack.pop()
+                    if kind == "arith" and nx == ")":
+                        i += 1  # the second ) of a closing ))
+            i += 1
+            continue
+        if c == "$":
+            if command.startswith("$((", i):
+                stack.append(["arith", 0])
+                i += 3
+            elif nx == "(":
+                stack.append(["cmd", 0])
+                word_start = True
+                i += 2
+            elif nx == "{":
+                stack.append(["param", 0])
+                i += 2
+            elif nx == "[":
+                stack.append(["bracket", 0])
+                i += 2
+            elif nx == "'" and kind != "dq":  # ANSI-C quoting (inside double quotes $' is literal)
+                i = _heredoc_skip_to(command, i + 2, n, "'")
+                word_start = False
+            else:  # a $"..." locale string then opens as a double-quoted one
+                word_start = False
+                i += 1
+            continue
+        if c == "`":
+            i = _heredoc_skip_to(command, i + 1, n, "`")
+            word_start = False
+            continue
+        if kind == "dq":
+            if c == '"':
+                stack.pop()
+                word_start = False
+            i += 1
+            continue
+        if c == "'":  # in a command or a ${...}: literal to the next single quote
+            close = command.find("'", i + 1)
+            i = n if close < 0 else close + 1
+            word_start = False
+            continue
+        if c == '"':
+            stack.append(["dq", 0])
+            word_start = False
+            i += 1
+            continue
+        if kind == "param":
+            if c == "}":
+                stack.pop()
+                word_start = False
+            i += 1
+            continue
+        if c == "\n":
+            i += 1
+            word_start = True
+            for index in pending:
+                i, terminated, near, stop = _heredoc_body(
+                    command, i, n, openers[index], len(stack) > 1, line_at(i))
+                openers[index] = openers[index]._replace(terminated=terminated, near=near, stop=stop)
+            del pending[:]
+            continue
+        if c == "#" and word_start:
+            nl = command.find("\n", i)
+            i = n if nl < 0 else nl
+            continue
+        if c == "<" and nx == "<":
+            if command.startswith("<<<", i):  # a here-string: no body and no terminator line
+                word_start = True
+                i += 3
+                continue
+            parsed = _parse_heredoc_delim(command, i + 2, n)
+            end = i + 2 if parsed is None else parsed[3]
+            if parsed is None:
+                openers.append(_HeredocOpener(command[i:end], line_at(i), None, False, False, False, None, None))
+            else:
+                quoted, delim, strip_tabs, _end = parsed
+                openers.append(_HeredocOpener(command[i:end], line_at(i), delim, strip_tabs, quoted, False, None,
+                                              None))
+                pending.append(len(openers) - 1)
+            word_start = parsed is None
+            i = end
+            continue
+        if c in "<>" and nx == "(":  # a process substitution runs a command
+            stack.append(["cmd", 0])
+            word_start = True
+            i += 2
+            continue
+        if c == "(":
+            if nx == "(" and word_start:  # an arithmetic command
+                stack.append(["arith", 0])
+                i += 2
+                continue
+            frame[1] += 1
+        elif c == ")":
+            if frame[1]:
+                frame[1] -= 1
+            elif len(stack) > 1:  # the ) that closes a $(...), <(...) or >(...)
+                stack.pop()
+                word_start = False
+                i += 1
+                continue
+        word_start = c in " \t;&|<>()"
+        i += 1
+    return openers
+
+
+def _heredoc_terminator_reason(bad):
+    """The deny reason: each unterminated or unreadable heredoc opener (the first three, then a count), with
+    its near-miss line where one was found."""
+    clauses = []
+    for op in bad[:3]:
+        spec = op.spec[:_HEREDOC_SHOWN]
+        if op.delim is None:
+            clauses.append("the {} on line {} is not followed by a delimiter word this check can read, so "
+                           "where its heredoc ends cannot be told".format(spec, op.line))
+            continue
+        if op.stop is not None:
+            clauses.append("the heredoc opened by {} on line {} is cut short at line {}, {!r}: that line starts "
+                           "with {!r} but is not exactly it, and because it holds a ) inside a substitution, "
+                           "bash ends the heredoc after the delimiter with a warning and reads the rest of the "
+                           "line as commands".format(spec, op.line, op.stop[0], op.stop[1][:_HEREDOC_SHOWN],
+                                                     op.delim[:_HEREDOC_SHOWN]))
+            continue
+        clause = ("the heredoc opened by {} on line {} has no line exactly equal to {!r}{} before the end of "
+                  "the command".format(spec, op.line, op.delim[:_HEREDOC_SHOWN],
+                                       " after its leading tabs" if op.strip_tabs else ""))
+        if op.near is not None:
+            near_line, near_text, distance = op.near
+            clause += "; line {}, {!r}, is {} edit{} away from it".format(
+                near_line, near_text[:_HEREDOC_SHOWN], distance, "" if distance == 1 else "s")
+        clauses.append(clause)
+    if len(bad) > 3:
+        clauses.append("{} more such opener{}".format(len(bad) - 3, "" if len(bad) == 4 else "s"))
+    return ("AIQT rule sectvl (tool-argument-validation): {}. Bash reads every line after an unterminated "
+            "heredoc's opener as heredoc text, so a program fed by it (python3 - <<'PY', bash -s) can run the "
+            "rest of the command as its own code while the shell runs none of it; the command is denied "
+            "before anything runs. Re-issue it with each heredoc closed by a line that is exactly its "
+            "delimiter: nothing before it (only tabs, and only for <<-) and nothing after it (no trailing "
+            "space or carriage return, and no ) of a $(...), which goes on the next line)."
+            .format("; and ".join(clauses)))
+
+
+def heredoc_terminator(data):
+    """sectvl (security/tool-argument-validation), PreToolUse/Bash. DENY-and-educate a Bash command in which a
+    heredoc opener (<<TOKEN, <<'TOKEN', <<"TOKEN", <<-TOKEN) has no later line exactly equal to its delimiter
+    (after the line's leading tabs for <<-) before the end of the command, naming the opener and the nearest
+    near-miss line. Hooks never ask; a command with every opener terminated allows silently. A << whose
+    delimiter word cannot be read, and a payload with no readable command string, deny fail-safe."""
+    if data.get("hook_event_name") != PRETOOL:
+        return _hard_block("aiqt_hooks: heredoc_terminator wired to unexpected event {!r}; failing closed"
+                           .format(data.get("hook_event_name")))
+    tool_name = data.get("tool_name")
+    if tool_name is None:
+        return _deny_missing_tool_name("sectvl")
+    if tool_name != "Bash":
+        return _allow()  # a present-but-different tool is out of scope (defensive; the matcher governs)
+    tool_input = data.get("tool_input")
+    command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    if not isinstance(command, str):
+        return _deny(
+            "AIQT rule sectvl (tool-argument-validation): the Bash payload carried no readable command "
+            "string, so the heredoc terminator check could not run; it is denied fail-safe. Re-issue a "
+            "well-formed Bash command.",
+            "AIQT guardrail: denied a Bash call with no readable command; re-issue a well-formed command "
+            "(rule sectvl, fail-safe).")
+    if "<<" not in command:
+        return _allow()
+    bad = [op for op in _heredoc_openers(command) if not op.terminated]
+    if not bad:
+        return _allow()
+    return _deny(
+        _heredoc_terminator_reason(bad),
+        "AIQT guardrail: denied a Bash command whose heredoc {} on line {} has no exactly matching terminator "
+        "line (rule sectvl); close it with a line that is exactly its delimiter."
+        .format(bad[0].spec[:_HEREDOC_SHOWN], bad[0].line))
+
+
 # --- secsec: an obvious hardcoded secret in a Write/Edit/MultiEdit/Bash write-form -------------------
 # A COMPENSATING, shift-left control: it does NOT replace the CI secret-scan and gitleaks gates (they
 # remain the real backstop), it moves the same high-signal detection to the moment a secret would be
@@ -16684,6 +17020,7 @@ HANDLERS = {
     "branch_root": branch_root,
     "gate_weakening": gate_weakening,
     "commit_msg_subst": commit_msg_subst,
+    "heredoc_terminator": heredoc_terminator,
     "secrets_shift_left": secrets_shift_left,
     "gensrc_guard": gensrc_guard,
     "write_scope_guard": write_scope_guard,
@@ -16721,6 +17058,7 @@ HANDLER_EVENT = {
     "branch_root": PRETOOL,
     "gate_weakening": PRETOOL,
     "commit_msg_subst": PRETOOL,
+    "heredoc_terminator": PRETOOL,
     "secrets_shift_left": PRETOOL,
     "gensrc_guard": PRETOOL,
     "write_scope_guard": PRETOOL,

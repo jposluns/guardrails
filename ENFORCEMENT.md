@@ -140,7 +140,7 @@ This register lists every rule and the shipped mechanical controls linked to it.
 | Validate server-initiated requests | `secssr` | None | Enforcement has not been built yet. |
 | Resolve privileged filesystem paths against symlink races | `secspr` | None | Enforcement has not been built yet. |
 | Threat-model new trust boundaries before implementation | `secthm` | None | Enforcement has not been built yet. |
-| Validate tool arguments before use | `sectvl` | Enforced | `hook:commit-msg-subst`, class b |
+| Validate tool arguments before use | `sectvl` | Enforced | `hook:commit-msg-subst`, class b; `hook:heredoc-terminator`, class b |
 | Untrusted content is data, not instructions | `secunt` | None | Enforcement has not been built yet. |
 | Verify a dependency exists before adding it | `secvde` | None | Enforcement has not been built yet. |
 | Bounded consumption and safe failure | `secres` | None | Enforcement has not been built yet. |
@@ -855,6 +855,20 @@ STACK-BLIND: no git calls or filesystem probes. Every recognized bare pop/apply 
 
 FAIL POSTURE: a tokenizer ValueError silently allows because unparsed text supplies no sound basis for this stash note. An absent/unreadable command emits the sibling's exact binding-convention note. Only the shared missing-tool_name contract returns a structured deny; an unexpected event hard-blocks and dispatcher errors retain the fail-closed manifest default.
 
+```
+
+### `hook:heredoc-terminator`
+
+- Platform: `claude-code`
+- Default: `block`
+- Entry point: `PreToolUse on Bash`
+- Class: `b`
+- Channel: `plugin`
+
+Technical limits (from the enforcement ledger):
+
+```
+A best-effort LEXICAL check over the raw Bash command text; it is DENY-and-educate (NO-ASK posture: it never returns an ask). The shared _lex_command is not reused, since it refuses an unquoted heredoc and reads a double-quoted command substitution as one word, so the guard makes its own quote-aware pass; the delimiter word is read by the shared _parse_heredoc_delim, so both read a delimiter alike. A heredoc opener is a << that is not part of a here-string <<<, is not quoted, escaped or commented out, and is not inside arithmetic ($((...)), $[...] or a ((...)) command, where << is a shift) or a ${...} parameter expansion; a << inside a $(...) command substitution or a <(...) or >(...) process substitution is an opener, also within double quotes, so the git commit -m form whose double-quoted message is $(cat <<'EOF' ...) is checked. Bodies are read as bash reads them: from the line after the opener's line, in the order the openers appeared, each ending at the first line exactly equal to its delimiter (for <<- after removing the line's leading tabs; for an unquoted delimiter after joining a line that ends in an odd run of backslashes to the next, as bash does). If any opener has no such line before the end of the command text, the command DENIES, naming the opener, its line, and, where one exists, the closest non-blank body line within edit distance 2 of the delimiter and fewer edits than the delimiter has characters (such as a short typo, a trailing space or carriage return, or one or two spaces before a <<- terminator); a terminator line further off is denied without a near-miss line. Inside a $(...) or a process substitution a body line that starts with the delimiter and holds a ) later on, such as EOF) or EOF;true), also DENIES, named as cut short: bash 5.3 ends the heredoc there with a warning and reads the rest of the line as commands, so the scan resumes there as bash does. A << whose delimiter word cannot be read (none follows, an unterminated quote, or an ANSI-C delimiter holding a backslash escape) DENIES fail-safe, and so does a payload with no readable command string; a missing tool_name denies under the shared contract, and a mis-wired event hard-blocks. HONEST RESIDUALS: a heredoc that exists only at run time (a script assembled by printf or echo and piped to a shell, or held in a variable or a generated file) is not in the command text and is not checked; a heredoc inside a string another program parses as shell (eval, bash -c, sh -c, ssh, su -c, xargs, a function or alias defined earlier) is quoted data to this pass and is not checked, while that shell can still read past a mistyped terminator; a heredoc inside a backtick command substitution or a ${...} expansion is not checked, and neither is one inside a $(...) in the body of an unquoted heredoc, which bash parses only when it expands the body at run time; a here-string has no terminator line and is out of scope; a mistyped terminator followed later by a line exactly equal to the same delimiter (a second heredoc that reuses it) is read, as bash reads it, as one longer body and passes, and so does a body line that happens to equal the delimiter and ends the heredoc early; a case pattern written without its leading ( inside a $(...) ends the substitution early in this pass, a (( that opens nested subshells is read as arithmetic, and a << or a delimiter word split by a backslash-newline line continuation is not joined as bash joins it, so an opener can be missed or misjudged in those forms. The bash behaviour it models was observed on bash 5.3; another shell or bash version can end a body differently. It checks termination only, not what the heredoc feeds or contains, and it targets the accidental mistyped terminator, not an adversary. It is platform=claude-code only.
 ```
 
 ### `hook:orch-ask-unattended`

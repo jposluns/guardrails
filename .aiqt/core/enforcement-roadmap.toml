@@ -551,7 +551,7 @@ mechanisms = []
 [[rule]]
 corpus-id = "sectvl"
 status = "enforced"
-mechanisms = ["hook:commit-msg-subst"]
+mechanisms = ["hook:commit-msg-subst", "hook:heredoc-terminator"]
 
 [[rule]]
 corpus-id = "secunt"
