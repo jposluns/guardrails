@@ -79,15 +79,26 @@ reserved`, `all rights waived`, `dedicated to the public domain`, `copyright wai
 matched on the same scanned surfaces classes 1 and 2 use, case-insensitively, tokens joined by [\\s>]+
 and \\b-anchored, so a line-wrapped waiver, a capitalized "No Rights Reserved", the hyphen-adjacent
 "CC0-1.0", and a waiver wrapped across markdown blockquote continuation lines ("> no rights" then "
-> reserved") are all caught, while "acc0unt" and the CSS HEX COLOUR "#cc0" are not. The colour
-exclusion is decided on the WHOLE hash token: a cc0 is excused only when a SINGLE "#" sits immediately
-before it, that "#" is at the start of the text or follows whitespace or one of : ( , { ; " ' =, the
-token ends with the cc0 (the end of the text, whitespace, or one of ; } ) , ! " ' < >), and no "1.0"
-version number follows; so "#CC0-1.0", "#CC0 1.0 Universal", "##cc0", "x#cc0", "&#cc0;", "#cc0.5em",
-and a sentence-final "#cc0." are findings (a genuine colour mention there needs an exception row). A
-six-digit colour such as "#cc0000" never matches the \\b-anchored cc0 phrase at all, so no length rule
-applies; every OTHER waiver phrase immediately after "#" (a markdown heading "#no rights reserved") IS
-a finding. There is
+> reserved") are all caught, while "acc0unt" and the CSS HEX COLOUR "#cc0" IN CSS CONTEXT are not.
+The colour exclusion requires real CSS context and the WHOLE hash token: a cc0 is excused only when
+ALL of these hold: (1) a single "#" sits immediately before it, and the character before that "#" is
+whitespace, a colon, an opening parenthesis, or a comma; (2) the token ends with the cc0 (the next
+character is whitespace or one of ; } ) , ! or the CSS region ends there) and no "1.0" version
+number follows; (3) it lies in a CSS REGION, either the body of an HTML <style> element closed by
+</style>, inside a { } block (the nearest brace before it in that body is "{"), or the QUOTED value
+of a style attribute of an HTML start tag (tag and attribute names case-insensitive); and (4) it is
+a declaration VALUE: the text of its declaration, from just after the nearest { } or ; before it in
+that region (or from the region start), opens with a CSS property name and a colon ("color:",
+"--accent:"; any CSS identifier, not a list of known properties). Everything else is a finding:
+prose ("Our project licence is #cc0", "Licence: #cc0"), a markdown heading "#cc0", a CSS-looking
+line in markdown text ("background: #cc0;"), a selector ("a:hover #cc0 {"), an unclosed <style>, a
+style attribute written as text, unquoted, or inside another attribute's value, and "#CC0-1.0",
+"#CC0 1.0 Universal", "##cc0", "x#cc0", "&#cc0;", "#cc0.5em", or a sentence-final "#cc0."
+anywhere; a genuine colour use outside CSS context needs an exception row. No file type admits a
+colour: no scanned surface is a stylesheet (they are *.html, *.md, and the three named files). A
+six-digit colour such as "#cc0000" never matches the \\b-anchored cc0 phrase at all, so no length
+rule applies; every OTHER waiver phrase immediately after "#" (a markdown heading "#no rights
+reserved") IS a finding. There is
 NO quoted-text exemption: a waiver phrase inside a markdown blockquote, a fenced code block, or an
 HTML blockquote element is a finding like any other, whether or not the quote names a licence (a
 genuinely quoted third-party licence text is excused only by an explicit exception row). The ONLY
@@ -155,9 +166,13 @@ whitespace and markdown blockquote markers ONLY, so a waiver phrase whose tokens
 markup or an entity is not seen: an HTML-SPLIT phrase ("no <b>rights</b> reserved"), a markdown
 EMPHASIS-SPLIT phrase ("no *rights* reserved"), and an entity-separated phrase ("no&nbsp;rights
 reserved", where entity text, not a space, sits between the tokens) all slip the matcher (a literal
-U+00A0 character IS whitespace and is caught); a cc0 that is the whole hash token "#cc0" in a colour
-position (above) is never matched, so a genuine waiver spelled exactly that way is not seen, though
-every OTHER waiver phrase after "#" IS a finding;
+U+00A0 character IS whitespace and is caught); a "#cc0" that is the whole value token of a CSS
+declaration in a CSS region (above) is never matched, and both are read SYNTACTICALLY: a <style>
+element or a style attribute written as text (in a markdown code span or fence, or in an HTML
+comment) still counts as CSS, any CSS identifier is a property name ('<p style="licence: #cc0">'
+is a declaration), and a nested selector that opens like a declaration inside a { } block ("a {
+b:hover #cc0 { } }") reads as one, so a waiver spelled "#cc0" there is not seen, though every
+OTHER waiver phrase after "#" IS a finding;
 a waiver token fused to an underscore ("CC0_1.0" written with an underscore is one \\w+ token) has
 no word boundary and is not seen; the other-identity refusal reads markdown markers as spaces but NOT
 HTML tags or entities, so an opening split by them ("<b>Apache</b> License", "Apache&nbsp;License") is
@@ -541,10 +556,10 @@ CONFIG_LICENCE_KEY = "licence"
 
 # The CLOSED waiver-phrase list. Tokens are joined by [\s>]+ (whitespace plus the markdown blockquote
 # continuation marker, so a waiver wrapped across quoted lines stays one phrase) and \b-anchored
-# ("acc0unt" is not cc0). The ONLY "#" exclusion is the CSS hex colour "#cc0", decided on the WHOLE
-# hash token in _is_css_colour_cc0, not in the regex; every OTHER phrase after "#" (a markdown
-# heading "#no rights reserved") flags. Closed and documented: a paraphrased or markup-split waiver is
-# a disclosed residual (module docstring), not a matcher ambition.
+# ("acc0unt" is not cc0). The ONLY "#" exclusion is the CSS hex colour "#cc0" in CSS context, decided
+# on the WHOLE hash token in _is_css_colour_cc0, not in the regex; every OTHER phrase after "#" (a
+# markdown heading "#no rights reserved") flags. Closed and documented: a paraphrased or
+# markup-split waiver is a disclosed residual (module docstring), not a matcher ambition.
 WAIVER_PHRASES = (
     "no rights reserved",
     "all rights waived",
@@ -553,30 +568,78 @@ WAIVER_PHRASES = (
     "cc0",
 )
 
-# The CSS colour exclusion, decided on the WHOLE hash token: what may precede the "#" (besides the
-# start of the text and whitespace), what may end the token (besides the end of the text and
-# whitespace), and the version number that makes a following cc0 name the dedication instead.
-_COLOUR_LEAD = ":(,{;\"'="
-_COLOUR_END = ";}),!\"'<>"
+# The CSS colour exclusion, decided in CSS context on the WHOLE hash token: what may precede the "#"
+# inside a declaration value (besides whitespace), what may end the token (besides whitespace and the
+# end of the CSS region), the version number that makes a following cc0 name the dedication instead,
+# and the property name and colon a declaration must open with.
+_COLOUR_LEAD = ":(,"
+_COLOUR_END = ";}),!"
 _CC0_VERSION = re.compile(r"\s+1\.0\b")
+_CSS_DECLARATION_HEAD = re.compile(r"\s*-{0,2}[A-Za-z][A-Za-z0-9-]*\s*:")
+# The CSS regions: an HTML start tag with its attributes (each quoted value consumed whole, so a
+# "style=" written inside another attribute's value is never read as an attribute), one attribute of
+# it (group 2 or 3 is a quoted value), and the end tag that closes a <style> element.
+_HTML_START_TAG = re.compile(
+    r"<([A-Za-z][A-Za-z0-9-]*)((?:\s+[^\s\"'<>/=]+(?:\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s\"'<>=`]+))?)*)"
+    r"\s*/?>")
+_HTML_ATTRIBUTE = re.compile(r"\s+([^\s\"'<>/=]+)(?:\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|[^\s\"'<>=`]+))?")
+_STYLE_END_TAG = re.compile(r"</style\s*>", re.IGNORECASE)
+
+
+def _css_regions(text):
+    """The CSS regions of text, as (start, end, block) triples: the body of every HTML <style> element
+    closed by </style> (block True: its declarations sit inside { } blocks), and the quoted value of
+    every style attribute of an HTML start tag (block False: the value is one declaration list). Tag
+    and attribute names are case-insensitive. Found syntactically: an unclosed <style> element and an
+    unquoted style value are no region."""
+    regions = []
+    for tag in _HTML_START_TAG.finditer(text):
+        if tag.group(1).lower() == "style":
+            close = _STYLE_END_TAG.search(text, tag.end())
+            if close:
+                regions.append((tag.end(), close.start(), True))
+        for attr in _HTML_ATTRIBUTE.finditer(tag.group(2)):
+            if attr.group(1).lower() != "style":
+                continue
+            for group in (2, 3):
+                if attr.group(group) is not None:
+                    base = tag.start(2)
+                    regions.append((base + attr.start(group), base + attr.end(group), False))
+    return regions
 
 
 def _is_css_colour_cc0(text, start, end):
-    """True iff the cc0 match text[start:end] is the WHOLE token after a single "#" in a colour
-    position: the "#" sits immediately before the match and is itself at the start of the text or
-    after whitespace or one of : ( , { ; " ' =; the token ends with the match (the end of the text,
-    whitespace, or one of ; } ) , ! " ' < >); and no "1.0" version number follows. So "#cc0",
-    "color:#cc0;", and "background: #cc0 " are the colour, while "#CC0-1.0", "#CC0 1.0 Universal",
-    "##cc0", "x#cc0", "&#cc0;", "#cc0.5em", and a sentence-final "#cc0." are not. A six-digit colour
-    such as "#cc0000" never matches the \\b-anchored cc0 phrase at all, so no length rule applies,
-    and no other waiver phrase is ever excluded by this test."""
-    if start == 0 or text[start - 1] != "#":
+    """True iff the cc0 match text[start:end] is the CSS hex colour "#cc0" in CSS context, which needs
+    ALL of: (1) a single "#" immediately before the match, after whitespace, a colon, an opening
+    parenthesis, or a comma; (2) the token ends with the match (whitespace, one of ; } ) , !, or the
+    end of the CSS region follows) and no "1.0" version number follows; (3) the "#" and the match lie
+    in one _css_regions region, and in a <style> body the nearest brace before the "#" is "{"; and (4)
+    the declaration holding it, from just after the nearest { } or ; before the "#" in that region (or
+    from the region start), opens with a CSS property name and a colon. So
+    "<style>a{color:#cc0}</style>" and '<p style="color: #cc0">' are the colour, while prose ("Our
+    project licence is #cc0"), a markdown heading "#cc0", "background: #cc0;" outside a style element
+    or attribute, a selector, "##cc0", "x#cc0", "#cc0.5em", and "#CC0 1.0" are not. A six-digit colour
+    such as "#cc0000" never matches the \\b-anchored cc0 phrase at all, so no length rule applies, and
+    no other waiver phrase is ever excluded by this test."""
+    hash_at = start - 1
+    if hash_at < 1 or text[hash_at] != "#":
         return False
-    if start > 1 and not (text[start - 2].isspace() or text[start - 2] in _COLOUR_LEAD):
+    if not (text[hash_at - 1].isspace() or text[hash_at - 1] in _COLOUR_LEAD):
         return False
-    if end < len(text) and not (text[end].isspace() or text[end] in _COLOUR_END):
+    region = next(((a, b, block) for a, b, block in _css_regions(text) if a <= hash_at and end <= b),
+                  None)
+    if region is None:
         return False
-    return not _CC0_VERSION.match(text, end)
+    a, b, block = region
+    if end < b and not (text[end].isspace() or text[end] in _COLOUR_END):
+        return False
+    if _CC0_VERSION.match(text, end, b):
+        return False
+    brace = max(text.rfind("{", a, hash_at), text.rfind("}", a, hash_at))
+    if block and (brace == -1 or text[brace] != "{"):
+        return False
+    head = max(a, brace + 1, text.rfind(";", a, hash_at) + 1)
+    return _CSS_DECLARATION_HEAD.match(text, head, hash_at) is not None
 
 
 def _waiver_regex(phrase):
@@ -709,7 +772,7 @@ def scan_waivers(text, rel, rows, consumed):
     """Return the class-3 (label, snippet) findings in one surface text whose repo-relative POSIX path
     is rel, given the parsed exception rows and the caller-owned parallel `consumed` flag list.
     Occurrences of one phrase are numbered 1-based in position order within this file (a cc0 excluded
-    as the whole CSS hex colour token "#cc0" is not an occurrence); an UNCONSUMED row excuses one
+    as the CSS hex colour "#cc0" in CSS context is not an occurrence); an UNCONSUMED row excuses one
     occurrence when its path and phrase match and its binder does (occurrence equals the index, or
     line equals the exact text of the line the occurrence starts on). A row is consumed by the first
     occurrence it excuses, so a SECOND occurrence beside an excused one still flags, even on the same
@@ -1316,16 +1379,26 @@ CLASS3_SCAN_CASES = [
      "A long separating paragraph keeps the two snippets apart.\nA copyright waiver.\n"
      "Closing context omega.\n", "docs/dupline.md",
      (("docs/dupline.md", "copyright waiver", "line", "A copyright waiver."),), 1, ("omega",)),
-    # the CSS-colour exclusion is cc0-only and decided on the WHOLE hash token: every other waiver
-    # phrase after "#" flags (markdown headings, quoted headings, fences, HTML), and so does "# cc0" ...
+    # the CSS-colour exclusion is cc0-only: every other waiver phrase after "#" flags (markdown
+    # headings, quoted headings, fences, HTML), and so does "# cc0" ...
     ("#no rights reserved\n", "docs/hash-heading.md", (), 1),
     ("> #no rights reserved\n", "docs/hash-quote.md", (), 1),
     ("```\n#all rights waived\n```\n", "docs/hash-fence.md", (), 1),
     ("<blockquote>#copyright waiver</blockquote>", "site/hash-quote.html", (), 1),
     ("# cc0 is discussed in this heading.", "docs/hash-spaced.md", (), 1),
-    # ... and so does a cc0 that is not the whole token after a single "#" in a colour position: a
-    # version suffix or a following version number, a doubled or fused "#", an entity, and a token
-    # that runs on past the cc0 (a dimension, a sentence-final full stop).
+    # ... and "#cc0" OUTSIDE CSS context flags, whatever the file type: a first-party claim in prose
+    # (with a label colon or in parentheses too), a bare markdown heading, a plain-text sentence, and
+    # a CSS-looking line in markdown text that is in no <style> element or style attribute ...
+    ("Our project licence is #cc0", "README.md", (), 1),
+    ("Licence: #cc0", "docs/hash-label.md", (), 1),
+    ("This work is free (#cc0).", "docs/hash-paren.md", (), 1),
+    ("#cc0", "docs/hash-bare.md", (), 1),
+    ("The accent colour is #cc0 in the banner.", "docs/palette.txt", (), 1),
+    ("background: #cc0;", "docs/hash-colour.md", (), 1),
+    ("border: 1px solid #cc0 !important", "docs/hash-spaced-end.md", (), 1),
+    # ... as does a cc0 that is not the whole token after a single "#": a version suffix or a
+    # following version number, a doubled or fused "#", an entity, and a token that runs on past the
+    # cc0 (a dimension, a sentence-final full stop) ...
     ("#CC0-1.0", "docs/hash-version.md", (), 1),
     ("#CC0 1.0 Universal", "docs/hash-name.md", (), 1),
     ("##cc0", "docs/hash-double.md", (), 1),
@@ -1333,14 +1406,37 @@ CLASS3_SCAN_CASES = [
     ("&#cc0;", "docs/hash-entity.md", (), 1),
     ("#cc0.5em", "docs/hash-dimension.md", (), 1),
     ("The accent is #cc0.", "docs/hash-stop.md", (), 1),
-    # ... while the whole-token colour stays excluded: alone, after whitespace or a CSS delimiter,
-    # and ended by the end of the text, whitespace, or a CSS terminator. A six-digit colour never
-    # matches the cc0 phrase at all.
-    ("#cc0", "docs/hash-bare.md", (), 0),
-    ("#cc0000", "docs/hash-six.md", (), 0),
-    ("background: #cc0;", "docs/hash-colour.md", (), 0),
-    ("border: 1px solid #cc0 !important", "docs/hash-spaced-end.md", (), 0),
+    # ... and the near-CSS shapes the rule does not admit: element text after a style attribute, an
+    # unclosed <style>, a style attribute written as text, unquoted, or inside another attribute's
+    # value, a selector (outside any { } block, or after a closed one), a declaration with no
+    # property name, and inside a declaration value a cc0 with no "#", a fused, doubled, or "=" led
+    # "#", a dimension or a quote run on after it, or a following version number.
+    ("<p style=\"color: red\">Licence: #cc0</p>", "site/hash-after-attr.html", (), 1),
+    ("<style>a{color:#cc0}", "site/hash-unclosed.html", (), 1),
+    ("style=\"color:#cc0\"", "docs/hash-attr-text.md", (), 1),
+    ("<p style=color:#cc0>x</p>", "site/hash-unquoted.html", (), 1),
+    ("<p title=\"style='color:#cc0'\">x</p>", "site/hash-in-title.html", (), 1),
+    ("<style>a:hover #cc0 {color:red}</style>", "site/hash-selector.html", (), 1),
+    ("<style>a{color:red} p:focus #cc0 {color:red}</style>", "site/hash-selector-after.html", (), 1),
+    ("<style>p{ #cc0 }</style>", "site/hash-no-property.html", (), 1),
+    ("<style>p{font-family: cc0}</style>", "site/hash-no-hash.html", (), 1),
+    ("<style>a{color:x#cc0}</style>", "site/hash-css-fused.html", (), 1),
+    ("<style>a{color:##cc0}</style>", "site/hash-css-double.html", (), 1),
+    ("<p style=\"color:=#cc0\">x</p>", "site/hash-css-equals.html", (), 1),
+    ("<style>a{width:#cc0.5em}</style>", "site/hash-css-dimension.html", (), 1),
+    ("<p style=\"color:#cc0'\">x</p>", "site/hash-css-quote.html", (), 1),
+    ("<p style=\"color:#cc0 1.0\">x</p>", "site/hash-css-version.html", (), 1),
+    # ... while the whole colour value of a declaration in a CSS region stays excluded: in a <style>
+    # element (with attributes, multi-line, after a "(" or ended by "!important" or ",", inside a
+    # nested at-rule block, upper-case, a custom property) and in a double- or single-quoted style
+    # attribute (upper-case, raw HTML in markdown). A six-digit colour never matches the cc0 phrase.
+    ("<style media=\"screen\">\n.banner {\n  border: 1px solid #cc0 !important;\n"
+     "  background: linear-gradient(#cc0, #fff);\n}\n</style>", "site/hash-block.html", (), 0),
+    ("<STYLE>@media print { :root { --accent: #CC0; } }</STYLE>", "site/hash-nested.html", (), 0),
     ("<p style=\"color:#cc0\">x</p>", "site/hash-attr.html", (), 0),
+    ("<p class='a' STYLE='background: #cc0; color: #000'>x</p>", "site/hash-attr-single.html", (), 0),
+    ("A <span style=\"color: #cc0\">yellow</span> accent.", "docs/hash-inline-html.md", (), 0),
+    ("#cc0000", "docs/hash-six.md", (), 0),
 ]
 
 # End-to-end class-3 evaluation fixtures over in-memory trees: (declared, licence text, exception rows,
@@ -1439,6 +1535,13 @@ _CFG_MALFORMED = (
     ("duplicate row", "[[exception]]\n" + _ROW_OK + "reason = \"r\"\n[[exception]]\n" + _ROW_OK
      + "reason = \"other\"\n", "duplicates an earlier row"),
 )
+# Configuration texts that are not TOML at all, with the exception class each parse handler must name:
+# a syntax error (tomllib.TOMLDecodeError, a ValueError) and an array nested ten times past the
+# default recursion limit (RecursionError). Both legs' handlers are driven with each.
+_CFG_UNPARSEABLE = (
+    ("not TOML", "licence = \n", "TOMLDecodeError"),
+    ("nested too deep", "licence = " + "[" * 10000 + "]" * 10000 + "\n", "RecursionError"),
+)
 
 # Result-rendering fixtures: (findings, claims, identity, reserves, class3_error, expected exit code,
 # required stdout substring or None, required stderr substring or None). The first case is the
@@ -1452,10 +1555,44 @@ RENDER_CASES = [
     ([], 2, "CC0-1.0", False, None, 0, "not applicable", None),
 ]
 
+
+def _valid_config_failures(text, want):
+    """The valid-configuration leg over one fixture text: [] when it parses as TOML and _parse_config
+    returns want, else the NAMED failure line (a text that does not parse is reported by its exception
+    class, never escapes)."""
+    import tomllib
+    try:
+        parsed = _parse_config(tomllib.loads(text), "fixture")
+    except (ValueError, RecursionError, MemoryError) as exc:
+        return ["CONFIG PARSE: valid fixture did not parse as TOML: {}".format(type(exc).__name__)]
+    except _FailClosed as exc:
+        return ["CONFIG PARSE: valid fixture refused: {}".format(exc)]
+    if parsed != want:
+        return ["CONFIG PARSE: valid fixture parsed to {!r}".format((parsed,))]
+    return []
+
+
+def _malformed_config_failures(label, text, want):
+    """The malformed-configuration leg over one fixture text: [] when it parses as TOML and
+    _parse_config refuses it with want in the diagnostic, else the NAMED failure line (a text that
+    does not parse is reported by its exception class, never escapes)."""
+    import tomllib
+    try:
+        _parse_config(tomllib.loads(text), "fixture")
+    except (ValueError, RecursionError, MemoryError) as exc:
+        return ["CONFIG PARSE: malformed fixture {} did not parse as TOML: {}".format(
+            label, type(exc).__name__)]
+    except _FailClosed as exc:
+        if want not in str(exc):
+            return ["CONFIG PARSE: {} refused with the wrong diagnostic ({!r} not in {!r})".format(
+                label, want, str(exc))]
+        return []
+    return ["CONFIG PARSE: malformed fixture accepted ({})".format(label)]
+
+
 def _self_test_class3():
     """The class-3 fixture legs; return the failure strings (the caller aggregates and reports)."""
     import hashlib
-    import tomllib
     failures = []
     # The canonical rights-waiving texts are pinned by SHA-256 (CC0 1.0 Universal legal code, 7048
     # bytes; the Unlicense with its closing reference line), and every rights-waiving identity in
@@ -1518,26 +1655,27 @@ def _self_test_class3():
         if not ok:
             failures.append("CLASS3 EVALUATE: declared={!r} text={!r} expected {!r} got {!r}".format(
                 declared, lic_text[:40], expected, got))
-    try:
-        parsed = _parse_config(tomllib.loads(_CFG_VALID), "fixture")
-        if parsed != _CFG_VALID_PARSED:
-            failures.append("CONFIG PARSE: valid fixture parsed to {!r}".format((parsed,)))
-    except (ValueError, RecursionError, MemoryError) as exc:
-        failures.append("CONFIG PARSE: valid fixture did not parse as TOML: {}".format(type(exc).__name__))
-    except _FailClosed as exc:
-        failures.append("CONFIG PARSE: valid fixture refused: {}".format(exc))
+    failures.extend(_valid_config_failures(_CFG_VALID, _CFG_VALID_PARSED))
     for label, bad, want in _CFG_MALFORMED:
-        try:
-            _parse_config(tomllib.loads(bad), "fixture")
-            failures.append("CONFIG PARSE: malformed fixture accepted ({})".format(label))
-        except (ValueError, RecursionError, MemoryError) as exc:
-            failures.append("CONFIG PARSE: malformed fixture {} did not parse as TOML: {}".format(
-                label, type(exc).__name__))
-        except _FailClosed as exc:
-            if want not in str(exc):
-                failures.append(
-                    "CONFIG PARSE: {} refused with the wrong diagnostic ({!r} not in {!r})".format(
-                        label, want, str(exc)))
+        failures.extend(_malformed_config_failures(label, bad, want))
+    # Each leg's parse handler is driven too: a text that is not TOML, and one nested past the
+    # recursion limit, must come back as that handler's NAMED failure line. An exception that escapes
+    # (a deleted or narrowed handler) is caught here and fails by name, never passes.
+    for label, text, exc_name in _CFG_UNPARSEABLE:
+        for leg, want_line in (
+                ("valid", "CONFIG PARSE: valid fixture did not parse as TOML: " + exc_name),
+                ("malformed", "CONFIG PARSE: malformed fixture {} did not parse as TOML: {}".format(
+                    label, exc_name))):
+            try:
+                if leg == "valid":
+                    got = _valid_config_failures(text, _CFG_VALID_PARSED)
+                else:
+                    got = _malformed_config_failures(label, text, "")
+            except (ValueError, RecursionError, MemoryError) as exc:
+                got = ["{} escaped the handler".format(type(exc).__name__)]
+            if got != [want_line]:
+                failures.append("CONFIG PARSE HANDLER: the {} leg on {} expected {!r} got {!r}".format(
+                    leg, label, [want_line], got))
     for findings, claims, identity, reserves, c3err, want_code, want_out, want_err in RENDER_CASES:
         code, out, err = _render(list(findings), claims, identity, reserves, c3err)
         joined_out = "\n".join(out)
@@ -1613,8 +1751,8 @@ def _self_test_files():
     the lstat-presence, stat, and EACCES fail-closed paths, and the never-hidden guarantee are
     exercised where they live, not only on in-memory lists. EACCES is injected through the _lstat /
     _stat / _read_file_text / _load_toml_file seams (a chmod 000 denies nothing under root). Every
-    child runs as -I -B with its working directory inside the temporary root, and the root is
-    checked to be gone afterwards. Returns (failures, case count)."""
+    child runs as -I -B and first reports os.getcwd(), which must lie inside the temporary root, and
+    the root is checked to be gone afterwards. Returns (failures, case count)."""
     import subprocess
     import tempfile
     global _lstat, _stat, _read_file_text, _load_toml_file
@@ -1635,9 +1773,23 @@ def _self_test_files():
             return None
         return got
 
-    def run_child(payload, cwd):
-        return subprocess.run([sys.executable, "-I", "-B", "-c", payload], cwd=cwd,
-                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120, text=True)
+    cwd_mark = "CHILD CWD "
+
+    def run_child(label, payload, cwd):
+        """Run payload in a -I -B child with working directory cwd. The child first prints
+        os.getcwd(), which must lie inside the temporary root td (a NAMED failure otherwise, so a
+        child run anywhere else, beside the sources included, fails); that line is dropped from the
+        returned capture."""
+        proc = subprocess.run(
+            [sys.executable, "-I", "-B", "-c",
+             "import os; print({!r} + os.getcwd(), flush=True); {}".format(cwd_mark, payload)],
+            cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120, text=True)
+        head, _, rest = proc.stdout.partition("\n")
+        reported = Path(head[len(cwd_mark):]) if head.startswith(cwd_mark) else None
+        if reported is None or not reported.resolve().is_relative_to(Path(td).resolve()):
+            failures.append("FILES {}: the child must run inside the temporary root {}, it reported"
+                            " {!r}".format(label, td, head))
+        return subprocess.CompletedProcess(proc.args, proc.returncode, rest)
 
     def merged_order_failure(label, proc, want_code, first, then):
         """None when the child exited want_code and `first` precedes `then` in its merged capture,
@@ -1806,13 +1958,14 @@ def _self_test_files():
                         " m._emit([\"FAIL: 1 license/trademark issue(s)\", \"  docs/a.md: class1 -> x\"],"
                         " [\"error: licence trouble; fail-closed\"])").format(src_dir, stem)
         cases.append("EMIT ORDER")
-        bad = merged_order_failure("EMIT ORDER", run_child(emit_payload, child_cwd), 0,
+        bad = merged_order_failure("EMIT ORDER", run_child("EMIT ORDER", emit_payload, child_cwd), 0,
                                    "FAIL: 1 license/trademark issue(s)", "error: licence trouble")
         if bad:
             failures.append(bad)
         # ... while the check refuses a child that printed in that order and then crashed ...
         cases.append("EMIT ORDER CRASH CONTROL")
-        crashed = run_child(emit_payload + "; raise RuntimeError('injected crash after output')",
+        crashed = run_child("EMIT ORDER CRASH CONTROL",
+                            emit_payload + "; raise RuntimeError('injected crash after output')",
                             child_cwd)
         if merged_order_failure("EMIT ORDER CRASH CONTROL", crashed, 0,
                                 "FAIL: 1 license/trademark issue(s)", "error: licence trouble") is None:
@@ -1827,7 +1980,7 @@ def _self_test_files():
                         " sys.argv = [m.__file__]; sys.exit(m.main())").format(
                             src_dir, stem, str(root / "tools" / (stem + ".py")))
         cases.append("MAIN ORDER")
-        bad = merged_order_failure("MAIN ORDER", run_child(main_payload, child_cwd), 2,
+        bad = merged_order_failure("MAIN ORDER", run_child("MAIN ORDER", main_payload, child_cwd), 2,
                                    "FAIL: 2 license/trademark issue(s)",
                                    "error: more than one licence file")
         if bad:
@@ -1869,7 +2022,7 @@ def _self_test():
           "licence-file, {} identity, {} scan, {} evaluate, {} config, {} render, {} file cases)".format(
               len(CLEAN_FIXTURES), len(FLAGGED_FIXTURES), len(LICENCE_FILE_CASES),
               len(LICENCE_IDENTITY_CASES), len(CLASS3_SCAN_CASES), len(CLASS3_EVALUATE_CASES),
-              1 + len(_CFG_MALFORMED), len(RENDER_CASES), file_cases))
+              1 + len(_CFG_MALFORMED) + len(_CFG_UNPARSEABLE), len(RENDER_CASES), file_cases))
     return 0
 
 
