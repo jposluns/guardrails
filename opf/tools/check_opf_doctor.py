@@ -250,17 +250,24 @@ def _self_test_legs():
 
 
 def _self_test():
-    """Isolate fixture configuration and restore the caller even on failure."""
+    """The doctor suite in its isolated fixture home, then the fault-channel vectors."""
+    code = _self_test_fixture_home()
+    failures = _fault_channel_vectors()
+    for failure in failures:
+        print("check_opf_doctor self-test: FAIL: {}".format(failure), file=sys.stderr)
+    return code or (1 if failures else 0)
+
+
+def _self_test_fixture_home():
+    """Isolate fixture configuration and restore the caller even on failure. The suite's status is
+    returned from inside the isolation: the git-fixture-env lifecycle roster derives this wrapper's
+    edge to _self_test_isolated from that return, so a status kept for later reads as no wrapper."""
     import tempfile
     from unittest.mock import patch
     with tempfile.TemporaryDirectory(prefix="opf-selftest-home-") as home:
         with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home,
                         GIT_CONFIG_NOSYSTEM="1"):
-            code = _self_test_isolated()
-    failures = _fault_channel_vectors()
-    for failure in failures:
-        print("check_opf_doctor self-test: FAIL: {}".format(failure), file=sys.stderr)
-    return code or (1 if failures else 0)
+            return _self_test_isolated()
 
 
 def _self_test_isolated():

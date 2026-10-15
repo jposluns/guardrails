@@ -2748,11 +2748,18 @@ def _read_plan(root):
 
 
 def _run_self_test():
-    code = _opf_oplock._st_with_git_lifecycle(_run_self_test_isolated)
+    code = _run_self_test_lifecycle()
     failures = _fault_channel_vectors()
     for failure in failures:
         print("_opf_init_operation self-test: FAIL: {}".format(failure), file=sys.stderr)
     return code or (1 if failures else 0)
+
+
+# The suite's status is returned straight from the lifecycle helper: the git-fixture-env lifecycle
+# roster derives this wrapper's edge to _run_self_test_isolated from that return, so a status kept
+# for later reads as no wrapper.
+def _run_self_test_lifecycle():
+    return _opf_oplock._st_with_git_lifecycle(_run_self_test_isolated)
 
 
 def _run_self_test_isolated():
