@@ -548,7 +548,7 @@ def _load_successor_inventory(path):
     # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
     # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
     # on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
-    except (tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise AdoptError("successor inventory {} is not valid TOML ({}); fail-closed".format(path, exc))
     rows = doc.get("clause", [])
     if not isinstance(rows, list):
@@ -723,8 +723,8 @@ def _fdopen_vectors(base):
     def candidate(fns):
         return lambda dfd: fns["_write_candidate"](dfd, "candidate text\n")
 
-    def flipped(name, fd_name, mode):
-        source = inspect.getsource(globals()[name])
+    def flipped(target, fd_name, mode):
+        source = inspect.getsource(target)
         lines = [line for line in source.splitlines(True) if "closefd=False) as fh:" in line]
         close = "_close_fd_yielding({})".format(fd_name)
         if len(lines) != 1 or source.count(close) != 1:
@@ -740,7 +740,7 @@ def _fdopen_vectors(base):
         # The reverted writer is written to a scratch module and loaded over a copy of this module's globals.
         flip_dir = base.with_name(base.name + "-flips")
         flip_dir.mkdir(exist_ok=True)
-        flip_path = flip_dir / "{}_{}.py".format(name.lstrip("_"), mode.lower())
+        flip_path = flip_dir / "{}_{}.py".format(target.__name__.lstrip("_"), mode.lower())
         flip_path.write_text(source.replace(line, new).replace(close, "pass"), encoding="utf-8")
         spec = importlib.util.spec_from_file_location("_crosswalk_fdopen_flip_" + flip_path.stem, flip_path)
         reverted = importlib.util.module_from_spec(spec)
@@ -750,15 +750,15 @@ def _fdopen_vectors(base):
 
     failures = []
     runs = 0
-    for label, writer, name, fd_name in (("_write_payload", payload, "_write_payload", "tfd"),
-                                         ("_write_candidate", candidate, "_write_candidate", "fd")):
+    for label, writer, target, fd_name in (("_write_payload", payload, _write_payload, "tfd"),
+                                           ("_write_candidate", candidate, _write_candidate, "fd")):
         for fault_label, fault in (("EARLY", early), ("LATE", late)):
             problems = run(writer(globals()), fault)
             runs += 1
             if problems:
                 failures.append("fdopen vector {} {}: {}".format(label, fault_label, ", ".join(problems)))
         for mode, red_fault, red_by in (("PREFIX", "EARLY", "OPEN"), ("EXCEPT", "LATE", "RAISED")):
-            fns = flipped(name, fd_name, mode)
+            fns = flipped(target, fd_name, mode)
             if fns is None:
                 failures.append("fdopen flip {} {}: target not found once".format(label, mode))
                 continue
