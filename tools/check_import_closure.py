@@ -3716,6 +3716,18 @@ class _ListStdlibSys:
     stdlib_module_names = ["os"]
 
 
+# A TOML file holding this comment (valid TOML, so the file parses without the injection) makes the parse raise the
+# error its vector's special names (_scan_rc): a real RecursionError or MemoryError from tomllib cannot be provoked
+# safely and portably, so each is injected at the tomllib.loads call _toml makes.
+_PARSE_FAILURE_MARK = "# the self-test's parser fails here\n"
+_PARSE_FAILURES = {"toml-recursion": RecursionError, "toml-memory": MemoryError}
+
+
+def _toml_parser():
+    """tomllib.loads as bound when called: _scan_rc saves it before an injection and restores it in a finally."""
+    return tomllib.loads
+
+
 # (name, extra rows, dropped rels, scan keyword overrides, special, a text of the refusal's message: the vector holds
 # only by that refusal, not by any exit 2)
 _CANNOT_VECTORS = (
@@ -3856,6 +3868,10 @@ _CANNOT_VECTORS = (
     ("workflow that is not UTF-8", ((_WF, b"steps: \xff\n"),), (), dict(), None, "p.yml: not UTF-8: "),
     ("malformed provenance record", ((_REC, "[package\n"),), (), dict(), None,
      "provenance.toml: does not parse as TOML"),
+    ("provenance record whose parse raises RecursionError", ((_REC, _GOOD_PROVENANCE + _PARSE_FAILURE_MARK),), (),
+     dict(), "toml-recursion", "provenance.toml: does not parse as TOML: injected RecursionError"),
+    ("provenance record whose parse raises MemoryError", ((_REC, _GOOD_PROVENANCE + _PARSE_FAILURE_MARK),), (),
+     dict(), "toml-memory", "provenance.toml: does not parse as TOML: injected MemoryError"),
     ("malformed manifest row", ((_MANIFEST, "abc lib/_vendor/pkg/mod.py\n"),), (), dict(), None,
      "manifest.sha256:1: not one sha256sum row"),
     ("duplicate manifest path", (), (), dict(), "duplicate-row", "manifest.sha256:8: not one sha256sum row"),
@@ -3914,10 +3930,18 @@ def _vector_cases(tmp):
 
 def _scan_rc(module, base, rules=None, special=None, **kwargs):
     """(rc, findings) of module's scan of base: rc 2, with the refusal's message as the one entry, when it cannot
-    evaluate."""
+    evaluate; rc 3, naming it, when the parse error a parser-failure special injects escapes the gate under test."""
     kwargs.setdefault("dispositions", _FIXTURE_DISPOSITIONS)
     kwargs.setdefault("search_roots", _FIXTURE_ROOTS)
     kwargs.setdefault("allowlist", _FIXTURE_SITES)
+    parser = _toml_parser()
+    failure = _PARSE_FAILURES.get(special)
+    injected = None if failure is None else failure("injected %s" % failure.__name__)
+
+    def _failing(text, **parse_kwargs):
+        if _PARSE_FAILURE_MARK in text:
+            raise injected
+        return parser(text, **parse_kwargs)
     original = os.scandir
     original_sites = module.dynamic_sites
     original_identities = module.__dict__.get("scope_identities")
@@ -3942,11 +3966,20 @@ def _scan_rc(module, base, rules=None, special=None, **kwargs):
     if special == "merged-scopes":
         module.scope_identities = lambda tree: dict((key, re.sub(r"#[0-9]+/[0-9]+", "", identity))
                                                     for key, identity in original_identities(tree).items())
+    if injected is not None:
+        tomllib.loads = _failing
     try:
         findings, _shown, _stats = module.scan(base, rules=module.RULES if rules is None else rules, **kwargs)
     except module.CannotEvaluate as exc:
         return 2, ["cannot evaluate: %s" % exc]
+    except (RecursionError, MemoryError) as exc:
+        # The injected error escaping (a handler that does not catch it) is that vector's own failure; any other
+        # RecursionError or MemoryError propagates.
+        if exc is not injected:
+            raise
+        return 3, ["the injected %s escaped the gate under test: %s" % (type(exc).__name__, exc)]
     finally:
+        tomllib.loads = parser
         os.scandir = original
         module.dynamic_sites = original_sites
         if original_identities is not None:
@@ -4086,6 +4119,14 @@ MUTANTS = (
      "workflow that is not UTF-8"),
     ("toml-refused", 'raise CannotEvaluate("%s: does not parse as TOML: %s" % (rel, exc))', "return dict()",
      "malformed provenance record"),
+    ("toml-recursion-refused", "except (ValueError, RecursionError, MemoryError) as exc:",
+     "except tomllib.TOMLDecodeError as exc:", "provenance record whose parse raises RecursionError"),
+    ("toml-memory-refused", "except (ValueError, RecursionError, MemoryError) as exc:",
+     "except tomllib.TOMLDecodeError as exc:", "provenance record whose parse raises MemoryError"),
+    ("toml-recursion-caught", "except (ValueError, RecursionError, MemoryError) as exc:",
+     "except (ValueError, MemoryError) as exc:", "provenance record whose parse raises RecursionError"),
+    ("toml-memory-caught", "except (ValueError, RecursionError, MemoryError) as exc:",
+     "except (ValueError, RecursionError) as exc:", "provenance record whose parse raises MemoryError"),
     ("python-parse-refused", 'raise CannotEvaluate("%s: does not parse: %s" % (rel, exc))', "continue",
      "unparseable Python file"),
     ("stdlib-frozenset", "if not isinstance(names, frozenset) or not names or", "if not names or",
