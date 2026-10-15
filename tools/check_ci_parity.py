@@ -46,10 +46,17 @@ reads as not success; a strategy matrix job's result is failure when any leg fai
 (GitHub behaviour, not observed here); name, runs-on, permissions, outputs, env, services,
 with and secrets do not decide a result (with and secrets apply only under uses).
 The step-level keys that could (continue-on-error, if:, timeout-minutes, and any
-shell: other than the exact line shell: bash) are outside the recognized step keys
+shell: whose value is not the plain bash) are outside the recognized step keys
 and stay cannot-evaluate, as does a gate command chained with || true.
 Step shell: every step with a run: key carries exactly one STEP_SHELL_LINE
-(shell: bash). GitHub's workflow syntax reference documents a step-level shell
+(shell: bash). This rule reads the line after removing a trailing YAML comment
+(a # that follows a space) and trailing spaces, so it accepts the value bash
+optionally followed by a comment, as in shell: bash  # pinned, and nothing else:
+a quoted 'bash', a tab, a second space before bash, or any other value is
+cannot-evaluate. Neither removal changes the value YAML reads, which is bash.
+The precheck-order pass (workflow_precheck_order_problems) is stricter and
+accepts only the exact line, with no comment and no trailing space.
+GitHub's workflow syntax reference documents a step-level shell
 (jobs.<job_id>.steps[*].shell) as overriding the job's default, and a job's
 default as overriding a workflow default of the same name (the most specific
 default wins). That a step shell also overrides a workflow's defaults.run.shell
@@ -5929,6 +5936,14 @@ def self_test():
     if got_problems or got_diagnostics:
         failures.append("36b shell: bash on the run: steps must stay modelled, got {!r} {!r}".format(
             got_problems, got_diagnostics))
+    # The order pass is stricter than the required-status rule (vector 34i): a comment after
+    # shell: bash on a run: step is a step-comment diagnostic there, never a clean pass.
+    got_problems, got_diagnostics = workflow_precheck_order_problems(
+        bashed.replace("        shell: bash\n        run: |\n",
+                       "        shell: bash  # pinned\n        run: |\n", 1), "fixture.yml")
+    if not any(diagnostic.code == "step-comment" for diagnostic in got_diagnostics):
+        failures.append("36b a comment after shell: bash must be a step-comment diagnostic in the "
+                        "order pass, got {!r} {!r}".format(got_problems, got_diagnostics))
     for label, mutated_fixture in (
         ("a custom shell true {0}", bashed.replace("        shell: bash\n        run: |\n",
                                                    "        shell: true {0}\n        run: |\n", 1)),

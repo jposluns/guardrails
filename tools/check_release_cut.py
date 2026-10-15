@@ -1162,7 +1162,7 @@ _RAW_READ_DYNAMIC_SHAPES = dict((
      (1, "imports the stdlib subprocess by literal name for the git-availability probe (git "
       "--version); git executes no Python here")),
     (("tools/check_manifest.py", "subprocess.run:<no-py-literal>"),
-     (3, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
+     (4, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
       "launcher call, the pristine import name included, so a new launch site drifts this count and "
       "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
       "named LIMITS residue")),
@@ -3095,7 +3095,7 @@ def _raw_read_lint(root):
     return failures, (len(modules), len(got_all), total, finding_total)
 
 
-_RAW_READ_PENDING = ("unconverted pre-existing raw read(s), pending conversion and tracked by this pin, which\n                     only shrinks. The D-400 precheck walk (which descends ignored directories and nested\n                     .git directories and refuses index- or HEAD-shadowing links) certifies IN-ROOT inputs\n                     as defence in depth, but it can never certify a configuration-declared out-of-root\n                     path, the contents of an accepted ignored out-of-root link, or a post-walk write, so\n                     this pin is NOT a per-site certification; sites with a verified per-site reason are\n                     in RAW_READ_SITE_REASONS instead")
+_RAW_READ_PENDING = ("unconverted pre-existing raw read(s), pending conversion and tracked by this pin, which\n                     only shrinks. The D-400 precheck walk (which descends ignored directories and nested\n                     .git directories and refuses index- or HEAD-shadowing links) certifies IN-ROOT inputs\n                     as defence in depth, but it can never certify a configuration-declared out-of-root\n                     path or a post-walk write, so\n                     this pin is NOT a per-site certification; sites with a verified per-site reason are\n                     in RAW_READ_SITE_REASONS instead")
 
 RAW_READ_ALLOWLIST = dict((
     (".aiqt/core/hooks/scripts/aiqt_hooks.py::_commit_run::os.read", 1),

@@ -780,6 +780,16 @@ def self_test(report_path=None):
         outcomes = _run_vectors(this, vectors)
         failing = [(vector, detail) for vector, ok, detail in outcomes if not ok]
         check("vector/every-vector-holds", vectors and len(outcomes) == len(vectors) and not failing, failing)
+        # the no-python roster drops the precheck invocation AND its bootstrap test: a bootstrap line left behind
+        # registers no roster member, so roster/no-python alone stays green when only the invocation is dropped
+        precheck_lines = set(check_ci_parity.PRECHECK_ABORT_LINES) | set(check_ci_parity.PRECHECK_BOOTSTRAP_LINES)
+        full = [line.strip() for line in _roster_text(()).splitlines()]
+        stripped = [line.strip() for line in _without_precheck(_roster_text(())).splitlines()]
+        check("roster/no-python-drops-precheck-and-bootstrap",
+              any(line in check_ci_parity.PRECHECK_ABORT_LINES for line in full)
+              and any(line in check_ci_parity.PRECHECK_BOOTSTRAP_LINES for line in full)
+              and not precheck_lines.intersection(stripped),
+              sorted(precheck_lines.intersection(stripped)))
 
         # 2. the splice reproduction, run directly: the intact script reaches its checks, and the spliced one,
         # a guard whose body only defines a function, a guard whose call follows a nested raise, and a

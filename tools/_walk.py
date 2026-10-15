@@ -36,8 +36,8 @@ def walk_files(root, skip_dirs=frozenset(), suffixes=None):
 def read_text_nonblocking(path, encoding="utf-8"):
     """path.read_text(encoding=...), through ONE O_NONBLOCK descriptor: the open of a FIFO with no
     writer returns at once instead of blocking, and a descriptor that fstat says is not a regular file
-    is refused as OSError, so a scanner that reads WHATEVER its walk meets (including one behind an
-    accepted ignored out-of-root directory link, which the D-400 precheck walk cannot certify) can never block forever on
+    is refused as OSError, so a scanner that reads WHATEVER its walk meets (including a special file
+    created after the D-400 precheck walk, which that walk cannot see) can never block forever on
     a special file; it fails closed loudly instead. A symlink is followed exactly as read_text follows
     it, bytes and decode behaviour (strict utf-8, universal newlines) are read_text's, and on a regular
     file O_NONBLOCK is a no-op, so the result is byte-identical to path.read_text(encoding=...)."""
