@@ -2608,7 +2608,7 @@ _RULE_VECTORS = (
      (("tools/t.py", "from importlib import util\nutil.find_spec('json')\n"),), (), {}, True),
     ("getattr with a literal name", "dynamic-import", "tools/t.py",
      (("tools/t.py", "import importlib\ngetattr(importlib, 'import_module')('json')\n"),), (), {}, True),
-    # Round-2 reproductions: each escaped the gate before dynamic imports were refused outside the allowlist.
+    # Reproductions that each escaped the gate before dynamic imports were refused outside the allowlist.
     ("function-local alias beside a module-level __import__", "dynamic-import", "tools/t.py",
      (("tools/t.py", "def unrelated():\n    from builtins import print as __import__\n__import__('json')\n"),),
      (), {}, True),
@@ -2648,7 +2648,7 @@ _RULE_VECTORS = (
      (("tools/t.py", "import builtins\ngetattr(builtins, b'__import__'.decode())('requests')\n"),), (), {}, True),
     ("string naming an importlib submodule", "dynamic-import", "tools/t.py",
      (("tools/t.py", "import sys\nsys.modules['importlib.util']\n"),), (), {}, True),
-    # Round-3 reproductions: each passed while a row allowed its names throughout a function, or while the
+    # Reproductions that each passed while a row allowed its names throughout a function, or while the
     # import system's own entry points were not watched.
     ("default argument evaluated outside its function", "dynamic-import", "tools/t.py",
      (("tools/t.py", "def f(x=__import__('json')):\n    return x\n"),), (),
@@ -2752,7 +2752,7 @@ _RULE_VECTORS = (
      (("tools/t.py", "def f():\n    return __import__\n"),), (),
      dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "f", ("#1: __import__",), "r"),
                                       ("tools/t.py", "f", ("#1: __import__",), "s"))), True),
-    # Round-4 reproductions: a permission named one line's text, not one node, and an importer's module name was
+    # Reproductions from when a permission named one line's text, not one node, and an importer's module name was
     # read only by position or the keyword name, and help was not watched.
     ("two identical calls on one line, one listed", "dynamic-import", "tools/t.py",
      (("tools/t.py", "def f(x):\n    __import__(x); x = 'requests'; __import__(x)\n"),), (),
@@ -2765,16 +2765,16 @@ _RULE_VECTORS = (
      (("tools/t.py", "def f():\n    return __import__\n"),), (),
      dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "f", ("#1: __import__", "#1: __import__"), "r"),)),
      True),
-    # Round-PINS8: a local named like a watched module suppresses nothing outside its own scope.
+    # A local named like a watched module suppresses nothing outside its own scope.
     ("a watched name bound only in an unrelated scope, used at module level", "dynamic-import", "tools/t.py",
      (("tools/t.py", "def f():\n    imp = 1\n    return imp\nx = imp\n"),), (), {}, True),
-    # Round-12: the exemption no longer covers a closure read: a def's local read from a scope it holds is a
+    # The exemption does not cover a closure read: a def's local read from a scope it holds is a
     # finding with no row, end to end.
     ("a closure read with no row, end to end", "dynamic-import", "tools/t.py",
      (("tools/t.py", "def f(record):\n    imp = record.get('import')\n    return lambda: imp.get('run')\n"),),
      (), {}, True),
-    # Round-PINS10: a binding Python looks up at run time suppresses nothing, end to end: each reproduction the
-    # round-9 reviews found is a dynamic-import finding with no row.
+    # A binding Python looks up at run time suppresses nothing, end to end: each reproduction below of such a
+    # binding is a dynamic-import finding with no row.
     ("a conditional module binding, end to end", "dynamic-import", "tools/t.py",
      (("tools/t.py", "if False:\n    help = 1\nloader = help\nloader('json')\n"),), (), {}, True),
     ("an unexecuted global write, end to end", "dynamic-import", "tools/t.py",
@@ -2786,10 +2786,10 @@ _RULE_VECTORS = (
                      "    return help(topic)\n"),), (), {}, True),
     ("a module binding after the def that reads it, end to end", "dynamic-import", "tools/t.py",
      (("tools/t.py", "def show(t):\n    return help(t)\nhelp = print\n"),), (), {}, True),
-    # Each of these is red on the round-9 code: the references round 9 already kept are listed (import
-    # statements, a global declaration and, for the inward barrier, the inner read), round 9 reported none of
-    # the rest, and this gate reports every remaining reference, one to three findings per vector, each
-    # without a row.
+    # Each of these is red against a gate that lets a binding Python looks up at run time suppress a site: the
+    # references such a gate already kept are listed (import statements, a global declaration and, for the
+    # inward barrier, the inner read), it reported none of the rest, and this gate reports every remaining
+    # reference, one to three findings per vector, each without a row.
     ("a class-body read before its binding, end to end", "dynamic-import", "tools/t.py",
      (("tools/t.py", "import pydoc\nclass C:\n    loader = pydoc.importfile\n    pydoc = None\n"),), (),
      dict(allowlist=_FIXTURE_SITES + (("tools/t.py", MODULE_SCOPE, ("#1: import pydoc",), "r"),)), True),
@@ -3000,7 +3000,7 @@ _RULE_VECTORS = (
      dict(dispositions=_FIXTURE_DISPOSITIONS + (("tools/t.py", "shinylib", "guarded-optional"),)), True),
     ("disposition row with an unknown condition", "disposition", "lib/_vendor/pkg/far.py", (), (),
      dict(dispositions=(_FIXTURE_DISPOSITIONS[0], ("lib/_vendor/pkg/far.py", "heavylib", "optional"))), True),
-    # Round-6: premise change. A listed literal climbs into the call or subscript around it, so an edit that
+    # Premise change. A listed literal climbs into the call or subscript around it, so an edit that
     # turns that call into a called importer goes stale; getattr with a starred argument is refused; and the
     # remaining spelled importer forms (help whitespace, resolve_name colon, pydoc subscript owner, .__call__,
     # type(help), and the import-system members _find_and_load, iter_importers, _run_module_as_main and
@@ -3059,7 +3059,7 @@ _RULE_VECTORS = (
      (("tools/t.py", "import builtins\ngetattr(builtins, name='__import__')('requests')\n"),), (),
      dict(allowlist=_FIXTURE_SITES + (("tools/t.py", MODULE_SCOPE,
                                        ("#1: getattr(builtins, name='__import__')('requests')",), "r"),)), True),
-    # Round-7: what the gate cannot read is a finding. A literal module name or level it cannot read with certainty
+    # What the gate cannot read is a finding. A literal module name or level it cannot read with certainty
     # is refused, at an allowlisted site too; each such vector names a standard-library module, so only the refusal
     # (never import-closure's resolution of a third-party name) can make it red. The getattr refusal applies
     # after the .__call__ normalisation, which also reads getattr.__call__ and pydoc.doc.__call__ (third-party
@@ -3145,7 +3145,7 @@ _RULE_VECTORS = (
     ("literal inside an f-string climbed into its call", "dynamic-import", "tools/t.py",
      (("tools/t.py", "import builtins\npatch(builtins, f'__import__', x)('requests')\n"),), (),
      dict(allowlist=_FIXTURE_SITES + (("tools/t.py", MODULE_SCOPE, ("#1: '__import__'",), "r"),)), True),
-    # Round-8: a help request pydoc's Helper reads as a listing (HELP_LISTINGS) is refused whatever module of that
+    # A help request pydoc's Helper reads as a listing (HELP_LISTINGS) is refused whatever module of that
     # name the tree holds, so each listing vector holds an in-tree module of its word; and the .__call__
     # normalisation at the vars owner, the type callee and the getattr owner, and the climb out of an f-string's
     # replacement field, are each pinned.
@@ -3252,10 +3252,10 @@ _GREEN_VECTORS = (
      (("tools/t.py", "def f():\n    return __import__('json')\ndef g():\n    return __import__('json')\n"),),
      dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "f", ("#1: __import__('json')",), "r"),
                                       ("tools/t.py", "g", ("#1: __import__('json')",), "r")))),
-    # Round-PINS8: a watched name bound in the scope that reads it needs no row.
+    # A watched name bound in the scope that reads it needs no row.
     ("a local bound in the scope that reads it, no row",
      (("tools/t.py", "def f(record):\n    imp = record.get('import')\n    return imp.get('run')\n"),), dict()),
-    # Round-12: a closure read is a site (the lambda reads f's local as a free variable), so it needs its row.
+    # A closure read is a site (the lambda reads f's local as a free variable), so it needs its row.
     ("a def's plain local read from a lambda it holds, its row reviewed",
      (("tools/t.py", "def f(record):\n    imp = record.get('import')\n    return lambda: imp.get('run')\n"),),
      dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "f.<lambda>", ("#1: imp.get('run')",), "r"),))),
@@ -3366,13 +3366,13 @@ _SITE_VECTORS = (
      "def f(a=lambda: __import__):\n    return lambda: __import__\ng = lambda: __import__\n",
      ("<lambda>#1/2 | #1: __import__", "f.<lambda> | #1: __import__", "<lambda>#2/2 | #1: __import__")),
     # A comprehension or generator expression is not a scope for rows: what it holds is listed under the scope
-    # around it (and nothing it holds is ever exempt: the Round-12 vectors below). A
+    # around it (and nothing it holds is ever exempt: the comprehension and generator-expression vectors below). A
     # regression pin, not red on revert: the gate listed it this way before this boundary was disclosed, so it
     # fails only against a later change to that listing.
     ("comprehension and generator expression read in the def around them",
      "def f(a):\n    return [__import__(n) for n in a], (__import__(n) for n in a)\n",
      ("f | #1: __import__(n)", "f | #2: __import__(n)")),
-    # Round-PINS10, narrowed by Round-12: only a name Python's own compile-time scoping (symtable: _kept)
+    # Only a name Python's own compile-time scoping (symtable: _kept)
     # proves a plain local of a def or lambda, read in that function's own body, is suppressed. Each
     # function-local binding form suppresses its body occurrences; an import of the watched module, a global or
     # nonlocal declared name, a module-scope or class-body binding (a conditional, deleted, later or unexecuted
@@ -3415,9 +3415,9 @@ _SITE_VECTORS = (
      "__path__ = ['x']\ndef f():\n    imp = 1\n    return imp\n", ("<module> | #1: __path__",)),
     ("a dunder bound in a def stays a site",
      "def f():\n    __path__ = ['x']\n    return __path__\n", ("f | #1: __path__", "f | #2: __path__")),
-    # Round-PINS10: a binding Python looks up at run time proves nothing, so it keeps every site: a module
+    # A binding Python looks up at run time proves nothing, so it keeps every site: a module
     # binding (conditional, deleted, later or unexecuted), a class-body binding, a * import's file, a global or
-    # nonlocal declared name, a comprehension target and an ambiguity, from both round-9 reviews.
+    # nonlocal declared name, a comprehension target and an ambiguity.
     ("a module binding under a false branch keeps the builtin's sites",
      "if False:\n    help = 1\nloader = help\nloader('json')\n",
      ("<module> | #1: help", "<module> | #2: help")),
@@ -3483,7 +3483,7 @@ _SITE_VECTORS = (
      "    return g\n", ("f.g.h | #1: imp",)),
     ("a generator-expression read of a name no def binds",
      "def f(rows):\n    return (imp for r in rows)\n", ("f | #1: imp",)),
-    # Round-12: nothing a generator expression holds is exempt (its first iterable included), and a target name
+    # Nothing a generator expression holds is exempt (its first iterable included), and a target name
     # it binds keeps every reference in the whole function, the shadowed def local's own binding among them; a
     # free read inside one is a site like every closure read.
     ("a generator-expression target read in its body",
@@ -3505,7 +3505,7 @@ _SITE_VECTORS = (
      "def f(rows):\n    return ((imp for imp in r) for r in rows)\n", ("f | #1: imp", "f | #2: imp")),
     ("a def named genexpr beside a generator expression on its line",
      "def genexpr(rows): return (imp for r in rows)\n", ("genexpr | #1: imp",)),
-    # Round-12: nothing a type-parameter scope holds is exempt (a bound, a generic class's base, a generic
+    # Nothing a type-parameter scope holds is exempt (a bound, a generic class's base, a generic
     # def's annotation, a generic type alias's value), and neither is a def's body read of a name its own type
     # parameter binds (a free variable there, kept like every closure read).
     ("a type parameter shadowing an enclosing local, read in the def's body",
@@ -3523,7 +3523,7 @@ _SITE_VECTORS = (
     ("a generic def's annotation read in its type-parameter scope",
      "def outer():\n    help = 0\n    def g[help](x: help):\n        return x\n    return g\n",
      ("outer | #1: help", "outer | #2: help")),
-    # Round-13: a generic def's defaults stay sites as a stated conservative policy, not by the floor
+    # A generic def's defaults stay sites as a stated conservative policy, not by the floor
     # version's scoping: it evaluates a def's defaults in the enclosing scope, generic or not (def f[T](x=T)
     # raises NameError, and def f[help](x=help) reads the enclosing help, never the type parameter), so the
     # keep can only over-report; these two default vectors pin the kept sites, and each catches the
@@ -3538,7 +3538,7 @@ _SITE_VECTORS = (
     ("a generic type alias's bound read in its type-parameter scope",
      "def outer():\n    help = 0\n    type A[T: help] = int\n    return A\n",
      ("outer | #1: help",)),
-    # Round-11: the exemption is a binding rule, not a value proof. A plain local can still hold import machinery
+    # The exemption is a binding rule, not a value proof. A plain local can still hold import machinery
     # obtained another way (a parameter, an eval or another unwatched dynamic call), and the gate reports nothing
     # for it: the disclosed residual, pinned here. A source symtable rejects keeps every site.
     ("a parameter named help, read and called", "def f(help):\n    return help('json')\n", ()),
@@ -3547,14 +3547,14 @@ _SITE_VECTORS = (
     ("a source symtable rejects keeps every site",
      "def f():\n    imp = 1\n    global imp\n    return imp\n",
      ("f | #1: imp", "f | #1: global imp", "f | #2: imp")),
-    # Round-12: a read inside a comprehension target keeps its site, and sweeps the name into the function's
+    # A read inside a comprehension target keeps its site, and sweeps the name into the function's
     # comprehension-bound names (the shadowed local's own binding is then a site too); a name its scope's table
     # does not hold keeps its site (a function-body annotation is dropped from the table, never evaluated).
     ("a comprehension target's subscript read kept with it",
      "def f(rows, d):\n    imp = 1\n    return [x for d[imp] in rows]\n", ("f | #1: imp", "f | #2: imp")),
     ("an annotation read of a name no def binds",
      "def f():\n    x: imp = 1\n    return x\n", ("f | #1: imp",)),
-    # Round-12 (both reviews): a type-parameter or annotation scope directly in a class body reads the class
+    # A type-parameter or annotation scope directly in a class body reads the class
     # namespace first, so resolving past the class to an enclosing def's local suppressed wrongly; now nothing
     # in an annotation, a type-parameter scope or a type alias's value is exempt, in a class body or anywhere.
     ("a generic method's annotation in a class body, read there",
@@ -3580,7 +3580,7 @@ _SITE_VECTORS = (
      ("outer | #1: help",)),
     ("a type alias's value read where the type statement runs",
      "def outer():\n    help = 0\n    type A = help\n    return A\n", ("outer | #1: help",)),
-    # Round-12 (both reviews): the floor version inlines a list, set or dict comprehension into the def around
+    # The floor version inlines a list, set or dict comprehension into the def around
     # it, and the def's merged symbol for a shadowed target reads as a plain local, so the table alone proved
     # the wrong binding; now nothing a comprehension holds is exempt, and a name a comprehension binds as a
     # target is kept everywhere in that function, the shadowed binding and a later body read among them.
@@ -3604,7 +3604,7 @@ _SITE_VECTORS = (
      ("f | #1: help", "f | #2: help", "f | #1: help('json')")),
     ("a list comprehension's read of an enclosing def's local",
      "def f(rows):\n    imp = 1\n    return [imp for x in rows]\n", ("f | #1: imp",)),
-    # Round-12 (both reviews): a closure read is a site; the exemption covers a reference in the one def or
+    # A closure read is a site; the exemption covers a reference in the one def or
     # lambda body whose own table binds the name, and nothing read across a scope boundary.
     ("a closure read of a def's plain local",
      "def f():\n    imp = 1\n    def g():\n        return imp\n    return g\n", ("f.g | #1: imp",)),
@@ -3676,7 +3676,7 @@ _MOVE_VECTORS = (
     ("generic class's base and keyword moved into statements beside the class",
      "class C[U](__import__(x), metaclass=__import__(y)):\n    pass\n",
      "class C[U]:\n    pass\nv = __import__(x)\nw = __import__(y)\n", ()),
-    # Round-11, kept by Round-12: nothing a generator expression holds is exempt, the rows unchanged: an edit
+    # Nothing a generator expression holds is exempt, the rows unchanged: an edit
     # that adds a read, call or condition naming the generator's target is a finding (the shadowed target was
     # listed, so a stale row or an unlisted reference discriminates).
     ("call added to a generator-expression target read, its rows unchanged",
@@ -3688,7 +3688,7 @@ _MOVE_VECTORS = (
     ("target read added to a generator expression, its rows unchanged",
      "def f(rows):\n    help = 0\n    return (0 for help in rows)\n",
      "def f(rows):\n    help = 0\n    return (help for help in rows)\n", (3,)),
-    # Round-12: the class-namespace and inlined-comprehension reproductions, end to end: with the rows the gate
+    # The class-namespace and inlined-comprehension reproductions, end to end: with the rows the gate
     # writes for the unchanged source, adding a call to the kept reference is a finding.
     ("call added to a class-body generic annotation read, its rows unchanged",
      "def outer():\n    help = 0\n    class C:\n        def m[T](self, x: help):\n            return x\n",
@@ -4218,7 +4218,7 @@ MUTANTS = (
      "SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)", "lambda body in a scope of its own"),
     ("site-scope-nested", 'identities[id(node)] = name if parent is tree else identities[id(parent)] + "." + name',
      "identities[id(node)] = name", "allowlist row naming a method by its bare name, no other scope of that name"),
-    # Round-9: each lexical scope instance is its own scope (same-named siblings numbered in source order in the
+    # Each lexical scope instance is its own scope (same-named siblings numbered in source order in the
     # scope that runs their definitions, a class marked), an identity two scopes share is refused, and a malformed
     # reference is refused as malformed; each removed in turn and caught by its vector.
     # Caught by their backstop, the shared-identity refusal (scope-identity-refused): the numbering, or its ordinal,
@@ -4344,7 +4344,7 @@ MUTANTS = (
      "(ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):", "except clause by its header"),
     ("keyword-name-exempt", "                    hits -= KEYWORD_EXEMPT_NAMES\n", "                    pass\n",
      "help as a keyword argument's name"),
-    # Round-PINS10, narrowed by Round-12: the exemption's checks removed one at a time, each caught by its own
+    # The local-binding exemption's checks removed one at a time, each caught by its own
     # vector.
     ("local-binding-dunder-kept", '    if name.startswith("__") and name.endswith("__"):\n        return True\n',
      '    if False:\n        return True\n',
@@ -4373,7 +4373,7 @@ MUTANTS = (
     ("local-binding-taint-kept", "    if sym.get_name() in tainted:\n        return False\n",
      "    if False:\n        return False\n",
      "an import under a nonlocal declaration taints the enclosing local"),
-    # Round-12 and Round-13: not removals but widenings, each put back one at a time and caught by its own
+    # Not removals but widenings, each put back one at a time and caught by its own
     # vector. What each widening mutant covers, exactly: free-widened a free variable; local-proven every name
     # regardless of compile-time locality; comprehension-widened what a list, set or dict comprehension or a
     # generator expression holds; type-params-widened a def's or class's type-parameter list;
@@ -4587,7 +4587,7 @@ MUTANTS = (
      "            if True:\n                continue\n", "relative import reaching an unreached module"),
     ("disposition-unreached", "                if reached:\n", "                if False:\n",
      "unreached-module row whose module is reached"),
-    # Round-6: the premise-change checks (literal climbs into its call or subscript; getattr with a starred
+    # The premise-change checks (literal climbs into its call or subscript; getattr with a starred
     # argument refused; help whitespace, resolve_name colon, pydoc subscript owner, .__call__, type(help) and the
     # member importers read), each removed in turn and caught by its vector.
     ("site-literal-lifted", "    if isinstance(node, ast.Constant):\n        parent = parents.get(id(node))\n",
@@ -4626,7 +4626,7 @@ MUTANTS = (
      "HELPER_CLASSES = dict(pair.split(\":\") for pair in \"Helper:help _Helper:help\".split())",
      "HELPER_CLASSES = dict(pair.split(\":\") for pair in \"Helper:help\".split())",
      "builtin help helper class instance at an allowlisted site"),
-    # Round-7: what the gate cannot read is a finding (an unreadable literal name, f-string or level; the getattr
+    # What the gate cannot read is a finding (an unreadable literal name, f-string or level; the getattr
     # refusal after the .__call__ normalisation; an f-string getattr name or subscript key), a relative or computed
     # f-string request stays unresolved rather than refused, and a literal inside an f-string climbs; each removed
     # in turn and caught by its vector.
@@ -4667,7 +4667,7 @@ MUTANTS = (
     ("site-fstring-climb",
      "        while isinstance(parent, (ast.FormattedValue, ast.JoinedStr)):\n",
      "        while False:\n", "literal inside an f-string climbed into its call"),
-    # Round-8: the help listing refusal (once per spelling) and each listing word; and the .__call__ normalisation
+    # The help listing refusal (once per spelling) and each listing word; and the .__call__ normalisation
     # at the vars owner, the type callee and the getattr owner, and the climb out of an f-string's replacement
     # field; each removed in turn and caught by its vector.
     ("help-listing-refused",
