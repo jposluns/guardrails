@@ -2866,6 +2866,36 @@ def _attribute_manifest_failure(rep, exc):
         rep._current = current
 
 
+def _grade_declared_homes(manifest_data, homes, rep):
+    """Grade the declared homes generation against homes, the generation homes_generation grades the
+    store as, under the current check (C-MANIFEST). Absence declares generation 1 (spec 9.2), and
+    homes_generation grades every declaration this tooling does not activate as generation 1, so a store
+    whose declaration differs from its graded generation is never VALID. The reserved homes-2 pair
+    (spec_version 2.0.0 with homes = 2) above the ceiling of this tooling is a cannot-evaluate: it keeps
+    its legacy grading (spec 9.2), and only tooling that activates homes 2 can evaluate its contract. Any
+    other difference, such as homes = 2 at the base spec_version, is a finding, because homes 2 is declared
+    only with spec_version 2.0.0 (spec 4.2). Returns True when it records a finding, which stops traversal
+    as any manifest finding does. Only a manifest validate_manifest accepted reaches here, so the
+    declaration is absent or the integer 1 or 2."""
+    opf = manifest_data.get("opf") if isinstance(manifest_data, dict) else None
+    opf = opf if isinstance(opf, dict) else {}
+    declared = opf.get("homes", 1)
+    if type(declared) is int and declared == homes:
+        return False
+    version = opf.get("spec_version")
+    if type(declared) is int and declared == 2 and version == _opf_store.HOMES2_SPEC_VERSION:
+        rep.cant("manifest: the store declares homes generation 2 with spec_version {}, which this tooling "
+                 "does not activate (it activates homes {} at most), so it is graded under legacy homes-1 "
+                 "rules only and its homes-2 contract is not evaluated; run tooling that activates homes 2 "
+                 "(spec 4.2/9.2; fail-closed)".format(version, _opf_store.SUPPORTED_HOMES))
+        return False
+    rep.finding("manifest: [opf].homes {} is declared with spec_version {}, but the store grades as homes "
+                "generation {}: homes 2 is declared only with spec_version {} (spec 4.2/9.2); correct the "
+                "[opf].homes declaration (fail-closed)".format(
+                    _safe_display(declared), _safe_display(version), homes, _opf_store.HOMES2_SPEC_VERSION))
+    return True
+
+
 def validate_store(resolution, supported_profiles=None, *, observations=None, ancestral_floor=None):
     """Validate a RESOLVED store's whole-store integrity (OPF-SPEC 11). `resolution` is the object
     _opf_store.resolve_store returns; a resolution that is not RESOLVED is CANNOT-EVALUATE. `observations`
@@ -2964,12 +2994,16 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
         return [], []
     for f in mv.findings:
         rep.finding("manifest: {}".format(f))
+    # The declared homes generation must be the graded one. Only a manifest that validated clean is
+    # compared, since validate_manifest already names a malformed declaration.
+    homes = _opf_store.homes_generation(manifest_data)
+    homes_finding = not mv.findings and mv.status == VALID and _grade_declared_homes(manifest_data, homes, rep)
 
     # --- C-PROFILES: name the evaluated / unevaluated profile scope (spec 16) -------------------------
     rep.ran("C-PROFILES")
     unevaluated_profiles = list(manifest_model.unevaluated_profiles)
     evaluated_profiles = list(manifest_model.evaluated_profiles)
-    if mv.findings or mv.status != VALID:
+    if mv.findings or mv.status != VALID or homes_finding:
         # No manifest-dependent source is safe to traverse after any finding.
         rep.ran("C-RECORDS")
         rep.cant("active worklog source under {} is not evaluated: {} failed manifest "
@@ -2985,7 +3019,6 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     registered_vendors = frozenset(reg) if isinstance(reg, list) and all(isinstance(x, str) for x in reg) \
         else frozenset()
     enabled_modules = _enabled_modules(manifest_data)
-    homes = _opf_store.homes_generation(manifest_data)
     rep.require_homes(homes)
 
     # --- C-ROSTER: reconcile the manifest [types] against the authoritative roster (spec 9/8.1) -------
@@ -5310,6 +5343,55 @@ def self_test():
               bad_manifest.status == CANNOT_EVALUATE
               and bad_manifest.checks["C-RECORDS"] == CANNOT_EVALUATE
               and bad_manifest.checks["C-ARCHIVE-ENUM"] == CANNOT_EVALUATE)
+        # Declared versus graded homes (spec 4.2/9.2): homes_generation grades every declaration this tooling
+        # does not activate as generation 1, so C-MANIFEST compares the two, and a store whose declaration
+        # differs is never VALID. Flip: without _grade_declared_homes both homes-2 stores below read VALID.
+        def homes_store(**declared):
+            f = clean_machine()
+            f["manifest.toml"]["opf"].update(declared)
+            return run(f)
+
+        def homes_messages(r):
+            return [m for m in r.by_check.get("C-MANIFEST", []) if "homes" in m]
+        # A legacy store with no homes key and one declaring homes = 1 stay VALID at the ceiling.
+        check("homes-absent-legacy-valid", "homes" not in base_manifest()["opf"]
+              and clean is not None and clean.status == VALID and not homes_messages(clean))
+        _h1 = homes_store(homes=1)
+        check("homes-1-declared-valid", _h1.status == VALID and _h1.checks["C-MANIFEST"] == "PASS")
+        # homes = 2 at the base spec_version is a C-MANIFEST finding (homes 2 is declared only with
+        # spec_version 2.0.0) that stops traversal like any manifest finding.
+        _h2 = homes_store(homes=2)
+        check("homes-2-base-version-c-manifest-finding", _h2.checks["C-MANIFEST"] == "FINDING"
+              and any("[opf].homes 2" in m and _opf_store.HOMES2_SPEC_VERSION in m for m in _h2.findings))
+        check("homes-2-base-version-stops-dependent-checks",
+              _h2.status == CANNOT_EVALUATE and _h2.checks["C-RECORDS"] == CANNOT_EVALUATE)
+        # The reserved pair above the ceiling of this tooling is a C-MANIFEST cannot-evaluate and keeps its
+        # legacy grading (spec 9.2): every legacy check still runs, and nothing else fails.
+        _hp = homes_store(homes=2, spec_version=_opf_store.HOMES2_SPEC_VERSION)
+        check("homes-2-pair-unactivated-cannot-eval", _hp.status == CANNOT_EVALUATE
+              and _hp.checks["C-MANIFEST"] == "CANNOT-EVALUATE"
+              and any("does not activate" in m for m in _hp.cannot_evaluate))
+        check("homes-2-pair-unactivated-legacy-graded", tuple(_hp.checks) == REQUIRED_CHECKS
+              and not _hp.findings and all(v == "PASS" for c, v in _hp.checks.items() if c != "C-MANIFEST"))
+        # A malformed declaration is the validator finding alone, never a second homes message.
+        check("homes-malformed-one-message", len(homes_messages(homes_store(homes=3))) == 1)
+        # With the ceiling raised to 2 the pair grades as homes 2 and C-MANIFEST passes, homes = 1 stays
+        # VALID, homes = 2 at the base spec_version is still the finding, and homes = 3 is still the
+        # validator finding alone.
+        _real_homes = _opf_store.SUPPORTED_HOMES
+        _opf_store.SUPPORTED_HOMES = 2
+        try:
+            _hpa = homes_store(homes=2, spec_version=_opf_store.HOMES2_SPEC_VERSION)
+            _h1a = homes_store(homes=1)
+            _h2a = homes_store(homes=2)
+            _h3a = homes_store(homes=3)
+        finally:
+            _opf_store.SUPPORTED_HOMES = _real_homes
+        check("homes-2-pair-activated-no-homes-message", _hpa.checks["C-MANIFEST"] == "PASS"
+              and "C-EVIDENCE-ENUM" in _hpa.checks and not homes_messages(_hpa))
+        check("homes-1-activated-valid", _h1a.status == VALID)
+        check("homes-2-base-version-activated-finding", _h2a.checks["C-MANIFEST"] == "FINDING")
+        check("homes-malformed-activated-one-message", len(homes_messages(_h3a)) == 1)
         # F6.5: index unknown-top-level-key finding (_index_rows).
         f = clean_machine()
         ibad = idx([bi(1, "done"), bi(2, "open")])

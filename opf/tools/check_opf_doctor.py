@@ -26,7 +26,9 @@ same leg gates real store integrity with no change.
 --self-test builds SYNTHETIC COMMITTED stores in a tempdir and asserts that 0/1/2/0 contract END TO END
 through opf.py: 0 on a clean, validate_store-VALID committed store; 1 after a one-field working-tree mutation
 of an immutable record body (a resurrection finding against the committed prior); 2 on a broken store (an
-unparseable manifest); and 0 (NOT APPLICABLE) on a non-adopter root. The enforcement-pack CI floor rides the
+unparseable manifest); and 0 (NOT APPLICABLE) on a non-adopter root. A store declaring homes = 1 stays 0, and
+homes = 2 at the base spec_version (a C-MANIFEST finding) and the reserved homes-2 pair above the tooling
+ceiling (a C-MANIFEST cannot-evaluate) are each 2, never VALID. The enforcement-pack CI floor rides the
 same fixtures: `doctor --require-store` keeps 0 on the clean store and turns the non-adopter root into 2, and
 the shipped recipe opf/enforcement/ci/opf-ci.sh (doctor --require-store, then render --check) exits 0 on the
 clean store and 2 on the non-adopter root, in both the one-operand and the documented NO-OPERAND arity
@@ -498,6 +500,19 @@ def _self_test_isolated():
             raise OSError("could not launch the render child for root {} ({})".format(root, exc))
         return proc.returncode
 
+    def _doctor_output(root):
+        """Run opf.py doctor --root <root> isolated (-I -B) and return its exit status unmasked with its
+        stdout, so a vector can name the check that decided the verdict. A launch failure raises OSError (a
+        harness error, exit 2 via _classify)."""
+        tools_dir = Path(__file__).resolve().parent
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-I", "-B", str(tools_dir / "opf.py"), "doctor", "--root", str(root)],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        except OSError as exc:
+            raise OSError("could not launch the doctor child for root {} ({})".format(root, exc))
+        return proc.returncode, proc.stdout.decode("utf-8", "replace")
+
     def _tree_digest(root, home):
         """A snapshot asserting the recipe's read-only claim. It covers EXACTLY these legs: (1) every
         entry under `root` recorded through os.lstat (relpath -> kind, mode, and a regular file's
@@ -596,6 +611,26 @@ def _self_test_isolated():
             clean.mkdir()
             _commit_store(clean, home, clean_machine())
             expect("clean-store", _run_doctor(clean, capture=True), EXIT_OK)
+
+            # Declared versus graded homes (spec 4.2/9.2). The clean store above is the legacy store with no
+            # homes key (0), and a store declaring homes = 1 stays 0. homes = 2 at the base spec_version is a
+            # C-MANIFEST finding, which stops traversal like any manifest finding (2), and the reserved pair,
+            # spec_version 2.0.0 with homes = 2, above the ceiling of this tooling is a C-MANIFEST
+            # cannot-evaluate (2). Before doctor compared the two, both homes-2 stores read VALID (0).
+            expect("clean-store-declares-no-homes", "homes" in clean_machine()["manifest.toml"]["opf"], False)
+            for label, declared, want, verdict in (
+                    ("homes-1-store", {"homes": 1}, EXIT_OK, "PASS"),
+                    ("homes-2-base-version-store", {"homes": 2}, EXIT_ERROR, "FINDING"),
+                    ("homes-2-pair-store", {"homes": 2, "spec_version": _opf_store.HOMES2_SPEC_VERSION},
+                     EXIT_ERROR, "CANNOT-EVALUATE")):
+                homes_root = base / label
+                homes_root.mkdir()
+                machine = clean_machine()
+                machine["manifest.toml"]["opf"].update(declared)
+                _commit_store(homes_root, home, machine)
+                rc, out = _doctor_output(homes_root)
+                expect(label, rc, want)
+                expect(label + "-c-manifest", ("  C-MANIFEST: " + verdict) in out.splitlines(), True)
 
             # A one-field working-tree mutation of an IMMUTABLE done record body (title t -> tampered),
             # UNCOMMITTED, so the committed prior digest disagrees -> a C-HISTORY-RESURRECTION finding ->
