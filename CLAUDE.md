@@ -69,12 +69,12 @@ the Checks API) and never `commits/<sha>/status` (which always reads pending). T
 toward the full pack roster (portability, dogfood and adapter parity, version monotonicity).
 
 CI runs two Python legs. Two required jobs in `.github/workflows/quality.yml`, `opf-host-patch` and
-`git-fixture-env-host-patch`, run the OPF tooling self-test and the git-fixture-env behaviour self-test on
+`git-fixture-env-host-patch`, run the OPF tooling self-test and the four git-fixture-env suites on
 the exact patch release the maintainer host runs, named in `.aiqt/python-host.toml`, on
 `runs-on: ubuntu-24.04`. Every other job there that sets up Python pins `3.14` (the Quality gates job sets
 up none); with `check-latest` off, setup-python may resolve that pin to a 3.14 already on the runner rather
 than the newest patch release. Every other job in `quality.yml` stays required. The host jobs add CI time,
-a cost accepted for this signal: the OPF tooling self-test and the git-fixture-env suite each run twice in
+a cost accepted for this signal: the OPF tooling self-test and the four git-fixture-env suites each run twice in
 every run, and an edit to a pull request's title or body starts a run. A passing local suite on the host
 patch then predicts a required CI leg; a failure on the `3.14` legs alone is diagnostic evidence of a
 patch-release difference, not proof that the change is innocent (a change once passed every local suite and

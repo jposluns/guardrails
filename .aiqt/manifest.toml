@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "a4bf02b0d815009cd704f1091f7e9149d576782d4a0d9b47cb513e99b3294156"
+tree-sha256 = "22500fa90012dbe8e5fd2e10d6a38ab60de9fb4b92381c84efa13c4ec41f36ca"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3431,13 +3431,13 @@ sha256 = "b7d2a32cfb4119adecc9f7e3a346215ca85eb92b9c5438c8215743944fbd8664"
 
 [[sources]]
 path = "tools/check_python_floor.py"
-bytes = 258848
-sha256 = "91d59dd6338ce0ff459dae3007158a8d0ad88d8eacba64beb0c474109d324c42"
+bytes = 261026
+sha256 = "cd588e0ff941a7c62872077e82bbd5ba808d0ba3a850f31f375ceeafc61d234e"
 
 [[sources]]
 path = "tools/check_python_host_pin.py"
-bytes = 207660
-sha256 = "ee27fccbbdb01d3ba3e351d14cf433ea808f200d63dc1c46075436c50b46b5b1"
+bytes = 228647
+sha256 = "28fbcbb861269ebf2568f1211ae5c5341c0fd77ae129daea148a049df82210f7"
 
 [[sources]]
 path = "tools/check_python_launcher_isolation.py"
@@ -3726,8 +3726,8 @@ sha256 = "345ecd2201864394181cf8b39dd604f06ac70a26407c8825310d95926600462f"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 76368
-sha256 = "bc5d7785da1ce8a91aa22eefcb99ada7f33f2edeb6d951c30ac435c8984ada28"
+bytes = 76568
+sha256 = "4ff7f6d1179e0c29297ed88d0aba68710cf54372c3a3097058ab0db03d454ed2"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
@@ -3776,8 +3776,8 @@ sha256 = "9159f0c51f6269626c2c446b4db76977b6d5fe84bc9cfe4cd9df50bafc6944f0"
 
 [[sources]]
 path = "tools/tomllib_parse_sites.toml"
-bytes = 22314
-sha256 = "311b5a1269b981e25558871305a4b6b8de4e9b7bce1218875582a8620bad498c"
+bytes = 23390
+sha256 = "2da2c7dcb86c981ae044c4a7458a5c635b6cc8b9e6af4c7143fbf4e4e3b79a70"
 
 [[artifacts]]
 artifact-id = "claude:.claude/RULES-INDEX.md"

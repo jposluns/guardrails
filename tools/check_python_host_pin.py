@@ -18,8 +18,9 @@ Legs, in order:
   source       the single source is a regular UTF-8 file that parses and carries exactly the keys
                format-version (the integer 1) and python-host-patch (a "MAJOR.MINOR.PATCH" string with no
                leading zero and at most four digits in each component, PATCH_RE); anything else is
-               cannot-evaluate, and so is a source that tomllib refuses with a RecursionError (deep nesting)
-               or a bare ValueError (an over-long integer), and a component that does not convert.
+               cannot-evaluate, and so is a source that tomllib refuses with a RecursionError (deep nesting),
+               a bare ValueError (an over-long integer) or a MemoryError, and a component that does not
+               convert.
   jobs         .github/workflows/quality.yml carries each HOST_JOBS job, and its top level and each such
                job are whole (JOB_RULES):
                  workflow-keys  the workflow carries no top-level key but name, on, permissions and jobs
@@ -45,10 +46,21 @@ Legs, in order:
                                 as the pin);
                  pin            that python-version is the host patch;
                  gate-step      the step right after the setup-python step is the Python host pin step, an
-                                executable step (no key but name and run) whose run: is GATE_RUN;
-                 suite-step     an executable step after the setup-python step runs the job's suite,
-                                HOST_SUITES (opf-host-patch: the OPF tooling self-test;
-                                git-fixture-env-host-patch: the git-fixture-env behaviour self-test);
+                                executable step whose run: is GATE_RUN; an executable step carries
+                                exactly the keys name, run and shell, with shell: bash (RUN_KEYS,
+                                STEP_SHELL: tools/check_ci_parity.py binds that line on every run:
+                                step, and this gate accepts only that exact value), so a step with
+                                no shell: and a shell: other than bash are each refused in their own
+                                words, and so are any other key and a missing name:;
+                 suite-step     the job's suite steps, each step whose run: is a HOST_SUITES run or
+                                names a suite runner (SUITE_RUNNERS) by a token's normpath base name
+                                (_suite_shaped), run exactly the job's HOST_SUITES tuple, in that
+                                order, none omitted, repeated or added, each an executable step after
+                                the setup-python step, so after the Python host pin step
+                                (opf-host-patch: the OPF tooling self-test; git-fixture-env-host-patch:
+                                the four git-fixture-env suites the '3.14' jobs run as separate lanes,
+                                core, config-combined, config-malformed and config-system, in that
+                                order);
                  outside-judge  the judge step holds its place: exactly one step outside the HOST_JOBS
                                 jobs runs this gate with --jobs-only (JOBS_ONLY_RUN) as its own run:
                                 command, judged by command tokens, never by exact text. EVERY job
@@ -95,7 +107,8 @@ Legs, in order:
                                 naming either literal (a matrix or include value, an env value, a
                                 with: input, a name: or a bare list item among them), are each a
                                 finding: only a step's own run: may carry the judge. The counted step
-                                carries no key but name and run; no non-comment line of a HOST_JOBS
+                                carries exactly name, run and shell: bash (a missing shell: and a
+                                shell: other than bash each named); no non-comment line of a HOST_JOBS
                                 job names --jobs-only, and no run: line of a HOST_JOBS job names
                                 the flag's stem --jobs-o once every quote, backslash and dollar
                                 character is deleted from its raw text (a raw-text read, never
@@ -174,9 +187,11 @@ Legs, in order:
                                 path is exit 2 there, dynamic-target).
                So a top-level key outside TOP_KEYS, another runner or checkout, an env: on a
                host-patch job or on any of its steps, removing or moving a
-               host-patch job, its setup-python step, its Python host pin step or its suite step, changing a
-               job id or the command a held step runs, and disabling a held step (if:, continue-on-error:) are
-               each a finding. A display name (name:) is not held: it changes neither what a step runs nor how
+               host-patch job, its setup-python step, its Python host pin step or one of its suite steps,
+               omitting, reordering, repeating or adding a suite step, changing a job id or the command a held
+               step runs, and disabling or re-pointing a held step (if:, continue-on-error:,
+               working-directory:, a missing shell: or a shell: other than bash) are each a finding. A held
+               step carries a name:, but its display text is not held: it changes neither what a step runs nor how
                the Quality gates job reads a job's result, which is by job id. Jobs are read by a line model.
                A line that still carries a carriage return once its one trailing CR is removed, or carries
                U+0085, U+2028 or U+2029 (LINE_BREAKS, the set the python-floor gate refuses), is
@@ -218,7 +233,10 @@ Legs, in order:
                                         line-break refusal reads each line-break case; a copy without
                                         the control-character refusal reads each form-feed and
                                         vertical-tab case; a copy whose source parse maps only
-                                        TOMLDecodeError lets a parser RecursionError escape; and the
+                                        TOMLDecodeError lets a parser RecursionError escape, and a
+                                        copy whose source parse drops one of RecursionError,
+                                        MemoryError and ValueError lets that class, injected at the
+                                        parse, escape; and the
                                         --jobs-only CLI wiring runs through main() on a pristine copy,
                                         with a copy that stops forwarding the flag and a copy whose main
                                         returns 0 without evaluating each red
@@ -243,7 +261,7 @@ backslash or opening a YAML anchor, alias or tag, a pin line outside the strict 
 temporary storage).
 
 DISCLOSED RESIDUAL. The jobs leg reads only quality.yml: its top-level keys; in the HOST_JOBS jobs, their
-keys, runner, checkout step, the env: of every step, setup-python step, Python host pin step and suite step;
+keys, runner, checkout step, the env: of every step, setup-python step, Python host pin step and suite steps;
 and EVERY job outside those jobs, each read whole with the same job model extended by LITERAL (|) block
 scalars (every non-blank body line kept, #-leading lines included, a blank body line dropped, as the
 shell ignores one, and read line by line; a folded > opener is
@@ -265,20 +283,22 @@ expression or a line shlex cannot tokenize there is cannot-evaluate (outside-jud
 run: line carrying any character outside the closed safe set it is held to (HOST_RUN_SAFE: a dollar
 sign, a backquote, a brace, a bracket, a glob character, a redirection, a parenthesis and the other
 shell-active characters, each named) or one whose first word is a shell assignment (a PATH=
-prefix among them, the assignment named), and accepts a
-step-level shell:,
-working-directory: or if: on it, which changes what, where or whether that step runs; and what the suites
+prefix among them, the assignment named). This gate holds the Python host pin step and each suite
+step to exactly name, run and shell: bash, and the judge step too; on another step of a host-patch job
+it does not judge a working-directory:, an if: or a shell: other than bash, which changes what, where
+or whether that step runs; and what the suites
 test is theirs: a step whose run: command starts another interpreter, appends to GITHUB_PATH or GITHUB_ENV,
 changes the checked-out tree, uses a local or composite action, or names an executable that itself
 prints or re-interprets text (a script that echoes the flag, or env running its arguments as a
 command under an assignment, among them, out of a text grammar's reach) is not judged here.
-tools/check_ci_parity.py is the second holder for those edits: its step grammar accepts only name:, uses:,
-run:, env: and with: as step keys, so a step-level shell:, working-directory: or if: is cannot-evaluate for
-it (measured at this commit on an extra host-patch-job step carrying each of the three: this gate passed,
-check_ci_parity refused), and in every job it refuses a uses: of an action other than actions/checkout and
-actions/setup-python and a run: command outside its parity grammar. In CI the jobs leg runs inside the
-host-patch jobs (their Python host pin steps) and once outside them, as the --jobs-only judge step of the
-registry job, and the outside-judge rule holds that placement by the command tokens of every run: of
+tools/check_ci_parity.py is the second holder for those edits: it binds the exact line shell: bash on
+every step with a run: key, and its step grammar accepts only name:, uses:, run:, env:, with: and that
+line as step keys, so a working-directory:, an if: or any shell: other than shell: bash is
+cannot-evaluate for it (measured at this commit on an extra host-patch-job step carrying each of the
+three: this gate passed, check_ci_parity refused), and in every job it refuses a uses: of an action
+other than actions/checkout and actions/setup-python and a run: command outside its parity grammar. In
+CI the jobs leg runs inside the host-patch jobs (their Python host pin steps) and once outside them, as
+the --jobs-only judge step of the registry job, and the outside-judge rule holds that placement by the command tokens of every run: of
 every outside job and the raw-text flag read of every run: of the host-patch jobs, so moving the
 judge into a
 host-patch job (a quote-spliced spelling among them), removing it, doubling it in any spelling
@@ -287,7 +307,8 @@ space, a ./tools/ path, quoted trailing whitespace, a quote-spliced path or flag
 literal block scalar among them), running any other judge-shaped command outside the
 host-patch jobs, naming this gate's file name or the flag in a value that is not a step's own run:
 property (a matrix or include value, an env value, a with: input or a job-level run: among them),
-putting a key beyond name and run on the judge step, or an env: on a job that carries a counted or
+putting a key beyond name, run and shell on the judge step or leaving it without shell: bash, or an
+env: on a job that carries a counted or
 judge-shaped step or on any of that job's steps is a finding; a line of any outside job the extended
 job model cannot read (a re-indented job body, a quoted env key, a flow-mapping step, a block opener
 carrying an indentation indicator, an anchor or an alias among them), a folded (>) block scalar of it
@@ -335,8 +356,8 @@ build's downstream patches and the system libraries an interpreter links (OpenSS
 others) can differ between the host and the runner, and this gate does not compare them. It does not check
 that the committed patch is what the host runs: when the host interpreter changes, the maintainer updates the
 source and both host-patch pins in one reviewed change, and until then every local run fails on the
-interpreter leg. CI cost: the two jobs run the OPF tooling self-test and the git-fixture-env suite a second
-time in every run of the workflow, and an edit to a pull request's title or body starts a run (the workflow
+interpreter leg. CI cost: the two jobs run the OPF tooling self-test and the four git-fixture-env suites a
+second time in every run of the workflow, and an edit to a pull request's title or body starts a run (the workflow
 runs on edited).
 
 Run this gate isolated: python3 -I -B tools/check_python_host_pin.py
@@ -369,15 +390,26 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCE_REL = ".aiqt/python-host.toml"
 SOURCE_KEYS = {"format-version", "python-host-patch"}
 WORKFLOW_REL = ".github/workflows/quality.yml"
-# The host-patch jobs of WORKFLOW_REL, each with the suite it exists to run (the run: text of one executable
-# step). tools/check_python_floor.py accepts a host-patch pin only inside these jobs; its HOST_JOBS names the
-# same jobs, which the self-test holds.
+# The host-patch jobs of WORKFLOW_REL, each with the ordered tuple of suites it exists to run (the run: text
+# of one executable step each, in this order): git-fixture-env-host-patch runs the four git-fixture-env
+# suites the '3.14' jobs run as separate lanes, in their order. tools/check_python_floor.py accepts a
+# host-patch pin only inside these jobs; its HOST_JOBS names the same jobs, which the self-test holds.
 HOST_SUITES = {
-    "opf-host-patch": "python3 -I -B opf/tools/opf.py --self-test",
-    "git-fixture-env-host-patch":
-        "python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-selftest",
+    "opf-host-patch": ("python3 -I -B opf/tools/opf.py --self-test",),
+    "git-fixture-env-host-patch": (
+        "python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-core",
+        "python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-combined",
+        "python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-malformed",
+        "python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-system"),
 }
 HOST_JOBS = tuple(HOST_SUITES)
+# Every suite run HOST_SUITES names, and the file names of the suite runners they run: a host-patch step
+# whose run: is one of SUITE_RUNS, or has a token whose os.path.normpath base name is in SUITE_RUNNERS, is a
+# suite step (_suite_shaped), so the suite-step rule holds every such step, an added, repeated or respelled
+# one included, never only the texts it wants.
+SUITE_RUNS = frozenset(run for runs in HOST_SUITES.values() for run in runs)
+SUITE_RUNNERS = frozenset(os.path.basename(token) for run in SUITE_RUNS for token in shlex.split(run)
+                          if token.endswith(".py"))
 # The path this gate runs as; _judge_shaped and _counts_as_judge read it from command tokens.
 GATE_PATH = "tools/check_python_host_pin.py"
 # The step right after a host-patch job's setup-python step: this gate, which fails there when the job does
@@ -397,7 +429,12 @@ CHECKOUT_USES = "actions/checkout@v4"
 CHECKOUT_KEYS = {"uses", "with"}
 CHECKOUT_INPUTS = {"fetch-depth": "0", "fetch-tags": "true"}
 SETUP_KEYS = {"name", "uses", "with"}
-RUN_KEYS = {"name", "run"}
+# The keys of an executable step (_step_departures): the Python host pin step, each suite step and the
+# --jobs-only judge step carry exactly these, with shell: bash (STEP_SHELL). tools/check_ci_parity.py binds
+# that line on every step with a run: key, and this gate accepts only that exact value, so a step with no
+# shell: and a shell: other than bash are each refused in their own words (_shell_departure).
+RUN_KEYS = frozenset({"name", "run", "shell"})
+STEP_SHELL = "bash"
 # The rules of the jobs leg; the self-test removes each from a copy of this gate to show its cases red on
 # revert.
 JOB_RULES = frozenset({"workflow-keys", "job-keys", "runner", "checkout", "step-env", "setup", "pin",
@@ -408,10 +445,10 @@ JOB_RULES = frozenset({"workflow-keys", "job-keys", "runner", "checkout", "step-
 # non-comment host-patch-job line names the flag and no run: line of a host-patch job names the
 # flag's stem once every quote, backslash and dollar character is deleted from its raw text
 # (_host_flag_findings, a raw-text read), exactly one step outside those jobs has the judge command's shlex
-# tokens as one line of its own run: property, with no other token-bearing line beside it and no key but
-# name and run, every other judge-shaped step and every other value naming GATE_BASENAME or the flag is
-# a finding, and no job that carries a counted or judge-shaped step, nor any step of such a job, carries
-# env:. EVERY job outside HOST_JOBS is read whole with the extended job model (_outside_entries /
+# tokens as one line of its own run: property, with no other token-bearing line beside it and exactly the
+# keys name, run and shell: bash, every other judge-shaped step and every other value naming
+# GATE_BASENAME or the flag is a finding, and no job that carries a counted or judge-shaped step, nor
+# any step of such a job, carries env:. EVERY job outside HOST_JOBS is read whole with the extended job model (_outside_entries /
 # _job_tree), never selected by literal text; a line of it that model cannot read is cannot-evaluate,
 # and a non-comment line of any outside job, a literal block's body lines included, carrying a backslash
 # or opening a YAML anchor, alias or tag is cannot-evaluate, never skipped
@@ -443,16 +480,19 @@ JOBS_ONLY_STEM = "--jobs-o"
 # set refuses each of them by the character it must spell. An eval needs no refused character, so
 # the grammar does not refuse one spelled only in safe characters: its line is read by the deletion
 # read like any other. A ${{ }} expression is refused first, with its own wording
-# (_run_line_tokens runs before this scan). The committed host-patch jobs carry five run: lines with
-# four distinct texts, each ASCII letters, digits, spaces and the - _ . / punctuation, so each
+# (_run_line_tokens runs before this scan). The committed host-patch jobs carry eight run: lines with
+# seven distinct texts, each ASCII letters, digits, spaces and the - _ . / punctuation, so each
 # passes this grammar unchanged. A line the grammar admits is still cannot-evaluate (exit 2, the
 # assignment named) when its first word, once any leading HOST_RUN_PREFIX_WORDS are skipped, is a
 # shell assignment (HOST_RUN_ASSIGNMENT_RE, _leading_assignment): a PATH=tools:/usr/bin prefix is
-# spelled in safe characters only, yet it re-points which file the named command runs. RESIDUAL,
-# the set the module docstring lists: this gate accepts a step-level shell:, working-directory: or
-# if: on a host-patch step, which changes what, where or whether that step runs (under shell:
-# perl {0} the run: text is a perl program, and the safe-set reading above holds for a POSIX shell
-# only; the module docstring names tools/check_ci_parity.py as the second holder for those keys),
+# spelled in safe characters only, yet it re-points which file the named command runs. The held
+# steps (the Python host pin step and each suite step) carry exactly name, run and shell: bash
+# (RUN_KEYS, STEP_SHELL), so this safe-set reading of their run: lines is a bash reading. RESIDUAL,
+# the set the module docstring lists: on a host-patch step this gate does not hold (an extra step
+# such as the OPF job's Python host pin self-test step), it does not judge a working-directory:,
+# an if: or a shell: other than bash, which changes what, where or whether that step runs (under
+# shell: perl {0} the run: text is a perl program; the module docstring names
+# tools/check_ci_parity.py as the second holder for those keys),
 # and it does not judge a step whose run: command starts another interpreter, appends to
 # GITHUB_PATH or GITHUB_ENV, changes the checked-out tree, uses a local or composite action, or
 # names an executable that itself prints or re-interprets text (a script that echoes the flag, or
@@ -629,10 +669,11 @@ def load_source(root):
         data = tomllib.loads(_read_text(root / SOURCE_REL))
     except tomllib.TOMLDecodeError as exc:
         raise CannotEvaluate("{}: does not parse: {}".format(SOURCE_REL, exc))
-    # tomllib also raises a BARE ValueError on an integer literal past CPython's int-string limit, and a
+    # tomllib also raises a BARE ValueError on an integer literal past CPython's int-string limit, a
     # RecursionError on a deeply nested array or inline table or, in a release that bounds key depth, on a
-    # key of more than 1000 dotted parts: each is cannot-evaluate, never a traceback.
-    except (ValueError, RecursionError) as exc:
+    # key of more than 1000 dotted parts, and a MemoryError on a source too large for the memory left:
+    # each is cannot-evaluate, never a traceback.
+    except (ValueError, RecursionError, MemoryError) as exc:
         raise CannotEvaluate("{}: does not parse ({}): {}".format(SOURCE_REL, type(exc).__name__, exc))
     if set(data) != SOURCE_KEYS:
         raise CannotEvaluate("{}: keys {} (want exactly {})".format(
@@ -744,9 +785,53 @@ def _count_key(node, key):
     return 0
 
 
-def _executes(step, command):
-    """Whether a step runs command and nothing can skip or mask it: no key but name and run."""
-    return step.get("run") == command and set(step) <= RUN_KEYS
+def _shell_departure(step):
+    """The words of how a step's shell: departs from shell: bash (STEP_SHELL), or None when it carries
+    exactly that value: a step with no shell: key and a shell: whose parsed value is anything other than
+    the string bash (bash -e {0}, Bash, perl {0} or an empty value among them) are each named in their
+    own words. A quoted 'bash' parses to that string and is accepted; tools/check_ci_parity.py, which
+    reads the literal line shell: bash, refuses that spelling there."""
+    if "shell" not in step:
+        return "carries no shell: (want shell: bash)"
+    if step["shell"] != STEP_SHELL:
+        return "carries shell: {!r}, not shell: bash".format(step["shell"])
+    return None
+
+
+def _step_departures(step):
+    """Each way a step departs from an executable step, in its own words (an empty list when it is one):
+    an executable step carries exactly the keys RUN_KEYS (name, run and shell) with shell: bash, so a
+    step with no shell: or another shell (_shell_departure), a key beyond RUN_KEYS (an if:,
+    continue-on-error:, working-directory: or env: among them, any of which can skip, mask or change
+    what it runs) and a missing name: are each named."""
+    shell = _shell_departure(step)
+    departures = [] if shell is None else [shell]
+    departures.extend("carries {}:, which can skip, mask or change what it runs".format(key)
+                      for key in sorted(set(step) - RUN_KEYS))
+    if "name" not in step:
+        departures.append("carries no name:")
+    return departures
+
+
+def _suite_shaped(step):
+    """Whether a host-patch step is a suite step: its run: is one of SUITE_RUNS, or a token of one of its
+    lines (shlex, POSIX) has an os.path.normpath base name in SUITE_RUNNERS (a respelled, renamed or
+    other suite of a suite runner among them). A run: line shlex cannot tokenize counts as one, so it
+    is held, never passed unread (_host_flag_findings refuses such a line first while the outside-judge
+    rule runs)."""
+    run = step.get("run")
+    if not isinstance(run, str):
+        return False
+    if run in SUITE_RUNS:
+        return True
+    for text in run.split("\n"):
+        try:
+            tokens = shlex.split(text)
+        except ValueError:
+            return True
+        if any(os.path.basename(os.path.normpath(token)) in SUITE_RUNNERS for token in tokens):
+            return True
+    return False
 
 
 def _judge_text(text):
@@ -1076,12 +1161,43 @@ def _host_job_findings(job, tree, want):
         found.append("{}:{}: python-version {!r} in the host-patch job {} differs from the host patch {!r} "
                      "that {} names".format(WORKFLOW_REL, value.line, str(value), job, want, SOURCE_REL))
     after = setups[0] + 1
-    if "gate-step" in JOB_RULES and not (after < len(steps) and _executes(steps[after], GATE_RUN)):
+    gate = steps[after] if after < len(steps) else {}
+    if "gate-step" in JOB_RULES and gate.get("run") != GATE_RUN:
         found.append("{}: the step right after its setup-python step is not the Python host pin step, an "
-                     "executable step (no key but name and run) that runs {}".format(where, GATE_RUN))
-    if "suite-step" in JOB_RULES and not any(_executes(step, HOST_SUITES[job]) for step in steps[after:]):
-        found.append("{} does not run its suite: no executable step (no key but name and run) after its "
-                     "setup-python step runs {}".format(where, HOST_SUITES[job]))
+                     "executable step (exactly name, run and shell: bash) that runs {}".format(where, GATE_RUN))
+    elif "gate-step" in JOB_RULES and _step_departures(gate):
+        found.append("{}: the step right after its setup-python step is not the Python host pin step: it runs "
+                     "{} but {} (an executable step carries exactly name, run and shell: bash)".format(
+                         where, GATE_RUN, "; ".join(_step_departures(gate))))
+    if "suite-step" in JOB_RULES:
+        found.extend(_suite_findings(where, job, steps, after))
+    return found
+
+
+def _suite_findings(where, job, steps, after):
+    """The suite-step rule for one host-patch job: its suite steps (_suite_shaped) run exactly
+    HOST_SUITES[job], in that order, none omitted, repeated or added; each sits after the job's
+    setup-python step (index after or later; the gate-step rule holds the Python host pin step at index
+    after, so the suites follow it); and each is an executable step (_step_departures)."""
+    want = HOST_SUITES[job]
+    carried = [(index, step) for index, step in enumerate(steps) if _suite_shaped(step)]
+    got = tuple(str(step["run"]) for index, step in carried)
+    found = []
+    if got != want:
+        why = (["omits " + run for run in want if run not in got]
+               + ["adds " + run for run in dict.fromkeys(got) if run not in want]
+               + ["repeats " + run for run in want if got.count(run) > 1])
+        found.append("{} does not run its suite steps as HOST_SUITES lists them (exactly {} suite step(s) "
+                     "after its setup-python step, in this order: {}): it {}".format(
+                         where, len(want), ", ".join(want), "; ".join(why) or "runs them in another order"))
+    for index, step in carried:
+        if index < after:
+            found.append("{} does not run its suite {} after its setup-python step: step {} runs it "
+                         "before".format(where, step["run"], index + 1))
+        if _step_departures(step):
+            found.append("{} does not run its suite {} as an executable step: step {} {} (an executable "
+                         "step carries exactly name, run and shell: bash)".format(
+                             where, step["run"], index + 1, "; ".join(_step_departures(step))))
     return found
 
 
@@ -1203,7 +1319,8 @@ def _judge_findings(host_judges, other_lines, other_raw, headers):
     whose tokens are judge-shaped or the judge's or whose text names either literal (_other_runs), and
     any other scalar value naming either literal (_judge_values), are each a finding: only a step's
     own run: may carry the judge. Exactly one step outside the host-patch jobs runs JOBS_ONLY_RUN; that
-    step carries no key but name and run; no non-comment host-patch-job line names the flag; and no job
+    step carries exactly name, run and shell: bash (a missing shell:, a shell: other than bash and a
+    missing name: each named); no non-comment host-patch-job line names the flag; and no job
     that carries a counted or judge-shaped step, nor any step of such a job, carries env: (in CI a
     job-level env: such as a BASH_ENV value can silence every step of the carrying job, an env: on the
     judge step the judge itself, and an env: on an earlier step every later step of the job, through a
@@ -1290,8 +1407,18 @@ def _judge_findings(host_judges, other_lines, other_raw, headers):
                              else "an unresolved judge-shaped command")
                 for key in sorted(set(step) - RUN_KEYS - {"env"}):
                     found.append("{}:{}: the step that carries {} carries {}:, which can skip, mask "
-                                 "or change what it runs (the judge step carries no key but name and "
-                                 "run)".format(WORKFLOW_REL, step.lines[key], step_kind, key))
+                                 "or change what it runs (the judge step carries exactly name, run and "
+                                 "shell: bash)".format(WORKFLOW_REL, step.lines[key], step_kind, key))
+                shell = _shell_departure(step)
+                if shell is not None:
+                    found.append("{}:{}: the step that carries {} {}: tools/check_ci_parity.py binds "
+                                 "shell: bash on every run: step, and the judge step carries exactly that "
+                                 "value".format(WORKFLOW_REL, step.lines.get("shell", step.lines.get("run")),
+                                                step_kind, shell))
+                if "name" not in step:
+                    found.append("{}:{}: the step that carries {} carries no name: (the judge step carries "
+                                 "exactly name, run and shell: bash)".format(
+                                     WORKFLOW_REL, step.lines.get("run"), step_kind))
             if "env" not in step:
                 continue
             number = step.lines["env"]
@@ -1437,9 +1564,10 @@ def evaluate(root, version, jobs_only=False):
         return 1, ["FAIL: " + finding for finding in findings]
     report = ("PASS: python host patch {} ({}): {} carries only the top-level keys {}, its host-patch jobs "
               "{} each run on {}, carry env: on no job key or step, check out as written, pin it in their "
-              "one setup-python step, run this gate right after it and run their suite, every run: of "
+              "one setup-python step, run this gate right after it and run their suites in order, each "
+              "held step with exactly name, run and shell: bash, every run: of "
               "every job outside them is tokenized line by line, and one step outside them carries the jobs leg's "
-              "--jobs-only judge as its own run: command with no key but name and run, its job and "
+              "--jobs-only judge as its own run: command with exactly name, run and shell: bash, its job and "
               "every step of that job free of env:".format(
                   _patch_text(patch), SOURCE_REL, WORKFLOW_REL, ", ".join(TOP_KEYS), ", ".join(HOST_JOBS),
                   RUNNER))
@@ -1465,9 +1593,11 @@ FLOOR_JOB = ("  floor:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ac
              "      - uses: actions/setup-python@v5\n        with:\n          python-version: '3.14'\n"
              "      - run: python3 -I -B tools/x.py\n")
 SETUP_STEP = "      - uses: actions/setup-python@v5\n        with:\n          " + PIN + "\n\n"
-GATE_STEP = "      - name: Python host pin\n        run: " + GATE_RUN + "\n\n"
-JUDGE_STEP = ("      - name: Python host pin (jobs leg, outside the host-patch jobs)\n"
-              "        run: " + JOBS_ONLY_RUN + "\n")
+# Each held step carries exactly name, run and shell: bash, as quality.yml writes it.
+SHELL_LINE = "        shell: bash\n"
+GATE_STEP = "      - name: Python host pin\n" + SHELL_LINE + "        run: " + GATE_RUN + "\n\n"
+JUDGE_STEP = ("      - name: Python host pin (jobs leg, outside the host-patch jobs)\n" + SHELL_LINE
+              + "        run: " + JOBS_ONLY_RUN + "\n")
 REGISTRY_JOB = ("  registry:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n"
                 "      - uses: actions/setup-python@v5\n        with:\n          python-version: '3.14'\n"
                 + JUDGE_STEP)
@@ -1519,7 +1649,11 @@ def _mutant(base, name, source, edits):
 
 
 def _suite_step(job):
-    return "      - name: Suite\n        run: " + HOST_SUITES[job] + "\n"
+    """The suite steps of a host-patch job, one executable step per HOST_SUITES run, in order: the first
+    named Suite and each later one Suite 2, Suite 3 and so on, so an edit anchored on one name line
+    meets exactly one step."""
+    return "".join("      - name: Suite{}\n".format(" {}".format(number) if number > 1 else "") + SHELL_LINE
+                   + "        run: " + run + "\n" for number, run in enumerate(HOST_SUITES[job], 1))
 
 
 def _committed_host_runs():
@@ -1593,7 +1727,7 @@ def _outcome(evaluate_tree, root, version, marker):
     parser exception escapes it."""
     try:
         code, lines = evaluate_tree(root, version)
-    except (RecursionError, ValueError) as exc:
+    except (RecursionError, ValueError, MemoryError) as exc:
         return "raised " + type(exc).__name__
     return code, _has(lines, marker)
 
@@ -1603,11 +1737,12 @@ class _ParserMismatch(Exception):
     wraps."""
 
 
-def _key_depth_bounded(real, calls):
+def _key_depth_bounded(real, calls, kind=RecursionError):
     """tomllib's key parser, made to raise RecursionError on a key of more than 1000 dotted parts, as a
-    release that bounds key depth does. calls records each call; a call or a result that does not fit
-    parse_key(src, pos) -> (pos, key), pos an int within src and key a tuple of str, raises
-    _ParserMismatch."""
+    release that bounds key depth does, or kind (MemoryError or ValueError, to inject that class at the
+    parse: real memory exhaustion cannot be provoked safely). calls records each call; a call or a
+    result that does not fit parse_key(src, pos) -> (pos, key), pos an int within src and key a tuple of
+    str, raises _ParserMismatch."""
     def parse_key(*args, **kwargs):
         calls.append(len(args))
         try:
@@ -1623,14 +1758,15 @@ def _key_depth_bounded(real, calls):
         if not (isinstance(result[1], tuple) and all(isinstance(part, str) for part in result[1])):
             raise _ParserMismatch("it returned the key {!r:.60}, not a tuple of str".format(result[1]))
         if len(result[1]) > 1000:
-            raise RecursionError("injected: a key of more than 1000 dotted parts")
+            raise kind("injected: a key of more than 1000 dotted parts")
         return result
     return parse_key
 
 
-def _parse_refusal(evaluate_tree, root, bound):
+def _parse_refusal(evaluate_tree, root, bound, kind=RecursionError):
     """(exit code, whether the report says the source does not parse) for evaluate_tree over root at HOST,
-    with tomllib's key parser bounded when bound is true; "raised NAME" when the exception escapes. The bound
+    with tomllib's key parser bounded when bound is true (raising kind, _key_depth_bounded); "raised NAME"
+    when the exception escapes. The bound
     patches a private tomllib function: on a release where it is missing, has another shape or is never
     called, the result is a text naming that cause, so the case fails cleanly rather than crashing."""
     parser = getattr(tomllib, "_parser", None)
@@ -1640,7 +1776,7 @@ def _parse_refusal(evaluate_tree, root, bound):
                 "key-depth case cannot run")
     calls = []
     if bound:
-        parser.parse_key = _key_depth_bounded(real, calls)
+        parser.parse_key = _key_depth_bounded(real, calls, kind)
     try:
         result = _outcome(evaluate_tree, root, HOST, SOURCE_REL + ": does not parse")
     except _ParserMismatch as exc:
@@ -1695,6 +1831,10 @@ def _job_cases():
     controls; a None case runs no rule-removal copy, so it is red through its exit code and finding
     marker alone)."""
     suite = {job: _suite_step(job) for job in HOST_JOBS}
+    # The four git-fixture-env suite steps, each a whole step text, in HOST_SUITES order.
+    lanes = ["      - name: Suite" + text for text in suite[GFE].split("      - name: Suite")[1:]]
+    floor_suite = "python3 -I -B tools/check_selftest_execution.py --suite python-floor-selftest"
+    retired_suite = "python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-selftest"
     gate_name = "      - name: Python host pin\n"
     suite_name = "      - name: Suite\n"
     setup_uses = "      - uses: actions/setup-python@v5\n"
@@ -1753,7 +1893,7 @@ def _job_cases():
         ("jobs/git-fixture-env-suite-removed-finding", ((GFE, suite[GFE], ""),), (),
          GFE + " does not run its suite", "suite-step"),
         ("jobs/suite-renamed-finding",
-         ((GFE, "--suite git-fixture-env-selftest", "--suite python-floor-selftest"),), (),
+         ((GFE, "--suite git-fixture-env-core", "--suite python-floor-selftest"),), (),
          GFE + " does not run its suite", "suite-step"),
         ("jobs/suite-before-setup-finding",
          ((OPF, suite[OPF], ""), (OPF, SETUP_STEP, suite[OPF] + "\n" + SETUP_STEP)), (),
@@ -1763,6 +1903,28 @@ def _job_cases():
         ("jobs/suite-step-continue-on-error-finding",
          ((OPF, suite_name, suite_name + "        continue-on-error: true\n"),), (),
          "opf-host-patch does not run its suite", "suite-step"),
+        # The git-fixture-env job runs the four split suites, each its own step, in HOST_SUITES order:
+        # omitting, reordering, repeating or adding a suite step (a renamed, retired or respelled suite
+        # of a suite runner, or another job's suite, among them) is each a finding.
+        ("jobs/git-fixture-env-suite-omitted-finding", ((GFE, lanes[2], ""),), (),
+         "it omits " + HOST_SUITES[GFE][2], "suite-step"),
+        ("jobs/git-fixture-env-suites-reordered-finding", ((GFE, lanes[0] + lanes[1], lanes[1] + lanes[0]),),
+         (), "it runs them in another order", "suite-step"),
+        ("jobs/git-fixture-env-suite-repeated-finding",
+         ((GFE, lanes[3], lanes[3] + lanes[0].replace("name: Suite\n", "name: Suite again\n")),), (),
+         "repeats " + HOST_SUITES[GFE][0], "suite-step"),
+        ("jobs/git-fixture-env-suite-added-finding",
+         ((GFE, lanes[3], lanes[3] + "      - name: Floor suite\n" + SHELL_LINE + "        run: " + floor_suite
+           + "\n"),), (), "adds " + floor_suite, "suite-step"),
+        ("jobs/git-fixture-env-retired-suite-added-finding",
+         ((GFE, lanes[3], lanes[3] + "      - name: Retired suite\n" + SHELL_LINE + "        run: "
+           + retired_suite + "\n"),), (), "adds " + retired_suite, "suite-step"),
+        ("jobs/git-fixture-env-suite-respelled-finding",
+         ((GFE, "run: " + HOST_SUITES[GFE][0], "run: " + HOST_SUITES[GFE][0].replace("tools/", "./tools/")),),
+         (), "adds " + HOST_SUITES[GFE][0].replace("tools/", "./tools/"), "suite-step"),
+        ("jobs/opf-other-job-suite-added-finding",
+         ((OPF, suite[OPF], suite[OPF] + lanes[0].replace("name: Suite\n", "name: Extra suite\n")),), (),
+         "adds " + HOST_SUITES[GFE][0], "suite-step"),
         ("jobs/job-if-finding", ((OPF, runs, "    if: false\n" + runs),), (),
          "opf-host-patch carries if:", "job-keys"),
         ("jobs/job-continue-on-error-finding", ((GFE, runs, "    continue-on-error: true\n" + runs),), (),
@@ -1875,8 +2037,8 @@ def _job_cases():
          (("registry", JUDGE_STEP,
            JUDGE_STEP + second + "      - run:\t" + JOBS_ONLY_RUN + "\n"),), (),
          "2 steps outside the host-patch jobs run", "outside-judge"),
-        # The judge step carries no key but name and run: any other key on it (an if: among them) can
-        # skip, mask or change what it runs, so it is a finding.
+        # The judge step carries exactly name, run and shell: bash: any other key on it (an if: among
+        # them) can skip, mask or change what it runs, so it is a finding.
         ("jobs/jobs-only-step-if-finding",
          (("registry", JUDGE_STEP, JUDGE_STEP + "        if: false\n"),), (),
          "the step that carries the --jobs-only judge carries if:", "outside-judge"),
@@ -2116,7 +2278,7 @@ def _self_test_cases(base):
     model = "this job model cannot read it"
     for check_id, edits, marker in (
             ("jobs/block-scalar-run-cannot-evaluate",
-             ((OPF, "run: " + HOST_SUITES[OPF], "run: |\n          " + HOST_SUITES[OPF]),), model),
+             ((OPF, "run: " + HOST_SUITES[OPF][0], "run: |\n          " + HOST_SUITES[OPF][0]),), model),
             ("jobs/flow-runner-cannot-evaluate", ((GFE, "runs-on: " + RUNNER, "runs-on: [" + RUNNER + "]"),),
              model),
             ("jobs/colon-in-plain-value-cannot-evaluate",
@@ -2669,19 +2831,115 @@ def _self_test_cases(base):
     check("jobs/host-job-assignment-argument-passes", evaluate(root, HOST)[0], 0)
 
     # Acceptance controls read from the committed .github/workflows/quality.yml (ROOT), not from
-    # module constants: its host-patch jobs carry five run: lines with four distinct texts (the gate
-    # line in each job, the gate self-test line and the two suite lines), and each of them passes the
-    # closed grammar and the assignment refusal unchanged. Each check holds one text: how many
-    # committed lines carry it, and what each refusal returns for it.
+    # module constants: its host-patch jobs carry eight run: lines with seven distinct texts (the gate
+    # line in each job, the gate self-test line, the OPF suite line and the four git-fixture-env suite
+    # lines), and each of them passes the closed grammar and the assignment refusal unchanged. Each
+    # check holds its texts: how many committed lines carry each, and what each refusal returns for it.
     committed = _committed_host_runs()
-    for check_id, text, count in (
-            ("jobs/host-job-committed-gate-line-grammar-passes", GATE_RUN, 2),
-            ("jobs/host-job-committed-selftest-line-grammar-passes", GATE_RUN + " --self-test", 1),
+    for check_id, texts, count in (
+            ("jobs/host-job-committed-gate-line-grammar-passes", (GATE_RUN,), 2),
+            ("jobs/host-job-committed-selftest-line-grammar-passes", (GATE_RUN + " --self-test",), 1),
             ("jobs/host-job-committed-opf-suite-line-grammar-passes", HOST_SUITES[OPF], 1),
             ("jobs/host-job-committed-gfe-suite-line-grammar-passes", HOST_SUITES[GFE], 1)):
-        check(check_id, (committed.count(text), _refused_run_char(text), _leading_assignment(text)),
-              (count, None, None))
-    check("jobs/host-job-committed-run-lines-counted", (len(committed), len(set(committed))), (5, 4))
+        check(check_id, [(committed.count(text), _refused_run_char(text), _leading_assignment(text))
+                         for text in texts], [(count, None, None)] * len(texts))
+    check("jobs/host-job-committed-run-lines-counted", (len(committed), len(set(committed))), (8, 7))
+
+    # The step shape (RUN_KEYS, STEP_SHELL): the Python host pin step, each suite step and the --jobs-only
+    # judge step carry exactly name, run and shell, with shell: bash. A held step with no shell: or with
+    # a shell: other than bash (each end of the one accepted value: bash with arguments, Bash, a quoted
+    # 'bash ' and an empty value) is a finding in its own words, red in the copy with its rule removed
+    # and in the copy whose _shell_departure no longer names that departure; a working-directory:, an
+    # env: or a missing name: on a held step is a finding too. Exactly shell: bash, quoted or with a
+    # trailing comment, passes.
+    no_shell_mutant = _mutant(base, "python_host_pin_no_shell_mutant", source,
+                              (('if "shell" not in ' + 'step:\n        return',
+                                'if "shell" not in step:\n        return None\n    if False:\n        return'),))
+    other_shell_mutant = _mutant(base, "python_host_pin_other_shell_mutant", source,
+                                 (('if step["shell"] != ' + 'STEP_SHELL:', 'if False:'),))
+    gate_lines = SHELL_LINE + "        run: " + GATE_RUN + "\n"
+    judge_lines = SHELL_LINE + "        run: " + JOBS_ONLY_RUN + "\n"
+    core_lines = SHELL_LINE + "        run: " + HOST_SUITES[GFE][0] + "\n"
+    opf_lines = SHELL_LINE + "        run: " + HOST_SUITES[OPF][0] + "\n"
+
+    def shell(lines, value):
+        return lines.replace(SHELL_LINE, "        shell:" + (" " + value if value else "") + "\n")
+
+    judge_carries = "the step that carries the --jobs-only judge carries "
+    core_step = "does not run its suite {} as an executable step: step 4 ".format(HOST_SUITES[GFE][0])
+    opf_step = "does not run its suite {} as an executable step: step 4 ".format(HOST_SUITES[OPF][0])
+    for check_id, edits, marker, rule, mutant in (
+            ("jobs/gate-step-no-shell-finding", ((OPF, gate_lines, gate_lines.replace(SHELL_LINE, "")),),
+             "but carries no shell: (want shell: bash)", "gate-step", no_shell_mutant),
+            ("jobs/gate-step-other-shell-finding", ((GFE, gate_lines, shell(gate_lines, "perl {0}")),),
+             "but carries shell: 'perl {0}', not shell: bash", "gate-step", other_shell_mutant),
+            ("jobs/gate-step-shell-bash-arguments-finding", ((OPF, gate_lines, shell(gate_lines, "bash -e {0}")),),
+             "but carries shell: 'bash -e {0}', not shell: bash", "gate-step", other_shell_mutant),
+            ("jobs/gate-step-shell-upper-case-finding", ((OPF, gate_lines, shell(gate_lines, "Bash")),),
+             "but carries shell: 'Bash', not shell: bash", "gate-step", other_shell_mutant),
+            ("jobs/gate-step-shell-quoted-trailing-space-finding",
+             ((OPF, gate_lines, shell(gate_lines, "'bash '")),),
+             "but carries shell: 'bash ', not shell: bash", "gate-step", other_shell_mutant),
+            ("jobs/gate-step-empty-shell-finding", ((GFE, gate_lines, shell(gate_lines, "")),),
+             "but carries shell: None, not shell: bash", "gate-step", other_shell_mutant),
+            ("jobs/suite-step-no-shell-finding", ((GFE, core_lines, core_lines.replace(SHELL_LINE, "")),),
+             core_step + "carries no shell: (want shell: bash)", "suite-step", no_shell_mutant),
+            ("jobs/suite-step-other-shell-finding", ((OPF, opf_lines, shell(opf_lines, "sh")),),
+             opf_step + "carries shell: 'sh', not shell: bash", "suite-step", other_shell_mutant),
+            ("jobs/jobs-only-step-no-shell-finding",
+             (("registry", judge_lines, judge_lines.replace(SHELL_LINE, "")),),
+             judge_carries + "no shell: (want shell: bash)", "outside-judge", no_shell_mutant),
+            ("jobs/jobs-only-step-other-shell-finding", (("registry", judge_lines, shell(judge_lines, "pwsh")),),
+             judge_carries + "shell: 'pwsh', not shell: bash", "outside-judge", other_shell_mutant),
+            ("jobs/gate-step-working-directory-finding",
+             ((OPF, gate_lines, "        working-directory: opf\n" + gate_lines),),
+             "but carries working-directory:, which can skip", "gate-step", None),
+            ("jobs/jobs-only-step-working-directory-finding",
+             (("registry", judge_lines, "        working-directory: tools\n" + judge_lines),),
+             judge_carries + "working-directory:", "outside-judge", None),
+            ("jobs/gate-step-no-name-finding",
+             ((OPF, "      - name: Python host pin\n" + SHELL_LINE, "      - shell: bash\n"),),
+             "but carries no name:", "gate-step", None),
+            ("jobs/jobs-only-step-no-name-finding",
+             (("registry", "      - name: Python host pin (jobs leg, outside the host-patch jobs)\n" + SHELL_LINE,
+               "      - shell: bash\n"),),
+             judge_carries + "no name:", "outside-judge", None),
+            # An env: on the Python host pin step: the step-env and gate-step rules both refuse it.
+            ("jobs/gate-step-env-finding",
+             ((GFE, gate_lines, gate_lines + "        env:\n          SAMPLE: value\n"),),
+             "but carries env:, which can skip", None, None)):
+        root = _fixture(base, workflow=_workflow(edits))
+        code, lines = evaluate(root, HOST)
+        got, want = (code, _has(lines, marker)), (1, True)
+        if rule is not None:
+            rules.JOB_RULES = JOB_RULES - {rule}
+            try:
+                got, want = got + (rules.evaluate(root, HOST)[0],), want + (0,)
+            finally:
+                rules.JOB_RULES = JOB_RULES
+        if mutant is not None:
+            got, want = got + (mutant.evaluate(root, HOST)[0],), want + (0,)
+        check(check_id, got, want)
+    for check_id, edits in (
+            ("jobs/gate-step-single-quoted-shell-passes", ((OPF, gate_lines, shell(gate_lines, "'bash'")),)),
+            ("jobs/jobs-only-step-double-quoted-shell-passes",
+             (("registry", judge_lines, shell(judge_lines, "\"bash\"")),)),
+            ("jobs/suite-step-shell-trailing-comment-passes",
+             ((GFE, core_lines, shell(core_lines, "bash  # the bound shell")),))):
+        check(check_id, evaluate(_fixture(base, workflow=_workflow(edits)), HOST)[0], 0)
+    # The suite-shape read: a suite of a suite runner that HOST_SUITES does not name is a suite step, so
+    # adding one is a finding; the copy whose _suite_shaped reads only the SUITE_RUNS texts passes it.
+    suite_shape_mutant = _mutant(base, "python_host_pin_suite_runs_only_mutant", source,
+                                 (("if any(os.path.basename(os.path.normpath(token)) in " + "SUITE_RUNNERS",
+                                   "if False and any(os.path.basename(os.path.normpath(token)) in "
+                                   + "SUITE_RUNNERS"),))
+    added = ("      - name: Floor suite\n" + SHELL_LINE
+             + "        run: python3 -I -B tools/check_selftest_execution.py --suite python-floor-selftest\n")
+    root = _fixture(base, workflow=_workflow(((GFE, _suite_step(GFE), _suite_step(GFE) + added),)))
+    code, lines = evaluate(root, HOST)
+    check("jobs/git-fixture-env-added-suite-shape-mutant-red",
+          (code, _has(lines, "adds python3 -I -B tools/check_selftest_execution.py --suite python-floor-selftest"),
+           suite_shape_mutant.evaluate(root, HOST)[0]), (1, True, 0))
 
     # FIX-529-R10: the number read is the conservative spelling classifier, which covers the
     # fractional sexagesimal forms the previous pattern missed; each vector is red under the mutant
@@ -2989,6 +3247,17 @@ def _self_test_cases(base):
         FAILURES.append("real/source: {}".format(exc))
     if real is not None:
         check("real/tree-passes-at-its-host-patch", evaluate(ROOT, real)[0], 0)
+    # The git-fixture-env host-patch suites are the '3.14' lanes of the committed workflow, in its order:
+    # the run: of every step outside HOST_JOBS that runs a git-fixture-env suite through the suite runner.
+    lane = "run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-"
+    lanes, job = [], None
+    for line in _read_text(ROOT / WORKFLOW_REL).split("\n"):
+        header = JOB_RE.fullmatch(line.rstrip("\r"))
+        if header is not None:
+            job = header.group("id")
+        elif job not in HOST_JOBS and line.strip().startswith(lane):
+            lanes.append(line.strip()[len("run: "):])
+    check("real/git-fixture-env-host-suites-are-the-lanes", tuple(lanes), HOST_SUITES[GFE])
     # The python-floor gate accepts a host-patch pin only inside these jobs of this workflow, read from this
     # source in this form, and refuses these line-break characters: its copies of those names must be these.
     floor = _copy(base, "python_floor_names", _read_text(ROOT / "tools" / "check_python_floor.py"))
@@ -3020,7 +3289,7 @@ def _red_on_revert(base):
               (1, True, 0))
     # The parse mapping: a copy whose load_source maps only TOMLDecodeError lets the injected key-depth
     # RecursionError escape, which the intact gate reports as cannot-evaluate.
-    anchor = "except (ValueError, " + "RecursionError) as exc:"
+    anchor = "except (ValueError, RecursionError, " + "MemoryError) as exc:"
     if source.count(anchor) != 1:
         raise CannotEvaluate("red-on-revert anchor for the parse mapping occurs {} times".format(
             source.count(anchor)))
@@ -3029,6 +3298,17 @@ def _red_on_revert(base):
     check("revert/parse-mapping",
           (_parse_refusal(evaluate, root, True), _parse_refusal(module.evaluate, root, True)),
           ((2, True), "raised RecursionError"))
+    # Each class the parse sites map (RecursionError, MemoryError and ValueError), INJECTED at tomllib's key
+    # parser on a key of more than 1000 dotted parts (real memory exhaustion cannot be provoked safely), is
+    # cannot-evaluate, never a traceback, and escapes the copy whose load_source no longer maps that class.
+    for check_id, kind, kept in (
+            ("source/injected-recursion-error-cannot-evaluate", RecursionError, "ValueError, MemoryError"),
+            ("source/injected-memory-error-cannot-evaluate", MemoryError, "ValueError, RecursionError"),
+            ("source/injected-value-error-cannot-evaluate", ValueError, "RecursionError, MemoryError")):
+        unmapped = _mutant(base, "python_host_pin_without_" + kind.__name__.lower(), source,
+                           ((anchor, "except (" + kept + ") as exc:"),))
+        check(check_id, (_parse_refusal(evaluate, root, True, kind),
+                         _parse_refusal(unmapped.evaluate, root, True, kind)), ((2, True), "raised " + kind.__name__))
 
 
 def self_test():

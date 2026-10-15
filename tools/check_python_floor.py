@@ -699,10 +699,11 @@ def load_host_patch(root):
         data = tomllib.loads(_read_text(root / HOST_SOURCE_REL))
     except tomllib.TOMLDecodeError as exc:
         raise CannotEvaluate("{}: does not parse: {}".format(HOST_SOURCE_REL, exc))
-    # tomllib also raises a BARE ValueError on an integer literal past CPython's int-string limit, and a
+    # tomllib also raises a BARE ValueError on an integer literal past CPython's int-string limit, a
     # RecursionError on a deeply nested array or inline table or, in a release that bounds key depth, on a
-    # key of more than 1000 dotted parts: each is cannot-evaluate, never a traceback.
-    except (ValueError, RecursionError) as exc:
+    # key of more than 1000 dotted parts, and a MemoryError on a source too large for the memory left:
+    # each is cannot-evaluate, never a traceback.
+    except (ValueError, RecursionError, MemoryError) as exc:
         raise CannotEvaluate("{}: does not parse ({}): {}".format(HOST_SOURCE_REL, type(exc).__name__,
                                                                      exc))
     patch = data.get("python-host-patch")
@@ -2700,11 +2701,12 @@ class _ParserMismatch(Exception):
     wraps."""
 
 
-def _key_depth_bounded(real, calls):
+def _key_depth_bounded(real, calls, kind=RecursionError):
     """tomllib's key parser, made to raise RecursionError on a key of more than 1000 dotted parts, as a
-    release that bounds key depth does. calls records each call; a call or a result that does not fit
-    parse_key(src, pos) -> (pos, key), pos an int within src and key a tuple of str, raises
-    _ParserMismatch."""
+    release that bounds key depth does, or kind (MemoryError or ValueError, to inject that class at the
+    parse: real memory exhaustion cannot be provoked safely). calls records each call; a call or a
+    result that does not fit parse_key(src, pos) -> (pos, key), pos an int within src and key a tuple of
+    str, raises _ParserMismatch."""
     def parse_key(*args, **kwargs):
         calls.append(len(args))
         try:
@@ -2720,14 +2722,15 @@ def _key_depth_bounded(real, calls):
         if not (isinstance(result[1], tuple) and all(isinstance(part, str) for part in result[1])):
             raise _ParserMismatch("it returned the key {!r:.60}, not a tuple of str".format(result[1]))
         if len(result[1]) > 1000:
-            raise RecursionError("injected: a key of more than 1000 dotted parts")
+            raise kind("injected: a key of more than 1000 dotted parts")
         return result
     return parse_key
 
 
-def _host_parse_refusal(root, bound):
-    """(exit code, whether the report says HOST_SOURCE_REL does not parse) for evaluate over root, with
-    tomllib's key parser bounded when bound is true; "raised NAME" when the exception escapes. The bound
+def _host_parse_refusal(root, bound, kind=RecursionError, evaluate_tree=None):
+    """(exit code, whether the report says HOST_SOURCE_REL does not parse) for evaluate_tree (evaluate when
+    None) over root, with tomllib's key parser bounded when bound is true (raising kind,
+    _key_depth_bounded); "raised NAME" when the exception escapes. The bound
     patches a private tomllib function: on a release where it is missing, has another shape or is never
     called, the result is a text naming that cause, so the case fails cleanly rather than crashing."""
     parser = getattr(tomllib, "_parser", None)
@@ -2737,10 +2740,10 @@ def _host_parse_refusal(root, bound):
                 "key-depth case cannot run")
     calls = []
     if bound:
-        parser.parse_key = _key_depth_bounded(real, calls)
+        parser.parse_key = _key_depth_bounded(real, calls, kind)
     try:
-        code, lines = evaluate(root)
-    except (RecursionError, ValueError) as exc:
+        code, lines = (evaluate if evaluate_tree is None else evaluate_tree)(root)
+    except (RecursionError, ValueError, MemoryError) as exc:
         return "raised " + type(exc).__name__
     except _ParserMismatch as exc:
         return "tomllib._parser.parse_key does not fit the injection on this release: {}".format(exc)
@@ -3051,6 +3054,31 @@ def _self_test_cases(base):
         root = _fixture(base, workflow_pin="3.14.4", job=opf,
                         files={HOST_SOURCE_REL: host[HOST_SOURCE_REL] + extra})
         check(check_id, _host_parse_refusal(root, bound), (2, True))
+    # Each class load_host_patch maps (RecursionError, MemoryError and ValueError), INJECTED at tomllib's
+    # key parser on a key of more than 1000 dotted parts (real memory exhaustion cannot be provoked
+    # safely), is cannot-evaluate, never a traceback, and escapes the copy whose load_host_patch no
+    # longer maps that class (red on revert).
+    root = _fixture(base, workflow_pin="3.14.4", job=opf,
+                    files={HOST_SOURCE_REL: host[HOST_SOURCE_REL] + ".".join(["k"] * 1001) + " = 1\n"})
+    mapping = ("except (ValueError, RecursionError, " + "MemoryError) as exc:\n"
+               "        raise CannotEvaluate(\"{}: does not parse ({}): {}\".format(HOST_SOURCE_REL")
+    gate = _read_text(Path(__file__).resolve())
+    if gate.count(mapping) != 1:
+        raise CannotEvaluate("the load_host_patch mapping anchor occurs {} times".format(gate.count(mapping)))
+    for check_id, kind, kept in (
+            ("pins/host-patch-source-injected-recursion-error-cannot-evaluate", RecursionError,
+             "ValueError, MemoryError"),
+            ("pins/host-patch-source-injected-memory-error-cannot-evaluate", MemoryError,
+             "ValueError, RecursionError"),
+            ("pins/host-patch-source-injected-value-error-cannot-evaluate", ValueError,
+             "RecursionError, MemoryError")):
+        name = "python_floor_without_" + kind.__name__.lower()
+        _write(base, name + ".py", gate.replace(mapping, mapping.replace(
+            "ValueError, RecursionError, " + "MemoryError", kept)))
+        unmapped = _load_path(name, base / (name + ".py"))
+        check(check_id, (_host_parse_refusal(root, True, kind),
+                         _host_parse_refusal(root, True, kind, unmapped.evaluate)),
+              ((2, True), "raised " + kind.__name__))
     # A key parser whose result breaks the (pos, key) contract: the bounded parser names the mismatch.
     root = _fixture(base, workflow_pin="3.14.4", job=opf, files=host)
     for check_id, name in (
